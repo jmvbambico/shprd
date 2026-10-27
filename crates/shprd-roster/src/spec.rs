@@ -86,6 +86,7 @@ impl HarnessSpec {
         )?;
         check_optional_template("launch.effort_args", &launch.effort_args, &["effort"])?;
         check_optional_template("launch.auto_approve", &launch.auto_approve, &[])?;
+        check_optional_template("launch.reviewer_args", &launch.reviewer_args, &[])?;
         check_optional_template(
             "launch.system_prompt_args",
             &launch.system_prompt_args,
@@ -149,6 +150,13 @@ pub struct LaunchSpec {
     pub effort_args: Option<Vec<String>>,
     /// Extra arguments that suppress approval prompts for unattended work.
     pub auto_approve: Option<Vec<String>>,
+    /// Extra arguments that confine a reviewer's writes, never approve them.
+    ///
+    /// A reviewer runs beside a human and must not act unprompted, so these
+    /// arguments may only narrow what its tools can reach — e.g. a sandbox that
+    /// keeps writes inside its working directory. They never suppress prompts
+    /// and, like [`Self::auto_approve`], may hold no placeholder.
+    pub reviewer_args: Option<Vec<String>>,
     /// Arguments that inject a system prompt, using `{prompt}` or `{prompt_file}`.
     pub system_prompt_args: Option<Vec<String>>,
     /// Arguments that resume a session, using `{session}`.

@@ -591,10 +591,14 @@ fn start_in_tab(
 
 /// The argv a reviewer's CLI starts with.
 ///
-/// The order is [`spawn`]'s: the base command, the flags that suppress approval
-/// prompts, then the model and finally the brief as the system prompt. The
-/// second element says whether the brief went in as an argument, which is also
-/// what says whether it has to be typed in instead.
+/// The order is the base command, the flags that confine a reviewer's writes
+/// ([`LaunchSpec::reviewer_args`]), the model and finally the brief as the
+/// system prompt. A reviewer never gets [`LaunchSpec::auto_approve`]: it runs
+/// beside a human, so its tools must prompt rather than act unprompted, and a
+/// reviewer that could silently write could read or change the worktree the
+/// brief told it to leave alone. The second element says whether the brief went
+/// in as an argument, which is also what says whether it has to be typed in
+/// instead.
 fn reviewer_argv(
     launch_spec: &LaunchSpec,
     model: Option<&str>,
@@ -602,8 +606,8 @@ fn reviewer_argv(
     brief_path: &Path,
 ) -> Result<(Vec<String>, bool), CliError> {
     let mut argv = launch_spec.interactive.clone();
-    if let Some(auto) = &launch_spec.auto_approve {
-        argv.extend(auto.iter().cloned());
+    if let Some(confine) = &launch_spec.reviewer_args {
+        argv.extend(confine.iter().cloned());
     }
     let values = Values {
         model: model.map(str::to_string),
@@ -1274,6 +1278,76 @@ project_dirs = []
                 .iter()
                 .any(|call| matches!(call, Call::Prompt(_, text) if text.contains("REVIEWER"))),
             "the brief was never typed in: {calls:?}"
+        );
+    }
+
+    /// The shipped `data/harness` directory.
+    fn harness_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness")
+    }
+
+    /// Every harness spec the data directory ships, parsed from its TOML.
+    fn shipped_specs() -> Vec<HarnessSpec> {
+        let mut specs = Vec::new();
+        for entry in std::fs::read_dir(harness_dir()).unwrap_or_else(|err| panic!("{err}")) {
+            let path = entry.unwrap_or_else(|err| panic!("{err}")).path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{err}"));
+            let spec = toml::from_str::<HarnessSpec>(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            specs.push(spec);
+        }
+        assert!(!specs.is_empty(), "no harness specs to check");
+        specs
+    }
+
+    /// One shipped spec by harness id.
+    fn shipped_spec(id: &str) -> HarnessSpec {
+        shipped_specs()
+            .into_iter()
+            .find(|spec| spec.id == id)
+            .unwrap_or_else(|| panic!("no shipped spec for {id}"))
+    }
+
+    #[test]
+    fn no_reviewer_inherits_the_specs_auto_approval_flags() {
+        // Auto-approval exists for unattended workers. A reviewer runs beside a
+        // human and must never act unprompted, so no shipped spec's flag reaches
+        // its argv, not even the one that only suppresses prompts.
+        let mut checked = 0;
+        for spec in shipped_specs() {
+            let some = spec.launch.auto_approve.clone();
+            let Some(auto) = some else { continue };
+            if auto.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let (argv, _) = reviewer_argv(&spec.launch, Some("m1"), "brief", Path::new("b.md"))
+                .unwrap_or_else(|err| panic!("{}: {err}", spec.id));
+            for flag in auto {
+                assert!(
+                    !argv.contains(&flag),
+                    "the {} reviewer inherited {flag}: {argv:?}",
+                    spec.id
+                );
+            }
+        }
+        assert!(checked > 0, "no shipped spec has auto-approval to check");
+    }
+
+    #[test]
+    fn the_codex_reviewer_is_confined_to_its_packet() {
+        // The packet directory is the reviewer's cwd, so a workspace-write
+        // sandbox is what keeps a codex reviewer's writes out of the worktree.
+        let spec = shipped_spec("codex");
+        let (argv, _) = reviewer_argv(&spec.launch, Some("m1"), "brief", Path::new("b.md"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--sandbox".to_string(), "workspace-write".to_string()]),
+            "the codex reviewer is not sandboxed: {argv:?}"
         );
     }
 }

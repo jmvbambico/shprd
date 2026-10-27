@@ -34,6 +34,9 @@ interactive = ["codex", "--no-daemon"]
 model_args = ["-m", "{model}"]
 effort_args = ["-c", "model_reasoning_effort={effort}"]
 auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
+# A reviewer gets no auto-approval; it gets a sandbox instead. Its working
+# directory is the review packet, so workspace-write confines its writes to it.
+reviewer_args = ["--sandbox", "workspace-write"]
 system_prompt_args = ["-c", "developer_instructions={prompt}"]
 resume_args = ["resume", "{session}"]
 verified = false
