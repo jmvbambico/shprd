@@ -246,3 +246,26 @@ fn a_dirty_integration_worktree_is_refused() {
     assert!(stderr.contains("has uncommitted changes"), "{stderr}");
     assert_eq!(fixture.events().len(), before, "nothing may be appended");
 }
+
+#[test]
+fn a_gate_that_changes_the_worktree_fails() {
+    let fixture = Fixture::new(&[("README.md", "hi\n")]);
+    fixture.write_config(Some(&["echo x > stray.txt"]));
+    let output = fixture.run(&["gate"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a gate that writes into the worktree exits 1\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_, passed, commands) = last_full_gate(&fixture);
+    assert!(
+        !passed,
+        "a gate that leaves the worktree dirty must not pass"
+    );
+    assert_eq!(
+        commands.last().map(String::as_str),
+        Some("worktree changed by the gate"),
+        "{commands:?}"
+    );
+}

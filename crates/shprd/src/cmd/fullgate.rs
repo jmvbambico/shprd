@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config};
-use shprd_core::event::EventKind;
+use shprd_core::event::{EventKind, GateStep};
 use shprd_git::gate::{self, GateRun};
 use shprd_git::git::Git;
 use shprd_git::integrate;
@@ -21,6 +21,9 @@ use shprd_roster::env::{EnvContext, Role, launch_env};
 
 use crate::cli::FullGateArgs;
 use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
+
+/// The final step recorded when the gate itself changed the worktree.
+const WORKTREE_CHANGED: &str = "worktree changed by the gate";
 
 /// The message printed when the config defines no integration gate.
 const NO_GATE: &str =
@@ -73,12 +76,31 @@ pub fn gate_verb(ctx: &Ctx, args: &FullGateArgs, home: Option<&Path>) -> Result<
         )));
     }
 
-    let env = worker_env(&worktree.path, &run.run_id);
-    let timeout = Duration::from_secs(args.timeout_secs);
-    let outcome = gate::run_gate(&worktree.path, commands, timeout, &env);
     let head = git
         .head_sha()
         .map_err(|err| CliError::other(anyhow!(err).context("reading the integration head")))?;
+    let env = worker_env(&worktree.path, &run.run_id);
+    let timeout = Duration::from_secs(args.timeout_secs);
+    let ran = gate::run_gate(&worktree.path, commands, timeout, &env);
+    // A gate runs commands, never edits: a step that leaves the worktree dirty
+    // or moves its HEAD changed the thing it was asked to judge, so the verdict
+    // is a failure whatever the exit codes said.
+    let changed = worktree_changed(&git, &head)?;
+    let outcome = if changed {
+        let mut steps = ran.steps.clone();
+        steps.push(GateStep {
+            command: WORKTREE_CHANGED.to_string(),
+            exit_code: Some(1),
+            duration_ms: 0,
+            output_tail: WORKTREE_CHANGED.to_string(),
+        });
+        GateRun {
+            passed: false,
+            steps,
+        }
+    } else {
+        ran
+    };
     if !ctx.json {
         print_steps(&outcome);
     }
@@ -91,9 +113,26 @@ pub fn gate_verb(ctx: &Ctx, args: &FullGateArgs, home: Option<&Path>) -> Result<
     if outcome.passed {
         return Ok(());
     }
+    if changed {
+        return Err(CliError::other(anyhow!(
+            "the integration gate changed its own worktree: leave the tree clean and its head \
+             where the gate found it, then run `shprd gate` again"
+        )));
+    }
     Err(CliError::other(anyhow!(
         "the integration gate failed: fix it on the integration branch and run `shprd gate` again"
     )))
+}
+
+/// True when the gate left the worktree dirty or moved its HEAD from `head`.
+fn worktree_changed(git: &Git, head: &str) -> Result<bool, CliError> {
+    let clean = git.is_clean().map_err(|err| {
+        CliError::other(anyhow!(err).context("re-reading the integration worktree"))
+    })?;
+    let after = git
+        .head_sha()
+        .map_err(|err| CliError::other(anyhow!(err).context("re-reading the integration head")))?;
+    Ok(!clean || after != head)
 }
 
 /// The config's `[gates]`, with the repo file winning over the global one.
