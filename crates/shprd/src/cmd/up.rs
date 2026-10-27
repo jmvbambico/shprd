@@ -471,7 +471,11 @@ impl OrchestratorPlan {
             session: None,
         };
         let mut argv = spec.launch.interactive.clone();
-        argv.extend(render(&spec.launch.model_args, &values, "model_args")?);
+        argv.extend(render(
+            super::launch::model_args(&spec.launch, agent.model.as_deref()),
+            &values,
+            "model_args",
+        )?);
         if let Some(template) = &spec.launch.effort_args
             && effort.is_some()
         {
@@ -695,6 +699,29 @@ mod tests {
             resumable_events: true,
             agent_state: true,
         })
+    }
+
+    #[test]
+    fn a_model_less_orchestrator_starts_without_model_args() -> Result<()> {
+        let fixture = Fixture::new(Some("claude"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let report = up(&mux, &env).map_err(failed)?;
+
+        let argvs = started_argvs(&mux);
+        assert_eq!(argvs.len(), 2, "{argvs:?}");
+        assert_eq!(
+            argvs[1],
+            vec![
+                "claude".to_string(),
+                "--effort".to_string(),
+                "high".to_string(),
+                "--append-system-prompt-file".to_string(),
+                report.brief_path.display().to_string(),
+            ],
+            "an orchestrator with no model gets no model flags"
+        );
+        Ok(())
     }
 
     #[test]

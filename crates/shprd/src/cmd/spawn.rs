@@ -674,9 +674,11 @@ fn launch_argv(
         prompt_file: Some(brief_path.display().to_string()),
         session: None,
     };
-    if model.is_some() {
-        argv.extend(render(launch, &launch.model_args, &values)?);
-    }
+    argv.extend(render(
+        launch,
+        super::launch::model_args(launch, model),
+        &values,
+    )?);
     if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
         argv.extend(render(launch, effort_args, &values)?);
     }
@@ -1086,6 +1088,43 @@ mod tests {
     use super::*;
     use shprd_core::state::TaskStatus;
     use shprd_roster::skills::Role as SkillRole;
+
+    /// A launch spec whose only model flag carries the `{model}` placeholder.
+    fn launch() -> LaunchSpec {
+        LaunchSpec {
+            interactive: vec!["claude".to_string()],
+            model_args: vec!["--model".to_string(), "{model}".to_string()],
+            effort_args: None,
+            auto_approve: None,
+            system_prompt_args: None,
+            resume_args: None,
+            verified: true,
+        }
+    }
+
+    #[test]
+    fn a_task_without_a_model_gets_no_model_flags() {
+        let brief = Path::new("/tmp/brief.md");
+        let (argv, in_args) = launch_argv(&launch(), None, None, "brief", brief)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(argv, ["claude".to_string()]);
+        assert!(!in_args);
+    }
+
+    #[test]
+    fn a_task_with_a_model_gets_its_flags() {
+        let brief = Path::new("/tmp/brief.md");
+        let (argv, _) = launch_argv(&launch(), Some("opus"), None, "brief", brief)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            argv,
+            [
+                "claude".to_string(),
+                "--model".to_string(),
+                "opus".to_string()
+            ]
+        );
+    }
 
     /// A task with the fields the brief and the skill selection read.
     fn task(id: &str, tags: &[&str]) -> Task {

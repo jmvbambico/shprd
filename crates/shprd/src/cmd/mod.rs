@@ -5,6 +5,7 @@ pub mod dagr;
 pub mod doctor;
 pub mod janitor;
 pub mod keys;
+pub mod launch;
 pub mod roster;
 pub mod run;
 pub mod set;
