@@ -439,24 +439,38 @@ pub fn scan_dir(dir: &Path, ignore: &[String]) -> (Vec<FoundSkill>, Vec<PathBuf>
     (skills, junk)
 }
 
+/// How deep junk collection descends, so no filesystem can cost more.
+const JUNK_DEPTH: usize = 8;
+
 /// Push every directory below `dir` that holds a `SKILL.md` onto `junk`.
+///
+/// A symlink is never followed, because a link loop under a junk folder would
+/// otherwise walk forever, and the walk stops after [`JUNK_DEPTH`] levels.
 fn collect_junk(dir: &Path, junk: &mut Vec<PathBuf>) {
+    collect_junk_at(dir, junk, 0);
+}
+
+/// [`collect_junk`] with the depth reached so far.
+fn collect_junk_at(dir: &Path, junk: &mut Vec<PathBuf>, depth: usize) {
+    if depth >= JUNK_DEPTH {
+        return;
+    }
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(_) => return,
     };
     for entry in read.filter_map(Result::ok) {
         let path = entry.path();
-        if !fs::metadata(&path)
+        let is_dir = fs::symlink_metadata(&path)
             .map(|meta| meta.is_dir())
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if !is_dir {
             continue;
         }
         if path.join("SKILL.md").is_file() {
             junk.push(path.clone());
         }
-        collect_junk(&path, junk);
+        collect_junk_at(&path, junk, depth + 1);
     }
 }
 
@@ -808,6 +822,21 @@ mod tests {
                 dir.join("synced/copied"),
             ]
         );
+    }
+
+    #[test]
+    fn never_follows_a_symlink_loop_under_junk() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path();
+        let dir = home.join(".agents/skills");
+        write_skill(home, ".agents/skills", "kept", "Real skill.");
+        write_skill_at(&dir.join(".trash/removed"), "removed", "Deleted skill.");
+        std::os::unix::fs::symlink("..", dir.join(".trash/loop")).must("loop symlink");
+        let (found, mut junk) = scan_dir(&dir, &[".trash".to_owned()]);
+        let names: Vec<&str> = found.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["kept"]);
+        junk.sort();
+        assert_eq!(junk, [dir.join(".trash"), dir.join(".trash/removed")]);
     }
 
     #[test]
