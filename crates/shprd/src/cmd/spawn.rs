@@ -715,6 +715,373 @@ fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
 }
 
 #[cfg(test)]
+mod flow_tests {
+    use super::*;
+    use std::process::Command;
+
+    use shprd_core::event::Actor;
+    use shprd_core::state::TaskStatus;
+    use shprd_mux::fake::{Call, FakeMux};
+    use tempfile::TempDir;
+
+    /// Runs one git command in `dir`, failing the test when it does.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
+        assert!(status.status.success(), "git {args:?}: {status:?}");
+    }
+
+    /// A repository with one commit and the integration branch, and a home.
+    struct Scratch {
+        repo: TempDir,
+        home: TempDir,
+    }
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            git(repo.path(), &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.path().join("README.md"), "scratch\n").unwrap_or_default();
+            git(repo.path(), &["add", "."]);
+            git(repo.path(), &["commit", "-q", "-m", "first"]);
+            git(repo.path(), &["branch", "integration/m4"]);
+            Scratch { repo, home }
+        }
+
+        fn root(&self) -> &Path {
+            self.repo.path()
+        }
+
+        /// The repo's directory name, which the workspace and worktree names use.
+        fn repo_name(&self) -> String {
+            self.root()
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+
+        /// A context with a started run and the task `T1` in its plan.
+        fn ctx(&self) -> Ctx {
+            let ctx = Ctx::new(self.root().to_path_buf(), Actor::Human, false, true);
+            ctx.commit(EventKind::RunStarted {
+                run_id: "t1".to_string(),
+                repo: self.repo_name(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m4".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "Make spawn real".to_string(),
+                scope: vec!["crates/shprd".to_string()],
+                acceptance: vec!["spawn opens a tab".to_string()],
+                tags: vec!["rust".to_string()],
+                skills: Vec::new(),
+                deps: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx
+        }
+
+        /// The environment a spawn runs in, with a fake `sh` CLI.
+        fn spawn_env<'a>(&self, ctx: &'a Ctx) -> SpawnEnv<'a> {
+            let mut base_env = BTreeMap::new();
+            base_env.insert("GH_TOKEN".to_string(), "secret".to_string());
+            base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            SpawnEnv {
+                ctx,
+                layout: Layout::default_for_home(self.home.path()),
+                briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                run: "t1".to_string(),
+                base_branch: "integration/m4".to_string(),
+                repo_name: self.repo_name(),
+                programs: vec![Program {
+                    id: "sh".to_string(),
+                    installed: true,
+                    launch: LaunchSpec {
+                        interactive: vec!["sh".to_string()],
+                        model_args: Vec::new(),
+                        effort_args: None,
+                        auto_approve: None,
+                        system_prompt_args: None,
+                        resume_args: None,
+                        verified: false,
+                    },
+                }],
+                workers: vec!["sh".to_string()],
+                skills: Skills {
+                    workers: vec!["tdd".to_string()],
+                    ..Skills::default()
+                },
+                compat: Vec::new(),
+                base_env,
+            }
+        }
+    }
+
+    fn request() -> SpawnRequest {
+        SpawnRequest {
+            task: "T1".to_string(),
+            agent: None,
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn spawn_creates_a_worktree_and_records_it() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+        let workspace = mux
+            .create_workspace(
+                &naming::workspace_name(&scratch.repo_name()),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.attempt, 1);
+        assert_eq!(report.agent, "sh");
+        assert_eq!(report.tab, "\u{25cf} sh\u{b7}T1");
+        assert!(
+            report.worktree.is_dir(),
+            "no worktree at {:?}",
+            report.worktree
+        );
+        assert_eq!(report.branch, "shprd/t1/T1");
+        assert_eq!(report.skills, vec!["tdd"]);
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("Make spawn real"), "{brief}");
+        assert!(brief.contains("crates/shprd"), "{brief}");
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = state.tasks.get("T1").unwrap_or_else(|| panic!("no task"));
+        assert_eq!(task.status, TaskStatus::Working);
+        assert_eq!(task.attempts.len(), 1);
+        let resources: Vec<(&ResourceKind, &str)> = state
+            .resources
+            .keys()
+            .map(|(kind, name)| (kind, name.as_str()))
+            .collect();
+        assert!(resources.contains(&(
+            &ResourceKind::Worktree,
+            report.worktree.to_str().unwrap_or_default()
+        )));
+        assert!(resources.contains(&(&ResourceKind::Branch, "shprd/t1/T1")));
+
+        let calls = mux.calls();
+        let tab = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::CreateTab(owner, title, cwd) => {
+                    Some((owner.clone(), title.clone(), cwd.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tab was created: {calls:?}"));
+        assert_eq!(tab.0, workspace.id);
+        assert_eq!(tab.1, "\u{25cf} sh\u{b7}T1");
+        assert_eq!(tab.2, report.worktree);
+        let (argv, pairs) = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Run(_, argv, pairs) => Some((argv.clone(), pairs.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"));
+        assert_eq!(argv, vec!["sh".to_string()]);
+        assert!(pairs.contains(&("SHPRD_TASK".to_string(), Some("T1".to_string()))));
+        assert!(pairs.contains(&("SHPRD_RUN".to_string(), Some("t1".to_string()))));
+        assert!(pairs.contains(&("SHPRD_ACTOR".to_string(), Some("agent:sh".to_string()))));
+        assert!(!pairs.contains(&("GH_TOKEN".to_string(), Some("secret".to_string()))));
+        assert!(pairs.contains(&("GH_TOKEN".to_string(), None)));
+        // The spec has no system-prompt arguments, so the brief is typed in.
+        let prompt = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Prompt(_, text) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the brief was never typed in: {calls:?}"));
+        assert!(prompt.contains("Make spawn real"), "{prompt}");
+    }
+
+    /// A [`Mux`] that delegates everything but refuses to open tabs, which is
+    /// how a host that lost the workspace looks from spawn's side.
+    struct NoTabs(FakeMux);
+
+    impl Mux for NoTabs {
+        fn capabilities(&self) -> shprd_mux::Capabilities {
+            self.0.capabilities()
+        }
+        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<shprd_mux::Workspace>> {
+            self.0.find_workspace(name)
+        }
+        fn create_workspace(
+            &self,
+            name: &str,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::Workspace> {
+            self.0.create_workspace(name, cwd)
+        }
+        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
+            self.0.focus_workspace(workspace)
+        }
+        fn list_tabs(
+            &self,
+            workspace: &shprd_mux::WorkspaceId,
+        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
+            self.0.list_tabs(workspace)
+        }
+        fn create_tab(
+            &self,
+            _workspace: &shprd_mux::WorkspaceId,
+            _title: &str,
+            _cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::Tab> {
+            Err(shprd_mux::MuxError::command(
+                "create tab",
+                "the host refused",
+            ))
+        }
+        fn rename_tab(&self, tab: &shprd_mux::TabId, title: &str) -> shprd_mux::Result<()> {
+            self.0.rename_tab(tab, title)
+        }
+        fn focus_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()> {
+            self.0.focus_tab(tab)
+        }
+        fn close_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()> {
+            self.0.close_tab(tab)
+        }
+        fn split(
+            &self,
+            pane: &shprd_mux::PaneId,
+            direction: shprd_mux::Direction,
+            ratio: f32,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::PaneId> {
+            self.0.split(pane, direction, ratio, cwd)
+        }
+        fn run(
+            &self,
+            pane: &shprd_mux::PaneId,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+        ) -> shprd_mux::Result<()> {
+            self.0.run(pane, argv, env)
+        }
+        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.0.send_text(pane, text)
+        }
+        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.0.prompt(pane, text)
+        }
+        fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
+            self.0.read(pane, lines)
+        }
+        fn agent_state(
+            &self,
+            pane: &shprd_mux::PaneId,
+        ) -> shprd_mux::Result<shprd_mux::AgentState> {
+            self.0.agent_state(pane)
+        }
+        fn next_events(
+            &self,
+            timeout: std::time::Duration,
+        ) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
+            self.0.next_events(timeout)
+        }
+    }
+
+    #[test]
+    fn a_failed_tab_removes_the_worktree_and_records_nothing() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = NoTabs(FakeMux::default());
+        mux.create_workspace(
+            &naming::workspace_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let failure = spawn(&mux, &env, &request());
+        assert!(failure.is_err(), "spawn should have failed");
+        assert_eq!(failure.map(|_| ()).map_err(|err| err.exit_code()), Err(1));
+
+        let worktree = env.layout.path(&env.repo_name, "t1", "T1");
+        assert!(
+            !worktree.exists(),
+            "worktree {} survived",
+            worktree.display()
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(state.resources.is_empty(), "{:?}", state.resources);
+        let task = state.tasks.get("T1").unwrap_or_else(|| panic!("no task"));
+        assert_eq!(task.status, TaskStatus::Queued);
+        assert!(task.attempts.is_empty());
+    }
+
+    #[test]
+    fn spawn_without_a_workspace_says_to_run_up_first() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+
+        let message = match spawn(&mux, &env, &request()) {
+            Ok(report) => panic!("spawn should have failed, got {report:?}"),
+            Err(err) => err.to_string(),
+        };
+        assert!(message.contains("shprd up"), "{message}");
+    }
+
+    #[test]
+    fn prompt_reaches_the_right_pane() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let workspace = mux
+            .create_workspace(
+                &naming::workspace_name(&scratch.repo_name()),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let other = mux
+            .create_tab(&workspace.id, "\u{25cf} sh\u{b7}T0", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mine = mux
+            .create_tab(&workspace.id, "\u{25cf} sh\u{b7}T1", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        prompt(&mux, scratch.root(), "T1", "keep going").unwrap_or_else(|err| panic!("{err}"));
+        let prompted = mux
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Prompt(pane, text) => Some((pane, text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("nothing was prompted"));
+        assert_eq!(prompted.0, mine.root_pane);
+        assert_ne!(prompted.0, other.root_pane);
+        assert_eq!(prompted.1, "keep going");
+
+        let missing = prompt(&mux, scratch.root(), "T9", "hello");
+        assert_eq!(missing.map(|_| ()).map_err(|err| err.exit_code()), Err(2));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use shprd_core::state::TaskStatus;
