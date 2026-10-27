@@ -102,6 +102,7 @@ fn spawn(root: &Path, id: &str) {
         &[
             "agent",
             "spawn",
+            "--record-only",
             "--task",
             id,
             "--attempt",
@@ -159,14 +160,13 @@ fn happy_path_reaches_integrated() {
         &[
             "agent",
             "spawn",
+            "--record-only",
             "--task",
             "T1",
             "--attempt",
             "1",
             "--agent",
-            "w1",
-            "--model",
-            "m",
+            "w1/claude-opus-5-5",
             "--worktree",
             "/tmp/wt",
             "--branch",
@@ -244,6 +244,7 @@ fn overlapping_scope_is_refused() {
         &[
             "agent",
             "spawn",
+            "--record-only",
             "--task",
             "T2",
             "--attempt",
@@ -392,6 +393,7 @@ fn a_scripted_run_writes_the_document_and_the_views() {
         &[
             "agent",
             "spawn",
+            "--record-only",
             "--task",
             "T1",
             "--attempt",
@@ -790,6 +792,7 @@ fn integrated_task(root: &Path, branch: &str) {
         &[
             "agent",
             "spawn",
+            "--record-only",
             "--task",
             "T1",
             "--attempt",

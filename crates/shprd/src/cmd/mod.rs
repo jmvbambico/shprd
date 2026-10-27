@@ -8,6 +8,7 @@ pub mod keys;
 pub mod roster;
 pub mod run;
 pub mod set;
+pub mod spawn;
 pub mod view;
 
 use anyhow::anyhow;
@@ -44,7 +45,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             RunCommand::Start(args) => run::start(&ctx, &args),
             RunCommand::Finish => run::finish(&ctx),
         },
-        Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd),
+        Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
         Some(Command::Status) => view::status(&ctx),

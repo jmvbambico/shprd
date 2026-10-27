@@ -469,6 +469,7 @@ dependencies = [
  "serde_json",
  "shprd-core",
  "shprd-git",
+ "shprd-mux",
  "shprd-mux-herdr",
  "shprd-roster",
  "shprd-views",
