@@ -1907,3 +1907,146 @@ mod tests {
         }
     }
 }
+
+/// Test-only host behaviour: a [`FakeMux`] that fails one call kind.
+///
+/// A transient host error and a closed tab are the same value to a caller that
+/// swallows errors, so the tests that must tell them apart make exactly one
+/// call fail here.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use shprd_mux::fake::FakeMux;
+    use shprd_mux::{
+        AgentState, Capabilities, Direction, Mux, MuxError, MuxEvent, PaneId, Tab, TabId,
+        Workspace, WorkspaceId,
+    };
+
+    /// The call a [`FlakyMux`] makes fail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Fault {
+        /// [`Mux::list_tabs`] answers [`MuxError::Command`].
+        ListTabs,
+        /// [`Mux::close_tab`] answers [`MuxError::Command`].
+        CloseTab,
+    }
+
+    /// A [`FakeMux`] whose `fault` call fails with a host error that is not
+    /// [`MuxError::NotFound`], i.e. one a caller must not read as "gone".
+    pub(crate) struct FlakyMux {
+        /// The fake host that answers every other call.
+        inner: FakeMux,
+        /// The call that fails.
+        fault: Fault,
+    }
+
+    impl FlakyMux {
+        /// Wraps `inner`, failing `fault`.
+        pub(crate) fn new(inner: FakeMux, fault: Fault) -> Self {
+            Self { inner, fault }
+        }
+
+        /// The fake underneath, so a test can script panes and read the calls.
+        pub(crate) fn inner(&self) -> &FakeMux {
+            &self.inner
+        }
+
+        /// The host error the failing call answers, if this is it.
+        fn failure(&self, call: Fault) -> Option<MuxError> {
+            if self.fault == call {
+                return Some(MuxError::command("the fake host", "the host went away"));
+            }
+            None
+        }
+    }
+
+    impl Mux for FlakyMux {
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+
+        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<Workspace>> {
+            self.inner.find_workspace(name)
+        }
+
+        fn create_workspace(&self, name: &str, cwd: &Path) -> shprd_mux::Result<Workspace> {
+            self.inner.create_workspace(name, cwd)
+        }
+
+        fn focus_workspace(&self, workspace: &WorkspaceId) -> shprd_mux::Result<()> {
+            self.inner.focus_workspace(workspace)
+        }
+
+        fn list_tabs(&self, workspace: &WorkspaceId) -> shprd_mux::Result<Vec<Tab>> {
+            match self.failure(Fault::ListTabs) {
+                Some(err) => Err(err),
+                None => self.inner.list_tabs(workspace),
+            }
+        }
+
+        fn create_tab(
+            &self,
+            workspace: &WorkspaceId,
+            title: &str,
+            cwd: &Path,
+        ) -> shprd_mux::Result<Tab> {
+            self.inner.create_tab(workspace, title, cwd)
+        }
+
+        fn rename_tab(&self, tab: &TabId, title: &str) -> shprd_mux::Result<()> {
+            self.inner.rename_tab(tab, title)
+        }
+
+        fn focus_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+            self.inner.focus_tab(tab)
+        }
+
+        fn close_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+            match self.failure(Fault::CloseTab) {
+                Some(err) => Err(err),
+                None => self.inner.close_tab(tab),
+            }
+        }
+
+        fn split(
+            &self,
+            pane: &PaneId,
+            direction: Direction,
+            ratio: f32,
+            cwd: &Path,
+        ) -> shprd_mux::Result<PaneId> {
+            self.inner.split(pane, direction, ratio, cwd)
+        }
+
+        fn run(
+            &self,
+            pane: &PaneId,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+        ) -> shprd_mux::Result<()> {
+            self.inner.run(pane, argv, env)
+        }
+
+        fn send_text(&self, pane: &PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.send_text(pane, text)
+        }
+
+        fn prompt(&self, pane: &PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.prompt(pane, text)
+        }
+
+        fn read(&self, pane: &PaneId, lines: usize) -> shprd_mux::Result<String> {
+            self.inner.read(pane, lines)
+        }
+
+        fn agent_state(&self, pane: &PaneId) -> shprd_mux::Result<AgentState> {
+            self.inner.agent_state(pane)
+        }
+
+        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<MuxEvent>> {
+            self.inner.next_events(timeout)
+        }
+    }
+}

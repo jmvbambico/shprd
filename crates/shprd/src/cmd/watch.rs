@@ -159,12 +159,21 @@ fn tick_task(
         return Ok(());
     };
 
+    let pane = match pane_for(mux, env, &tab) {
+        Ok(pane) => pane,
+        Err(MuxError::NotFound { .. }) => None,
+        // A host that cannot answer says nothing about the agent: skipping the
+        // tick keeps the watch, because a transient error is not an exit.
+        Err(err) => {
+            eprintln!("warning: cannot look up the tab of {}: {err}", task.id);
+            return Ok(());
+        }
+    };
     let key = (task.id.clone(), attempt.n, agent.clone());
     let (watch, sampler) = watcher
         .watches
-        .entry(key)
+        .entry(key.clone())
         .or_insert_with(|| (Watch::new(), Sampler::new()));
-    let pane = pane_for(mux, env, &tab);
     let (screen, process_exited) = observe(
         mux,
         pane.as_ref(),
@@ -270,13 +279,21 @@ fn home_of<'a>(env: &'a SpawnEnv<'_>) -> Option<&'a Path> {
 }
 
 /// The pane `tab` holds, or `None` when the host no longer has it.
-fn pane_for(mux: &dyn Mux, env: &SpawnEnv<'_>, tab: &str) -> Option<PaneId> {
+///
+/// Only a host that answered without the tab says the agent is gone. A host
+/// that failed to answer is an error the caller must not read as an exit: a
+/// transient failure would otherwise mark a working agent dry and hand its task
+/// to somebody else.
+fn pane_for(mux: &dyn Mux, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
     let name = naming::workspace_name(&env.repo_name);
-    let workspace = mux.find_workspace(&name).ok()??;
-    let tabs = mux.list_tabs(&workspace.id).ok()?;
-    tabs.iter()
+    let Some(workspace) = mux.find_workspace(&name)? else {
+        return Ok(None);
+    };
+    let tabs = mux.list_tabs(&workspace.id)?;
+    Ok(tabs
+        .iter()
         .find(|listed| listed.id.as_str() == tab)
-        .map(|listed| listed.root_pane.clone())
+        .map(|listed| listed.root_pane.clone()))
 }
 
 /// Reads the pane once, folding a closed pane into "the process exited".
@@ -350,6 +367,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::cmd::spawn::SpawnRequest;
+    use crate::cmd::spawn::fault::{Fault, FlakyMux};
 
     use super::*;
 
@@ -689,6 +707,45 @@ project_dirs = []
         assert!(
             appended(fresh, |kind| matches!(kind, EventKind::HandedOff { .. })),
             "a closed pane must hand the task off"
+        );
+    }
+
+    /// A host that cannot list its tabs says nothing about the agent: no tick
+    /// may read that as an exit and hand the task to somebody else.
+    #[test]
+    fn a_transient_mux_error_is_not_a_dead_agent() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_state(&pane, AgentState::Working);
+        let flaky = FlakyMux::new(mux, Fault::ListTabs);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let before = events(&ctx).len();
+        let t0 = 1_700_000_000_000u64;
+        for step in 0..5u64 {
+            watcher
+                .tick(&flaky, &env, t0 + 10_000 * step)
+                .unwrap_or_else(|err| panic!("{err}"));
+        }
+
+        let log = events(&ctx);
+        let fresh = &log[before..];
+        assert!(
+            !appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
+            "a transient mux error marked the agent dry"
+        );
+        assert!(
+            !appended(fresh, |kind| matches!(kind, EventKind::HandedOff { .. })),
+            "a transient mux error handed the task off"
+        );
+        assert!(
+            fresh.is_empty(),
+            "the failing ticks appended {} events",
+            fresh.len()
         );
     }
 }
