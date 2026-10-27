@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::quota::QuotaReport;
@@ -83,15 +84,45 @@ impl Cache {
             .parent()
             .ok_or_else(|| io::Error::other("cache path has no parent"))?;
         fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!(
-            "quota.json.{}.{}.tmp",
-            std::process::id(),
-            now_ms()
-        ));
+        let tmp = dir.join(temp_name());
         fs::write(&tmp, body)?;
         fs::rename(&tmp, &self.path).inspect_err(|_| {
             let _ = fs::remove_file(&tmp);
         })
+    }
+}
+
+/// The temp file name a store writes through.
+///
+/// The process id separates runs and the monotonic nanosecond counter separates
+/// writes inside one process: two threads storing in the same millisecond must
+/// not share a temp file, or one of them writes over the other's bytes.
+fn temp_name() -> String {
+    format!("quota.json.{}.{}.tmp", std::process::id(), unique_nanos())
+}
+
+/// The largest nanosecond timestamp this process has handed out so far.
+static LAST_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since the Unix epoch, at least one more than the previous call's
+/// value within this process.
+fn unique_nanos() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let mut previous = LAST_NANOS.load(Ordering::Relaxed);
+    loop {
+        let candidate = now.max(previous.saturating_add(1));
+        match LAST_NANOS.compare_exchange_weak(
+            previous,
+            candidate,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => previous = actual,
+        }
     }
 }
 
@@ -201,5 +232,47 @@ mod tests {
         assert!(cache.load().is_empty());
         store(&cache, &report("claude", 5));
         assert_eq!(cache.load().len(), 1);
+    }
+
+    #[test]
+    fn temp_names_never_repeat_within_one_process() {
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..1_000 {
+            let name = temp_name();
+            assert!(seen.insert(name.clone()), "repeat: {name}");
+        }
+    }
+
+    #[test]
+    fn concurrent_stores_leave_a_parseable_cache_and_no_temp_files() {
+        let dir = temp_dir();
+        let cache = Cache::new(dir.path());
+        std::thread::scope(|scope| {
+            for worker in 0..2 {
+                let cache = &cache;
+                scope.spawn(move || {
+                    for round in 0..50 {
+                        let agent = format!("agent-{worker}-{round}");
+                        store(cache, &report(&agent, 1_000 + round));
+                    }
+                });
+            }
+        });
+        // A store either wins its rename or loses it, but the file on disk is
+        // always one whole document.
+        let text = std::fs::read_to_string(cache.path()).unwrap_or_default();
+        match serde_json::from_str::<BTreeMap<String, QuotaReport>>(&text) {
+            Ok(parsed) => assert!(!parsed.is_empty(), "cache lost every record"),
+            Err(error) => panic!("cache is not one document: {error}\n{text}"),
+        }
+        let left: Vec<_> = match std::fs::read_dir(dir_of(&cache)) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect(),
+            Err(error) => panic!("should read cache dir: {error}"),
+        };
+        assert!(left.is_empty(), "temp files left: {left:?}");
     }
 }
