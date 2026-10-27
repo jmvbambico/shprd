@@ -16,7 +16,8 @@ read and one file `stat`.
 | 1 | process exited, pane closed | crashes, a CLI quitting on an auth error |
 | 2 | host agent state (herdr status events; tuios `agent-state`, including `errored`) | blocked, idle, errored |
 | 3 | provider errors in the conversation record ([Agents](agents.md)) | rate limit, quota, auth expired, often with a reset time |
-| 4 | screen signatures: the last ~40 lines matched against the CLI's dry patterns | CLIs that print errors but don't record them, and OpenCode/Kilo retry loops |
+| 3b | live retry status: OpenCode/Kilo `serve` `session.status` (`type: "retry"`); Pi json/rpc `auto_retry_start` | retry loops as they happen, before anything is written to the record |
+| 4 | screen signatures: the last ~40 lines matched against the CLI's dry patterns | CLIs that print errors but don't record them |
 | 5 | liveness: no screen change and no record growth for N minutes while "working" | silent hangs |
 | 6 | quota before dispatch (codex, claude) | avoids sending work to a nearly dry agent |
 | 7 | canary: one cheap non-interactive call | re-admitting a dry agent only; it spends quota |

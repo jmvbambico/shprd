@@ -44,3 +44,9 @@ inside itself. We'll ask upstream for a `--json` option.
 tuios has its own remote surfaces: `tuios-web`, SSH server mode, `hosts`, and
 `register-push`. On tuios, the box shows the `tuios-web` address and status.
 Its pairing and auth model is unverified.
+
+**herdr-mobile-relay may also run on tuios.** tuios hosts herdr plugins and
+serves a herdr-compatible socket, provided `[agents] herdr_protocol = "always"`
+is set (see [Multiplexers](multiplexers.md#tuios-speaks-herdr)). If the relay's
+needed methods are all supported, one remote experience covers both hosts. That
+gets tested in M8.

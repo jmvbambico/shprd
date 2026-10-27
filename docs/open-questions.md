@@ -5,13 +5,11 @@ Close each with evidence and move the result into the relevant page.
 
 | Question | Affects | How to check |
 |---|---|---|
-| Is the `prefix+alt+<letter>` layer free on herdr and tuios? | [Multiplexers](multiplexers.md) | `herdr --default-config`; `tuios keybinds free` |
-| Which environment variable marks "inside tuios"? | launch | tuios source or a live pane |
+| Does `prefix+alt` arrive at runtime on tuios in a real terminal? | [Multiplexers](multiplexers.md) | `tuios keybinds doctor` |
 | Does tuios's `split-window` take a ratio? | layout | tuios protocol `list-verbs` |
-| Can tuios host herdr plugins (`plugin_action`)? | [Remote](remote.md) | tuios source; a live test with herdr-mobile-relay |
+| Does herdr-mobile-relay run on tuios's herdr-compat layer? | [Remote](remote.md) | compare the relay's socket calls with tuios's `unsupported` list; live test |
 | Can a herdr pane declare itself an agent? | relay visibility (deferred) | live test |
-| Do OpenCode and Kilo expose retry status through `serve`? | [Availability](availability.md) | `opencode serve` OpenAPI and event stream |
-| Exactly how og reads Claude and Codex quota | [Agents](agents.md) | og source |
+| Is OpenCode/Kilo `SessionStatus.next` a timestamp or a delay? | [Availability](availability.md) | observe a real rate-limited turn |
 | Does Codex load `~/.agents/skills`? | [Skills](skills.md) | `/skills` in a live Codex session |
 | `tuios-web` pairing and auth on a phone | [Remote](remote.md) | live test |
 | Will herdr-mobile-relay add `setup-link --json`? | remote box | ask upstream |

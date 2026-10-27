@@ -5,6 +5,12 @@ truth; this log holds how we got there.
 
 ## 2026-10-27
 
+- **Build plan proposed** ([plan.md](plan.md)): M0–M9 with gates. The dogfood
+  point is after M6, when shprd builds shprd.
+- **Keys confirmed free:** `prefix+alt+<letter>` has no default binding on
+  either herdr or tuios.
+- **tuios speaks herdr** (plugins, socket, CLI shim). M8 starts by trying the
+  herdr adapter and herdr-mobile-relay on it before writing tuios-native code.
 - **Language: Rust.** The projects we're most likely to borrow from (herdr-cadence,
   herdr-projects, herdr-dagr) are Rust.
 - **License: MIT.** It's compatible with everything shprd might borrow, and it

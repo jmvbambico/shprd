@@ -33,6 +33,16 @@ harness table, so supporting a new CLI version is a table change.
 For CLIs that can't report quota up front, the screen-and-silence watchdog does
 the work. See [Availability](availability.md).
 
+### How quota and retries are read (verified 2026-10-27)
+
+| CLI | Source |
+|---|---|
+| claude | `GET https://api.anthropic.com/api/oauth/usage`, bearer token from Claude Code's own Keychain credential; `five_hour` / `seven_day` with `utilization` or `used_percentage` and `resets_at`. Ported from og (`installer/og_quota.py:168-211`). |
+| codex | `GET https://chatgpt.com/backend-api/wham/usage`, token and account id from `~/.codex/auth.json`; `rate_limit.primary_window` / `secondary_window`, `reset_at`, `credits`. Ported from og (`og_quota.py:252-318`). |
+| kilo | `kilo profile --json` balance; on the free router the balance doesn't bind. |
+| opencode, kilo | `opencode serve` / `kilo serve`: `GET /session/status` and the `/event` SSE stream carry `SessionStatus {type: "retry", attempt, message, next}` while a turn is being retried. Also `session.next.retried` and `session.error` with `statusCode` and `isRetryable`. |
+| pi | `--mode json` / `--mode rpc` emit `auto_retry_start {attempt, maxAttempts, delayMs, errorMessage}` and `auto_retry_end`. No quota. |
+
 ## Harness table
 
 One TOML table per CLI, shipped with shprd:

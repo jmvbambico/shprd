@@ -10,6 +10,7 @@ Where something is built, the page says so; until then, read it as the spec.
 | [Architecture](architecture.md) | how the engine, the event log, the host adapters and the views fit together |
 | [Run lifecycle](workflow.md) | what happens from `shprd up` to a landed PR |
 | [Decisions](decisions.md) | what was decided, when, and why; check here before re-opening a question |
+| [Build plan](plan.md) | milestones M0–M9, their tasks, lanes and gates |
 
 ## Reference
 
