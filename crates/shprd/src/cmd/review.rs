@@ -691,3 +691,404 @@ pub fn review_verb(ctx: &Ctx, args: &ReviewArgs, home: Option<&Path>) -> Result<
     println!("{}", report.dir.display());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use std::time::Duration;
+
+    use shprd_core::config::Skills;
+    use shprd_core::event::Actor;
+    use shprd_git::worktree::Layout;
+    use shprd_mux::fake::{Call, FakeMux};
+    use shprd_mux::naming;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// Runs one git command in `dir`, failing the test when it does.
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+
+    /// A harness spec for a fake CLI from `vendor`: the tests record the launch,
+    /// never run it, so `interactive` is the harmless `sh`.
+    fn fake_spec(id: &str, vendor: &str) -> HarnessSpec {
+        let text = format!(
+            r#"
+id = "{id}"
+name = "Fake {id}"
+vendor = "{vendor}"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "{id}"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["sh"]
+model_args = ["--model", "{{model}}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{{session}}.jsonl"
+errors = "fake"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+"#
+        );
+        toml::from_str::<HarnessSpec>(&text)
+            .unwrap_or_else(|err| panic!("the test spec is invalid: {err}"))
+    }
+
+    /// A repository with the integration branch, a task branch one commit ahead
+    /// of it, a started run and one completed attempt, plus a home directory.
+    struct Scratch {
+        repo: TempDir,
+        home: TempDir,
+    }
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let root = repo.path();
+            git(root, &["init", "-q", "-b", "main"]);
+            std::fs::write(root.join("README.md"), "scratch\n").unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-q", "-m", "first"]);
+            git(root, &["branch", "integration/m4"]);
+            git(root, &["checkout", "-q", "-b", "feature/t1"]);
+            std::fs::write(root.join("README.md"), "scratch\nand the change\n").unwrap();
+            git(root, &["commit", "-q", "-a", "-m", "t1 work"]);
+            git(root, &["checkout", "-q", "main"]);
+            Scratch { repo, home }
+        }
+
+        fn root(&self) -> &Path {
+            self.repo.path()
+        }
+
+        /// The repo's directory name, which the workspace name uses.
+        fn repo_name(&self) -> String {
+            self.root()
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+
+        /// A context with a started run and one completed attempt at `T1`.
+        fn ctx(&self) -> Ctx {
+            let ctx = Ctx::new(self.root().to_path_buf(), Actor::Human, false, true);
+            ctx.commit(EventKind::RunStarted {
+                run_id: "t1".to_string(),
+                repo: self.repo_name(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m4".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "Make review real".to_string(),
+                scope: vec!["README.md".to_string()],
+                acceptance: vec!["the diff is reviewed".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx
+        }
+
+        /// Records the attempt `git` describes: `sh` worked on `feature/t1`.
+        fn reported(&self, ctx: &Ctx) {
+            ctx.commit(EventKind::Spawned {
+                task: "T1".to_string(),
+                attempt: 1,
+                agent: "sh".to_string(),
+                model: None,
+                worktree: "/tmp/wt/T1".to_string(),
+                branch: "feature/t1".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::Reported {
+                task: "T1".to_string(),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: "made it real".to_string(),
+                tests: vec!["cargo test".to_string()],
+                changed_paths: vec!["README.md".to_string()],
+                commit: None,
+                skills_used: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        }
+
+        /// The environment a review runs in, with three fake CLIs: two from one
+        /// vendor and one from another.
+        fn review_env<'a>(&self, ctx: &'a Ctx, reviewer: Option<&str>) -> ReviewEnv<'a> {
+            let mut base_env = BTreeMap::new();
+            base_env.insert("GH_TOKEN".to_string(), "secret".to_string());
+            base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            ReviewEnv {
+                spawn: SpawnEnv {
+                    ctx,
+                    layout: Layout::default_for_home(self.home.path()),
+                    briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                    run: "t1".to_string(),
+                    base_branch: "integration/m4".to_string(),
+                    repo_name: self.repo_name(),
+                    programs: vec![
+                        Program {
+                            spec: fake_spec("sh", "pi"),
+                            installed: true,
+                        },
+                        Program {
+                            spec: fake_spec("pi", "pi"),
+                            installed: true,
+                        },
+                        Program {
+                            spec: fake_spec("codex", "openai"),
+                            installed: true,
+                        },
+                    ],
+                    workers: vec!["sh".to_string()],
+                    skills: Skills::default(),
+                    compat: Vec::new(),
+                    base_env,
+                    // No wait: a fake pane that never reports an agent would
+                    // otherwise stall every test.
+                    ready_wait: Duration::ZERO,
+                },
+                reviews_dir: self.home.path().join(".shprd").join("reviews"),
+                reviewer: reviewer.map(str::to_string),
+            }
+        }
+
+        /// A fake host that already has this repository's workspace.
+        fn mux(&self) -> FakeMux {
+            let mux = FakeMux::default().with_ready_agent();
+            mux.create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
+                .unwrap_or_else(|err| panic!("{err}"));
+            mux
+        }
+    }
+
+    /// A review request for `T1`.
+    fn request(degraded: bool) -> ReviewRequest {
+        ReviewRequest {
+            task: "T1".to_string(),
+            degraded,
+        }
+    }
+
+    #[test]
+    fn the_packet_carries_the_real_diff_and_the_contract() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.task, "T1");
+        assert_eq!(report.attempt, 1);
+        assert_eq!(report.agent, "codex");
+        assert_eq!(report.model.as_deref(), Some("m1"));
+        assert!(!report.degraded);
+        assert_eq!(report.dir, packet_dir(&env.reviews_dir, "t1", "T1", 1));
+        assert_eq!(
+            report.brief,
+            brief_path(&env.spawn.briefs_dir, "t1", "T1", 1)
+        );
+
+        // The diff is the task branch's own change, taken from its merge base.
+        let diff = std::fs::read_to_string(report.dir.join("diff.patch"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(diff.starts_with("diff --git"), "{diff}");
+        assert!(diff.contains("+and the change"), "{diff}");
+
+        let contract = std::fs::read_to_string(report.dir.join("contract.md"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(contract.contains("Make review real"), "{contract}");
+        assert!(contract.contains("the diff is reviewed"), "{contract}");
+        assert!(contract.contains("README.md"), "{contract}");
+        assert!(contract.contains("made it real"), "{contract}");
+
+        let schema: Value = serde_json::from_str(
+            &std::fs::read_to_string(report.dir.join("findings.schema.json"))
+                .unwrap_or_else(|err| panic!("{err}")),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            schema["items"]["properties"]["severity"]["enum"][0],
+            "critical"
+        );
+
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        let findings = report.dir.join("findings.json").display().to_string();
+        assert!(
+            brief.contains(&format!(
+                "shprd agent review-verdict --task T1 --attempt 1 --findings {findings}"
+            )),
+            "{brief}"
+        );
+        assert!(brief.contains("REVIEWER"), "{brief}");
+        assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
+    }
+
+    #[test]
+    fn a_reviewer_from_the_authors_vendor_is_refused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        // `pi` and `sh` are two CLIs from one vendor, so neither can review the
+        // other's work: the rule is about vendors, not programs.
+        let env = scratch.review_env(&ctx, Some("pi/m1"));
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &request(false)).unwrap_err();
+
+        assert_eq!(err.exit_code(), 2);
+        let message = format!("{err}");
+        assert!(message.contains("both Pi"), "{message}");
+        assert!(message.contains("--degraded"), "{message}");
+        // Nothing was written and no tab was opened.
+        assert!(!env.reviews_dir.exists(), "no packet may be written");
+        assert!(
+            mux.calls()
+                .iter()
+                .all(|call| !matches!(call, Call::CreateTab(..))),
+            "no tab may be opened"
+        );
+    }
+
+    #[test]
+    fn a_degraded_review_is_allowed_and_says_so() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("pi/m1"));
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(true)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(report.degraded);
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        assert!(brief.contains(DEGRADED_LABEL), "{brief}");
+        assert!(report.dir.is_dir(), "the packet was written anyway");
+        // The tab record names the tab the review opened, beside the brief.
+        let recorded = tab_record_path(&env.spawn.briefs_dir, "t1", "T1", 1);
+        let tab_id = std::fs::read_to_string(&recorded).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!tab_id.trim().is_empty(), "the record names no tab");
+        assert!(
+            mux.calls().iter().any(|call| matches!(
+                call,
+                Call::CreateTab(_, title, _) if title == &report.tab
+            )),
+            "no tab titled {:?} was opened",
+            report.tab
+        );
+    }
+
+    #[test]
+    fn the_reviewer_tab_starts_in_the_packet_not_the_worktree() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let calls = mux.calls();
+        let (title, cwd) = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::CreateTab(_, title, cwd) => Some((title.clone(), cwd.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tab was created: {calls:?}"));
+        assert_eq!(cwd, report.dir, "the tab must start in the packet");
+        assert_eq!(cwd, packet_dir(&env.reviews_dir, "t1", "T1", 1));
+        assert_eq!(
+            cwd,
+            scratch
+                .home
+                .path()
+                .join(".shprd")
+                .join("reviews")
+                .join("t1")
+                .join("T1-a1")
+        );
+        assert_ne!(
+            cwd,
+            std::path::PathBuf::from("/tmp/wt/T1"),
+            "the tab must never start in the worktree"
+        );
+        // A reviewer is prefixed with its own glyph, so it never reads as a worker.
+        assert_eq!(
+            title,
+            naming::tab_title(naming::Role::Reviewer, "codex", "T1", false)
+        );
+        assert!(title.starts_with('\u{25c7}'), "{title}");
+
+        let pairs = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Run(_, _, pairs) => Some(pairs.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the reviewer CLI was not started: {calls:?}"));
+        assert!(
+            pairs.contains(&("SHPRD_ACTOR".to_string(), Some("agent:codex".to_string()))),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&(
+                "SHPRD_REPO".to_string(),
+                Some(report.dir.display().to_string())
+            )),
+            "{pairs:?}"
+        );
+        // A reviewer may not push, so the remote credentials are dropped.
+        assert!(pairs.contains(&("GH_TOKEN".to_string(), None)), "{pairs:?}");
+        assert!(
+            !pairs.contains(&("GH_TOKEN".to_string(), Some("secret".to_string()))),
+            "{pairs:?}"
+        );
+        // The spec has no system-prompt arguments, so the brief is typed in.
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, Call::Prompt(_, text) if text.contains("REVIEWER"))),
+            "the brief was never typed in: {calls:?}"
+        );
+    }
+}
