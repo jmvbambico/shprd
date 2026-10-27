@@ -271,11 +271,25 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Writes `text` to `path` atomically.
 ///
-/// A uniquely named temp file in the same directory is written, flushed and
-/// synced, then renamed over `path`, so a concurrent reader sees either the old
-/// file or the new one and never a half-written config. The temp file is
-/// removed when the write fails, so a crash leaves no debris behind.
+/// A uniquely named temp file in the same directory is created fresh, written,
+/// flushed and synced, then renamed over `path`, so a concurrent reader sees
+/// either the old file or the new one and never a half-written config. The temp
+/// file is opened with `create_new`, so no other writer's temp file is ever
+/// truncated: a name already on disk is skipped and the next counter value
+/// tried, up to [`TEMP_RETRIES`] times. The temp file is removed when the write
+/// fails, so a crash leaves no debris behind.
 pub fn write_atomic(path: &Path, text: &str) -> Result<(), KeysError> {
+    write_atomic_at(path, text, TEMP_COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// How many temp names [`write_atomic`] tries before giving up.
+const TEMP_RETRIES: u64 = 16;
+
+/// [`write_atomic`] starting its temp naming at `first_counter`.
+///
+/// Split out so a test can pin the exact names that are tried instead of
+/// racing the process-wide counter.
+fn write_atomic_at(path: &Path, text: &str, first_counter: u64) -> Result<(), KeysError> {
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -284,25 +298,41 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), KeysError> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config.toml".to_owned());
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp = directory.join(format!(
-        ".{name}.shprd-{}-{counter}.tmp",
-        std::process::id()
-    ));
-    if let Err(error) = write_synced(&temp, text) {
-        let _ = fs::remove_file(&temp);
-        return Err(KeysError::Io(error));
+    let mut last: Option<std::io::Error> = None;
+    for offset in 0..TEMP_RETRIES {
+        let counter = first_counter.wrapping_add(offset);
+        let temp = directory.join(format!(
+            ".{name}.shprd-{}-{counter}.tmp",
+            std::process::id()
+        ));
+        match write_new_synced(&temp, text) {
+            Ok(()) => return rename_over(&temp, path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(KeysError::Io(error)),
+        }
     }
-    if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
+    let error = last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free temp name")
+    });
+    Err(KeysError::Io(error))
+}
+
+/// Renames `temp` over `path`, removing the temp file if the rename fails.
+fn rename_over(temp: &Path, path: &Path) -> Result<(), KeysError> {
+    if let Err(error) = fs::rename(temp, path) {
+        let _ = fs::remove_file(temp);
         return Err(KeysError::Io(error));
     }
     Ok(())
 }
 
-/// Writes `text` to `path` and flushes it all the way to the device.
-fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
-    let mut file = fs::File::create(path)?;
+/// Creates `path` (which must not exist yet) and writes `text` to it, flushed
+/// all the way to the device.
+fn write_new_synced(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()
 }
@@ -444,5 +474,19 @@ command = \"vim\"\ndescription = \"mine\"\n";
         let path = dir.path().join("fresh.toml");
         ok(write_atomic(&path, "a = 1\n"));
         assert_eq!(ok(fs::read_to_string(&path)), "a = 1\n");
+    }
+
+    #[test]
+    fn write_atomic_skips_a_temp_name_that_already_exists() {
+        let dir = ok(tempfile::tempdir());
+        let path = dir.path().join("config.toml");
+        let first = dir
+            .path()
+            .join(format!(".config.toml.shprd-{}-0.tmp", std::process::id()));
+        // Another writer's temp file: it must survive untouched.
+        ok(fs::write(&first, "theirs\n"));
+        ok(write_atomic_at(&path, "ours = true\n", 0));
+        assert_eq!(ok(fs::read_to_string(&first)), "theirs\n");
+        assert_eq!(ok(fs::read_to_string(&path)), "ours = true\n");
     }
 }
