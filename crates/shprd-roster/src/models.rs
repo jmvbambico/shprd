@@ -77,7 +77,8 @@ impl AgentRef {
     /// The string splits at its first `/`, because a model may contain more
     /// slashes and spaces. With a model given, a spec that is
     /// [`provider_qualified`](crate::spec::ModelsSpec::provider_qualified)
-    /// requires the model to name its provider too.
+    /// requires the model to name its provider too, with neither the provider
+    /// nor the rest empty or blank.
     pub fn parse(s: &str, specs: &[HarnessSpec]) -> Result<AgentRef, ModelError> {
         let (program, model) = match s.find('/') {
             Some(index) => (&s[..index], Some(&s[index + 1..])),
@@ -104,11 +105,21 @@ impl AgentRef {
                 agent: s.to_owned(),
             });
         }
-        if spec.models.provider_qualified && !model.contains('/') {
-            return Err(ModelError::NeedsProvider {
-                program: program.to_owned(),
-                hint: format!("{program}/<provider>/{model}"),
-            });
+        if spec.models.provider_qualified {
+            let (provider, rest) = model.split_once('/').unwrap_or_default();
+            if provider.trim().is_empty() || rest.trim().is_empty() {
+                // A bare model is shown back with its name, so the fix is
+                // obvious; an empty half keeps the generic shape.
+                let hint = if model.contains('/') {
+                    format!("{program}/<provider>/<model>")
+                } else {
+                    format!("{program}/<provider>/{model}")
+                };
+                return Err(ModelError::NeedsProvider {
+                    program: program.to_owned(),
+                    hint,
+                });
+            }
         }
         Ok(AgentRef {
             program: program.to_owned(),
@@ -333,6 +344,24 @@ project_dirs = []
             }
             other => panic!("expected NeedsProvider, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn refuses_a_provider_qualified_model_with_an_empty_part() {
+        let specs = specs();
+        for bad in ["pi//m", "pi/ /m", "pi/p/", "pi/p/ "] {
+            match AgentRef::parse(bad, &specs) {
+                Err(ModelError::NeedsProvider { program, .. }) => assert_eq!(program, "pi"),
+                other => panic!("`{bad}` should need a provider, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_a_provider_qualified_model_holding_slashes() {
+        let specs = specs();
+        let parsed = parse_ok("pi/Command Code/deepseek/x", &specs);
+        assert_eq!(parsed.model.as_deref(), Some("Command Code/deepseek/x"));
     }
 
     #[test]
