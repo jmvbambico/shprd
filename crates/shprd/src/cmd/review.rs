@@ -7,18 +7,20 @@
 //! [`spawn`] does, so a test drives a fake host and nothing here reads the
 //! environment or starts a process of its own.
 
-#![allow(dead_code)] // the next two commits wire these into the verb
-
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use serde_json::{Value, json};
-use shprd_core::event::ReportStatus;
+use shprd_core::event::{EventKind, ReportStatus};
 use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
+use shprd_mux::{Mux, naming};
+use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{HarnessSpec, LaunchSpec, Vendor};
+use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, Vendor, render_args};
 
+use crate::cli::ReviewArgs;
+use crate::cmd::launch;
 use crate::cmd::spawn::{self, Program, SpawnEnv};
 use crate::ctx::{CliError, Ctx};
 
@@ -378,4 +380,314 @@ fn author_vendor(programs: &[Program], agent: &str) -> Option<Vendor> {
         .iter()
         .find(|program| program.spec.id == agent)
         .map(|program| program.spec.vendor)
+}
+
+/// What a reviewer's brief says, as data, so its rendering is testable alone.
+pub struct ReviewBrief<'a> {
+    /// The task being reviewed.
+    pub task: &'a Task,
+    /// The run id.
+    pub run: &'a str,
+    /// The attempt number.
+    pub attempt: u32,
+    /// The program the reviewer runs.
+    pub agent: &'a str,
+    /// The model it runs, when one was chosen.
+    pub model: Option<&'a str>,
+    /// The folder the reviewer reads and writes in.
+    pub dir: &'a str,
+    /// The absolute path the reviewer writes its findings to.
+    pub findings: &'a str,
+    /// Whether the review is degraded, and so must say so.
+    pub degraded: bool,
+}
+
+/// Renders the brief a reviewer reads before its first turn.
+///
+/// It names the three files the reviewer may read, says plainly that the
+/// repository is off limits, and ends with the command that records the verdict,
+/// so the reviewer never has to guess how its work gets back into the run.
+pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# REVIEW {} {}\n\n",
+        input.task.id, input.task.title
+    ));
+    out.push_str(&format!(
+        "run `{}`, attempt {}, reviewer `{}`{}\nyour folder: `{}`\n\n",
+        input.run,
+        input.attempt,
+        input.agent,
+        match input.model {
+            Some(model) => format!(" ({model})"),
+            None => String::new(),
+        },
+        input.dir
+    ));
+    if input.degraded {
+        out.push_str(&format!(
+            "this review is labelled **{DEGRADED_LABEL}**: the reviewer shares a vendor with \
+             the agent that wrote the change, so it is not an independent review. Say so in \
+             your findings.\n\n"
+        ));
+    }
+    out.push_str("You are a REVIEWER. You do not write code and you do not fix anything.\n\n");
+    out.push_str("## What you may read\n\n");
+    out.push_str(
+        "- `diff.patch` — the whole change, against its merge base with the integration branch\n",
+    );
+    out.push_str("- `contract.md` — the task, what \"done\" meant, and what the agent reported\n");
+    out.push_str("- `findings.schema.json` — the shape of what you write\n\n");
+    out.push_str("- Read those three files, in this folder, and nothing else.\n");
+    out.push_str("- Never open or edit the repository or any worktree; the diff is the truth you judge. If the packet does not show something you need, record that as a finding.\n");
+    out.push_str("- Write nothing outside this folder.\n\n");
+    out.push_str("## What to write\n\n");
+    out.push_str("Write `findings.json` in this folder, matching `findings.schema.json`: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write an empty array — `[]` — when nothing is wrong: an empty array is a clean review, and it is the answer to aim for.\n\n");
+    out.push_str("Judge the diff against the acceptance criteria and the scope: what it does wrong, what it misses, what it changes that it may not touch. A critical or major finding blocks integration, so spend them on things that matter.\n\n");
+    out.push_str("## Then\n\n");
+    out.push_str("Run this once `findings.json` is written:\n\n");
+    out.push_str(&format!(
+        "    shprd agent review-verdict --task {} --attempt {} --findings {}\n",
+        input.task.id, input.attempt, input.findings
+    ));
+    out
+}
+
+/// Opens the reviewer's tab in `dir` and starts its CLI there.
+///
+/// The tab's cwd is the packet folder, never the worktree: where a reviewer's
+/// shell starts is the difference between reading a diff and editing the code.
+/// Returns the tab's id and title.
+fn open_reviewer(
+    mux: &dyn Mux,
+    env: &ReviewEnv<'_>,
+    task: &str,
+    reviewer: &Reviewer,
+    dir: &Path,
+    brief: &ReviewBrief<'_>,
+    brief_path: &Path,
+) -> Result<(shprd_mux::TabId, String), CliError> {
+    let workspace = spawn::workspace_of(mux, &env.spawn)?;
+    let wanted = naming::tab_title(naming::Role::Reviewer, &reviewer.agent, task, false);
+    let existing = mux
+        .list_tabs(&workspace.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?
+        .into_iter()
+        .map(|tab| tab.title)
+        .collect::<Vec<String>>();
+    let title = naming::disambiguate(&existing, &wanted, task);
+    let tab = mux
+        .create_tab(&workspace.id, &title, dir)
+        .map_err(|err| CliError::other(anyhow!(err).context("creating the reviewer tab")))?;
+    // The tab exists from here on, so every failure closes it again.
+    let started = start_in_tab(
+        mux, env, task, reviewer, dir, brief, brief_path, &title, &tab,
+    );
+    match started {
+        Ok(()) => Ok((tab.id, title)),
+        Err(err) => {
+            spawn::close_tab(mux, &tab.id);
+            Err(err)
+        }
+    }
+}
+
+/// Starts the reviewer's CLI in `tab` and hands it the brief.
+///
+/// A brief that does not arrive is reported, never fatal: the CLI is running,
+/// and the human can resend the brief into the tab.
+#[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
+fn start_in_tab(
+    mux: &dyn Mux,
+    env: &ReviewEnv<'_>,
+    task: &str,
+    reviewer: &Reviewer,
+    dir: &Path,
+    brief: &ReviewBrief<'_>,
+    brief_path: &Path,
+    title: &str,
+    tab: &shprd_mux::Tab,
+) -> Result<(), CliError> {
+    let text = render_review_brief(brief);
+    let (argv, brief_in_args) = reviewer_argv(
+        &reviewer.launch,
+        reviewer.model.as_deref(),
+        &text,
+        brief_path,
+    )?;
+    let pairs = env_pairs(launch_env(
+        &env.spawn.base_env,
+        EnvRole::Reviewer,
+        &EnvContext {
+            actor: format!("agent:{}", reviewer.agent),
+            task: Some(task.to_string()),
+            run: Some(env.spawn.run.clone()),
+            repo: dir.to_path_buf(),
+        },
+    ));
+    mux.run(&tab.root_pane, &argv, &pairs)
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the reviewer CLI")))?;
+    if brief_in_args {
+        return Ok(());
+    }
+    let delivery = launch::deliver_brief(mux, &tab.root_pane, &text, env.spawn.ready_wait);
+    let Some(reason) = delivery.reason() else {
+        return Ok(());
+    };
+    eprintln!(
+        "warning: review brief not delivered to {title}: {reason}; it is at {}",
+        brief_path.display()
+    );
+    let escalation = EventKind::Escalated {
+        task: Some(task.to_string()),
+        body: "review brief not delivered".to_string(),
+        default_action: "resend the review brief into the reviewer tab".to_string(),
+    };
+    if let Err(err) = env.spawn.ctx.commit(escalation) {
+        eprintln!("warning: could not record the escalation: {err}");
+    }
+    Ok(())
+}
+
+/// The argv a reviewer's CLI starts with.
+///
+/// The order is [`spawn`]'s: the base command, the flags that suppress approval
+/// prompts, then the model and finally the brief as the system prompt. The
+/// second element says whether the brief went in as an argument, which is also
+/// what says whether it has to be typed in instead.
+fn reviewer_argv(
+    launch_spec: &LaunchSpec,
+    model: Option<&str>,
+    brief: &str,
+    brief_path: &Path,
+) -> Result<(Vec<String>, bool), CliError> {
+    let mut argv = launch_spec.interactive.clone();
+    if let Some(auto) = &launch_spec.auto_approve {
+        argv.extend(auto.iter().cloned());
+    }
+    let values = Values {
+        model: model.map(str::to_string),
+        // A reviewer has no effort level of its own: `roster.effort` is keyed by
+        // worker agent strings, and a reviewer is chosen for its vendor, not its
+        // depth.
+        effort: None,
+        prompt: Some(brief.to_string()),
+        prompt_file: Some(brief_path.display().to_string()),
+        session: None,
+    };
+    argv.extend(render(
+        launch_spec,
+        launch::model_args(launch_spec, model),
+        &values,
+    )?);
+    let mut brief_in_args = false;
+    if let Some(system_prompt_args) = &launch_spec.system_prompt_args {
+        argv.extend(render(launch_spec, system_prompt_args, &values)?);
+        brief_in_args = true;
+    }
+    Ok((argv, brief_in_args))
+}
+
+/// Renders one argument template, naming the template when it cannot be filled.
+fn render(
+    launch_spec: &LaunchSpec,
+    template: &[String],
+    values: &Values,
+) -> Result<Vec<String>, CliError> {
+    render_args(template, values).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "filling the launch arguments {template:?} of {:?}",
+            launch_spec.interactive
+        )))
+    })
+}
+
+/// Flattens a launch environment into the pairs [`Mux::run`] takes: set entries
+/// first, then the removals, both in name order.
+fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
+    let mut pairs: Vec<(String, Option<String>)> = diff
+        .set
+        .into_iter()
+        .map(|(name, value)| (name, Some(value)))
+        .collect();
+    pairs.extend(diff.remove.into_iter().map(|name| (name, None)));
+    pairs
+}
+
+/// Opens a cross-vendor reviewer on a task's latest completed attempt.
+///
+/// The order is the one [`spawn`] uses: every rule is checked and every decision
+/// is made before the first side effect, so a refused review leaves nothing
+/// behind. The effects then run in the order the packet needs: the files the
+/// reviewer reads, the brief that points at them, and only then the tab.
+pub fn review(
+    mux: &dyn Mux,
+    env: &ReviewEnv<'_>,
+    req: &ReviewRequest,
+) -> Result<ReviewReport, CliError> {
+    let state = env.spawn.ctx.state()?;
+    let task = spawn::task_of(&state, &req.task)?;
+    let attempt = reviewed_attempt(task)?;
+    let reviewer = choose_reviewer(
+        env.reviewer.as_deref(),
+        &attempt.agent,
+        &env.spawn.programs,
+        req.degraded,
+    )?;
+    let dir = write_packet(env, task, attempt)?;
+    let findings = dir.join("findings.json");
+    let brief_path = brief_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n);
+    let brief = ReviewBrief {
+        task,
+        run: &env.spawn.run,
+        attempt: attempt.n,
+        agent: &reviewer.agent,
+        model: reviewer.model.as_deref(),
+        dir: &dir.display().to_string(),
+        findings: &findings.display().to_string(),
+        degraded: reviewer.degraded,
+    };
+    spawn::write_brief(&brief_path, &render_review_brief(&brief))?;
+    let (tab_id, tab) = open_reviewer(mux, env, &task.id, &reviewer, &dir, &brief, &brief_path)?;
+    spawn::write_tab(
+        &tab_record_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n),
+        &tab_id,
+    );
+    Ok(ReviewReport {
+        task: task.id.clone(),
+        attempt: attempt.n,
+        agent: reviewer.agent,
+        model: reviewer.model,
+        degraded: reviewer.degraded,
+        dir,
+        brief: brief_path,
+        tab,
+    })
+}
+
+/// `shprd agent review`: opens a reviewer on a task's latest attempt.
+pub fn review_verb(ctx: &Ctx, args: &ReviewArgs, home: Option<&Path>) -> Result<(), CliError> {
+    let mux = spawn::real_mux();
+    let env = ReviewEnv::build(ctx, home)?;
+    let request = ReviewRequest {
+        task: args.task.clone(),
+        degraded: args.degraded,
+    };
+    let report = review(&mux, &env, &request)?;
+    if ctx.json {
+        let value = json!({
+            "task": report.task,
+            "attempt": report.attempt,
+            "agent": report.agent,
+            "model": report.model,
+            "degraded": report.degraded,
+            "dir": report.dir.display().to_string(),
+            "brief": report.brief.display().to_string(),
+            "tab": report.tab,
+        });
+        println!("{value}");
+        return Ok(());
+    }
+    println!("{}", report.dir.display());
+    Ok(())
 }

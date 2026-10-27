@@ -246,6 +246,8 @@ pub enum AgentCommand {
     Integrate(IntegrateArgs),
     /// Hand a task from one agent to the next, keeping its worktree.
     Handoff(HandoffArgs),
+    /// Open a cross-vendor reviewer on a finished attempt's diff.
+    Review(ReviewArgs),
 }
 
 /// Plan verbs.
@@ -334,6 +336,21 @@ pub struct HandoffArgs {
     /// Defaults to the next configured worker after the current one.
     #[arg(long, value_name = "PROGRAM/MODEL")]
     pub to: Option<String>,
+}
+
+/// Arguments for `agent review`.
+///
+/// The task and the log decide the rest: the attempt, the branch, the diff and
+/// the reviewer all come from the run, so the caller only chooses what to review
+/// and whether to accept a review that is not cross-vendor.
+#[derive(Debug, Args)]
+pub struct ReviewArgs {
+    /// The task whose latest attempt is reviewed.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// Review anyway when the reviewer shares the author's vendor.
+    #[arg(long)]
+    pub degraded: bool,
 }
 
 /// Arguments for `agent prompt`.
