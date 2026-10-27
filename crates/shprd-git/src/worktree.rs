@@ -217,6 +217,26 @@ pub fn remove_worktree_only(
     Ok(())
 }
 
+/// Deletes one branch, treating one that is already gone as gone.
+///
+/// Refuses any branch outside [`Layout::namespace`], so a branch a human made
+/// by hand is never deleted. This is the only branch deletion shprd has, and
+/// callers reach it only for a branch their ledger recorded creating.
+pub fn delete_branch(repo: &Path, layout: &Layout, branch: &str) -> Result<(), WorktreeError> {
+    if !layout.owns_branch(branch) {
+        return Err(WorktreeError::OutsideNamespace {
+            branch: branch.to_string(),
+            namespace: layout.namespace.clone(),
+        });
+    }
+    let git = Git::new(repo);
+    if !git.branch_exists(branch)? {
+        return Ok(());
+    }
+    git.run(&["branch", "-D", branch])?;
+    Ok(())
+}
+
 /// Rejects an id that is empty, uses anything but `[A-Za-z0-9._-]`, or
 /// contains `..`.
 fn check_id(what: &'static str, id: &str) -> Result<(), WorktreeError> {

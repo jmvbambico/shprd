@@ -897,6 +897,30 @@ fn janitor_dry_run_changes_nothing_and_apply_appends_resource_events() {
 }
 
 #[test]
+fn restore_refuses_a_finished_run_before_creating_the_branch() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    let branch = "shprd/r1/T1";
+    integrated_task(&root, branch);
+    let tip = git.git(&["rev-parse", "main"]);
+    git.git(&["update-ref", "refs/shprd/archive/r1/T1", &tip]);
+    ok(&root, &["run", "finish"]);
+
+    let output = run_with_home(&root, home.path(), &["restore", "T1"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("refused"), "stderr: {stderr}");
+    assert!(
+        !git.has_ref(branch),
+        "a refused restore must not leave the branch behind"
+    );
+}
+
+#[test]
 fn janitor_leaves_a_branch_outside_the_namespace_alone() {
     let git = GitRepo::new();
     let root = git.path.clone();

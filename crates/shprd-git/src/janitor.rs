@@ -15,7 +15,6 @@ use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
 use shprd_core::state::{ResourceStatus, RunState, TaskStatus};
 
 use crate::archive;
-use crate::git::Git;
 use crate::worktree::{self, Layout};
 
 /// Milliseconds in a day, for the archive-expiry arithmetic.
@@ -272,7 +271,9 @@ pub fn execute(repo: &Path, layout: &Layout, run: &str, actions: &[Action]) -> V
                 } else if !layout.owns_branch(branch) {
                     Err(format!("branch {branch} is outside the shprd namespace"))
                 } else {
-                    delete_branch(repo, branch).map(|()| action.events())
+                    worktree::delete_branch(repo, layout, branch)
+                        .map(|()| action.events())
+                        .map_err(|err| err.to_string())
                 }
             }
             Action::RemoveWorktree { path, .. } => {
@@ -290,24 +291,6 @@ pub fn execute(repo: &Path, layout: &Layout, run: &str, actions: &[Action]) -> V
         });
     }
     outcomes
-}
-
-/// Deletes a branch, treating "already gone" as success.
-///
-/// This is the only path that deletes a branch, and the plan only reaches it
-/// from a `Live` `Branch` resource the ledger recorded. A branch that is
-/// already gone — a re-run of a half-applied plan — is the finished state, not
-/// a failure, and the ledger records it either way.
-fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
-    let git = Git::new(repo);
-    match git.branch_exists(branch) {
-        Ok(false) => Ok(()),
-        Ok(true) => git
-            .run(&["branch", "-D", branch])
-            .map(|_| ())
-            .map_err(|err| err.to_string()),
-        Err(err) => Err(err.to_string()),
-    }
 }
 
 /// True when the task's resources are free to go: it landed, or the run is over

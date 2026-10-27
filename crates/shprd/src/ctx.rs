@@ -111,15 +111,24 @@ impl Ctx {
         Ok((state, outcome.events))
     }
 
+    /// Checks `kind` against the current state, and appends nothing.
+    ///
+    /// A verb that has an effect outside the log — creating a branch, removing
+    /// a worktree — runs this first, so a refused event never leaves a side
+    /// effect the ledger does not know about.
+    pub fn check(&self, kind: &EventKind) -> Result<(), CliError> {
+        let state = self.state()?;
+        state
+            .check(kind, SystemClock.now_ms())
+            .map_err(CliError::Refused)
+    }
+
     /// Checks `kind` against the current state, then appends it.
     ///
     /// A refused event is never written. Returns the appended event.
     pub fn commit(&self, kind: EventKind) -> Result<Event, CliError> {
-        let state = self.state()?;
+        self.check(&kind)?;
         let clock = SystemClock;
-        state
-            .check(&kind, clock.now_ms())
-            .map_err(CliError::Refused)?;
         let mut log = EventLog::open(&self.log_path)
             .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
         let event = log

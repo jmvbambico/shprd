@@ -18,7 +18,7 @@ use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 use shprd_core::config::{self as config, Config};
 use shprd_git::archive;
 use shprd_git::janitor;
-use shprd_git::worktree::Layout;
+use shprd_git::worktree::{self, Layout};
 
 /// Runs `shprd janitor`: print the plan, or apply it.
 pub fn plan_verb(
@@ -63,6 +63,11 @@ pub fn plan_verb(
 }
 
 /// Runs `shprd restore <task>`: recreate the branch from its archive ref.
+///
+/// The ledger is checked before git: a restore that would not be recorded must
+/// not create a branch at all. If appending the record then fails, the branch
+/// this call just made is deleted again, so the branch and the ledger never
+/// disagree.
 pub fn restore_verb(
     ctx: &Ctx,
     args: &RestoreArgs,
@@ -74,15 +79,27 @@ pub fn restore_verb(
         Some(run) => run.clone(),
         None => run_id(&state)?,
     };
-    let branch = archive::restore(&ctx.root, &layout, &run, &args.task)
-        .map_err(|err| CliError::other(anyhow!(err).context("restoring the archived branch")))?;
     let kind = EventKind::Resource {
         action: ResourceAction::Created,
         kind: ResourceKind::Branch,
-        name: branch.clone(),
+        name: layout.branch_name(&run, &args.task),
         task: Some(args.task.clone()),
     };
-    let event = ctx.commit(kind)?;
+    ctx.check(&kind)?;
+    let branch = archive::restore(&ctx.root, &layout, &run, &args.task)
+        .map_err(|err| CliError::other(anyhow!(err).context("restoring the archived branch")))?;
+    let event = match ctx.commit(kind) {
+        Ok(event) => event,
+        Err(err) => {
+            let name = &branch;
+            if let Err(undo) = worktree::delete_branch(&ctx.root, &layout, name) {
+                return Err(CliError::other(anyhow!(err).context(format!(
+                    "and the branch it created could not be removed: {undo}"
+                ))));
+            }
+            return Err(err);
+        }
+    };
     emit(ctx, &event)
 }
 
