@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,16 @@ const SIGNIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often a running probe is asked whether it has exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How long to wait before each retry of a spawn the kernel refused with
+/// `ETXTBSY`, one delay per retry after the first attempt.
+const BUSY_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+];
 
 /// The placeholder a sign-in probe may use for the model it depends on.
 const MODEL_PLACEHOLDER: &str = "{model}";
@@ -127,6 +137,36 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Spawns `command`, retrying the few times the kernel may refuse with
+/// `ETXTBSY`.
+///
+/// `execve` fails with `ETXTBSY`, which std reports as
+/// [`io::ErrorKind::ExecutableFileBusy`], while any process still holds a
+/// descriptor open for writing on the file being executed, even one it merely
+/// inherited and never writes to. A probe binary that was just written, or a
+/// sibling thread's child that briefly inherited such a descriptor, can leave a
+/// spawn refused for a few milliseconds, so that one error is retried with a
+/// short backoff. Any other error is returned at once, and so is `ETXTBSY` once
+/// the retries are spent.
+fn spawn_retrying_busy(command: &mut Command) -> io::Result<Child> {
+    let mut backoffs = BUSY_RETRY_DELAYS.iter();
+    loop {
+        let busy = match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(source) => {
+                if source.kind() != io::ErrorKind::ExecutableFileBusy {
+                    return Err(source);
+                }
+                source
+            }
+        };
+        match backoffs.next() {
+            Some(backoff) => thread::sleep(*backoff),
+            None => return Err(busy),
+        }
+    }
+}
+
 /// Runs `program` with `args` and a timeout, and returns what it printed.
 ///
 /// `env` starts from the current process environment: a [`Some`] entry sets a
@@ -162,7 +202,7 @@ pub fn run_with_timeout(
         command.process_group(0);
     }
 
-    let mut child = command.spawn().map_err(|source| DetectError::Spawn {
+    let mut child = spawn_retrying_busy(&mut command).map_err(|source| DetectError::Spawn {
         program: program.to_owned(),
         source,
     })?;
