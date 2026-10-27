@@ -1,0 +1,22 @@
+{
+  "id": "cli:pane:split",
+  "result": {
+    "pane": {
+      "agent_status": "unknown",
+      "cwd": "/tmp/fixture",
+      "focused": false,
+      "foreground_cwd": "/tmp/fixture",
+      "pane_id": "w1:p5",
+      "revision": 0,
+      "scroll": {
+        "max_offset_from_bottom": 0,
+        "offset_from_bottom": 0,
+        "viewport_rows": 18
+      },
+      "tab_id": "w1:t1",
+      "terminal_id": "term_fixture",
+      "workspace_id": "w1"
+    },
+    "type": "pane_info"
+  }
+}

@@ -7,6 +7,14 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+shprd-mux = { path = "../shprd-mux" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

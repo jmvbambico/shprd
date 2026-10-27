@@ -4,9 +4,13 @@ pub mod agent;
 pub mod dagr;
 pub mod doctor;
 pub mod janitor;
+pub mod keys;
+pub mod launch;
 pub mod roster;
 pub mod run;
 pub mod set;
+pub mod spawn;
+pub mod up;
 pub mod view;
 
 use anyhow::anyhow;
@@ -25,6 +29,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Set(args)) = &cli.command {
         return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
     }
+    // `keys` edits herdr's config file, so it too needs no repository.
+    if let Some(Command::Keys(args)) = &cli.command {
+        return keys::run(args, cli.global.home.as_deref());
+    }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
         return doctor::run(args, cli.global.json, cli.global.home.as_deref());
@@ -39,7 +47,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             RunCommand::Start(args) => run::start(&ctx, &args),
             RunCommand::Finish => run::finish(&ctx),
         },
-        Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd),
+        Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
         Some(Command::Status) => view::status(&ctx),
@@ -59,6 +67,9 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.repo.as_deref(),
         ),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
+        Some(Command::Keys(args)) => keys::run(&args, None),
+        Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
+        Some(Command::Down) => up::down(&ctx),
     }
 }
 

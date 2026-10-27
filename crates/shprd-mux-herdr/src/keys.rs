@@ -1,0 +1,556 @@
+//! Herdr keybind block writer.
+//!
+//! Herdr's config is a TOML file a human also edits, so shprd owns only one
+//! marked stretch of it: everything between [`BEGIN`] and [`END`] is generated
+//! and everything outside is preserved byte for byte.
+
+use std::fs;
+use std::io::Write;
+use std::ops::Range;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The line that opens the block shprd owns.
+pub const BEGIN: &str = "# >>> shprd (managed) >>>";
+/// The line that closes the block shprd owns.
+pub const END: &str = "# <<< shprd (managed) <<<";
+
+/// The comment the block opens with when the file it was installed into did not
+/// end with a newline.
+const NO_FINAL_NEWLINE: &str = "# shprd: original had no final newline";
+
+/// How herdr runs a bound command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A shell command, run in the background.
+    Shell,
+    /// A command that opens a pane.
+    Pane,
+    /// A command that opens a popup.
+    Popup,
+}
+
+impl Kind {
+    /// The `type` herdr spells this kind as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Pane => "pane",
+            Self::Popup => "popup",
+        }
+    }
+}
+
+/// One key herdr binds to a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    /// The key chord, in herdr spelling (`prefix+alt+u`).
+    pub key: String,
+    /// How herdr runs the command.
+    pub kind: Kind,
+    /// The command line herdr runs.
+    pub command: String,
+    /// The one-line label shown next to the chord.
+    pub description: String,
+}
+
+/// The bindings shprd installs, in the order they render.
+pub fn default_bindings() -> Vec<Binding> {
+    vec![
+        binding("prefix+alt+u", Kind::Shell, "shprd up", "shprd: up"),
+        binding(
+            "prefix+alt+c",
+            Kind::Shell,
+            "shprd focus chat",
+            "shprd: chat",
+        ),
+        binding(
+            "prefix+alt+o",
+            Kind::Shell,
+            "shprd focus orchestrator",
+            "shprd: orchestrator",
+        ),
+        binding(
+            "prefix+alt+n",
+            Kind::Shell,
+            "shprd focus next",
+            "shprd: what needs me",
+        ),
+        binding("prefix+alt+r", Kind::Pane, "shprd remote", "shprd: remote"),
+        binding("prefix+alt+s", Kind::Popup, "shprd status", "shprd: status"),
+        binding("prefix+alt+d", Kind::Popup, "shprd doctor", "shprd: doctor"),
+    ]
+}
+
+/// One binding, built from its four parts.
+fn binding(key: &str, kind: Kind, command: &str, description: &str) -> Binding {
+    Binding {
+        key: key.to_owned(),
+        kind,
+        command: command.to_owned(),
+        description: description.to_owned(),
+    }
+}
+
+/// Renders the managed block, ending with a newline.
+pub fn render(bindings: &[Binding]) -> String {
+    let mut text = String::new();
+    text.push_str(BEGIN);
+    text.push('\n');
+    for binding in bindings {
+        text.push_str("\n[[keys.command]]\n");
+        field(&mut text, "key", &binding.key);
+        field(&mut text, "type", binding.kind.as_str());
+        field(&mut text, "command", &binding.command);
+        field(&mut text, "description", &binding.description);
+    }
+    text.push('\n');
+    text.push_str(END);
+    text.push('\n');
+    text
+}
+
+/// Appends one `name = "value"` line, quoted with [`quote`].
+fn field(text: &mut String, name: &str, value: &str) {
+    text.push_str(name);
+    text.push_str(" = ");
+    text.push_str(&quote(value));
+    text.push('\n');
+}
+
+/// Quotes `value` as a TOML basic string.
+fn quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// What can go wrong while installing or removing the managed block.
+#[derive(Debug, thiserror::Error)]
+pub enum KeysError {
+    /// The managed block is missing one of its two markers, has one twice, or
+    /// has them in the wrong order.
+    #[error("the shprd block markers are unbalanced, so shprd will not touch this file")]
+    Unbalanced,
+    /// A binding outside the block already owns one of shprd's keys.
+    #[error("key `{key}` is already bound outside the shprd block, to `{existing}`")]
+    Conflict {
+        /// The key both sides want.
+        key: String,
+        /// The command the user's own config binds to it.
+        existing: String,
+    },
+    /// The text outside the block is not valid TOML.
+    #[error("the herdr config outside the shprd block is not valid TOML: {0}")]
+    Parse(String),
+    /// Reading or writing the config file failed.
+    #[error("herdr config i/o failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// The byte span of the managed block: the [`BEGIN`] line through the end of
+/// the [`END`] line.
+fn block_span(text: &str) -> Result<Option<Range<usize>>, KeysError> {
+    let mut begin = None;
+    let mut end = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let marker = line.trim();
+        if marker == BEGIN && begin.replace(offset).is_some() {
+            return Err(KeysError::Unbalanced);
+        }
+        if marker == END && end.replace(offset + line.len()).is_some() {
+            return Err(KeysError::Unbalanced);
+        }
+        offset += line.len();
+    }
+    match (begin, end) {
+        (None, None) => Ok(None),
+        (Some(start), Some(stop)) if start < stop => Ok(Some(start..stop)),
+        _ => Err(KeysError::Unbalanced),
+    }
+}
+
+/// `block` with [`NO_FINAL_NEWLINE`] as the first line inside the markers.
+fn marked_block(block: &str) -> String {
+    match block.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{NO_FINAL_NEWLINE}\n{rest}"),
+        None => block.to_owned(),
+    }
+}
+
+/// Whether `block`, markers included, records a file that had no final newline.
+fn keeps_no_final_newline(block: &str) -> bool {
+    block
+        .strip_prefix(BEGIN)
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .is_some_and(|rest| rest.starts_with(NO_FINAL_NEWLINE))
+}
+
+/// Installs (or refreshes) the managed block in `text`.
+///
+/// An existing block is replaced in place, so everything outside it stays byte
+/// for byte; a file without one gains `text`'s own block at the end, after a
+/// blank line. Nothing is written to disk here: the caller decides.
+///
+/// A file whose last line had no newline gets one, because the block must start
+/// on a line of its own, and the block records that in its first line so
+/// [`uninstall`] can give the original byte for byte back.
+pub fn install(text: &str, bindings: &[Binding]) -> Result<String, KeysError> {
+    let block = render(bindings);
+    let installed = match block_span(text)? {
+        Some(span) => {
+            let block = if keeps_no_final_newline(&text[span.start..span.end]) {
+                marked_block(&block)
+            } else {
+                block
+            };
+            let mut out = String::with_capacity(text.len() + block.len());
+            out.push_str(&text[..span.start]);
+            out.push_str(&block);
+            out.push_str(&text[span.end..]);
+            out
+        }
+        None => {
+            let missing_newline = !text.is_empty() && !text.ends_with('\n');
+            let mut out = text.to_owned();
+            if !out.is_empty() {
+                // One newline either ends a last line that had none, or makes
+                // the blank line that separates the user's text from the block.
+                out.push('\n');
+            }
+            out.push_str(&if missing_newline {
+                marked_block(&block)
+            } else {
+                block
+            });
+            out
+        }
+    };
+    ensure_compatible(&installed, bindings)?;
+    Ok(installed)
+}
+
+/// Removes the managed block, and the newlines installing it added.
+///
+/// A file without a block comes back unchanged, and a file that had no final
+/// newline before the block was installed gets its last byte back.
+pub fn uninstall(text: &str) -> Result<String, KeysError> {
+    let Some(span) = block_span(text)? else {
+        return Ok(text.to_owned());
+    };
+    let mut start = span.start;
+    let marked = keeps_no_final_newline(&text[span.start..span.end]);
+    if marked && text[..start].ends_with('\n') {
+        // Only the newline synth made room for the block: the original had none.
+        start -= 1;
+    } else if !marked && text[..start].ends_with("\n\n") {
+        // The blank line installing the block added.
+        start -= 1;
+    }
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..start]);
+    out.push_str(&text[span.end..]);
+    Ok(out)
+}
+
+/// Refuses text whose part outside the block is not TOML herdr could load, or
+/// which binds one of shprd's keys outside the block.
+fn ensure_compatible(text: &str, bindings: &[Binding]) -> Result<(), KeysError> {
+    let outside = match block_span(text)? {
+        Some(span) => {
+            let mut outside = String::with_capacity(text.len());
+            outside.push_str(&text[..span.start]);
+            outside.push_str(&text[span.end..]);
+            outside
+        }
+        None => text.to_owned(),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&outside).map_err(|err| KeysError::Parse(err.to_string()))?;
+    let entries = parsed
+        .get("keys")
+        .and_then(|keys| keys.get("command"))
+        .and_then(toml::Value::as_array);
+    for entry in entries.into_iter().flatten() {
+        let Some(key) = entry.get("key").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        if !bindings.iter().any(|binding| binding.key == key) {
+            continue;
+        }
+        let existing = entry
+            .get("command")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        return Err(KeysError::Conflict {
+            key: key.to_owned(),
+            existing: existing.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The process-wide counter that keeps temp names unique within one process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes `text` to `path` atomically.
+///
+/// A uniquely named temp file in the same directory is created fresh, written,
+/// flushed and synced, then renamed over `path`, so a concurrent reader sees
+/// either the old file or the new one and never a half-written config. The temp
+/// file is opened with `create_new`, so no other writer's temp file is ever
+/// truncated: a name already on disk is skipped and the next counter value
+/// tried, up to [`TEMP_RETRIES`] times. The temp file is removed when the write
+/// fails, so a crash leaves no debris behind.
+pub fn write_atomic(path: &Path, text: &str) -> Result<(), KeysError> {
+    write_atomic_at(path, text, TEMP_COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// How many temp names [`write_atomic`] tries before giving up.
+const TEMP_RETRIES: u64 = 16;
+
+/// [`write_atomic`] starting its temp naming at `first_counter`.
+///
+/// Split out so a test can pin the exact names that are tried instead of
+/// racing the process-wide counter.
+fn write_atomic_at(path: &Path, text: &str, first_counter: u64) -> Result<(), KeysError> {
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_owned());
+    let mut last: Option<std::io::Error> = None;
+    for offset in 0..TEMP_RETRIES {
+        let counter = first_counter.wrapping_add(offset);
+        let temp = directory.join(format!(
+            ".{name}.shprd-{}-{counter}.tmp",
+            std::process::id()
+        ));
+        match write_new_synced(&temp, text) {
+            Ok(()) => return rename_over(&temp, path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(KeysError::Io(error)),
+        }
+    }
+    let error = last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free temp name")
+    });
+    Err(KeysError::Io(error))
+}
+
+/// Renames `temp` over `path`, removing the temp file if the rename fails.
+fn rename_over(temp: &Path, path: &Path) -> Result<(), KeysError> {
+    if let Err(error) = fs::rename(temp, path) {
+        let _ = fs::remove_file(temp);
+        return Err(KeysError::Io(error));
+    }
+    Ok(())
+}
+
+/// Creates `path` (which must not exist yet) and writes `text` to it, flushed
+/// all the way to the device.
+fn write_new_synced(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A user's own config: comments, a table, and one unrelated key.
+    const USER_CONFIG: &str = "# my herdr\n[terminal]\nshell = \"zsh\"\n\n\
+# mine\n[[keys.command]]\nkey = \"prefix+x\"\ntype = \"shell\"\n\
+command = \"mine\"\ndescription = \"mine\"\n";
+
+    /// Unwraps a result in a test, failing it with the error instead of panicking
+    /// on the call site.
+    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("unexpected failure: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn render_parses_as_toml_with_one_table_per_binding() {
+        let text = render(&default_bindings());
+        let parsed: toml::Value = ok(toml::from_str(&text));
+        let tables = parsed
+            .get("keys")
+            .and_then(|keys| keys.get("command"))
+            .and_then(toml::Value::as_array);
+        let tables = match tables {
+            Some(tables) => tables,
+            None => panic!("expected keys.command tables in {text}"),
+        };
+        assert_eq!(tables.len(), 7);
+        assert_eq!(
+            tables[0].get("key").and_then(toml::Value::as_str),
+            Some("prefix+alt+u")
+        );
+        assert_eq!(
+            tables[4].get("type").and_then(toml::Value::as_str),
+            Some("pane")
+        );
+    }
+
+    #[test]
+    fn render_escapes_quotes_and_backslashes() {
+        assert_eq!(quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
+    fn install_into_an_empty_file_installs_only_the_block() {
+        let installed = ok(install("", &default_bindings()));
+        assert_eq!(installed, render(&default_bindings()));
+    }
+
+    #[test]
+    fn install_keeps_everything_outside_the_block_byte_for_byte() {
+        let bindings = default_bindings();
+        let installed = ok(install(USER_CONFIG, &bindings));
+        assert_eq!(installed, format!("{USER_CONFIG}\n{}", render(&bindings)));
+    }
+
+    #[test]
+    fn install_twice_changes_nothing_the_second_time() {
+        let bindings = default_bindings();
+        let once = ok(install(USER_CONFIG, &bindings));
+        let twice = ok(install(&once, &bindings));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn uninstall_restores_the_original_exactly() {
+        let installed = ok(install(USER_CONFIG, &default_bindings()));
+        assert_eq!(ok(uninstall(&installed)), USER_CONFIG);
+    }
+
+    #[test]
+    fn uninstall_of_a_file_without_a_block_changes_nothing() {
+        assert_eq!(ok(uninstall(USER_CONFIG)), USER_CONFIG);
+    }
+
+    #[test]
+    fn install_refuses_a_key_the_user_already_bound() {
+        let taken = "[[keys.command]]\nkey = \"prefix+alt+u\"\ntype = \"shell\"\n\
+command = \"vim\"\ndescription = \"mine\"\n";
+        match install(taken, &default_bindings()) {
+            Err(KeysError::Conflict { key, existing }) => {
+                assert_eq!(key, "prefix+alt+u");
+                assert_eq!(existing, "vim");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_refuses_missing_duplicated_and_reordered_markers() {
+        let bindings = default_bindings();
+        for broken in [
+            format!("x = 1\n{BEGIN}\n"),
+            format!("x = 1\n{END}\n"),
+            format!("{END}\nx = 1\n{BEGIN}\n"),
+            format!("{BEGIN}\n{END}\n{BEGIN}\n{END}\n"),
+        ] {
+            assert!(
+                matches!(install(&broken, &bindings), Err(KeysError::Unbalanced)),
+                "expected unbalanced for {broken:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_refuses_text_outside_the_block_that_is_not_toml() {
+        let broken = "this is not toml = = =\n";
+        assert!(matches!(
+            install(broken, &default_bindings()),
+            Err(KeysError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn install_and_uninstall_round_trip_every_ending() {
+        let bindings = default_bindings();
+        for original in ["", "# mine\n", "# mine", "[terminal]\nshell = \"zsh\""] {
+            let installed = ok(install(original, &bindings));
+            assert_ne!(installed, original, "install must add the block");
+            assert_eq!(
+                ok(uninstall(&installed)),
+                original,
+                "round trip {original:?}"
+            );
+            let twice = ok(install(&installed, &bindings));
+            assert_eq!(twice, installed, "a second install is a no-op {original:?}");
+            assert_eq!(ok(uninstall(&twice)), original, "twice {original:?}");
+        }
+    }
+
+    #[test]
+    fn the_marker_appears_only_for_a_file_without_a_final_newline() {
+        let bindings = default_bindings();
+        assert!(
+            ok(install("# mine", &bindings))
+                .starts_with(&format!("# mine\n{BEGIN}\n{NO_FINAL_NEWLINE}\n"))
+        );
+        assert!(!ok(install("# mine\n", &bindings)).contains(NO_FINAL_NEWLINE));
+        assert!(!ok(install("", &bindings)).contains(NO_FINAL_NEWLINE));
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp_behind() {
+        let dir = ok(tempfile::tempdir());
+        let path = dir.path().join("config.toml");
+        ok(fs::write(&path, "old = true\n"));
+        ok(write_atomic(&path, "new = true\n"));
+        assert_eq!(ok(fs::read_to_string(&path)), "new = true\n");
+        let mut left: Vec<String> = Vec::new();
+        for entry in ok(fs::read_dir(dir.path())) {
+            let entry = ok(entry);
+            left.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(left, vec!["config.toml".to_owned()]);
+    }
+
+    #[test]
+    fn write_atomic_creates_the_file_when_it_is_missing() {
+        let dir = ok(tempfile::tempdir());
+        let path = dir.path().join("fresh.toml");
+        ok(write_atomic(&path, "a = 1\n"));
+        assert_eq!(ok(fs::read_to_string(&path)), "a = 1\n");
+    }
+
+    #[test]
+    fn write_atomic_skips_a_temp_name_that_already_exists() {
+        let dir = ok(tempfile::tempdir());
+        let path = dir.path().join("config.toml");
+        let first = dir
+            .path()
+            .join(format!(".config.toml.shprd-{}-0.tmp", std::process::id()));
+        // Another writer's temp file: it must survive untouched.
+        ok(fs::write(&first, "theirs\n"));
+        ok(write_atomic_at(&path, "ours = true\n", 0));
+        assert_eq!(ok(fs::read_to_string(&first)), "theirs\n");
+        assert_eq!(ok(fs::read_to_string(&path)), "ours = true\n");
+    }
+}

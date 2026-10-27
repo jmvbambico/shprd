@@ -86,6 +86,12 @@ pub enum Command {
     Set(SetArgs),
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
+    /// Print, install or remove herdr's shprd keybinds.
+    Keys(KeysArgs),
+    /// Start or resume the run and lay out this repository's workspace.
+    Up,
+    /// Finish the run; refuses while a task is still working.
+    Down,
 }
 
 /// Arguments for `janitor`.
@@ -209,8 +215,10 @@ pub enum AgentCommand {
         #[command(subcommand)]
         cmd: TaskCommand,
     },
-    /// Record that an agent was spawned for a task attempt.
+    /// Spawn an agent for a task attempt: worktree, tab and launched CLI.
     Spawn(SpawnArgs),
+    /// Send one turn of input to the tab a spawned agent is working in.
+    Prompt(PromptArgs),
     /// Record an agent's report for a task attempt.
     Report(ReportArgs),
     /// Record a gate result for a task attempt.
@@ -257,26 +265,50 @@ pub struct TaskAddArgs {
 }
 
 /// Arguments for `agent spawn`.
+///
+/// The run and the task decide where the agent works: the worktree, the branch
+/// and the attempt number all come from the log and the layout, so the agent is
+/// the only thing left to choose.
 #[derive(Debug, Args)]
 pub struct SpawnArgs {
     /// The task.
     #[arg(long, value_name = "ID")]
     pub task: String,
-    /// Attempt number, starting at 1.
+    /// The agent taking the attempt, as `<program>/<model>`.
+    ///
+    /// Defaults to the first configured worker whose CLI is installed.
+    #[arg(long, value_name = "PROGRAM/MODEL")]
+    pub agent: Option<String>,
+    /// Effort level for this attempt, e.g. `high`.
+    #[arg(long, value_name = "EFFORT")]
+    pub effort: Option<String>,
+    /// Only record the attempt in the log: no worktree, no tab, no CLI.
+    ///
+    /// This keeps the record-only behaviour for callers whose worktree a human
+    /// made by hand; with it `--attempt`, `--worktree` and `--branch` are
+    /// required.
+    #[arg(long = "record-only", hide = true)]
+    pub record_only: bool,
+    /// Attempt number, for `--record-only` only.
     #[arg(long, value_name = "N")]
-    pub attempt: u32,
-    /// The agent taking the attempt.
-    #[arg(long, value_name = "AGENT")]
-    pub agent: String,
-    /// Model the agent runs on.
-    #[arg(long, value_name = "MODEL")]
-    pub model: Option<String>,
-    /// Worktree the agent works in.
+    pub attempt: Option<u32>,
+    /// Worktree the agent works in, for `--record-only` only.
     #[arg(long, value_name = "PATH")]
-    pub worktree: PathBuf,
-    /// Branch the agent commits on.
+    pub worktree: Option<PathBuf>,
+    /// Branch the agent commits on, for `--record-only` only.
     #[arg(long, value_name = "BRANCH")]
-    pub branch: String,
+    pub branch: Option<String>,
+}
+
+/// Arguments for `agent prompt`.
+#[derive(Debug, Args)]
+pub struct PromptArgs {
+    /// The task whose agent tab is prompted.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// The text to submit as one turn of input; quote it.
+    #[arg(value_name = "TEXT")]
+    pub text: String,
 }
 
 /// Arguments for `agent report`.
@@ -395,4 +427,29 @@ pub enum GateOutcome {
     Pass,
     /// The gate failed.
     Fail,
+}
+
+/// Arguments for `keys`.
+#[derive(Debug, Args)]
+pub struct KeysArgs {
+    /// Which keybind verb.
+    #[command(subcommand)]
+    pub cmd: KeysCommand,
+    /// The herdr config file to read and write.
+    ///
+    /// Defaults to `$HERDR_CONFIG_PATH`, then
+    /// `$HOME/.config/herdr/config.toml`.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// The keybind verbs.
+#[derive(Debug, Subcommand)]
+pub enum KeysCommand {
+    /// Print the block shprd installs.
+    Show,
+    /// Install the block, or refresh an existing one in place.
+    Install,
+    /// Remove the block.
+    Uninstall,
 }

@@ -1,0 +1,4 @@
+echo hello shprd
+user@host fixture % echo hello shprd
+hello shprd
+user@host fixture %

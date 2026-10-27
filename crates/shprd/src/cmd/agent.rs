@@ -1,22 +1,32 @@
 //! `shprd agent …`: planning, spawning, reporting, gating and integrating.
 
-use anyhow::Context;
+use std::path::Path;
+
+use anyhow::{Context, anyhow};
 use shprd_core::event::{EventKind, Finding};
 
 use crate::cli::{
-    AgentCommand, EscalateArgs, GateArgs, GateOutcome, IntegrateArgs, OverrideArgs, ReportArgs,
-    SpawnArgs, TaskAddArgs, TaskCommand,
+    AgentCommand, EscalateArgs, GateArgs, GateOutcome, IntegrateArgs, OverrideArgs, PromptArgs,
+    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand,
 };
-use crate::cmd::emit;
+use crate::cmd::{emit, spawn};
 use crate::ctx::{CliError, Ctx};
 
 /// Dispatches one of the agent verbs.
-pub fn dispatch(ctx: &Ctx, cmd: AgentCommand) -> Result<(), CliError> {
+///
+/// `home` is the global `--home`, threaded through because spawning writes brief
+/// files and worktrees under it.
+pub fn dispatch(
+    ctx: &Ctx,
+    cmd: AgentCommand,
+    home: Option<&std::path::Path>,
+) -> Result<(), CliError> {
     match cmd {
         AgentCommand::Task { cmd } => match cmd {
             TaskCommand::Add(args) => task_add(ctx, &args),
         },
-        AgentCommand::Spawn(args) => spawn(ctx, &args),
+        AgentCommand::Spawn(args) => spawn_cmd(ctx, &args, home),
+        AgentCommand::Prompt(args) => prompt_cmd(ctx, &args),
         AgentCommand::Report(args) => report(ctx, &args),
         AgentCommand::Gate(args) => gate(ctx, &args),
         AgentCommand::Escalate(args) => escalate(ctx, &args),
@@ -40,18 +50,103 @@ fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
     emit(ctx, &event)
 }
 
-/// Records that an agent took a task attempt. No worktree is created here.
-fn spawn(ctx: &Ctx, args: &SpawnArgs) -> Result<(), CliError> {
+/// Spawns an agent for a task attempt, or records one a human set up by hand.
+fn spawn_cmd(ctx: &Ctx, args: &SpawnArgs, home: Option<&Path>) -> Result<(), CliError> {
+    if args.record_only {
+        return record_only(ctx, args);
+    }
+    let mux = spawn::real_mux();
+    let env = spawn::build_env(ctx, home)?;
+    let request = spawn::SpawnRequest {
+        task: args.task.clone(),
+        agent: args.agent.clone(),
+        effort: args.effort.clone(),
+    };
+    let report = spawn::spawn(&mux, &env, &request)?;
+    print_report(ctx, &report);
+    sync_dagr(ctx);
+    Ok(())
+}
+
+/// Records an attempt whose worktree and tab a human set up, with no side
+/// effects of its own.
+fn record_only(ctx: &Ctx, args: &SpawnArgs) -> Result<(), CliError> {
+    let (Some(attempt), Some(worktree), Some(branch)) =
+        (args.attempt, args.worktree.as_ref(), args.branch.as_ref())
+    else {
+        return Err(CliError::other(anyhow!(
+            "--record-only needs --attempt, --worktree and --branch"
+        )));
+    };
+    let agent = args.agent.clone().ok_or_else(|| {
+        CliError::other(anyhow!("--record-only needs --agent (<program>/<model>)"))
+    })?;
+    let (agent, model) = match agent.split_once('/') {
+        Some((program, model)) if !model.is_empty() => {
+            (program.to_string(), Some(model.to_string()))
+        }
+        _ => (agent, None),
+    };
     let kind = EventKind::Spawned {
         task: args.task.clone(),
-        attempt: args.attempt,
-        agent: args.agent.clone(),
-        model: args.model.clone(),
-        worktree: args.worktree.to_string_lossy().to_string(),
-        branch: args.branch.clone(),
+        attempt,
+        agent,
+        model,
+        worktree: worktree.to_string_lossy().to_string(),
+        branch: branch.clone(),
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)
+}
+
+/// Prints what a spawn did: JSON when asked, else one short human line.
+fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
+    if ctx.json {
+        let value = serde_json::json!({
+            "task": report.task,
+            "attempt": report.attempt,
+            "agent": report.agent,
+            "model": report.model,
+            "worktree": report.worktree.display().to_string(),
+            "branch": report.branch,
+            "tab": report.tab,
+            "brief": report.brief.display().to_string(),
+            "skills": report.skills,
+        });
+        println!("{value}");
+        return;
+    }
+    println!(
+        "ok spawned {} attempt {} with {} in {} (tab {:?})",
+        report.task,
+        report.attempt,
+        report.agent,
+        report.worktree.display(),
+        report.tab
+    );
+}
+
+/// Rewrites the dagr document, warning on stderr when that fails.
+fn sync_dagr(ctx: &Ctx) {
+    if ctx.no_dagr {
+        return;
+    }
+    if let Err(err) = crate::cmd::dagr::sync(ctx) {
+        eprintln!("warning: dagr sync failed: {err}");
+    }
+}
+
+/// Types one turn of input into the tab a spawned agent is working in.
+fn prompt_cmd(ctx: &Ctx, args: &PromptArgs) -> Result<(), CliError> {
+    let mux = spawn::real_mux();
+    spawn::prompt(&mux, &ctx.root, &args.task, &args.text)?;
+    if ctx.json {
+        let value = serde_json::json!({ "task": args.task, "prompted": true });
+        println!("{value}");
+    } else {
+        println!("ok prompted {} in its tab", args.task);
+    }
+    Ok(())
 }
 
 /// Records an agent's report for an attempt.

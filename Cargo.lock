@@ -469,6 +469,8 @@ dependencies = [
  "serde_json",
  "shprd-core",
  "shprd-git",
+ "shprd-mux",
+ "shprd-mux-herdr",
  "shprd-roster",
  "shprd-views",
  "tempfile",
@@ -499,10 +501,21 @@ dependencies = [
 [[package]]
 name = "shprd-mux"
 version = "0.0.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "shprd-mux-herdr"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shprd-mux",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "shprd-mux-tuios"
