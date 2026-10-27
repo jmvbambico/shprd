@@ -8,9 +8,11 @@ version.workspace = true
 
 [dependencies]
 shprd-mux = { path = "../shprd-mux" }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
 serde_json.workspace = true
-ureq.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true
