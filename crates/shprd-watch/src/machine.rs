@@ -282,3 +282,301 @@ fn is_unretryable(kind: ErrorKind) -> bool {
         ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Auth
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screen::Liveness;
+
+    /// A fixed epoch time so the timelines read as plain offsets.
+    const NOW: u64 = 1_700_000_000_000;
+
+    /// Inputs with every signal absent.
+    fn inputs(now_ms: u64) -> Inputs {
+        Inputs {
+            now_ms,
+            record_error: None,
+            serve: None,
+            screen: None,
+            process_exited: false,
+        }
+    }
+
+    /// A screen signal in `state` whose screen has been still for a while.
+    fn still(state: AgentState, unchanged_for_ms: u64) -> ScreenSignal {
+        ScreenSignal {
+            dry_pattern: None,
+            reset_hint: None,
+            liveness: Liveness {
+                changed: false,
+                unchanged_for_ms,
+            },
+            agent_state: state,
+        }
+    }
+
+    /// A working pane that has produced nothing for `unchanged_for_ms`.
+    fn silence(now_ms: u64, unchanged_for_ms: u64) -> Inputs {
+        Inputs {
+            screen: Some(still(AgentState::Working, unchanged_for_ms)),
+            ..inputs(now_ms)
+        }
+    }
+
+    #[test]
+    fn silence_goes_suspect_then_dry() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+
+        assert_eq!(w.step(&silence(NOW, 179_999), &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+
+        let suspect_at = NOW + 180_000;
+        assert_eq!(w.step(&silence(suspect_at, 180_000), &p), Vec::new());
+        assert_eq!(
+            w.health,
+            Health::Suspect {
+                since_ms: suspect_at
+            }
+        );
+
+        assert_eq!(w.step(&silence(NOW + 270_000, 270_000), &p), Vec::new());
+        let acts = w.step(&silence(NOW + 300_000, 300_000), &p);
+        assert_eq!(
+            acts,
+            vec![
+                Action::MarkDry {
+                    reason: String::from("no output for too long"),
+                    reset_at_ms: None,
+                },
+                Action::HandOff,
+            ]
+        );
+        assert_eq!(
+            w.health,
+            Health::Dry {
+                since_ms: NOW + 300_000,
+                reason: String::from("no output for too long"),
+                retry_at_ms: NOW + 300_000 + 900_000,
+                source: Source::Silence,
+                canary_sent: false,
+            }
+        );
+    }
+
+    #[test]
+    fn quota_record_error_goes_dry_immediately() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let resets = NOW + 3_600_000;
+        let i = Inputs {
+            record_error: Some(RecordError {
+                kind: ErrorKind::Quota,
+                message: String::from("credit balance is too low"),
+                at_ms: Some(NOW),
+                resets_at_ms: Some(resets),
+            }),
+            ..inputs(NOW)
+        };
+
+        assert_eq!(
+            w.step(&i, &p),
+            vec![
+                Action::MarkDry {
+                    reason: String::from("credit balance is too low"),
+                    reset_at_ms: Some(resets),
+                },
+                Action::HandOff,
+            ]
+        );
+        assert_eq!(
+            w.health,
+            Health::Dry {
+                since_ms: NOW,
+                reason: String::from("credit balance is too low"),
+                retry_at_ms: resets,
+                source: Source::Record,
+                canary_sent: false,
+            }
+        );
+    }
+
+    #[test]
+    fn serve_retries_go_dry_on_the_fifth() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let retry = Status::Retry {
+            attempt: 1,
+            message: String::from("overloaded"),
+            next_at_ms: None,
+        };
+
+        for _ in 0..4 {
+            let i = Inputs {
+                serve: Some(retry.clone()),
+                ..inputs(NOW)
+            };
+            assert_eq!(w.step(&i, &p), Vec::new());
+            assert_eq!(w.health, Health::Working);
+        }
+
+        let i = Inputs {
+            serve: Some(retry.clone()),
+            ..inputs(NOW)
+        };
+        let acts = w.step(&i, &p);
+        assert_eq!(acts.len(), 2);
+        assert_eq!(
+            acts.first(),
+            Some(&Action::MarkDry {
+                reason: String::from("overloaded"),
+                reset_at_ms: None,
+            })
+        );
+        assert_eq!(acts.get(1), Some(&Action::HandOff));
+    }
+
+    #[test]
+    fn a_screen_change_clears_suspicion() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        w.step(&silence(NOW, 180_000), &p);
+        assert!(matches!(w.health, Health::Suspect { .. }));
+
+        let moved = Inputs {
+            screen: Some(ScreenSignal {
+                liveness: Liveness {
+                    changed: true,
+                    unchanged_for_ms: 0,
+                },
+                ..still(AgentState::Working, 0)
+            }),
+            ..inputs(NOW + 200_000)
+        };
+        assert_eq!(w.step(&moved, &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+    }
+
+    #[test]
+    fn an_idle_agent_is_never_suspect() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let i = Inputs {
+            screen: Some(still(AgentState::Idle, 10_000_000)),
+            ..inputs(NOW)
+        };
+        assert_eq!(w.step(&i, &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+    }
+
+    #[test]
+    fn an_exited_process_goes_dry() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let i = Inputs {
+            process_exited: true,
+            ..inputs(NOW)
+        };
+
+        assert_eq!(
+            w.step(&i, &p),
+            vec![
+                Action::MarkDry {
+                    reason: String::from("agent process exited"),
+                    reset_at_ms: None,
+                },
+                Action::HandOff,
+            ]
+        );
+        assert!(matches!(
+            w.health,
+            Health::Dry {
+                source: Source::Exit,
+                ..
+            }
+        ));
+    }
+
+    /// Drive `w` into a dry verdict through an exited process.
+    fn go_dry(w: &mut Watch, p: &Policy) {
+        let i = Inputs {
+            process_exited: true,
+            ..inputs(NOW)
+        };
+        w.step(&i, p);
+    }
+
+    #[test]
+    fn canary_success_marks_available() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        go_dry(&mut w, &p);
+
+        assert_eq!(w.step(&inputs(NOW + 899_999), &p), Vec::new());
+        assert_eq!(w.step(&inputs(NOW + 900_000), &p), vec![Action::Canary]);
+        assert_eq!(w.step(&inputs(NOW + 900_001), &p), Vec::new());
+
+        assert_eq!(
+            w.canary_result(true, NOW + 900_002, &p),
+            vec![Action::MarkAvailable]
+        );
+        assert_eq!(w.health, Health::Available);
+
+        // Counters were cleared: the next dry spell starts at the first backoff.
+        go_dry(&mut w, &p);
+        assert!(matches!(
+            w.health,
+            Health::Dry {
+                retry_at_ms,
+                ..
+            } if retry_at_ms == NOW + 900_000
+        ));
+    }
+
+    #[test]
+    fn canary_failure_schedules_a_later_probe() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        go_dry(&mut w, &p);
+        w.step(&inputs(NOW + 900_000), &p);
+
+        assert_eq!(w.canary_result(false, NOW + 900_001, &p), Vec::new());
+        let retry_at = NOW + 900_001 + 1_800_000;
+        assert_eq!(
+            w.health,
+            Health::Dry {
+                since_ms: NOW,
+                reason: String::from("agent process exited"),
+                retry_at_ms: retry_at,
+                source: Source::Exit,
+                canary_sent: false,
+            }
+        );
+
+        assert_eq!(w.step(&inputs(retry_at - 1), &p), Vec::new());
+        assert_eq!(w.step(&inputs(retry_at), &p), vec![Action::Canary]);
+    }
+
+    #[test]
+    fn a_screen_dry_pattern_goes_dry() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let i = Inputs {
+            screen: Some(ScreenSignal {
+                dry_pattern: Some(String::from("usage limit reached")),
+                ..still(AgentState::Working, 0)
+            }),
+            ..inputs(NOW)
+        };
+        assert_eq!(
+            w.step(&i, &p),
+            vec![
+                Action::MarkDry {
+                    reason: String::from("usage limit reached"),
+                    reset_at_ms: None,
+                },
+                Action::HandOff,
+            ]
+        );
+    }
+}
