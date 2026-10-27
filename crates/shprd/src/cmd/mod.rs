@@ -2,8 +2,11 @@
 
 pub mod agent;
 pub mod dagr;
+pub mod doctor;
 pub mod janitor;
+pub mod roster;
 pub mod run;
+pub mod set;
 pub mod view;
 
 use anyhow::anyhow;
@@ -14,6 +17,18 @@ use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
 
 /// Runs whichever verb the command line asked for.
 pub fn dispatch(cli: Cli) -> Result<(), CliError> {
+    // `roster` reads no run log, so it answers outside a repository too.
+    if let Some(Command::Roster(args)) = &cli.command {
+        return roster::run(args, cli.global.json);
+    }
+    // `set` writes a config file, not a log, so it too needs no repository.
+    if let Some(Command::Set(args)) = &cli.command {
+        return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
+    }
+    // `doctor` diagnoses the machine, so it answers outside a repository too.
+    if let Some(Command::Doctor(args)) = &cli.command {
+        return doctor::run(args, cli.global.json, cli.global.home.as_deref());
+    }
     let root = resolve_root(cli.global.repo.as_deref())?;
     let actor = resolve_actor(cli.global.actor.as_deref())?;
     let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr);
@@ -36,6 +51,14 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Restore(args)) => {
             janitor::restore_verb(&ctx, &args, cli.global.home.as_deref())
         }
+        Some(Command::Roster(args)) => roster::run(&args, ctx.json),
+        // Unreachable in practice: `set` returns above, before any log is read.
+        Some(Command::Set(args)) => set::run(
+            &args,
+            cli.global.home.as_deref(),
+            cli.global.repo.as_deref(),
+        ),
+        Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
     }
 }
 

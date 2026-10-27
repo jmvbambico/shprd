@@ -4,6 +4,7 @@
 //! Locations and formats live in data so supporting a new CLI version is a
 //! table change rather than a code change (see `docs/agents.md`).
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -63,6 +64,24 @@ impl HarnessSpec {
                 return Err(SpecError::InvalidSkillDir { dir: dir.clone() });
             }
         }
+
+        let launch = &self.launch;
+        check_template("launch.interactive", &launch.interactive, &[], None)?;
+        check_template(
+            "launch.model_args",
+            &launch.model_args,
+            &["model"],
+            Some("model"),
+        )?;
+        check_optional_template("launch.effort_args", &launch.effort_args, &["effort"])?;
+        check_optional_template("launch.auto_approve", &launch.auto_approve, &[])?;
+        check_optional_template(
+            "launch.system_prompt_args",
+            &launch.system_prompt_args,
+            &["prompt", "prompt_file"],
+        )?;
+        check_optional_template("launch.resume_args", &launch.resume_args, &["session"])?;
+        check_optional_template("detect.signin_args", &self.detect.signin_args, &["model"])?;
         Ok(())
     }
 }
@@ -93,6 +112,12 @@ pub struct DetectSpec {
     pub version_args: Vec<String>,
     /// The command a user runs to sign in.
     pub signin_hint: String,
+    /// Arguments that probe whether the CLI is signed in.
+    ///
+    /// They run after the binary and exit 0 when the user is signed in. A
+    /// probe may use `{model}` when the answer depends on the model. It must
+    /// never print a credential: the output is not shown.
+    pub signin_args: Option<Vec<String>>,
 }
 
 /// Argument templates for starting the CLI and injecting session settings.
@@ -146,6 +171,9 @@ pub struct Values {
 pub struct ModelsSpec {
     /// The command that lists available models, if the CLI has one.
     pub list_command: Option<Vec<String>>,
+    /// Whether a model name must also name its provider, as `pi` requires.
+    #[serde(default)]
+    pub provider_qualified: bool,
 }
 
 /// Where the CLI writes its conversation record and provider errors.
@@ -179,6 +207,9 @@ const LOCATION_PLACEHOLDERS: [&str; 5] = ["cwd_slug", "session", "yyyy", "mm", "
 /// component; and `~` may appear only as the first component, where it means the
 /// user's home directory.
 pub fn validate_location(location: &str) -> Result<(), SpecError> {
+    if location.trim().is_empty() {
+        return Err(SpecError::EmptyLocation);
+    }
     if location
         .char_indices()
         .any(|(index, ch)| ch == '~' && index != 0)
@@ -186,6 +217,26 @@ pub fn validate_location(location: &str) -> Result<(), SpecError> {
         return Err(SpecError::TildeNotLeading {
             location: location.to_owned(),
         });
+    }
+    if location.contains("**") {
+        return Err(SpecError::DoubleStar {
+            location: location.to_owned(),
+        });
+    }
+
+    // A leading `/` is the root; every component after it must be non-empty.
+    let body = location.strip_prefix('/').unwrap_or(location);
+    for (index, component) in body.split('/').enumerate() {
+        if component.is_empty() {
+            return Err(SpecError::EmptyPathComponent {
+                location: location.to_owned(),
+            });
+        }
+        if index == 0 && component.starts_with('*') {
+            return Err(SpecError::LeadingStar {
+                location: location.to_owned(),
+            });
+        }
     }
 
     let mut rest = location;
@@ -299,6 +350,60 @@ pub enum SpecError {
         /// The location pattern that failed.
         location: String,
     },
+    /// A loaded harness spec failed the checks in [`HarnessSpec::validate`].
+    #[error("invalid harness spec {path}: {source}")]
+    Invalid {
+        /// The file that failed.
+        path: PathBuf,
+        /// The validation error.
+        #[source]
+        source: Box<SpecError>,
+    },
+    /// Two harness spec files declare the same `id`.
+    #[error("duplicate harness id {id} in {path}: already defined in {first}")]
+    DuplicateId {
+        /// The repeated id.
+        id: String,
+        /// The file that repeats it.
+        path: PathBuf,
+        /// The file that declared it first.
+        first: PathBuf,
+    },
+    /// A launch argument template uses a placeholder it may not or must use.
+    #[error("invalid {field} template: {reason}")]
+    InvalidTemplate {
+        /// The launch field that failed, e.g. `launch.model_args`.
+        field: &'static str,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// An argument template has an unmatched `{` or `}`.
+    #[error("unmatched brace in template token {token}")]
+    UnmatchedBrace {
+        /// The template token that failed.
+        token: String,
+    },
+    /// A record location is empty or whitespace only.
+    #[error("location pattern is empty")]
+    EmptyLocation,
+    /// A record location has an empty path component, e.g. `a//b` or a trailing `/`.
+    #[error("location {location} has an empty path component")]
+    EmptyPathComponent {
+        /// The location pattern that failed.
+        location: String,
+    },
+    /// A record location uses `**`, which no supported CLI needs.
+    #[error("location {location} uses `**`: use a single `*` inside one path component")]
+    DoubleStar {
+        /// The location pattern that failed.
+        location: String,
+    },
+    /// A record location starts its first path component with `*`.
+    #[error("location {location} starts a path component with `*`")]
+    LeadingStar {
+        /// The location pattern that failed.
+        location: String,
+    },
     /// A skill directory is neither home-relative nor repo-relative.
     #[error(
         "invalid skill directory {dir}: use a leading `~/` for home dirs and a relative path for project dirs"
@@ -328,11 +433,18 @@ fn render_token(token: &str, values: &Values) -> Result<String, SpecError> {
     let mut out = String::with_capacity(token.len());
     let mut rest = token;
     while let Some(start) = rest.find('{') {
-        out.push_str(&rest[..start]);
+        let prefix = &rest[..start];
+        if prefix.contains('}') {
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
+        }
+        out.push_str(prefix);
         let after = &rest[start + 1..];
         let Some(end) = after.find('}') else {
-            out.push_str(&rest[start..]);
-            return Ok(out);
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
         };
         let name = &after[..end];
         let value = match name {
@@ -355,11 +467,104 @@ fn render_token(token: &str, values: &Values) -> Result<String, SpecError> {
         out.push_str(value);
         rest = &after[end + 1..];
     }
+    if rest.contains('}') {
+        return Err(SpecError::UnmatchedBrace {
+            token: token.to_owned(),
+        });
+    }
     out.push_str(rest);
     Ok(out)
 }
 
+/// The placeholder names in one template token, rejecting malformed braces.
+fn template_placeholders(token: &str) -> Result<Vec<&str>, SpecError> {
+    let mut names = Vec::new();
+    let mut rest = token;
+    loop {
+        let Some(start) = rest.find('{') else {
+            if rest.contains('}') {
+                return Err(SpecError::UnmatchedBrace {
+                    token: token.to_owned(),
+                });
+            }
+            return Ok(names);
+        };
+        if rest[..start].contains('}') {
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
+        }
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
+        };
+        names.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+}
+
+/// Check one launch template: at most one placeholder per token, only the
+/// placeholders in `allowed`, and `required` exactly once across the template.
+fn check_template(
+    field: &'static str,
+    tokens: &[String],
+    allowed: &[&str],
+    required: Option<&str>,
+) -> Result<(), SpecError> {
+    let mut required_count = 0usize;
+    for token in tokens {
+        let names = template_placeholders(token)?;
+        if names.len() > 1 {
+            return Err(SpecError::InvalidTemplate {
+                field,
+                reason: format!(
+                    "token `{token}` has {} placeholders; use at most one",
+                    names.len()
+                ),
+            });
+        }
+        for name in names {
+            if !allowed.contains(&name) {
+                return Err(SpecError::InvalidTemplate {
+                    field,
+                    reason: format!("token `{token}` uses {{{name}}}, which is not allowed here"),
+                });
+            }
+            if Some(name) == required {
+                required_count += 1;
+            }
+        }
+    }
+    if let Some(required) = required
+        && required_count != 1
+    {
+        return Err(SpecError::InvalidTemplate {
+            field,
+            reason: format!("must use {{{required}}} exactly once, found {required_count}"),
+        });
+    }
+    Ok(())
+}
+
+/// Check an optional launch template, ignoring a field the spec leaves out.
+fn check_optional_template(
+    field: &'static str,
+    tokens: &Option<Vec<String>>,
+    allowed: &[&str],
+) -> Result<(), SpecError> {
+    match tokens {
+        Some(tokens) => check_template(field, tokens, allowed, None),
+        None => Ok(()),
+    }
+}
+
 /// Load every `*.toml` harness spec in `path`, sorted by file name.
+///
+/// Every spec is checked with [`HarnessSpec::validate`]; a spec that fails, or
+/// two specs that declare the same [`HarnessSpec::id`], are rejected with an
+/// error naming the offending file.
 pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     let entries = fs::read_dir(path).map_err(|source| SpecError::ReadDir {
         path: path.to_owned(),
@@ -379,7 +584,25 @@ pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     }
     files.sort();
 
-    files.iter().map(|file| load_file(file)).collect()
+    let mut specs = Vec::with_capacity(files.len());
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for file in &files {
+        let spec = load_file(file)?;
+        spec.validate().map_err(|source| SpecError::Invalid {
+            path: file.clone(),
+            source: Box::new(source),
+        })?;
+        if let Some(first) = seen.get(&spec.id) {
+            return Err(SpecError::DuplicateId {
+                id: spec.id.clone(),
+                path: file.clone(),
+                first: first.clone(),
+            });
+        }
+        seen.insert(spec.id.clone(), file.clone());
+        specs.push(spec);
+    }
+    Ok(specs)
 }
 
 fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
@@ -601,5 +824,180 @@ project_dirs = []
             Err(error) => error,
         };
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn write_spec(dir: &Path, name: &str, contents: &str) {
+        if let Err(error) = std::fs::write(dir.join(name), contents) {
+            panic!("should write {name}: {error}");
+        }
+    }
+
+    fn temp_harness_dir() -> tempfile::TempDir {
+        match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(error) => panic!("should create a temp dir: {error}"),
+        }
+    }
+
+    #[test]
+    fn load_dir_rejects_invalid_spec_naming_the_file() {
+        let dir = temp_harness_dir();
+        let broken = MINIMAL_SPEC.replace(
+            "location = \"~/.claude/projects/{cwd_slug}/{session}.jsonl\"",
+            "location = \"~/.claude//{session}.jsonl\"",
+        );
+        write_spec(dir.path(), "broken.toml", &broken);
+        let error = match load_dir(dir.path()) {
+            Ok(specs) => panic!("invalid spec should be rejected, got {} specs", specs.len()),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::Invalid { .. }));
+        assert!(error.to_string().contains("broken.toml"), "{error}");
+    }
+
+    #[test]
+    fn load_dir_rejects_duplicate_ids() {
+        let dir = temp_harness_dir();
+        write_spec(dir.path(), "a.toml", MINIMAL_SPEC);
+        write_spec(dir.path(), "b.toml", MINIMAL_SPEC);
+        let error = match load_dir(dir.path()) {
+            Ok(specs) => panic!(
+                "duplicate ids should be rejected, got {} specs",
+                specs.len()
+            ),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DuplicateId { .. }));
+    }
+
+    fn template_error(fixture: &str) -> SpecError {
+        let spec = parse_fixture(fixture);
+        match spec.validate() {
+            Ok(()) => panic!("launch template should be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn rejects_model_args_without_model_placeholder() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"model_args = ["--model", "{model}"]"#,
+            r#"model_args = ["--model", "sonnet"]"#,
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_effort_args_using_model_placeholder() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"model_args = ["--model", "{model}"]"#,
+            "model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{model}\"]",
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn accepts_signin_args_using_model() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"signin_hint = "claude auth login""#,
+            "signin_hint = \"claude auth login\"\nsignin_args = [\"auth\", \"check\", \"--model\", \"{model}\"]",
+            1,
+        );
+        let spec = parse_fixture(&fixture);
+        assert!(
+            spec.validate().is_ok(),
+            "optionally using {{model}} is allowed"
+        );
+    }
+
+    #[test]
+    fn rejects_signin_args_using_effort_placeholder() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"signin_hint = "claude auth login""#,
+            "signin_hint = \"claude auth login\"\nsignin_args = [\"--effort\", \"{effort}\"]",
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_two_placeholders_in_one_token() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"model_args = ["--model", "{model}"]"#,
+            r#"model_args = ["--model={model}{effort}"]"#,
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_unmatched_open_brace() {
+        let template = tokens(&["--model={model"]);
+        let error = match render_args(&template, &Values::default()) {
+            Ok(rendered) => panic!("unmatched `{{` should be rejected, got {rendered:?}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::UnmatchedBrace { .. }));
+    }
+
+    #[test]
+    fn rejects_unmatched_close_brace() {
+        let template = tokens(&["--model}"]);
+        let error = match render_args(&template, &Values::default()) {
+            Ok(rendered) => panic!("unmatched `}}` should be rejected, got {rendered:?}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::UnmatchedBrace { .. }));
+    }
+
+    fn location_error(location: &str) -> SpecError {
+        match validate_location(location) {
+            Ok(()) => panic!("{location} should be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn rejects_empty_location() {
+        assert!(matches!(location_error(""), SpecError::EmptyLocation));
+        assert!(matches!(location_error("   "), SpecError::EmptyLocation));
+    }
+
+    #[test]
+    fn rejects_empty_location_component() {
+        let error = location_error("~/.claude//{session}.jsonl");
+        assert!(matches!(error, SpecError::EmptyPathComponent { .. }));
+    }
+
+    #[test]
+    fn rejects_trailing_slash_location() {
+        let error = location_error("~/.claude/projects/");
+        assert!(matches!(error, SpecError::EmptyPathComponent { .. }));
+    }
+
+    #[test]
+    fn rejects_double_star_location() {
+        let error = location_error("~/.codex/sessions/**/*.jsonl");
+        assert!(matches!(error, SpecError::DoubleStar { .. }));
+    }
+
+    #[test]
+    fn rejects_leading_star_component() {
+        let error = location_error("*.jsonl/{session}");
+        assert!(matches!(error, SpecError::LeadingStar { .. }));
     }
 }

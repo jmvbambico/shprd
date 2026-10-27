@@ -25,6 +25,7 @@ dry_patterns = [
 binary = "codex"
 version_args = ["--version"]
 signin_hint = "codex login"
+signin_args = ["login", "status"]
 
 [launch]
 # herdr-projects starts codex for work with --no-daemon as well; it belongs to

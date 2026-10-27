@@ -25,6 +25,7 @@ dry_patterns = [
 binary = "pi"
 version_args = ["--version"]
 signin_hint = "run `pi` and sign in to a provider, then `pi auth check --provider <provider>`"
+signin_args = ["auth", "check", "--model", "{model}", "--no-refresh", "--json"]
 
 [launch]
 # pi cannot ask for approval, so there is no auto-approve flag.
@@ -37,6 +38,9 @@ verified = false
 
 [models]
 list_command = ["pi", "--list-models"]
+# `pi auth check --model <name>` wants the provider too, e.g.
+# `Command Code/deepseek/deepseek-v4.1-flash`; a bare model is ambiguous.
+provider_qualified = true
 
 [records]
 kind = "jsonl"

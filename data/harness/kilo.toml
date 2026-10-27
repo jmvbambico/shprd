@@ -25,6 +25,7 @@ dry_patterns = [
 binary = "kilo"
 version_args = ["--version"]
 signin_hint = "kilo auth login"
+signin_args = ["auth", "list"]
 
 [launch]
 interactive = ["kilo"]

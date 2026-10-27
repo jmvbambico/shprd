@@ -25,6 +25,7 @@ dry_patterns = [
 binary = "claude"
 version_args = ["--version"]
 signin_hint = "claude auth login"
+signin_args = ["auth", "status"]
 
 [launch]
 interactive = ["claude"]

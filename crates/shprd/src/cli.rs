@@ -79,6 +79,13 @@ pub enum Command {
     Janitor(JanitorArgs),
     /// Recreate a task's branch from its archive ref.
     Restore(RestoreArgs),
+    /// Detect the agent CLIs installed here, their version and sign-in state.
+    Roster(RosterArgs),
+    /// Write a roster role into the global config, or with `--repo <PATH>`
+    /// into that repository's `.shprd/config.toml`.
+    Set(SetArgs),
+    /// Check this machine's setup and print what to fix.
+    Doctor(DoctorArgs),
 }
 
 /// Arguments for `janitor`.
@@ -103,6 +110,63 @@ pub struct RestoreArgs {
     /// The run, when the log holds more than one; defaults to the log's run.
     #[arg(long, value_name = "ID")]
     pub run: Option<String>,
+}
+
+/// Arguments for `roster`.
+#[derive(Debug, Args)]
+pub struct RosterArgs {
+    /// Print the detections as a JSON array instead of one line per CLI.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `set`.
+#[derive(Debug, Args)]
+pub struct SetArgs {
+    /// Which role to write.
+    #[command(subcommand)]
+    pub role: SetRole,
+}
+
+/// The roster role `set` writes.
+#[derive(Debug, Subcommand)]
+pub enum SetRole {
+    /// The agent that plans the run.
+    Orchestrator(OneAgent),
+    /// The agent that reviews, which must differ from the orchestrator.
+    Reviewer(OneAgent),
+    /// The agents workers fall back through, in order; replaces the list.
+    Workers(ManyAgents),
+}
+
+/// One agent string with the effort it runs at.
+#[derive(Debug, Args)]
+pub struct OneAgent {
+    /// `<program>/<model>`, e.g. `claude/claude-opus-5-5`.
+    #[arg(value_name = "AGENT")]
+    pub agent: String,
+    /// Effort for this agent: low, medium, high, xhigh or max.
+    #[arg(long, value_name = "EFFORT")]
+    pub effort: Option<String>,
+}
+
+/// The agent strings for `set workers`, in fallback order.
+#[derive(Debug, Args)]
+pub struct ManyAgents {
+    /// `<program>/<model>`, repeated in fallback order.
+    #[arg(value_name = "AGENT", required = true)]
+    pub agents: Vec<String>,
+}
+
+/// Arguments for `doctor`.
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Print the report as JSON instead of one indented page.
+    #[arg(long)]
+    pub json: bool,
+    /// Skip the quota probes, which touch the network.
+    #[arg(long = "no-quota")]
+    pub no_quota: bool,
 }
 
 /// dagr verbs.

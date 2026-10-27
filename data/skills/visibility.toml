@@ -1,0 +1,34 @@
+# shprd skills visibility rules. Reviewed 2026-10-27.
+#
+# Which skill directories a CLI actually reads depends on the environment it is
+# launched with, not only on the CLI. Each `[[rule]]` names one CLI, the
+# environment variable that switches a set of directories off, and the
+# directories that variable hides. A rule applies only when the variable is set
+# to a non-empty value other than "0".
+#
+# `cli` is the harness id from data/harness/<id>.toml. `hides` entries use the
+# same `~/`-relative spelling as `skills.home_dirs`, or a repository-relative
+# path for `skills.project_dirs` entries.
+
+schema = 1
+
+[[rule]]
+cli = "opencode"
+env = "OPENCODE_DISABLE_EXTERNAL_SKILLS"
+hides = ["~/.agents/skills", "~/.claude/skills"]
+
+[[rule]]
+cli = "opencode"
+env = "OPENCODE_DISABLE_CLAUDE_CODE"
+hides = ["~/.claude/skills"]
+
+# Folders that can appear inside a skills directory without being a skill:
+# `.trash` is left behind by `npx skills` removals, `synced` by mirrored copies.
+# An entry whose directory name equals a pattern is reported as junk, never
+# scanned, and any skill found beneath it is reported as junk too.
+
+[[ignore]]
+pattern = ".trash"
+
+[[ignore]]
+pattern = "synced"
