@@ -14,7 +14,7 @@ Status: design.
 | `shprd remote [--invite]` | remote access status; `--invite` shows a fresh pairing QR |
 | `shprd land` | land approved work now (normally automatic) |
 | `shprd doctor` | check CLIs, sign-ins, skill visibility, mux, relay, git and gh |
-| `shprd set <key> <value>` | change a setting, e.g. `shprd set orchestrator codex/gpt-6-luna` |
+| `shprd set orchestrator\|reviewer <agent> [--effort E]`, `shprd set workers <agent>…` | change the roster in your global config, or the repo's with `--repo <path>`; e.g. `shprd set reviewer codex/gpt-6-luna --effort high` |
 | `shprd roster` | show agents, roles, models, availability |
 | `shprd restore <task>` | bring back archived work |
 
@@ -22,7 +22,24 @@ Every command supports `--json`. `shprd completion zsh` prints shell completion.
 
 Agent and model strings use the CLI's own model names: `program/model`, e.g.
 `opencode/deepseek-v4.1-flash-free` or `claude/claude-opus-5-5`, with effort set
-separately (`--effort high`).
+separately (`--effort high`). Pi's models must name their provider, because the
+same model id can be served by several providers:
+`pi/Command Code/deepseek/deepseek-v4.1-flash`.
+
+### How `shprd set` writes your config
+
+- The change is validated in memory first; an invalid change writes nothing and
+  exits 2 (for example a reviewer equal to the orchestrator).
+- Comments and other keys in the file are kept.
+- The new file is written to a temporary file, synced, and renamed into place, so
+  the config is never half-written.
+- Two `shprd set` runs never interleave: they share a lock file
+  (`.config.toml.lock` next to the config). A second run while one is active
+  exits 2.
+- If the file changes while `set` is working, `set` refuses (exit 2) instead of
+  overwriting. The one gap: an editor that ignores the lock file and saves in the
+  instant between that final check and the rename can still be overwritten. No
+  POSIX tool can close that window; editors such as vim have the same one.
 
 ## For agents
 
