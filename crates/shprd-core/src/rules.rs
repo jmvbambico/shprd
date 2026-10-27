@@ -293,6 +293,7 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
             name,
             task,
         } => check_resource(state, *action, *kind, name, task.as_deref()),
+        EventKind::FullGate { .. } => Ok(()),
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }
@@ -821,6 +822,17 @@ mod tests {
         ev(seq, EventKind::RunFinished {})
     }
 
+    fn full_gate(seq: u64, passed: bool) -> Event {
+        ev(
+            seq,
+            EventKind::FullGate {
+                head: "abc1234".to_string(),
+                passed,
+                steps: vec![],
+            },
+        )
+    }
+
     /// A resource-ledger event for task `a`.
     fn res(seq: u64, action: ResourceAction, kind: ResourceKind, name: &str) -> Event {
         ev(
@@ -1285,6 +1297,16 @@ mod tests {
             finished(4),
         ];
         assert!(matches!(refused(&log), RuleError::WrongStatus { .. }));
+    }
+
+    #[test]
+    fn a_full_gate_needs_a_live_run() {
+        assert!(matches!(refused(&[full_gate(1, true)]), RuleError::NoRun));
+        let log = vec![started(1), full_gate(2, true), finished(3)];
+        let state = folded(&log);
+        assert!(state.finished);
+        let after = vec![started(1), finished(2), full_gate(3, true)];
+        assert!(matches!(refused(&after), RuleError::RunFinished));
     }
 
     #[test]

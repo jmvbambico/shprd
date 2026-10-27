@@ -88,6 +88,30 @@ pub struct Finding {
     pub detail: String,
 }
 
+/// One command of the run-wide gate, and how it went.
+///
+/// The step is recorded whole so a reviewer can see what ran and why it failed
+/// without the machine that ran it: the command string, its exit code (`None`
+/// when a timeout killed it) and the tail of what it printed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateStep {
+    /// The command, as the config spelled it.
+    pub command: String,
+    /// Its exit code, or `None` when a timeout killed it.
+    pub exit_code: Option<i32>,
+    /// How long it took, in milliseconds.
+    pub duration_ms: u64,
+    /// The last lines it printed, capped at [`GATE_OUTPUT_TAIL_CHARS`].
+    pub output_tail: String,
+}
+
+/// How many characters of a gate step's output the event keeps.
+///
+/// A failing build can print megabytes and the log is folded on every command,
+/// so the tail is capped rather than kept whole.
+pub const GATE_OUTPUT_TAIL_CHARS: usize = 4000;
+
 /// What happened to a resource shprd owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +299,18 @@ pub enum EventKind {
         /// The task it belongs to, when it belongs to one.
         task: Option<TaskId>,
     },
+    /// The run-wide gate ran over the integration branch.
+    ///
+    /// One event per `shprd gate` run, holding every step it reached: the
+    /// whole verdict is one log line, so a reader never has to join steps.
+    FullGate {
+        /// The integration branch's head the gate ran on.
+        head: String,
+        /// True when every step it ran passed.
+        passed: bool,
+        /// The steps it ran, in order.
+        steps: Vec<GateStep>,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -385,6 +421,24 @@ mod tests {
                 name: "/tmp/wt/M1.1".to_string(),
                 task: Some("M1.1".to_string()),
             },
+            EventKind::FullGate {
+                head: "abc1234".to_string(),
+                passed: false,
+                steps: vec![
+                    GateStep {
+                        command: "cargo test --workspace".to_string(),
+                        exit_code: Some(101),
+                        duration_ms: 1200,
+                        output_tail: "test result: FAILED".to_string(),
+                    },
+                    GateStep {
+                        command: "cargo fmt --all --check".to_string(),
+                        exit_code: None,
+                        duration_ms: 30_000,
+                        output_tail: "timed out".to_string(),
+                    },
+                ],
+            },
             EventKind::RunFinished {},
         ]
     }
@@ -392,7 +446,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 13, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 14, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

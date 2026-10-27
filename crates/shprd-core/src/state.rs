@@ -38,6 +38,11 @@ pub struct RunState {
     pub resources: BTreeMap<(ResourceKind, String), ResourceRecord>,
     /// Whether the run has finished.
     pub finished: bool,
+    /// The last run-wide gate: the head it ran on, whether it passed, and the
+    /// sequence number of the event that recorded it.
+    ///
+    /// Only the newest one is kept: the full history is the log's job.
+    pub last_full_gate: Option<(String, bool, u64)>,
     /// Sequence number of the last applied event, 0 before the first.
     pub last_seq: u64,
 }
@@ -454,6 +459,9 @@ impl RunState {
                     }
                 }
             }
+            EventKind::FullGate { head, passed, .. } => {
+                self.last_full_gate = Some((head.clone(), *passed, event.seq));
+            }
             EventKind::RunFinished {} => self.finished = true,
         }
     }
@@ -662,6 +670,35 @@ mod tests {
             state.check(&resource(6, ResourceAction::Archived, "wt/a").kind, 6_000),
             Ok(())
         ));
+    }
+
+    #[test]
+    fn the_newest_full_gate_is_the_one_kept() {
+        let failed = ev(
+            3,
+            EventKind::FullGate {
+                head: "aaa111".to_string(),
+                passed: false,
+                steps: Vec::new(),
+            },
+        );
+        let passed = ev(
+            4,
+            EventKind::FullGate {
+                head: "bbb222".to_string(),
+                passed: true,
+                steps: Vec::new(),
+            },
+        );
+        let state = match fold_extra(vec![failed, passed]) {
+            Ok(state) => state,
+            Err(err) => panic!("two full gates must fold: {err}"),
+        };
+        assert_eq!(
+            state.last_full_gate,
+            Some(("bbb222".to_string(), true, 4)),
+            "the later event wins"
+        );
     }
 
     #[test]

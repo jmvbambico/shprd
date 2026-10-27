@@ -44,6 +44,16 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
     }
 
     out.push(String::new());
+    out.push("## Full gate".to_string());
+    out.push(String::new());
+    let full_gates = full_gate_lines(events);
+    if full_gates.is_empty() {
+        out.push("none".to_string());
+    } else {
+        out.extend(full_gates);
+    }
+
+    out.push(String::new());
     out.push("## Overrides".to_string());
     out.push(String::new());
     let overrides = override_lines(state);
@@ -176,6 +186,44 @@ fn finding_text(finding: &Finding) -> &str {
     }
 }
 
+/// Every run-wide gate in the log: its head, its verdict, and each step.
+///
+/// A gate is one event, so this needs no task and no state: the log is the
+/// whole fact. Steps are listed in the order they ran, which is the order that
+/// stopped at the first failure.
+fn full_gate_lines(events: &[Event]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for event in events {
+        let EventKind::FullGate {
+            head,
+            passed,
+            steps,
+        } = &event.kind
+        else {
+            continue;
+        };
+        let verdict = if *passed { "passed" } else { "failed" };
+        lines.push(format!("- head `{}`: {verdict}", cell(head)));
+        for step in steps {
+            let mark = if step.exit_code == Some(0) {
+                "✓"
+            } else {
+                "✗"
+            };
+            let seconds = step.duration_ms / 1000;
+            lines.push(format!(
+                "  - {mark} `{}` ({seconds}s, exit {})",
+                cell(&step.command),
+                match step.exit_code {
+                    Some(code) => code.to_string(),
+                    None => "none".to_string(),
+                }
+            ));
+        }
+    }
+    lines
+}
+
 /// A Markdown table cell: pipes and newlines would break the row.
 fn cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
@@ -194,7 +242,7 @@ fn blank_as_dash(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fixture;
-    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::event::{Actor, GateStep, ReportStatus};
     use shprd_core::state::RunState;
 
     /// The body for the fixture log.
@@ -366,6 +414,46 @@ mod tests {
         let body = pr_body(&state, &[]);
         assert!(body.contains("## Overrides\n\nnone"), "{body}");
         assert!(body.contains("count: 0"), "{body}");
+    }
+
+    #[test]
+    fn a_full_gate_lists_every_step_with_its_verdict() {
+        let events = vec![ev(
+            1,
+            EventKind::FullGate {
+                head: "abc1234".to_string(),
+                passed: false,
+                steps: vec![
+                    GateStep {
+                        command: "cargo fmt --all --check".to_string(),
+                        exit_code: Some(0),
+                        duration_ms: 1_500,
+                        output_tail: String::new(),
+                    },
+                    GateStep {
+                        command: "cargo test --workspace".to_string(),
+                        exit_code: Some(101),
+                        duration_ms: 60_000,
+                        output_tail: "FAILED".to_string(),
+                    },
+                ],
+            },
+        )];
+        let body = pr_body(&RunState::default(), &events);
+        assert!(body.contains("## Full gate"), "{body}");
+        assert!(body.contains("- head `abc1234`: failed"), "{body}");
+        assert!(
+            body.contains("  - ✓ `cargo fmt --all --check` (1s, exit 0)"),
+            "{body}"
+        );
+        assert!(
+            body.contains("  - ✗ `cargo test --workspace` (60s, exit 101)"),
+            "{body}"
+        );
+        assert!(
+            pr_body(&RunState::default(), &[]).contains("## Full gate\n\nnone"),
+            "a run with no full gate says none"
+        );
     }
 
     #[test]

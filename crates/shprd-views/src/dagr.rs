@@ -422,6 +422,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::Escalated { .. } => "escalated",
         EventKind::Override { .. } => "override",
         EventKind::Resource { .. } => "resource",
+        EventKind::FullGate { .. } => "full_gate",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }
