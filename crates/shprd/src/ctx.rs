@@ -159,25 +159,33 @@ fn git_top_level() -> Result<PathBuf, CliError> {
     Ok(PathBuf::from(trimmed))
 }
 
-/// Resolves the layout shprd's git state lives in.
+/// Resolves the home directory shprd keeps its state and global config in.
 ///
-/// `--home` wins, then `$SHPRD_HOME`, then `$HOME`. The namespace and the
-/// worktree root both come from the layout, so a janitor can never be pointed
-/// at someone else's branches by a stale flag.
-pub fn resolve_layout(home: Option<&Path>) -> Result<Layout, CliError> {
+/// `--home` wins, then `$SHPRD_HOME`, then `$HOME`.
+pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
     let explicit = home.map(|path| path.to_path_buf()).or_else(|| {
         std::env::var_os(HOME_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     });
-    let resolved = match explicit {
-        Some(path) => path,
+    match explicit {
+        Some(path) => Ok(path),
         None => std::env::var_os("HOME")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .ok_or_else(|| CliError::other(anyhow!("no home directory: pass --home")))?,
-    };
-    Ok(Layout::default_for_home(resolved))
+            .ok_or_else(|| CliError::other(anyhow!("no home directory: pass --home"))),
+    }
+}
+
+/// Resolves the layout shprd's git state lives in, with `namespace` as the
+/// branch prefix and archive namespace.
+///
+/// The worktree root and the namespace both come from here, so a janitor can
+/// never be pointed at someone else's branches by a stale flag.
+pub fn resolve_layout(home: Option<&Path>, namespace: &str) -> Result<Layout, CliError> {
+    let mut layout = Layout::default_for_home(resolve_home(home)?);
+    layout.namespace = namespace.to_string();
+    Ok(layout)
 }
 
 /// Parses `--as`, falling back to `$SHPRD_ACTOR`, then to `human`.

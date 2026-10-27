@@ -88,8 +88,10 @@ pub struct JanitorArgs {
     #[arg(long)]
     pub apply: bool,
     /// Days an archive ref is kept before it is expired.
-    #[arg(long = "archive-days", value_name = "DAYS", default_value_t = 30)]
-    pub archive_days: u32,
+    ///
+    /// Defaults to `[janitor] archive_days` from the config, or 14.
+    #[arg(long = "archive-days", value_name = "DAYS")]
+    pub archive_days: Option<u32>,
 }
 
 /// Arguments for `restore`.

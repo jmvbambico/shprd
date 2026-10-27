@@ -725,6 +725,11 @@ fn ok_with_home(root: &Path, home: &Path, args: &[&str]) -> String {
 
 /// Appends `kinds` to the run log, continuing its sequence numbers.
 fn append_events(root: &Path, kinds: Vec<EventKind>) {
+    append_events_at(root, kinds, 1_800_000_000_000);
+}
+
+/// Appends `kinds` to the run log with `at_ms` as the first one's timestamp.
+fn append_events_at(root: &Path, kinds: Vec<EventKind>, at_ms: u64) {
     let path = root.join(".shprd").join("events.jsonl");
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -736,7 +741,7 @@ fn append_events(root: &Path, kinds: Vec<EventKind>) {
         seq += 1;
         let event = Event {
             seq,
-            at_ms: 1_800_000_000_000 + seq,
+            at_ms: at_ms.saturating_add(seq),
             actor: Actor::Engine,
             kind,
         };
@@ -932,4 +937,115 @@ fn janitor_without_a_run_is_an_error() {
     assert_eq!(output.status.code(), Some(1), "no run is not a refusal");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no run"), "{stderr}");
+}
+
+/// Milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        Err(err) => panic!("system clock before the epoch: {err}"),
+    }
+}
+
+/// Writes `<root>/.shprd/config.toml`.
+fn write_repo_config(root: &Path, body: &str) {
+    let path = root.join(".shprd").join("config.toml");
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        panic!("mkdir {}: {err}", parent.display());
+    }
+    if let Err(err) = std::fs::write(&path, body) {
+        panic!("write {}: {err}", path.display());
+    }
+}
+
+#[test]
+fn janitor_takes_the_archive_window_from_the_repo_config() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    ok(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ],
+    );
+    add_task(&root, "T2", "crates/x");
+    let ref_name = "refs/shprd/archive/r1/T2";
+    append_events_at(
+        &root,
+        vec![EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::ArchiveRef,
+            name: ref_name.to_string(),
+            task: Some("T2".to_string()),
+        }],
+        now_ms() - 5 * 86_400_000,
+    );
+
+    let unconfigured = ok_with_home(&root, home.path(), &["janitor"]);
+    assert!(
+        unconfigured.contains("nothing to clean up"),
+        "the 14-day default keeps a five-day-old archive: {unconfigured}"
+    );
+
+    write_repo_config(&root, "[janitor]\narchive_days = 3\n");
+    let configured = ok_with_home(&root, home.path(), &["janitor"]);
+    assert!(
+        configured.contains("would expire archive"),
+        "a three-day window expires it: {configured}"
+    );
+    assert!(configured.contains(ref_name), "{configured}");
+
+    let overridden = ok_with_home(&root, home.path(), &["janitor", "--archive-days", "30"]);
+    assert!(
+        overridden.contains("nothing to clean up"),
+        "the flag still wins over the config: {overridden}"
+    );
+}
+
+#[test]
+fn janitor_takes_the_namespace_from_the_repo_config() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    let branch = "shprdtest/r1/T1";
+    integrated_task(&root, branch);
+    git.git(&["branch", branch, "main"]);
+    append_events(
+        &root,
+        vec![EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: branch.to_string(),
+            task: Some("T1".to_string()),
+        }],
+    );
+
+    let unconfigured = ok_with_home(&root, home.path(), &["janitor"]);
+    assert!(
+        unconfigured.contains("nothing to clean up"),
+        "the default namespace does not own {branch}: {unconfigured}"
+    );
+
+    write_repo_config(&root, "[janitor]\nnamespace = \"shprdtest/\"\n");
+    let configured = ok_with_home(&root, home.path(), &["janitor"]);
+    assert!(
+        configured.contains("would archive"),
+        "the configured namespace owns {branch}: {configured}"
+    );
 }

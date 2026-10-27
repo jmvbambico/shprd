@@ -5,6 +5,8 @@
 //! succeeded, through the same check-then-append path every other verb uses.
 //! A dry run writes nothing at all.
 
+use std::path::Path;
+
 use anyhow::anyhow;
 use serde_json::json;
 use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
@@ -12,9 +14,11 @@ use shprd_core::log::{Clock, SystemClock};
 
 use crate::cli::{JanitorArgs, RestoreArgs};
 use crate::cmd::emit;
-use crate::ctx::{CliError, Ctx, resolve_layout};
+use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
+use shprd_core::config::{self as config, Config};
 use shprd_git::archive;
 use shprd_git::janitor;
+use shprd_git::worktree::Layout;
 
 /// Runs `shprd janitor`: print the plan, or apply it.
 pub fn plan_verb(
@@ -22,11 +26,12 @@ pub fn plan_verb(
     args: &JanitorArgs,
     home: Option<&std::path::Path>,
 ) -> Result<(), CliError> {
-    let layout = resolve_layout(home)?;
+    let (loaded, layout) = config_and_layout(ctx, home)?;
+    let archive_days = args.archive_days.unwrap_or(loaded.janitor.archive_days);
     let (state, events) = ctx.load()?;
     let run = run_id(&state)?;
     let now_ms = SystemClock.now_ms();
-    let actions = janitor::plan(&state, &events, &layout, now_ms, args.archive_days);
+    let actions = janitor::plan(&state, &events, &layout, now_ms, archive_days);
 
     if !args.apply {
         print_plan(ctx, &actions);
@@ -63,7 +68,7 @@ pub fn restore_verb(
     args: &RestoreArgs,
     home: Option<&std::path::Path>,
 ) -> Result<(), CliError> {
-    let layout = resolve_layout(home)?;
+    let (_config, layout) = config_and_layout(ctx, home)?;
     let state = ctx.state()?;
     let run = match &args.run {
         Some(run) => run.clone(),
@@ -79,6 +84,20 @@ pub fn restore_verb(
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)
+}
+
+/// The resolved config and the layout its janitor settings describe.
+///
+/// The global file is `<home>/.config/shprd/config.toml`, the repo file is
+/// `<repo>/.shprd/config.toml`, and the repo file wins.
+fn config_and_layout(ctx: &Ctx, home: Option<&Path>) -> Result<(Config, Layout), CliError> {
+    let home = resolve_home(home)?;
+    let global = home.join(".config").join("shprd").join("config.toml");
+    let repo = ctx.root.join(".shprd").join("config.toml");
+    let loaded = config::load(Some(&global), Some(&repo))
+        .map_err(|err| CliError::other(anyhow!(err).context("loading the config")))?;
+    let layout = resolve_layout(Some(&home), &loaded.janitor.namespace)?;
+    Ok((loaded, layout))
 }
 
 /// The run id the plan is about.
