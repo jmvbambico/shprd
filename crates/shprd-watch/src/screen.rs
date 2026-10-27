@@ -189,3 +189,121 @@ pub fn sample(
         agent_state,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Sampler, match_dry, reset_hint, sample};
+    use shprd_mux::fake::FakeMux;
+    use shprd_mux::{AgentState, PaneId};
+    use std::fmt::Display;
+
+    /// Unwrap like a test wants to, without tripping the `unwrap_used` lint.
+    fn ok<T, E: Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("expected Ok, got: {error}"),
+        }
+    }
+
+    /// The patterns a roster spec would carry for a Claude Code harness.
+    fn patterns() -> Vec<String> {
+        vec!["rate limit".to_string(), "out of quota".to_string()]
+    }
+
+    #[test]
+    fn patterns_match_case_insensitively() {
+        assert_eq!(
+            match_dry("Claude\nAPI error: RATE LIMIT reached", &patterns()),
+            Some("rate limit".to_string())
+        );
+        assert_eq!(
+            match_dry("out of QUOTA", &patterns()),
+            Some("out of quota".to_string())
+        );
+        assert_eq!(match_dry("still working", &patterns()), None);
+    }
+
+    #[test]
+    fn matches_above_the_window_are_ignored() {
+        let mut escaped = vec!["rate limit hit".to_string()];
+        escaped.extend((0..40).map(|_| "working".to_string()));
+        assert_eq!(match_dry(&escaped.join("\n"), &patterns()), None);
+
+        let mut inside = vec!["rate limit hit".to_string()];
+        inside.extend((0..39).map(|_| "working".to_string()));
+        assert_eq!(
+            match_dry(&inside.join("\n"), &patterns()),
+            Some("rate limit".to_string())
+        );
+    }
+
+    #[test]
+    fn echoed_input_lines_are_ignored() {
+        let screen = "$ grep -i rate limit notes.md\n> rate limit\nstill working";
+        assert_eq!(match_dry(screen, &patterns()), None);
+        assert_eq!(reset_hint("$ resets 3pm\n> try again in 4 hours"), None);
+    }
+
+    #[test]
+    fn reset_hints_keep_the_text_after_the_marker() {
+        assert_eq!(
+            reset_hint("Limit reached · resets 3:00pm (America/Los_Angeles)"),
+            Some("3:00pm (America/Los_Angeles)".to_string())
+        );
+        assert_eq!(
+            reset_hint("quota spent, try again in 4 hours"),
+            Some("4 hours".to_string())
+        );
+        assert_eq!(
+            reset_hint("reset at midnight"),
+            Some("midnight".to_string())
+        );
+        assert_eq!(reset_hint("all clear"), None);
+        let long = format!("resets {}", "9".repeat(80));
+        assert_eq!(reset_hint(&long).map(|hint| hint.len()), Some(60));
+    }
+
+    #[test]
+    fn unchanged_screen_accumulates_and_padding_does_not_count() {
+        let mut sampler = Sampler::new();
+        let first = sampler.observe("working", 1_000);
+        assert!(first.changed);
+        assert_eq!(first.unchanged_for_ms, 0);
+
+        // Trailing spaces and trailing blank lines are resize and cursor noise.
+        let padded = sampler.observe("working   \n\n", 3_000);
+        assert!(!padded.changed);
+        assert_eq!(padded.unchanged_for_ms, 2_000);
+
+        let same = sampler.observe("working", 7_500);
+        assert!(!same.changed);
+        assert_eq!(same.unchanged_for_ms, 6_500);
+
+        let moved = sampler.observe("done", 8_000);
+        assert!(moved.changed);
+        assert_eq!(moved.unchanged_for_ms, 0);
+    }
+
+    #[test]
+    fn fake_mux_pane_yields_the_expected_signal() {
+        let mux = FakeMux::default();
+        let pane = PaneId::new("pane-1");
+        mux.set_screen(
+            &pane,
+            "Claude\nAPI error: rate limit reached · resets 5pm\n",
+        );
+        mux.set_state(&pane, AgentState::Blocked);
+
+        let mut sampler = Sampler::new();
+        let signal = ok(sample(&mux, &pane, &patterns(), &mut sampler, 1_000));
+        assert_eq!(signal.dry_pattern, Some("rate limit".to_string()));
+        assert_eq!(signal.reset_hint, Some("5pm".to_string()));
+        assert!(signal.liveness.changed);
+        assert_eq!(signal.agent_state, AgentState::Blocked);
+
+        let again = ok(sample(&mux, &pane, &patterns(), &mut sampler, 4_500));
+        assert_eq!(again.dry_pattern, Some("rate limit".to_string()));
+        assert!(!again.liveness.changed);
+        assert_eq!(again.liveness.unchanged_for_ms, 3_500);
+    }
+}
