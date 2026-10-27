@@ -27,11 +27,13 @@ pub fn verdict_verb(
     let findings = read_findings(&args.findings)?;
     let decided = gate::verdict(&findings, policy.must_fix);
     if decided.passed {
+        // A pass keeps every finding it was given: minor advice is still worth
+        // printing in the pull request, so an empty list would lose it.
         let kind = EventKind::GatePassed {
             task: args.task.clone(),
             attempt: args.attempt,
             gate: REVIEW_GATE.to_string(),
-            findings: Vec::new(),
+            findings,
         };
         record(ctx, kind)?;
         println!("review passed");

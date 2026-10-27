@@ -293,3 +293,29 @@ fn bad_findings_exit_2() {
         );
     }
 }
+
+#[test]
+fn a_passed_review_keeps_its_minor_findings() {
+    // A pass with minor findings still carries them: the pull request body
+    // prints the gate's findings, and an empty list would hide advice the
+    // reviewer gave.
+    let fixture = Fixture::new();
+    fixture.add_task("T1");
+    fixture.attempt("T1", 1);
+    let output = fixture.review("T1", 1, &finding("minor"));
+    assert!(output.status.success(), "a minor-only review should pass");
+    let log = events(&fixture.root);
+    let passed = log
+        .iter()
+        .find(|event| event.get("kind").and_then(Value::as_str) == Some("gate_passed"))
+        .unwrap_or_else(|| panic!("no gate_passed event in {log:?}"));
+    let findings = passed
+        .get("findings")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("the pass recorded no findings list: {passed:?}"));
+    assert_eq!(findings.len(), 1, "the pass lost its finding: {passed:?}");
+    assert_eq!(
+        findings[0].get("title").and_then(Value::as_str),
+        Some("a finding")
+    );
+}
