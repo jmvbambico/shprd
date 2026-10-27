@@ -22,20 +22,21 @@ use shprd_core::state::{RunState, Task};
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
+use shprd_roster::models::AgentRef;
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
-use shprd_roster::spec::{LaunchSpec, Values, render_args};
+use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
 /// One agent CLI the spawn can launch.
 #[derive(Debug, Clone)]
 pub struct Program {
-    /// The spec id, which is also the program name, e.g. `claude`.
-    pub id: String,
+    /// The harness spec: its id is the program name, e.g. `claude`, and it
+    /// carries both the launch recipe and the model rules an agent string is
+    /// parsed against.
+    pub spec: HarnessSpec,
     /// Whether the CLI is installed on this machine.
     pub installed: bool,
-    /// How to start it and how to pass it a model, an effort and a prompt.
-    pub launch: LaunchSpec,
 }
 
 /// Everything [`spawn`] needs from the caller's environment.
@@ -404,54 +405,73 @@ fn task_of<'a>(state: &'a RunState, id: &str) -> Result<&'a Task, CliError> {
     })
 }
 
-/// The agent string for a worker: `<program>`, or `<program>/<model>`.
-fn parse_agent(raw: &str) -> (String, Option<String>) {
-    let raw = raw.trim();
-    match raw.split_once('/') {
-        Some((program, model)) if !model.is_empty() => {
-            (program.to_string(), Some(model.to_string()))
-        }
-        _ => (raw.to_string(), None),
-    }
+/// The harness table the agent strings are parsed against.
+///
+/// [`AgentRef::parse`] takes borrowed specs, so this copies the ones the
+/// environment already holds rather than making the caller hand both a program
+/// list and a spec list.
+fn spec_table(programs: &[Program]) -> Vec<HarnessSpec> {
+    programs
+        .iter()
+        .map(|program| program.spec.clone())
+        .collect()
+}
+
+/// The program the parser named, or an error when the data directory has no
+/// spec for it.
+fn program_of<'a>(programs: &'a [Program], agent: &str) -> Result<&'a Program, CliError> {
+    programs
+        .iter()
+        .find(|program| program.spec.id == agent)
+        .ok_or_else(|| {
+            CliError::other(anyhow!(
+                "no harness spec for {agent:?} in the data directory"
+            ))
+        })
 }
 
 /// Picks the agent for an attempt.
 ///
 /// An explicit `--agent` wins even when its CLI is not installed, because the
-/// human may be pointing at a wrapper script; without one, the first configured
-/// worker whose CLI *is* installed takes the attempt, so an unattended run never
-/// opens an empty tab.
+/// human may be pointing at a wrapper script, but it must parse against the
+/// harness table: a typo is refused here rather than after a worktree exists.
+/// Without one, the first configured worker whose CLI *is* installed takes the
+/// attempt, so an unattended run never opens an empty tab; a worker whose
+/// string does not parse is skipped with a warning, the same way an uninstalled
+/// one is.
 fn choose_agent(
     explicit: Option<&str>,
     workers: &[String],
     programs: &[Program],
 ) -> Result<Pick, CliError> {
+    let specs = spec_table(programs);
     if let Some(raw) = explicit {
-        let (agent, model) = parse_agent(raw);
-        let program = programs
-            .iter()
-            .find(|program| program.id == agent)
-            .ok_or_else(|| {
-                CliError::other(anyhow!(
-                    "no harness spec for {agent:?} in the data directory"
-                ))
-            })?;
+        let parsed = AgentRef::parse(raw, &specs).map_err(|err| {
+            CliError::Invalid(anyhow!(err).context(format!("`{raw}` is not a usable agent")))
+        })?;
+        let program = program_of(programs, &parsed.program)?;
         return Ok(Pick {
-            agent,
-            model,
-            launch: program.launch.clone(),
+            agent: parsed.program,
+            model: parsed.model,
+            launch: program.spec.launch.clone(),
         });
     }
     for raw in workers {
-        let (agent, model) = parse_agent(raw);
-        if let Some(program) = programs
+        let parsed = match AgentRef::parse(raw, &specs) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                eprintln!("warning: skipping configured worker `{raw}`: {err}");
+                continue;
+            }
+        };
+        let found = programs
             .iter()
-            .find(|program| program.id == agent && program.installed)
-        {
+            .find(|program| program.spec.id == parsed.program && program.installed);
+        if let Some(program) = found {
             return Ok(Pick {
-                agent,
-                model,
-                launch: program.launch.clone(),
+                agent: parsed.program,
+                model: parsed.model,
+                launch: program.spec.launch.clone(),
             });
         }
     }
@@ -606,9 +626,8 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
     let programs: Vec<Program> = specs
         .iter()
         .map(|spec| Program {
-            id: spec.id.clone(),
             installed: shprd_roster::detect::find_binary(&spec.detect.binary, &path_env).is_some(),
-            launch: spec.launch.clone(),
+            spec: spec.clone(),
         })
         .collect();
     let global = home.join(".config").join("shprd").join("config.toml");
@@ -791,6 +810,57 @@ mod flow_tests {
         assert!(status.status.success(), "git {args:?}: {status:?}");
     }
 
+    /// A harness spec for a fake CLI named `id`, parsed the way the data
+    /// directory's specs are, so the tests exercise the real model rules.
+    fn fake_spec(id: &str) -> HarnessSpec {
+        fake_spec_with(id, false)
+    }
+
+    /// The same spec, but with the model rules `provider_qualified` sets, as
+    /// `pi` has them.
+    fn fake_spec_with(id: &str, provider_qualified: bool) -> HarnessSpec {
+        let text = format!(
+            r#"
+id = "{id}"
+name = "Fake {id}"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "{id}"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["{id}"]
+model_args = ["--model", "{{model}}"]
+verified = false
+
+[models]
+provider_qualified = {provider_qualified}
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{{session}}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+"#
+        );
+        match toml::from_str::<HarnessSpec>(&text) {
+            Ok(spec) => spec,
+            Err(err) => panic!("the test spec is invalid: {err}"),
+        }
+    }
+
     /// A repository with one commit and the integration branch, and a home.
     struct Scratch {
         repo: TempDir,
@@ -857,17 +927,8 @@ mod flow_tests {
                 base_branch: "integration/m4".to_string(),
                 repo_name: self.repo_name(),
                 programs: vec![Program {
-                    id: "sh".to_string(),
+                    spec: fake_spec("sh"),
                     installed: true,
-                    launch: LaunchSpec {
-                        interactive: vec!["sh".to_string()],
-                        model_args: Vec::new(),
-                        effort_args: None,
-                        auto_approve: None,
-                        system_prompt_args: None,
-                        resume_args: None,
-                        verified: false,
-                    },
                 }],
                 workers: vec!["sh".to_string()],
                 skills: Skills {
@@ -881,6 +942,54 @@ mod flow_tests {
                 ready_wait: Duration::ZERO,
             }
         }
+    }
+
+    /// The harness table two of the agent-string cases parse against: a plain
+    /// `sh` and a `pi` that needs its model provider-qualified.
+    fn programs() -> Vec<Program> {
+        vec![
+            Program {
+                spec: fake_spec("sh"),
+                installed: true,
+            },
+            Program {
+                spec: fake_spec_with("pi", true),
+                installed: true,
+            },
+        ]
+    }
+
+    /// The refusal an explicit agent string earns, panicking when it is
+    /// accepted instead.
+    fn refusal(agent: Option<&str>) -> CliError {
+        match choose_agent(agent, &[], &programs()) {
+            Ok(pick) => panic!("{agent:?} was accepted as {}", pick.agent),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn an_agent_string_with_no_model_is_refused() {
+        let refused = refusal(Some("sh/"));
+        assert_eq!(refused.exit_code(), 2);
+        let text = refused.to_string();
+        assert!(text.contains("names no model"), "{text}");
+    }
+
+    #[test]
+    fn a_model_that_names_no_provider_is_refused_with_the_hint() {
+        let refused = refusal(Some("pi/deepseek-x"));
+        assert_eq!(refused.exit_code(), 2);
+        let text = refused.to_string();
+        assert!(text.contains("needs a provider"), "{text}");
+        assert!(text.contains("pi/<provider>/deepseek-x"), "{text}");
+    }
+
+    #[test]
+    fn a_configured_worker_that_does_not_parse_is_skipped() {
+        let workers = vec!["pi/bare".to_string(), "sh".to_string()];
+        let pick = choose_agent(None, &workers, &programs()).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(pick.agent, "sh");
     }
 
     fn request() -> SpawnRequest {
