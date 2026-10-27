@@ -74,12 +74,7 @@ pub fn default_bindings() -> Vec<Binding> {
         ),
         binding("prefix+alt+r", Kind::Pane, "shprd remote", "shprd: remote"),
         binding("prefix+alt+s", Kind::Popup, "shprd status", "shprd: status"),
-        binding(
-            "prefix+alt+d",
-            Kind::Popup,
-            "shprd doctor",
-            "shprd: doctor",
-        ),
+        binding("prefix+alt+d", Kind::Popup, "shprd doctor", "shprd: doctor"),
     ]
 }
 
@@ -135,113 +130,6 @@ fn quote(value: &str) -> String {
     }
     quoted.push('"');
     quoted
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A user's own config: comments, a table, and one unrelated key.
-    const USER_CONFIG: &str = "# my herdr\n[terminal]\nshell = \"zsh\"\n\n\
-        # mine\n[[keys.command]]\nkey = \"prefix+x\"\ntype = \"shell\"\n\
-        command = \"mine\"\ndescription = \"mine\"\n";
-
-    #[test]
-    fn install_into_an_empty_file_installs_only_the_block() {
-        let installed = install("", &default_bindings()).unwrap();
-        assert_eq!(installed, render(&default_bindings()));
-    }
-
-    #[test]
-    fn install_keeps_everything_outside_the_block_byte_for_byte() {
-        let bindings = default_bindings();
-        let installed = install(USER_CONFIG, &bindings).unwrap();
-        assert_eq!(installed, format!("{USER_CONFIG}\n{}", render(&bindings)));
-    }
-
-    #[test]
-    fn install_twice_changes_nothing_the_second_time() {
-        let bindings = default_bindings();
-        let once = install(USER_CONFIG, &bindings).unwrap();
-        let twice = install(&once, &bindings).unwrap();
-        assert_eq!(once, twice);
-    }
-
-    #[test]
-    fn uninstall_restores_the_original_exactly() {
-        let bindings = default_bindings();
-        let installed = install(USER_CONFIG, &bindings).unwrap();
-        assert_eq!(uninstall(&installed).unwrap(), USER_CONFIG);
-    }
-
-    #[test]
-    fn uninstall_of_a_file_without_a_block_changes_nothing() {
-        assert_eq!(uninstall(USER_CONFIG).unwrap(), USER_CONFIG);
-    }
-
-    #[test]
-    fn install_refuses_a_key_the_user_already_bound() {
-        let warned = "[[keys.command]]\nkey = \"prefix+alt+u\"\ntype = \"shell\"\n\
-            command = \"vim\"\ndescription = \"mine\"\n";
-        match install(warned, &default_bindings()) {
-            Err(KeysError::Conflict { key, existing }) => {
-                assert_eq!(key, "prefix+alt+u");
-                assert_eq!(existing, "vim");
-            }
-            other => panic!("expected a conflict, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn install_refuses_missing_and_duplicated_markers() {
-        let bindings = default_bindings();
-        for broken in [
-            format!("x = 1\n{BEGIN}\n"),
-            format!("x = 1\n{END}\n"),
-            format!("{END}\nx = 1\n{BEGIN}\n"),
-            format!("{BEGIN}\n{END}\n{BEGIN}\n{END}\n"),
-        ] {
-            assert!(
-                matches!(install(&broken, &bindings), Err(KeysError::Unbalanced)),
-                "expected unbalanced for {broken:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn install_refuses_text_outside_the_block_that_is_not_toml() {
-        let broken = "this is not toml = = =\n";
-        assert!(matches!(
-            install(broken, &default_bindings()),
-            Err(KeysError::Parse(_))
-        ));
-    }
-
-    #[test]
-    fn render_parses_as_toml_with_one_table_per_binding() {
-        let text = render(&default_bindings());
-        let parsed: toml::Value = toml::from_str(&text).unwrap();
-        let tables = parsed
-            .get("keys")
-            .and_then(|keys| keys.get("command"))
-            .and_then(toml::Value::as_array)
-            .unwrap();
-        assert_eq!(tables.len(), 7);
-        assert_eq!(
-            tables[0].get("key").and_then(toml::Value::as_str),
-            Some("prefix+alt+u")
-        );
-        assert_eq!(
-            tables[4].get("type").and_then(toml::Value::as_str),
-            Some("pane")
-        );
-    }
-
-    #[test]
-    fn render_escapes_quotes_and_backslashes() {
-        let quoted = quote("a\"b\\c");
-        assert_eq!(quoted, "\"a\\\"b\\\\c\"");
-    }
 }
 
 /// What can go wrong while installing or removing the managed block.
@@ -420,34 +308,141 @@ fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod write_tests {
+mod tests {
     use super::*;
+
+    /// A user's own config: comments, a table, and one unrelated key.
+    const USER_CONFIG: &str = "# my herdr\n[terminal]\nshell = \"zsh\"\n\n\
+# mine\n[[keys.command]]\nkey = \"prefix+x\"\ntype = \"shell\"\n\
+command = \"mine\"\ndescription = \"mine\"\n";
+
+    /// Unwraps a result in a test, failing it with the error instead of panicking
+    /// on the call site.
+    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("unexpected failure: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn render_parses_as_toml_with_one_table_per_binding() {
+        let text = render(&default_bindings());
+        let parsed: toml::Value = ok(toml::from_str(&text));
+        let tables = parsed
+            .get("keys")
+            .and_then(|keys| keys.get("command"))
+            .and_then(toml::Value::as_array);
+        let tables = match tables {
+            Some(tables) => tables,
+            None => panic!("expected keys.command tables in {text}"),
+        };
+        assert_eq!(tables.len(), 7);
+        assert_eq!(
+            tables[0].get("key").and_then(toml::Value::as_str),
+            Some("prefix+alt+u")
+        );
+        assert_eq!(
+            tables[4].get("type").and_then(toml::Value::as_str),
+            Some("pane")
+        );
+    }
+
+    #[test]
+    fn render_escapes_quotes_and_backslashes() {
+        assert_eq!(quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
+    fn install_into_an_empty_file_installs_only_the_block() {
+        let installed = ok(install("", &default_bindings()));
+        assert_eq!(installed, render(&default_bindings()));
+    }
+
+    #[test]
+    fn install_keeps_everything_outside_the_block_byte_for_byte() {
+        let bindings = default_bindings();
+        let installed = ok(install(USER_CONFIG, &bindings));
+        assert_eq!(installed, format!("{USER_CONFIG}\n{}", render(&bindings)));
+    }
+
+    #[test]
+    fn install_twice_changes_nothing_the_second_time() {
+        let bindings = default_bindings();
+        let once = ok(install(USER_CONFIG, &bindings));
+        let twice = ok(install(&once, &bindings));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn uninstall_restores_the_original_exactly() {
+        let installed = ok(install(USER_CONFIG, &default_bindings()));
+        assert_eq!(ok(uninstall(&installed)), USER_CONFIG);
+    }
+
+    #[test]
+    fn uninstall_of_a_file_without_a_block_changes_nothing() {
+        assert_eq!(ok(uninstall(USER_CONFIG)), USER_CONFIG);
+    }
+
+    #[test]
+    fn install_refuses_a_key_the_user_already_bound() {
+        let taken = "[[keys.command]]\nkey = \"prefix+alt+u\"\ntype = \"shell\"\n\
+command = \"vim\"\ndescription = \"mine\"\n";
+        match install(taken, &default_bindings()) {
+            Err(KeysError::Conflict { key, existing }) => {
+                assert_eq!(key, "prefix+alt+u");
+                assert_eq!(existing, "vim");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_refuses_missing_duplicated_and_reordered_markers() {
+        let bindings = default_bindings();
+        for broken in [
+            format!("x = 1\n{BEGIN}\n"),
+            format!("x = 1\n{END}\n"),
+            format!("{END}\nx = 1\n{BEGIN}\n"),
+            format!("{BEGIN}\n{END}\n{BEGIN}\n{END}\n"),
+        ] {
+            assert!(
+                matches!(install(&broken, &bindings), Err(KeysError::Unbalanced)),
+                "expected unbalanced for {broken:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_refuses_text_outside_the_block_that_is_not_toml() {
+        let broken = "this is not toml = = =\n";
+        assert!(matches!(
+            install(broken, &default_bindings()),
+            Err(KeysError::Parse(_))
+        ));
+    }
 
     #[test]
     fn write_atomic_replaces_the_file_and_leaves_no_temp_behind() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = ok(tempfile::tempdir());
         let path = dir.path().join("config.toml");
-        fs::write(&path, "old = true\n").unwrap();
-        write_atomic(&path, "new = true\n").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new = true\n");
-        let left: Vec<String> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
+        ok(fs::write(&path, "old = true\n"));
+        ok(write_atomic(&path, "new = true\n"));
+        assert_eq!(ok(fs::read_to_string(&path)), "new = true\n");
+        let mut left: Vec<String> = Vec::new();
+        for entry in ok(fs::read_dir(dir.path())) {
+            let entry = ok(entry);
+            left.push(entry.file_name().to_string_lossy().into_owned());
+        }
         assert_eq!(left, vec!["config.toml".to_owned()]);
     }
 
     #[test]
     fn write_atomic_creates_the_file_when_it_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = ok(tempfile::tempdir());
         let path = dir.path().join("fresh.toml");
-        write_atomic(&path, "a = 1\n").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "a = 1\n");
+        ok(write_atomic(&path, "a = 1\n"));
+        assert_eq!(ok(fs::read_to_string(&path)), "a = 1\n");
     }
 }
