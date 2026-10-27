@@ -183,6 +183,17 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_the_api_error_code_when_no_text_is_recorded() {
+        let line = r#"{"timestamp":"2026-10-27T05:00:00Z","isApiErrorMessage":true,"error":"rate_limit","apiError":"usage_limit_reached","message":{"role":"assistant","content":[]}}"#;
+        let (_dir, path) = fixture("s.jsonl", &[line]);
+        let scan = scan_claude(&path, 0).unwrap();
+        let error = scan.last_error.unwrap();
+        assert_eq!(error.kind, ErrorKind::RateLimit);
+        assert_eq!(error.message, "rate_limit usage_limit_reached");
+        assert!(error.resets_at_ms.is_none());
+    }
+
+    #[test]
     fn ignores_everything_before_the_cutoff() {
         let (_dir, path) = fixture("s.jsonl", &[OLD_LIMIT, AUTH_FAILED]);
         let scan = scan_claude(&path, 1_792_972_800_000).unwrap();

@@ -141,6 +141,16 @@ mod tests {
     }
 
     #[test]
+    fn the_latest_error_wins() {
+        let auth = r#"{"timestamp":"2026-10-27T06:00:00Z","type":"event_msg","payload":{"type":"error","message":"401 invalid api key"}}"#;
+        let (_dir, path) = fixture("rollout.jsonl", &[LIMIT_ERROR, auth]);
+        let scan = scan_codex(&path, 1_792_972_800_000).unwrap();
+        let error = scan.last_error.unwrap();
+        assert_eq!(error.kind, ErrorKind::Auth);
+        assert_eq!(error.at_ms, Some(1_793_080_800_000));
+    }
+
+    #[test]
     fn classifies_an_error_only_payload() {
         let auth = r#"{"timestamp":"2026-10-27T05:30:00Z","type":"event_msg","payload":{"type":"error","message":"401 Unauthorized"}}"#;
         let (_dir, path) = fixture("rollout.jsonl", &[auth]);
