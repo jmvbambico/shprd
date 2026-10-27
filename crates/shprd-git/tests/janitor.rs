@@ -443,3 +443,26 @@ fn an_outside_worktree_path_is_never_executed_even_if_the_branch_is_ours() {
     let _ = janitor::execute(&repo.path, &layout, &actions);
     assert!(outside.is_dir(), "the worktree must survive");
 }
+
+#[test]
+fn an_archive_ref_for_an_outside_branch_is_refused_rather_than_invented() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let outside = "not-ours/T1";
+    repo.git(&["branch", outside, "main"]);
+    let action = Action::ArchiveRef {
+        task: "T1".to_string(),
+        branch: outside.to_string(),
+    };
+    assert!(
+        action.events(&layout).is_err(),
+        "a branch outside the namespace has no archive ref: {:?}",
+        action.events(&layout)
+    );
+    let outcomes = janitor::execute(&repo.path, &layout, &[action]);
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert!(
+        outcomes[0].result.is_err(),
+        "the refusal is reported, not an event: {outcomes:?}"
+    );
+}

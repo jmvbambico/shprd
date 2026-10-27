@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
 use shprd_core::state::{ResourceStatus, RunState, TaskStatus};
 
-use crate::archive;
+use crate::archive::{self, ArchiveError};
 use crate::worktree::{self, Layout};
 
 /// Milliseconds in a day, for the archive-expiry arithmetic.
@@ -81,14 +81,17 @@ impl Action {
     /// Archiving records two: the branch's archive ref now exists, and the
     /// branch is archived — kept, but out of service. `layout` names the ref,
     /// because the ref is named after the branch.
-    pub fn events(&self, layout: &Layout) -> Vec<EventKind> {
-        match self {
+    ///
+    /// The ref name comes from [`archive::archive_ref_for_branch`] or not at
+    /// all: a branch it refuses has no archive ref, so this returns that
+    /// refusal rather than recording a ref shprd never made.
+    pub fn events(&self, layout: &Layout) -> Result<Vec<EventKind>, ArchiveError> {
+        Ok(match self {
             Self::ArchiveRef { task, branch } => vec![
                 EventKind::Resource {
                     action: ResourceAction::Created,
                     kind: ResourceKind::ArchiveRef,
-                    name: archive::archive_ref_for_branch(layout, branch)
-                        .unwrap_or_else(|_| archive::archive_ref_name("", branch)),
+                    name: archive::archive_ref_for_branch(layout, branch)?,
                     task: Some(task.clone()),
                 },
                 EventKind::Resource {
@@ -116,7 +119,7 @@ impl Action {
                 name: ref_name.clone(),
                 task: Some(task.clone()),
             }],
-        }
+        })
     }
 
     /// The task this step is about.
@@ -260,8 +263,11 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
     let mut failed_archive: Vec<String> = Vec::new();
     for action in actions {
         let result = match action {
+            // The events are built from the same refusal-aware lookup the
+            // archive itself used, so a branch that cannot be named is a
+            // failure here too — and its deletion is skipped with it.
             Action::ArchiveRef { branch, .. } => archive::archive(repo, layout, branch)
-                .map(|_| action.events(layout))
+                .and_then(|_| action.events(layout))
                 .map_err(|err| {
                     failed_archive.push(branch.clone());
                     err.to_string()
@@ -275,16 +281,19 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                     worktree::delete_branch(repo, layout, branch)
                         .map(|()| action.events(layout))
                         .map_err(|err| err.to_string())
+                        .and_then(|events| events.map_err(|err| err.to_string()))
                 }
             }
             Action::RemoveWorktree { path, .. } => {
                 worktree::remove_worktree_only(repo, layout, path, false)
                     .map(|()| action.events(layout))
                     .map_err(|err| err.to_string())
+                    .and_then(|events| events.map_err(|err| err.to_string()))
             }
             Action::ExpireArchive { ref_name, .. } => archive::expire(repo, ref_name)
                 .map(|()| action.events(layout))
-                .map_err(|err| err.to_string()),
+                .map_err(|err| err.to_string())
+                .and_then(|events| events.map_err(|err| err.to_string())),
         };
         outcomes.push(Outcome {
             action: action.clone(),
