@@ -42,6 +42,16 @@ impl CliError {
     }
 }
 
+impl std::fmt::Display for CliError {
+    /// The message the binary prints for this failure, without a prefix.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(rule) => write!(f, "{rule}"),
+            Self::Other(source) => write!(f, "{source:#}"),
+        }
+    }
+}
+
 impl From<RuleError> for CliError {
     fn from(err: RuleError) -> Self {
         Self::Refused(err)
@@ -59,29 +69,42 @@ pub struct Ctx {
     pub actor: Actor,
     /// Whether to print JSON on stdout.
     pub json: bool,
+    /// Whether to skip the dagr sync that follows every write.
+    pub no_dagr: bool,
 }
 
 impl Ctx {
     /// Builds a context from the resolved root and the global options.
-    pub fn new(root: PathBuf, actor: Actor, json: bool) -> Self {
+    pub fn new(root: PathBuf, actor: Actor, json: bool, no_dagr: bool) -> Self {
         let log_path = root.join(".shprd").join("events.jsonl");
         Self {
             root,
             log_path,
             actor,
             json,
+            no_dagr,
         }
     }
 
     /// The folded state of the run, or the empty state when no log exists yet.
     pub fn state(&self) -> Result<RunState, CliError> {
+        Ok(self.load()?.0)
+    }
+
+    /// The folded state and the events it was folded from.
+    ///
+    /// Both are read from the same pass over the log, so a caller that needs
+    /// the projectors' view of the run (state plus log) never sees two
+    /// versions of the same file.
+    pub fn load(&self) -> Result<(RunState, Vec<Event>), CliError> {
         if !self.log_path.exists() {
-            return Ok(RunState::default());
+            return Ok((RunState::default(), Vec::new()));
         }
         let outcome = EventLog::read_all(&self.log_path)
             .map_err(|err| CliError::other(anyhow!(err).context("reading the event log")))?;
-        RunState::fold(&outcome.events)
-            .map_err(|err| CliError::other(anyhow!(err).context("folding the event log")))
+        let state = RunState::fold(&outcome.events)
+            .map_err(|err| CliError::other(anyhow!(err).context("folding the event log")))?;
+        Ok((state, outcome.events))
     }
 
     /// Checks `kind` against the current state, then appends it.

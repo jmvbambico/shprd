@@ -318,3 +318,291 @@ fn verbs_before_run_start_are_refused() {
         "a refused verb wrote to the log anyway"
     );
 }
+
+/// Runs the binary with `--repo <root>`, `PATH` set to `bin_dir` and
+/// `SHPRD_DAGR_BIN` unset, so no dagr checker can be found.
+fn run_with_path(root: &Path, args: &[&str], bin_dir: &Path) -> Output {
+    let mut all: Vec<String> = vec!["--repo".into(), root.display().to_string()];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    match Command::new(BIN)
+        .args(&all)
+        .env("PATH", bin_dir)
+        .env_remove("SHPRD_DAGR_BIN")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    }
+}
+
+/// [`run_with_path`], asserting success and returning stdout.
+fn ok_with_path(root: &Path, args: &[&str], bin_dir: &Path) -> String {
+    let output = run_with_path(root, args, bin_dir);
+    assert!(
+        output.status.success(),
+        "expected success for {args:?}, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+#[test]
+fn a_scripted_run_writes_the_document_and_the_views() {
+    let dir = repo();
+    let root = dir.path();
+    // An empty directory stands in for PATH: no dagr can be found there.
+    let empty = repo();
+    let bin_dir = empty.path();
+
+    ok_with_path(
+        root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "a task",
+            "--scope",
+            "crates/shprd",
+            "--acceptance",
+            "it works",
+        ],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &[
+            "agent",
+            "spawn",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--agent",
+            "w1",
+            "--worktree",
+            "/tmp/wt",
+            "--branch",
+            "feature/x",
+        ],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &[
+            "agent",
+            "report",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+        ],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &[
+            "agent",
+            "gate",
+            "pass",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--gate",
+            "lint",
+        ],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &["agent", "integrate", "--task", "T1", "--commit", "abc123"],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &[
+            "agent",
+            "override",
+            "--rule",
+            "no_main_push",
+            "--reason",
+            "release branch",
+        ],
+        bin_dir,
+    );
+
+    let doc_path = root.join(".dagr").join("run.json");
+    let text = match std::fs::read_to_string(&doc_path) {
+        Ok(text) => text,
+        Err(err) => panic!("{} was not written: {err}", doc_path.display()),
+    };
+    let doc: Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(err) => panic!("run.json is not JSON ({err}): {text}"),
+    };
+    assert_eq!(doc.get("dagr").and_then(Value::as_u64), Some(3), "{text}");
+
+    let brief = ok_with_path(root, &["brief"], bin_dir);
+    assert!(brief.starts_with("run "), "brief was {brief:?}");
+
+    let status = ok_with_path(root, &["status"], bin_dir);
+    assert!(status.contains("T1"), "status was {status:?}");
+    assert!(status.contains('✓'), "status was {status:?}");
+
+    let body = ok_with_path(root, &["pr-body"], bin_dir);
+    assert!(body.contains("## Tasks"), "pr-body was {body:?}");
+    assert!(
+        body.contains("- run-wide `no_main_push`: release branch"),
+        "a run-wide override must reach the PR body: {body:?}"
+    );
+}
+
+#[test]
+fn bare_shprd_prints_the_status_line() {
+    let dir = repo();
+    let root = dir.path();
+    let empty = repo();
+    let bin_dir = empty.path();
+    ok_with_path(
+        root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ],
+        bin_dir,
+    );
+    ok_with_path(
+        root,
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "a task",
+            "--scope",
+            "crates/shprd",
+            "--acceptance",
+            "it works",
+        ],
+        bin_dir,
+    );
+    let bare = ok_with_path(root, &[], bin_dir);
+    let status = ok_with_path(root, &["status"], bin_dir);
+    assert_eq!(bare, status, "bare shprd must equal shprd status");
+}
+
+#[test]
+fn dagr_sync_checks_the_document_when_a_checker_is_given() {
+    let checker =
+        Path::new("/Users/cryogenix/scratch/mh-verify/repos/herdr-dagr/target/release/dagr");
+    if !checker.exists() {
+        eprintln!("skipping: no dagr at {}", checker.display());
+        return;
+    }
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    let output = Command::new(BIN)
+        .args(["--repo", &root.display().to_string(), "dagr", "sync"])
+        .env("SHPRD_DAGR_BIN", checker)
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "dagr sync failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join(".dagr").join("run.json").exists());
+}
+
+#[test]
+fn a_failing_sync_does_not_undo_a_write() {
+    let dir = repo();
+    let root = dir.path();
+    // A checker that always refuses: `/bin/false`.
+    let output = Command::new(BIN)
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ])
+        .env("SHPRD_DAGR_BIN", "/bin/false")
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the write must still succeed"
+    );
+    assert!(log_path(root).exists(), "the event must still be written");
+}
+
+#[test]
+fn no_dagr_flag_skips_the_sync() {
+    let dir = repo();
+    let root = dir.path();
+    ok(
+        root,
+        &[
+            "--no-dagr",
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ],
+    );
+    assert!(
+        !root.join(".dagr").join("run.json").exists(),
+        "--no-dagr must not write the document"
+    );
+}

@@ -310,6 +310,7 @@ dependencies = [
  "clap",
  "serde_json",
  "shprd-core",
+ "shprd-views",
  "tempfile",
 ]
 

@@ -16,9 +16,9 @@ pub struct Cli {
     /// Options shared by every subcommand.
     #[command(flatten)]
     pub global: Global,
-    /// What to do.
+    /// What to do; `shprd` with no subcommand prints the status.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Options every subcommand accepts.
@@ -35,6 +35,9 @@ pub struct Global {
     /// Print machine-readable JSON on stdout instead of a human line.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Skip the dagr sync that normally follows every write.
+    #[arg(long = "no-dagr", global = true)]
+    pub no_dagr: bool,
 }
 
 /// The top-level verbs.
@@ -54,6 +57,26 @@ pub enum Command {
     },
     /// Print the folded run state.
     State,
+    /// Print the rehydration brief: what an agent needs to resume.
+    Brief,
+    /// Print where every task sits, one line each.
+    Status,
+    /// Print the pull-request body for the run.
+    PrBody,
+    /// dagr document verbs: project the run as dagr v3 and write it.
+    Dagr {
+        /// Which dagr verb.
+        #[command(subcommand)]
+        cmd: DagrCommand,
+    },
+}
+
+/// dagr verbs.
+#[derive(Debug, Subcommand)]
+pub enum DagrCommand {
+    /// Project the run as `<root>/.dagr/run.json`, checking it when dagr is
+    /// available.
+    Sync,
 }
 
 /// Run lifecycle verbs.
