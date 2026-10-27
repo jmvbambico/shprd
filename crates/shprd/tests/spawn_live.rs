@@ -148,7 +148,6 @@ signin_args = []
 [launch]
 interactive = ["sh"]
 model_args = ["-m", "{model}"]
-system_prompt_args = ["-c", "echo reading {prompt_file}; exec sh"]
 verified = false
 [models]
 [records]
@@ -174,6 +173,9 @@ project_dirs = []
             .env("SHPRD_HOME", &home)
             .env("SHPRD_DATA_DIR", &data)
             .env("HERDR_SOCKET_PATH", &server.socket)
+            // A plain `sh` is never detected as an agent, so the wait is short
+            // and the delivery is expected to fail its way into a warning.
+            .env("SHPRD_AGENT_READY_TIMEOUT_MS", "2000")
             .env_remove("GH_TOKEN")
             .output()
             .expect("the shprd binary must run")
@@ -232,10 +234,25 @@ project_dirs = []
         ])
         .expect("the test must be able to create its own workspace");
 
-    let out = ok(&[
+    let spawned = shprd(&[
         "--repo", &repo_arg, "agent", "spawn", "--task", "M4.4", "--agent", "sh",
     ]);
+    let out = String::from_utf8_lossy(&spawned.stdout).to_string();
+    let warning = String::from_utf8_lossy(&spawned.stderr).to_string();
+    assert!(spawned.status.success(), "spawn failed: {warning}");
     assert!(out.contains("ok spawned M4.4 attempt 1"), "{out}");
+    // The spec has no system-prompt flag, so the brief is typed in, and herdr
+    // only prompts a pane it has detected as an agent. Nobody detected this
+    // shell, so the spawn says so and stays successful.
+    assert!(
+        warning.contains("brief not delivered to \u{25cf} sh\u{b7}M4.4"),
+        "no warning in {warning}"
+    );
+    assert!(warning.contains("brief not delivered"), "{warning}");
+    assert!(
+        warning.contains("--task M4.4"),
+        "the warning must say how to resend: {warning}"
+    );
 
     // The tab exists, titled for the worker, and its title names the task.
     let tabs = ok(&["--repo", &repo_arg, "state", "--json"]);
@@ -251,9 +268,7 @@ project_dirs = []
         "the tab's pane is not in a worktree: {snapshot}"
     );
 
-    // The brief the agent was pointed at says what "done" means. `agent prompt`
-    // is not exercised here: herdr only prompts a pane it recognises as an agent,
-    // and the fake CLI in this test is a plain shell.
+    // The brief the human is told to resend says what "done" means.
     let brief = home
         .join(".shprd")
         .join("briefs")
