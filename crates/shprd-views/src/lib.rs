@@ -7,6 +7,7 @@
 
 pub mod brief;
 mod clock;
+pub mod dagr;
 pub mod pr;
 pub mod status;
 
