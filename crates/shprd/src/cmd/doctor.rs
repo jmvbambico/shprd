@@ -13,7 +13,7 @@ use shprd_core::config::{self, Config};
 use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_roster::quota::{self, ProbeContext, QuotaReport, QuotaState};
-use shprd_roster::skills::{CompatList, VisibilityRules};
+use shprd_roster::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
 use shprd_roster::spec::{HarnessSpec, Vendor, load_dir};
 
 use crate::cli::DoctorArgs;
@@ -132,11 +132,15 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     host(&mut report, &facts);
     let specs = data(&mut report, &facts);
     let config = config_section(&mut report, &facts);
-    agents(&mut report, &facts, &specs, config.as_ref());
+    let clean = worker_env(&facts);
+    let detections = detect_every(&facts, &specs, config.as_ref());
+    agents(&mut report, &detections);
     review(&mut report, &facts, &specs, config.as_ref());
     if !no_quota {
         quota_section(&mut report, &facts, &specs, config.as_ref());
     }
+    skills_section(&mut report, &facts, &specs, &clean, &detections);
+    launch_env_section(&mut report, &facts, &clean);
     report
 }
 
@@ -374,18 +378,25 @@ fn model_after_pi(agent: &str) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_owned())
 }
 
-/// Section 4: every harness CLI, probed with the environment a worker gets.
-fn agents(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
-    let section = report.section("Agents");
+/// Probes every harness CLI with the environment a worker is launched with.
+fn detect_every(facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) -> Vec<Detection> {
     if specs.is_empty() {
+        return Vec::new();
+    }
+    let pairs = worker_env(facts).as_pairs();
+    let models = pi_models(facts, specs, config);
+    detect_all(specs, &facts.path_env, &pairs, &models)
+}
+
+/// Section 4: every harness CLI, as a worker would find it.
+fn agents(report: &mut Report, detections: &[Detection]) {
+    let section = report.section("Agents");
+    if detections.is_empty() {
         section.add(Level::Warn, "no harness spec, so no agent could be probed");
         return;
     }
-    let clean = worker_env(facts);
-    let pairs = clean.as_pairs();
-    let models = pi_models(facts, specs, config);
-    for detection in detect_all(specs, &facts.path_env, &pairs, &models) {
-        let (level, text) = describe(&detection);
+    for detection in detections {
+        let (level, text) = describe(detection);
         section.add(level, text);
     }
 }
@@ -538,4 +549,145 @@ fn quota_line(report: &QuotaReport) -> (Level, String) {
 fn clock(ms: u64) -> String {
     let of_day = (ms / 1000) % 86_400;
     format!("{:02}:{:02}", of_day / 3600, (of_day % 3600) / 60)
+}
+
+/// Section 7: the skills each installed CLI sees, and the curated review.
+fn skills_section(
+    report: &mut Report,
+    facts: &Facts,
+    specs: &[HarnessSpec],
+    clean: &LaunchEnv,
+    detections: &[Detection],
+) {
+    let section = report.section("Skills");
+    let (Some(dir), Some(home)) = (facts.data.as_ref(), facts.home.as_ref()) else {
+        section.add(
+            Level::Warn,
+            "no data directory or home, so no skill was scanned",
+        );
+        return;
+    };
+    let skills_dir = dir.join("skills");
+    let (Ok(compat), Ok(rules)) = (
+        CompatList::load(&skills_dir.join("compat.toml")),
+        VisibilityRules::load(&skills_dir.join("visibility.toml")),
+    ) else {
+        section.add(Level::Warn, "the skill tables do not load");
+        return;
+    };
+    let ignore = rules.ignore_patterns();
+    let clean_env = clean.apply_to(&facts.current);
+    let lock = skills::read_lock(home).unwrap_or_default();
+    for spec in specs {
+        if !detections
+            .iter()
+            .any(|found| found.id == spec.id && found.binary.is_some())
+        {
+            continue;
+        }
+        let seen = skills::visible(
+            spec,
+            home,
+            facts.repo.as_deref(),
+            &clean_env,
+            &rules,
+            &ignore,
+        );
+        section.add(
+            Level::Ok,
+            format!("{}  {} skill(s) visible", spec.id, seen.skills.len()),
+        );
+        hidden_now(section, &spec.id, &rules, &facts.current, &clean_env);
+        if !seen.junk.is_empty() {
+            let names: Vec<String> = seen
+                .junk
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            section.add(
+                Level::Warn,
+                format!(
+                    "{}  junk in a skills directory: {}",
+                    spec.id,
+                    names.join(", ")
+                ),
+            );
+        }
+    }
+    compat_review(section, &compat, &lock);
+}
+
+/// Warns for each variable that hides a directory from this shell but not
+/// from a launch.
+fn hidden_now(
+    section: &mut Section,
+    cli: &str,
+    rules: &VisibilityRules,
+    current: &BTreeMap<String, String>,
+    clean_env: &BTreeMap<String, String>,
+) {
+    let still_shown = rules.hidden(cli, clean_env);
+    for (dir, var) in rules.hidden(cli, current) {
+        if still_shown.iter().any(|(shown, _)| *shown == dir) {
+            continue;
+        }
+        section.add(
+            Level::Warn,
+            format!("{var} hides {dir} from this shell; unset {var} to see it"),
+        );
+    }
+}
+
+/// Warns about skills the curated list wants looked at.
+fn compat_review(
+    section: &mut Section,
+    compat: &CompatList,
+    lock: &BTreeMap<String, skills::LockEntry>,
+) {
+    for row in skills::review(compat, lock) {
+        match &row.state {
+            ReviewState::Reviewed => {}
+            ReviewState::ChangedUpstream { reviewed, current } => section.add(
+                Level::Warn,
+                format!(
+                    "{}  changed upstream ({reviewed} -> {current}): re-review",
+                    row.name
+                ),
+            ),
+            ReviewState::NotInCompatList => section.add(
+                Level::Warn,
+                format!("{}  installed but not in compat.toml", row.name),
+            ),
+            ReviewState::MissingLocally => {}
+        }
+        if row.verdict == Some(Verdict::Deny) && row.state != ReviewState::MissingLocally {
+            section.add(
+                Level::Info,
+                format!("{}  denied by compat.toml but installed", row.name),
+            );
+        }
+    }
+}
+
+/// Section 8: the variables a worker launch drops, by name only.
+///
+/// Values are never printed: the variables dropped include credentials.
+fn launch_env_section(report: &mut Report, facts: &Facts, clean: &LaunchEnv) {
+    let section = report.section("Launch env");
+    let dropped: Vec<String> = clean
+        .removed_names()
+        .into_iter()
+        .filter(|name| facts.current.contains_key(name))
+        .collect();
+    if dropped.is_empty() {
+        section.add(
+            Level::Ok,
+            "no variable a worker launch drops is set in this shell",
+        );
+    } else {
+        section.add(
+            Level::Info,
+            format!("worker launches drop {}", dropped.join(", ")),
+        );
+    }
 }
