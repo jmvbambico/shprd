@@ -123,6 +123,7 @@ Goal: shprd knows which agents exist, can run, and have quota.
 
 | ID | Task | Scope | Size |
 |---|---|---|---|
+| M3.0 | Harden `spec.rs` (from the M0 review): reject empty locations and misplaced `*`; reject an unmatched `{` in templates; validate launch templates at load (placeholder fits its field, `model_args` uses `{model}`); `load_dir` runs `validate` | `shprd-roster/src/spec.rs` | S |
 | M3.1 | Detection: binary, version, sign-in probes per harness file; `shprd roster` | `shprd-roster/src/detect.rs` | M |
 | M3.2 | Models: list per CLI where possible; `program/model` + effort parsing; `shprd set` | `shprd-roster/src/models.rs`, `shprd/src/cmd/set.rs` | S |
 | M3.3 | Quota probes: Claude OAuth usage and Codex wham usage ported from og (`installer/og_quota.py:168-318`, credited); kilo profile; cache and 429 fallback | `shprd-roster/src/quota/` | M |
@@ -130,7 +131,7 @@ Goal: shprd knows which agents exist, can run, and have quota.
 | M3.5 | Clean launch environment builder (strip push credentials, drop og-style overrides) | `shprd-roster/src/env.rs` | S |
 | M3.6 | `shprd doctor` | `shprd/src/cmd/doctor.rs` | S |
 
-Lanes: M3.1 ∥ M3.3 ∥ M3.4 ∥ M3.5; then M3.2 ∥ M3.6.
+Lanes: M3.0 first (same file as later roster work); then M3.1 ∥ M3.3 ∥ M3.4 ∥ M3.5; then M3.2 ∥ M3.6.
 
 **Gate:** `shprd roster` and `shprd doctor` on this machine correctly report the
 five CLIs, their sign-in state, Claude and Codex quota, and which skills each CLI
