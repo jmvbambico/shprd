@@ -218,7 +218,7 @@ fn happy_path_reaches_integrated() {
     );
     ok(
         root,
-        &["agent", "integrate", "--task", "T1", "--commit", "abc123"],
+        &["agent", "integrate", "--task", "T1", "--record-only"],
     );
 
     let state = state(root);
@@ -440,7 +440,7 @@ fn a_scripted_run_writes_the_document_and_the_views() {
     );
     ok_with_path(
         root,
-        &["agent", "integrate", "--task", "T1", "--commit", "abc123"],
+        &["agent", "integrate", "--task", "T1", "--record-only"],
         bin_dir,
     );
     ok_with_path(
@@ -838,7 +838,7 @@ fn integrated_task(root: &Path, branch: &str) {
     );
     ok(
         root,
-        &["agent", "integrate", "--task", "T1", "--commit", "abc123"],
+        &["agent", "integrate", "--task", "T1", "--record-only"],
     );
 }
 

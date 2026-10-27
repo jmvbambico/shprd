@@ -6,8 +6,8 @@ use anyhow::{Context, anyhow};
 use shprd_core::event::{EventKind, Finding};
 
 use crate::cli::{
-    AgentCommand, EscalateArgs, GateArgs, GateOutcome, HandoffArgs, IntegrateArgs, OverrideArgs,
-    PromptArgs, ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand,
+    AgentCommand, EscalateArgs, GateArgs, GateOutcome, HandoffArgs, OverrideArgs, PromptArgs,
+    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand,
 };
 use crate::cmd::{emit, handoff, spawn};
 use crate::ctx::{CliError, Ctx};
@@ -32,7 +32,7 @@ pub fn dispatch(
         AgentCommand::ReviewVerdict(args) => crate::cmd::verdict::verdict_verb(ctx, &args, home),
         AgentCommand::Escalate(args) => escalate(ctx, &args),
         AgentCommand::Override(args) => override_rule(ctx, &args),
-        AgentCommand::Integrate(args) => integrate(ctx, &args),
+        AgentCommand::Integrate(args) => crate::cmd::integrate::verb(ctx, &args, home),
         AgentCommand::Handoff(args) => handoff_cmd(ctx, &args, home),
     }
 }
@@ -224,18 +224,6 @@ fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
         task: args.task.clone().unwrap_or_default(),
         rule: args.rule.clone(),
         reason: args.reason.clone(),
-    };
-    let event = ctx.commit(kind)?;
-    emit(ctx, &event)
-}
-
-/// Records that a task's commits landed on the integration branch.
-///
-/// In M1 nothing is merged; this only records what the caller reports.
-fn integrate(ctx: &Ctx, args: &IntegrateArgs) -> Result<(), CliError> {
-    let kind = EventKind::Integrated {
-        task: args.task.clone(),
-        commits: args.commits.clone(),
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)

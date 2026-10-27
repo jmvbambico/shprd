@@ -444,9 +444,12 @@ pub struct IntegrateArgs {
     /// The task.
     #[arg(long, value_name = "ID")]
     pub task: String,
-    /// Commit that landed; repeatable, at least one.
-    #[arg(long = "commit", value_name = "SHA", required = true)]
-    pub commits: Vec<String>,
+    /// Record that the task landed without running git.
+    ///
+    /// This is the behaviour M1 shipped, kept for callers that land work by
+    /// hand and only need the ledger to know.
+    #[arg(long = "record-only", hide = true)]
+    pub record_only: bool,
 }
 
 /// The `--status` values.

@@ -1,0 +1,157 @@
+//! `shprd agent integrate`: landing a passed task's commits on the run's
+//! integration branch.
+//!
+//! The git side of the work lives in [`shprd_git::integrate`]; this module
+//! checks the ledger, finds what the task promises, and records the outcome.
+
+use std::path::Path;
+
+use anyhow::anyhow;
+use shprd_core::event::EventKind;
+use shprd_core::state::Task;
+use shprd_git::git::Git;
+use shprd_git::integrate::{self, IntegrateError, TaskCommits};
+use shprd_git::worktree::Layout;
+
+use crate::cli::IntegrateArgs;
+use crate::cmd::emit;
+use crate::ctx::{CliError, Ctx, resolve_home};
+
+/// How many characters of a sha the human line shows.
+const SHORT_SHA: usize = 7;
+
+/// Lands a passed task's commits, or records a landing a caller did by hand.
+///
+/// The task has to be `Passed` with no unanswered failed gate, which is what
+/// the `Integrated` rule checks, so a refused task touches no git state.
+pub fn verb(ctx: &Ctx, args: &IntegrateArgs, home: Option<&Path>) -> Result<(), CliError> {
+    if args.record_only {
+        return record_only(ctx, args);
+    }
+    let landed = EventKind::Integrated {
+        task: args.task.clone(),
+        commits: Vec::new(),
+    };
+    ctx.check(&landed)?;
+    let state = ctx.state()?;
+    let run = state
+        .run
+        .as_ref()
+        .ok_or_else(|| CliError::other(anyhow!("no run has started")))?;
+    let task = state
+        .tasks
+        .get(&args.task)
+        .cloned()
+        .ok_or_else(|| CliError::other(anyhow!("unknown task {:?}", args.task)))?;
+    let branch = latest_branch(&task)?;
+    let home = resolve_home(home)?;
+    let layout = Layout::default_for_home(&home);
+    let repo_name = repo_name(ctx)?;
+    let worktree = integrate::open_integration(
+        &ctx.root,
+        &layout,
+        &repo_name,
+        &run.run_id,
+        &run.base_branch,
+    )
+    .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
+    let base_sha = merge_base(&ctx.root, &branch, &worktree.branch)?;
+    let claimed = rev_list(&ctx.root, &base_sha, &branch)?;
+    let commits = TaskCommits {
+        branch,
+        base_sha,
+        claimed,
+        scope: task.scope.clone(),
+    };
+    let picked = integrate::integrate(&worktree, &commits).map_err(failed)?;
+    let event = ctx.commit(EventKind::Integrated {
+        task: args.task.clone(),
+        commits: picked.picked.clone(),
+    })?;
+    emit(ctx, &event)?;
+    println!(
+        "integrated {}: {} commit(s), head {}",
+        args.task,
+        picked.picked.len(),
+        short(&picked.new_head)
+    );
+    Ok(())
+}
+
+/// Records that a task's commits landed, without touching a repository.
+///
+/// This is the M1 path: the caller did the merge and only needs the ledger to
+/// know about it, so no commit list is invented here.
+fn record_only(ctx: &Ctx, args: &IntegrateArgs) -> Result<(), CliError> {
+    let event = ctx.commit(EventKind::Integrated {
+        task: args.task.clone(),
+        commits: Vec::new(),
+    })?;
+    emit(ctx, &event)
+}
+
+/// The branch the task's latest attempt committed on.
+fn latest_branch(task: &Task) -> Result<String, CliError> {
+    match task.attempts.last() {
+        Some(attempt) if !attempt.branch.trim().is_empty() => Ok(attempt.branch.clone()),
+        Some(_) => Err(CliError::other(anyhow!(
+            "task {:?} has no branch to integrate",
+            task.id
+        ))),
+        None => Err(CliError::other(anyhow!(
+            "task {:?} was never attempted",
+            task.id
+        ))),
+    }
+}
+
+/// The name of the repository directory, which keeps repos apart on disk.
+fn repo_name(ctx: &Ctx) -> Result<String, CliError> {
+    ctx.root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            CliError::other(anyhow!(
+                "cannot name the repository: {} has no last path component",
+                ctx.root.display()
+            ))
+        })
+}
+
+/// The commit both branches share, which is where the picks start.
+fn merge_base(repo: &Path, branch: &str, integration: &str) -> Result<String, CliError> {
+    let git = Git::new(repo);
+    let base = git
+        .run(&["merge-base", branch, integration])
+        .map_err(|err| CliError::other(anyhow!(err).context("finding the merge base")))?;
+    let base = base.trim().to_string();
+    if base.is_empty() {
+        return Err(CliError::other(anyhow!(
+            "{branch:?} and {integration:?} share no commit"
+        )));
+    }
+    Ok(base)
+}
+
+/// The commits on `branch` after `base`, oldest first.
+fn rev_list(repo: &Path, base: &str, branch: &str) -> Result<Vec<String>, CliError> {
+    let range = format!("{base}..{branch}");
+    let raw = Git::new(repo)
+        .run(&["rev-list", "--reverse", &range])
+        .map_err(|err| CliError::other(anyhow!(err).context("listing the task's commits")))?;
+    Ok(raw
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+/// Turns a failed integration into a process failure with its cause.
+fn failed(err: IntegrateError) -> CliError {
+    CliError::other(anyhow!(err).context("integrating the task"))
+}
+
+/// The short form of a sha, for the human line.
+fn short(sha: &str) -> &str {
+    sha.get(..SHORT_SHA).unwrap_or(sha)
+}
