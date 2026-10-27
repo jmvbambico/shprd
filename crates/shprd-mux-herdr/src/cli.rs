@@ -162,6 +162,7 @@ impl HerdrMux {
             .map_err(|failure| failure.into_mux_error(context))?;
         answer
             .object()
+            .map(|value| value.and_then(|value| value.get("result").cloned()))
             .map_err(|failure| failure.into_mux_error(context))
     }
 
@@ -179,7 +180,7 @@ impl HerdrMux {
             .answer(args)
             .map_err(|failure| failure.into_mux_error(context))?;
         match answer.object() {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok(value.and_then(|value| value.get("result").cloned())),
             Err(failure) if failure.is_not_found() => Err(MuxError::not_found(what, id)),
             Err(failure) => Err(failure.into_mux_error(context)),
         }
