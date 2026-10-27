@@ -300,6 +300,8 @@ pub struct Reviewer {
     pub launch: LaunchSpec,
     /// Whether this review is cross-vendor or degraded.
     pub degraded: bool,
+    /// A one-line note to show the human when a flag had no effect.
+    pub note: Option<String>,
 }
 
 /// Picks the reviewer for one attempt.
@@ -345,7 +347,10 @@ pub fn choose_reviewer(
         agent: parsed.program,
         model: parsed.model,
         launch: program.spec.launch.clone(),
-        degraded,
+        // `--degraded` is only recorded where the review needs the label: the
+        // branches below set it, and it stays false for an independent review.
+        degraded: false,
+        note: None,
     };
     // The run log keeps the author's program and model apart; both name the
     // agent in a message.
@@ -387,6 +392,14 @@ pub fn choose_reviewer(
              {vendor} family: this review is {DEGRADED_LABEL}"
         );
         reviewer.degraded = true;
+    } else if degraded {
+        // The reviewer is provably from another family, so the flag was not
+        // needed: say so once rather than labelling a sound review.
+        reviewer.note = Some(format!(
+            "note: --degraded was ignored: the reviewer `{raw}` uses the {} family, which differs \
+             from the author's",
+            reviewer_vendor.as_deref().unwrap_or_default()
+        ));
     }
     Ok(reviewer)
 }
@@ -679,6 +692,9 @@ pub fn review(
         &env.spawn.programs,
         req.degraded,
     )?;
+    if let Some(note) = &reviewer.note {
+        eprintln!("{note}");
+    }
     let dir = write_packet(env, task, attempt)?;
     let findings = dir.join("findings.json");
     let brief_path = brief_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n);
@@ -1349,5 +1365,40 @@ project_dirs = []
                 .any(|pair| pair == ["--sandbox".to_string(), "workspace-write".to_string()]),
             "the codex reviewer is not sandboxed: {argv:?}"
         );
+    }
+
+    #[test]
+    fn degraded_is_ignored_when_the_reviewer_is_independent() {
+        // `--degraded` is a permission, not a claim. When the reviewer's family
+        // is known and differs from the author's, the review is independent no
+        // matter what the flag said, so the label would be a lie.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported_with(&ctx, "pi", Some("deepseek/deepseek-v4.1-flash"));
+        let programs = family_programs();
+        let chosen = choose_reviewer(
+            Some("pi/claude/claude-opus-5-5"),
+            "pi",
+            Some("deepseek/deepseek-v4.1-flash"),
+            &programs,
+            true,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !chosen.degraded,
+            "--degraded must not mark an independent review"
+        );
+        let note = chosen
+            .note
+            .clone()
+            .unwrap_or_else(|| panic!("the ignored flag is never mentioned"));
+        assert!(note.contains("--degraded"), "{note}");
+
+        let env = scratch.review_env_with(&ctx, Some("pi/claude/claude-opus-5-5"), programs);
+        let mux = scratch.mux();
+        let report = review(&mux, &env, &request(true)).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!report.degraded, "the report labels an independent review");
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
     }
 }
