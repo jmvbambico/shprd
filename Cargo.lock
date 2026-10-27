@@ -508,6 +508,9 @@ dependencies = [
 name = "shprd-mux-herdr"
 version = "0.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "shprd-mux",
  "tempfile",
  "thiserror",
  "toml",
