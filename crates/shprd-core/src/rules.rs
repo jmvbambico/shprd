@@ -538,10 +538,16 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
     let found = task_in(state, task)?;
     // A failed gate leaves the task Failed; a later gate on the same attempt is
     // still allowed, which is how a failed attempt gets re-gated after a fix.
-    if !matches!(found.status, TaskStatus::Reported | TaskStatus::Failed) {
+    // A Passed task is gated too: integration runs after the task's own gates
+    // passed, and a conflicting pick is recorded as a failed gate that sends
+    // the task back to Failed.
+    if !matches!(
+        found.status,
+        TaskStatus::Reported | TaskStatus::Failed | TaskStatus::Passed
+    ) {
         return Err(RuleError::WrongStatus {
             task: task.to_string(),
-            expected: "Reported or Failed",
+            expected: "Reported, Failed or Passed",
             found: found.status,
         });
     }

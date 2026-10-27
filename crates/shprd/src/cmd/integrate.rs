@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
-use shprd_core::event::EventKind;
+use shprd_core::event::{EventKind, Finding, Severity};
 use shprd_core::state::Task;
 use shprd_git::git::Git;
 use shprd_git::integrate::{self, IntegrateError, TaskCommits};
@@ -64,7 +64,13 @@ pub fn verb(ctx: &Ctx, args: &IntegrateArgs, home: Option<&Path>) -> Result<(), 
         claimed,
         scope: task.scope.clone(),
     };
-    let picked = integrate::integrate(&worktree, &commits).map_err(failed)?;
+    let picked = match integrate::integrate(&worktree, &commits) {
+        Ok(picked) => picked,
+        Err(IntegrateError::Conflict { commit, files }) => {
+            return send_back(ctx, args, &task, &commit, &files);
+        }
+        Err(err) => return Err(failed(err)),
+    };
     let event = ctx.commit(EventKind::Integrated {
         task: args.task.clone(),
         commits: picked.picked.clone(),
@@ -190,4 +196,34 @@ fn lock_run(home: &Path, repo_name: &str, run: &str) -> Result<RunLock, CliError
         .with_context(|| format!("locking {}", path.display()))
         .map_err(CliError::other)?;
     Ok(RunLock { _file: file })
+}
+
+/// Records a conflicting pick as a failed `integrate` gate and fails with
+/// exit 2, so the task goes back to `Failed` and can be spawned again.
+fn send_back(
+    ctx: &Ctx,
+    args: &IntegrateArgs,
+    task: &Task,
+    commit: &str,
+    files: &[String],
+) -> Result<(), CliError> {
+    let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
+    let finding = Finding {
+        severity: Severity::Major,
+        title: "conflicts with the integration branch".to_string(),
+        location: files.first().cloned(),
+        detail: format!("cherry-pick of {commit} conflicts in {}", files.join(", ")),
+    };
+    let event = ctx.commit(EventKind::GateFailed {
+        task: args.task.clone(),
+        attempt,
+        gate: "integrate".to_string(),
+        findings: vec![finding],
+    })?;
+    emit(ctx, &event)?;
+    Err(CliError::Invalid(anyhow!(
+        "integrate {}: {} conflict(s) with the integration branch, task marked failed",
+        args.task,
+        files.len()
+    )))
 }
