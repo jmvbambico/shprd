@@ -38,6 +38,9 @@ verified = false
 
 [models]
 list_command = ["pi", "--list-models"]
+# `pi auth check --model <name>` wants the provider too, e.g.
+# `Command Code/deepseek/deepseek-v4.1-flash`; a bare model is ambiguous.
+provider_qualified = true
 
 [records]
 kind = "jsonl"

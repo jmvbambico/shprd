@@ -171,6 +171,9 @@ pub struct Values {
 pub struct ModelsSpec {
     /// The command that lists available models, if the CLI has one.
     pub list_command: Option<Vec<String>>,
+    /// Whether a model name must also name its provider, as `pi` requires.
+    #[serde(default)]
+    pub provider_qualified: bool,
 }
 
 /// Where the CLI writes its conversation record and provider errors.
