@@ -16,6 +16,8 @@
 mod cli;
 pub mod keys;
 // Wired into the trait impl by the next commit.
+#[allow(dead_code)]
+mod panes;
 mod shell;
 #[allow(dead_code)]
 mod tabs;
