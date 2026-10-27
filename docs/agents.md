@@ -45,15 +45,29 @@ the work. See [Availability](availability.md).
 
 ## Harness table
 
-One TOML table per CLI, shipped with shprd:
+One TOML file per CLI in `data/harness/`, loaded and validated by
+`shprd-roster::spec`:
 
-- detection: binary name, version probe, sign-in probe;
-- launch: interactive command, model flag, effort flag, auto-approve flag,
-  system-prompt injection, resume flag;
-- models: how to list them;
-- records: conversation location and reader;
-- dry patterns: on-screen strings that mean "rate limited" or "out of quota";
-- skills: which global and native skill folders the CLI reads.
+- **detect:** binary name, version arguments, sign-in hint.
+- **launch:** the interactive command, plus **argument templates**:
+  `model_args`, `effort_args`, `system_prompt_args`, `resume_args`,
+  `auto_approve`. Each element is one argv token with at most one placeholder:
+  `{model}`, `{effort}`, `{prompt}`, `{prompt_file}` or `{session}`. For example,
+  Codex's effort is `["-c", "model_reasoning_effort={effort}"]`.
+  `render_args` fills them in.
+- **models:** the command that lists them.
+- **records:** format (`jsonl` or `sqlite`) and a location pattern. The
+  location may use `~` (first component only), `{cwd_slug}`, `{session}`,
+  `{yyyy}`, `{mm}`, `{dd}`, and `*` within one component. For example,
+  `~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl`.
+- **quota:** source (`anthropic_oauth`, `codex_wham`, `kilo_profile` or
+  `none`) and the live retry signal, if any.
+- **skills:** `home_dirs` (must start with `~/`) and `project_dirs` (relative
+  to the repo root, e.g. Codex's `.agents/skills`).
+- **dry_patterns:** on-screen strings that mean "rate limited" or "out of
+  quota".
+- `launch.verified` and `records.verified` say whether those facts were
+  checked on a real machine.
 
 The starting data comes from herdr-projects' per-CLI table (MIT, credited in the
 README) and is re-checked against each CLI version we support.
