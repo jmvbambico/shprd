@@ -4,6 +4,7 @@ pub mod agent;
 pub mod dagr;
 pub mod doctor;
 pub mod janitor;
+pub mod keys;
 pub mod roster;
 pub mod run;
 pub mod set;
@@ -24,6 +25,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // `set` writes a config file, not a log, so it too needs no repository.
     if let Some(Command::Set(args)) = &cli.command {
         return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
+    }
+    // `keys` edits herdr's config file, so it too needs no repository.
+    if let Some(Command::Keys(args)) = &cli.command {
+        return keys::run(args, cli.global.home.as_deref());
     }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
@@ -59,6 +64,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.repo.as_deref(),
         ),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
+        Some(Command::Keys(args)) => keys::run(&args, None),
     }
 }
 

@@ -86,6 +86,8 @@ pub enum Command {
     Set(SetArgs),
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
+    /// Print, install or remove herdr's shprd keybinds.
+    Keys(KeysArgs),
 }
 
 /// Arguments for `janitor`.
@@ -395,4 +397,29 @@ pub enum GateOutcome {
     Pass,
     /// The gate failed.
     Fail,
+}
+
+/// Arguments for `keys`.
+#[derive(Debug, Args)]
+pub struct KeysArgs {
+    /// Which keybind verb.
+    #[command(subcommand)]
+    pub cmd: KeysCommand,
+    /// The herdr config file to read and write.
+    ///
+    /// Defaults to `$HERDR_CONFIG_PATH`, then
+    /// `$HOME/.config/herdr/config.toml`.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// The keybind verbs.
+#[derive(Debug, Subcommand)]
+pub enum KeysCommand {
+    /// Print the block shprd installs.
+    Show,
+    /// Install the block, or refresh an existing one in place.
+    Install,
+    /// Remove the block.
+    Uninstall,
 }
