@@ -4,6 +4,7 @@
 //! Locations and formats live in data so supporting a new CLI version is a
 //! table change rather than a code change (see `docs/agents.md`).
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -339,6 +340,25 @@ pub enum SpecError {
         /// The location pattern that failed.
         location: String,
     },
+    /// A loaded harness spec failed the checks in [`HarnessSpec::validate`].
+    #[error("invalid harness spec {path}: {source}")]
+    Invalid {
+        /// The file that failed.
+        path: PathBuf,
+        /// The validation error.
+        #[source]
+        source: Box<SpecError>,
+    },
+    /// Two harness spec files declare the same `id`.
+    #[error("duplicate harness id {id} in {path}: already defined in {first}")]
+    DuplicateId {
+        /// The repeated id.
+        id: String,
+        /// The file that repeats it.
+        path: PathBuf,
+        /// The file that declared it first.
+        first: PathBuf,
+    },
     /// A launch argument template uses a placeholder it may not or must use.
     #[error("invalid {field} template: {reason}")]
     InvalidTemplate {
@@ -531,6 +551,10 @@ fn check_optional_template(
 }
 
 /// Load every `*.toml` harness spec in `path`, sorted by file name.
+///
+/// Every spec is checked with [`HarnessSpec::validate`]; a spec that fails, or
+/// two specs that declare the same [`HarnessSpec::id`], are rejected with an
+/// error naming the offending file.
 pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     let entries = fs::read_dir(path).map_err(|source| SpecError::ReadDir {
         path: path.to_owned(),
@@ -550,7 +574,25 @@ pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     }
     files.sort();
 
-    files.iter().map(|file| load_file(file)).collect()
+    let mut specs = Vec::with_capacity(files.len());
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for file in &files {
+        let spec = load_file(file)?;
+        spec.validate().map_err(|source| SpecError::Invalid {
+            path: file.clone(),
+            source: Box::new(source),
+        })?;
+        if let Some(first) = seen.get(&spec.id) {
+            return Err(SpecError::DuplicateId {
+                id: spec.id.clone(),
+                path: file.clone(),
+                first: first.clone(),
+            });
+        }
+        seen.insert(spec.id.clone(), file.clone());
+        specs.push(spec);
+    }
+    Ok(specs)
 }
 
 fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
@@ -772,6 +814,50 @@ project_dirs = []
             Err(error) => error,
         };
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn write_spec(dir: &Path, name: &str, contents: &str) {
+        if let Err(error) = std::fs::write(dir.join(name), contents) {
+            panic!("should write {name}: {error}");
+        }
+    }
+
+    fn temp_harness_dir() -> tempfile::TempDir {
+        match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(error) => panic!("should create a temp dir: {error}"),
+        }
+    }
+
+    #[test]
+    fn load_dir_rejects_invalid_spec_naming_the_file() {
+        let dir = temp_harness_dir();
+        let broken = MINIMAL_SPEC.replace(
+            "location = \"~/.claude/projects/{cwd_slug}/{session}.jsonl\"",
+            "location = \"~/.claude//{session}.jsonl\"",
+        );
+        write_spec(dir.path(), "broken.toml", &broken);
+        let error = match load_dir(dir.path()) {
+            Ok(specs) => panic!("invalid spec should be rejected, got {} specs", specs.len()),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::Invalid { .. }));
+        assert!(error.to_string().contains("broken.toml"), "{error}");
+    }
+
+    #[test]
+    fn load_dir_rejects_duplicate_ids() {
+        let dir = temp_harness_dir();
+        write_spec(dir.path(), "a.toml", MINIMAL_SPEC);
+        write_spec(dir.path(), "b.toml", MINIMAL_SPEC);
+        let error = match load_dir(dir.path()) {
+            Ok(specs) => panic!(
+                "duplicate ids should be rejected, got {} specs",
+                specs.len()
+            ),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DuplicateId { .. }));
     }
 
     fn template_error(fixture: &str) -> SpecError {
