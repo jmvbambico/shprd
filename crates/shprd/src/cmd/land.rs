@@ -323,6 +323,15 @@ fn merge(
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
     })?;
     if status.merged {
+        // The forge closed the pull request without shprd: the merge is still a
+        // fact about this run, recorded once and never twice.
+        if !pr.merged {
+            let event = ctx.commit(EventKind::PrMerged {
+                number,
+                head: branch,
+            })?;
+            crate::cmd::emit(ctx, &event)?;
+        }
         println!("merged {url}");
         return Ok(());
     }

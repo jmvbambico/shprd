@@ -708,3 +708,76 @@ fn allow_never_merges_into_a_protected_base() {
     );
     assert!(!fixture.recorded_merge(1));
 }
+
+/// A forge script whose pull request #1 is already merged on the forge.
+fn merged_script(head: &str) -> String {
+    let script = serde_json::json!({
+        "status": [{
+            "number": 1,
+            "url": "https://example.invalid/pull/1",
+            "head": INT_BRANCH,
+            "approved": true,
+            "checks_passed": Some(true),
+            "merged": true,
+            "head_sha": head,
+        }],
+    });
+    script.to_string()
+}
+
+/// Every `PrMerged` head the log recorded, oldest first.
+fn merged_heads(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::PrMerged { head, .. } => Some(head),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_merge_records_the_branch_so_the_janitor_deletes_it_remotely() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+    fixture.script_forge(&status_script(&head, true, Some(true)));
+    fixture.ok(&["land", "--merge"]);
+    assert_eq!(
+        merged_heads(&fixture),
+        vec![INT_BRANCH.to_string()],
+        "the merge names the head branch, not its sha"
+    );
+    let plan = fixture.ok(&["janitor"]);
+    assert!(
+        plan.contains(&format!("delete remote branch {INT_BRANCH}")),
+        "the janitor plans deleting the merged branch remotely: {plan}"
+    );
+}
+
+#[test]
+fn a_merge_done_on_the_forge_is_recorded_once() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+    fixture.script_forge(&merged_script(&head));
+    let printed = fixture.ok(&["land", "--merge"]);
+    assert!(
+        printed.contains("merged https://example.invalid/pull/1"),
+        "{printed}"
+    );
+    assert_eq!(
+        merged_heads(&fixture),
+        vec![INT_BRANCH.to_string()],
+        "the merge GitHub already did is in the log"
+    );
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge ").is_empty(),
+        "the forge is not asked for a second merge"
+    );
+    fixture.ok(&["land", "--merge"]);
+    assert_eq!(
+        merged_heads(&fixture).len(),
+        1,
+        "a second land records no second merge"
+    );
+}
