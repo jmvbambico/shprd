@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config};
-use shprd_roster::detect::find_binary;
+use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
+use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_roster::skills::{CompatList, VisibilityRules};
-use shprd_roster::spec::{HarnessSpec, load_dir};
+use shprd_roster::spec::{HarnessSpec, Vendor, load_dir};
 
 use crate::cli::DoctorArgs;
 use crate::ctx::{CliError, resolve_home};
@@ -128,8 +129,10 @@ fn build(home_flag: Option<&Path>) -> Report {
     let facts = Facts::resolve(home_flag);
     let mut report = Report::default();
     host(&mut report, &facts);
-    let _specs = data(&mut report, &facts);
-    let _config = config_section(&mut report, &facts);
+    let specs = data(&mut report, &facts);
+    let config = config_section(&mut report, &facts);
+    agents(&mut report, &facts, &specs, config.as_ref());
+    review(&mut report, &facts, &specs, config.as_ref());
     report
 }
 
@@ -315,5 +318,150 @@ fn role(section: &mut Section, name: &str, agent: Option<&str>) {
             section.add(Level::Ok, format!("{name} {agent}"));
         }
         _ => section.add(Level::Warn, format!("{name} not set")),
+    }
+}
+
+/// The clean environment a worker CLI is launched with.
+fn worker_env(facts: &Facts) -> LaunchEnv {
+    let ctx = EnvContext {
+        actor: "worker".to_owned(),
+        task: None,
+        run: None,
+        repo: std::env::current_dir().unwrap_or_default(),
+    };
+    env::launch_env(&facts.current, Role::Worker, &ctx)
+}
+
+/// The model the pi sign-in probe needs: from the roster, else the environment.
+fn pi_models(
+    facts: &Facts,
+    specs: &[HarnessSpec],
+    config: Option<&Config>,
+) -> BTreeMap<String, String> {
+    if !specs.iter().any(|spec| spec.id == "pi") {
+        return BTreeMap::new();
+    }
+    let roster = config.map(|config| &config.roster);
+    let from_roster = roster.and_then(|roster| {
+        roster
+            .workers
+            .iter()
+            .chain(roster.orchestrator.iter())
+            .chain(roster.reviewer.iter())
+            .find_map(|agent| model_after_pi(agent))
+    });
+    let model = from_roster.or_else(|| {
+        facts
+            .current
+            .get("SHPRD_PI_MODEL")
+            .map(|model| model.trim().to_owned())
+            .filter(|model| !model.is_empty())
+    });
+    let mut models = BTreeMap::new();
+    if let Some(model) = model {
+        models.insert("pi".to_owned(), model);
+    }
+    models
+}
+
+/// The model of an agent string of the form `pi/<model>`, when it is one.
+fn model_after_pi(agent: &str) -> Option<String> {
+    let rest = agent.strip_prefix("pi/")?.trim();
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// Section 4: every harness CLI, probed with the environment a worker gets.
+fn agents(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
+    let section = report.section("Agents");
+    if specs.is_empty() {
+        section.add(Level::Warn, "no harness spec, so no agent could be probed");
+        return;
+    }
+    let clean = worker_env(facts);
+    let pairs = clean.as_pairs();
+    let models = pi_models(facts, specs, config);
+    for detection in detect_all(specs, &facts.path_env, &pairs, &models) {
+        let (level, text) = describe(&detection);
+        section.add(level, text);
+    }
+}
+
+/// One detection as a level and a line.
+fn describe(detection: &Detection) -> (Level, String) {
+    let (level, binary) = match &detection.binary {
+        Some(path) => (Level::Ok, path.display().to_string()),
+        None => (Level::Warn, "not installed".to_owned()),
+    };
+    let (level, signin) = match &detection.signin {
+        SignIn::SignedIn => (level, "signed in".to_owned()),
+        SignIn::SignedOut => (Level::Fail, "signed out".to_owned()),
+        SignIn::Unknown(reason) => (level, format!("unknown ({reason})")),
+    };
+    let version = detection.version.as_deref().unwrap_or("-");
+    let text = format!(
+        "{}  {}  {}  {}  {}",
+        detection.id,
+        binary,
+        version,
+        signin,
+        vendor_name(detection.vendor)
+    );
+    (level, text)
+}
+
+/// The vendor of the harness an agent string names, by its program prefix.
+fn vendor_of(specs: &[HarnessSpec], agent: &str) -> Option<Vendor> {
+    let program = agent.split('/').next()?.trim();
+    specs
+        .iter()
+        .find(|spec| spec.id == program)
+        .map(|spec| spec.vendor)
+}
+
+/// Section 5: whether the reviewer comes from another vendor than every worker.
+fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
+    let section = report.section("Review");
+    let Some(roster) = config.map(|config| &config.roster) else {
+        section.add(Level::Warn, "no config loads, so no reviewer to check");
+        return;
+    };
+    let reviewer = roster
+        .reviewer
+        .as_deref()
+        .filter(|agent| !agent.trim().is_empty());
+    let Some(reviewer) = reviewer else {
+        section.add(Level::Warn, "reviewer not set, so no cross-vendor review");
+        return;
+    };
+    let Some(vendor) = vendor_of(specs, reviewer) else {
+        section.add(
+            Level::Warn,
+            format!("reviewer {reviewer}: no harness spec names its vendor"),
+        );
+        return;
+    };
+    let clashes: Vec<&str> = roster
+        .workers
+        .iter()
+        .filter(|worker| vendor_of(specs, worker) == Some(vendor))
+        .map(String::as_str)
+        .collect();
+    if clashes.is_empty() {
+        section.add(
+            Level::Ok,
+            format!(
+                "reviewer {reviewer} is {}, independent of every worker",
+                vendor_name(vendor)
+            ),
+        );
+    } else {
+        section.add(
+            Level::Fail,
+            format!(
+                "reviewer {reviewer} is {}: the same vendor as worker(s) {}",
+                vendor_name(vendor),
+                clashes.join(", ")
+            ),
+        );
     }
 }
