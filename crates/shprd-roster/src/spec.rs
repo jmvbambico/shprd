@@ -322,6 +322,12 @@ pub enum SpecError {
         /// The location pattern that failed.
         location: String,
     },
+    /// An argument template has an unmatched `{` or `}`.
+    #[error("unmatched brace in template token {token}")]
+    UnmatchedBrace {
+        /// The template token that failed.
+        token: String,
+    },
     /// A record location is empty or whitespace only.
     #[error("location pattern is empty")]
     EmptyLocation,
@@ -372,11 +378,18 @@ fn render_token(token: &str, values: &Values) -> Result<String, SpecError> {
     let mut out = String::with_capacity(token.len());
     let mut rest = token;
     while let Some(start) = rest.find('{') {
-        out.push_str(&rest[..start]);
+        let prefix = &rest[..start];
+        if prefix.contains('}') {
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
+        }
+        out.push_str(prefix);
         let after = &rest[start + 1..];
         let Some(end) = after.find('}') else {
-            out.push_str(&rest[start..]);
-            return Ok(out);
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
         };
         let name = &after[..end];
         let value = match name {
@@ -398,6 +411,11 @@ fn render_token(token: &str, values: &Values) -> Result<String, SpecError> {
         };
         out.push_str(value);
         rest = &after[end + 1..];
+    }
+    if rest.contains('}') {
+        return Err(SpecError::UnmatchedBrace {
+            token: token.to_owned(),
+        });
     }
     out.push_str(rest);
     Ok(out)
@@ -645,6 +663,26 @@ project_dirs = []
             Err(error) => error,
         };
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn rejects_unmatched_open_brace() {
+        let template = tokens(&["--model={model"]);
+        let error = match render_args(&template, &Values::default()) {
+            Ok(rendered) => panic!("unmatched `{{` should be rejected, got {rendered:?}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::UnmatchedBrace { .. }));
+    }
+
+    #[test]
+    fn rejects_unmatched_close_brace() {
+        let template = tokens(&["--model}"]);
+        let error = match render_args(&template, &Values::default()) {
+            Ok(rendered) => panic!("unmatched `}}` should be rejected, got {rendered:?}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::UnmatchedBrace { .. }));
     }
 
     fn location_error(location: &str) -> SpecError {
