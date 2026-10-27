@@ -6,9 +6,9 @@
 
 use thiserror::Error;
 
-use crate::event::{AgentId, EventKind, ReportStatus, TaskId};
+use crate::event::{AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, TaskId};
 use crate::scope::{self, ScopeError};
-use crate::state::{AgentInfo, RunState, Task, TaskStatus};
+use crate::state::{AgentInfo, ResourceStatus, RunState, Task, TaskStatus};
 
 /// Why an event was refused.
 #[derive(Debug, Error)]
@@ -154,6 +154,38 @@ pub enum RuleError {
         /// The task, or empty for a run-wide override.
         task: TaskId,
     },
+    /// A resource was created under a name that is already live or archived.
+    #[error("{kind:?} {name:?} has already been created and not removed")]
+    ResourceExists {
+        /// The resource kind.
+        kind: ResourceKind,
+        /// The resource name.
+        name: String,
+    },
+    /// A resource was archived or removed that the ledger does not know about.
+    #[error("{kind:?} {name:?} was never created")]
+    ResourceUnknown {
+        /// The resource kind.
+        kind: ResourceKind,
+        /// The resource name.
+        name: String,
+    },
+    /// A resource was archived or removed from a status that does not allow it.
+    #[error("{kind:?} {name:?} is {found:?}, which does not allow this action")]
+    WrongResourceStatus {
+        /// The resource kind.
+        kind: ResourceKind,
+        /// The resource name.
+        name: String,
+        /// The status it actually has.
+        found: ResourceStatus,
+    },
+    /// A resource event carried an empty name.
+    #[error("{kind:?} needs a non-empty name")]
+    EmptyResourceName {
+        /// The resource kind.
+        kind: ResourceKind,
+    },
     /// Integration was requested while the latest attempt has a failed gate and
     /// no override recorded after it.
     #[error("task {task:?} cannot be integrated: gate {gate:?} failed and no override followed")]
@@ -193,7 +225,7 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
     if state.run.is_none() {
         return Err(RuleError::NoRun);
     }
-    if state.finished {
+    if state.finished && !is_cleanup(kind) {
         return Err(RuleError::RunFinished);
     }
     match kind {
@@ -238,7 +270,86 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
             }
             Ok(())
         }
+        EventKind::Resource {
+            action,
+            kind,
+            name,
+            task,
+        } => check_resource(state, *action, *kind, name, task.as_deref()),
         EventKind::RunFinished {} => check_run_finished(state),
+    }
+}
+
+/// Whether `kind` only cleans up, and so stays legal after the run finished.
+///
+/// The janitor has to be able to remove a finished run's worktrees, but
+/// nothing may be created once the run is over.
+fn is_cleanup(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Resource {
+            action: ResourceAction::Archived | ResourceAction::Removed,
+            ..
+        }
+    )
+}
+
+/// Rules for the resource ownership ledger.
+///
+/// shprd may only ever clean up what it recorded creating, so an archive or a
+/// removal has to name a resource this run created, and a creation has to be
+/// either new or a re-creation after removal.
+fn check_resource(
+    state: &RunState,
+    action: ResourceAction,
+    kind: ResourceKind,
+    name: &str,
+    task: Option<&str>,
+) -> Result<(), RuleError> {
+    if name.trim().is_empty() {
+        return Err(RuleError::EmptyResourceName { kind });
+    }
+    if let Some(task) = task {
+        task_in(state, task)?;
+    }
+    let found = state
+        .resources
+        .get(&(kind, name.to_string()))
+        .map(|record| record.status);
+    match action {
+        ResourceAction::Created => match found {
+            Some(ResourceStatus::Live | ResourceStatus::Archived) => {
+                Err(RuleError::ResourceExists {
+                    kind,
+                    name: name.to_string(),
+                })
+            }
+            Some(ResourceStatus::Removed) | None => Ok(()),
+        },
+        ResourceAction::Archived => match found {
+            Some(ResourceStatus::Live | ResourceStatus::Archived) => Ok(()),
+            Some(found) => Err(RuleError::WrongResourceStatus {
+                kind,
+                name: name.to_string(),
+                found,
+            }),
+            None => Err(RuleError::ResourceUnknown {
+                kind,
+                name: name.to_string(),
+            }),
+        },
+        ResourceAction::Removed => match found {
+            Some(ResourceStatus::Live | ResourceStatus::Archived) => Ok(()),
+            Some(found) => Err(RuleError::WrongResourceStatus {
+                kind,
+                name: name.to_string(),
+                found,
+            }),
+            None => Err(RuleError::ResourceUnknown {
+                kind,
+                name: name.to_string(),
+            }),
+        },
     }
 }
 
