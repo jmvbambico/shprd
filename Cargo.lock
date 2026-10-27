@@ -551,7 +551,9 @@ dependencies = [
 name = "shprd-watch"
 version = "0.0.0"
 dependencies = [
- "shprd-mux",
+ "serde_json",
+ "thiserror",
+ "ureq",
 ]
 
 [[package]]
