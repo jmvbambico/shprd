@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use shprd_core::config::Skills;
-use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
-use shprd_core::state::{RunState, Task};
+use shprd_core::event::{Actor, EventKind, Finding, ResourceAction, ResourceKind, Severity};
+use shprd_core::state::{GateResult, RunState, Task};
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
@@ -633,6 +633,60 @@ pub struct BriefInput<'a> {
     pub skills: &'a [String],
 }
 
+/// The gate that sent the previous attempt back, when its latest gate failed.
+///
+/// A new attempt starts from the same task, so the brief repeats what the
+/// review or the gates rejected instead of making the agent rediscover it.
+fn previous_failure(task: &Task, attempt: u32) -> Option<&GateResult> {
+    let earlier = task
+        .attempts
+        .iter()
+        .filter(|earlier| earlier.n < attempt)
+        .max_by_key(|earlier| earlier.n)?;
+    let gate = earlier.gates.last()?;
+    (!gate.passed).then_some(gate)
+}
+
+/// The word the brief prints for a finding's severity.
+fn severity_word(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Critical => "critical",
+        Severity::Major => "major",
+        Severity::Minor => "minor",
+        Severity::Trivial => "trivial",
+    }
+}
+
+/// The longest detail the brief keeps from a previous attempt's finding, so one
+/// verbose finding cannot push the rest of the brief out of view.
+const DETAIL_LIMIT: usize = 300;
+
+/// One finding as the brief lists it: `- <severity>: <title> (<where>) — <why>`.
+fn finding_line(finding: &Finding) -> String {
+    let detail: String = finding.detail.chars().take(DETAIL_LIMIT).collect();
+    let detail = if detail.len() < finding.detail.len() {
+        format!("{detail}…")
+    } else {
+        detail
+    };
+    let title = if finding.title.trim().is_empty() {
+        finding
+            .location
+            .as_deref()
+            .unwrap_or(finding.detail.as_str())
+    } else {
+        finding.title.as_str()
+    };
+    let where_ = match &finding.location {
+        Some(location) => format!(" ({location})"),
+        None => String::new(),
+    };
+    format!(
+        "- {}: {title}{where_} — {detail}\n",
+        severity_word(finding.severity)
+    )
+}
+
 /// Renders the brief an agent reads before its first turn.
 ///
 /// It states only what the agent cannot look up faster itself: where it works,
@@ -654,7 +708,15 @@ pub fn render_brief(input: &BriefInput<'_>) -> String {
         "branch `{}` in worktree `{}`\n\n",
         input.branch, input.worktree
     ));
-    out.push_str("## Acceptance criteria\n\n");
+    if let Some(gate) = previous_failure(input.task, input.attempt) {
+        out.push_str("## Why the previous attempt was sent back\n\n");
+        out.push_str(&format!("gate `{}` failed:\n\n", gate.gate));
+        for finding in &gate.findings {
+            out.push_str(&finding_line(finding));
+        }
+        out.push_str("Fix these first; keep what already works.\n");
+    }
+    out.push_str("\n## Acceptance criteria\n\n");
     for item in &input.task.acceptance {
         out.push_str(&format!("- {item}\n"));
     }
@@ -1911,6 +1973,82 @@ mod tests {
                 "brief is missing {needle:?}:\n{text}"
             );
         }
+    }
+
+    /// The brief of a second attempt repeats what sent the first one back: the
+    /// gate's name and each finding, so the new agent fixes those first.
+    #[test]
+    fn a_new_attempts_brief_carries_the_previous_findings() {
+        let skills = Vec::new();
+        let plan = task_sent_back();
+        let text = render_brief(&BriefInput {
+            task: &plan,
+            run: "m4",
+            attempt: 2,
+            agent: "claude",
+            model: None,
+            branch: "shprd/m4/M4.4",
+            worktree: "/wt/m4/M4.4",
+            skills: &skills,
+        });
+        for needle in [
+            "## Why the previous attempt was sent back",
+            "gate `review` failed",
+            "- major: the unwrap panics on an empty log (crates/shprd/src/cmd/spawn.rs:120) — Return a CliError instead.",
+            "Fix these first; keep what already works.",
+        ] {
+            assert!(
+                text.contains(needle),
+                "brief is missing {needle:?}:\n{text}"
+            );
+        }
+    }
+
+    /// A first attempt has nothing to answer, and a passing gate sends nothing
+    /// back: the section appears only after a failed gate.
+    #[test]
+    fn a_brief_repeats_only_a_failed_earlier_gate() {
+        let skills = Vec::new();
+        let plan = task_sent_back();
+        let brief_for = |attempt| {
+            render_brief(&BriefInput {
+                task: &plan,
+                run: "m4",
+                attempt,
+                agent: "claude",
+                model: None,
+                branch: "shprd/m4/M4.4",
+                worktree: "/wt/m4/M4.4",
+                skills: &skills,
+            })
+        };
+        assert!(!brief_for(1).contains("sent back"));
+        assert!(brief_for(2).contains("sent back"));
+    }
+    /// A task whose first attempt failed its review, with one major finding.
+    fn task_sent_back() -> Task {
+        let mut plan = task("M4.4", &[]);
+        plan.attempts.push(shprd_core::state::Attempt {
+            n: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt/m4/M4.4".to_string(),
+            branch: "shprd/m4/M4.4".to_string(),
+            report: None,
+            gates: vec![GateResult {
+                gate: "review".to_string(),
+                passed: false,
+                findings: vec![Finding {
+                    severity: Severity::Major,
+                    title: "the unwrap panics on an empty log".to_string(),
+                    location: Some("crates/shprd/src/cmd/spawn.rs:120".to_string()),
+                    detail: "Return a CliError instead.".to_string(),
+                }],
+                seq: 7,
+            }],
+            reviews: Vec::new(),
+        });
+        plan
     }
 }
 
