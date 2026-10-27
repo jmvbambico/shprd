@@ -124,6 +124,8 @@ impl Inner {
 #[derive(Debug)]
 pub struct FakeMux {
     caps: Capabilities,
+    /// Whether a new workspace also gets the starter tab a real host makes.
+    starter_tab: bool,
     inner: Mutex<Inner>,
 }
 
@@ -147,8 +149,17 @@ impl FakeMux {
     pub fn new(caps: Capabilities) -> Self {
         Self {
             caps,
+            starter_tab: false,
             inner: Mutex::new(Inner::fresh()),
         }
+    }
+
+    /// Make [`Mux::create_workspace`] also create the starter tab a real host
+    /// makes, titled the way herdr titles it. Tests that lay out a workspace
+    /// use this to see the tab a host would have left behind.
+    pub fn with_starter_tab(mut self) -> Self {
+        self.starter_tab = true;
+        self
     }
 
     /// Every call made so far, oldest first.
@@ -223,6 +234,16 @@ impl Mux for FakeMux {
             name: name.to_string(),
         };
         inner.workspaces.push(workspace.clone());
+        if self.starter_tab {
+            let root_pane = inner.new_pane();
+            inner.next_tab += 1;
+            let tab = Tab {
+                id: TabId::new(format!("tab-{}", inner.next_tab)),
+                title: "1".to_string(),
+                root_pane,
+            };
+            inner.tabs.push((workspace.id.clone(), tab));
+        }
         Ok(workspace)
     }
 

@@ -118,6 +118,21 @@ pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
     let (chat_tab, created_chat_tab) = if let Some(found) = titled(&tabs, CHAT_TITLE) {
         (found, false)
+    } else if let Some(starter) = starter_tab(&tabs, created_workspace) {
+        // A host makes a starter tab with every workspace. Adopting it keeps
+        // the workspace at one chat tab instead of leaving a stray one beside
+        // ours. Only a workspace `up` just created is ever retitled.
+        mux.rename_tab(&starter.id, CHAT_TITLE)
+            .map_err(|err| CliError::other(anyhow!(err).context("renaming the starter tab")))?;
+        mux.run(&starter.root_pane, &chat_argv(), &[])
+            .map_err(|err| CliError::other(anyhow!(err).context("starting the chat tab")))?;
+        (
+            Tab {
+                title: CHAT_TITLE.to_string(),
+                ..starter
+            },
+            true,
+        )
     } else {
         let tab = mux
             .create_tab(&workspace.id, CHAT_TITLE, &repo)
@@ -396,6 +411,18 @@ fn print_report(ctx: &Ctx, report: &UpReport) -> Result<(), CliError> {
 /// keys on: a tab found by title is the tab a previous `up` created.
 fn titled(tabs: &[Tab], title: &str) -> Option<Tab> {
     tabs.iter().find(|tab| tab.title == title).cloned()
+}
+
+/// The starter tab a host made with a workspace `up` just created, if any.
+///
+/// The tab is only ever adopted from a freshly created workspace, and only when
+/// it is the sole tab there: in a workspace `up` did not create, a lone tab
+/// belongs to a human and is left exactly as it is.
+fn starter_tab(tabs: &[Tab], created_workspace: bool) -> Option<Tab> {
+    match tabs {
+        [only] if created_workspace => Some(only.clone()),
+        _ => None,
+    }
 }
 
 /// Finds the repository's workspace, or creates it with its first pane in the
@@ -703,6 +730,61 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A fake host that also makes the starter tab a real host makes with
+    /// every new workspace, as herdr does (titled with the tab's number).
+    fn mux_with_starter_tab() -> FakeMux {
+        mux().with_starter_tab()
+    }
+
+    #[test]
+    fn first_up_adopts_the_starter_tab_as_the_chat_tab() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux_with_starter_tab();
+        let report = up(&mux, &env).map_err(failed)?;
+
+        assert!(report.created_workspace);
+        assert!(
+            report.created_chat_tab,
+            "the starter tab became the chat tab"
+        );
+        // The starter tab is retitled and the chat placeholder runs in its pane,
+        // so no second tab is created for the human.
+        assert_eq!(
+            created_titles(&mux),
+            vec!["★ claude·orchestrator".to_string()]
+        );
+        let renamed = mux.calls().into_iter().find_map(|call| match call {
+            Call::RenameTab(tab, title) => Some((tab, title)),
+            _ => None,
+        });
+        let (tab, title) = renamed.context("the starter tab was renamed")?;
+        assert_eq!(title, "shprd·chat");
+        assert_eq!(tab, report.chat_tab);
+        assert_eq!(started_argvs(&mux)[0], chat_argv());
+
+        // The host agrees: one chat tab and one orchestrator tab, nothing else.
+        let listed = mux
+            .list_tabs(&shprd_mux::WorkspaceId::new("ws-1"))
+            .map_err(|err| anyhow!("{err}"))?;
+        let titles: Vec<&str> = listed.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(titles, ["shprd·chat", "★ claude·orchestrator"]);
+
+        // A second `up` finds the adopted tab by title and leaves it alone.
+        let second = up(&mux, &env).map_err(failed)?;
+        assert!(!second.created_chat_tab);
+        assert_eq!(second.chat_tab, report.chat_tab);
+        assert_eq!(
+            mux.calls()
+                .into_iter()
+                .filter(|call| matches!(call, Call::RenameTab(..)))
+                .count(),
+            1,
+            "a tab up did not create is never retitled"
+        );
+        Ok(())
     }
 
     /// A fake host that claims every capability.
@@ -1145,10 +1227,14 @@ mod tests {
                     .as_str(),
             ))
             .map_err(|err| anyhow!("{err}"))?;
-        for title in ["shprd·chat", "★ sh·orchestrator"] {
-            let count = listed.iter().filter(|tab| tab.title == title).count();
-            assert_eq!(count, 1, "{title} appears {count} times in {listed:?}");
-        }
+        // Exactly two tabs, no stray starter tab beside them: the chat tab
+        // adopted the one the host made with the workspace.
+        let titles: Vec<&str> = listed.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["shprd·chat", "★ sh·orchestrator"],
+            "the workspace does not have exactly the two tabs up lays out"
+        );
         let output = std::process::Command::new("herdr")
             .args(["tab", "list"])
             .env("HOME", scratch.home.path())
