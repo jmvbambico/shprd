@@ -10,9 +10,10 @@
 //!
 //! - shprd records no orchestrator pane or agent, so `run.orchestrator` (which
 //!   only enables dagr's message view) is omitted.
-//! - Attempt times come from the event log: [`EventKind::Spawned`] starts an
-//!   attempt, its report or gate outcome ends it. A settled attempt with no
-//!   such event is stamped with `generated_at`, so durations read as zero.
+//! - Attempt times come from the event log alone: [`EventKind::Spawned`]
+//!   starts an attempt, its report or gate outcome ends it. An attempt whose
+//!   start or settle event is absent is refused rather than stamped with
+//!   `generated_at`.
 //! - A live attempt carries `locator.agent` (shprd knows which agent it
 //!   spawned, not which pane it landed in, so `locator.pane` is omitted) and
 //!   `liveness.queued_input: 0` (shprd has no way to feed input to an agent
@@ -29,6 +30,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 use shprd_core::event::{Event, EventKind};
@@ -509,13 +512,16 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 /// Writes `doc` to `path` atomically, optionally gating on `dagr check`.
 ///
-/// The document is written as pretty JSON to `<path>.tmp` in the same
-/// directory (created if missing). When `checker` is given it is run as
-/// `<checker> check <path>.tmp --strict --json`, and the document replaces
-/// `path` only if the checker exits 0 with no findings. Every failure after the
-/// temporary file exists — a rejected document, a failed rename — removes it,
-/// so a reader never sees a partial or unchecked `run.json` and no `.tmp`
-/// outlives a failed write.
+/// The document is written as pretty JSON to a temporary file in the same
+/// directory (created if missing): `.<file name>.<pid>.<nanos>.tmp`, unique per
+/// write, so concurrent writers — parallel agents each syncing their own run
+/// through this crate — never share one and never leave a half-written
+/// document behind. When `checker` is given it is run as
+/// `<checker> check <temporary file> --strict --json`, and the document
+/// replaces `path` only if the checker exits 0 with no findings. Every failure
+/// after the temporary file exists — a rejected document, a failed rename —
+/// removes exactly that file, so a reader never sees a partial or unchecked
+/// `run.json` and no temporary file outlives a failed write.
 ///
 /// # Errors
 ///
@@ -556,7 +562,7 @@ pub fn write_atomic(doc: &Value, path: &Path, checker: Option<&Path>) -> Result<
 ///
 /// Renaming it into place makes the drop a no-op: the path is already gone.
 struct TempFile {
-    /// The `<path>.tmp` this write owns.
+    /// The unique temporary path this write owns.
     path: PathBuf,
 }
 
@@ -580,12 +586,51 @@ impl Drop for TempFile {
     }
 }
 
-/// `<path>.tmp`, in the same directory so the rename stays within one
-/// filesystem.
+/// `.<file name>.<pid>.<nanos since epoch>.tmp`, in `path`'s directory so the
+/// rename stays within one filesystem.
+///
+/// The name is unique per write: the process id separates concurrent shprd
+/// processes, and [`unique_nanos`] makes the timestamp component strictly
+/// increase within one process, so two writers in the same process never share
+/// a temporary file even when they read the same clock tick.
 fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".tmp");
-    PathBuf::from(name)
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = format!(".{name}.{}.{}.tmp", std::process::id(), unique_nanos());
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => parent.join(tmp),
+        None => PathBuf::from(tmp),
+    }
+}
+
+/// The largest nanosecond timestamp this process has handed out so far.
+static LAST_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since the Unix epoch, at least one more than the previous call's
+/// value within this process.
+fn unique_nanos() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let mut previous = LAST_NANOS.load(Ordering::Relaxed);
+    loop {
+        let candidate = now.max(previous.saturating_add(1));
+        match LAST_NANOS.compare_exchange_weak(
+            previous,
+            candidate,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => previous = actual,
+        }
+    }
 }
 
 /// Runs `<checker> check <tmp> --strict --json` and requires no findings.
@@ -1073,9 +1118,62 @@ mod tests {
         let path = dir.path().join("views/run.json");
         assert!(write_atomic(&projected(), &path, None).is_ok());
         assert!(path.exists());
-        assert!(!temp_path(&path).exists());
+        assert!(
+            tmp_files(dir.path()).is_empty(),
+            "{:?}",
+            tmp_files(dir.path())
+        );
         let text = fs::read_to_string(&path).unwrap_or_default();
         assert!(text.contains("\"dagr\": 3"), "{text}");
+    }
+
+    /// Every leftover temporary file in `dir`.
+    fn tmp_files(dir: &Path) -> Vec<PathBuf> {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("tmp"))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_leave_one_parsable_document_and_no_temporary_file() {
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let path = dir.path().join("run.json");
+        let doc = projected();
+        let workers: Vec<std::thread::JoinHandle<()>> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let doc = doc.clone();
+                std::thread::spawn(move || {
+                    for round in 0..50 {
+                        assert!(
+                            write_atomic(&doc, &path, None).is_ok(),
+                            "write {round} failed"
+                        );
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert!(worker.join().is_ok());
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            serde_json::from_str::<Value>(&text).is_ok(),
+            "run.json must parse: {text}"
+        );
+        assert!(
+            tmp_files(dir.path()).is_empty(),
+            "{:?}",
+            tmp_files(dir.path())
+        );
     }
 
     #[test]
@@ -1092,9 +1190,9 @@ mod tests {
             other => panic!("expected the rename to fail, got {other:?}"),
         }
         assert!(
-            !temp_path(&path).exists(),
-            "a failed write must not leave {}",
-            temp_path(&path).display()
+            tmp_files(dir.path()).is_empty(),
+            "a failed write must not leave {:?}",
+            tmp_files(dir.path())
         );
     }
 
@@ -1123,7 +1221,11 @@ mod tests {
             other => panic!("expected a check failure, got {other:?}"),
         }
         assert!(!path.exists(), "a rejected document must not be written");
-        assert!(!temp_path(&path).exists(), "the temporary file is removed");
+        assert!(
+            tmp_files(dir.path()).is_empty(),
+            "the temporary file is removed: {:?}",
+            tmp_files(dir.path())
+        );
     }
 
     /// The real thing, when a dagr binary is around: the projection must be a
