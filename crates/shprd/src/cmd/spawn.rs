@@ -185,6 +185,12 @@ pub fn spawn(
             return Err(err);
         }
     };
+    // The tab id goes next to the brief: a label is only 16 characters, so
+    // two tasks can share one, and the id cannot.
+    write_tab(
+        &tab_path(&env.briefs_dir, &env.run, &task.id, attempt),
+        &tab_id,
+    );
     if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
         close_tab(mux, &tab_id);
         discard_worktree(env, &created);
@@ -685,6 +691,19 @@ pub fn real_mux() -> shprd_mux_herdr::HerdrMux {
 /// The tab is found by title inside the repository's workspace, so a prompt can
 /// only ever reach a tab this repository's shprd opened for that task.
 pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
+    let home = crate::ctx::resolve_home(None)?;
+    prompt_in(mux, &home, repo, task, text)
+}
+
+/// [`prompt`], against an explicit home directory, so a test needs no
+/// environment.
+fn prompt_in(
+    mux: &dyn Mux,
+    home: &Path,
+    repo: &Path,
+    task: &str,
+    text: &str,
+) -> Result<(), CliError> {
     let repo_name = repo
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -699,25 +718,78 @@ pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), 
     let tabs = mux
         .list_tabs(&workspace.id)
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
-    let tab = find_task_tab(&tabs, task).ok_or_else(|| {
-        CliError::Invalid(anyhow!(
-            "no tab for task {task:?} in {name:?}: spawn it with `shprd agent spawn --task {task}`"
-        ))
+    let record = latest_tab_record(&home.join(".shprd").join("briefs"), task)
+        .ok_or_else(|| no_open_tab(task))?;
+    let wanted = std::fs::read_to_string(&record).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("reading {}", record.display())))
     })?;
+    let tab = tabs
+        .iter()
+        .find(|tab| tab.id.as_str() == wanted.trim())
+        .ok_or_else(|| no_open_tab(task))?;
     mux.prompt(&tab.root_pane, text)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
 }
 
-/// The tab a task's agent runs in.
+/// The refusal a task with no reachable tab earns.
+fn no_open_tab(task: &str) -> CliError {
+    CliError::Invalid(anyhow!(
+        "no open tab for task {task:?}: spawn it with `shprd agent spawn --task {task}`"
+    ))
+}
+
+/// Where an attempt records the id of the tab it opened:
+/// `<briefs>/<run>/<task>-a<attempt>.tab`, next to its brief.
+fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+    briefs.join(run).join(format!("{task}-a{attempt}.tab"))
+}
+
+/// Records the tab an attempt opened, so a later prompt reaches that exact tab
+/// rather than one whose truncated label happens to match.
 ///
-/// A tab title is `<symbol> <cli>·<label>`, so the segment between the first and
-/// the second `·` is the task label; a disambiguated title keeps that segment
-/// and appends the task's short tag after another `·`.
-pub fn find_task_tab(tabs: &[shprd_mux::Tab], task: &str) -> Option<shprd_mux::Tab> {
-    let label = naming::truncate_label(task);
-    tabs.iter()
-        .find(|tab| tab.title.split('·').nth(1) == Some(label.as_str()))
-        .cloned()
+/// A failure is only a warning: the agent is running, and a prompt that cannot
+/// find the record says so.
+fn write_tab(path: &Path, tab: &shprd_mux::TabId) {
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("warning: could not create {}: {err}", parent.display());
+        return;
+    }
+    if let Err(err) = std::fs::write(path, tab.as_str()) {
+        eprintln!("warning: could not write {}: {err}", path.display());
+    }
+}
+
+/// The tab record of a task's latest attempt, across every run.
+///
+/// The attempt number is part of the file name, so the highest one names the
+/// tab a prompt should reach; the run name only breaks a tie between two runs.
+fn latest_tab_record(briefs: &Path, task: &str) -> Option<PathBuf> {
+    let prefix = format!("{task}-a");
+    let mut best: Option<(u32, String, PathBuf)> = None;
+    for run in std::fs::read_dir(briefs).ok()?.flatten() {
+        let dir = run.path();
+        let run_name = dir.file_name()?.to_string_lossy().to_string();
+        for file in std::fs::read_dir(&dir).ok()?.flatten() {
+            let name = file.file_name().to_string_lossy().to_string();
+            let attempt = name
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".tab"))
+                .and_then(|digits| digits.parse::<u32>().ok());
+            let Some(attempt) = attempt else {
+                continue;
+            };
+            let better = match &best {
+                Some((kept, kept_run, _)) => (attempt, &run_name) > (*kept, kept_run),
+                None => true,
+            };
+            if better {
+                best = Some((attempt, run_name.clone(), file.path()));
+            }
+        }
+    }
+    best.map(|(_, _, path)| path)
 }
 
 /// Builds the argv the agent's CLI starts with.
@@ -1028,6 +1100,22 @@ project_dirs = []
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
         assert!(brief.contains("Make spawn real"), "{brief}");
         assert!(brief.contains("crates/shprd"), "{brief}");
+        // The tab id is recorded beside the brief, so a later prompt reaches
+        // this exact tab even when another task shares its 16-char label.
+        let recorded = tab_path(
+            &scratch.home.path().join(".shprd").join("briefs"),
+            "t1",
+            "T1",
+            1,
+        );
+        let tab_id = std::fs::read_to_string(&recorded).unwrap_or_default();
+        let tabs = mux
+            .list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            tabs.iter().any(|tab| tab.id.as_str() == tab_id),
+            "{tab_id:?} names no tab in {tabs:?}"
+        );
 
         let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
         let task = state.tasks.get("T1").unwrap_or_else(|| panic!("no task"));
@@ -1333,8 +1421,20 @@ project_dirs = []
         assert!(message.contains("shprd up"), "{message}");
     }
 
+    /// Writes the tab record a spawn would have written for one attempt.
+    fn record_tab(scratch: &Scratch, task: &str, attempt: u32, tab: &shprd_mux::TabId) {
+        let path = tab_path(
+            &scratch.home.path().join(".shprd").join("briefs"),
+            "t1",
+            task,
+            attempt,
+        );
+        write_tab(&path, tab);
+        assert!(path.exists(), "{} was not written", path.display());
+    }
+
     #[test]
-    fn prompt_reaches_the_right_pane() {
+    fn prompt_reaches_the_tab_its_own_task_spawned() {
         let scratch = Scratch::new();
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
@@ -1343,14 +1443,39 @@ project_dirs = []
                 scratch.root(),
             )
             .unwrap_or_else(|err| panic!("{err}"));
+        // These two labels truncate to the same 16 characters, so the title
+        // alone would send the second task's prompt to the first task's tab.
+        let first = "task-identical-label-one";
+        let second = "task-identical-label-two";
+        assert_eq!(
+            naming::truncate_label(first),
+            naming::truncate_label(second)
+        );
         let other = mux
-            .create_tab(&workspace.id, "\u{25cf} sh\u{b7}T0", scratch.root())
+            .create_tab(
+                &workspace.id,
+                &format!("\u{25cf} sh\u{b7}{}", naming::truncate_label(first)),
+                scratch.root(),
+            )
             .unwrap_or_else(|err| panic!("{err}"));
         let mine = mux
-            .create_tab(&workspace.id, "\u{25cf} sh\u{b7}T1", scratch.root())
+            .create_tab(
+                &workspace.id,
+                &format!("\u{25cf} sh\u{b7}{}", naming::truncate_label(second)),
+                scratch.root(),
+            )
             .unwrap_or_else(|err| panic!("{err}"));
+        record_tab(&scratch, first, 1, &other.id);
+        record_tab(&scratch, second, 1, &mine.id);
 
-        prompt(&mux, scratch.root(), "T1", "keep going").unwrap_or_else(|err| panic!("{err}"));
+        prompt_in(
+            &mux,
+            scratch.home.path(),
+            scratch.root(),
+            second,
+            "keep going",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         let prompted = mux
             .calls()
             .into_iter()
@@ -1363,8 +1488,31 @@ project_dirs = []
         assert_ne!(prompted.0, other.root_pane);
         assert_eq!(prompted.1, "keep going");
 
-        let missing = prompt(&mux, scratch.root(), "T9", "hello");
-        assert_eq!(missing.map(|_| ()).map_err(|err| err.exit_code()), Err(2));
+        // A task with no record, and a record whose tab is gone, both refuse
+        // with the same message rather than prompting the wrong agent.
+        let unrecorded = prompt_in(&mux, scratch.home.path(), scratch.root(), "T9", "hello");
+        let message = match unrecorded {
+            Ok(()) => panic!("a task with no tab record was prompted"),
+            Err(err) => {
+                assert_eq!(err.exit_code(), 2);
+                err.to_string()
+            }
+        };
+        assert!(message.contains("no open tab for task"), "{message}");
+
+        // The latest attempt's tab is gone from the host: that is refused too,
+        // never replaced by an older attempt's tab.
+        write_tab(
+            &tab_path(
+                &scratch.home.path().join(".shprd").join("briefs"),
+                "t1",
+                first,
+                2,
+            ),
+            &shprd_mux::TabId::new("tab-gone"),
+        );
+        let closed = prompt_in(&mux, scratch.home.path(), scratch.root(), first, "hello");
+        assert_eq!(closed.map(|_| ()).map_err(|err| err.exit_code()), Err(2));
     }
 }
 
