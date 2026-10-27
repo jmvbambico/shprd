@@ -10,6 +10,7 @@
 //! writes to the server.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -143,4 +144,116 @@ pub fn parse_statuses(body: &str, now_ms: u64) -> Result<BTreeMap<String, Status
         .iter()
         .map(|(session, status)| (session.clone(), Status::from_json(status, now_ms)))
         .collect())
+}
+
+/// Whether `base` points at this machine.
+///
+/// The watchdog only ever talks to a serve instance started here, so anything
+/// else is refused before a connection is made.
+#[must_use]
+pub fn is_local_base(base: &str) -> bool {
+    let rest = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// A read-only client for one `opencode serve` / `kilo serve` instance.
+#[derive(Debug, Clone)]
+pub struct ServeClient {
+    /// Server root, for example `http://127.0.0.1:4096`.
+    base: String,
+    /// Ceiling for a whole request, and for connecting the event stream.
+    timeout: Duration,
+}
+
+impl ServeClient {
+    /// A client for `base`, which must be loopback (see [`is_local_base`]).
+    ///
+    /// The base is not validated here; every request checks it, so a client can
+    /// be built before the port is known.
+    pub fn new(base: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            base: base.into().trim_end_matches('/').to_owned(),
+            timeout,
+        }
+    }
+
+    /// A client for `port` on the loopback interface.
+    #[must_use]
+    pub fn local(port: u16, timeout: Duration) -> Self {
+        Self::new(format!("http://127.0.0.1:{port}"), timeout)
+    }
+
+    /// The base URL this client talks to.
+    #[must_use]
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Refuse a base that is not loopback.
+    fn ensure_local(&self) -> Result<(), ServeError> {
+        if is_local_base(&self.base) {
+            Ok(())
+        } else {
+            Err(ServeError::NotLocal)
+        }
+    }
+}
+
+impl ServeClient {
+    /// An agent whose whole request, including the body, must finish within
+    /// [`ServeClient::timeout`].
+    fn agent(&self) -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .into()
+    }
+
+    /// The state of one session, or of every session when `session` is `None`.
+    ///
+    /// When `session` is `Some`, the returned map holds that session alone, and
+    /// carries [`Status::Unknown`] if the server did not list it: a caller
+    /// asking about one session should not have to tell "absent" from "unknown".
+    ///
+    /// `now_ms` resolves the ambiguous `next` of a retry status.
+    ///
+    /// # Errors
+    ///
+    /// [`ServeError::NotLocal`] for a non-loopback base, [`ServeError::Network`]
+    /// when nothing answers, [`ServeError::Http`] for a non-200 status and
+    /// [`ServeError::Shape`] for a body that is not the expected JSON.
+    pub fn status(
+        &self,
+        session: Option<&str>,
+        now_ms: u64,
+    ) -> Result<BTreeMap<String, Status>, ServeError> {
+        self.ensure_local()?;
+        let url = format!("{}/session/status", self.base);
+        let body = match self.agent().get(&url).call() {
+            Ok(mut resp) => resp
+                .body_mut()
+                .read_to_string()
+                .map_err(|_| ServeError::Network)?,
+            Err(ureq::Error::StatusCode(code)) => return Err(ServeError::Http(code)),
+            Err(_) => return Err(ServeError::Network),
+        };
+        let mut statuses = parse_statuses(&body, now_ms)?;
+        if let Some(session) = session {
+            let only = statuses.remove(session).unwrap_or(Status::Unknown);
+            statuses.clear();
+            statuses.insert(session.to_owned(), only);
+        }
+        Ok(statuses)
+    }
 }
