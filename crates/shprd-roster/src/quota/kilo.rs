@@ -7,6 +7,7 @@
 //! measured `dry` would blacklist a healthy worker. A free pin therefore
 //! reports `ok` at tier `assumed`, with no number (og's rule).
 
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -104,6 +105,114 @@ pub fn free_pin(model_id: Option<&str>) -> bool {
     last == "free" || last.ends_with(":free")
 }
 
+/// The model Kilo itself is configured to use, read from its own config.
+///
+/// Only the top-level `model` string of `<home>/.config/kilo/kilo.jsonc` is
+/// read: no other key is looked at and nothing is returned for a missing or
+/// unreadable file, so a Kilo user who pinned the free router in their own
+/// client is recognized without shprd naming that model.
+#[must_use]
+pub fn default_model(home: &Path) -> Option<String> {
+    let path = home.join(".config").join("kilo").join("kilo.jsonc");
+    top_level_model(&std::fs::read_to_string(path).ok()?)
+}
+
+/// The top-level `"model"` string of JSON-with-comments text, if it has one.
+fn top_level_model(text: &str) -> Option<String> {
+    let chars: Vec<char> = uncommented(text).chars().collect();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '{' | '[' => {
+                depth += 1;
+                index += 1;
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            '"' => {
+                let (key, after) = string_at(&chars, index)?;
+                index = after;
+                if depth == 1 && key == "model" {
+                    let value_at = skip_ws(&chars, after);
+                    if chars.get(value_at) != Some(&':') {
+                        continue;
+                    }
+                    let quote = skip_ws(&chars, value_at + 1);
+                    if chars.get(quote) != Some(&'"') {
+                        continue;
+                    }
+                    return string_at(&chars, quote).map(|(value, _)| value);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// `index` moved past any whitespace.
+fn skip_ws(chars: &[char], index: usize) -> usize {
+    let mut at = index;
+    while matches!(chars.get(at), Some(found) if found.is_whitespace()) {
+        at += 1;
+    }
+    at
+}
+
+/// The string literal opening at `start`, unescaped, and the index past it.
+fn string_at(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut text = String::new();
+    let mut index = start + 1;
+    while let Some(&found) = chars.get(index) {
+        match found {
+            '\\' => {
+                index += 1;
+                if let Some(&escaped) = chars.get(index) {
+                    text.push(escaped);
+                }
+            }
+            '"' => return Some((text, index + 1)),
+            other => text.push(other),
+        }
+        index += 1;
+    }
+    None
+}
+
+/// `text` with `//` line comments removed, never inside a string literal.
+fn uncommented(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quoted = false;
+    while let Some(found) = chars.next() {
+        match found {
+            '"' => {
+                quoted = !quoted;
+                out.push(found);
+            }
+            '\\' if quoted => {
+                out.push(found);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '/' if !quoted && chars.peek() == Some(&'/') => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push(next);
+                        break;
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +280,31 @@ mod tests {
         assert!(!free_pin(Some("kilo/openai/free-lunch")));
         assert!(!free_pin(Some("")));
         assert!(!free_pin(None));
+    }
+
+    #[test]
+    fn the_default_model_comes_from_kilos_own_config() {
+        let home = temp_dir();
+        let dir = home.path().join(".config").join("kilo");
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let body = "{\n  // the router this user picked\n  \"model\": \"ohmyproxy/kilo-auto/free\", // pinned\n  \"other\": {\"model\": \"kilo/openai/gpt-5\"},\n}\n";
+        assert!(std::fs::write(dir.join("kilo.jsonc"), body).is_ok());
+
+        let model = default_model(home.path());
+        assert_eq!(model.as_deref(), Some("ohmyproxy/kilo-auto/free"));
+        assert!(free_pin(model.as_deref()));
+    }
+
+    #[test]
+    fn no_config_or_no_model_key_is_no_default_model() {
+        let home = temp_dir();
+        assert_eq!(default_model(home.path()), None);
+
+        let dir = home.path().join(".config").join("kilo");
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let only_nested = "{\"provider\": {\"model\": \"kilo/openai/gpt-5\"}}";
+        assert!(std::fs::write(dir.join("kilo.jsonc"), only_nested).is_ok());
+        assert_eq!(default_model(home.path()), None);
     }
 
     #[cfg(unix)]

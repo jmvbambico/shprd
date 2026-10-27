@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use shprd_core::config::{self, Config};
+use shprd_core::config::{self, Config, Roster};
 use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_roster::models::AgentRef;
@@ -499,8 +499,8 @@ fn quota_section(
         );
         return;
     };
-    let mut ctx = ProbeContext::new(home);
-    ctx.free_pin = free_pin(config);
+    let mut ctx = ProbeContext::new(home.clone());
+    ctx.free_pin = free_pin(config, &home);
     for agent in ["claude", "codex", "kilo"] {
         if !specs.iter().any(|spec| spec.id == agent) {
             section.add(Level::Info, format!("{agent}  not in the harness table"));
@@ -511,17 +511,33 @@ fn quota_section(
     }
 }
 
+/// Whether kilo runs on its free tier: shprd's own pick, else kilo's default.
+///
+/// A configured free model wins, because it is the one a dispatch would use. A
+/// machine with no kilo pick at all still counts when kilo's own config names
+/// a free router: the paid balance is zero there and does not bind.
+fn free_pin(config: Option<&Config>, home: &Path) -> bool {
+    if configured_free_pin(config) {
+        return true;
+    }
+    quota::kilo::free_pin(quota::kilo::default_model(home).as_deref())
+}
+
 /// Whether a configured kilo agent string pins the free tier.
-fn free_pin(config: Option<&Config>) -> bool {
+fn configured_free_pin(config: Option<&Config>) -> bool {
     let Some(roster) = config.map(|config| &config.roster) else {
         return false;
     };
+    every_agent(roster).any(|agent| agent.starts_with("kilo/") && agent.contains("free"))
+}
+
+/// Every agent string the roster names, in any role.
+fn every_agent(roster: &Roster) -> impl Iterator<Item = &String> {
     roster
         .workers
         .iter()
         .chain(roster.orchestrator.iter())
         .chain(roster.reviewer.iter())
-        .any(|agent| agent.starts_with("kilo/") && agent.contains("free"))
 }
 
 /// One quota report as a level and a line: state, binding window, reset.
@@ -707,5 +723,52 @@ fn tilde(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// A config whose roles are the given agents.
+    fn config(orchestrator: Option<&str>, workers: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.roster.orchestrator = orchestrator.map(str::to_owned);
+        config.roster.workers = workers.iter().map(|agent| (*agent).to_owned()).collect();
+        config
+    }
+
+    #[test]
+    fn a_free_pin_is_taken_from_kilos_own_config_when_shprd_names_none() {
+        let home = home_with_kilo(Some(
+            "{\n  // picked by hand\n  \"model\": \"ohmyproxy/kilo-auto/free\",\n}\n",
+        ));
+        assert!(free_pin(None, home.path()));
+
+        let paid = home_with_kilo(Some("{\"model\": \"kilo/openai/gpt-5\"}"));
+        assert!(!free_pin(None, paid.path()));
+    }
+
+    #[test]
+    fn a_configured_free_pin_wins_over_kilos_own_model() {
+        let home = home_with_kilo(Some("{\"model\": \"kilo/openai/gpt-5\"}"));
+        let config = config(None, &["kilo/kilo-auto/free"]);
+        assert!(free_pin(Some(&config), home.path()));
+    }
+
+    /// A temp home, holding a kilo jsonc with `body` when one is given.
+    fn home_with_kilo(body: Option<&str>) -> TempDir {
+        let home = match TempDir::new() {
+            Ok(home) => home,
+            Err(error) => panic!("temp home failed: {error}"),
+        };
+        if let Some(body) = body {
+            let dir = home.path().join(".config").join("kilo");
+            assert!(std::fs::create_dir_all(&dir).is_ok());
+            assert!(std::fs::write(dir.join("kilo.jsonc"), body).is_ok());
+        }
+        home
     }
 }
