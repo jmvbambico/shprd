@@ -8,10 +8,11 @@
 //! rotate the user's real session) and never appears in a report or an error.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::detect::{DetectError, run_with_timeout};
 use crate::quota::{
     ProbeContext, QuotaError, QuotaReport, Tier, Window, first, pct, state_from_windows,
     timestamp_ms,
@@ -26,6 +27,15 @@ pub const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// `source` field of a report produced here.
 pub const SOURCE: &str = "anthropic-oauth";
 
+/// How long `security find-generic-password` may run.
+///
+/// The Keychain can put up an access dialog, and a process waiting on one never
+/// returns; og bounded the call at 5 s for exactly this reason.
+pub const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why a Keychain read was abandoned. Fixed text: no command output, no token.
+const KEYCHAIN_TIMED_OUT: &str = "timed out (a Keychain access prompt may be waiting)";
+
 /// Where the Claude Code OAuth token lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSource {
@@ -33,6 +43,10 @@ pub struct CredentialSource {
     pub keychain: bool,
     /// Home directory holding `.claude/.credentials.json`.
     pub home: PathBuf,
+    /// `security` binary to run; tests point this at a fake script.
+    pub security: PathBuf,
+    /// How long `security` may run before it is killed.
+    pub timeout: Duration,
 }
 
 impl CredentialSource {
@@ -42,14 +56,15 @@ impl CredentialSource {
         Self {
             keychain: ctx.keychain,
             home: ctx.home.clone(),
+            security: PathBuf::from("security"),
+            timeout: KEYCHAIN_TIMEOUT,
         }
     }
 
     /// The OAuth access token, or why there is none.
     ///
-    /// `security` has no timeout in `std::process`; og bounded the call at 5 s.
-    /// The keychain helper is local and returns promptly, so the probe accepts
-    /// the unbounded wait rather than spawning a watchdog thread.
+    /// `security` is killed at [`KEYCHAIN_TIMEOUT`]: an unanswered Keychain
+    /// access dialog would otherwise freeze `shprd doctor` forever.
     pub fn token(&self, now_ms: u64) -> Result<String, QuotaError> {
         if self.keychain
             && let Some(token) = self.keychain_token(now_ms)
@@ -59,12 +74,23 @@ impl CredentialSource {
         self.file_token(now_ms)
     }
 
-    /// Keychain path. A failure here is not fatal: the file is tried next.
+    /// Keychain path. A failed or missing entry is not fatal: the file is
+    /// tried next. A timeout is an answer, because retrying cannot help.
     fn keychain_token(&self, now_ms: u64) -> Option<Result<String, QuotaError>> {
-        let output = Command::new("security")
-            .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
-            .output()
-            .ok()?;
+        let args = [
+            "find-generic-password".to_owned(),
+            "-s".to_owned(),
+            KEYCHAIN_SERVICE.to_owned(),
+            "-w".to_owned(),
+        ];
+        let output = match run_with_timeout(&self.security, &args, &[], self.timeout) {
+            Ok(output) => output,
+            Err(DetectError::Timeout { .. }) => {
+                return Some(Err(QuotaError::Credential(KEYCHAIN_TIMED_OUT)));
+            }
+            // No usable `security`, or it could not be waited on: not an answer.
+            Err(_) => return None,
+        };
         if !output.status.success() {
             return None;
         }
@@ -382,5 +408,49 @@ mod tests {
             ),
             Err(error) => println!("probe answered: {error}"),
         }
+    }
+
+    /// A script that hangs, standing in for `security` waiting on a Keychain
+    /// access prompt nobody will answer.
+    fn write_hanging_script(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        if let Err(error) = std::fs::write(&path, "#!/bin/sh\nsleep 30\n") {
+            panic!("writing {name} failed: {error}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            if let Err(error) = std::fs::set_permissions(&path, mode) {
+                panic!("chmod {name} failed: {error}");
+            }
+        }
+        path
+    }
+
+    #[test]
+    fn a_keychain_prompt_that_never_answers_times_out() {
+        let dir = temp_dir();
+        let source = CredentialSource {
+            keychain: true,
+            home: dir.path().to_path_buf(),
+            // A fake `security`, so the real Keychain is never touched.
+            security: write_hanging_script(dir.path(), "security"),
+            timeout: std::time::Duration::from_millis(300),
+        };
+        let started = std::time::Instant::now();
+        let error = match source.token(NOW) {
+            Ok(token) => panic!("a hanging security should not yield a token: {token}"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            QuotaError::Credential("timed out (a Keychain access prompt may be waiting)")
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "the keychain probe should give up promptly, took {elapsed:?}"
+        );
     }
 }

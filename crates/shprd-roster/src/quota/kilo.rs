@@ -7,25 +7,38 @@
 //! measured `dry` would blacklist a healthy worker. A free pin therefore
 //! reports `ok` at tier `assumed`, with no number (og's rule).
 
-use std::process::Command;
+use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::detect::{DetectError, run_with_timeout};
 use crate::quota::{ProbeContext, QuotaError, QuotaReport, QuotaState, Tier, first};
 
 /// `source` field of a report produced here.
 pub const SOURCE: &str = "kilo-profile";
 
-/// Run `kilo profile --json` and read the paid balance.
+/// How long `kilo profile --json` may run (og's 8 s).
 ///
-/// The command is local and quick; `std::process` has no timeout, so a hung
-/// binary is the user's problem (og bounded it at 8 s, which would need a
-/// watchdog thread here).
+/// A `kilo` that hangs must not freeze `shprd doctor`.
+pub const PROFILE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Why the probe gave up. Fixed text: no command output.
+const PROFILE_TIMED_OUT: &str = "kilo profile timed out";
+
+/// Run `kilo profile --json` and read the paid balance.
 pub fn probe(ctx: &ProbeContext) -> Result<QuotaReport, QuotaError> {
-    let output = Command::new(&ctx.kilo_bin)
-        .args(["profile", "--json"])
-        .output()
-        .map_err(|_| QuotaError::Command("kilo binary not found"))?;
+    probe_with_timeout(ctx, PROFILE_TIMEOUT)
+}
+
+/// [`probe`] with an explicit timeout, so a test can prove a hung `kilo` is
+/// killed instead of waiting out the real 8 s.
+fn probe_with_timeout(ctx: &ProbeContext, timeout: Duration) -> Result<QuotaReport, QuotaError> {
+    let args = ["profile".to_owned(), "--json".to_owned()];
+    let output =
+        run_with_timeout(&ctx.kilo_bin, &args, &[], timeout).map_err(|error| match error {
+            DetectError::Timeout { .. } => QuotaError::Command(PROFILE_TIMED_OUT),
+            _ => QuotaError::Command("kilo binary not found"),
+        })?;
     if !output.status.success() {
         return Err(QuotaError::Command("kilo profile failed"));
     }
@@ -199,5 +212,41 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error, QuotaError::Command("kilo binary not found"));
+    }
+
+    /// A hanging shell script standing in for a wedged `kilo` binary.
+    fn write_hanging_script(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        if let Err(error) = std::fs::write(&path, "#!/bin/sh\nsleep 30\n") {
+            panic!("writing {name} failed: {error}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            if let Err(error) = std::fs::set_permissions(&path, mode) {
+                panic!("chmod {name} failed: {error}");
+            }
+        }
+        path
+    }
+
+    #[test]
+    fn a_hanging_kilo_profile_times_out() {
+        let dir = temp_dir();
+        let mut probe_ctx = ctx(dir.path(), FakeHttp::new(200, "{}"), NOW);
+        // A fake `kilo`, so the real binary is never run.
+        probe_ctx.kilo_bin = write_hanging_script(dir.path(), "kilo");
+        let started = std::time::Instant::now();
+        let error = match probe_with_timeout(&probe_ctx, std::time::Duration::from_millis(300)) {
+            Ok(report) => panic!("a hanging kilo should not report, got {report:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error, QuotaError::Command("kilo profile timed out"));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "the kilo probe should give up promptly, took {elapsed:?}"
+        );
     }
 }
