@@ -13,6 +13,7 @@ pub mod set;
 pub mod spawn;
 pub mod up;
 pub mod view;
+pub mod watch;
 
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};

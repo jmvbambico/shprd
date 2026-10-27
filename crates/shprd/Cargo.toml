@@ -19,6 +19,7 @@ shprd-git = { path = "../shprd-git" }
 shprd-mux = { path = "../shprd-mux" }
 shprd-mux-herdr = { path = "../shprd-mux-herdr" }
 shprd-roster = { path = "../shprd-roster" }
+shprd-watch = { path = "../shprd-watch" }
 shprd-views = { path = "../shprd-views" }
 toml.workspace = true
 toml_edit.workspace = true
