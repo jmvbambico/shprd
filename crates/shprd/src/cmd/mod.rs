@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod dagr;
+pub mod janitor;
 pub mod run;
 pub mod view;
 
@@ -31,6 +32,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Dagr { cmd }) => match cmd {
             DagrCommand::Sync => dagr::sync_verb(&ctx),
         },
+        Some(Command::Janitor(args)) => janitor::plan_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Restore(args)) => {
+            janitor::restore_verb(&ctx, &args, cli.global.home.as_deref())
+        }
     }
 }
 

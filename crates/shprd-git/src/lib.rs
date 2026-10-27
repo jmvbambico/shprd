@@ -7,4 +7,5 @@ pub mod archive;
 pub mod changed;
 pub mod git;
 pub mod integrate;
+pub mod janitor;
 pub mod worktree;

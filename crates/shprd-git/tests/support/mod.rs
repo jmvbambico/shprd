@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use shprd_core::event::{Actor, Event, EventKind, ReportStatus, ResourceAction, ResourceKind};
 use shprd_git::worktree::Layout;
 
 /// A fresh repository with one commit on `main`.
@@ -144,4 +145,90 @@ pub fn commit_in(dir: &Path, rel: &str, body: &str, message: &str) -> String {
     git_in(dir, &["add", "--", rel]);
     git_in(dir, &["commit", "-m", message]);
     head_in(dir)
+}
+
+/// One event, as the log would hold it.
+pub fn event(seq: u64, at_ms: u64, kind: EventKind) -> Event {
+    Event {
+        seq,
+        at_ms,
+        actor: Actor::Engine,
+        kind,
+    }
+}
+
+/// The events of a run whose single task reached `Integrated`.
+///
+/// The ledger records `branch` and `worktree` before the attempt runs, exactly
+/// as the engine does when it creates them.
+pub fn integrated_run(
+    run: &str,
+    task: &str,
+    branch: &str,
+    worktree: &Path,
+    at_ms: u64,
+) -> Vec<Event> {
+    let worktree_text = worktree.display().to_string();
+    let kinds = vec![
+        EventKind::RunStarted {
+            run_id: run.to_string(),
+            repo: "/tmp/repo".to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "integration/m1".to_string(),
+        },
+        EventKind::TaskAdded {
+            task: task.to_string(),
+            title: "the task".to_string(),
+            scope: vec!["crates/x".to_string()],
+            acceptance: vec!["it works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+        EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: branch.to_string(),
+            task: Some(task.to_string()),
+        },
+        EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Worktree,
+            name: worktree_text.clone(),
+            task: Some(task.to_string()),
+        },
+        EventKind::Spawned {
+            task: task.to_string(),
+            attempt: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: worktree_text,
+            branch: branch.to_string(),
+        },
+        EventKind::Reported {
+            task: task.to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            changed_paths: vec!["crates/x/a.rs".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+        },
+        EventKind::GatePassed {
+            task: task.to_string(),
+            attempt: 1,
+            gate: "lint".to_string(),
+            findings: Vec::new(),
+        },
+        EventKind::Integrated {
+            task: task.to_string(),
+            commits: vec!["abc123".to_string()],
+        },
+    ];
+    kinds
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| event(index as u64 + 1, at_ms, kind))
+        .collect()
 }

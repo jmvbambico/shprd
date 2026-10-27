@@ -8,9 +8,13 @@ use shprd_core::event::{Actor, Event, EventKind};
 use shprd_core::log::{Clock, EventLog, SystemClock};
 use shprd_core::rules::RuleError;
 use shprd_core::state::RunState;
+use shprd_git::worktree::Layout;
 
 /// Environment variable holding the default actor.
 const ACTOR_ENV: &str = "SHPRD_ACTOR";
+
+/// Environment variable overriding the home directory shprd keeps state in.
+const HOME_ENV: &str = "SHPRD_HOME";
 
 /// Exit code for a command a transition rule refused.
 pub const EXIT_REFUSED: u8 = 2;
@@ -153,6 +157,27 @@ fn git_top_level() -> Result<PathBuf, CliError> {
         return Err(CliError::other(anyhow!("git reported no repository root")));
     }
     Ok(PathBuf::from(trimmed))
+}
+
+/// Resolves the layout shprd's git state lives in.
+///
+/// `--home` wins, then `$SHPRD_HOME`, then `$HOME`. The namespace and the
+/// worktree root both come from the layout, so a janitor can never be pointed
+/// at someone else's branches by a stale flag.
+pub fn resolve_layout(home: Option<&Path>) -> Result<Layout, CliError> {
+    let explicit = home.map(|path| path.to_path_buf()).or_else(|| {
+        std::env::var_os(HOME_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let resolved = match explicit {
+        Some(path) => path,
+        None => std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| CliError::other(anyhow!("no home directory: pass --home")))?,
+    };
+    Ok(Layout::default_for_home(resolved))
 }
 
 /// Parses `--as`, falling back to `$SHPRD_ACTOR`, then to `human`.

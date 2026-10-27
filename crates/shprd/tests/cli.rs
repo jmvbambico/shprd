@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
+use shprd_core::event::{Actor, Event, EventKind, ResourceAction, ResourceKind};
 use tempfile::TempDir;
 
 /// The binary under test, built by cargo for this integration test.
@@ -627,4 +628,308 @@ fn no_dagr_flag_skips_the_sync() {
         !root.join(".dagr").join("run.json").exists(),
         "--no-dagr must not write the document"
     );
+}
+
+/// A throwaway repository, for verbs that drive real git.
+struct GitRepo {
+    /// Keeps the temp directory alive.
+    _temp: TempDir,
+    /// The repository itself.
+    path: PathBuf,
+}
+
+impl GitRepo {
+    /// Initializes a repository with one commit on `main`.
+    fn new() -> GitRepo {
+        let temp = match TempDir::new() {
+            Ok(temp) => temp,
+            Err(err) => panic!("tempdir failed: {err}"),
+        };
+        let path = temp.path().join("repo");
+        if let Err(err) = std::fs::create_dir(&path) {
+            panic!("mkdir {}: {err}", path.display());
+        }
+        let repo = GitRepo { _temp: temp, path };
+        repo.git(&["init", "-b", "main"]);
+        repo.git(&["config", "user.name", "shprd tests"]);
+        repo.git(&["config", "user.email", "tests@example.invalid"]);
+        repo.git(&["config", "commit.gpgsign", "false"]);
+        if let Err(err) = std::fs::write(repo.path.join("seed.txt"), "seed\n") {
+            panic!("write seed: {err}");
+        }
+        repo.git(&["add", "--", "seed.txt"]);
+        repo.git(&["commit", "-m", "seed"]);
+        repo
+    }
+
+    /// Runs git here, returning its trimmed stdout.
+    fn git(&self, args: &[&str]) -> String {
+        let output = match Command::new("git")
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => panic!("git {args:?}: {err}"),
+        };
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string()
+    }
+
+    /// True when `rev` resolves.
+    fn has_ref(&self, rev: &str) -> bool {
+        match Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", rev])
+            .current_dir(&self.path)
+            .output()
+        {
+            Ok(output) => output.status.success(),
+            Err(err) => panic!("git rev-parse {rev}: {err}"),
+        }
+    }
+}
+
+/// Runs the binary with `--repo`, `--no-dagr`, `--home` and `args`.
+fn run_with_home(root: &Path, home: &Path, args: &[&str]) -> Output {
+    let mut all: Vec<String> = vec![
+        "--repo".into(),
+        root.display().to_string(),
+        "--no-dagr".into(),
+        "--home".into(),
+        home.display().to_string(),
+    ];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    match Command::new(BIN).args(&all).output() {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    }
+}
+
+/// Runs the binary and asserts it succeeded, returning stdout.
+fn ok_with_home(root: &Path, home: &Path, args: &[&str]) -> String {
+    let output = run_with_home(root, home, args);
+    assert!(
+        output.status.success(),
+        "expected success for {args:?}, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// Appends `kinds` to the run log, continuing its sequence numbers.
+fn append_events(root: &Path, kinds: Vec<EventKind>) {
+    let path = root.join(".shprd").join("events.jsonl");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => panic!("read {}: {err}", path.display()),
+    };
+    let mut body = existing;
+    let mut seq = body.lines().count() as u64;
+    for kind in kinds {
+        seq += 1;
+        let event = Event {
+            seq,
+            at_ms: 1_800_000_000_000 + seq,
+            actor: Actor::Engine,
+            kind,
+        };
+        let line = match serde_json::to_string(&event) {
+            Ok(line) => line,
+            Err(err) => panic!("serialize event: {err}"),
+        };
+        body.push_str(&line);
+        body.push('\n');
+    }
+    if let Err(err) = std::fs::write(&path, body) {
+        panic!("write {}: {err}", path.display());
+    }
+}
+
+/// How many `resource` events the log holds.
+fn resource_events(root: &Path) -> usize {
+    let path = root.join(".shprd").join("events.jsonl");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => text
+            .lines()
+            .filter(|line| line.contains("\"kind\":\"resource\""))
+            .count(),
+        Err(err) => panic!("read {}: {err}", path.display()),
+    }
+}
+
+/// Drives one task of run `r1` from planned to integrated, against a real repo.
+fn integrated_task(root: &Path, branch: &str) {
+    ok(
+        root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ],
+    );
+    add_task(root, "T1", "crates/x");
+    ok(
+        root,
+        &[
+            "agent",
+            "spawn",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--agent",
+            "w1",
+            "--worktree",
+            "/tmp/wt",
+            "--branch",
+            branch,
+        ],
+    );
+    ok(
+        root,
+        &[
+            "agent",
+            "report",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "done",
+            "--changed",
+            "crates/x/a.rs",
+        ],
+    );
+    ok(
+        root,
+        &[
+            "agent",
+            "gate",
+            "pass",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--gate",
+            "lint",
+        ],
+    );
+    ok(
+        root,
+        &["agent", "integrate", "--task", "T1", "--commit", "abc123"],
+    );
+}
+
+#[test]
+fn janitor_dry_run_changes_nothing_and_apply_appends_resource_events() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    let branch = "shprd/r1/T1";
+    integrated_task(&root, branch);
+    let tip = git.git(&["rev-parse", "main"]);
+    git.git(&["branch", branch, "main"]);
+    append_events(
+        &root,
+        vec![EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: branch.to_string(),
+            task: Some("T1".to_string()),
+        }],
+    );
+    let before = resource_events(&root);
+
+    let plan = ok_with_home(&root, home.path(), &["janitor"]);
+    assert!(plan.contains("would archive"), "{plan}");
+    assert!(plan.contains(branch), "{plan}");
+    assert!(git.has_ref(branch), "a dry run must not delete the branch");
+    assert!(
+        !git.has_ref("refs/shprd/archive/r1/T1"),
+        "a dry run must not create the archive ref"
+    );
+    assert_eq!(resource_events(&root), before, "a dry run writes nothing");
+
+    let applied = ok_with_home(&root, home.path(), &["janitor", "--apply"]);
+    assert!(applied.contains("ok "), "{applied}");
+    assert!(!git.has_ref(branch), "the branch must be gone");
+    assert_eq!(
+        git.git(&["rev-parse", "refs/shprd/archive/r1/T1"]),
+        tip,
+        "the archive ref must hold the branch tip"
+    );
+    assert_eq!(
+        resource_events(&root),
+        before + 3,
+        "the archive ref, the archived branch and the deleted branch"
+    );
+
+    let restored = ok_with_home(&root, home.path(), &["restore", "T1"]);
+    assert!(restored.contains("ok resource"), "{restored}");
+    assert_eq!(
+        git.git(&["rev-parse", branch]),
+        tip,
+        "restore must bring the branch back at the same commit"
+    );
+    assert_eq!(resource_events(&root), before + 4, "restore is recorded");
+}
+
+#[test]
+fn janitor_leaves_a_branch_outside_the_namespace_alone() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    integrated_task(&root, "feature/x");
+    git.git(&["branch", "feature/x", "main"]);
+    append_events(
+        &root,
+        vec![EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: "feature/x".to_string(),
+            task: Some("T1".to_string()),
+        }],
+    );
+
+    let plan = ok_with_home(&root, home.path(), &["janitor"]);
+    assert!(plan.contains("nothing to clean up"), "{plan}");
+    ok_with_home(&root, home.path(), &["janitor", "--apply"]);
+    assert!(
+        git.has_ref("feature/x"),
+        "a branch shprd did not create must survive"
+    );
+}
+
+#[test]
+fn janitor_without_a_run_is_an_error() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    let output = run_with_home(&root, home.path(), &["janitor"]);
+    assert_eq!(output.status.code(), Some(1), "no run is not a refusal");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no run"), "{stderr}");
 }
