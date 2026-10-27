@@ -1,0 +1,1 @@
+//! Events, fold, task model, transition rules, config (no I/O beyond the log file).

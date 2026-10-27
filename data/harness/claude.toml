@@ -1,0 +1,52 @@
+# Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
+# Copyright (c) 2026 Elias Stravik
+# https://github.com/eliasstravik/herdr-projects
+#
+# Record, error and quota facts are from shprd's docs/agents.md (verified
+# 2026-10-27). Launch flags were re-checked with `claude --help` (2.1.311) but
+# are not stated in docs/agents.md, so launch.verified is false.
+
+id = "claude"
+name = "Claude Code"
+vendor = "anthropic"
+verified_version = "2.1.311"
+dry_patterns = [
+    "rate limit",
+    "usage limit",
+    "quota",
+    "insufficient credits",
+    "429",
+    "resets at",
+    "rate_limit",
+    "credit balance",
+]
+
+[detect]
+binary = "claude"
+version_args = ["--version"]
+signin_hint = "claude auth login"
+
+[launch]
+interactive = ["claude"]
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
+auto_approve = ["--dangerously-skip-permissions"]
+system_prompt_args = ["--append-system-prompt-file", "{prompt_file}"]
+resume_args = ["--resume", "{session}"]
+verified = false
+
+[models]
+# Claude Code has no model-list command; names live in herdr-projects' table.
+
+[records]
+kind = "jsonl"
+location = "~/.claude/projects/{cwd_slug}/{session}.jsonl"
+errors = "isApiErrorMessage: true, error: \"rate_limit\", text with the reset time"
+verified = true
+
+[quota]
+source = "anthropic_oauth"
+
+[skills]
+home_dirs = ["~/.claude/skills"]
+project_dirs = []
