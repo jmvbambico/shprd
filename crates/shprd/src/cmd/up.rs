@@ -639,8 +639,45 @@ fn write_brief(env: &UpEnv, run_id: &str, base_branch: &str) -> Result<PathBuf, 
     Ok(path)
 }
 
-/// The brief's text: who you are, where the branches are, and which verbs the
-/// engine validates.
+/// The `## How a run works` section of the brief: the order a run actually
+/// happens in, from planning a task to landing the pull request.
+const FLOW: &str = r#"## How a run works
+
+1. **You never write code, never push, never merge.** Workers write code; the
+   engine pushes; the human approves.
+
+2. **Plan.** Split the human's ask into tasks whose scopes do not overlap:
+   `shprd agent task add --id <ID> --title "…" --scope <path>… \
+   --acceptance "<testable criterion>"… [--tag feature|bug|ui|docs|perf] \
+   [--dep <ID>]`.
+
+3. **Start each task.** `shprd agent spawn --task <ID>`: shprd picks the
+   worker, the worktree and the tab. Independent tasks can run at the same
+   time.
+
+4. **Follow up.** Workers report themselves. Check progress with `shprd status`
+   and `shprd brief`; send a worker a message with
+   `shprd agent prompt --task <ID> "…"`. Keep `shprd watch` running in a pane
+   so a stuck or rate-limited worker is handed off automatically.
+
+5. **Review.** When a task is reported: `shprd agent review --task <ID>`. The
+   reviewer submits its verdict; code decides. If the review fails, start the
+   next attempt with `shprd agent spawn --task <ID>`: the new brief carries the
+   findings. After repeated failures shprd escalates to the human.
+
+6. **Integrate.** When a task passed review: `shprd agent integrate --task <ID>`.
+   A conflict sends it back like a failed review.
+
+7. **Land.** When every task is integrated: `shprd gate` (the repository's
+   full checks), then `shprd land`, and tell the human the pull request URL.
+   Only after the human approves: `shprd land --merge`, then
+   `shprd janitor --apply`, then `shprd down`.
+
+8. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
+   --body "…" --default "what you will do if nobody answers"`.
+"#;
+/// The brief's text: who you are, where the branches are, how a run flows,
+/// and which skills to load.
 fn brief_text(env: &UpEnv, run_id: &str, base_branch: &str) -> String {
     let skills = if env.config.skills.orchestrator.is_empty() {
         "none configured".to_string()
@@ -654,22 +691,12 @@ You are the orchestrator for run `{run_id}` in `{repo}`.\n\n\
 ## Branches\n\n\
 - base: `{base}`\n\
 - integration: `{integration}`\n\n\
-## Your verbs\n\n\
-Every verb writes one event to the run log, and the engine checks it against\n\
-the transition rules: a verb that does not fit the current state is refused\n\
-and nothing is written. Record what you do; do not keep state in your head.\n\n\
-- `shprd agent task add --id M4.1 --title \"…\" --scope <path> --acceptance <text>`\n\
-- `shprd agent spawn --task M4.1 --attempt 1 --agent claude/claude-opus-5-5 --worktree <path> --branch feature/m4-1`\n\
-- `shprd agent report --task M4.1 --attempt 1 --status completed --summary \"…\"`\n\
-- `shprd agent gate pass --task M4.1 --attempt 1 --gate lint`\n\
-- `shprd agent integrate --task M4.1 --commit <sha>`\n\
-- `shprd agent escalate --body \"…\" --default \"…\"` when a human must decide\n\
-- `shprd status` to see where every task sits\n\n\
-## Skills\n\n\
+{flow}\n## Skills\n\n\
 Configured for you: {skills}\n\n\
 Load them before planning; they carry the conventions this repository runs on.\n",
         base = base_branch,
         integration = integration_branch(run_id),
+        flow = FLOW,
     )
 }
 
@@ -1028,7 +1055,10 @@ mod tests {
         // the branch checked out in it.
         let brief = std::fs::read_to_string(&report.brief_path)?;
         assert!(brief.contains(&report.run_id));
-        assert!(brief.contains("shprd agent spawn"), "{brief}");
+        assert!(brief.contains("## How a run works"), "{brief}");
+        assert!(brief.contains("shprd agent review"), "{brief}");
+        assert!(brief.contains("shprd land --merge"), "{brief}");
+        assert!(!brief.contains("--commit"), "{brief}");
         assert!(report.brief_path.ends_with("orchestrator.md"));
         let integration = fixture
             .home
