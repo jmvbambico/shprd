@@ -506,7 +506,7 @@ fn quota_section(
             section.add(Level::Info, format!("{agent}  not in the harness table"));
             continue;
         }
-        let in_role = fills_a_role(config, agent);
+        let in_role = fills_a_role(config, specs, agent);
         let (level, text) = quota_line(&quota::probe(agent, &ctx), in_role);
         section.add(level, text);
     }
@@ -529,9 +529,8 @@ fn configured_free_pin(config: Option<&Config>) -> bool {
     let Some(roster) = config.map(|config| &config.roster) else {
         return false;
     };
-    every_agent(roster).any(|agent| {
-        agent.starts_with("kilo/") && quota::kilo::free_pin(Some(agent.as_str()))
-    })
+    every_agent(roster)
+        .any(|agent| agent.starts_with("kilo/") && quota::kilo::free_pin(Some(agent.as_str())))
 }
 
 /// Every agent string the roster names, in any role.
@@ -544,12 +543,18 @@ fn every_agent(roster: &Roster) -> impl Iterator<Item = &String> {
 }
 
 /// Whether `agent`'s program fills at least one role in the loaded config.
-fn fills_a_role(config: Option<&Config>, agent: &str) -> bool {
+///
+/// Every configured string is parsed against the harness table, so a bare
+/// `kilo` in a role counts exactly like `kilo/kilo-auto/free` does.
+fn fills_a_role(config: Option<&Config>, specs: &[HarnessSpec], agent: &str) -> bool {
     let Some(roster) = config.map(|config| &config.roster) else {
         return false;
     };
-    let prefix = format!("{agent}/");
-    every_agent(roster).any(|pinned| pinned.starts_with(&prefix))
+    every_agent(roster).any(|pinned| {
+        AgentRef::parse(pinned, specs)
+            .map(|named| named.program == agent)
+            .unwrap_or(false)
+    })
 }
 
 /// One quota report as a level and a line: state, binding window, reset.
@@ -773,9 +778,20 @@ mod tests {
         config
     }
 
+    /// The shipped harness table, which names every program.
+    fn harness_specs() -> Vec<HarnessSpec> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
+        match load_dir(&dir) {
+            Ok(specs) => specs,
+            Err(error) => panic!("the shipped harness table must load: {error}"),
+        }
+    }
+
     /// A report holding only this one quota line, and the level it carries.
     fn line_level(config: Option<&Config>, agent: &str, state: QuotaState) -> (Level, bool) {
-        let (level, text) = quota_line(&report(agent, state), fills_a_role(config, agent));
+        let specs = harness_specs();
+        let in_role = fills_a_role(config, &specs, agent);
+        let (level, text) = quota_line(&report(agent, state), in_role);
         let mut report = Report::default();
         report.section("Quota").add(level, text);
         (level, report.has_fail())
@@ -817,6 +833,15 @@ mod tests {
             line_level(Some(&config), "codex", QuotaState::Ok),
             (Level::Ok, false)
         );
+    }
+
+    #[test]
+    fn a_bare_agent_name_a_worker_uses_is_still_in_a_role() {
+        let config = config(Some("claude/opus"), &["kilo"]);
+        let (level, fails) = line_level(Some(&config), "kilo", QuotaState::Dry);
+        assert_eq!(level, Level::Fail);
+        assert_eq!(level.glyph(), '✗');
+        assert!(fails, "a dry agent a bare-name role dispatches must fail");
     }
 
     #[test]
