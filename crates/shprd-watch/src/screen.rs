@@ -7,6 +7,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use shprd_mux::{AgentState, Mux, MuxError, PaneId};
+
 /// How many trailing screen lines a signal looks at. Anything further up has
 /// scrolled out of the agent's current turn.
 pub const WINDOW_LINES: usize = 40;
@@ -151,4 +153,39 @@ impl Sampler {
             }
         }
     }
+}
+
+/// Everything the watchdog knows about one pane at one moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenSignal {
+    /// The configured dry pattern the screen matched, if any.
+    pub dry_pattern: Option<String>,
+    /// The text after a reset marker, for display only.
+    pub reset_hint: Option<String>,
+    /// Whether the screen is still changing.
+    pub liveness: Liveness,
+    /// What the host reports the agent is doing.
+    pub agent_state: AgentState,
+}
+
+/// Read `pane` through `mux` and turn its screen into one [`ScreenSignal`].
+///
+/// Reads the last [`WINDOW_LINES`] lines and the host's agent state, then folds
+/// the screen into `sampler`. The caller owns the sampler so the liveness
+/// history survives between polls of the same pane.
+pub fn sample(
+    mux: &dyn Mux,
+    pane: &PaneId,
+    patterns: &[String],
+    sampler: &mut Sampler,
+    now_ms: u64,
+) -> Result<ScreenSignal, MuxError> {
+    let screen = mux.read(pane, WINDOW_LINES)?;
+    let agent_state = mux.agent_state(pane)?;
+    Ok(ScreenSignal {
+        dry_pattern: match_dry(&screen, patterns),
+        reset_hint: reset_hint(&screen),
+        liveness: sampler.observe(&screen, now_ms),
+        agent_state,
+    })
 }
