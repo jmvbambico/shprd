@@ -28,9 +28,9 @@ signin_hint = "opencode auth login"
 
 [launch]
 interactive = ["opencode"]
-model_flag = "-m"
+model_args = ["-m", "{model}"]
 auto_approve = ["--auto"]
-resume_flag = "--session"
+resume_args = ["--session", "{session}"]
 verified = false
 
 [models]
@@ -49,4 +49,5 @@ retry_signal = "serve session.status"
 [skills]
 # docs/skills.md writes the native folder as ~/.config/opencode/skill(s); this is
 # the plural location.
-dirs = ["~/.config/opencode/skills", "~/.agents/skills", "~/.claude/skills"]
+home_dirs = ["~/.config/opencode/skills", "~/.agents/skills", "~/.claude/skills"]
+project_dirs = []

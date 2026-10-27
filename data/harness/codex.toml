@@ -30,11 +30,11 @@ signin_hint = "codex login"
 # herdr-projects starts codex for work with --no-daemon as well; it belongs to
 # the base command, not to approval handling.
 interactive = ["codex", "--no-daemon"]
-model_flag = "-m"
-effort_flag = "-c model_reasoning_effort="
+model_args = ["-m", "{model}"]
+effort_args = ["-c", "model_reasoning_effort={effort}"]
 auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
-system_prompt = "-c developer_instructions="
-resume_flag = "resume"
+system_prompt_args = ["-c", "developer_instructions={prompt}"]
+resume_args = ["resume", "{session}"]
 verified = false
 
 [models]
@@ -42,7 +42,7 @@ list_command = ["codex", "debug", "models"]
 
 [records]
 kind = "jsonl"
-location = "~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl"
+location = "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl"
 errors = "provider errors in the rollout; quota on every turn via event_msg/token_count.rate_limits"
 verified = true
 
@@ -50,4 +50,5 @@ verified = true
 source = "codex_wham"
 
 [skills]
-dirs = ["~/.codex/skills", ".agents/skills"]
+home_dirs = ["~/.codex/skills", "~/.agents/skills"]
+project_dirs = [".agents/skills"]

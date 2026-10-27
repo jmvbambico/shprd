@@ -28,9 +28,9 @@ signin_hint = "kilo auth login"
 
 [launch]
 interactive = ["kilo"]
-model_flag = "-m"
+model_args = ["-m", "{model}"]
 auto_approve = ["--auto"]
-resume_flag = "--session"
+resume_args = ["--session", "{session}"]
 verified = false
 
 [models]
@@ -47,4 +47,5 @@ source = "kilo_profile"
 retry_signal = "serve session.status"
 
 [skills]
-dirs = ["~/.agents/skills", "~/.claude/skills"]
+home_dirs = ["~/.agents/skills", "~/.claude/skills"]
+project_dirs = []

@@ -28,11 +28,11 @@ signin_hint = "claude auth login"
 
 [launch]
 interactive = ["claude"]
-model_flag = "--model"
-effort_flag = "--effort"
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
 auto_approve = ["--dangerously-skip-permissions"]
-system_prompt = "--append-system-prompt-file"
-resume_flag = "--resume"
+system_prompt_args = ["--append-system-prompt-file", "{prompt_file}"]
+resume_args = ["--resume", "{session}"]
 verified = false
 
 [models]
@@ -40,7 +40,7 @@ verified = false
 
 [records]
 kind = "jsonl"
-location = "~/.claude/projects/<cwd-slug>/<session>.jsonl"
+location = "~/.claude/projects/{cwd_slug}/{session}.jsonl"
 errors = "isApiErrorMessage: true, error: \"rate_limit\", text with the reset time"
 verified = true
 
@@ -48,4 +48,5 @@ verified = true
 source = "anthropic_oauth"
 
 [skills]
-dirs = ["~/.claude/skills"]
+home_dirs = ["~/.claude/skills"]
+project_dirs = []

@@ -29,10 +29,10 @@ signin_hint = "run `pi` and sign in to a provider, then `pi auth check --provide
 [launch]
 # pi cannot ask for approval, so there is no auto-approve flag.
 interactive = ["pi"]
-model_flag = "--model"
-effort_flag = "--thinking"
-system_prompt = "--append-system-prompt"
-resume_flag = "--session-id"
+model_args = ["--model", "{model}"]
+effort_args = ["--thinking", "{effort}"]
+system_prompt_args = ["--append-system-prompt", "{prompt}"]
+resume_args = ["--session-id", "{session}"]
 verified = false
 
 [models]
@@ -40,7 +40,7 @@ list_command = ["pi", "--list-models"]
 
 [records]
 kind = "jsonl"
-location = "~/.pi/agent/sessions/<cwd-slug>/<ts>_<id>.jsonl"
+location = "~/.pi/agent/sessions/{cwd_slug}/*_{session}.jsonl"
 errors = "stopReason: \"error\" plus errorMessage; no reset time"
 verified = true
 
@@ -49,4 +49,5 @@ source = "none"
 retry_signal = "json auto_retry_start"
 
 [skills]
-dirs = ["~/.pi/agent/skills", "~/.agents/skills"]
+home_dirs = ["~/.pi/agent/skills", "~/.agents/skills"]
+project_dirs = []
