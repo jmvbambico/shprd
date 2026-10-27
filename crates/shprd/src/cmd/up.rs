@@ -36,7 +36,23 @@ const CHAT_TITLE: &str = "shprd·chat";
 const ORCHESTRATOR_LABEL: &str = "orchestrator";
 
 /// The argv the chat tab runs: print the status, then hand over to a shell.
-const CHAT_ARGV: [&str; 3] = ["sh", "-c", "shprd status; exec \"${SHELL:-sh}\""];
+///
+/// The status comes from this very binary rather than from `PATH`, so the tab
+/// reports the run `up` just laid out even when an older `shprd` is installed.
+fn chat_argv() -> Vec<String> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("shprd"));
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("{} status; exec \"${{SHELL:-sh}}\"", posix_quote(&exe)),
+    ]
+}
+
+/// Quotes `path` as one word for a POSIX shell, so a path with spaces or
+/// quotes reaches the shell as a single argument.
+fn posix_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
 
 /// Everything `up` needs that does not come from the multiplexer.
 ///
@@ -106,8 +122,7 @@ pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
         let tab = mux
             .create_tab(&workspace.id, CHAT_TITLE, &repo)
             .map_err(|err| CliError::other(anyhow!(err).context("creating the chat tab")))?;
-        let argv: Vec<String> = CHAT_ARGV.iter().map(|arg| (*arg).to_string()).collect();
-        mux.run(&tab.root_pane, &argv, &[])
+        mux.run(&tab.root_pane, &chat_argv(), &[])
             .map_err(|err| CliError::other(anyhow!(err).context("starting the chat tab")))?;
         (tab, true)
     };
@@ -725,6 +740,33 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_placeholder_runs_this_binary() {
+        let argv = chat_argv();
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(err) => panic!("the running binary has a path: {err}"),
+        };
+        assert_eq!(argv[0], "sh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(
+            argv[2],
+            format!("'{}' status; exec \"${{SHELL:-sh}}\"", exe.display())
+        );
+        assert!(
+            exe.is_absolute(),
+            "{exe:?} is not an absolute path, so the tab would fall back to PATH"
+        );
+    }
+
+    #[test]
+    fn a_path_with_quotes_survives_as_one_shell_word() {
+        assert_eq!(
+            posix_quote(StdPath::new("/tmp/it's here/shprd")),
+            "'/tmp/it'\\''s here/shprd'"
+        );
+    }
+
+    #[test]
     fn first_up_creates_the_workspace_and_starts_a_run() -> Result<()> {
         let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
         let env = fixture.env()?;
@@ -770,7 +812,7 @@ mod tests {
         // system prompt and the run in its environment.
         let argvs = started_argvs(&mux);
         assert_eq!(argvs.len(), 2);
-        assert_eq!(argvs[0], CHAT_ARGV.map(str::to_string).to_vec());
+        assert_eq!(argvs[0], chat_argv());
         assert_eq!(
             argvs[1][..5],
             ["claude", "--model", "claude-opus-5-5", "--effort", "high"]
