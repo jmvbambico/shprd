@@ -8,9 +8,13 @@ use shprd_core::event::{Actor, Event, EventKind};
 use shprd_core::log::{Clock, EventLog, SystemClock};
 use shprd_core::rules::RuleError;
 use shprd_core::state::RunState;
+use shprd_git::worktree::Layout;
 
 /// Environment variable holding the default actor.
 const ACTOR_ENV: &str = "SHPRD_ACTOR";
+
+/// Environment variable overriding the home directory shprd keeps state in.
+const HOME_ENV: &str = "SHPRD_HOME";
 
 /// Exit code for a command a transition rule refused.
 pub const EXIT_REFUSED: u8 = 2;
@@ -107,15 +111,24 @@ impl Ctx {
         Ok((state, outcome.events))
     }
 
+    /// Checks `kind` against the current state, and appends nothing.
+    ///
+    /// A verb that has an effect outside the log — creating a branch, removing
+    /// a worktree — runs this first, so a refused event never leaves a side
+    /// effect the ledger does not know about.
+    pub fn check(&self, kind: &EventKind) -> Result<(), CliError> {
+        let state = self.state()?;
+        state
+            .check(kind, SystemClock.now_ms())
+            .map_err(CliError::Refused)
+    }
+
     /// Checks `kind` against the current state, then appends it.
     ///
     /// A refused event is never written. Returns the appended event.
     pub fn commit(&self, kind: EventKind) -> Result<Event, CliError> {
-        let state = self.state()?;
+        self.check(&kind)?;
         let clock = SystemClock;
-        state
-            .check(&kind, clock.now_ms())
-            .map_err(CliError::Refused)?;
         let mut log = EventLog::open(&self.log_path)
             .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
         let event = log
@@ -153,6 +166,35 @@ fn git_top_level() -> Result<PathBuf, CliError> {
         return Err(CliError::other(anyhow!("git reported no repository root")));
     }
     Ok(PathBuf::from(trimmed))
+}
+
+/// Resolves the home directory shprd keeps its state and global config in.
+///
+/// `--home` wins, then `$SHPRD_HOME`, then `$HOME`.
+pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
+    let explicit = home.map(|path| path.to_path_buf()).or_else(|| {
+        std::env::var_os(HOME_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    match explicit {
+        Some(path) => Ok(path),
+        None => std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| CliError::other(anyhow!("no home directory: pass --home"))),
+    }
+}
+
+/// Resolves the layout shprd's git state lives in, with `namespace` as the
+/// branch prefix and archive namespace.
+///
+/// The worktree root and the namespace both come from here, so a janitor can
+/// never be pointed at someone else's branches by a stale flag.
+pub fn resolve_layout(home: Option<&Path>, namespace: &str) -> Result<Layout, CliError> {
+    let mut layout = Layout::default_for_home(resolve_home(home)?);
+    layout.namespace = namespace.to_string();
+    Ok(layout)
 }
 
 /// Parses `--as`, falling back to `$SHPRD_ACTOR`, then to `human`.

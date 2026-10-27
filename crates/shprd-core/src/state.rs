@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::event::{AgentId, Event, EventKind, Finding, ReportStatus, TaskId};
+use crate::event::{
+    AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind, TaskId,
+};
 use crate::rules::{self, RuleError};
 use crate::scope;
 
@@ -28,6 +30,12 @@ pub struct RunState {
     /// hang off, and dropping them would lose the only record of a run-wide
     /// override. Newest last, in event order.
     pub run_overrides: Vec<OverrideRecord>,
+    /// Resources shprd created for this run, keyed by kind and name.
+    ///
+    /// This ledger is what makes cleanup safe: the janitor may only remove
+    /// what shprd itself recorded here, never whatever happens to look like
+    /// its own work.
+    pub resources: BTreeMap<(ResourceKind, String), ResourceRecord>,
     /// Whether the run has finished.
     pub finished: bool,
     /// Sequence number of the last applied event, 0 before the first.
@@ -148,6 +156,28 @@ pub struct OverrideRecord {
     pub reason: String,
     /// Sequence number of the event that recorded it.
     pub seq: u64,
+}
+
+/// Where a resource is in its lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceStatus {
+    /// It exists and is in service.
+    Live,
+    /// It exists but has been taken out of service.
+    Archived,
+    /// It has been deleted.
+    Removed,
+}
+
+/// What the run knows about one resource it created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceRecord {
+    /// The task it belongs to, when it belongs to one.
+    pub task: Option<TaskId>,
+    /// Where it is in its lifecycle.
+    pub status: ResourceStatus,
+    /// Sequence number of the event that created it.
+    pub created_seq: u64,
 }
 
 /// What is known about an agent.
@@ -388,6 +418,36 @@ impl RunState {
                     entry.overrides.push(record);
                 }
             }
+            EventKind::Resource {
+                action,
+                kind,
+                name,
+                task,
+            } => {
+                let key = (*kind, name.clone());
+                match action {
+                    ResourceAction::Created => {
+                        self.resources.insert(
+                            key,
+                            ResourceRecord {
+                                task: task.clone(),
+                                status: ResourceStatus::Live,
+                                created_seq: event.seq,
+                            },
+                        );
+                    }
+                    ResourceAction::Archived => {
+                        if let Some(record) = self.resources.get_mut(&key) {
+                            record.status = ResourceStatus::Archived;
+                        }
+                    }
+                    ResourceAction::Removed => {
+                        if let Some(record) = self.resources.get_mut(&key) {
+                            record.status = ResourceStatus::Removed;
+                        }
+                    }
+                }
+            }
             EventKind::RunFinished {} => self.finished = true,
         }
     }
@@ -397,6 +457,7 @@ impl RunState {
 mod tests {
     use super::*;
     use crate::event::Actor;
+    use crate::event::ResourceAction;
 
     /// An event with `kind` at position `seq`.
     fn ev(seq: u64, kind: EventKind) -> Event {
@@ -477,5 +538,141 @@ mod tests {
         assert_eq!(task.overrides.len(), 1, "{task:?}");
         assert_eq!(task.overrides[0].rule, "integrate_after_failed_gate");
         assert_eq!(task.overrides[0].seq, 3);
+    }
+
+    /// A resource event on `name`.
+    fn resource(seq: u64, action: ResourceAction, name: &str) -> Event {
+        ev(
+            seq,
+            EventKind::Resource {
+                action,
+                kind: ResourceKind::Worktree,
+                name: name.to_string(),
+                task: Some("a".to_string()),
+            },
+        )
+    }
+
+    /// A run `a` with one task and the given extra events, folded.
+    fn fold_extra(extra: Vec<Event>) -> Result<RunState, RuleError> {
+        let mut events = log("a", "no_main_push");
+        events.truncate(2);
+        events.extend(extra);
+        RunState::fold(&events)
+    }
+
+    #[test]
+    fn a_resource_can_be_created_removed_and_created_again() {
+        let state = match fold_extra(vec![
+            resource(3, ResourceAction::Created, "wt/a"),
+            resource(4, ResourceAction::Removed, "wt/a"),
+            resource(5, ResourceAction::Created, "wt/a"),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("create, remove, re-create must fold: {err}"),
+        };
+        let key = (ResourceKind::Worktree, "wt/a".to_string());
+        let record = match state.resources.get(&key) {
+            Some(record) => record,
+            None => panic!("the resource must be in the ledger: {state:?}"),
+        };
+        assert_eq!(record.status, ResourceStatus::Live);
+        assert_eq!(
+            record.created_seq, 5,
+            "the record tracks the newest creation"
+        );
+        assert_eq!(record.task.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn removing_an_unknown_resource_is_refused() {
+        let state = match fold_extra(vec![resource(3, ResourceAction::Created, "wt/a")]) {
+            Ok(state) => state,
+            Err(err) => panic!("one resource must fold: {err}"),
+        };
+        assert!(matches!(
+            state.check(
+                &EventKind::Resource {
+                    action: ResourceAction::Removed,
+                    kind: ResourceKind::Worktree,
+                    name: "wt/other".to_string(),
+                    task: None,
+                },
+                4_000,
+            ),
+            Err(RuleError::ResourceUnknown { .. })
+        ));
+    }
+
+    #[test]
+    fn archiving_then_removing_a_resource_is_allowed() {
+        let state = match fold_extra(vec![
+            resource(3, ResourceAction::Created, "wt/a"),
+            resource(4, ResourceAction::Archived, "wt/a"),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("archive must fold: {err}"),
+        };
+        let key = (ResourceKind::Worktree, "wt/a".to_string());
+        assert_eq!(
+            state.resources.get(&key).map(|record| record.status),
+            Some(ResourceStatus::Archived)
+        );
+        assert!(
+            state
+                .check(&resource(5, ResourceAction::Removed, "wt/a").kind, 5_000)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn creating_a_resource_after_the_run_finished_is_refused() {
+        let state = match fold_extra(vec![ev(3, EventKind::RunFinished {})]) {
+            Ok(state) => state,
+            Err(err) => panic!("finishing must fold: {err}"),
+        };
+        assert!(matches!(
+            state.check(&resource(4, ResourceAction::Created, "wt/a").kind, 4_000),
+            Err(RuleError::RunFinished)
+        ));
+    }
+
+    #[test]
+    fn removing_a_resource_after_the_run_finished_is_allowed() {
+        let state = match fold_extra(vec![
+            resource(3, ResourceAction::Created, "wt/a"),
+            ev(4, EventKind::RunFinished {}),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("a finished run must keep its ledger: {err}"),
+        };
+        assert!(
+            state
+                .check(&resource(5, ResourceAction::Removed, "wt/a").kind, 5_000)
+                .is_ok(),
+            "the janitor must be able to clean up a finished run"
+        );
+        assert!(matches!(
+            state.check(&resource(6, ResourceAction::Archived, "wt/a").kind, 6_000),
+            Ok(())
+        ));
+    }
+
+    #[test]
+    fn a_resource_event_must_name_a_known_task() {
+        let state = match fold_extra(vec![]) {
+            Ok(state) => state,
+            Err(err) => panic!("the bare run must fold: {err}"),
+        };
+        let kind = EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: "shprd/r1/a".to_string(),
+            task: Some("ghost".to_string()),
+        };
+        assert!(matches!(
+            state.check(&kind, 3_000),
+            Err(RuleError::UnknownTask { .. })
+        ));
     }
 }

@@ -420,6 +420,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
         EventKind::Override { .. } => "override",
+        EventKind::Resource { .. } => "resource",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }

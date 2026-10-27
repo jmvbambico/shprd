@@ -88,6 +88,34 @@ pub struct Finding {
     pub detail: String,
 }
 
+/// What happened to a resource shprd owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceAction {
+    /// shprd created it.
+    Created,
+    /// shprd kept it but took it out of service.
+    Archived,
+    /// shprd deleted it.
+    Removed,
+}
+
+/// A kind of resource shprd creates and is therefore allowed to clean up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    /// A git worktree.
+    Worktree,
+    /// A local branch.
+    Branch,
+    /// A branch on a remote.
+    RemoteBranch,
+    /// An archive ref holding a run's history.
+    ArchiveRef,
+    /// An exported bundle.
+    Bundle,
+}
+
 /// What happened. Serialized with a `kind` tag alongside the [`Event`] fields.
 ///
 /// Unknown-field rejection is not enabled here: `deny_unknown_fields` cannot
@@ -225,6 +253,21 @@ pub enum EventKind {
         /// Why it was overridden.
         reason: String,
     },
+    /// A resource was created, archived or removed.
+    Resource {
+        /// What happened to it.
+        action: ResourceAction,
+        /// What sort of resource it is.
+        ///
+        /// Serialized as `resource`, because `kind` is taken by the tag that
+        /// names the event variant.
+        #[serde(rename = "resource")]
+        kind: ResourceKind,
+        /// Its name: a worktree path, a branch name, an archive ref.
+        name: String,
+        /// The task it belongs to, when it belongs to one.
+        task: Option<TaskId>,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -329,6 +372,12 @@ mod tests {
                 rule: "no_main_push".to_string(),
                 reason: "release branch".to_string(),
             },
+            EventKind::Resource {
+                action: ResourceAction::Created,
+                kind: ResourceKind::Worktree,
+                name: "/tmp/wt/M1.1".to_string(),
+                task: Some("M1.1".to_string()),
+            },
             EventKind::RunFinished {},
         ]
     }
@@ -336,7 +385,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 12, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 13, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

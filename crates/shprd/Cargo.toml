@@ -15,6 +15,7 @@ anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 shprd-core = { path = "../shprd-core" }
+shprd-git = { path = "../shprd-git" }
 shprd-views = { path = "../shprd-views" }
 
 [dev-dependencies]

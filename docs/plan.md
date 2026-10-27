@@ -104,12 +104,13 @@ Goal: worktrees, scopes, integration and cleanup, all owned by the engine.
 
 | ID | Task | Scope | Size |
 |---|---|---|---|
-| M2.1 | Worktree create/remove under `~/.shprd/wt/<repo>/<run>/<task>`, branch `shprd/<run>/<task>`, ledger events | `shprd-git/src/worktree.rs` | M |
-| M2.2 | Scope model: normalize, overlap check, changed-paths-within-scope check (port cadence's rules, credited) | `shprd-git/src/scope.rs` | S |
+| M2.1 | Git runner (no shell), ownership ledger event in core (`Resource` created/archived/removed), worktree create/remove under `~/.shprd/wt/<repo>/<run>/<task>` on branch `shprd/<run>/<task>`, and changed-paths-of-a-range checked against the task scope (the scope rules already live in `shprd-core::scope` from M1) | `shprd-git/src/{git,worktree,changed}.rs`, `shprd-core` events/state/rules | M |
 | M2.3 | Integration: verify claimed commits, cherry-pick onto `shprd/<run>/int`, conflict → event, clean-tree guards | `shprd-git/src/integrate.rs` | M |
 | M2.4 | Archive refs + bundles, `shprd restore`, local janitor (ledger-owned only, namespace-guarded) | `shprd-git/src/{archive,janitor}.rs` | M |
 
-Lanes: M2.1 ∥ M2.2, then M2.3 ∥ M2.4.
+M2.2 was folded into M2.1: M1 already built the scope rules in `shprd-core::scope`.
+
+Lanes: M2.1 first (the runner and ledger everything else uses), then M2.3 ∥ M2.4.
 
 **Gate:** integration tests in temp repos: overlapping scopes refused, a commit
 outside scope refused, conflict recorded and work retained, janitor never

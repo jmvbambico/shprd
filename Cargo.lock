@@ -310,6 +310,7 @@ dependencies = [
  "clap",
  "serde_json",
  "shprd-core",
+ "shprd-git",
  "shprd-views",
  "tempfile",
 ]
@@ -328,6 +329,11 @@ dependencies = [
 [[package]]
 name = "shprd-git"
 version = "0.0.0"
+dependencies = [
+ "shprd-core",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "shprd-mux"

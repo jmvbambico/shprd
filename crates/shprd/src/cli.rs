@@ -38,6 +38,12 @@ pub struct Global {
     /// Skip the dagr sync that normally follows every write.
     #[arg(long = "no-dagr", global = true)]
     pub no_dagr: bool,
+    /// Home directory whose `.shprd` directory holds shprd's git state:
+    /// worktrees, archive refs.
+    ///
+    /// Defaults to `$SHPRD_HOME`, then `$HOME`.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub home: Option<PathBuf>,
 }
 
 /// The top-level verbs.
@@ -69,6 +75,34 @@ pub enum Command {
         #[command(subcommand)]
         cmd: DagrCommand,
     },
+    /// Print the cleanup plan for this run, or apply it with `--apply`.
+    Janitor(JanitorArgs),
+    /// Recreate a task's branch from its archive ref.
+    Restore(RestoreArgs),
+}
+
+/// Arguments for `janitor`.
+#[derive(Debug, Args)]
+pub struct JanitorArgs {
+    /// Execute the plan instead of only printing it.
+    #[arg(long)]
+    pub apply: bool,
+    /// Days an archive ref is kept before it is expired.
+    ///
+    /// Defaults to `[janitor] archive_days` from the config, or 14.
+    #[arg(long = "archive-days", value_name = "DAYS")]
+    pub archive_days: Option<u32>,
+}
+
+/// Arguments for `restore`.
+#[derive(Debug, Args)]
+pub struct RestoreArgs {
+    /// The task whose branch comes back.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// The run, when the log holds more than one; defaults to the log's run.
+    #[arg(long, value_name = "ID")]
+    pub run: Option<String>,
 }
 
 /// dagr verbs.
