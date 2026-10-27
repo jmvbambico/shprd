@@ -315,6 +315,9 @@ fn merge(
     let url = pr.url.clone();
     let number = pr.number;
     let base = run.base_branch.clone();
+    // The ledger's head is the branch, not the sha: the janitor deletes a
+    // remote branch only when the merged pull request names it as its head.
+    let branch = worktree.branch.clone();
     let forge = forge(&worktree.path)?;
     let status = forge.status(number).map_err(|err| {
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
@@ -347,7 +350,7 @@ fn merge(
         .map_err(|err| CliError::other(anyhow!(err).context("merging the pull request")))?;
     let event = ctx.commit(EventKind::PrMerged {
         number,
-        head: head.to_string(),
+        head: branch,
     })?;
     crate::cmd::emit(ctx, &event)?;
     if !ctx.json {
