@@ -111,13 +111,27 @@ impl Default for Policy {
     }
 }
 
+/// How long one continuous run of serve retries is tolerated: the whole
+/// [`Policy::transient_backoff_ms`] schedule added up, or the fallback when the
+/// policy lists no steps.
+fn transient_budget(p: &Policy) -> u64 {
+    p.transient_backoff_ms
+        .iter()
+        .copied()
+        .reduce(u64::saturating_add)
+        .unwrap_or(FALLBACK_BACKOFF_MS)
+}
+
 /// Carries the watchdog's memory from one [`Watch::step`] to the next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watch {
     /// What the watchdog believes right now; also exposed to readers.
     pub health: Health,
-    /// Serve retries tolerated since the last healthy observation.
-    transient_attempts: usize,
+    /// When the current run of serve retries was first seen, if it is running.
+    ///
+    /// `None` means no retry is outstanding: the next retry observation starts
+    /// a fresh budget.
+    transient_since_ms: Option<u64>,
     /// How many times the agent has gone dry in this run of trouble.
     dry_count: usize,
 }
@@ -133,7 +147,7 @@ impl Watch {
     pub fn new() -> Self {
         Self {
             health: Health::Working,
-            transient_attempts: 0,
+            transient_since_ms: None,
             dry_count: 0,
         }
     }
@@ -161,7 +175,7 @@ impl Watch {
     ) -> Vec<Action> {
         let backoff = self.next_dry_backoff(p);
         let retry_at_ms = reset_at_ms.unwrap_or_else(|| now_ms.saturating_add(backoff));
-        self.transient_attempts = 0;
+        self.transient_since_ms = None;
         self.health = Health::Dry {
             since_ms: now_ms,
             reason: reason.clone(),
@@ -209,11 +223,20 @@ impl Watch {
             return self.go_dry(i.now_ms, Source::Record, reason, err.resets_at_ms, p);
         }
 
-        if let Some(Status::Retry { message, .. }) = &i.serve {
-            self.transient_attempts = self.transient_attempts.saturating_add(1);
-            if self.transient_attempts > p.transient_backoff_ms.len() {
-                let reason = message.clone();
-                return self.go_dry(i.now_ms, Source::Serve, reason, None, p);
+        if let Some(status) = &i.serve {
+            if let Status::Retry { message, .. } = status {
+                // The run of retries is timed, not counted: one retry that the
+                // server keeps re-issuing must not age into a dry verdict, so
+                // the clock starts with the first observation and only the
+                // whole backoff schedule expiring is fatal.
+                let since_ms = *self.transient_since_ms.get_or_insert(i.now_ms);
+                if i.now_ms.saturating_sub(since_ms) >= transient_budget(p) {
+                    let reason = message.clone();
+                    return self.go_dry(i.now_ms, Source::Serve, reason, None, p);
+                }
+            } else {
+                // Any other serve status ends the run of retries.
+                self.transient_since_ms = None;
             }
         }
 
@@ -227,8 +250,15 @@ impl Watch {
         }
 
         if matches!(screen.agent_state, AgentState::Idle | AgentState::Done) {
+            self.transient_since_ms = None;
             self.health = Health::Working;
             return Vec::new();
+        }
+
+        // A moving screen means the agent is producing again, so the retry
+        // budget restarts.
+        if screen.liveness.changed {
+            self.transient_since_ms = None;
         }
 
         let suspect_since = match &self.health {
@@ -257,7 +287,7 @@ impl Watch {
     pub fn canary_result(&mut self, ok: bool, now_ms: u64, p: &Policy) -> Vec<Action> {
         if ok {
             self.health = Health::Available;
-            self.transient_attempts = 0;
+            self.transient_since_ms = None;
             self.dry_count = 0;
             return vec![Action::MarkAvailable];
         }
@@ -401,39 +431,87 @@ mod tests {
         );
     }
 
+    /// One polling instant in which the server reports a self-retry.
+    fn retrying(now_ms: u64) -> Inputs {
+        Inputs {
+            serve: Some(Status::Retry {
+                attempt: 1,
+                message: String::from("overloaded"),
+                next_at_ms: None,
+            }),
+            ..inputs(now_ms)
+        }
+    }
+
     #[test]
-    fn serve_retries_go_dry_on_the_fifth() {
+    fn serve_retries_are_tolerated_for_the_whole_backoff_schedule() {
         let p = Policy::default();
         let mut w = Watch::new();
-        let retry = Status::Retry {
-            attempt: 1,
-            message: String::from("overloaded"),
-            next_at_ms: None,
-        };
 
-        for _ in 0..4 {
-            let i = Inputs {
-                serve: Some(retry.clone()),
-                ..inputs(NOW)
-            };
-            assert_eq!(w.step(&i, &p), Vec::new());
+        // A retry every 10 s for 10 minutes: one continuous retry well inside
+        // the policy's 15 minute budget, so the agent is never declared dry.
+        for tick in 0..=60 {
+            assert_eq!(w.step(&retrying(NOW + tick * 10_000), &p), Vec::new());
             assert_eq!(w.health, Health::Working);
         }
+    }
 
-        let i = Inputs {
-            serve: Some(retry.clone()),
-            ..inputs(NOW)
-        };
-        let acts = w.step(&i, &p);
-        assert_eq!(acts.len(), 2);
+    #[test]
+    fn serve_retries_go_dry_past_the_backoff_sum() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+
+        let mut dry_acts = None;
+        for tick in 0..=96 {
+            let acts = w.step(&retrying(NOW + tick * 10_000), &p);
+            if !acts.is_empty() {
+                dry_acts.get_or_insert(acts);
+            }
+        }
+
         assert_eq!(
-            acts.first(),
-            Some(&Action::MarkDry {
-                reason: String::from("overloaded"),
-                reset_at_ms: None,
-            })
+            dry_acts,
+            Some(vec![
+                Action::MarkDry {
+                    reason: String::from("overloaded"),
+                    reset_at_ms: None,
+                },
+                Action::HandOff,
+            ])
         );
-        assert_eq!(acts.get(1), Some(&Action::HandOff));
+        assert!(matches!(
+            w.health,
+            Health::Dry {
+                source: Source::Serve,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_non_retry_status_restarts_the_transient_clock() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+
+        for tick in 0..=60 {
+            assert_eq!(w.step(&retrying(NOW + tick * 10_000), &p), Vec::new());
+        }
+
+        // The server reports idle: the retry spell is over.
+        let idle = Inputs {
+            serve: Some(Status::Idle),
+            ..inputs(NOW + 610_000)
+        };
+        assert_eq!(w.step(&idle, &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+
+        // A further 10 minutes of retries stays inside the budget because the
+        // clock restarted with the first retry after the idle report.
+        for tick in 1..=60 {
+            let acts = w.step(&retrying(NOW + 610_000 + tick * 10_000), &p);
+            assert_eq!(acts, Vec::new());
+            assert_eq!(w.health, Health::Working);
+        }
     }
 
     #[test]
