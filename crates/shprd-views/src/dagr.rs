@@ -119,8 +119,8 @@ pub fn project(
     let mut tasks: Vec<Value> = state
         .tasks
         .values()
-        .map(|task| task_value(task, &times, &generated_at))
-        .collect();
+        .map(|task| task_value(task, &times))
+        .collect::<Result<_, _>>()?;
     tasks.sort_by(|left, right| id_of(left).cmp(id_of(right)));
 
     Ok(json!({
@@ -200,16 +200,14 @@ fn project_of(path: &str) -> Option<&str> {
 }
 
 /// Projects one task.
-fn task_value(task: &Task, times: &BTreeMap<(&str, u32), Times>, generated_at: &str) -> Value {
+fn task_value(task: &Task, times: &BTreeMap<(&str, u32), Times>) -> Result<Value, ViewError> {
     let latest = task.attempts.len().checked_sub(1);
     let attempts: Vec<Value> = task
         .attempts
         .iter()
         .enumerate()
-        .map(|(index, attempt)| {
-            attempt_value(task, attempt, Some(index) == latest, times, generated_at)
-        })
-        .collect();
+        .map(|(index, attempt)| attempt_value(task, attempt, Some(index) == latest, times))
+        .collect::<Result<_, _>>()?;
 
     let (state, unblock, note) = task_state(task);
 
@@ -233,7 +231,7 @@ fn task_value(task: &Task, times: &BTreeMap<(&str, u32), Times>, generated_at: &
         object.insert("note".to_string(), json!(note));
     }
     object.insert("attempts".to_string(), Value::Array(attempts));
-    Value::Object(object)
+    Ok(Value::Object(object))
 }
 
 /// The task's dagr kind, derived from its tags.
@@ -273,13 +271,22 @@ fn failed_note(task: &Task) -> String {
 }
 
 /// Projects one attempt.
+///
+/// Both times are recorded facts: `started_at` is the attempt's `Spawned`
+/// event and `ended_at` its settling event. When either is missing from the
+/// log the projection refuses; the document's `generated_at` is never
+/// borrowed as an attempt time.
+///
+/// # Errors
+///
+/// [`ViewError::MissingFact`] when the log has no `Spawned` event for the
+/// attempt, or no settling event although the attempt is settled.
 fn attempt_value(
     task: &Task,
     attempt: &Attempt,
     latest: bool,
     times: &BTreeMap<(&str, u32), Times>,
-    generated_at: &str,
-) -> Value {
+) -> Result<Value, ViewError> {
     let state = attempt_state(task, attempt, latest);
     let terminal = matches!(state, "done" | "failed");
 
@@ -299,32 +306,31 @@ fn attempt_value(
     }
     object.insert("state".to_string(), json!(state));
 
-    let start = time_ms(times, &task.id, attempt.n, |times| {
-        times.start.or(times.end)
-    });
-    if let Some(ms) = start {
-        object.insert("started_at".to_string(), json!(rfc3339_utc(ms)));
-    } else if terminal {
-        object.insert("started_at".to_string(), json!(generated_at));
-    }
+    let start = time_ms(times, &task.id, attempt.n, |times| times.start)
+        .ok_or_else(|| missing_fact("a Spawned event", task, attempt))?;
+    object.insert("started_at".to_string(), json!(rfc3339_utc(start)));
     if state == "working" {
         object.insert("locator".to_string(), json!({ "agent": attempt.agent }));
         object.insert("liveness".to_string(), json!({ "queued_input": 0 }));
     }
     if terminal {
-        let end = time_ms(times, &task.id, attempt.n, |times| {
-            times.end.or(times.start)
-        });
-        let ended_at = end
-            .map(rfc3339_utc)
-            .unwrap_or_else(|| generated_at.to_string());
-        object.insert("ended_at".to_string(), json!(ended_at));
+        let end = time_ms(times, &task.id, attempt.n, |times| times.end).ok_or_else(|| {
+            missing_fact("a Reported, GatePassed or GateFailed event", task, attempt)
+        })?;
+        object.insert("ended_at".to_string(), json!(rfc3339_utc(end)));
         object.insert(
             "outcome".to_string(),
             json!({ "result": state, "evidence": evidence(attempt) }),
         );
     }
-    Value::Object(object)
+    Ok(Value::Object(object))
+}
+
+/// A [`ViewError::MissingFact`] naming `fact` for `task`'s attempt `attempt`.
+fn missing_fact(fact: &str, task: &Task, attempt: &Attempt) -> ViewError {
+    ViewError::MissingFact {
+        what: format!("{fact} for task {} attempt {}", task.id, attempt.n),
+    }
 }
 
 /// The time recorded for an attempt under `pick`, in ms since the epoch.
@@ -847,6 +853,61 @@ mod tests {
         match project(&state, &excerpt, T0 + 10 * MINUTE) {
             Err(ViewError::MissingFact { what }) => {
                 assert!(what.contains("RunStarted"), "{what}")
+            }
+            other => panic!("expected MissingFact, got {other:?}"),
+        }
+    }
+
+    /// `events` minus the events of task `a` attempt 1 for which `keep` is
+    /// false, leaving every other event in place.
+    fn without(events: Vec<Event>, keep: fn(&EventKind) -> bool) -> Vec<Event> {
+        events
+            .into_iter()
+            .filter(|event| !is_task_attempt(&event.kind, "a", 1) || keep(&event.kind))
+            .collect()
+    }
+
+    fn is_task_attempt(kind: &EventKind, want_task: &str, want_attempt: u32) -> bool {
+        let named = |task: &String, attempt: &u32| task == want_task && *attempt == want_attempt;
+        match kind {
+            EventKind::Spawned { task, attempt, .. }
+            | EventKind::Reported { task, attempt, .. }
+            | EventKind::GatePassed { task, attempt, .. }
+            | EventKind::GateFailed { task, attempt, .. } => named(task, attempt),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn refuses_to_project_an_attempt_without_a_spawn_event() {
+        let events = scenario();
+        let state = state(&events);
+        let excerpt = without(events, |kind| !matches!(kind, EventKind::Spawned { .. }));
+        match project(&state, &excerpt, T0 + 10 * MINUTE) {
+            Err(ViewError::MissingFact { what }) => {
+                assert!(what.contains("Spawned"), "{what}");
+                assert!(what.contains('a') && what.contains('1'), "{what}");
+            }
+            other => panic!("expected MissingFact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_to_project_a_settled_attempt_without_a_settling_event() {
+        let events = scenario();
+        let state = state(&events);
+        let excerpt = without(events, |kind| {
+            !matches!(
+                kind,
+                EventKind::Reported { .. }
+                    | EventKind::GatePassed { .. }
+                    | EventKind::GateFailed { .. }
+            )
+        });
+        match project(&state, &excerpt, T0 + 10 * MINUTE) {
+            Err(ViewError::MissingFact { what }) => {
+                assert!(what.contains("Reported"), "{what}");
+                assert!(what.contains('a') && what.contains('1'), "{what}");
             }
             other => panic!("expected MissingFact, got {other:?}"),
         }
