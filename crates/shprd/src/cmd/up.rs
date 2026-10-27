@@ -21,8 +21,11 @@ use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
 use shprd_core::state::RunState;
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
-use shprd_mux::Mux;
-use shprd_roster::spec::HarnessSpec;
+use shprd_mux::naming::{self, Role as TabRole};
+use shprd_mux::{Mux, Tab, TabId, Workspace};
+use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
+use shprd_roster::models::AgentRef;
+use shprd_roster::spec::{HarnessSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -68,6 +71,10 @@ pub struct UpReport {
     pub base_branch: String,
     /// The branch landed work is integrated on.
     pub integration_branch: String,
+    /// The human's own tab, focused when `up` is done.
+    pub chat_tab: TabId,
+    /// The orchestrator agent's tab.
+    pub orchestrator_tab: TabId,
     /// True when this call created the workspace.
     pub created_workspace: bool,
     /// True when this call created the human's chat tab.
@@ -82,18 +89,43 @@ pub struct UpReport {
 pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
     let repo = env.ctx.root.clone();
     let base_branch = preconditions(&repo, &env.config)?;
-    let _ = mux;
-    let (run_id, resumed, integration_branch) =
-        begin_run(&env.ctx, &env.home, &env.repo_name, &base_branch)?;
+    let boot = begin_run(&env.ctx, &env.home, &env.repo_name, &base_branch)?;
+    let run_id = boot.run_id;
+    let resumed = boot.resumed;
+    let integration_branch = boot.integration_branch;
+    let base_branch = boot.base_branch;
+    let (workspace, created_workspace) =
+        find_or_create_workspace(mux, naming::workspace_name(&env.repo_name), &repo)?;
+    let brief_path = write_brief(env, &run_id, &base_branch)?;
+    let tabs = mux
+        .list_tabs(&workspace.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
+    let (chat_tab, created_chat_tab) = if let Some(found) = titled(&tabs, CHAT_TITLE) {
+        (found, false)
+    } else {
+        let tab = mux
+            .create_tab(&workspace.id, CHAT_TITLE, &repo)
+            .map_err(|err| CliError::other(anyhow!(err).context("creating the chat tab")))?;
+        let argv: Vec<String> = CHAT_ARGV.iter().map(|arg| (*arg).to_string()).collect();
+        mux.run(&tab.root_pane, &argv, &[])
+            .map_err(|err| CliError::other(anyhow!(err).context("starting the chat tab")))?;
+        (tab, true)
+    };
+    let (orchestrator_tab, created_orchestrator_tab) =
+        ensure_orchestrator_tab(mux, env, &workspace, &tabs, &brief_path, &run_id)?;
+    mux.focus_tab(&chat_tab.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("focusing the chat tab")))?;
     Ok(UpReport {
         run_id,
         resumed,
         base_branch,
         integration_branch,
-        created_workspace: false,
-        created_chat_tab: false,
-        created_orchestrator_tab: false,
-        brief_path: env.home.join(".shprd").join("briefs"),
+        chat_tab: chat_tab.id,
+        orchestrator_tab: orchestrator_tab.id,
+        created_workspace,
+        created_chat_tab,
+        created_orchestrator_tab,
+        brief_path,
     })
 }
 
@@ -157,13 +189,18 @@ fn begin_run(
     home: &Path,
     repo_name: &str,
     base_branch: &str,
-) -> Result<(String, bool, String), CliError> {
+) -> Result<RunBoot, CliError> {
     let state = ctx.state()?;
     if let Some(run) = resume_target(&state) {
-        return Ok((run.run_id, true, run.integration_branch));
+        return Ok(RunBoot {
+            run_id: run.run_id,
+            resumed: true,
+            base_branch: run.base_branch,
+            integration_branch: run.integration_branch,
+        });
     }
     let run_id = new_run_id();
-    let integration_branch = format!("shprd/{run_id}/int");
+    let integration_branch = integration_branch(&run_id);
     ctx.commit(EventKind::RunStarted {
         run_id: run_id.clone(),
         repo: ctx.root.to_string_lossy().to_string(),
@@ -174,7 +211,30 @@ fn begin_run(
     let worktree = integrate::open_integration(&ctx.root, &layout, repo_name, &run_id, base_branch)
         .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
     record_integration(ctx, &worktree)?;
-    Ok((run_id, false, integration_branch))
+    Ok(RunBoot {
+        run_id,
+        resumed: false,
+        base_branch: base_branch.to_string(),
+        integration_branch,
+    })
+}
+
+/// What `up` learned about the run before touching the multiplexer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunBoot {
+    /// The run now in flight.
+    run_id: String,
+    /// True when an unfinished run was resumed.
+    resumed: bool,
+    /// The branch the run was cut from.
+    base_branch: String,
+    /// The branch landed work is integrated on.
+    integration_branch: String,
+}
+
+/// The integration branch a run carries: `shprd/<run>/int`.
+fn integration_branch(run_id: &str) -> String {
+    format!("shprd/{run_id}/int")
 }
 
 /// The run `up` should continue, if there is one still in flight.
@@ -195,7 +255,10 @@ fn record_integration(ctx: &Ctx, worktree: &IntegrationWorktree) -> Result<(), C
         return Ok(());
     }
     for (kind, name) in [
-        (ResourceKind::Worktree, worktree.path.to_string_lossy().to_string()),
+        (
+            ResourceKind::Worktree,
+            worktree.path.to_string_lossy().to_string(),
+        ),
         (ResourceKind::Branch, worktree.branch.clone()),
     ] {
         ctx.commit(EventKind::Resource {
@@ -283,4 +346,191 @@ fn print_report(ctx: &Ctx, report: &UpReport) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+/// The first tab carrying `title`, if any.
+///
+/// Titles are shprd's own interface, so they are the identity a resumed `up`
+/// keys on: a tab found by title is the tab a previous `up` created.
+fn titled(tabs: &[Tab], title: &str) -> Option<Tab> {
+    tabs.iter().find(|tab| tab.title == title).cloned()
+}
+
+/// Finds the repository's workspace, or creates it with its first pane in the
+/// repository root.
+fn find_or_create_workspace(
+    mux: &dyn Mux,
+    name: String,
+    repo: &Path,
+) -> Result<(Workspace, bool), CliError> {
+    if let Some(found) = mux
+        .find_workspace(&name)
+        .map_err(|err| CliError::other(anyhow!(err).context("finding the workspace")))?
+    {
+        return Ok((found, false));
+    }
+    let created = mux
+        .create_workspace(&name, repo)
+        .map_err(|err| CliError::other(anyhow!(err).context("creating the workspace")))?;
+    Ok((created, true))
+}
+
+/// Opens the orchestrator's tab unless it is already there.
+///
+/// An existing tab is never recreated and never re-prompted: a human may be
+/// mid-conversation in it, and a second start would replace the session they
+/// are typing into.
+fn ensure_orchestrator_tab(
+    mux: &dyn Mux,
+    env: &UpEnv,
+    workspace: &Workspace,
+    tabs: &[Tab],
+    brief_path: &Path,
+    run_id: &str,
+) -> Result<(Tab, bool), CliError> {
+    let plan = OrchestratorPlan::resolve(env, brief_path, run_id)?;
+    if let Some(found) = titled(tabs, &plan.title) {
+        return Ok((found, false));
+    }
+    let tab = mux
+        .create_tab(&workspace.id, &plan.title, &env.ctx.root)
+        .map_err(|err| CliError::other(anyhow!(err).context("creating the orchestrator tab")))?;
+    mux.run(&tab.root_pane, &plan.argv, &plan.env)
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the orchestrator")))?;
+    if let Some(prompt) = &plan.inline_prompt {
+        mux.prompt(&tab.root_pane, prompt)
+            .map_err(|err| CliError::other(anyhow!(err).context("prompting the orchestrator")))?;
+    }
+    Ok((tab, true))
+}
+
+/// Everything one orchestrator launch needs: the title shprd finds it by
+/// later, the process to run, and how the brief reaches the agent.
+#[derive(Debug, Clone)]
+struct OrchestratorPlan {
+    /// The tab title, stable across `up` invocations.
+    title: String,
+    /// The program and its arguments.
+    argv: Vec<String>,
+    /// The environment diff as `run` takes it.
+    env: Vec<(String, Option<String>)>,
+    /// The brief, when the CLI has no system-prompt flag to carry it.
+    inline_prompt: Option<String>,
+}
+
+impl OrchestratorPlan {
+    /// Builds the plan from the config, the harness specs and the brief.
+    fn resolve(env: &UpEnv, brief_path: &Path, run_id: &str) -> Result<Self, CliError> {
+        let line = env.config.roster.orchestrator.clone().ok_or_else(|| {
+            CliError::Invalid(anyhow!(
+                "no orchestrator configured: run `shprd set orchestrator <agent>`"
+            ))
+        })?;
+        let agent = AgentRef::parse(&line, &env.specs)
+            .map_err(|err| CliError::other(anyhow!(err).context("reading the orchestrator")))?;
+        let spec = env
+            .specs
+            .iter()
+            .find(|spec| spec.id == agent.program)
+            .ok_or_else(|| CliError::other(anyhow!("no harness spec for {:?}", agent.program)))?;
+        let effort = env.config.roster.effort.get(&line).cloned();
+        let brief = std::fs::read_to_string(brief_path)
+            .map_err(|err| CliError::other(anyhow!(err).context("reading the brief")))?;
+        let mut values = Values {
+            model: agent.model.clone(),
+            effort: effort.clone(),
+            prompt: None,
+            prompt_file: None,
+            session: None,
+        };
+        let mut argv = spec.launch.interactive.clone();
+        argv.extend(render(&spec.launch.model_args, &values, "model_args")?);
+        if let Some(template) = &spec.launch.effort_args
+            && effort.is_some()
+        {
+            argv.extend(render(template, &values, "effort_args")?);
+        }
+        let mut inline_prompt = Some(brief.clone());
+        if let Some(template) = &spec.launch.system_prompt_args {
+            values.prompt = Some(brief);
+            values.prompt_file = Some(brief_path.to_string_lossy().into_owned());
+            argv.extend(render(template, &values, "system_prompt_args")?);
+            inline_prompt = None;
+        }
+        Ok(Self {
+            title: naming::tab_title(TabRole::Orchestrator, &spec.id, ORCHESTRATOR_LABEL, false),
+            argv,
+            env: launch_env_mod::launch_env(
+                &env.process_env,
+                LaunchRole::Orchestrator,
+                &EnvContext {
+                    actor: "orchestrator".to_string(),
+                    task: None,
+                    run: Some(run_id.to_string()),
+                    repo: env.ctx.root.clone(),
+                },
+            )
+            .as_pairs(),
+            inline_prompt,
+        })
+    }
+}
+
+/// Renders one argument template, naming it in the error when it cannot be.
+fn render(template: &[String], values: &Values, what: &str) -> Result<Vec<String>, CliError> {
+    if template.is_empty() {
+        return Ok(Vec::new());
+    }
+    render_args(template, values)
+        .map_err(|err| CliError::other(anyhow!(err).context(format!("rendering {what}"))))
+}
+
+/// Writes the orchestrator's brief and returns its path.
+///
+/// The brief is rewritten on every `up` so a resumed run gets the current one,
+/// even though the tab that reads it is only started once.
+fn write_brief(env: &UpEnv, run_id: &str, base_branch: &str) -> Result<PathBuf, CliError> {
+    let dir = env.home.join(".shprd").join("briefs").join(run_id);
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("creating {}", dir.display())))
+    })?;
+    let path = dir.join("orchestrator.md");
+    std::fs::write(&path, brief_text(env, run_id, base_branch)).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("writing {}", path.display())))
+    })?;
+    Ok(path)
+}
+
+/// The brief's text: who you are, where the branches are, and which verbs the
+/// engine validates.
+fn brief_text(env: &UpEnv, run_id: &str, base_branch: &str) -> String {
+    let skills = if env.config.skills.orchestrator.is_empty() {
+        "none configured".to_string()
+    } else {
+        env.config.skills.orchestrator.join(", ")
+    };
+    let repo = env.ctx.root.display();
+    format!(
+        "# Orchestrator brief\n\n\
+You are the orchestrator for run `{run_id}` in `{repo}`.\n\n\
+## Branches\n\n\
+- base: `{base}`\n\
+- integration: `{integration}`\n\n\
+## Your verbs\n\n\
+Every verb writes one event to the run log, and the engine checks it against\n\
+the transition rules: a verb that does not fit the current state is refused\n\
+and nothing is written. Record what you do; do not keep state in your head.\n\n\
+- `shprd agent task add --id M4.1 --title \"…\" --scope <path> --acceptance <text>`\n\
+- `shprd agent spawn --task M4.1 --attempt 1 --agent claude/claude-opus-5-5 --worktree <path> --branch feature/m4-1`\n\
+- `shprd agent report --task M4.1 --attempt 1 --status completed --summary \"…\"`\n\
+- `shprd agent gate pass --task M4.1 --attempt 1 --gate lint`\n\
+- `shprd agent integrate --task M4.1 --commit <sha>`\n\
+- `shprd agent escalate --body \"…\" --default \"…\"` when a human must decide\n\
+- `shprd status` to see where every task sits\n\n\
+## Skills\n\n\
+Configured for you: {skills}\n\n\
+Load them before planning; they carry the conventions this repository runs on.\n",
+        base = base_branch,
+        integration = integration_branch(run_id),
+    )
 }
