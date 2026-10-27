@@ -120,6 +120,7 @@ mod tests {
             branch: String::from("feature/x"),
             report: None,
             gates,
+            reviews: Vec::new(),
         }
     }
 

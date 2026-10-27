@@ -274,6 +274,9 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
         } => check_reported(state, task, *attempt, changed_paths),
         EventKind::GatePassed { task, attempt, .. }
         | EventKind::GateFailed { task, attempt, .. } => check_gate(state, task, *attempt),
+        EventKind::ReviewRequested { task, attempt, .. } => {
+            check_review_requested(state, task, *attempt)
+        }
         EventKind::Integrated { task, .. } => check_integrated(state, task),
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, agent),
@@ -578,6 +581,24 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
             attempt,
         }),
     }
+}
+
+/// Rules for recording a review dispatch.
+///
+/// Only a finished attempt can be reviewed: the task has to be Reported, and
+/// the attempt named has to be the one that reported. Refusing here is what
+/// makes `shprd agent review` open no reviewer tab for a task that has
+/// nothing to review.
+fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
+    let found = task_in(state, task)?;
+    if found.status != TaskStatus::Reported {
+        return Err(RuleError::WrongStatus {
+            task: task.to_string(),
+            expected: "Reported",
+            found: found.status,
+        });
+    }
+    expect_current_attempt(task, found, attempt).map(|_| ())
 }
 
 /// Rules for integrating a passed task: a failed gate needs a later override.
@@ -1101,6 +1122,57 @@ mod tests {
             ]),
             RuleError::ReportNotCompleted { .. }
         ));
+    }
+
+    fn review_requested(seq: u64, id: &str, attempt: u32, reviewer: &str, degraded: bool) -> Event {
+        ev(
+            seq,
+            EventKind::ReviewRequested {
+                task: id.to_string(),
+                attempt,
+                reviewer: reviewer.to_string(),
+                degraded,
+            },
+        )
+    }
+
+    /// A review dispatch needs a reported attempt, and the one that reported.
+    #[test]
+    fn a_review_dispatch_needs_the_reported_attempt() {
+        assert!(matches!(
+            refused(&[
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                review_requested(4, "a", 1, "agent-2", false),
+            ]),
+            RuleError::WrongStatus { .. }
+        ));
+        assert!(matches!(
+            refused(&[
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                reported(4, "a", 1, &["src/a"]),
+                review_requested(5, "a", 2, "agent-2", false),
+            ]),
+            RuleError::AttemptOutOfOrder { .. }
+        ));
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a"]),
+            review_requested(5, "a", 1, "agent-2", true),
+        ]);
+        assert_eq!(status(&state, "a"), TaskStatus::Reported);
+        let reviews = match state.tasks.get("a").and_then(|task| task.latest_attempt()) {
+            Some(attempt) => attempt.reviews.clone(),
+            None => panic!("the attempt is missing"),
+        };
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].reviewer, "agent-2");
+        assert!(reviews[0].degraded);
     }
 
     #[test]

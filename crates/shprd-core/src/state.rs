@@ -138,6 +138,20 @@ pub struct Attempt {
     pub report: Option<Report>,
     /// Gates run against this attempt, in order.
     pub gates: Vec<GateResult>,
+    /// Reviews dispatched for this attempt, in order.
+    pub reviews: Vec<ReviewRequest>,
+}
+
+/// A review handed to a reviewer for an attempt.
+///
+/// It records who reviewed and whether the review was independent, so a
+/// landing decision reads the fact instead of guessing it from prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRequest {
+    /// The agent string the review was handed to.
+    pub reviewer: AgentId,
+    /// True when the reviewer shares the author's vendor.
+    pub degraded: bool,
 }
 
 /// What an agent reported about an attempt.
@@ -326,6 +340,7 @@ impl RunState {
                         branch: branch.clone(),
                         report: None,
                         gates: Vec::new(),
+                        reviews: Vec::new(),
                     });
                 }
             }
@@ -391,6 +406,23 @@ impl RunState {
                             seq: event.seq,
                         });
                     }
+                }
+            }
+            EventKind::ReviewRequested {
+                task,
+                reviewer,
+                degraded,
+                ..
+            } => {
+                // A review dispatch never moves the task on: it stays Reported
+                // until the review gate records its verdict.
+                if let Some(entry) = self.tasks.get_mut(task)
+                    && let Some(current) = entry.attempts.last_mut()
+                {
+                    current.reviews.push(ReviewRequest {
+                        reviewer: reviewer.clone(),
+                        degraded: *degraded,
+                    });
                 }
             }
             EventKind::Integrated { task, .. } => {

@@ -141,6 +141,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
+        EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",

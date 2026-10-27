@@ -416,6 +416,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
+        EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
@@ -438,6 +439,7 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
+        | EventKind::ReviewRequested { task, .. }
         | EventKind::HandedOff { task, .. } => Some(task),
         EventKind::Escalated { task, .. } => task.as_deref(),
         _ => None,

@@ -239,6 +239,21 @@ pub enum EventKind {
         /// Commits that were landed.
         commits: Vec<String>,
     },
+    /// A review was handed to a reviewer for an attempt.
+    ///
+    /// `degraded` is the fact a landing decision needs: it records that the
+    /// reviewer shares the author's vendor, so no independent review happened.
+    /// Recording it here keeps `shprd land` from guessing it out of prose.
+    ReviewRequested {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+        /// The agent string the review runs on.
+        reviewer: String,
+        /// True when the reviewer shares the author's vendor.
+        degraded: bool,
+    },
     /// An agent was put on cooldown (rate limit, quota, auth).
     Dry {
         /// The agent.
@@ -411,6 +426,12 @@ mod tests {
                 task: "M1.1".to_string(),
                 commits: vec!["abc123".to_string(), "def456".to_string()],
             },
+            EventKind::ReviewRequested {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                reviewer: "codex".to_string(),
+                degraded: true,
+            },
             EventKind::Dry {
                 agent: "codex".to_string(),
                 reason: "rate limited".to_string(),
@@ -472,7 +493,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 16, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 17, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {
