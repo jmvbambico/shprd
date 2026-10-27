@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use shprd_core::config::Skills;
-use shprd_core::event::EventKind;
+use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
 use shprd_core::state::{RunState, Task};
-use shprd_git::worktree::Layout;
+use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{Mux, naming};
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
 use shprd_roster::spec::LaunchSpec;
@@ -127,8 +127,8 @@ pub fn spawn(
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
-    let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     let tab = naming::tab_title(naming::Role::Worker, &pick.agent, &task.id, false);
+    let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     let kind = EventKind::Spawned {
         task: task.id.clone(),
         attempt,
@@ -139,6 +139,9 @@ pub fn spawn(
     };
     // Refuse before any effect: a refused spawn must leave nothing behind.
     env.ctx.check(&kind)?;
+    for resource in resource_kinds(&task.id, &worktree, &branch) {
+        env.ctx.check(&resource)?;
+    }
     let brief = render_brief(&BriefInput {
         task,
         run: &env.run,
@@ -150,19 +153,83 @@ pub fn spawn(
         skills: &skills,
     });
     write_brief(&brief_path, &brief)?;
+    let created = create_worktree(env, &task.id)?;
     let _ = mux;
-    env.ctx.commit(kind)?;
+    // The log is written last, so a failure here leaves nothing recorded and the
+    // worktree is taken back out.
+    if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
+        discard_worktree(env, &created);
+        return Err(err);
+    }
     Ok(SpawnReport {
         task: task.id.clone(),
         attempt,
         agent: pick.agent,
         model: pick.model,
-        worktree,
-        branch,
+        worktree: created.path,
+        branch: created.branch,
         tab,
         brief: brief_path,
         skills,
     })
+}
+
+/// The ledger entries a spawn writes for its worktree and branch.
+fn resource_kinds(task: &str, worktree: &Path, branch: &str) -> [EventKind; 2] {
+    [
+        EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Worktree,
+            name: worktree.display().to_string(),
+            task: Some(task.to_string()),
+        },
+        EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: branch.to_string(),
+            task: Some(task.to_string()),
+        },
+    ]
+}
+
+/// Creates the attempt's worktree from the integration branch.
+fn create_worktree(env: &SpawnEnv<'_>, task: &str) -> Result<Worktree, CliError> {
+    worktree::create(&env.ctx.root, &env.layout, &env.run, task, &env.base_branch).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("creating a worktree for {task}")))
+    })
+}
+
+/// Removes a worktree this spawn created, ignoring the failure: the caller is
+/// already returning a more useful error.
+fn discard_worktree(env: &SpawnEnv<'_>, created: &Worktree) {
+    if let Err(err) = worktree::remove(&env.ctx.root, &env.layout, created, true) {
+        eprintln!(
+            "warning: could not remove {}: {err}",
+            created.path.display()
+        );
+    }
+}
+
+/// Appends the worktree, the branch and then the attempt itself.
+fn record_attempt(
+    env: &SpawnEnv<'_>,
+    task: &str,
+    attempt: u32,
+    pick: &Pick,
+    created: &Worktree,
+) -> Result<(), CliError> {
+    for resource in resource_kinds(task, &created.path, &created.branch) {
+        env.ctx.commit(resource)?;
+    }
+    env.ctx.commit(EventKind::Spawned {
+        task: task.to_string(),
+        attempt,
+        agent: pick.agent.clone(),
+        model: pick.model.clone(),
+        worktree: created.path.display().to_string(),
+        branch: created.branch.clone(),
+    })?;
+    Ok(())
 }
 
 /// The task `id` names, or an error saying the run plan has no such task.
