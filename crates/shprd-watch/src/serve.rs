@@ -257,3 +257,158 @@ impl ServeClient {
         Ok(statuses)
     }
 }
+
+/// Epoch milliseconds now, saturating at 0 before 1970.
+#[must_use]
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Parse one SSE `data:` payload into an event.
+///
+/// kilo's specification duplicates the event schema names, so events are
+/// matched on `type` alone. Anything unrecognized or malformed is
+/// [`ServeEvent::Other`]: a stream never stops over one line it cannot read.
+#[must_use]
+pub fn parse_event(data: &str, now_ms: u64) -> ServeEvent {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return ServeEvent::Other;
+    };
+    let properties = value.get("properties");
+    match value.get("type").and_then(Value::as_str) {
+        Some("session.status") => {
+            let Some(session) = properties
+                .and_then(|p| p.get("sessionID"))
+                .and_then(Value::as_str)
+            else {
+                return ServeEvent::Other;
+            };
+            let status = properties
+                .and_then(|p| p.get("status"))
+                .map_or(Status::Unknown, |s| Status::from_json(s, now_ms));
+            ServeEvent::Status {
+                session: session.to_owned(),
+                status,
+            }
+        }
+        Some("session.error") => {
+            let error = properties.and_then(|p| p.get("error"));
+            ServeEvent::Error {
+                session: properties
+                    .and_then(|p| p.get("sessionID"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                name: error
+                    .and_then(|e| e.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("UnknownError")
+                    .to_owned(),
+                message: error
+                    .and_then(|e| e.get("data"))
+                    .and_then(|d| d.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }
+        }
+        _ => ServeEvent::Other,
+    }
+}
+
+impl ServeClient {
+    /// Open the `/event` stream.
+    ///
+    /// The connect is bounded by [`ServeClient::timeout`]; the reads are not,
+    /// because a quiet stream is normal. Dropping the returned
+    /// [`EventStream`] closes the connection.
+    ///
+    /// # Errors
+    ///
+    /// [`ServeError::NotLocal`] for a non-loopback base, [`ServeError::Network`]
+    /// when the connect fails and [`ServeError::Http`] for a non-200 status.
+    pub fn events(&self) -> Result<EventStream, ServeError> {
+        self.ensure_local()?;
+        // No global timeout: it would cut a long-lived stream short.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(self.timeout))
+            .timeout_global(None)
+            .build()
+            .into();
+        let url = format!("{}/event", self.base);
+        let resp = match agent.get(&url).call() {
+            Ok(resp) => resp,
+            Err(ureq::Error::StatusCode(code)) => return Err(ServeError::Http(code)),
+            Err(_) => return Err(ServeError::Network),
+        };
+        Ok(EventStream {
+            reader: std::io::BufReader::new(resp.into_body().into_reader()),
+            data: String::new(),
+            done: false,
+        })
+    }
+}
+
+/// The `/event` stream, read one SSE field at a time.
+pub struct EventStream {
+    /// Raw response body.
+    reader: std::io::BufReader<ureq::BodyReader<'static>>,
+    /// `data:` lines of the event being assembled, joined by newlines.
+    data: String,
+    /// Set once the body ended or failed; the iterator then stops.
+    done: bool,
+}
+
+impl EventStream {
+    /// Read one line into `line`; false at end of body or on a read error.
+    fn next_line(&mut self, line: &mut String) -> bool {
+        line.clear();
+        match std::io::BufRead::read_line(&mut self.reader, line) {
+            Ok(0) | Err(_) => false,
+            Ok(_) => true,
+        }
+    }
+
+    /// Turn the assembled `data:` payload into an event, if any.
+    fn take_event(&mut self) -> Option<ServeEvent> {
+        if self.data.is_empty() {
+            return None;
+        }
+        let payload = std::mem::take(&mut self.data);
+        Some(parse_event(&payload, now_ms()))
+    }
+}
+
+impl Iterator for EventStream {
+    type Item = Result<ServeEvent, ServeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let mut line = String::new();
+        loop {
+            if !self.next_line(&mut line) {
+                self.done = true;
+                return self.take_event().map(Ok);
+            }
+            let text = line.trim_end_matches(['\n', '\r']);
+            if text.is_empty() {
+                // Blank line: the event is complete.
+                if let Some(event) = self.take_event() {
+                    return Some(Ok(event));
+                }
+            } else if text.starts_with(':') {
+                // Comment, keep-alive: nothing to parse.
+            } else if let Some(value) = text.strip_prefix("data:") {
+                if !self.data.is_empty() {
+                    self.data.push('\n');
+                }
+                self.data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            }
+        }
+    }
+}
