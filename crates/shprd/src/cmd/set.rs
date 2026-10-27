@@ -10,7 +10,9 @@
 //! is never seen half-written and no restore step is needed. The file is read
 //! again once the temp file is on disk and just before the rename, so a file
 //! that changed at any point between the first read and the swap is refused
-//! instead of replaced.
+//! instead of replaced. The whole edit holds an exclusive lock on a sidecar file
+//! beside the config, so a second `set` refuses instead of interleaving with
+//! the first.
 
 use std::fs;
 use std::io::Write as _;
@@ -59,6 +61,10 @@ fn execute(
     let path = target_path(local, &home, root.as_deref())?;
 
     let (global, repo) = layers(&home, root.as_deref());
+
+    // Hold the lock from the first read until after the swap, so two `set` runs
+    // cannot interleave: the file is released when `_lock` drops.
+    let _lock = lock_sidecar(&path)?;
 
     // Read and edit in memory: the file stays untouched until the edited text
     // is known to be good.
@@ -196,6 +202,48 @@ fn ensure_unchanged(path: &Path, before: Option<&str>) -> Result<(), CliError> {
     Err(CliError::Invalid(anyhow!(
         "config changed while editing; try again"
     )))
+}
+
+/// The sidecar lock file beside `path`: `.config.toml` locks `.config.toml.lock`.
+fn lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.lock"))
+}
+
+/// Take the exclusive lock that guards every edit of `path`.
+///
+/// The returned file holds the lock and releases it when dropped, so the caller
+/// keeps it alive for the whole edit: no other `set` can read, check and swap
+/// this config in between. The lock file itself stays behind, empty, and is
+/// reused by the next run. A run that finds the lock held refuses rather than
+/// waits.
+fn lock_sidecar(path: &Path) -> Result<fs::File, CliError> {
+    let lock = lock_path(path);
+    if let Some(parent) = lock.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            CliError::other(anyhow!(error).context(format!("creating {}", parent.display())))
+        })?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock)
+        .map_err(|error| {
+            CliError::other(anyhow!(error).context(format!("opening {}", lock.display())))
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(CliError::Invalid(anyhow!(
+            "another shprd set is running; try again"
+        ))),
+        Err(fs::TryLockError::Error(error)) => Err(CliError::other(
+            anyhow!(error).context(format!("locking {}", lock.display())),
+        )),
+    }
 }
 
 /// Write `text` to `path` through a temp file beside it, then swap it in.
@@ -549,15 +597,15 @@ mod tests {
         );
     }
 
-    /// Every file beside `path` other than the config itself, so a refused or
-    /// failed write can prove it left no temp debris.
+    /// Every file beside `path` other than the config and its lock, so a refused
+    /// or failed write can prove it left no temp debris.
     fn other_files_beside(path: &Path) -> Vec<String> {
         let parent = path.parent().unwrap_or(Path::new("."));
         match fs::read_dir(parent) {
             Ok(entries) => entries
                 .filter_map(Result::ok)
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .filter(|name| name != "config.toml")
+                .filter(|name| name != "config.toml" && !name.ends_with(".lock"))
                 .collect(),
             Err(error) => panic!("should read {}: {error}", parent.display()),
         }
@@ -629,5 +677,31 @@ mod tests {
         assert_eq!(text_of(&path), hook_text);
         let left = other_files_beside(&path);
         assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    #[test]
+    fn refuses_when_another_set_holds_the_lock() {
+        let fixture = Fixture::new();
+        let args = orchestrator("claude/claude-opus-5-5");
+        assert!(fixture.run(&args).is_ok());
+        let path = fixture.global();
+        let before = fs::read(&path).unwrap_or_default();
+
+        let held = lock_sidecar(&path).unwrap_or_else(|err| panic!("lock: {err}"));
+        let refused = fixture.run(&args);
+        match refused {
+            Err(ref err) => assert!(
+                format!("{err}").contains("another shprd set is running; try again"),
+                "{err}"
+            ),
+            Ok(()) => panic!("a held lock should be refused"),
+        }
+        assert_eq!(fs::read(&path).unwrap_or_default(), before);
+
+        drop(held);
+        assert!(
+            fixture.run(&args).is_ok(),
+            "the lock releases with the file"
+        );
     }
 }
