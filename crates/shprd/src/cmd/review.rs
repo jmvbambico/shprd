@@ -16,8 +16,10 @@ use serde_json::{Value, json};
 use shprd_core::event::ReportStatus;
 use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
+use shprd_roster::models::AgentRef;
+use shprd_roster::spec::{HarnessSpec, LaunchSpec, Vendor};
 
-use crate::cmd::spawn::{self, SpawnEnv};
+use crate::cmd::spawn::{self, Program, SpawnEnv};
 use crate::ctx::{CliError, Ctx};
 
 /// The label a review carries when it is not cross-vendor, in the brief and on
@@ -282,4 +284,98 @@ fn reviewed_attempt(task: &Task) -> Result<&Attempt, CliError> {
             attempt.n
         ))),
     }
+}
+
+/// The agent a review runs on, with everything needed to start it.
+#[derive(Debug, Clone)]
+pub struct Reviewer {
+    /// The program name, which is the harness spec id.
+    pub agent: String,
+    /// The model to select, when the configured string carried one.
+    pub model: Option<String>,
+    /// How to start the program.
+    pub launch: LaunchSpec,
+    /// Whether this review is cross-vendor or degraded.
+    pub degraded: bool,
+}
+
+/// Picks the reviewer for one attempt.
+///
+/// The rule is the one AGENTS.md states: a change is reviewed by an agent from a
+/// different vendor than the one that wrote it, and a review that cannot meet
+/// that rule is labelled rather than pretended. So the vendor comes from the two
+/// harness specs, never from the program names, because two CLIs from one vendor
+/// share a vendor even when they share no binary.
+pub fn choose_reviewer(
+    configured: Option<&str>,
+    author: &str,
+    programs: &[Program],
+    degraded: bool,
+) -> Result<Reviewer, CliError> {
+    let raw = configured.ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no reviewer is configured: set one with `shprd set reviewer <program>/<model>`"
+        ))
+    })?;
+    let specs: Vec<HarnessSpec> = spawn::spec_table(programs);
+    let parsed = AgentRef::parse(raw, &specs).map_err(|err| {
+        CliError::Invalid(anyhow!(err).context(format!(
+            "the configured reviewer `{raw}` is not a usable agent"
+        )))
+    })?;
+    let program = programs
+        .iter()
+        .find(|program| program.spec.id == parsed.program)
+        .ok_or_else(|| {
+            CliError::Invalid(anyhow!(
+                "no harness spec for the reviewer {:?} in the data directory",
+                parsed.program
+            ))
+        })?;
+    let author_vendor = author_vendor(programs, author);
+    let mut reviewer = Reviewer {
+        agent: parsed.program,
+        model: parsed.model,
+        launch: program.spec.launch.clone(),
+        degraded,
+    };
+    match author_vendor {
+        None => {
+            // Without the author's spec there is no way to prove the two differ,
+            // so the review is only degraded when the caller says it may be.
+            if !degraded {
+                return Err(CliError::Invalid(anyhow!(
+                    "no harness spec for `{author}`, the agent that wrote this change, so \
+                     cross-vendor review cannot be checked: pass --degraded to review anyway"
+                )));
+            }
+            eprintln!("warning: no harness spec for `{author}`: this review is {DEGRADED_LABEL}");
+            reviewer.degraded = true;
+        }
+        Some(vendor) if vendor == program.spec.vendor => {
+            if !degraded {
+                return Err(CliError::Invalid(anyhow!(
+                    "the reviewer `{raw}` and `{author}`, which wrote this change, are both \
+                     {vendor:?}: set a reviewer from another vendor with `shprd set reviewer`, \
+                     or pass --degraded to review anyway"
+                )));
+            }
+            eprintln!(
+                "warning: the reviewer `{raw}` shares the vendor {vendor:?} with `{author}`: \
+                 this review is {DEGRADED_LABEL}"
+            );
+            reviewer.degraded = true;
+        }
+        Some(_) => {}
+    }
+    Ok(reviewer)
+}
+
+/// The vendor of `agent`'s harness spec, or `None` when the data directory has
+/// no spec for it.
+fn author_vendor(programs: &[Program], agent: &str) -> Option<Vendor> {
+    programs
+        .iter()
+        .find(|program| program.spec.id == agent)
+        .map(|program| program.spec.vendor)
 }
