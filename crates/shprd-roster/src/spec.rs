@@ -179,6 +179,9 @@ const LOCATION_PLACEHOLDERS: [&str; 5] = ["cwd_slug", "session", "yyyy", "mm", "
 /// component; and `~` may appear only as the first component, where it means the
 /// user's home directory.
 pub fn validate_location(location: &str) -> Result<(), SpecError> {
+    if location.trim().is_empty() {
+        return Err(SpecError::EmptyLocation);
+    }
     if location
         .char_indices()
         .any(|(index, ch)| ch == '~' && index != 0)
@@ -186,6 +189,26 @@ pub fn validate_location(location: &str) -> Result<(), SpecError> {
         return Err(SpecError::TildeNotLeading {
             location: location.to_owned(),
         });
+    }
+    if location.contains("**") {
+        return Err(SpecError::DoubleStar {
+            location: location.to_owned(),
+        });
+    }
+
+    // A leading `/` is the root; every component after it must be non-empty.
+    let body = location.strip_prefix('/').unwrap_or(location);
+    for (index, component) in body.split('/').enumerate() {
+        if component.is_empty() {
+            return Err(SpecError::EmptyPathComponent {
+                location: location.to_owned(),
+            });
+        }
+        if index == 0 && component.starts_with('*') {
+            return Err(SpecError::LeadingStar {
+                location: location.to_owned(),
+            });
+        }
     }
 
     let mut rest = location;
@@ -296,6 +319,27 @@ pub enum SpecError {
     /// A record location uses `~` anywhere but its first path component.
     #[error("location {location} uses `~` outside its first path component")]
     TildeNotLeading {
+        /// The location pattern that failed.
+        location: String,
+    },
+    /// A record location is empty or whitespace only.
+    #[error("location pattern is empty")]
+    EmptyLocation,
+    /// A record location has an empty path component, e.g. `a//b` or a trailing `/`.
+    #[error("location {location} has an empty path component")]
+    EmptyPathComponent {
+        /// The location pattern that failed.
+        location: String,
+    },
+    /// A record location uses `**`, which no supported CLI needs.
+    #[error("location {location} uses `**`: use a single `*` inside one path component")]
+    DoubleStar {
+        /// The location pattern that failed.
+        location: String,
+    },
+    /// A record location starts its first path component with `*`.
+    #[error("location {location} starts a path component with `*`")]
+    LeadingStar {
         /// The location pattern that failed.
         location: String,
     },
@@ -601,5 +645,42 @@ project_dirs = []
             Err(error) => error,
         };
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn location_error(location: &str) -> SpecError {
+        match validate_location(location) {
+            Ok(()) => panic!("{location} should be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn rejects_empty_location() {
+        assert!(matches!(location_error(""), SpecError::EmptyLocation));
+        assert!(matches!(location_error("   "), SpecError::EmptyLocation));
+    }
+
+    #[test]
+    fn rejects_empty_location_component() {
+        let error = location_error("~/.claude//{session}.jsonl");
+        assert!(matches!(error, SpecError::EmptyPathComponent { .. }));
+    }
+
+    #[test]
+    fn rejects_trailing_slash_location() {
+        let error = location_error("~/.claude/projects/");
+        assert!(matches!(error, SpecError::EmptyPathComponent { .. }));
+    }
+
+    #[test]
+    fn rejects_double_star_location() {
+        let error = location_error("~/.codex/sessions/**/*.jsonl");
+        assert!(matches!(error, SpecError::DoubleStar { .. }));
+    }
+
+    #[test]
+    fn rejects_leading_star_component() {
+        let error = location_error("*.jsonl/{session}");
+        assert!(matches!(error, SpecError::LeadingStar { .. }));
     }
 }
