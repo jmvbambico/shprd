@@ -92,6 +92,19 @@ pub enum Command {
     Up,
     /// Finish the run; refuses while a task is still working.
     Down,
+    /// Watch every working agent and hand work over when one goes dry.
+    Watch(WatchArgs),
+}
+
+/// Arguments for `watch`.
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    /// Run one polling pass and exit, instead of watching until stopped.
+    #[arg(long)]
+    pub once: bool,
+    /// How long to wait between polling passes, in milliseconds.
+    #[arg(long = "interval-ms", value_name = "MS", default_value_t = 10_000)]
+    pub interval_ms: u64,
 }
 
 /// Arguments for `janitor`.

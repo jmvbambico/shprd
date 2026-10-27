@@ -72,6 +72,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Keys(args)) => keys::run(&args, None),
         Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Down) => up::down(&ctx),
+        Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 

@@ -3,8 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use shprd_core::event::{Event, EventKind};
+use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_mux::{Mux, MuxError, PaneId, naming};
 use shprd_watch::machine::{Action, Health, Inputs, Policy, Watch};
@@ -14,9 +16,10 @@ use shprd_watch::records::pi::scan_pi;
 use shprd_watch::records::sqlite::{scan_kilo, scan_opencode};
 use shprd_watch::screen::{Sampler, ScreenSignal, sample};
 
+use crate::cli::WatchArgs;
 use crate::cmd::handoff::{HandoffRequest, handoff};
 use crate::cmd::spawn::{self, Program, SpawnEnv};
-use crate::ctx::CliError;
+use crate::ctx::{CliError, Ctx};
 
 /// The newest `*.jsonl` file in `dir`, if the directory holds one.
 ///
@@ -119,7 +122,7 @@ impl Watcher {
             if task.status != TaskStatus::Working {
                 continue;
             }
-            tick_task(self, mux, env, &state, &events, task, now_ms, &mut lines)?;
+            tick_task(self, mux, env, (&state, &events), task, now_ms, &mut lines)?;
         }
         let working = |task: &String, n: &u32, agent: &String| {
             state
@@ -139,12 +142,12 @@ fn tick_task(
     watcher: &mut Watcher,
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
-    state: &RunState,
-    events: &[Event],
+    run: (&RunState, &[Event]),
     task: &Task,
     now_ms: u64,
     lines: &mut Vec<String>,
 ) -> Result<(), CliError> {
+    let (state, events) = run;
     let Some(attempt) = task.attempts.last() else {
         return Ok(());
     };
@@ -309,6 +312,27 @@ fn spawned_at_ms(events: &[Event], task: &str, attempt: u32) -> u64 {
         })
         .map(|event| event.at_ms)
         .unwrap_or(0)
+}
+
+/// The `watch` verb: poll every working agent once per interval.
+///
+/// The loop only ends when the caller stops it: an unattended run wants the
+/// watchdog up for as long as the run lasts, and `--once` is how a caller asks
+/// for a single pass.
+pub fn run_verb(ctx: &Ctx, args: &WatchArgs, home: Option<&Path>) -> Result<(), CliError> {
+    let mux = spawn::real_mux();
+    let env = spawn::build_env(ctx, home)?;
+    let mut watcher = Watcher::new(Policy::default());
+    loop {
+        let now_ms = SystemClock.now_ms();
+        for line in watcher.tick(&mux, &env, now_ms)? {
+            println!("{line}");
+        }
+        if args.once {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(args.interval_ms));
+    }
 }
 
 #[cfg(test)]
