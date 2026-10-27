@@ -7,7 +7,7 @@
 //! torn final line (a crash mid-write) is tolerated.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Error as JsonError;
@@ -124,8 +124,10 @@ impl EventLog {
     ///
     /// The file is locked exclusively for the whole operation; the last `seq`
     /// is re-read under the lock because another process may have appended
-    /// since this handle was opened. Exactly one `\n`-terminated JSON line is
-    /// written and flushed to disk before returning.
+    /// since this handle was opened. A torn final line left by a crash is
+    /// truncated away first, so the new event never shares a line with it.
+    /// Exactly one `\n`-terminated JSON line is written and flushed to disk
+    /// before returning.
     pub fn append(
         &mut self,
         actor: Actor,
@@ -146,6 +148,9 @@ impl EventLog {
         })?;
 
         let outcome = read_locked(&file, &self.path)?;
+        // A crash can leave a partial line behind. Reads skip it, but an append
+        // would glue the new event onto it, so cut it off before writing.
+        repair_torn_tail(&file, &self.path)?;
         let seq = match outcome.events.last() {
             Some(last) => last.seq.saturating_add(1),
             None => 1,
@@ -212,6 +217,41 @@ fn write_line(mut file: &File, event: &Event, path: &Path) -> Result<(), LogErro
     };
     file.write_all(line.as_bytes()).map_err(io_err)?;
     file.flush().map_err(io_err)
+}
+
+/// Drop any bytes after the final `\n` so the next append starts a clean line.
+///
+/// Only bytes after the last newline are ever dropped, so no complete line is
+/// lost, and the cut is synced before the caller writes.
+fn repair_torn_tail(file: &File, path: &Path) -> Result<(), LogError> {
+    let io_err = |source: std::io::Error| LogError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let len = file.metadata().map_err(io_err)?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    let mut reader = file;
+    let mut keep = 0u64;
+    let mut chunk = [0u8; 4096];
+    let mut end = len;
+    while end > 0 {
+        let take = usize::try_from(end.min(4096)).unwrap_or(4096);
+        let start = end.saturating_sub(take as u64);
+        reader.seek(SeekFrom::Start(start)).map_err(io_err)?;
+        reader.read_exact(&mut chunk[..take]).map_err(io_err)?;
+        if let Some(index) = chunk[..take].iter().rposition(|byte| *byte == b'\n') {
+            keep = start.saturating_add(index as u64).saturating_add(1);
+            break;
+        }
+        end = start;
+    }
+    if keep == len {
+        return Ok(());
+    }
+    file.set_len(keep).map_err(io_err)?;
+    file.sync_all().map_err(io_err)
 }
 
 /// Parse and validate the whole stream behind `file`.
@@ -444,6 +484,45 @@ mod tests {
         };
         let third = append(&mut reopened, finished());
         assert_eq!(third.seq, 3, "the torn tail did not consume a seq");
+    }
+
+    #[test]
+    fn append_repairs_a_torn_tail_first() {
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let mut log = open_log(dir.path());
+        let first = append(&mut log, started());
+        let second = append(&mut log, finished());
+
+        let mut text = match std::fs::read_to_string(log.path()) {
+            Ok(text) => text,
+            Err(err) => panic!("read failed: {err}"),
+        };
+        text.push_str("{\"seq\":3,\"at_ms\":17,\"actor\":{\"type\":\"eng");
+        write_raw(log.path(), &text);
+
+        let third = append(&mut log, finished());
+        assert_eq!(third.seq, 3, "the torn tail did not consume a seq");
+        let after = match std::fs::read_to_string(log.path()) {
+            Ok(text) => text,
+            Err(err) => panic!("read failed: {err}"),
+        };
+        assert!(after.ends_with('\n'), "the log ends on a line boundary");
+        for line in after.lines() {
+            if let Err(err) = serde_json::from_str::<Event>(line) {
+                panic!("corrupt line: {err}\n{line}");
+            }
+        }
+
+        let outcome = read_all(&log);
+        assert!(!outcome.truncated_tail, "the torn tail was repaired");
+        assert_eq!(
+            outcome.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(outcome.events, vec![first, second, third]);
     }
 
     #[test]
