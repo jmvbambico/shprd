@@ -1,0 +1,52 @@
+# Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
+# Copyright (c) 2026 Elias Stravik
+# https://github.com/eliasstravik/herdr-projects
+#
+# Record, error and quota facts are from shprd's docs/agents.md (verified
+# 2026-10-27). Launch flags were re-checked with `opencode --help` (1.18.35)
+# but are not stated in docs/agents.md, so launch.verified is false.
+
+id = "opencode"
+name = "OpenCode"
+vendor = "opencode"
+verified_version = "1.18.35"
+dry_patterns = [
+    "rate limit",
+    "usage limit",
+    "quota",
+    "insufficient credits",
+    "429",
+    "resets at",
+    "insufficient_quota",
+    "rate_limit_exceeded",
+]
+
+[detect]
+binary = "opencode"
+version_args = ["--version"]
+signin_hint = "opencode auth login"
+
+[launch]
+interactive = ["opencode"]
+model_flag = "-m"
+auto_approve = ["--auto"]
+resume_flag = "--session"
+verified = false
+
+[models]
+list_command = ["opencode", "models"]
+
+[records]
+kind = "sqlite"
+location = "~/.local/share/opencode/opencode.db"
+errors = "message.data.error holds final errors; retries are not persisted"
+verified = true
+
+[quota]
+source = "none"
+retry_signal = "serve session.status"
+
+[skills]
+# docs/skills.md writes the native folder as ~/.config/opencode/skill(s); this is
+# the plural location.
+dirs = ["~/.config/opencode/skills", "~/.agents/skills", "~/.claude/skills"]

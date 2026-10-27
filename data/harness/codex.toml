@@ -1,0 +1,53 @@
+# Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
+# Copyright (c) 2026 Elias Stravik
+# https://github.com/eliasstravik/herdr-projects
+#
+# Record, error and quota facts are from shprd's docs/agents.md (verified
+# 2026-10-27). Launch flags were re-checked with `codex --help` (0.164.0) but
+# are not stated in docs/agents.md, so launch.verified is false.
+
+id = "codex"
+name = "Codex"
+vendor = "openai"
+verified_version = "0.164.0"
+dry_patterns = [
+    "rate limit",
+    "usage limit",
+    "quota",
+    "insufficient credits",
+    "429",
+    "resets at",
+    "rate_limit_exceeded",
+    "usage limit reached",
+]
+
+[detect]
+binary = "codex"
+version_args = ["--version"]
+signin_hint = "codex login"
+
+[launch]
+# herdr-projects starts codex for work with --no-daemon as well; it belongs to
+# the base command, not to approval handling.
+interactive = ["codex", "--no-daemon"]
+model_flag = "-m"
+effort_flag = "-c model_reasoning_effort="
+auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
+system_prompt = "-c developer_instructions="
+resume_flag = "resume"
+verified = false
+
+[models]
+list_command = ["codex", "debug", "models"]
+
+[records]
+kind = "jsonl"
+location = "~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl"
+errors = "provider errors in the rollout; quota on every turn via event_msg/token_count.rate_limits"
+verified = true
+
+[quota]
+source = "codex_wham"
+
+[skills]
+dirs = ["~/.codex/skills", ".agents/skills"]

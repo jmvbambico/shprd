@@ -1,0 +1,52 @@
+# Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
+# Copyright (c) 2026 Elias Stravik
+# https://github.com/eliasstravik/herdr-projects
+#
+# Record, error and quota facts are from shprd's docs/agents.md (verified
+# 2026-10-27). Launch flags were re-checked with `pi --help` (1.4.0) but are not
+# stated in docs/agents.md, so launch.verified is false.
+
+id = "pi"
+name = "Pi"
+vendor = "pi"
+verified_version = "1.4.0"
+dry_patterns = [
+    "rate limit",
+    "usage limit",
+    "quota",
+    "insufficient credits",
+    "429",
+    "resets at",
+    "rate_limit_error",
+    "credit balance is too low",
+]
+
+[detect]
+binary = "pi"
+version_args = ["--version"]
+signin_hint = "run `pi` and sign in to a provider, then `pi auth check --provider <provider>`"
+
+[launch]
+# pi cannot ask for approval, so there is no auto-approve flag.
+interactive = ["pi"]
+model_flag = "--model"
+effort_flag = "--thinking"
+system_prompt = "--append-system-prompt"
+resume_flag = "--session-id"
+verified = false
+
+[models]
+list_command = ["pi", "--list-models"]
+
+[records]
+kind = "jsonl"
+location = "~/.pi/agent/sessions/<cwd-slug>/<ts>_<id>.jsonl"
+errors = "stopReason: \"error\" plus errorMessage; no reset time"
+verified = true
+
+[quota]
+source = "none"
+retry_signal = "json auto_retry_start"
+
+[skills]
+dirs = ["~/.pi/agent/skills", "~/.agents/skills"]

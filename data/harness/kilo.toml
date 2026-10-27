@@ -1,0 +1,50 @@
+# Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
+# Copyright (c) 2026 Elias Stravik
+# https://github.com/eliasstravik/herdr-projects
+#
+# Record, error and quota facts are from shprd's docs/agents.md (verified
+# 2026-10-27). Launch flags were re-checked with `kilo --help` (7.7.3) but are
+# not stated in docs/agents.md, so launch.verified is false.
+
+id = "kilo"
+name = "Kilo"
+vendor = "kilo"
+verified_version = "7.7.3"
+dry_patterns = [
+    "rate limit",
+    "usage limit",
+    "quota",
+    "insufficient credits",
+    "429",
+    "resets at",
+    "insufficient_quota",
+    "rate_limit_exceeded",
+]
+
+[detect]
+binary = "kilo"
+version_args = ["--version"]
+signin_hint = "kilo auth login"
+
+[launch]
+interactive = ["kilo"]
+model_flag = "-m"
+auto_approve = ["--auto"]
+resume_flag = "--session"
+verified = false
+
+[models]
+list_command = ["kilo", "models"]
+
+[records]
+kind = "sqlite"
+location = "~/.local/share/kilo/kilo.db"
+errors = "message.data.error holds final errors; retries are not persisted"
+verified = true
+
+[quota]
+source = "kilo_profile"
+retry_signal = "serve session.status"
+
+[skills]
+dirs = ["~/.agents/skills", "~/.claude/skills"]
