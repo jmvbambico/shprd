@@ -7,8 +7,10 @@
 //! config unusable (a reviewer equal to the orchestrator, say) exits 2 with the
 //! reason and writes nothing at all. A write that survives that check goes to a
 //! unique temp file, is fsynced, and is renamed over the target, so the config
-//! is never seen half-written and no restore step is needed. A file that changed
-//! between the read and the write is refused instead of replaced.
+//! is never seen half-written and no restore step is needed. The file is read
+//! again once the temp file is on disk and just before the rename, so a file
+//! that changed at any point between the first read and the swap is refused
+//! instead of replaced.
 
 use std::fs;
 use std::io::Write as _;
@@ -72,9 +74,9 @@ fn execute(
     validate_edited(&path, &edited, &global, repo.as_deref())?;
 
     // A file someone else saved in the meantime wins: replacing it would
-    // silently drop their edit.
-    ensure_unchanged(&path, previous.as_deref())?;
-    write_atomic(&path, &edited)?;
+    // silently drop their edit. The check runs again just before the swap, so
+    // an edit that lands while the temp file is written is caught too.
+    replace_checked(&path, &edited, previous.as_deref(), || {})?;
 
     let path_env = std::env::var("PATH").unwrap_or_default();
     for agent in &change.agents {
@@ -196,12 +198,39 @@ fn ensure_unchanged(path: &Path, before: Option<&str>) -> Result<(), CliError> {
     )))
 }
 
-/// Write `text` to `path` through a unique temp file beside it, then rename.
+/// Write `text` to `path` through a temp file beside it, then swap it in.
 ///
-/// The temp file shares the target's directory, so the rename stays inside one
-/// filesystem, and it is fsynced before the rename, so a crash cannot leave a
-/// half-written config behind.
-fn write_atomic(path: &Path, text: &str) -> Result<(), CliError> {
+/// The temp file is on disk and fsynced before the target is checked again, so
+/// an edit that landed while the temp file was being written is refused instead
+/// of overwritten. `before_rename` runs between the two: production passes a
+/// no-op, a test uses it to change the target at the last possible moment.
+fn replace_checked(
+    path: &Path,
+    text: &str,
+    before: Option<&str>,
+    before_rename: impl FnOnce(),
+) -> Result<(), CliError> {
+    let temp = write_temp(path, text)?;
+    before_rename();
+    if let Err(refusal) = ensure_unchanged(path, before) {
+        let _ = fs::remove_file(&temp);
+        return Err(refusal);
+    }
+    fs::rename(&temp, path)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&temp);
+        })
+        .map_err(|error| {
+            CliError::other(anyhow!(error).context(format!("replacing {}", path.display())))
+        })
+}
+
+/// Write `text` to a unique, fsynced temp file beside `path`, returning its path.
+///
+/// The temp file shares the target's directory, so a later rename stays inside
+/// one filesystem, and it is fsynced, so a crash cannot leave a half-written
+/// config behind. The caller must rename or remove the file.
+fn write_temp(path: &Path, text: &str) -> Result<PathBuf, CliError> {
     let parent = path
         .parent()
         .map_or_else(|| Path::new("."), |parent| parent);
@@ -219,13 +248,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), CliError> {
             anyhow!(error).context(format!("writing {}", temp.display())),
         ));
     }
-    fs::rename(&temp, path)
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&temp);
-        })
-        .map_err(|error| {
-            CliError::other(anyhow!(error).context(format!("replacing {}", path.display())))
-        })
+    Ok(temp)
 }
 
 /// A temp path beside `path` that no two writers can pick at the same time.
@@ -589,5 +612,22 @@ mod tests {
         }
         assert_eq!(refusal_code(ensure_unchanged(&path, before.as_deref())), 2);
         assert_eq!(text_of(&path), "mux = \"tuios\"\n");
+    }
+
+    #[test]
+    fn refuses_a_change_that_lands_while_the_temp_file_is_written() {
+        let home = temp("hook");
+        let path = home.path().join("config.toml");
+        let before = "mux = \"herdr\"\n";
+        assert!(fs::write(&path, before).is_ok());
+        let hook_text = "mux = \"tuios\"\n";
+
+        let refused = replace_checked(&path, "mux = \"herdr\"\n[roster]\n", Some(before), || {
+            assert!(fs::write(&path, hook_text).is_ok());
+        });
+        assert_eq!(refusal_code(refused), 2);
+        assert_eq!(text_of(&path), hook_text);
+        let left = other_files_beside(&path);
+        assert!(left.is_empty(), "left behind: {left:?}");
     }
 }
