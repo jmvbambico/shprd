@@ -15,7 +15,12 @@
 
 mod cli;
 pub mod keys;
+// Wired into the trait impl by the next commit.
 mod shell;
+#[allow(dead_code)]
+mod tabs;
+#[allow(dead_code)]
+mod workspaces;
 
 use std::path::{Path, PathBuf};
 
