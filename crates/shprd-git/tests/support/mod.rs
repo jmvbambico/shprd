@@ -103,3 +103,45 @@ impl Repo {
 pub fn is_dir(path: &Path) -> bool {
     path.is_dir()
 }
+
+/// Runs git in `dir` and returns its trimmed stdout.
+///
+/// Worktrees are separate directories, so a test that drives them needs git
+/// somewhere other than [`Repo::path`].
+pub fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = match Command::new("git").args(args).current_dir(dir).output() {
+        Ok(output) => output,
+        Err(err) => panic!("git {args:?} in {}: {err}", dir.display()),
+    };
+    if !output.status.success() {
+        panic!(
+            "git {args:?} in {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string()
+}
+
+/// The commit HEAD points at in `dir`.
+pub fn head_in(dir: &Path) -> String {
+    git_in(dir, &["rev-parse", "HEAD"])
+}
+
+/// Writes `body` to `rel`, commits it, and returns the new commit id.
+pub fn commit_in(dir: &Path, rel: &str, body: &str, message: &str) -> String {
+    let path = dir.join(rel);
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        panic!("mkdir {}: {err}", parent.display());
+    }
+    if let Err(err) = std::fs::write(&path, body) {
+        panic!("write {}: {err}", path.display());
+    }
+    git_in(dir, &["add", "--", rel]);
+    git_in(dir, &["commit", "-m", message]);
+    head_in(dir)
+}

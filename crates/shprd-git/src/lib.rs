@@ -5,4 +5,5 @@
 
 pub mod changed;
 pub mod git;
+pub mod integrate;
 pub mod worktree;
