@@ -550,6 +550,9 @@ dependencies = [
 [[package]]
 name = "shprd-watch"
 version = "0.0.0"
+dependencies = [
+ "shprd-mux",
+]
 
 [[package]]
 name = "simd-adler32"
