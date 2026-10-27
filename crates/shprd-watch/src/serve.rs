@@ -412,3 +412,222 @@ impl Iterator for EventStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::thread::JoinHandle;
+
+    /// A 200 response carrying `body` as JSON.
+    fn http_ok(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A response with an error status and no body.
+    fn http_code(code: u16) -> String {
+        format!("HTTP/1.1 {code} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    /// A 200 response carrying an SSE body.
+    fn sse(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+        )
+    }
+
+    /// Reply to one connection per canned response, then stop.
+    ///
+    /// Returns the loopback port and the server thread's handle.
+    fn fake_server(responses: Vec<String>) -> (u16, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                drain(&mut stream);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                let _ = stream.shutdown(Shutdown::Write);
+            }
+        });
+        (port, handle)
+    }
+
+    /// Consume the request head so the write does not race the read.
+    fn drain(stream: &mut TcpStream) {
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+    }
+    const NOW: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn status_parsing_reads_both_next_interpretations() {
+        let body = r#"{"a":{"type":"idle"},"b":{"type":"busy"},
+            "c":{"type":"retry","attempt":3,"message":"slow down","next":1700000009999},
+            "d":{"type":"retry","attempt":1,"message":"wait","next":2500},
+            "e":{"type":"paused"}}"#;
+        let statuses = parse_statuses(body, NOW).expect("parses");
+        assert_eq!(statuses.get("a"), Some(&Status::Idle));
+        assert_eq!(statuses.get("b"), Some(&Status::Busy));
+        assert_eq!(
+            statuses.get("c"),
+            Some(&Status::Retry {
+                attempt: 3,
+                message: "slow down".to_owned(),
+                next_at_ms: Some(1_700_000_009_999),
+            })
+        );
+        assert_eq!(
+            statuses.get("d"),
+            Some(&Status::Retry {
+                attempt: 1,
+                message: "wait".to_owned(),
+                next_at_ms: Some(NOW + 2500),
+            })
+        );
+        assert_eq!(statuses.get("e"), Some(&Status::Unknown));
+        assert_eq!(statuses.len(), 5);
+    }
+
+    #[test]
+    fn status_parsing_truncates_message_and_rejects_non_object() {
+        let long = "x".repeat(500);
+        let body = format!(r#"{{"r":{{"type":"retry","attempt":2,"message":"{long}"}}}}"#);
+        let statuses = parse_statuses(&body, NOW).expect("parses");
+        let Some(Status::Retry { message, .. }) = statuses.get("r") else {
+            panic!("expected retry, got {:?}", statuses.get("r"));
+        };
+        assert_eq!(message.chars().count(), MESSAGE_LIMIT);
+        assert_eq!(parse_statuses("[]", NOW), Err(ServeError::Shape));
+        assert_eq!(parse_statuses("not json", NOW), Err(ServeError::Shape));
+    }
+
+    #[test]
+    fn local_base_check_accepts_only_loopback() {
+        assert!(is_local_base("http://127.0.0.1:4096"));
+        assert!(is_local_base("http://localhost:8080/"));
+        assert!(is_local_base("http://[::1]:1234"));
+        assert!(!is_local_base("https://example.com"));
+        assert!(!is_local_base("http://10.0.0.5:4096"));
+        assert!(!is_local_base("127.0.0.1:4096"));
+    }
+
+    #[test]
+    fn status_client_reads_snapshot_and_filters_by_session() {
+        let body = r#"{"s1":{"type":"busy"},"s2":{"type":"idle"}}"#;
+        let (port, server) = fake_server(vec![http_ok(body), http_ok(body)]);
+        let client = ServeClient::local(port, Duration::from_secs(5));
+        let all = client.status(None, NOW).expect("snapshot");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get("s1"), Some(&Status::Busy));
+        let one = client.status(Some("s2"), NOW).expect("filtered");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one.get("s2"), Some(&Status::Idle));
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn status_client_reports_unknown_for_a_session_the_server_omits() {
+        let (port, server) = fake_server(vec![http_ok("{}")]);
+        let client = ServeClient::local(port, Duration::from_secs(5));
+        let map = client.status(Some("gone"), NOW).expect("snapshot");
+        assert_eq!(map.get("gone"), Some(&Status::Unknown));
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn status_client_maps_http_errors_and_refuses_remote_bases() {
+        let (port, server) = fake_server(vec![http_code(404)]);
+        let client = ServeClient::local(port, Duration::from_secs(5));
+        assert_eq!(client.status(None, NOW), Err(ServeError::Http(404)));
+        server.join().expect("server thread");
+        let remote = ServeClient::new("http://192.168.1.20:4096", Duration::from_secs(1));
+        assert_eq!(remote.status(None, NOW), Err(ServeError::NotLocal));
+        assert!(matches!(remote.events(), Err(ServeError::NotLocal)));
+    }
+
+    #[test]
+    fn event_stream_yields_status_error_and_skips_noise() {
+        let payload = concat!(
+            ": keep-alive\n\n",
+            "event: session.status\n",
+            "data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"s1\",",
+            "\"status\":{\"type\":\"retry\",\"attempt\":2,\"message\":\"rate limited\",",
+            "\"next\":1700000009999}}}\n\n",
+            "data: {\"type\":\"session.error\",\"properties\":{\"sessionID\":\"s1\",",
+            "\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"boom\",",
+            "\"statusCode\":429}}}}\n\n",
+            "data: {not json\n\n",
+            "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n",
+        );
+        let (port, server) = fake_server(vec![sse(payload)]);
+        let client = ServeClient::local(port, Duration::from_secs(5));
+        let events: Vec<ServeEvent> = client
+            .events()
+            .expect("stream opens")
+            .map(|event| event.expect("no transport error"))
+            .collect();
+        server.join().expect("server thread");
+        assert_eq!(
+            events,
+            vec![
+                ServeEvent::Status {
+                    session: "s1".to_owned(),
+                    status: Status::Retry {
+                        attempt: 2,
+                        message: "rate limited".to_owned(),
+                        next_at_ms: Some(1_700_000_009_999),
+                    },
+                },
+                ServeEvent::Error {
+                    session: Some("s1".to_owned()),
+                    name: "UnknownError".to_owned(),
+                    message: "boom".to_owned(),
+                },
+                ServeEvent::Other,
+                ServeEvent::Other,
+            ]
+        );
+    }
+
+    #[test]
+    fn event_parsing_defaults_and_ignores_the_unknown() {
+        assert_eq!(parse_event("", NOW), ServeEvent::Other);
+        assert_eq!(parse_event("{\"type\":\"x\"}", NOW), ServeEvent::Other);
+        let bare =
+            r#"{"type":"session.status","properties":{"sessionID":"s","status":{"type":"busy"}}}"#;
+        assert_eq!(
+            parse_event(bare, NOW),
+            ServeEvent::Status {
+                session: "s".to_owned(),
+                status: Status::Busy,
+            }
+        );
+        let no_status = r#"{"type":"session.status","properties":{"sessionID":"s"}}"#;
+        assert_eq!(
+            parse_event(no_status, NOW),
+            ServeEvent::Status {
+                session: "s".to_owned(),
+                status: Status::Unknown,
+            }
+        );
+        let no_session = r#"{"type":"session.error","properties":{"error":{"name":"E"}}}"#;
+        assert_eq!(
+            parse_event(no_session, NOW),
+            ServeEvent::Error {
+                session: None,
+                name: "E".to_owned(),
+                message: String::new(),
+            }
+        );
+    }
+}
