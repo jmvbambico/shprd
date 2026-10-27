@@ -506,3 +506,402 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use std::time::Duration;
+
+    use shprd_core::config::Skills;
+    use shprd_core::event::Actor;
+    use shprd_core::state::TaskStatus;
+    use shprd_git::worktree::Layout;
+    use shprd_mux::fake::{Call, FakeMux};
+    use shprd_mux::naming;
+    use shprd_roster::spec::HarnessSpec;
+    use tempfile::TempDir;
+
+    use crate::cmd::spawn::{self, Program, SpawnRequest};
+    use crate::ctx::Ctx;
+
+    /// Runs one git command in `dir`, returning its trimmed stdout.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A harness spec for a fake CLI: the tests record the launch, never run
+    /// it, so `interactive` is the harmless `sh`.
+    fn fake_spec(id: &str) -> HarnessSpec {
+        let text = format!(
+            r#"
+id = "{id}"
+name = "Fake {id}"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "{id}"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["sh"]
+model_args = ["--model", "{{model}}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{{session}}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+"#
+        );
+        toml::from_str::<HarnessSpec>(&text).unwrap_or_else(|err| panic!("the test spec: {err}"))
+    }
+
+    /// A repository with one commit on `main` and the integration branch, plus
+    /// a home for briefs and worktrees.
+    struct Scratch {
+        repo: TempDir,
+        home: TempDir,
+    }
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            git_out(repo.path(), &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.path().join("README.md"), "scratch\n").unwrap_or_default();
+            git_out(repo.path(), &["add", "."]);
+            git_out(repo.path(), &["commit", "-q", "-m", "first"]);
+            git_out(repo.path(), &["branch", "integration/m5"]);
+            Scratch { repo, home }
+        }
+
+        fn root(&self) -> &Path {
+            self.repo.path()
+        }
+
+        fn repo_name(&self) -> String {
+            self.root()
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+
+        /// A context with a started run and one task `T1` in its plan.
+        fn ctx(&self) -> Ctx {
+            let ctx = Ctx::new(self.root().to_path_buf(), Actor::Human, false, true);
+            ctx.commit(EventKind::RunStarted {
+                run_id: "t1".to_string(),
+                repo: self.repo_name(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m5".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "Hand a task over".to_string(),
+                scope: vec!["crates/shprd".to_string()],
+                acceptance: vec!["the next agent continues".to_string()],
+                tags: vec!["rust".to_string()],
+                skills: Vec::new(),
+                deps: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx
+        }
+
+        /// The environment a hand-off runs in, with `workers` configured.
+        fn env<'a>(&self, ctx: &'a Ctx, workers: &[&str]) -> SpawnEnv<'a> {
+            let mut base_env = BTreeMap::new();
+            base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            SpawnEnv {
+                ctx,
+                layout: Layout::default_for_home(self.home.path()),
+                briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                run: "t1".to_string(),
+                base_branch: "integration/m5".to_string(),
+                repo_name: self.repo_name(),
+                programs: workers
+                    .iter()
+                    .map(|id| Program {
+                        spec: fake_spec(id),
+                        installed: true,
+                    })
+                    .collect(),
+                workers: workers.iter().map(|id| (*id).to_string()).collect(),
+                skills: Skills {
+                    workers: vec!["tdd".to_string()],
+                    ..Skills::default()
+                },
+                compat: Vec::new(),
+                base_env,
+                // No wait: a fake pane that never reports an agent would
+                // otherwise stall every test that launches one.
+                ready_wait: Duration::ZERO,
+            }
+        }
+    }
+
+    /// A fake multiplexer holding the repo's workspace.
+    fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(
+            &naming::workspace_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        mux
+    }
+
+    /// Spawns the fake `sh` agent on `T1` and returns its worktree.
+    fn seed(mux: &FakeMux, env: &SpawnEnv<'_>) -> PathBuf {
+        let request = SpawnRequest {
+            task: "T1".to_string(),
+            agent: Some("sh".to_string()),
+            effort: None,
+        };
+        let report = spawn::spawn(mux, env, &request).unwrap_or_else(|err| panic!("{err}"));
+        report.worktree
+    }
+
+    /// What the human asked for: hand `T1` over, optionally to a named agent.
+    fn request(to: Option<&str>) -> HandoffRequest {
+        HandoffRequest {
+            task: "T1".to_string(),
+            reason: "the agent hit its limit".to_string(),
+            to: to.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_hand_off_checkpoints_the_work_and_swaps_the_agent() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        // The outgoing agent leaves half a change behind.
+        std::fs::write(worktree.join("half.rs"), "fn half() {}\n").unwrap_or_default();
+        let before = git_out(&worktree, &["rev-parse", "HEAD"]);
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.from, "sh");
+        assert_eq!(report.to, "pi");
+        assert_eq!(report.attempt, 1);
+        assert_ne!(report.checkpoint, before, "no checkpoint commit was made");
+        assert_eq!(
+            git_out(&worktree, &["rev-parse", "HEAD"]),
+            report.checkpoint
+        );
+        assert_eq!(
+            git_out(&worktree, &["log", "-1", "--format=%s"]),
+            "wip(shprd): checkpoint before hand-off from sh"
+        );
+        assert!(
+            git_out(&worktree, &["status", "--porcelain"]).is_empty(),
+            "the checkpoint left the worktree dirty"
+        );
+        assert!(report.elapsed_ms < 60_000, "took {}ms", report.elapsed_ms);
+        assert!(
+            report.brief.to_string_lossy().ends_with("T1-a1-h1.md"),
+            "{:?}",
+            report.brief
+        );
+    }
+
+    #[test]
+    fn a_hand_off_records_the_event_and_moves_the_tab() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        let old_tab = std::fs::read_to_string(&record)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = state.tasks.get("T1").unwrap_or_else(|| panic!("no task"));
+        assert_eq!(
+            task.attempts.len(),
+            1,
+            "the hand-off must not add an attempt"
+        );
+        assert_eq!(task.attempts[0].agent, "pi");
+        assert_eq!(task.status, TaskStatus::Working);
+        let workspace = mux
+            .find_workspace(&naming::workspace_name(&scratch.repo_name()))
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no workspace"));
+        let tabs = mux
+            .list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(tabs.len(), 1, "the old tab should be closed: {tabs:?}");
+        assert_eq!(tabs[0].title, "\u{25cf} pi\u{b7}T1");
+        assert!(
+            mux.calls()
+                .contains(&Call::CloseTab(TabId::new(old_tab.clone()))),
+            "the old tab {:?} was not closed",
+            old_tab
+        );
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap_or_default().trim(),
+            tabs[0].id.as_str(),
+            "the tab record still points at the old tab"
+        );
+        let created = mux
+            .calls()
+            .iter()
+            .rev()
+            .find_map(|call| match call {
+                Call::CreateTab(_, _, cwd) => Some(cwd.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tab was created by the hand-off"));
+        assert_eq!(created, worktree, "the newcomer sits elsewhere");
+        assert_eq!(report.tab, "\u{25cf} pi\u{b7}T1");
+    }
+
+    #[test]
+    fn the_brief_says_where_to_continue() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        // What the outgoing agent last printed, which the newcomer should see.
+        let pane = mux
+            .calls()
+            .iter()
+            .find_map(|call| match call {
+                Call::Run(pane, _, _) => Some(pane.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the CLI was never started"));
+        mux.set_screen(&pane, "half of the parser is written");
+        std::fs::write(worktree.join("half.rs"), "fn half() {}\n").unwrap_or_default();
+
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(
+            brief.contains("Hand a task over"),
+            "the original brief: {brief}"
+        );
+        assert!(brief.contains("## You are taking over"), "{brief}");
+        assert!(brief.contains("handed from `sh` to `pi`"), "{brief}");
+        assert!(brief.contains("the agent hit its limit"), "{brief}");
+        assert!(brief.contains(&report.checkpoint), "{brief}");
+        assert!(brief.contains("do not start over"), "{brief}");
+        assert!(
+            brief.contains("half.rs"),
+            "the diffstat is missing: {brief}"
+        );
+        assert!(brief.contains("half of the parser is written"), "{brief}");
+    }
+
+    #[test]
+    fn no_worker_available_escalates_and_exits_two() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        // Only the agent handing over is configured, so the roster wraps onto
+        // itself and comes up empty.
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+
+        let err = match handoff(&mux, &env, &request(None)) {
+            Ok(report) => panic!("handed off to {} anyway", report.to),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.exit_code(), 2);
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let escalation = state
+            .escalations
+            .last()
+            .unwrap_or_else(|| panic!("nothing was escalated"));
+        assert_eq!(escalation.body, "no worker available to take over");
+        assert_eq!(escalation.default_action, "wait for an agent to come back");
+        assert_eq!(
+            state.tasks.get("T1").map(|task| task.attempts.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_dry_next_worker_is_skipped() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi", "opencode"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        ctx.commit(EventKind::Dry {
+            agent: "pi".to_string(),
+            reason: "quota".to_string(),
+            reset_at_ms: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.to, "opencode");
+    }
+
+    #[test]
+    fn an_invalid_to_exits_two_and_changes_nothing() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        let before = git_out(&worktree, &["rev-parse", "HEAD"]);
+
+        let err = match handoff(&mux, &env, &request(Some("nope/model"))) {
+            Ok(report) => panic!("accepted {report:?}"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(git_out(&worktree, &["rev-parse", "HEAD"]), before);
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            state
+                .tasks
+                .get("T1")
+                .and_then(|task| task.latest_attempt())
+                .map(|attempt| attempt.agent.clone()),
+            Some("sh".to_string())
+        );
+    }
+}
