@@ -428,15 +428,20 @@ fn describe(detection: &Detection) -> (Level, String) {
     (level, text)
 }
 
-/// The vendor of the harness an agent string names.
-fn vendor_of(specs: &[HarnessSpec], agent: &str) -> Option<Vendor> {
-    AgentRef::parse(agent, specs)
-        .ok()?
+/// The vendor `agent` names, or why the string names none.
+fn vendor_or_reason(specs: &[HarnessSpec], agent: &str) -> Result<Vendor, String> {
+    let named = AgentRef::parse(agent, specs).map_err(|error| error.to_string())?;
+    named
         .spec(specs)
         .map(|spec| spec.vendor)
+        .ok_or_else(|| format!("the harness table has no spec for `{}`", named.program))
 }
 
 /// Section 5: whether the reviewer comes from another vendor than every worker.
+///
+/// An agent string that names no vendor is reported as a warning line rather
+/// than skipped, and a review with any such agent never claims independence:
+/// an unchecked worker could share the reviewer's vendor.
 fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
     let section = report.section("Review");
     let Some(roster) = config.map(|config| &config.roster) else {
@@ -451,36 +456,52 @@ fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Op
         section.add(Level::Warn, "reviewer not set, so no cross-vendor review");
         return;
     };
-    let Some(vendor) = vendor_of(specs, reviewer) else {
-        section.add(
-            Level::Warn,
-            format!("reviewer {reviewer}: no harness spec names its vendor"),
-        );
-        return;
+    let mut skipped = 0usize;
+    let vendor = match vendor_or_reason(specs, reviewer) {
+        Ok(vendor) => Some(vendor),
+        Err(reason) => {
+            skipped += 1;
+            section.add(
+                Level::Warn,
+                format!("cannot check vendor of {reviewer}: {reason}"),
+            );
+            None
+        }
     };
-    let clashes: Vec<&str> = roster
-        .workers
-        .iter()
-        .filter(|worker| vendor_of(specs, worker) == Some(vendor))
-        .map(String::as_str)
-        .collect();
-    if clashes.is_empty() {
-        section.add(
+    let mut clashes: Vec<&str> = Vec::new();
+    for worker in &roster.workers {
+        match vendor_or_reason(specs, worker) {
+            Ok(worker_vendor) => {
+                if vendor == Some(worker_vendor) {
+                    clashes.push(worker.as_str());
+                }
+            }
+            Err(reason) => {
+                skipped += 1;
+                section.add(
+                    Level::Warn,
+                    format!("cannot check vendor of {worker}: {reason}"),
+                );
+            }
+        }
+    }
+    match vendor {
+        Some(vendor) if clashes.is_empty() && skipped == 0 => section.add(
             Level::Ok,
             format!(
                 "reviewer {reviewer} is {}, independent of every worker",
                 vendor_name(vendor)
             ),
-        );
-    } else {
-        section.add(
+        ),
+        Some(vendor) if !clashes.is_empty() => section.add(
             Level::Fail,
             format!(
                 "reviewer {reviewer} is {}: the same vendor as worker(s) {}",
                 vendor_name(vendor),
                 clashes.join(", ")
             ),
-        );
+        ),
+        _ => {}
     }
 }
 
@@ -776,6 +797,30 @@ mod tests {
         config.roster.orchestrator = orchestrator.map(str::to_owned);
         config.roster.workers = workers.iter().map(|agent| (*agent).to_owned()).collect();
         config
+    }
+
+    #[test]
+    fn a_worker_whose_vendor_cannot_be_checked_is_reported() {
+        let specs = harness_specs();
+        let mut config = config(None, &["kilo", "gemini/pro"]);
+        config.roster.reviewer = Some("claude/opus".to_owned());
+        let mut page = Report::default();
+        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        let text = render(&page);
+        assert!(text.contains("cannot check vendor of gemini/pro"), "{text}");
+        assert!(!text.contains("independent of every worker"), "{text}");
+    }
+
+    #[test]
+    fn a_reviewer_whose_vendor_cannot_be_checked_is_reported() {
+        let specs = harness_specs();
+        let mut config = config(None, &["claude/opus"]);
+        config.roster.reviewer = Some("gemini/pro".to_owned());
+        let mut page = Report::default();
+        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        let text = render(&page);
+        assert!(text.contains("cannot check vendor of gemini/pro"), "{text}");
+        assert!(!text.contains("independent of every worker"), "{text}");
     }
 
     /// The shipped harness table, which names every program.
