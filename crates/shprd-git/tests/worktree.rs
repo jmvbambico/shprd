@@ -125,3 +125,53 @@ fn refuses_an_unusable_run_or_task_id() {
         assert!(matches!(err, WorktreeError::InvalidId { .. }), "{err:?}");
     }
 }
+
+#[test]
+fn refuses_to_remove_a_worktree_outside_the_root() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let outside = repo.path.join("outside-wt");
+    let path_text = outside.display().to_string();
+    repo.git(&["worktree", "add", "-b", "shprd/r1/OUT", &path_text, "main"]);
+
+    let outside_wt = worktree(&outside, "shprd/r1/OUT");
+    let err = match worktree::remove(&repo.path, &layout, &outside_wt, true) {
+        Ok(()) => panic!("a worktree outside the root must be refused"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, WorktreeError::OutsideRoot { .. }), "{err:?}");
+    assert!(is_dir(&outside), "the worktree must survive the refusal");
+    assert!(
+        !repo.git(&["branch", "--list", "shprd/r1/OUT"]).is_empty(),
+        "the branch must survive the refusal"
+    );
+}
+
+#[test]
+fn a_sibling_directory_sharing_a_name_prefix_is_outside_the_root() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    // `<root>-evil` starts with the root's characters but is a different place:
+    // components, not string prefixes, decide.
+    let sibling = layout
+        .root
+        .with_file_name(format!(
+            "{}-evil",
+            layout
+                .root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("wt")
+        ))
+        .join("repo/r1/M2.1");
+    let path_text = sibling.display().to_string();
+    repo.git(&["worktree", "add", "-b", "shprd/r1/SIB", &path_text, "main"]);
+
+    let sibling_wt = worktree(&sibling, "shprd/r1/SIB");
+    let err = match worktree::remove(&repo.path, &layout, &sibling_wt, true) {
+        Ok(()) => panic!("a sibling directory must be refused"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, WorktreeError::OutsideRoot { .. }), "{err:?}");
+    assert!(is_dir(&sibling), "the worktree must survive the refusal");
+}

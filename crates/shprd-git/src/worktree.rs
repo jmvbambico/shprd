@@ -91,6 +91,15 @@ pub enum WorktreeError {
         /// shprd's own prefix.
         namespace: String,
     },
+    /// The worktree path is not inside the layout root, so shprd may not
+    /// remove it: it was not created by shprd.
+    #[error("worktree path {path:?} is outside the root {root:?}")]
+    OutsideRoot {
+        /// The path that was offered for removal.
+        path: PathBuf,
+        /// shprd's worktree root.
+        root: PathBuf,
+    },
     /// A directory could not be created.
     #[error("could not create {path:?}: {source}")]
     Io {
@@ -152,7 +161,9 @@ pub fn create(
 /// Removes a worktree and its branch.
 ///
 /// Refuses any branch outside [`Layout::namespace`], so a worktree a human
-/// made by hand is never touched, and refuses a dirty worktree unless `force`.
+/// made by hand is never touched; refuses a path outside [`Layout::root`], so a
+/// directory shprd did not create is never deleted; and refuses a dirty
+/// worktree unless `force`.
 pub fn remove(
     repo: &Path,
     layout: &Layout,
@@ -163,6 +174,12 @@ pub fn remove(
         return Err(WorktreeError::OutsideNamespace {
             branch: wt.branch.clone(),
             namespace: layout.namespace.clone(),
+        });
+    }
+    if !inside_root(&layout.root, &wt.path) {
+        return Err(WorktreeError::OutsideRoot {
+            path: wt.path.clone(),
+            root: layout.root.clone(),
         });
     }
     if wt.path.exists() && !Git::new(&wt.path).is_clean()? && !force {
@@ -185,18 +202,58 @@ pub fn remove(
 /// Rejects an id that is empty, uses anything but `[A-Za-z0-9._-]`, or
 /// contains `..`.
 fn check_id(what: &'static str, id: &str) -> Result<(), WorktreeError> {
-    let usable = !id.is_empty()
-        && !id.contains("..")
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if usable {
+    if valid_id(id) {
         return Ok(());
     }
     Err(WorktreeError::InvalidId {
         what,
         id: id.to_string(),
     })
+}
+
+/// True when `id` is usable as a run or task id: non-empty, only
+/// `[A-Za-z0-9._-]`, and no `..`.
+pub(crate) fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// True when `path` lies inside `root`, compared by path components rather
+/// than by string prefix.
+///
+/// Both sides are resolved first — symlinks and `..` dropped, for the longest
+/// existing prefix of the path — so `/tmp/x/wt` and `/private/tmp/x/wt` are the
+/// same place on a platform where `/tmp` is a symlink.
+pub(crate) fn inside_root(root: &Path, path: &Path) -> bool {
+    resolve(path).starts_with(resolve(root))
+}
+
+/// Replaces `path` with an absolute, symlink-free path, resolving as much of
+/// it as exists and appending the rest unchanged.
+fn resolve(path: &Path) -> PathBuf {
+    let mut prefix = path.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(mut resolved) = std::fs::canonicalize(&prefix) {
+            for part in rest.iter().rev() {
+                resolved.push(part);
+            }
+            return resolved;
+        }
+        match (
+            prefix.file_name().map(|name| name.to_os_string()),
+            prefix.parent(),
+        ) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                prefix = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// The name of the repository directory, used to keep repos apart on disk.
