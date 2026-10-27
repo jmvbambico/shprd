@@ -30,24 +30,31 @@ pub(crate) fn quote(element: &str) -> Result<String> {
 /// The shell line that runs `argv` with `env` applied.
 ///
 /// `env` is expressed as `env -u NAME ... NAME=VALUE ...`: every `env` option
-/// has to come before the assignments, so removals are emitted first. Within
-/// each group the caller's order is kept, and a removal then a set for the same
-/// key ends up set, which is what "a later entry wins" means for a pair that
-/// crosses the two groups. `exec` replaces the pane's shell with the program,
-/// so the pane's process is the program and not a shell waiting behind it.
+/// has to come before the assignments, so removals are emitted first. The pairs
+/// are folded into each key's final state first, the last entry for a key
+/// winning, so a key that was set and then removed is only removed, and one
+/// that was removed and then set is only set. Keys keep the order in which they
+/// first appeared. `exec` replaces the pane's shell with the program, so the
+/// pane's process is the program and not a shell waiting behind it.
 pub(crate) fn line(argv: &[String], env: &[(String, Option<String>)]) -> Result<String> {
     if argv.is_empty() {
         return Err(MuxError::command("run", "refusing to run an empty argv"));
     }
-    let mut line = String::from("exec env");
-    for name in env
-        .iter()
-        .filter_map(|(name, value)| value.is_none().then_some(name))
-    {
-        line.push_str(" -u ");
-        line.push_str(&quote(name)?);
-    }
+    let mut folded: Vec<(&str, &Option<String>)> = Vec::new();
     for (name, value) in env {
+        match folded.iter_mut().find(|(seen, _)| seen == name) {
+            Some(entry) => entry.1 = value,
+            None => folded.push((name, value)),
+        }
+    }
+    let mut line = String::from("exec env");
+    for (name, value) in &folded {
+        if value.is_none() {
+            line.push_str(" -u ");
+            line.push_str(&quote(name)?);
+        }
+    }
+    for (name, value) in &folded {
         if let Some(value) = value {
             line.push(' ');
             line.push_str(&quote(&format!("{name}={value}"))?);
@@ -122,14 +129,32 @@ mod tests {
         ];
         let line = line(&argv(&["true"]), &env).unwrap();
         assert_eq!(line, "exec env -u 'A' 'B=two words' 'C=' 'true'");
-        let reversed = vec![
+    }
+
+    #[test]
+    fn later_env_entries_win() {
+        // Removed last: only the removal is emitted.
+        let unset_last = vec![
             ("B".to_string(), Some("set".to_string())),
             ("B".to_string(), None),
         ];
-        // A removal always precedes the sets, so the set wins here.
         assert_eq!(
-            line_of(&argv(&["true"]), &reversed),
-            "exec env -u 'B' 'B=set' 'true'"
+            line_of(&argv(&["true"]), &unset_last),
+            "exec env -u 'B' 'true'"
+        );
+        // Set last: only the assignment is emitted, and it keeps the position
+        // the key first appeared in.
+        let set_last = vec![
+            ("A".to_string(), Some("one".to_string())),
+            ("B".to_string(), None),
+            ("A".to_string(), None),
+            ("A".to_string(), Some("one".to_string())),
+            ("C".to_string(), Some("three".to_string())),
+            ("B".to_string(), Some("two".to_string())),
+        ];
+        assert_eq!(
+            line_of(&argv(&["true"]), &set_last),
+            "exec env 'A=one' 'B=two' 'C=three' 'true'"
         );
     }
 
