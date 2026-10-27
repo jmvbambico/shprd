@@ -529,7 +529,9 @@ fn configured_free_pin(config: Option<&Config>) -> bool {
     let Some(roster) = config.map(|config| &config.roster) else {
         return false;
     };
-    every_agent(roster).any(|agent| agent.starts_with("kilo/") && agent.contains("free"))
+    every_agent(roster).any(|agent| {
+        agent.starts_with("kilo/") && quota::kilo::free_pin(Some(agent.as_str()))
+    })
 }
 
 /// Every agent string the roster names, in any role.
@@ -826,6 +828,14 @@ mod tests {
 
         let paid = home_with_kilo(Some("{\"model\": \"kilo/openai/gpt-5\"}"));
         assert!(!free_pin(None, paid.path()));
+    }
+
+    #[test]
+    fn a_model_merely_named_free_is_not_the_free_tier() {
+        let paid = config(None, &["kilo/vendor/free-lunch"]);
+        assert!(!configured_free_pin(Some(&paid)));
+        let free = config(None, &["kilo/kilo/kilo-auto/free"]);
+        assert!(configured_free_pin(Some(&free)));
     }
 
     #[test]
