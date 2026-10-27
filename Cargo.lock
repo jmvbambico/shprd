@@ -356,6 +356,9 @@ version = "0.0.0"
 [[package]]
 name = "shprd-views"
 version = "0.0.0"
+dependencies = [
+ "shprd-core",
+]
 
 [[package]]
 name = "shprd-watch"
