@@ -9,8 +9,8 @@ use crate::clock;
 /// One line per task, then one line per agent that is dry at `now_ms`.
 ///
 /// Each task line starts with a symbol: `○` queued, `●` working, `◇` reported
-/// and awaiting review, `✓` passed (with ` landed` appended once integrated)
-/// or `✗` failed. Tasks are listed in id order. A dry agent is `◌ <agent> dry
+/// and awaiting review, `✓` for a passed task (`✓ <task> passed <title>`) or
+/// one whose work landed (`✓ <task> landed <title>`), or `✗` failed. Tasks are listed in id order. A dry agent is `◌ <agent> dry
 /// until HH:MM` in UTC; an agent dry with no known reset time shows `unknown`.
 pub fn status(state: &RunState, now_ms: u64) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -52,7 +52,7 @@ fn word(status: TaskStatus) -> &'static str {
         TaskStatus::Working => "working",
         TaskStatus::Reported => "reported",
         TaskStatus::Passed => "passed",
-        TaskStatus::Integrated => "passed landed",
+        TaskStatus::Integrated => "landed",
         TaskStatus::Failed => "failed",
     }
 }
@@ -78,9 +78,22 @@ mod tests {
     #[test]
     fn each_status_gets_its_own_symbol() {
         let text = status(&fixture::state(), fixture::NOW);
-        assert_eq!(line_of(&text, "M1.1"), "✓ M1.1 passed landed event log");
+        assert_eq!(line_of(&text, "M1.1"), "✓ M1.1 landed event log");
         assert_eq!(line_of(&text, "M1.2"), "✗ M1.2 failed views");
         assert_eq!(line_of(&text, "M1.3"), "○ M1.3 queued roster");
+    }
+
+    #[test]
+    fn a_passed_task_says_passed_until_its_work_lands() {
+        let events = fixture::events();
+        let passed = match RunState::fold(&events[..7]) {
+            Ok(state) => state,
+            Err(err) => panic!("the fixture prefix must fold: {err}"),
+        };
+        assert_eq!(
+            line_of(&status(&passed, fixture::NOW), "M1.1"),
+            "✓ M1.1 passed event log"
+        );
     }
 
     #[test]
