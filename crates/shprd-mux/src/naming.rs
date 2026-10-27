@@ -58,15 +58,33 @@ pub fn tab_title(role: Role, cli: &str, label: &str, dry: bool) -> String {
 
 /// Make `wanted` unique against the titles already in use.
 ///
-/// Only a collision costs anything: the first four characters of `suffix` (the
-/// task id, say) are appended so two workers on similar branches stay
-/// distinguishable on the tab bar.
+/// Only a collision costs anything, and the tag it appends grows until it is
+/// unique: the first four characters of `suffix` (the task id, say), then more
+/// of it, and finally the whole suffix with a counter. Two workers on similar
+/// branches therefore stay distinguishable even when their first four
+/// characters agree.
 pub fn disambiguate(titles: &[String], wanted: &str, suffix: &str) -> String {
-    if !titles.iter().any(|title| title == wanted) {
+    let taken = |candidate: &str| titles.iter().any(|title| title == candidate);
+    if !taken(wanted) {
         return wanted.to_string();
     }
-    let tag: String = suffix.chars().take(4).collect();
-    format!("{wanted}·{tag}")
+    let chars: Vec<char> = suffix.chars().collect();
+    for len in 4.min(chars.len())..=chars.len() {
+        let tag: String = chars[..len].iter().collect();
+        let candidate = format!("{wanted}·{tag}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    // Even the full suffix collided: number the tags until one is free.
+    let mut n: u32 = 2;
+    loop {
+        let candidate = format!("{wanted}·{suffix}{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// The workspace name for a repository: `shprd · <repo_name>`.
@@ -153,6 +171,30 @@ mod tests {
             "● claude·m4-mux·M4.1"
         );
         assert_eq!(disambiguate(&[], "shprd·chat", "M4.1"), "shprd·chat");
+    }
+
+    #[test]
+    fn disambiguation_grows_the_tag_until_unique() {
+        let wanted = "● claude·m4-mux";
+        let titles = vec![wanted.to_string(), format!("{wanted}·abcd")];
+        assert_eq!(
+            disambiguate(&titles, wanted, "abcdefgh"),
+            format!("{wanted}·abcde")
+        );
+        // Every prefix of the suffix taken: fall back to numbering it.
+        let mut titles = titles;
+        for len in 5..=8 {
+            titles.push(format!("{wanted}·{}", &"abcdefgh"[..len]));
+        }
+        assert_eq!(
+            disambiguate(&titles, wanted, "abcdefgh"),
+            format!("{wanted}·abcdefgh2")
+        );
+        titles.push(format!("{wanted}·abcdefgh2"));
+        assert_eq!(
+            disambiguate(&titles, wanted, "abcdefgh"),
+            format!("{wanted}·abcdefgh3")
+        );
     }
 
     #[test]
