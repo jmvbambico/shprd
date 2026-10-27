@@ -4,6 +4,7 @@
 //! marked stretch of it: everything between [`BEGIN`] and [`END`] is generated
 //! and everything outside is preserved byte for byte.
 
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The line that opens the block shprd owns.
@@ -137,6 +138,82 @@ fn quote(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A user's own config: comments, a table, and one unrelated key.
+    const USER_CONFIG: &str = "# my herdr\n[terminal]\nshell = \"zsh\"\n\n\
+        # mine\n[[keys.command]]\nkey = \"prefix+x\"\ntype = \"shell\"\n\
+        command = \"mine\"\ndescription = \"mine\"\n";
+
+    #[test]
+    fn install_into_an_empty_file_installs_only_the_block() {
+        let installed = install("", &default_bindings()).unwrap();
+        assert_eq!(installed, render(&default_bindings()));
+    }
+
+    #[test]
+    fn install_keeps_everything_outside_the_block_byte_for_byte() {
+        let bindings = default_bindings();
+        let installed = install(USER_CONFIG, &bindings).unwrap();
+        assert_eq!(installed, format!("{USER_CONFIG}\n{}", render(&bindings)));
+    }
+
+    #[test]
+    fn install_twice_changes_nothing_the_second_time() {
+        let bindings = default_bindings();
+        let once = install(USER_CONFIG, &bindings).unwrap();
+        let twice = install(&once, &bindings).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn uninstall_restores_the_original_exactly() {
+        let bindings = default_bindings();
+        let installed = install(USER_CONFIG, &bindings).unwrap();
+        assert_eq!(uninstall(&installed).unwrap(), USER_CONFIG);
+    }
+
+    #[test]
+    fn uninstall_of_a_file_without_a_block_changes_nothing() {
+        assert_eq!(uninstall(USER_CONFIG).unwrap(), USER_CONFIG);
+    }
+
+    #[test]
+    fn install_refuses_a_key_the_user_already_bound() {
+        let warned = "[[keys.command]]\nkey = \"prefix+alt+u\"\ntype = \"shell\"\n\
+            command = \"vim\"\ndescription = \"mine\"\n";
+        match install(warned, &default_bindings()) {
+            Err(KeysError::Conflict { key, existing }) => {
+                assert_eq!(key, "prefix+alt+u");
+                assert_eq!(existing, "vim");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_refuses_missing_and_duplicated_markers() {
+        let bindings = default_bindings();
+        for broken in [
+            format!("x = 1\n{BEGIN}\n"),
+            format!("x = 1\n{END}\n"),
+            format!("{END}\nx = 1\n{BEGIN}\n"),
+            format!("{BEGIN}\n{END}\n{BEGIN}\n{END}\n"),
+        ] {
+            assert!(
+                matches!(install(&broken, &bindings), Err(KeysError::Unbalanced)),
+                "expected unbalanced for {broken:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_refuses_text_outside_the_block_that_is_not_toml() {
+        let broken = "this is not toml = = =\n";
+        assert!(matches!(
+            install(broken, &default_bindings()),
+            Err(KeysError::Parse(_))
+        ));
+    }
+
     #[test]
     fn render_parses_as_toml_with_one_table_per_binding() {
         let text = render(&default_bindings());
@@ -162,4 +239,138 @@ mod tests {
         let quoted = quote("a\"b\\c");
         assert_eq!(quoted, "\"a\\\"b\\\\c\"");
     }
+}
+
+/// What can go wrong while installing or removing the managed block.
+#[derive(Debug, thiserror::Error)]
+pub enum KeysError {
+    /// The managed block is missing one of its two markers, has one twice, or
+    /// has them in the wrong order.
+    #[error("the shprd block markers are unbalanced, so shprd will not touch this file")]
+    Unbalanced,
+    /// A binding outside the block already owns one of shprd's keys.
+    #[error("key `{key}` is already bound outside the shprd block, to `{existing}`")]
+    Conflict {
+        /// The key both sides want.
+        key: String,
+        /// The command the user's own config binds to it.
+        existing: String,
+    },
+    /// The text outside the block is not valid TOML.
+    #[error("the herdr config outside the shprd block is not valid TOML: {0}")]
+    Parse(String),
+    /// Reading or writing the config file failed.
+    #[error("herdr config i/o failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// The byte span of the managed block: the [`BEGIN`] line through the end of
+/// the [`END`] line.
+fn block_span(text: &str) -> Result<Option<Range<usize>>, KeysError> {
+    let mut begin = None;
+    let mut end = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let marker = line.trim();
+        if marker == BEGIN && begin.replace(offset).is_some() {
+            return Err(KeysError::Unbalanced);
+        }
+        if marker == END && end.replace(offset + line.len()).is_some() {
+            return Err(KeysError::Unbalanced);
+        }
+        offset += line.len();
+    }
+    match (begin, end) {
+        (None, None) => Ok(None),
+        (Some(start), Some(stop)) if start < stop => Ok(Some(start..stop)),
+        _ => Err(KeysError::Unbalanced),
+    }
+}
+
+/// Installs (or refreshes) the managed block in `text`.
+///
+/// An existing block is replaced in place, so everything outside it stays byte
+/// for byte; a file without one gains `text`'s own block at the end, after a
+/// blank line. Nothing is written to disk here: the caller decides.
+///
+/// A file whose last line had no newline gets one, because the block must start
+/// on a line of its own.
+pub fn install(text: &str, bindings: &[Binding]) -> Result<String, KeysError> {
+    let block = render(bindings);
+    let installed = match block_span(text)? {
+        Some(span) => {
+            let mut out = String::with_capacity(text.len() + block.len());
+            out.push_str(&text[..span.start]);
+            out.push_str(&block);
+            out.push_str(&text[span.end..]);
+            out
+        }
+        None => {
+            let mut out = text.to_owned();
+            if !out.is_empty() {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            out.push_str(&block);
+            out
+        }
+    };
+    ensure_compatible(&installed, bindings)?;
+    Ok(installed)
+}
+
+/// Removes the managed block, and the blank line installing it added.
+///
+/// A file without a block comes back unchanged.
+pub fn uninstall(text: &str) -> Result<String, KeysError> {
+    let Some(span) = block_span(text)? else {
+        return Ok(text.to_owned());
+    };
+    let mut start = span.start;
+    if text[..start].ends_with("\n\n") {
+        start -= 1;
+    }
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..start]);
+    out.push_str(&text[span.end..]);
+    Ok(out)
+}
+
+/// Refuses text whose part outside the block is not TOML herdr could load, or
+/// which binds one of shprd's keys outside the block.
+fn ensure_compatible(text: &str, bindings: &[Binding]) -> Result<(), KeysError> {
+    let outside = match block_span(text)? {
+        Some(span) => {
+            let mut outside = String::with_capacity(text.len());
+            outside.push_str(&text[..span.start]);
+            outside.push_str(&text[span.end..]);
+            outside
+        }
+        None => text.to_owned(),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&outside).map_err(|err| KeysError::Parse(err.to_string()))?;
+    let entries = parsed
+        .get("keys")
+        .and_then(|keys| keys.get("command"))
+        .and_then(toml::Value::as_array);
+    for entry in entries.into_iter().flatten() {
+        let Some(key) = entry.get("key").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        if !bindings.iter().any(|binding| binding.key == key) {
+            continue;
+        }
+        let existing = entry
+            .get("command")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        return Err(KeysError::Conflict {
+            key: key.to_owned(),
+            existing: existing.to_owned(),
+        });
+    }
+    Ok(())
 }
