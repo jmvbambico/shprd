@@ -135,14 +135,7 @@ pub fn spawn(
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
-    let kind = EventKind::Spawned {
-        task: task.id.clone(),
-        attempt,
-        agent: pick.agent.clone(),
-        model: pick.model.clone(),
-        worktree: worktree.display().to_string(),
-        branch: branch.clone(),
-    };
+    let kind = spawned_event(&task.id, attempt, &pick, &worktree, &branch);
     // Refuse before any effect: a refused spawn must leave nothing behind.
     env.ctx.check(&kind)?;
     for resource in resource_kinds(&task.id, &worktree, &branch) {
@@ -380,7 +373,84 @@ fn discard_worktree(env: &SpawnEnv<'_>, created: &Worktree) {
     }
 }
 
+/// The ledger entries a spawn writes, in order: its two resources, then the
+/// attempt itself.
+fn attempt_events(task: &str, attempt: u32, pick: &Pick, created: &Worktree) -> Vec<EventKind> {
+    let mut events = resource_kinds(task, &created.path, created.branch.as_str()).to_vec();
+    events.push(spawned_event(
+        task,
+        attempt,
+        pick,
+        &created.path,
+        &created.branch,
+    ));
+    events
+}
+
+/// The `Spawned` event one attempt appends.
+fn spawned_event(
+    task: &str,
+    attempt: u32,
+    pick: &Pick,
+    worktree: &Path,
+    branch: &str,
+) -> EventKind {
+    EventKind::Spawned {
+        task: task.to_string(),
+        attempt,
+        agent: pick.agent.clone(),
+        model: pick.model.clone(),
+        worktree: worktree.display().to_string(),
+        branch: branch.to_string(),
+    }
+}
+
+/// Appends `events` in order, returning the ones that landed when one fails.
+///
+/// The caller needs them: an event that landed and is not compensated would
+/// leave the state holding a resource the spawn is about to take away.
+fn append_in_order(
+    events: impl IntoIterator<Item = EventKind>,
+    mut commit: impl FnMut(EventKind) -> Result<(), CliError>,
+) -> Result<(), (CliError, Vec<EventKind>)> {
+    let mut landed: Vec<EventKind> = Vec::new();
+    for event in events {
+        if let Err(err) = commit(event.clone()) {
+            return Err((err, landed));
+        }
+        landed.push(event);
+    }
+    Ok(())
+}
+
+/// Appends the `Removed` counterpart of every resource event a half-written
+/// attempt already landed, so the run never keeps a live resource the caller is
+/// about to delete.
+fn compensate(env: &SpawnEnv<'_>, landed: &[EventKind]) {
+    for event in landed {
+        let EventKind::Resource {
+            kind, name, task, ..
+        } = event
+        else {
+            continue;
+        };
+        let removed = EventKind::Resource {
+            action: ResourceAction::Removed,
+            kind: *kind,
+            name: name.clone(),
+            task: task.clone(),
+        };
+        if let Err(err) = env.ctx.commit(removed) {
+            eprintln!("warning: could not record that {name} is gone: {err}");
+        }
+    }
+}
+
 /// Appends the worktree, the branch and then the attempt itself.
+///
+/// Should any of the three be refused or fail, the resources that did land get
+/// their `Removed` events before the error goes back to the caller, which takes
+/// the worktree and the tab away.
 fn record_attempt(
     env: &SpawnEnv<'_>,
     task: &str,
@@ -388,18 +458,14 @@ fn record_attempt(
     pick: &Pick,
     created: &Worktree,
 ) -> Result<(), CliError> {
-    for resource in resource_kinds(task, &created.path, &created.branch) {
-        env.ctx.commit(resource)?;
+    let events = attempt_events(task, attempt, pick, created);
+    match append_in_order(events, |event| env.ctx.commit(event).map(|_| ())) {
+        Ok(()) => Ok(()),
+        Err((err, landed)) => {
+            compensate(env, &landed);
+            Err(err)
+        }
     }
-    env.ctx.commit(EventKind::Spawned {
-        task: task.to_string(),
-        attempt,
-        agent: pick.agent.clone(),
-        model: pick.model.clone(),
-        worktree: created.path.display().to_string(),
-        branch: created.branch.clone(),
-    })?;
-    Ok(())
 }
 
 /// The task `id` names, or an error saying the run plan has no such task.
@@ -864,7 +930,7 @@ mod flow_tests {
     use std::process::Command;
 
     use shprd_core::event::Actor;
-    use shprd_core::state::TaskStatus;
+    use shprd_core::state::{ResourceRecord, ResourceStatus, TaskStatus};
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
 
@@ -1070,6 +1136,49 @@ project_dirs = []
             agent: None,
             effort: None,
         }
+    }
+
+    /// The pick a spawn makes for the fake `sh` worker.
+    fn pick() -> Pick {
+        Pick {
+            agent: "sh".to_string(),
+            model: None,
+            launch: fake_spec("sh").launch,
+        }
+    }
+
+    #[test]
+    fn a_spawned_append_that_fails_leaves_no_live_resource() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let created = create_worktree(&env, "T1").unwrap_or_else(|err| panic!("{err}"));
+        // The third append is the `Spawned` event; the two resources land.
+        let mut commits = 0;
+        let outcome = append_in_order(attempt_events("T1", 1, &pick(), &created), |event| {
+            commits += 1;
+            if commits == 3 {
+                return Err(CliError::other(anyhow!("the log went away")));
+            }
+            env.ctx.commit(event).map(|_| ())
+        });
+        let (err, landed) = match outcome {
+            Ok(()) => panic!("the attempt should not have landed"),
+            Err(failed) => failed,
+        };
+        assert!(err.to_string().contains("the log went away"), "{err}");
+        assert_eq!(landed.len(), 2, "only the two resources landed");
+        compensate(&env, &landed);
+        discard_worktree(&env, &created);
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let live: Vec<&ResourceRecord> = state
+            .resources
+            .values()
+            .filter(|record| record.status == ResourceStatus::Live)
+            .collect();
+        assert!(live.is_empty(), "still live: {live:?}");
+        assert!(!created.path.exists(), "the worktree is still there");
     }
 
     #[test]
