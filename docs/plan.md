@@ -240,6 +240,41 @@ from the phone via the relay.
 | M9.2 | Install paths: `cargo install`, Homebrew tap, release binaries via CI | M |
 | M9.3 | herdr thin plugin (actions → `shprd <verb>`), marketplace listing | S |
 | M9.4 | `THIRD_PARTY_NOTICES.md` audit, README status table updated, release notes | S |
+| M9.5 | Release on every merge (below) | M |
+
+### Releases after v0.1.0
+
+From v0.1.0 on, **every PR merged into `main` produces a tagged, published
+release.** No release PRs and no manual tagging.
+
+- **Trigger:** a GitHub Actions workflow on `push` to `main`. Merging an
+  approved PR is the only way anything reaches `main`.
+- **Next version** comes from the Conventional Commits in the merge since the
+  last tag:
+
+  | Commits contain | Before 1.0 | From 1.0 |
+  |---|---|---|
+  | `feat!` or `BREAKING CHANGE` | minor | major |
+  | `feat` | minor | minor |
+  | `fix`, `perf` | patch | patch |
+  | only `docs`, `chore`, `ci`, `test`, `refactor` | patch | patch |
+
+  Every merge releases, so a docs-only PR still ships a patch. Its notes say
+  "no functional change".
+- **Tag, don't commit.** The workflow creates and pushes tag `vX.Y.Z` and does
+  **not** push a version-bump commit. That way protected `main` never needs a
+  bot that bypasses the PR rule. The build stamps the version from the tag
+  (`SHPRD_VERSION` env read in `build.rs`, falling back to `Cargo.toml`), so
+  `shprd --version` matches the release. `Cargo.toml` stays at the last minor
+  version and is bumped by hand only when publishing to crates.io.
+- **Publish:** build release binaries (macOS arm64 + x86_64, Linux x86_64 +
+  arm64), attach them with checksums to a GitHub Release, and write notes
+  grouped by commit type with each merged PR linked. Then update the Homebrew
+  tap formula.
+- **Safety:** the workflow refuses to tag if the CI run for that commit didn't
+  pass, or if the tag already exists. A failed publish leaves no tag behind.
+- **Before v0.1.0:** no automatic releases. Milestone merges stay untagged
+  until M9 ships v0.1.0.
 
 ---
 

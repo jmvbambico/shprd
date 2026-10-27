@@ -5,6 +5,10 @@ truth; this log holds how we got there.
 
 ## 2026-10-27
 
+- **Release on every merge after v0.1.0.** Each approved PR merged into `main`
+  gets the next semver tag, computed from Conventional Commits, and a published
+  GitHub Release with binaries. Tag-only (no bump commit), so protected `main`
+  needs no bypass. See [plan.md](plan.md#releases-after-v010).
 - **Build plan proposed** ([plan.md](plan.md)): M0–M9 with gates. The dogfood
   point is after M6, when shprd builds shprd.
 - **Keys confirmed free:** `prefix+alt+<letter>` has no default binding on
