@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow};
 use shprd_core::config::Config;
 use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
-use shprd_core::state::RunState;
+use shprd_core::state::{ResourceStatus, RunState};
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
 use shprd_mux::naming::{self, Role as TabRole};
@@ -228,8 +228,8 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, CliError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Reuses the run in flight, or starts a fresh one and opens its integration
-/// worktree.
+/// Reuses the run in flight, or starts a fresh one, and opens its integration
+/// worktree either way.
 ///
 /// Returns the run id, whether it was resumed, and its integration branch.
 fn begin_run(
@@ -239,32 +239,58 @@ fn begin_run(
     base_branch: &str,
 ) -> Result<RunBoot, CliError> {
     let state = ctx.state()?;
-    if let Some(run) = resume_target(&state) {
-        return Ok(RunBoot {
+    let boot = match resume_target(&state) {
+        Some(run) => RunBoot {
             run_id: run.run_id,
             resumed: true,
             base_branch: run.base_branch,
             integration_branch: run.integration_branch,
-        });
-    }
-    let run_id = new_run_id();
-    let integration_branch = integration_branch(&run_id);
-    ctx.commit(EventKind::RunStarted {
-        run_id: run_id.clone(),
-        repo: ctx.root.to_string_lossy().to_string(),
-        base_branch: base_branch.to_string(),
-        integration_branch: integration_branch.clone(),
-    })?;
+        },
+        None => {
+            let run_id = new_run_id();
+            let integration_branch = integration_branch(&run_id);
+            ctx.commit(EventKind::RunStarted {
+                run_id: run_id.clone(),
+                repo: ctx.root.to_string_lossy().to_string(),
+                base_branch: base_branch.to_string(),
+                integration_branch: integration_branch.clone(),
+            })?;
+            RunBoot {
+                run_id,
+                resumed: false,
+                base_branch: base_branch.to_string(),
+                integration_branch,
+            }
+        }
+    };
+    // Opening the worktree is not part of starting the run: it happens on every
+    // `up`, so a log that says the run started while the worktree never landed
+    // is healed by the retry instead of being resumed as if it were whole.
+    ensure_integration(ctx, home, repo_name, &boot, &state)?;
+    Ok(boot)
+}
+
+/// Opens the run's integration worktree and records the resources it owns.
+///
+/// [`integrate::open_integration`] creates the worktree when it is missing and
+/// reuses it when it is there, so this is safe to call on every `up`.
+fn ensure_integration(
+    ctx: &Ctx,
+    home: &Path,
+    repo_name: &str,
+    boot: &RunBoot,
+    state: &RunState,
+) -> Result<(), CliError> {
     let layout = Layout::default_for_home(home);
-    let worktree = integrate::open_integration(&ctx.root, &layout, repo_name, &run_id, base_branch)
-        .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
-    record_integration(ctx, &worktree)?;
-    Ok(RunBoot {
-        run_id,
-        resumed: false,
-        base_branch: base_branch.to_string(),
-        integration_branch,
-    })
+    let worktree = integrate::open_integration(
+        &ctx.root,
+        &layout,
+        repo_name,
+        &boot.run_id,
+        &boot.base_branch,
+    )
+    .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
+    record_integration(ctx, &worktree, state)
 }
 
 /// What `up` learned about the run before touching the multiplexer.
@@ -293,12 +319,16 @@ fn resume_target(state: &RunState) -> Option<shprd_core::state::RunInfo> {
     state.run.clone()
 }
 
-/// Appends the two resources a fresh integration worktree owns.
+/// Appends the resources a fresh integration worktree owns.
 ///
-/// Only what this call created is recorded: the ledger is what licenses the
-/// janitor to remove something, so a worktree that was already there is not
-/// shprd's to claim again.
-fn record_integration(ctx: &Ctx, worktree: &IntegrationWorktree) -> Result<(), CliError> {
+/// Only what this call created and the ledger does not already hold live is
+/// recorded: the ledger is what licenses the janitor to remove something, so a
+/// worktree that was already there is not shprd's to claim again.
+fn record_integration(
+    ctx: &Ctx,
+    worktree: &IntegrationWorktree,
+    state: &RunState,
+) -> Result<(), CliError> {
     if !worktree.created {
         return Ok(());
     }
@@ -309,6 +339,13 @@ fn record_integration(ctx: &Ctx, worktree: &IntegrationWorktree) -> Result<(), C
         ),
         (ResourceKind::Branch, worktree.branch.clone()),
     ] {
+        let live = state
+            .resources
+            .get(&(kind, name.clone()))
+            .is_some_and(|record| record.status == ResourceStatus::Live);
+        if live {
+            continue;
+        }
         ctx.commit(EventKind::Resource {
             action: ResourceAction::Created,
             kind,
@@ -746,6 +783,18 @@ mod tests {
             .collect()
     }
 
+    /// Where the run's integration worktree belongs on disk.
+    fn integration_worktree(fixture: &Fixture, run_id: &str) -> PathBuf {
+        fixture
+            .home
+            .path()
+            .join(".shprd")
+            .join("wt")
+            .join("repo")
+            .join(run_id)
+            .join("_int")
+    }
+
     /// A fake host that also makes the starter tab a real host makes with
     /// every new workspace, as herdr does (titled with the tab's number).
     fn mux_with_starter_tab() -> FakeMux {
@@ -1013,6 +1062,45 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, Call::FindWorkspace(_))),
             "second up should look for the workspace: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_resumed_run_re_opens_a_missing_integration_worktree() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        // A log that says the run started and no worktree on disk: the shape a
+        // crash between the two leaves behind.
+        let run_id = new_run_id();
+        env.ctx
+            .commit(EventKind::RunStarted {
+                run_id: run_id.clone(),
+                repo: env.ctx.root.to_string_lossy().to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: integration_branch(&run_id),
+            })
+            .map_err(failed)?;
+        let integration = integration_worktree(&fixture, &run_id);
+        assert!(
+            !integration.exists(),
+            "{} started out missing",
+            integration.display()
+        );
+
+        let report = up(&mux, &env).map_err(failed)?;
+        assert!(report.resumed, "the log already held a run");
+        assert_eq!(report.run_id, run_id);
+        assert!(integration.is_dir(), "{} is missing", integration.display());
+        assert_eq!(env.ctx.state().map_err(failed)?.resources.len(), 2);
+
+        // The second `up` finds both resources live, so it records nothing new.
+        up(&mux, &env).map_err(failed)?;
+        assert_eq!(
+            env.ctx.state().map_err(failed)?.resources.len(),
+            2,
+            "a repeated up recorded the same resources twice"
         );
         Ok(())
     }
