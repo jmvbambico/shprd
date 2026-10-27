@@ -210,11 +210,31 @@ fn kill(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// The absolute path of the system `kill`, when one of its standard locations
+/// exists.
+///
+/// It is never resolved through `PATH`: a `kill` planted earlier on the path
+/// would run arbitrary code during timeout cleanup, in every process shprd
+/// probes.
+#[cfg(unix)]
+fn kill_program() -> Option<&'static Path> {
+    ["/bin/kill", "/usr/bin/kill"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+}
+
 /// Kill the process group led by `leader`, ignoring a group that is already
 /// gone.
+///
+/// A machine with no absolute `kill` skips the group kill: the direct child is
+/// still killed by [`kill`], so only the grandchildren outlive the probe.
 #[cfg(unix)]
 fn kill_group(leader: u32) {
-    let _ = Command::new("kill")
+    let Some(program) = kill_program() else {
+        return;
+    };
+    let _ = Command::new(program)
         .arg("-KILL")
         .arg(format!("-{leader}"))
         .stdin(Stdio::null())
@@ -681,6 +701,84 @@ project_dirs = []
             "the script should have written its child pid"
         );
 
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(&pid) && Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            !alive(&pid),
+            "the background child {pid} survived the timeout"
+        );
+    }
+
+    /// Carries the fixture directory from
+    /// [`a_timeout_ignores_a_kill_on_the_path`] to the ignored test it runs in
+    /// a child process.
+    const POISON_ENV: &str = "SHRPD_KILL_PATH_FIXTURE";
+
+    /// The child half of [`a_timeout_ignores_a_kill_on_the_path`]: a probe that
+    /// forks a background child times out under a `PATH` whose first entry
+    /// holds a fake `kill`. Only meaningful in a process started with that
+    /// `PATH`, so the test above is the one that runs it.
+    #[test]
+    #[ignore = "run by a_timeout_ignores_a_kill_on_the_path"]
+    fn times_out_under_a_poisoned_path() {
+        let dir = match std::env::var(POISON_ENV) {
+            Ok(dir) => PathBuf::from(dir),
+            Err(error) => panic!("{POISON_ENV} is not set: {error}"),
+        };
+        let pidfile = dir.join("child.pid");
+        let body = format!("sleep 30 &\necho $! > {}\nsleep 30", pidfile.display());
+        write_script(&dir, "forker", &body);
+
+        let out = run_with_timeout(&dir.join("forker"), &[], &[], Duration::from_secs(2));
+        assert!(
+            matches!(out, Err(DetectError::Timeout { .. })),
+            "expected a timeout, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_timeout_ignores_a_kill_on_the_path() {
+        let dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
+        let fixture = dir.path();
+        let marker = fixture.join("marker");
+        write_script(fixture, "kill", &format!("echo ran > {}", marker.display()));
+        let real_path = std::env::var("PATH").unwrap_or_default();
+        let poisoned = format!("{}:{real_path}", fixture.display());
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(error) => panic!("current_exe failed: {error}"),
+        };
+        let child = Command::new(exe)
+            // A substring filter, not `--exact`: the child names no module
+            // path, so it survives the test moving inside `mod tests`.
+            .args([
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+                "times_out_under_a_poisoned_path",
+            ])
+            .env("PATH", &poisoned)
+            .env(POISON_ENV, fixture)
+            .stdout(Stdio::null())
+            .status();
+        match child {
+            Ok(status) => assert!(status.success(), "the child test failed: {status:?}"),
+            Err(error) => panic!("running the child test failed: {error}"),
+        }
+        assert!(
+            !marker.exists(),
+            "a kill earlier on PATH ran during cleanup"
+        );
+        let pidfile = fixture.join("child.pid");
+        let pid = match fs::read_to_string(&pidfile) {
+            Ok(pid) => pid.trim().to_owned(),
+            Err(error) => panic!("reading {}: {error}", pidfile.display()),
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         while alive(&pid) && Instant::now() < deadline {
             thread::sleep(POLL_INTERVAL);
