@@ -163,11 +163,14 @@ pub fn spawn(
         mux,
         env,
         &workspace,
-        &brief,
-        &brief_path,
-        &pick,
-        req,
-        &created,
+        &Launching {
+            pick: &pick,
+            task: &task.id,
+            effort: req.effort.as_deref(),
+            brief: &brief,
+            brief_path: &brief_path,
+            worktree: &created,
+        },
     );
     let (tab_id, tab) = match opened {
         Ok(opened) => opened,
@@ -209,31 +212,51 @@ fn workspace_of(mux: &dyn Mux, env: &SpawnEnv<'_>) -> Result<shprd_mux::Workspac
 /// Returns the tab's id and title. A host that has no `system_prompt_args`
 /// cannot take the brief as an argument, so the brief is typed in as the agent's
 /// first turn instead.
+/// What [`open_agent`] needs to start one attempt's CLI.
+struct Launching<'a> {
+    /// The agent that was picked.
+    pick: &'a Pick,
+    /// The task it works on.
+    task: &'a str,
+    /// The effort it runs at, when one was asked for.
+    effort: Option<&'a str>,
+    /// The brief the agent reads.
+    brief: &'a str,
+    /// The brief file's path.
+    brief_path: &'a Path,
+    /// The worktree the agent works in.
+    worktree: &'a Worktree,
+}
+
 fn open_agent(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
     workspace: &shprd_mux::Workspace,
-    brief: &str,
-    brief_path: &Path,
-    pick: &Pick,
-    req: &SpawnRequest,
-    created: &Worktree,
+    launching: &Launching<'_>,
 ) -> Result<(shprd_mux::TabId, String), CliError> {
-    let wanted = naming::tab_title(naming::Role::Worker, &pick.agent, &req.task, false);
+    let Launching {
+        pick,
+        task,
+        effort,
+        brief,
+        brief_path,
+        worktree,
+    } = *launching;
+    let wanted = naming::tab_title(naming::Role::Worker, &pick.agent, task, false);
     let existing = mux
         .list_tabs(&workspace.id)
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?
         .into_iter()
         .map(|tab| tab.title)
         .collect::<Vec<String>>();
-    let title = naming::disambiguate(&existing, &wanted, &req.task);
+    let title = naming::disambiguate(&existing, &wanted, task);
     let tab = mux
-        .create_tab(&workspace.id, &title, &created.path)
+        .create_tab(&workspace.id, &title, &worktree.path)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the agent tab")))?;
     let (argv, brief_in_args) = launch_argv(
         &pick.launch,
         pick.model.as_deref(),
-        req.effort.as_deref(),
+        effort,
         brief,
         brief_path,
     )?;
@@ -242,9 +265,9 @@ fn open_agent(
         EnvRole::Worker,
         &EnvContext {
             actor: format!("agent:{}", pick.agent),
-            task: Some(req.task.clone()),
+            task: Some(task.to_string()),
             run: Some(env.run.clone()),
-            repo: created.path.clone(),
+            repo: worktree.path.clone(),
         },
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
@@ -418,7 +441,7 @@ pub fn select_skills(skills: &Skills, compat: &[CompatEntry], tags: &[String]) -
     }
     for entry in compat {
         let tagged = entry.tags.iter().any(|tag| tags.contains(tag));
-        let for_workers = entry.roles.iter().any(|role| *role == SkillRole::Worker);
+        let for_workers = entry.roles.contains(&SkillRole::Worker);
         if entry.verdict == Verdict::Allow && for_workers && tagged {
             push(&entry.name, &mut chosen);
         }
@@ -587,6 +610,110 @@ pub fn real_mux() -> shprd_mux_herdr::HerdrMux {
     shprd_mux_herdr::HerdrMux::new()
 }
 
+/// Sends one turn of input to the tab a task's agent runs in.
+///
+/// The tab is found by title inside the repository's workspace, so a prompt can
+/// only ever reach a tab this repository's shprd opened for that task.
+pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
+    let repo_name = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))?;
+    let name = naming::workspace_name(&repo_name);
+    let workspace = mux
+        .find_workspace(&name)
+        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
+        .ok_or_else(|| {
+            CliError::Invalid(anyhow!("no workspace {name:?} yet: run `shprd up` first"))
+        })?;
+    let tabs = mux
+        .list_tabs(&workspace.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
+    let tab = find_task_tab(&tabs, task).ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no tab for task {task:?} in {name:?}: spawn it with `shprd agent spawn --task {task}`"
+        ))
+    })?;
+    mux.prompt(&tab.root_pane, text)
+        .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// The tab a task's agent runs in.
+///
+/// A tab title is `<symbol> <cli>·<label>`, so the segment between the first and
+/// the second `·` is the task label; a disambiguated title keeps that segment
+/// and appends the task's short tag after another `·`.
+pub fn find_task_tab(tabs: &[shprd_mux::Tab], task: &str) -> Option<shprd_mux::Tab> {
+    let label = naming::truncate_label(task);
+    tabs.iter()
+        .find(|tab| tab.title.split('·').nth(1) == Some(label.as_str()))
+        .cloned()
+}
+
+/// Builds the argv the agent's CLI starts with.
+///
+/// The order is fixed by the launch spec: the base command, then the flags that
+/// suppress approval prompts, then the model, the effort and finally the system
+/// prompt. The second element of the result says whether the brief went in as an
+/// argument, which is also what says whether it has to be typed in instead.
+fn launch_argv(
+    launch: &LaunchSpec,
+    model: Option<&str>,
+    effort: Option<&str>,
+    brief: &str,
+    brief_path: &Path,
+) -> Result<(Vec<String>, bool), CliError> {
+    let mut argv = launch.interactive.clone();
+    if let Some(auto) = &launch.auto_approve {
+        argv.extend(auto.iter().cloned());
+    }
+    let values = Values {
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
+        prompt: Some(brief.to_string()),
+        prompt_file: Some(brief_path.display().to_string()),
+        session: None,
+    };
+    if model.is_some() {
+        argv.extend(render(launch, &launch.model_args, &values)?);
+    }
+    if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
+        argv.extend(render(launch, effort_args, &values)?);
+    }
+    let mut brief_in_args = false;
+    if let Some(system_prompt_args) = &launch.system_prompt_args {
+        argv.extend(render(launch, system_prompt_args, &values)?);
+        brief_in_args = true;
+    }
+    Ok((argv, brief_in_args))
+}
+
+/// Renders one argument template, naming the template when it cannot be filled.
+fn render(
+    launch: &LaunchSpec,
+    template: &[String],
+    values: &Values,
+) -> Result<Vec<String>, CliError> {
+    render_args(template, values).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "filling the launch arguments {template:?} of {:?}",
+            launch.interactive
+        )))
+    })
+}
+
+/// Flattens a launch environment into the pairs [`Mux::run`] takes: set entries
+/// first, then the removals, both in name order.
+fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
+    let mut pairs: Vec<(String, Option<String>)> = diff
+        .set
+        .into_iter()
+        .map(|(name, value)| (name, Some(value)))
+        .collect();
+    pairs.extend(diff.remove.into_iter().map(|name| (name, None)));
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,106 +837,4 @@ mod tests {
             );
         }
     }
-}
-
-/// Builds the argv the agent's CLI starts with.
-///
-/// The order is fixed by the launch spec: the base command, then the flags that
-/// suppress approval prompts, then the model, the effort and finally the system
-/// prompt. The second element of the result says whether the brief went in as an
-/// argument, which is also what says whether it has to be typed in instead.
-fn launch_argv(
-    launch: &LaunchSpec,
-    model: Option<&str>,
-    effort: Option<&str>,
-    brief: &str,
-    brief_path: &Path,
-) -> Result<(Vec<String>, bool), CliError> {
-    let mut argv = launch.interactive.clone();
-    if let Some(auto) = &launch.auto_approve {
-        argv.extend(auto.iter().cloned());
-    }
-    let values = Values {
-        model: model.map(str::to_string),
-        effort: effort.map(str::to_string),
-        prompt: Some(brief.to_string()),
-        prompt_file: Some(brief_path.display().to_string()),
-        session: None,
-    };
-    argv.extend(render(launch, &launch.model_args, &values)?);
-    if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
-        argv.extend(render(launch, effort_args, &values)?);
-    }
-    let mut brief_in_args = false;
-    if let Some(system_prompt_args) = &launch.system_prompt_args {
-        argv.extend(render(launch, system_prompt_args, &values)?);
-        brief_in_args = true;
-    }
-    Ok((argv, brief_in_args))
-}
-
-/// Renders one argument template, naming the template when it cannot be filled.
-fn render(
-    launch: &LaunchSpec,
-    template: &[String],
-    values: &Values,
-) -> Result<Vec<String>, CliError> {
-    render_args(template, values).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!(
-            "filling the launch arguments {template:?} of {:?}",
-            launch.interactive
-        )))
-    })
-}
-
-/// Flattens a launch environment into the pairs [`Mux::run`] takes: set entries
-/// first, then the removals, both in name order.
-fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
-    let mut pairs: Vec<(String, Option<String>)> = diff
-        .set
-        .into_iter()
-        .map(|(name, value)| (name, Some(value)))
-        .collect();
-    pairs.extend(diff.remove.into_iter().map(|name| (name, None)));
-    pairs
-}
-
-/// Sends one turn of input to the tab a task's agent runs in.
-///
-/// The tab is found by title inside the repository's workspace, so a prompt can
-/// only ever reach a tab this repository's shprd opened for that task.
-pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
-    let repo_name = repo
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))?;
-    let name = naming::workspace_name(&repo_name);
-    let workspace = mux
-        .find_workspace(&name)
-        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
-        .ok_or_else(|| {
-            CliError::Invalid(anyhow!("no workspace {name:?} yet: run `shprd up` first"))
-        })?;
-    let tabs = mux
-        .list_tabs(&workspace.id)
-        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
-    let tab = find_task_tab(&tabs, task).ok_or_else(|| {
-        CliError::Invalid(anyhow!(
-            "no tab for task {task:?} in {name:?}: spawn it with `shprd agent spawn --task {task}`"
-        ))
-    })?;
-    mux.prompt(&tab.root_pane, text)
-        .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
-}
-
-/// The tab a task's agent runs in.
-///
-/// A tab title is `<symbol> <cli>·<label>`, so the segment between the first and
-/// the second `·` is the task label; a disambiguated title keeps that segment
-/// and appends the task's short tag after another `·`.
-pub fn find_task_tab(tabs: &[shprd_mux::Tab], task: &str) -> Option<shprd_mux::Tab> {
-    let label = naming::truncate_label(task);
-    tabs.iter()
-        .find(|tab| tab.title.split('·').nth(1) == Some(label.as_str()))
-        .cloned()
 }
