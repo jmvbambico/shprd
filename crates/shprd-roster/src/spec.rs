@@ -63,6 +63,23 @@ impl HarnessSpec {
                 return Err(SpecError::InvalidSkillDir { dir: dir.clone() });
             }
         }
+
+        let launch = &self.launch;
+        check_template("launch.interactive", &launch.interactive, &[], None)?;
+        check_template(
+            "launch.model_args",
+            &launch.model_args,
+            &["model"],
+            Some("model"),
+        )?;
+        check_optional_template("launch.effort_args", &launch.effort_args, &["effort"])?;
+        check_optional_template("launch.auto_approve", &launch.auto_approve, &[])?;
+        check_optional_template(
+            "launch.system_prompt_args",
+            &launch.system_prompt_args,
+            &["prompt", "prompt_file"],
+        )?;
+        check_optional_template("launch.resume_args", &launch.resume_args, &["session"])?;
         Ok(())
     }
 }
@@ -322,6 +339,14 @@ pub enum SpecError {
         /// The location pattern that failed.
         location: String,
     },
+    /// A launch argument template uses a placeholder it may not or must use.
+    #[error("invalid {field} template: {reason}")]
+    InvalidTemplate {
+        /// The launch field that failed, e.g. `launch.model_args`.
+        field: &'static str,
+        /// What is wrong with it.
+        reason: String,
+    },
     /// An argument template has an unmatched `{` or `}`.
     #[error("unmatched brace in template token {token}")]
     UnmatchedBrace {
@@ -419,6 +444,90 @@ fn render_token(token: &str, values: &Values) -> Result<String, SpecError> {
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// The placeholder names in one template token, rejecting malformed braces.
+fn template_placeholders(token: &str) -> Result<Vec<&str>, SpecError> {
+    let mut names = Vec::new();
+    let mut rest = token;
+    loop {
+        let Some(start) = rest.find('{') else {
+            if rest.contains('}') {
+                return Err(SpecError::UnmatchedBrace {
+                    token: token.to_owned(),
+                });
+            }
+            return Ok(names);
+        };
+        if rest[..start].contains('}') {
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
+        }
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            return Err(SpecError::UnmatchedBrace {
+                token: token.to_owned(),
+            });
+        };
+        names.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+}
+
+/// Check one launch template: at most one placeholder per token, only the
+/// placeholders in `allowed`, and `required` exactly once across the template.
+fn check_template(
+    field: &'static str,
+    tokens: &[String],
+    allowed: &[&str],
+    required: Option<&str>,
+) -> Result<(), SpecError> {
+    let mut required_count = 0usize;
+    for token in tokens {
+        let names = template_placeholders(token)?;
+        if names.len() > 1 {
+            return Err(SpecError::InvalidTemplate {
+                field,
+                reason: format!(
+                    "token `{token}` has {} placeholders; use at most one",
+                    names.len()
+                ),
+            });
+        }
+        for name in names {
+            if !allowed.contains(&name) {
+                return Err(SpecError::InvalidTemplate {
+                    field,
+                    reason: format!("token `{token}` uses {{{name}}}, which is not allowed here"),
+                });
+            }
+            if Some(name) == required {
+                required_count += 1;
+            }
+        }
+    }
+    if let Some(required) = required {
+        if required_count != 1 {
+            return Err(SpecError::InvalidTemplate {
+                field,
+                reason: format!("must use {{{required}}} exactly once, found {required_count}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Check an optional launch template, ignoring a field the spec leaves out.
+fn check_optional_template(
+    field: &'static str,
+    tokens: &Option<Vec<String>>,
+    allowed: &[&str],
+) -> Result<(), SpecError> {
+    match tokens {
+        Some(tokens) => check_template(field, tokens, allowed, None),
+        None => Ok(()),
+    }
 }
 
 /// Load every `*.toml` harness spec in `path`, sorted by file name.
@@ -663,6 +772,53 @@ project_dirs = []
             Err(error) => error,
         };
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn template_error(fixture: &str) -> SpecError {
+        let spec = parse_fixture(fixture);
+        match spec.validate() {
+            Ok(()) => panic!("launch template should be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn rejects_model_args_without_model_placeholder() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"model_args = ["--model", "{model}"]"#,
+            r#"model_args = ["--model", "sonnet"]"#,
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_effort_args_using_model_placeholder() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"model_args = ["--model", "{model}"]"#,
+            "model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{model}\"]",
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_two_placeholders_in_one_token() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"model_args = ["--model", "{model}"]"#,
+            r#"model_args = ["--model={model}{effort}"]"#,
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
     }
 
     #[test]
