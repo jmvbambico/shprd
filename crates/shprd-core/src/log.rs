@@ -3,8 +3,10 @@
 //! One file per run (`<repo>/.shprd/events.jsonl`), one [`Event`] per line,
 //! `\n`-terminated. Appends take an exclusive lock on the file so two writers
 //! cannot interleave a line or reuse a `seq`. Reads are strict: a complete
-//! line that does not parse, or a sequence that skips, is an error; only a
-//! torn final line (a crash mid-write) is tolerated.
+//! line that does not parse, or a sequence that skips, is an error. Only a
+//! torn final line (a crash mid-write) is tolerated: a final line with no
+//! trailing newline is never an event, even when it parses. An append drops
+//! such a tail before writing, so the next event still starts a clean line.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -39,8 +41,9 @@ impl Clock for SystemClock {
 pub struct ReadOutcome {
     /// Every event that parsed, in log order.
     pub events: Vec<Event>,
-    /// True when the last line was an unterminated, unparseable tail (a torn
-    /// write from a crash); it was skipped.
+    /// True when the file ended mid-line: the final line had no trailing
+    /// newline, so it was treated as a torn write from a crash and skipped,
+    /// whether or not it parsed.
     pub truncated_tail: bool,
 }
 
@@ -182,8 +185,8 @@ impl EventLog {
     /// Read and validate every event in the log at `path`.
     ///
     /// Every complete line must parse and carry the next `seq`; a final line
-    /// with no trailing newline that does not parse is treated as a torn write
-    /// and skipped, with [`ReadOutcome::truncated_tail`] set.
+    /// with no trailing newline is treated as a torn write and skipped, with
+    /// [`ReadOutcome::truncated_tail`] set, whether or not it parses.
     pub fn read_all(path: &Path) -> Result<ReadOutcome, LogError> {
         let file = File::open(path).map_err(|source| LogError::Io {
             path: path.to_path_buf(),
@@ -274,38 +277,29 @@ fn read_locked(file: &File, path: &Path) -> Result<ReadOutcome, LogError> {
             break;
         }
         line_no = line_no.saturating_add(1);
-        let terminated = buf.last() == Some(&b'\n');
-        let text: &[u8] = if terminated {
-            buf.get(..buf.len().saturating_sub(1)).unwrap_or(&[])
-        } else {
-            &buf[..]
-        };
-
-        match serde_json::from_slice::<Event>(text) {
-            Ok(event) => {
-                let expected = u64::try_from(events.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1);
-                if event.seq != expected {
-                    return Err(LogError::BadSequence {
-                        line: line_no,
-                        expected,
-                        found: event.seq,
-                    });
-                }
-                events.push(event);
-            }
-            Err(source) => {
-                if terminated {
-                    return Err(LogError::Corrupt {
-                        line: line_no,
-                        source,
-                    });
-                }
-                // Unterminated and unparseable: a crash truncated the write.
-                truncated_tail = true;
-            }
+        if buf.last() != Some(&b'\n') {
+            // Only a `\n`-terminated line is an event, so whatever trails the
+            // last newline is a torn write from a crash, whether or not it
+            // happens to parse. It was not appended, so it is skipped.
+            truncated_tail = true;
+            break;
         }
+        let text: &[u8] = buf.get(..buf.len().saturating_sub(1)).unwrap_or(&[]);
+        let event = serde_json::from_slice::<Event>(text).map_err(|source| LogError::Corrupt {
+            line: line_no,
+            source,
+        })?;
+        let expected = u64::try_from(events.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        if event.seq != expected {
+            return Err(LogError::BadSequence {
+                line: line_no,
+                expected,
+                found: event.seq,
+            });
+        }
+        events.push(event);
     }
 
     Ok(ReadOutcome {
@@ -523,6 +517,41 @@ mod tests {
             vec![1, 2, 3]
         );
         assert_eq!(outcome.events, vec![first, second, third]);
+    }
+
+    #[test]
+    fn complete_json_without_a_newline_is_still_torn() {
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let mut log = open_log(dir.path());
+        let first = append(&mut log, started());
+        let second = append(&mut log, finished());
+
+        let pending = Event {
+            seq: 3,
+            at_ms: 17,
+            actor: Actor::Human,
+            kind: finished(),
+        };
+        let mut text = match std::fs::read_to_string(log.path()) {
+            Ok(text) => text,
+            Err(err) => panic!("read failed: {err}"),
+        };
+        text.push_str(&line_of(&pending));
+        write_raw(log.path(), &text);
+
+        let outcome = read_all(&log);
+        assert!(
+            outcome.truncated_tail,
+            "an unterminated line is torn even when it parses"
+        );
+        assert_eq!(outcome.events, vec![first, second]);
+
+        let next = append(&mut log, finished());
+        assert_eq!(next.seq, 3, "the torn tail did not consume a seq");
+        assert_eq!(read_all(&log).events.len(), 3, "the tail was dropped");
     }
 
     #[test]
