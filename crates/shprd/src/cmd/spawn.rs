@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use shprd_core::config::Skills;
-use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
+use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
 use shprd_core::state::{RunState, Task};
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{Mux, naming};
@@ -754,11 +754,14 @@ pub fn real_mux() -> shprd_mux_herdr::HerdrMux {
 
 /// Sends one turn of input to the tab a task's agent runs in.
 ///
-/// The tab is found by title inside the repository's workspace, so a prompt can
-/// only ever reach a tab this repository's shprd opened for that task.
+/// Only the tab the active run's log says this task's latest attempt opened is
+/// reachable, so a prompt can never land in another run's agent.
 pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
     let home = crate::ctx::resolve_home(None)?;
-    prompt_in(mux, &home, repo, task, text)
+    // Reading the log needs the root; the actor and the flags only matter to a
+    // verb that writes.
+    let ctx = Ctx::new(repo.to_path_buf(), Actor::Human, false, true);
+    prompt_in(mux, &home, &ctx, task, text)
 }
 
 /// [`prompt`], against an explicit home directory, so a test needs no
@@ -766,10 +769,12 @@ pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), 
 fn prompt_in(
     mux: &dyn Mux,
     home: &Path,
-    repo: &Path,
+    ctx: &Ctx,
     task: &str,
     text: &str,
 ) -> Result<(), CliError> {
+    let run = active_run(ctx)?;
+    let repo = &ctx.root;
     let repo_name = repo
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -784,7 +789,7 @@ fn prompt_in(
     let tabs = mux
         .list_tabs(&workspace.id)
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
-    let record = latest_tab_record(&home.join(".shprd").join("briefs"), task)
+    let record = latest_tab_record(&home.join(".shprd").join("briefs"), &run, task)
         .ok_or_else(|| no_open_tab(task))?;
     let wanted = std::fs::read_to_string(&record).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("reading {}", record.display())))
@@ -795,6 +800,21 @@ fn prompt_in(
         .ok_or_else(|| no_open_tab(task))?;
     mux.prompt(&tab.root_pane, text)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// The run the folded event log names as active.
+///
+/// A prompt outside a run has no tab to reach: the run id is half of every tab
+/// record's path.
+fn active_run(ctx: &Ctx) -> Result<String, CliError> {
+    let state = ctx.state()?;
+    state
+        .run
+        .as_ref()
+        .map(|run| run.run_id.clone())
+        .ok_or_else(|| {
+            CliError::Invalid(anyhow!("no active run: start one with `shprd run start`"))
+        })
 }
 
 /// The refusal a task with no reachable tab earns.
@@ -827,35 +847,28 @@ fn write_tab(path: &Path, tab: &shprd_mux::TabId) {
     }
 }
 
-/// The tab record of a task's latest attempt, across every run.
+/// The tab record of a task's latest attempt in one run.
 ///
-/// The attempt number is part of the file name, so the highest one names the
-/// tab a prompt should reach; the run name only breaks a tie between two runs.
-fn latest_tab_record(briefs: &Path, task: &str) -> Option<PathBuf> {
+/// Only `run`'s directory is read: a task id reused in a later run must not
+/// resolve to the older run's tab. The attempt number is part of the file name,
+/// so the highest one names the tab a prompt should reach.
+fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
     let prefix = format!("{task}-a");
-    let mut best: Option<(u32, String, PathBuf)> = None;
-    for run in std::fs::read_dir(briefs).ok()?.flatten() {
-        let dir = run.path();
-        let run_name = dir.file_name()?.to_string_lossy().to_string();
-        for file in std::fs::read_dir(&dir).ok()?.flatten() {
-            let name = file.file_name().to_string_lossy().to_string();
-            let attempt = name
-                .strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix(".tab"))
-                .and_then(|digits| digits.parse::<u32>().ok());
-            let Some(attempt) = attempt else {
-                continue;
-            };
-            let better = match &best {
-                Some((kept, kept_run, _)) => (attempt, &run_name) > (*kept, kept_run),
-                None => true,
-            };
-            if better {
-                best = Some((attempt, run_name.clone(), file.path()));
-            }
+    let mut best: Option<(u32, PathBuf)> = None;
+    for file in std::fs::read_dir(briefs.join(run)).ok()?.flatten() {
+        let name = file.file_name().to_string_lossy().to_string();
+        let attempt = name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tab"))
+            .and_then(|digits| digits.parse::<u32>().ok());
+        let Some(attempt) = attempt else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(kept, _)| attempt > *kept) {
+            best = Some((attempt, file.path()));
         }
     }
-    best.map(|(_, _, path)| path)
+    best.map(|(_, path)| path)
 }
 
 /// Builds the argv the agent's CLI starts with.
@@ -1531,10 +1544,10 @@ project_dirs = []
     }
 
     /// Writes the tab record a spawn would have written for one attempt.
-    fn record_tab(scratch: &Scratch, task: &str, attempt: u32, tab: &shprd_mux::TabId) {
+    fn record_tab(scratch: &Scratch, run: &str, task: &str, attempt: u32, tab: &shprd_mux::TabId) {
         let path = tab_path(
             &scratch.home.path().join(".shprd").join("briefs"),
-            "t1",
+            run,
             task,
             attempt,
         );
@@ -1545,6 +1558,7 @@ project_dirs = []
     #[test]
     fn prompt_reaches_the_tab_its_own_task_spawned() {
         let scratch = Scratch::new();
+        let ctx = scratch.ctx();
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
             .create_workspace(
@@ -1574,17 +1588,11 @@ project_dirs = []
                 scratch.root(),
             )
             .unwrap_or_else(|err| panic!("{err}"));
-        record_tab(&scratch, first, 1, &other.id);
-        record_tab(&scratch, second, 1, &mine.id);
+        record_tab(&scratch, "t1", first, 1, &other.id);
+        record_tab(&scratch, "t1", second, 1, &mine.id);
 
-        prompt_in(
-            &mux,
-            scratch.home.path(),
-            scratch.root(),
-            second,
-            "keep going",
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        prompt_in(&mux, scratch.home.path(), &ctx, second, "keep going")
+            .unwrap_or_else(|err| panic!("{err}"));
         let prompted = mux
             .calls()
             .into_iter()
@@ -1599,7 +1607,7 @@ project_dirs = []
 
         // A task with no record, and a record whose tab is gone, both refuse
         // with the same message rather than prompting the wrong agent.
-        let unrecorded = prompt_in(&mux, scratch.home.path(), scratch.root(), "T9", "hello");
+        let unrecorded = prompt_in(&mux, scratch.home.path(), &ctx, "T9", "hello");
         let message = match unrecorded {
             Ok(()) => panic!("a task with no tab record was prompted"),
             Err(err) => {
@@ -1620,8 +1628,69 @@ project_dirs = []
             ),
             &shprd_mux::TabId::new("tab-gone"),
         );
-        let closed = prompt_in(&mux, scratch.home.path(), scratch.root(), first, "hello");
+        let closed = prompt_in(&mux, scratch.home.path(), &ctx, first, "hello");
         assert_eq!(closed.map(|_| ()).map_err(|err| err.exit_code()), Err(2));
+    }
+
+    /// Two runs can each hold a tab record for the same task. A prompt belongs
+    /// to the active run, even when an older run's record has the higher
+    /// attempt number.
+    #[test]
+    fn prompt_ignores_an_older_runs_tab_record() {
+        let scratch = Scratch::new();
+        let ctx = Ctx::new(scratch.root().to_path_buf(), Actor::Human, false, true);
+        ctx.commit(EventKind::RunStarted {
+            run_id: "run-two".to_string(),
+            repo: scratch.repo_name(),
+            base_branch: "main".to_string(),
+            integration_branch: "integration/m4".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default().with_ready_agent();
+        let workspace = mux
+            .create_workspace(
+                &naming::workspace_name(&scratch.repo_name()),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let stale = mux
+            .create_tab(&workspace.id, "stale", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let current = mux
+            .create_tab(&workspace.id, "current", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        // The older run kept retrying, so its attempt number is the higher one.
+        record_tab(&scratch, "run-one", "api", 7, &stale.id);
+        record_tab(&scratch, "run-two", "api", 1, &current.id);
+
+        prompt_in(&mux, scratch.home.path(), &ctx, "api", "keep going")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let prompted = mux
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Prompt(pane, _) => Some(pane),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("nothing was prompted"));
+        assert_eq!(prompted, current.root_pane);
+        assert_ne!(prompted, stale.root_pane);
+    }
+
+    /// With no run in the folded log there is no current run to prompt in.
+    #[test]
+    fn prompt_without_a_run_says_so() {
+        let scratch = Scratch::new();
+        let ctx = Ctx::new(scratch.root().to_path_buf(), Actor::Human, false, true);
+        let mux = FakeMux::default().with_ready_agent();
+        let message = match prompt_in(&mux, scratch.home.path(), &ctx, "api", "hello") {
+            Ok(()) => panic!("a prompt with no active run was sent"),
+            Err(err) => {
+                assert_eq!(err.exit_code(), 2);
+                err.to_string()
+            }
+        };
+        assert!(message.contains("no active run"), "{message}");
     }
 }
 
