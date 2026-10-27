@@ -186,7 +186,6 @@ shprd stands on other people's work. Thank you to:
 | [herdr-cadence](https://github.com/zhenyufu/herdr-cadence) | David Fu | MIT | the scope-locked worktree and verified cherry-pick model shprd's engine follows |
 | [herdr-projects](https://github.com/eliasstravik/herdr-projects) | Elias Stravik | MIT | the per-CLI launch, model and provider-error knowledge, and the review-gate rules |
 | [skills](https://github.com/vercel-labs/skills) | Vercel | MIT | `npx skills`, the global skills shprd routes to agents |
-| [og](https://github.com/jmvbambico/og) | John Michael Vincent Bambico | WTFPL | the orchestration flow shprd grew out of |
 
 Agent skills belong to their authors. shprd reads the ones you installed and
 never ships them.

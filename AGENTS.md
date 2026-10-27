@@ -9,19 +9,19 @@ design. Read [docs/plan.md](docs/plan.md) for what's being built now.
 
 ## Gates
 
-| Gate | Command | Scope |
-|---|---|---|
-| format | `cargo fmt --all --check` | worker + integration |
-| lint | `cargo clippy --workspace --all-targets -- -D warnings` | worker + integration |
-| unit tests | `cargo test --workspace` | worker + integration |
-| integration tests | `cargo test --workspace --features it -- --test-threads=1` | **integration branch only** |
+| Gate | Command | Run by workers | Run on the integration branch | Run by CI |
+|---|---|---|---|---|
+| format | `cargo fmt --all --check` | yes | yes | yes |
+| lint | `cargo clippy --workspace --all-targets -- -D warnings` | yes | yes | yes |
+| unit tests | `cargo test --workspace` | yes | yes | yes |
+| integration tests | `cargo test --workspace --features it -- --test-threads=1` | **no** | yes | no |
 
-- Workers run the three worker gates in their own worktree before reporting
+- Workers run the first three gates in their own worktree before reporting
   done, and say which ones they ran.
-- Workers never run the integration tests. They run once, on the integration
-  branch.
-- Until a crate defines the `it` feature, the integration gate is the same as
-  the unit tests.
+- The integration tests run only on the integration branch, once per batch,
+  and never in two places at once.
+- Until a crate defines the `it` feature, the integration-tests row is run as
+  `cargo test --workspace -- --test-threads=1`.
 - Tests that need a real CLI, a real multiplexer or a model call are
   `#[ignore]` and are run by hand at milestone gates. CI never makes model
   calls.
