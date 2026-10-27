@@ -7,6 +7,11 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+shprd-core = { path = "../shprd-core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

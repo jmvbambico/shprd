@@ -328,6 +328,11 @@ dependencies = [
 [[package]]
 name = "shprd-git"
 version = "0.0.0"
+dependencies = [
+ "shprd-core",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "shprd-mux"
