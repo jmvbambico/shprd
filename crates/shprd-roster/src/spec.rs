@@ -81,6 +81,7 @@ impl HarnessSpec {
             &["prompt", "prompt_file"],
         )?;
         check_optional_template("launch.resume_args", &launch.resume_args, &["session"])?;
+        check_optional_template("detect.signin_args", &self.detect.signin_args, &["model"])?;
         Ok(())
     }
 }
@@ -111,6 +112,12 @@ pub struct DetectSpec {
     pub version_args: Vec<String>,
     /// The command a user runs to sign in.
     pub signin_hint: String,
+    /// Arguments that probe whether the CLI is signed in.
+    ///
+    /// They run after the binary and exit 0 when the user is signed in. A
+    /// probe may use `{model}` when the answer depends on the model. It must
+    /// never print a credential: the output is not shown.
+    pub signin_args: Option<Vec<String>>,
 }
 
 /// Argument templates for starting the CLI and injecting session settings.
@@ -886,6 +893,33 @@ project_dirs = []
         let fixture = MINIMAL_SPEC.replacen(
             r#"model_args = ["--model", "{model}"]"#,
             "model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{model}\"]",
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn accepts_signin_args_using_model() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"signin_hint = "claude auth login""#,
+            "signin_hint = \"claude auth login\"\nsignin_args = [\"auth\", \"check\", \"--model\", \"{model}\"]",
+            1,
+        );
+        let spec = parse_fixture(&fixture);
+        assert!(
+            spec.validate().is_ok(),
+            "optionally using {{model}} is allowed"
+        );
+    }
+
+    #[test]
+    fn rejects_signin_args_using_effort_placeholder() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"signin_hint = "claude auth login""#,
+            "signin_hint = \"claude auth login\"\nsignin_args = [\"--effort\", \"{effort}\"]",
             1,
         );
         assert!(matches!(

@@ -25,6 +25,7 @@ dry_patterns = [
 binary = "opencode"
 version_args = ["--version"]
 signin_hint = "opencode auth login"
+signin_args = ["auth", "list"]
 
 [launch]
 interactive = ["opencode"]
