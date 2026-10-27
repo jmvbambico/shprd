@@ -93,6 +93,12 @@ fn record_error(
 pub struct Watcher {
     /// Per attempt: the state machine's memory and the screen sampler.
     watches: BTreeMap<(String, u32, String), (Watch, Sampler)>,
+    /// Per agent that went dry: the memory its attempt left behind.
+    ///
+    /// An attempt's watch is dropped when it is handed off, but the outgoing
+    /// agent's dry mark outlives the attempt: without this map nothing would
+    /// ever clear it, and the roster would skip that agent for good.
+    cooldowns: BTreeMap<String, Watch>,
     /// The thresholds and backoffs the state machine runs under.
     policy: Policy,
 }
@@ -102,6 +108,7 @@ impl Watcher {
     pub fn new(policy: Policy) -> Self {
         Self {
             watches: BTreeMap::new(),
+            cooldowns: BTreeMap::new(),
             policy,
         }
     }
@@ -118,6 +125,7 @@ impl Watcher {
     ) -> Result<Vec<String>, CliError> {
         let (state, events) = env.ctx.load()?;
         let mut lines = Vec::new();
+        self.tick_cooldowns(env, &state, now_ms, &mut lines)?;
         for task in state.tasks.values() {
             if task.status != TaskStatus::Working {
                 continue;
@@ -134,6 +142,63 @@ impl Watcher {
         self.watches
             .retain(|key, _| working(&key.0, &key.1, &key.2));
         Ok(lines)
+    }
+
+    /// Polls the agents a hand-off left behind, so their cooldown still ends.
+    ///
+    /// A watch that emitted [`Action::HandOff`] moves here when its attempt is
+    /// over: the outgoing agent is still marked dry in the log, and only a
+    /// probe that is due can clear that mark. An entry the log no longer calls
+    /// dry is dropped, because there is nothing left to clear.
+    fn tick_cooldowns(
+        &mut self,
+        env: &SpawnEnv<'_>,
+        state: &RunState,
+        now_ms: u64,
+        lines: &mut Vec<String>,
+    ) -> Result<(), CliError> {
+        let policy = self.policy.clone();
+        let idle = Inputs {
+            now_ms,
+            record_error: None,
+            serve: None,
+            screen: None,
+            process_exited: false,
+        };
+        let mut finished: Vec<String> = Vec::new();
+        for (agent, watch) in self.cooldowns.iter_mut() {
+            if !state.agents.get(agent).is_some_and(|info| info.dry) {
+                finished.push(agent.clone());
+                continue;
+            }
+            let probe_due = watch
+                .step(&idle, &policy)
+                .iter()
+                .any(|action| matches!(action, Action::Canary));
+            if !probe_due {
+                continue;
+            }
+            // No quota call is wired yet, so a probe that is due always reads
+            // as recovered: the dry mark existed to make the agent wait, and
+            // the wait is over.
+            let follow = watch.canary_result(true, now_ms, &policy);
+            if !follow
+                .iter()
+                .any(|action| matches!(action, Action::MarkAvailable))
+            {
+                continue;
+            }
+            env.ctx.commit(EventKind::Available {
+                agent: agent.clone(),
+                reason: String::from("reset time passed"),
+            })?;
+            lines.push(format!("available again: {agent}"));
+            finished.push(agent.clone());
+        }
+        for agent in finished {
+            self.cooldowns.remove(&agent);
+        }
+        Ok(())
     }
 }
 
@@ -192,6 +257,7 @@ fn tick_task(
         process_exited,
     };
     let mut queue = watch.step(&inputs, &watcher.policy);
+    let mut handed_off = false;
     queue.reverse();
     while let Some(action) = queue.pop() {
         match action {
@@ -215,6 +281,7 @@ fn tick_task(
                     reason: dry_reason(watch),
                     to: None,
                 };
+                handed_off = true;
                 match handoff(mux, env, &request) {
                     Ok(report) => lines.push(format!("handed off {} to {}", task.id, report.to)),
                     Err(err) => escalate(env, &task.id, &err, lines),
@@ -242,6 +309,11 @@ fn tick_task(
                 lines.push(format!("available again: {agent}"));
             }
         }
+    }
+    // The attempt is over, but the outgoing agent's cooldown is not: its watch
+    // moves to the map that outlives the attempt.
+    if handed_off && let Some((cooldown, _)) = watcher.watches.remove(&key) {
+        watcher.cooldowns.insert(agent.clone(), cooldown);
     }
     Ok(())
 }
@@ -745,6 +817,54 @@ project_dirs = []
         assert!(
             fresh.is_empty(),
             "the failing ticks appended {} events",
+            fresh.len()
+        );
+    }
+
+    /// A hand-off ends the attempt, not the outgoing agent's cooldown: once its
+    /// retry time passes, the roster must see it as available again.
+    #[test]
+    fn a_handed_off_agent_is_available_again_after_its_retry_time() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_screen(&pane, "step 1\nstep 2\n");
+        mux.set_state(&pane, AgentState::Working);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let t0 = 1_700_000_000_000u64;
+        let mut dry_at = None;
+        for step in 0..=30u64 {
+            let now_ms = t0 + 10_000 * step;
+            watcher
+                .tick(&mux, &env, now_ms)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let dry = events(&ctx)
+                .iter()
+                .any(|event| matches!(&event.kind, EventKind::Dry { agent, .. } if agent == "sh"));
+            if dry {
+                dry_at = Some(now_ms);
+                break;
+            }
+        }
+        let dry_at = dry_at.unwrap_or_else(|| panic!("the agent never went dry"));
+
+        // The first dry backoff is 900s; a tick past it is the probe.
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, dry_at + 910_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let log = events(&ctx);
+        let fresh = &log[before..];
+        assert!(
+            appended(fresh, |kind| matches!(
+                kind,
+                EventKind::Available { agent, .. } if agent == "sh"
+            )),
+            "the handed-off agent stayed dry: {} events",
             fresh.len()
         );
     }
