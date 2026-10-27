@@ -19,6 +19,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::spec::HarnessSpec;
+
+/// Lines of a `SKILL.md` that may hold the YAML frontmatter.
+const FRONTMATTER_LINES: usize = 40;
+
 /// An error while loading or checking skills data.
 #[derive(Debug, thiserror::Error)]
 pub enum SkillsError {
@@ -378,4 +383,606 @@ pub fn read_lock(home: &Path) -> Result<BTreeMap<String, LockEntry>, SkillsError
             )
         })
         .collect())
+}
+
+/// Scan one skills directory for skills.
+///
+/// Every immediate subdirectory (or symlink to one) that holds a `SKILL.md` is
+/// a skill. Only the leading [`FRONTMATTER_LINES`] lines of that file are read,
+/// and only its `name:` and `description:` fields: the body is never touched.
+/// Entries whose name matches an ignore pattern are reported as junk and never
+/// scanned; any `SKILL.md` directory underneath them is reported as junk too.
+/// A directory that cannot be read is treated as absent.
+pub fn scan_dir(dir: &Path, ignore: &[String]) -> (Vec<FoundSkill>, Vec<PathBuf>) {
+    let mut skills = Vec::new();
+    let mut junk = Vec::new();
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => return (skills, junk),
+    };
+    let mut entries: Vec<_> = read.filter_map(Result::ok).collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if ignore.iter().any(|pattern| pattern == &name) {
+            collect_junk(&path, &mut junk);
+            junk.push(path);
+            continue;
+        }
+        let is_dir = fs::metadata(&path)
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false);
+        if !is_dir || !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        let symlink = fs::symlink_metadata(&path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+        let target = if symlink {
+            fs::read_link(&path).ok()
+        } else {
+            None
+        };
+        let (front_name, description) = read_frontmatter(&path.join("SKILL.md"));
+        skills.push(FoundSkill {
+            name,
+            front_name,
+            description,
+            path,
+            dir: dir.to_path_buf(),
+            symlink,
+            target,
+        });
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    (skills, junk)
+}
+
+/// Push every directory below `dir` that holds a `SKILL.md` onto `junk`.
+fn collect_junk(dir: &Path, junk: &mut Vec<PathBuf>) {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => return,
+    };
+    for entry in read.filter_map(Result::ok) {
+        let path = entry.path();
+        if !fs::metadata(&path)
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if path.join("SKILL.md").is_file() {
+            junk.push(path.clone());
+        }
+        collect_junk(&path, junk);
+    }
+}
+
+/// Read `name:` and `description:` from the YAML frontmatter of a `SKILL.md`.
+///
+/// Stops after [`FRONTMATTER_LINES`] lines in every case, so a large skill file
+/// costs the same as a small one. Unquoted, single-quoted and double-quoted
+/// scalar values are accepted; anything else is left as written.
+fn read_frontmatter(path: &Path) -> (Option<String>, Option<String>) {
+    use std::io::BufRead;
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (None, None),
+    };
+    let mut name = None;
+    let mut description = None;
+    let mut seen_marker = false;
+    for line in io::BufReader::new(file).lines().take(FRONTMATTER_LINES) {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => break,
+        };
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            if seen_marker {
+                break;
+            }
+            seen_marker = true;
+            continue;
+        }
+        if !seen_marker {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let value = unquote(value.trim());
+        match key.trim() {
+            "name" if name.is_none() && !value.is_empty() => name = Some(value),
+            "description" if description.is_none() && !value.is_empty() => {
+                description = Some(value);
+            }
+            _ => {}
+        }
+    }
+    (name, description)
+}
+
+/// Strip one layer of matching single or double quotes from a scalar.
+fn unquote(value: &str) -> String {
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.to_string();
+        }
+    }
+    value.to_string()
+}
+
+/// The skills one CLI sees when launched with a given environment.
+#[derive(Debug, Clone, Default)]
+pub struct CliSkills {
+    /// Harness id the scan was made for.
+    pub cli: String,
+    /// Every skills directory the CLI reads, in spec order, with whether the
+    /// launch environment leaves it visible.
+    pub dirs: Vec<(PathBuf, bool)>,
+    /// Skills found, one entry per name: the first directory to provide a name
+    /// wins.
+    pub skills: Vec<FoundSkill>,
+    /// Directories hidden by an environment variable, with the variable's name.
+    pub hidden_dirs: Vec<(PathBuf, String)>,
+    /// Junk folders found inside a visible skills directory.
+    pub junk: Vec<PathBuf>,
+    /// Names provided by more than one directory, with the later directory.
+    pub duplicates: Vec<(String, PathBuf)>,
+}
+
+/// Where the curated compatibility list lives inside the repository.
+pub fn compat_path(repo: &Path) -> PathBuf {
+    repo.join("data").join("skills").join("compat.toml")
+}
+
+/// Where the visibility rules live inside the repository.
+pub fn visibility_path(repo: &Path) -> PathBuf {
+    repo.join("data").join("skills").join("visibility.toml")
+}
+
+/// Expand a spec directory against the home directory and the repo root.
+fn resolve(raw: &str, home: &Path, repo: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        Some(home.join(rest))
+    } else {
+        repo.map(|repo| repo.join(raw))
+    }
+}
+
+/// Find the skills a CLI sees, given the environment it is launched with.
+///
+/// Directories come from the harness spec: `skills.home_dirs` are expanded
+/// under `home`, `skills.project_dirs` are joined to `repo` (skipped when no
+/// repo is given). A directory is hidden when an [`EnvRule`] for this CLI names
+/// it and its variable is set to a non-empty value other than `0`. A skill
+/// offered by two directories counts once.
+pub fn visible(
+    spec: &HarnessSpec,
+    home: &Path,
+    repo: Option<&Path>,
+    env: &BTreeMap<String, String>,
+    rules: &VisibilityRules,
+    ignore: &[String],
+) -> CliSkills {
+    let hidden = rules.hidden(&spec.id, env);
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut out = CliSkills {
+        cli: spec.id.clone(),
+        ..CliSkills::default()
+    };
+    let raws = spec
+        .skills
+        .home_dirs
+        .iter()
+        .chain(spec.skills.project_dirs.iter());
+    for raw in raws {
+        let Some(path) = resolve(raw, home, repo) else {
+            continue;
+        };
+        if let Some((_, variable)) = hidden.iter().find(|(dir, _)| dir == raw) {
+            out.hidden_dirs.push((path.clone(), variable.clone()));
+            out.dirs.push((path, false));
+            continue;
+        }
+        out.dirs.push((path.clone(), true));
+        let (found, junk) = scan_dir(&path, ignore);
+        out.junk.extend(junk);
+        for skill in found {
+            if let Some(first) = seen.get(&skill.name) {
+                out.duplicates.push((skill.name.clone(), first.clone()));
+                continue;
+            }
+            seen.insert(skill.name.clone(), skill.path.clone());
+            out.skills.push(skill);
+        }
+    }
+    out
+}
+
+/// One row of `shprd doctor`'s skills review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Review {
+    /// Skill name, i.e. the directory name.
+    pub name: String,
+    /// The curated verdict, absent when the list does not know the skill.
+    pub verdict: Option<Verdict>,
+    /// What the review found.
+    pub state: ReviewState,
+}
+
+/// What a review found for one skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewState {
+    /// Curated and installed at the reviewed hash.
+    Reviewed,
+    /// Installed, but the folder hash moved past the reviewed one.
+    ChangedUpstream {
+        /// The hash in the compatibility list.
+        reviewed: String,
+        /// The hash on disk.
+        current: String,
+    },
+    /// Installed but absent from the compatibility list.
+    NotInCompatList,
+    /// Curated but not installed.
+    MissingLocally,
+}
+
+/// Compare the curated list with what `npx skills` installed.
+///
+/// Curated entries come first in file order, then installed skills the list
+/// does not know about, in lock-file order.
+pub fn review(compat: &CompatList, lock: &BTreeMap<String, LockEntry>) -> Vec<Review> {
+    let mut rows = Vec::with_capacity(compat.skills.len() + lock.len());
+    for entry in &compat.skills {
+        let state = match lock.get(&entry.name) {
+            None => ReviewState::MissingLocally,
+            Some(installed) if installed.folder_hash == entry.reviewed_hash => {
+                ReviewState::Reviewed
+            }
+            Some(installed) => ReviewState::ChangedUpstream {
+                reviewed: entry.reviewed_hash.clone(),
+                current: installed.folder_hash.clone(),
+            },
+        };
+        rows.push(Review {
+            name: entry.name.clone(),
+            verdict: Some(entry.verdict),
+            state,
+        });
+    }
+    for name in lock.keys() {
+        if compat.entry(name).is_some() {
+            continue;
+        }
+        rows.push(Review {
+            name: name.clone(),
+            verdict: None,
+            state: ReviewState::NotInCompatList,
+        });
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `unwrap`/`expect` are denied workspace-wide, tests included.
+    trait Must<T> {
+        /// Return the value or panic with `what`.
+        fn must(self, what: &str) -> T;
+    }
+
+    impl<T, E: std::fmt::Display> Must<T> for Result<T, E> {
+        fn must(self, what: &str) -> T {
+            match self {
+                Ok(value) => value,
+                Err(error) => panic!("{what}: {error}"),
+            }
+        }
+    }
+
+    impl<T> Must<T> for Option<T> {
+        fn must(self, what: &str) -> T {
+            match self {
+                Some(value) => value,
+                None => panic!("{what}: not found"),
+            }
+        }
+    }
+
+    /// The repository root, where the shipped data files live.
+    fn repo() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// The shipped OpenCode spec, which reads two shared home directories.
+    fn opencode_spec() -> HarnessSpec {
+        let specs = crate::spec::load_dir(&repo().join("data/harness")).must("specs load");
+        specs
+            .into_iter()
+            .find(|spec| spec.id == "opencode")
+            .must("opencode spec is shipped")
+    }
+
+    /// Write a skill directory holding a frontmattered `SKILL.md`.
+    fn write_skill_at(path: &Path, name: &str, description: &str) {
+        fs::create_dir_all(path).must("skill dir");
+        let body = format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n");
+        fs::write(path.join("SKILL.md"), body).must("SKILL.md");
+    }
+
+    /// Write `<root>/<dir>/<name>/SKILL.md` and return the skill directory.
+    fn write_skill(root: &Path, dir: &str, name: &str, description: &str) -> PathBuf {
+        let path = root.join(dir).join(name);
+        write_skill_at(&path, name, description);
+        path
+    }
+
+    /// A lock map with one entry.
+    fn lock_of(name: &str, hash: &str) -> BTreeMap<String, LockEntry> {
+        let mut lock = BTreeMap::new();
+        lock.insert(
+            name.to_owned(),
+            LockEntry {
+                source: "obra/superpowers".to_owned(),
+                folder_hash: hash.to_owned(),
+            },
+        );
+        lock
+    }
+
+    /// A compat list with one curated entry.
+    fn compat_of(name: &str, hash: &str) -> CompatList {
+        CompatList {
+            schema: 1,
+            skills: vec![CompatEntry {
+                name: name.to_owned(),
+                source: "obra/superpowers".to_owned(),
+                verdict: Verdict::Allow,
+                roles: vec![Role::Worker],
+                tags: Vec::new(),
+                reason: "fixture".to_owned(),
+                reviewed_hash: hash.to_owned(),
+            }],
+            natives: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn finds_skills_including_symlinked_ones() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path();
+        write_skill(
+            home,
+            ".agents/skills",
+            "writing-plans",
+            "Turns asks into tasks.",
+        );
+        let real = write_skill(home, "elsewhere", "brainstorming", "Asks questions.");
+        let link = home.join(".agents/skills/brainstorming");
+        std::os::unix::fs::symlink(&real, &link).must("symlink");
+        let (found, junk) = scan_dir(&home.join(".agents/skills"), &[]);
+        assert!(junk.is_empty());
+        let names: Vec<&str> = found.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["brainstorming", "writing-plans"]);
+        let linked = found
+            .iter()
+            .find(|skill| skill.name == "brainstorming")
+            .must("symlinked skill is found");
+        assert!(linked.symlink);
+        assert_eq!(linked.target.as_deref(), Some(real.as_path()));
+        assert_eq!(linked.display_name(), "brainstorming");
+        assert_eq!(linked.description.as_deref(), Some("Asks questions."));
+        assert!(!found[1].symlink);
+        assert_eq!(found[1].dir, home.join(".agents/skills"));
+    }
+
+    #[test]
+    fn reports_junk_dirs_and_skips_them() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path();
+        let dir = home.join(".agents/skills");
+        write_skill(home, ".agents/skills", "kept", "Real skill.");
+        write_skill_at(&dir.join(".trash/removed"), "removed", "Deleted skill.");
+        write_skill_at(&dir.join("synced/copied"), "copied", "Mirrored skill.");
+        let (found, mut junk) = scan_dir(&dir, &[".trash".to_owned(), "synced".to_owned()]);
+        let names: Vec<&str> = found.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["kept"]);
+        junk.sort();
+        assert_eq!(
+            junk,
+            [
+                dir.join(".trash"),
+                dir.join(".trash/removed"),
+                dir.join("synced"),
+                dir.join("synced/copied"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_only_the_frontmatter_window() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let skill = tmp.path().join("late");
+        fs::create_dir_all(&skill).must("skill dir");
+        let mut body = String::from("# late\n");
+        for _ in 0..FRONTMATTER_LINES {
+            body.push_str("prose line\n");
+        }
+        body.push_str("name: late\n");
+        fs::write(skill.join("SKILL.md"), body).must("SKILL.md");
+        let (found, _) = scan_dir(tmp.path(), &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].front_name, None);
+        assert_eq!(found[0].display_name(), "late");
+    }
+
+    /// The shipped visibility rules.
+    fn rules() -> VisibilityRules {
+        VisibilityRules::load(&visibility_path(&repo())).must("visibility rules load")
+    }
+
+    #[test]
+    fn env_rules_hide_directories() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path();
+        write_skill(home, ".agents/skills", "brainstorming", "Shared skill.");
+        write_skill(home, ".claude/skills", "claude-only", "Claude skill.");
+        let spec = opencode_spec();
+        let rules = rules();
+        let mut env = BTreeMap::new();
+
+        let plain = visible(&spec, home, None, &env, &rules, &rules.ignore_patterns());
+        let names: Vec<&str> = plain.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["brainstorming", "claude-only"]);
+        assert!(plain.hidden_dirs.is_empty());
+        assert!(plain.dirs.iter().all(|(_, shown)| *shown));
+
+        env.insert(
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS".to_owned(),
+            "0".to_owned(),
+        );
+        let zero = visible(&spec, home, None, &env, &rules, &rules.ignore_patterns());
+        assert_eq!(zero.skills.len(), 2, "`0` does not disable anything");
+
+        env.insert(
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS".to_owned(),
+            "1".to_owned(),
+        );
+        let hidden = visible(&spec, home, None, &env, &rules, &rules.ignore_patterns());
+        assert!(hidden.skills.is_empty());
+        assert_eq!(
+            hidden.hidden_dirs,
+            [
+                (
+                    home.join(".agents/skills"),
+                    "OPENCODE_DISABLE_EXTERNAL_SKILLS".to_owned()
+                ),
+                (
+                    home.join(".claude/skills"),
+                    "OPENCODE_DISABLE_EXTERNAL_SKILLS".to_owned()
+                ),
+            ]
+        );
+        let hidden_count = hidden.dirs.iter().filter(|(_, shown)| !*shown).count();
+        assert_eq!(hidden_count, 2, "only the two hidden dirs are marked");
+    }
+
+    #[test]
+    fn scans_project_directories() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path().join("home");
+        let repo = tmp.path().join("repo");
+        write_skill(&repo, "skills", "repo-helper", "Project skill.");
+        let mut spec = opencode_spec();
+        spec.skills.home_dirs = Vec::new();
+        spec.skills.project_dirs = vec!["skills".to_owned()];
+        let rules = rules();
+        let env = BTreeMap::new();
+        let found = visible(&spec, &home, Some(&repo), &env, &rules, &[]);
+        assert_eq!(found.dirs, [(repo.join("skills"), true)]);
+        let names: Vec<&str> = found.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["repo-helper"]);
+    }
+
+    #[test]
+    fn duplicate_skill_counts_once() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path();
+        write_skill(home, ".agents/skills", "brainstorming", "Shared copy.");
+        write_skill(home, ".claude/skills", "brainstorming", "Claude copy.");
+        let spec = opencode_spec();
+        let rules = rules();
+        let env = BTreeMap::new();
+        let found = visible(&spec, home, None, &env, &rules, &[]);
+        assert_eq!(found.skills.len(), 1);
+        assert_eq!(found.skills[0].dir, home.join(".agents/skills"));
+        assert_eq!(
+            found.duplicates,
+            [(
+                "brainstorming".to_owned(),
+                home.join(".agents/skills/brainstorming")
+            )]
+        );
+    }
+
+    #[test]
+    fn hash_change_is_changed_upstream() {
+        let rows = review(&compat_of("brainstorming", "aaa"), &lock_of("x", "bbb"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "brainstorming");
+        assert_eq!(rows[0].verdict, Some(Verdict::Allow));
+        assert_eq!(rows[0].state, ReviewState::MissingLocally);
+        assert_eq!(rows[1].verdict, None);
+        assert_eq!(rows[1].state, ReviewState::NotInCompatList);
+
+        let rows = review(
+            &compat_of("brainstorming", "aaa"),
+            &lock_of("brainstorming", "bbb"),
+        );
+        assert_eq!(
+            rows[0].state,
+            ReviewState::ChangedUpstream {
+                reviewed: "aaa".to_owned(),
+                current: "bbb".to_owned(),
+            }
+        );
+        let rows = review(
+            &compat_of("brainstorming", "aaa"),
+            &lock_of("brainstorming", "aaa"),
+        );
+        assert_eq!(rows[0].state, ReviewState::Reviewed);
+    }
+
+    #[test]
+    fn reads_the_skill_lock() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let home = tmp.path();
+        assert!(read_lock(home).must("missing lock is empty").is_empty());
+        fs::create_dir_all(home.join(".agents")).must("agents dir");
+        let lock = r#"{"version":1,"skills":{"brainstorming":{"source":"obra/superpowers","skillFolderHash":"abc"}}}"#;
+        fs::write(home.join(".agents/.skill-lock.json"), lock).must("lock file");
+        let entries = read_lock(home).must("lock loads");
+        let entry = entries.get("brainstorming").must("entry is present");
+        assert_eq!(entry.source, "obra/superpowers");
+        assert_eq!(entry.folder_hash, "abc");
+    }
+
+    #[test]
+    fn shipped_skills_data_loads() {
+        let list = CompatList::load(&compat_path(&repo())).must("compat list loads");
+        assert_eq!(list.schema, 1);
+        assert!(list.skills.len() > 10);
+        assert!(!list.natives.is_empty());
+        let entry = list.entry("brainstorming").must("brainstorming is curated");
+        assert_eq!(entry.verdict, Verdict::Allow);
+        assert_eq!(entry.roles, [Role::Orchestrator]);
+        assert!(list.is_native("herdr-projects"));
+
+        let rules = rules();
+        assert_eq!(rules.schema, 1);
+        assert_eq!(rules.rules_for("opencode").count(), 2);
+        let ignores = rules.ignore_patterns();
+        assert_eq!(ignores, [".trash", "synced"]);
+        let mut env = BTreeMap::new();
+        env.insert("OPENCODE_DISABLE_CLAUDE_CODE".to_owned(), "1".to_owned());
+        assert_eq!(
+            rules.hidden("opencode", &env),
+            [(
+                "~/.claude/skills".to_owned(),
+                "OPENCODE_DISABLE_CLAUDE_CODE".to_owned()
+            )]
+        );
+        assert!(rules.hidden("claude", &env).is_empty());
+    }
 }
