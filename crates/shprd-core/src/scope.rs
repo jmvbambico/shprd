@@ -24,13 +24,26 @@ pub enum ScopeError {
         /// The offending path, as given.
         path: String,
     },
+    /// The path uses backslashes; scopes are `/`-separated.
+    #[error("path {path:?} contains a backslash")]
+    Backslash {
+        /// The offending path, as given.
+        path: String,
+    },
+    /// The path starts with a drive letter, so it is not repo-relative.
+    #[error("path {path:?} starts with a drive letter")]
+    Drive {
+        /// The offending path, as given.
+        path: String,
+    },
 }
 
 /// Normalizes a repo-relative path for use in a scope.
 ///
 /// Trims surrounding whitespace, strips one leading `./` and any trailing
-/// `/`. Rejects empty paths, absolute paths and paths containing a `..`
-/// component.
+/// `/`. Rejects empty paths, absolute paths, paths containing a `..`
+/// component, paths containing a backslash and paths that start with a drive
+/// letter such as `C:`; a scope is always repo-relative and `/`-separated.
 pub fn normalize(path: &str) -> Result<String, ScopeError> {
     let trimmed = path.trim();
     let mut text = trimmed;
@@ -45,6 +58,16 @@ pub fn normalize(path: &str) -> Result<String, ScopeError> {
             path: trimmed.to_string(),
         });
     }
+    if text.contains('\\') {
+        return Err(ScopeError::Backslash {
+            path: trimmed.to_string(),
+        });
+    }
+    if starts_with_drive(text) {
+        return Err(ScopeError::Drive {
+            path: trimmed.to_string(),
+        });
+    }
     if text.split('/').any(|component| component == "..") {
         return Err(ScopeError::ParentEscape {
             path: trimmed.to_string(),
@@ -54,6 +77,16 @@ pub fn normalize(path: &str) -> Result<String, ScopeError> {
         return Err(ScopeError::Empty);
     }
     Ok(text.to_string())
+}
+
+/// True when the first component of `text` looks like a Windows drive (`C:`
+/// or `c:src`), which no repo-relative scope may.
+fn starts_with_drive(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    match (bytes.first(), bytes.get(1)) {
+        (Some(first), Some(b':')) => first.is_ascii_alphabetic(),
+        _ => false,
+    }
 }
 
 /// True when `path` is one of `scope` or sits underneath one of its entries.
@@ -124,6 +157,20 @@ mod tests {
         assert!(matches!(
             normalize("src/../../x"),
             Err(ScopeError::ParentEscape { .. })
+        ));
+    }
+
+    #[test]
+    fn normalize_rejects_foreign_separators_and_drives() {
+        assert!(matches!(normalize("C:/src"), Err(ScopeError::Drive { .. })));
+        assert!(matches!(normalize("c:src"), Err(ScopeError::Drive { .. })));
+        assert!(matches!(
+            normalize("\\src"),
+            Err(ScopeError::Backslash { .. })
+        ));
+        assert!(matches!(
+            normalize("src\\x"),
+            Err(ScopeError::Backslash { .. })
         ));
     }
 
