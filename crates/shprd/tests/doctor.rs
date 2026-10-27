@@ -144,7 +144,7 @@ fn stdout(output: &Output) -> String {
 #[test]
 fn reports_every_section_and_succeeds_on_a_clean_setup() {
     let setup = Setup::new(
-        "orchestrator = \"claude/opus\"\nreviewer = \"pi/pi-sonnet\"\nworkers = [\"claude/opus\"]",
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/anthropic/claude-sonnet\"\nworkers = [\"claude/opus\"]",
     );
     let output = setup.run(&[]);
     let text = stdout(&output);
@@ -164,6 +164,14 @@ fn reports_every_section_and_succeeds_on_a_clean_setup() {
     assert!(
         text.contains("2 skill(s) visible"),
         "the fake skills should be counted: {text}"
+    );
+    let unknown = text
+        .lines()
+        .find(|line| line.contains("unknown (not installed"))
+        .unwrap_or_else(|| panic!("no unknown sign-in in {text}"));
+    assert!(
+        unknown.trim_start().starts_with('!'),
+        "an unknown sign-in must warn, not pass: {unknown}"
     );
 }
 
@@ -189,7 +197,7 @@ fn fails_when_the_reviewer_shares_a_vendor_with_a_worker() {
 #[test]
 fn warns_when_this_shell_hides_a_skill_directory() {
     let setup = Setup::new(
-        "orchestrator = \"claude/opus\"\nreviewer = \"pi/pi-sonnet\"\nworkers = [\"claude/opus\"]",
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/anthropic/claude-sonnet\"\nworkers = [\"claude/opus\"]",
     );
     let var = "OPENCODE_DISABLE_EXTERNAL_SKILLS";
     let output = setup.run(&[(var, "1")]);

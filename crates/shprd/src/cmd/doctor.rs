@@ -12,6 +12,7 @@ use anyhow::anyhow;
 use shprd_core::config::{self, Config};
 use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
+use shprd_roster::models::AgentRef;
 use shprd_roster::quota::{self, ProbeContext, QuotaReport, QuotaState};
 use shprd_roster::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
 use shprd_roster::spec::{HarnessSpec, Vendor, load_dir};
@@ -356,7 +357,7 @@ fn pi_models(
             .iter()
             .chain(roster.orchestrator.iter())
             .chain(roster.reviewer.iter())
-            .find_map(|agent| model_after_pi(agent))
+            .find_map(|agent| model_after_pi(specs, agent))
     });
     let model = from_roster.or_else(|| {
         facts
@@ -372,10 +373,13 @@ fn pi_models(
     models
 }
 
-/// The model of an agent string of the form `pi/<model>`, when it is one.
-fn model_after_pi(agent: &str) -> Option<String> {
-    let rest = agent.strip_prefix("pi/")?.trim();
-    (!rest.is_empty()).then(|| rest.to_owned())
+/// The model of an agent string that names the pi harness, when it has one.
+fn model_after_pi(specs: &[HarnessSpec], agent: &str) -> Option<String> {
+    let parsed = AgentRef::parse(agent, specs).ok()?;
+    if parsed.program != "pi" {
+        return None;
+    }
+    parsed.model.filter(|model| !model.trim().is_empty())
 }
 
 /// Probes every harness CLI with the environment a worker is launched with.
@@ -410,7 +414,7 @@ fn describe(detection: &Detection) -> (Level, String) {
     let (level, signin) = match &detection.signin {
         SignIn::SignedIn => (level, "signed in".to_owned()),
         SignIn::SignedOut => (Level::Fail, "signed out".to_owned()),
-        SignIn::Unknown(reason) => (level, format!("unknown ({reason})")),
+        SignIn::Unknown(reason) => (Level::Warn, format!("unknown ({reason})")),
     };
     let version = detection.version.as_deref().unwrap_or("-");
     let text = format!(
@@ -424,12 +428,11 @@ fn describe(detection: &Detection) -> (Level, String) {
     (level, text)
 }
 
-/// The vendor of the harness an agent string names, by its program prefix.
+/// The vendor of the harness an agent string names.
 fn vendor_of(specs: &[HarnessSpec], agent: &str) -> Option<Vendor> {
-    let program = agent.split('/').next()?.trim();
-    specs
-        .iter()
-        .find(|spec| spec.id == program)
+    AgentRef::parse(agent, specs)
+        .ok()?
+        .spec(specs)
         .map(|spec| spec.vendor)
 }
 
