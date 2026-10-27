@@ -393,17 +393,25 @@ pub fn handoff(
         },
     );
     spawn::write_brief(&brief_path, &brief)?;
-    if let Err(err) = close_old_tab(mux, env, &task.id, attempt) {
-        // Two agents in one worktree would both write the same files, so the
-        // hand-off stops here: the checkpoint commit is already the record of
-        // the work the newcomer was meant to continue.
-        escalate(
-            env,
-            &task.id,
-            &format!("could not stop {from}; hand-off aborted"),
-            "stop the run",
-        );
-        return Err(err);
+    // Two agents in one worktree would both write the same files, so the
+    // hand-off stops here: the checkpoint commit is already the record of the
+    // work the newcomer was meant to continue.
+    match close_old_tab(mux, env, &task.id, attempt) {
+        Ok(OldTab::Stopped) => {}
+        Ok(OldTab::Unrecorded) => {
+            let body = format!("cannot find {from}'s tab; hand-off aborted");
+            escalate(env, &task.id, &body, "stop the run");
+            return Err(CliError::other(anyhow!(body)));
+        }
+        Err(err) => {
+            escalate(
+                env,
+                &task.id,
+                &format!("could not stop {from}; hand-off aborted"),
+                "stop the run",
+            );
+            return Err(err);
+        }
     }
     // The worktree is not created here: the newcomer continues in the one the
     // attempt already has, on the branch the checkpoint sits on.
@@ -478,29 +486,41 @@ pub fn handoff(
     })
 }
 
+/// What closing the outgoing tab proved about the old agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OldTab {
+    /// The recorded tab was closed, or the host already did not know it.
+    Stopped,
+    /// No readable `.tab` record: nothing says the old agent ever started, let
+    /// alone stopped, so the hand-off has no proof to proceed on.
+    Unrecorded,
+}
+
 /// Closes the outgoing agent's tab, from the record the attempt left.
 ///
 /// A host that no longer knows the tab (a human closed it, say) is not an
 /// error: that is the state the hand-off wanted anyway. Any other failure is
 /// one, because launching the newcomer while the outgoing agent still runs
-/// would put two agents in one worktree.
+/// would put two agents in one worktree. A missing record is reported as
+/// [`OldTab::Unrecorded`] rather than success: without it there is no tab to
+/// close and nothing to prove the old agent stopped.
 fn close_old_tab(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
     task: &str,
     attempt: &Attempt,
-) -> Result<(), CliError> {
+) -> Result<OldTab, CliError> {
     let record = spawn::tab_path(&env.briefs_dir, &env.run, task, attempt.n);
     let Ok(id) = std::fs::read_to_string(record) else {
-        return Ok(());
+        return Ok(OldTab::Unrecorded);
     };
     let id = id.trim().to_string();
     if id.is_empty() {
-        return Ok(());
+        return Ok(OldTab::Unrecorded);
     }
     let tab = TabId::new(id);
     match mux.close_tab(&tab) {
-        Ok(()) | Err(MuxError::NotFound { .. }) => Ok(()),
+        Ok(()) | Err(MuxError::NotFound { .. }) => Ok(OldTab::Stopped),
         Err(err) => Err(CliError::other(anyhow!(
             "the outgoing agent's tab {tab} is still open: {err}"
         ))),
@@ -994,6 +1014,54 @@ project_dirs = []
             .last()
             .unwrap_or_else(|| panic!("nothing was escalated"));
         assert_eq!(escalation.body, "could not stop sh; hand-off aborted");
+        assert_ne!(
+            git_out(&worktree, &["rev-parse", "HEAD"]),
+            before,
+            "the checkpoint commit should stay"
+        );
+    }
+
+    /// A missing `.tab` record proves nothing about the outgoing agent, so the
+    /// hand-off must abort instead of starting a second agent beside it.
+    #[test]
+    fn a_hand_off_without_a_tab_record_starts_no_new_one() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        // Work the checkpoint has something to commit.
+        std::fs::write(worktree.join("half.rs"), "fn half() {}\n").unwrap_or_default();
+        let before = git_out(&worktree, &["rev-parse", "HEAD"]);
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        std::fs::remove_file(&record).unwrap_or_else(|err| panic!("{err}"));
+        let opened = tabs_created(&mux);
+
+        let err = match handoff(&mux, &env, &request(None)) {
+            Ok(report) => panic!("handed off to {} anyway", report.to),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            tabs_created(&mux),
+            opened,
+            "a second agent was launched into the worktree"
+        );
+        let (state, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::HandedOff { .. })),
+            "the aborted hand-off was recorded as done"
+        );
+        assert_eq!(
+            state
+                .escalations
+                .last()
+                .map(|escalation| escalation.body.as_str()),
+            Some("cannot find sh's tab; hand-off aborted")
+        );
         assert_ne!(
             git_out(&worktree, &["rev-parse", "HEAD"]),
             before,
