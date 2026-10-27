@@ -63,7 +63,8 @@ fn execute(
     let (global, repo) = layers(&home, root.as_deref());
 
     // Hold the lock from the first read until after the swap, so two `set` runs
-    // cannot interleave: the file is released when `_lock` drops.
+    // cannot interleave: the guard unlocks on every return path below, so a run
+    // that has returned never leaves the lock behind.
     let _lock = lock_sidecar(&path)?;
 
     // Read and edit in memory: the file stays untouched until the edited text
@@ -213,14 +214,29 @@ fn lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.lock"))
 }
 
+/// The exclusive lock that guards one edit of a config file.
+///
+/// The handle owns the lock. It is never cloned, moved into a longer-lived
+/// value or handed to a child process, so the lock is released at exactly one
+/// point: this guard's [`Drop`], on every return path of the edit.
+struct Lock(fs::File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Closing the file releases the lock too, but only when the kernel gets
+        // to it; unlocking first makes the release happen here, at a known
+        // point, instead of whenever the handle is finally closed.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Take the exclusive lock that guards every edit of `path`.
 ///
-/// The returned file holds the lock and releases it when dropped, so the caller
-/// keeps it alive for the whole edit: no other `set` can read, check and swap
-/// this config in between. The lock file itself stays behind, empty, and is
-/// reused by the next run. A run that finds the lock held refuses rather than
-/// waits.
-fn lock_sidecar(path: &Path) -> Result<fs::File, CliError> {
+/// The returned guard holds the lock until it drops, so the caller keeps it
+/// alive for the whole edit: no other `set` can read, check and swap this
+/// config in between. The lock file itself stays behind, empty, and is reused
+/// by the next run. A run that finds the lock held refuses rather than waits.
+fn lock_sidecar(path: &Path) -> Result<Lock, CliError> {
     let lock = lock_path(path);
     if let Some(parent) = lock.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -236,7 +252,7 @@ fn lock_sidecar(path: &Path) -> Result<fs::File, CliError> {
             CliError::other(anyhow!(error).context(format!("opening {}", lock.display())))
         })?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(Lock(file)),
         Err(fs::TryLockError::WouldBlock) => Err(CliError::Invalid(anyhow!(
             "another shprd set is running; try again"
         ))),
@@ -388,6 +404,8 @@ fn warn_unknown_model(agent: &str, specs: &[HarnessSpec], path_env: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -679,6 +697,27 @@ mod tests {
         assert!(left.is_empty(), "left behind: {left:?}");
     }
 
+    /// Take `path`'s lock, giving a run that has just returned up to two
+    /// seconds to release it: the release is the kernel's, and a loaded machine
+    /// can be slow to get there. A lock a live run holds is still refused.
+    fn lock_after_a_finished_run(path: &Path) -> Lock {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match lock_sidecar(path) {
+                Ok(lock) => return lock,
+                Err(err) if is_lock_held(&err) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("lock: {err}"),
+            }
+        }
+    }
+
+    /// Whether `err` is the refusal a held lock produces.
+    fn is_lock_held(err: &CliError) -> bool {
+        format!("{err}").contains("another shprd set is running; try again")
+    }
+
     #[test]
     fn refuses_when_another_set_holds_the_lock() {
         let fixture = Fixture::new();
@@ -687,7 +726,7 @@ mod tests {
         let path = fixture.global();
         let before = fs::read(&path).unwrap_or_default();
 
-        let held = lock_sidecar(&path).unwrap_or_else(|err| panic!("lock: {err}"));
+        let held = lock_after_a_finished_run(&path);
         let refused = fixture.run(&args);
         match refused {
             Err(ref err) => assert!(
