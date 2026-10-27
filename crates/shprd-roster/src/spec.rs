@@ -527,13 +527,13 @@ fn check_template(
             }
         }
     }
-    if let Some(required) = required {
-        if required_count != 1 {
-            return Err(SpecError::InvalidTemplate {
-                field,
-                reason: format!("must use {{{required}}} exactly once, found {required_count}"),
-            });
-        }
+    if let Some(required) = required
+        && required_count != 1
+    {
+        return Err(SpecError::InvalidTemplate {
+            field,
+            reason: format!("must use {{{required}}} exactly once, found {required_count}"),
+        });
     }
     Ok(())
 }
