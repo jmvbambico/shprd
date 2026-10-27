@@ -230,7 +230,7 @@ impl Watch {
                 // the clock starts with the first observation and only the
                 // whole backoff schedule expiring is fatal.
                 let since_ms = *self.transient_since_ms.get_or_insert(i.now_ms);
-                if i.now_ms.saturating_sub(since_ms) >= transient_budget(p) {
+                if i.now_ms.saturating_sub(since_ms) > transient_budget(p) {
                     let reason = message.clone();
                     return self.go_dry(i.now_ms, Source::Serve, reason, None, p);
                 }
@@ -486,6 +486,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The budget is a threshold to exceed, not to reach: a retry still being
+    /// reported at exactly one budget's worth of elapsed time is inside the
+    /// schedule, and only the first instant past it is fatal.
+    #[test]
+    fn serve_retries_dry_only_past_the_backoff_sum() {
+        let p = Policy::default();
+        let budget = transient_budget(&p);
+        assert_eq!(budget, 900_000, "the default schedule sums to 15 minutes");
+        let mut w = Watch::new();
+
+        // The clock starts with the first observation.
+        assert_eq!(w.step(&retrying(NOW), &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+
+        // Exactly one budget later the retry spell is not yet fatal.
+        assert_eq!(w.step(&retrying(NOW + budget), &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+
+        // One millisecond past it is.
+        let dry_at = NOW + budget + 1;
+        assert_eq!(
+            w.step(&retrying(dry_at), &p),
+            vec![
+                Action::MarkDry {
+                    reason: String::from("overloaded"),
+                    reset_at_ms: None,
+                },
+                Action::HandOff,
+            ]
+        );
+        assert_eq!(
+            w.health,
+            Health::Dry {
+                since_ms: dry_at,
+                reason: String::from("overloaded"),
+                retry_at_ms: dry_at + 900_000,
+                source: Source::Serve,
+                canary_sent: false,
+            }
+        );
     }
 
     #[test]
