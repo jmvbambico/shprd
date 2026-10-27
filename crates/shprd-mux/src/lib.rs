@@ -10,6 +10,7 @@
 //! start from an argv, never from a string, so a branch name or a title can
 //! never turn into a command.
 
+pub mod fake;
 pub mod types;
 
 use std::path::Path;
