@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod dagr;
+pub mod doctor;
 pub mod janitor;
 pub mod roster;
 pub mod run;
@@ -23,6 +24,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // `set` writes a config file, not a log, so it too needs no repository.
     if let Some(Command::Set(args)) = &cli.command {
         return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
+    }
+    // `doctor` diagnoses the machine, so it answers outside a repository too.
+    if let Some(Command::Doctor(args)) = &cli.command {
+        return doctor::run(args, cli.global.json, cli.global.home.as_deref());
     }
     let root = resolve_root(cli.global.repo.as_deref())?;
     let actor = resolve_actor(cli.global.actor.as_deref())?;
@@ -53,6 +58,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.home.as_deref(),
             cli.global.repo.as_deref(),
         ),
+        Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
     }
 }
 

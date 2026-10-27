@@ -84,6 +84,8 @@ pub enum Command {
     /// Write a roster role into the global config, or with `--repo <PATH>`
     /// into that repository's `.shprd/config.toml`.
     Set(SetArgs),
+    /// Check this machine's setup and print what to fix.
+    Doctor(DoctorArgs),
 }
 
 /// Arguments for `janitor`.
@@ -154,6 +156,17 @@ pub struct ManyAgents {
     /// `<program>/<model>`, repeated in fallback order.
     #[arg(value_name = "AGENT", required = true)]
     pub agents: Vec<String>,
+}
+
+/// Arguments for `doctor`.
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Print the report as JSON instead of one indented page.
+    #[arg(long)]
+    pub json: bool,
+    /// Skip the quota probes, which touch the network.
+    #[arg(long = "no-quota")]
+    pub no_quota: bool,
 }
 
 /// dagr verbs.
