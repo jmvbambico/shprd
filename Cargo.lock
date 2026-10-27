@@ -499,6 +499,9 @@ dependencies = [
 [[package]]
 name = "shprd-mux"
 version = "0.0.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "shprd-mux-herdr"
