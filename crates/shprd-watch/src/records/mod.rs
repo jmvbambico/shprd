@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 
+pub mod claude;
+
 /// What kind of provider trouble an error record describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
