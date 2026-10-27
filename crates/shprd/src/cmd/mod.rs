@@ -8,6 +8,7 @@ pub mod handoff;
 pub mod integrate;
 pub mod janitor;
 pub mod keys;
+pub mod land;
 pub mod launch;
 pub mod review;
 pub mod roster;
@@ -78,6 +79,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Down) => up::down(&ctx),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Land(args)) => land::land_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 

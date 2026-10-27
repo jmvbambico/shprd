@@ -96,6 +96,9 @@ pub enum Command {
     Watch(WatchArgs),
     /// Run the integration branch's gate commands once, in its worktree.
     Gate(FullGateArgs),
+    /// Push the integration branch and open its pull request; with `--merge`,
+    /// merge it when `[land]` allows.
+    Land(LandArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -105,6 +108,14 @@ pub struct FullGateArgs {
     /// How long one command may run before it is killed, in seconds.
     #[arg(long = "timeout-secs", value_name = "SECS", default_value_t = 1800)]
     pub timeout_secs: u64,
+}
+
+/// Arguments for `land`.
+#[derive(Debug, Args)]
+pub struct LandArgs {
+    /// Merge the pull request instead of only opening it.
+    #[arg(long)]
+    pub merge: bool,
 }
 
 /// Arguments for `watch`.
