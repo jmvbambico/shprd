@@ -21,7 +21,18 @@ pub struct HarnessSpec {
     /// Human-readable name, e.g. `Claude Code`.
     pub name: String,
     /// The vendor that ships the CLI.
+    ///
+    /// For a CLI that runs its vendor's own models this is also the vendor of
+    /// the model. A CLI that runs other vendors' models says so with
+    /// [`HarnessSpec::multi_model`], and then only the model names a vendor.
     pub vendor: Vendor,
+    /// Whether the CLI runs models from vendors other than its own.
+    ///
+    /// pi, opencode and kilo all run other vendors' models, so the spec's
+    /// [`HarnessSpec::vendor`] says who ships the CLI and says nothing about
+    /// the model. Defaults to `false`, the single-vendor CLI.
+    #[serde(default)]
+    pub multi_model: bool,
     /// The CLI version the facts in this spec were checked against.
     pub verified_version: String,
     /// How to find the CLI and tell whether it is signed in.

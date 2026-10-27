@@ -9,6 +9,8 @@
 id = "kilo"
 name = "Kilo"
 vendor = "kilo"
+# Runs other vendors' models, so the model names the vendor.
+multi_model = true
 verified_version = "7.7.3"
 dry_patterns = [
     "rate limit",

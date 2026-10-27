@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::detect::vendor_name;
+use crate::models::AgentRef;
+use crate::spec::HarnessSpec;
+
 /// The only `schema` value this build understands.
 pub const SCHEMA: u32 = 1;
 
@@ -191,9 +195,54 @@ impl Families {
     }
 }
 
+/// The vendor of the model `agent` would actually run.
+///
+/// A single-model CLI runs its own vendor's models, so its spec's
+/// [`HarnessSpec::vendor`] is the answer: `claude/...` is anthropic and
+/// `codex/...` is openai. A [`multi_model`](HarnessSpec::multi_model) CLI runs
+/// anyone's models, so the family of the named model is the answer, with the
+/// provider segment dropped first for a
+/// [provider-qualified](crate::spec::ModelsSpec::provider_qualified) harness:
+/// `pi/Command Code/deepseek/deepseek-v4.1-flash` is deepseek.
+///
+/// [`None`] means the answer is unknown, never that the agent is independent:
+/// no spec for the program, no model named, or a model no family claims, which
+/// is what a router such as `kilo/kilo-auto/free` is.
+pub fn agent_vendor(
+    agent: &AgentRef,
+    specs: &[HarnessSpec],
+    families: &Families,
+) -> Option<String> {
+    let spec = agent.spec(specs)?;
+    if !spec.multi_model {
+        return Some(vendor_name(spec.vendor).to_owned());
+    }
+    let model = agent.model.as_deref()?;
+    families
+        .family_of(model_body(model, spec.models.provider_qualified))
+        .map(str::to_owned)
+}
+
+/// The part of `model` that names the model itself.
+///
+/// A provider-qualified harness writes `<provider>/<model>`, so the first
+/// segment is the provider and not the model's name. The rest may still hold
+/// slashes, which [`Families::family_of`] handles.
+fn model_body(model: &str, provider_qualified: bool) -> &str {
+    if !provider_qualified {
+        return model;
+    }
+    match model.split_once('/') {
+        Some((_, rest)) => rest,
+        None => model,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Families, FamilyError, SCHEMA, is_word};
+    use super::{Families, FamilyError, SCHEMA, agent_vendor, is_word};
+    use crate::models::AgentRef;
+    use crate::spec::{HarnessSpec, load_dir};
     use std::path::Path;
 
     /// The shipped table, which names every family.
@@ -231,6 +280,89 @@ mod tests {
                 "the shipped table has no `{name}`"
             );
         }
+    }
+
+    /// The shipped harness table, which says which CLIs are multi-model.
+    fn harness_specs() -> Vec<HarnessSpec> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
+        match load_dir(&dir) {
+            Ok(specs) => specs,
+            Err(error) => panic!("the shipped harness table must load: {error}"),
+        }
+    }
+
+    /// Parses `agent` against the shipped table, which must accept it.
+    fn parse(agent: &str, specs: &[HarnessSpec]) -> AgentRef {
+        match AgentRef::parse(agent, specs) {
+            Ok(parsed) => parsed,
+            Err(error) => panic!("`{agent}` should parse: {error}"),
+        }
+    }
+
+    #[test]
+    fn the_vendor_of_an_agent_is_the_family_of_its_model() {
+        let specs = harness_specs();
+        let families = shipped();
+        let cases = [
+            // A single-model CLI runs its own vendor's models.
+            ("claude/claude-opus-5-5", Some("anthropic")),
+            ("codex/gpt-5-codex", Some("openai")),
+            // A multi-model CLI is whatever model it runs.
+            (
+                "pi/Command Code/deepseek/deepseek-v4.1-flash",
+                Some("deepseek"),
+            ),
+            ("pi/openrouter/anthropic/claude-opus-5-5", Some("anthropic")),
+            ("pi/Claude Code/claude-sonnet-4", Some("anthropic")),
+            ("opencode/deepseek-v4.1-flash-free", Some("deepseek")),
+            // A router names no family at all.
+            ("kilo/kilo-auto/free", None),
+            // No model named, so no family to name.
+            ("pi", None),
+            ("opencode", None),
+        ];
+        for (agent, expected) in cases {
+            let parsed = parse(agent, &specs);
+            assert_eq!(
+                agent_vendor(&parsed, &specs, &families).as_deref(),
+                expected,
+                "for `{agent}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_multi_model_cli_names_a_family_only_through_its_model() {
+        // Nothing about the CLI decides: the same program reads as two
+        // families, and an unknown program reads as none.
+        let specs = harness_specs();
+        let families = shipped();
+        let multi = HarnessSpec {
+            multi_model: false,
+            ..parse("pi/Command Code/deepseek/deepseek-v4.1-flash", &specs)
+                .spec(&specs)
+                .cloned()
+                .unwrap_or_else(|| panic!("pi must have a spec"))
+        };
+        // A single-vendor reading of pi would say `pi`; it must not.
+        let deepseek = parse("pi/Command Code/deepseek/deepseek-v4.1-flash", &specs);
+        let as_single = [
+            multi.clone(),
+            parse("claude/opus", &specs)
+                .spec(&specs)
+                .cloned()
+                .unwrap_or_else(|| panic!("claude must have a spec")),
+        ];
+        assert_eq!(
+            agent_vendor(&deepseek, &as_single, &families).as_deref(),
+            Some("pi")
+        );
+        let unknown = AgentRef {
+            program: "gemini".to_owned(),
+            model: Some("gemini-3-pro".to_owned()),
+        };
+        assert_eq!(agent_vendor(&unknown, &specs, &families), None);
+        assert_eq!(agent_vendor(&unknown, &as_single, &families), None);
     }
 
     #[test]

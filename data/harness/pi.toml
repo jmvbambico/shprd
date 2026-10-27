@@ -9,6 +9,8 @@
 id = "pi"
 name = "Pi"
 vendor = "pi"
+# Runs other vendors' models, so the model names the vendor.
+multi_model = true
 verified_version = "1.4.0"
 dry_patterns = [
     "rate limit",
