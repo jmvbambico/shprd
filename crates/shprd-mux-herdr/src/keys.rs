@@ -4,7 +4,10 @@
 //! marked stretch of it: everything between [`BEGIN`] and [`END`] is generated
 //! and everything outside is preserved byte for byte.
 
+use std::fs;
+use std::io::Write;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The line that opens the block shprd owns.
@@ -373,4 +376,78 @@ fn ensure_compatible(text: &str, bindings: &[Binding]) -> Result<(), KeysError> 
         });
     }
     Ok(())
+}
+
+/// The process-wide counter that keeps temp names unique within one process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes `text` to `path` atomically.
+///
+/// A uniquely named temp file in the same directory is written, flushed and
+/// synced, then renamed over `path`, so a concurrent reader sees either the old
+/// file or the new one and never a half-written config. The temp file is
+/// removed when the write fails, so a crash leaves no debris behind.
+pub fn write_atomic(path: &Path, text: &str) -> Result<(), KeysError> {
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_owned());
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = directory.join(format!(
+        ".{name}.shprd-{}-{counter}.tmp",
+        std::process::id()
+    ));
+    if let Err(error) = write_synced(&temp, text) {
+        let _ = fs::remove_file(&temp);
+        return Err(KeysError::Io(error));
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(KeysError::Io(error));
+    }
+    Ok(())
+}
+
+/// Writes `text` to `path` and flushes it all the way to the device.
+fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "old = true\n").unwrap();
+        write_atomic(&path, "new = true\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new = true\n");
+        let left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(left, vec!["config.toml".to_owned()]);
+    }
+
+    #[test]
+    fn write_atomic_creates_the_file_when_it_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.toml");
+        write_atomic(&path, "a = 1\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a = 1\n");
+    }
 }
