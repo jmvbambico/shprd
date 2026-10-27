@@ -674,6 +674,54 @@ project_dirs = []
             .unwrap_or(false)
     }
 
+    /// How long a fake probe is given to fork its background child and record
+    /// that child's pid. It cannot be short: the kill that ends the probe also
+    /// ends any chance of the pid file appearing, and on a cold and loaded
+    /// machine a first `sh` start has been seen to take seconds.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// The body of a fake probe that forks a background child, records that
+    /// child's pid before doing anything else, then blocks until the probe's
+    /// timeout kills it. Writing the pid first means the record exists even if
+    /// the kill lands in the middle of the script.
+    fn forker_body(pidfile: &Path) -> String {
+        format!("sleep 30 & echo $! > {}\nsleep 30", pidfile.display())
+    }
+
+    /// The pid [`forker_body`]'s script wrote, waiting up to 5 s for the file to
+    /// appear and hold a pid: the write and the kill can land close together, so
+    /// nothing here races the timeout on a fixed delay.
+    fn script_child_pid(pidfile: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(pid) = fs::read_to_string(pidfile) {
+                let pid = pid.trim().to_owned();
+                if !pid.is_empty() {
+                    return pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "waiting for {} to hold a pid",
+                pidfile.display()
+            );
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    /// Waits up to 5 s for a timed-out probe's background child to disappear,
+    /// then asserts that it did.
+    fn assert_grandchild_dead(pid: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            !alive(pid),
+            "the background child {pid} survived the timeout"
+        );
+    }
+
     #[test]
     fn a_timeout_kills_what_the_probe_started() {
         let dir = match TempDir::new() {
@@ -681,34 +729,18 @@ project_dirs = []
             Err(error) => panic!("tempdir failed: {error}"),
         };
         let pidfile = dir.path().join("child.pid");
-        let body = format!("sleep 30 &\necho $! > {}\nsleep 30", pidfile.display());
-        write_script(dir.path(), "forker", &body);
+        write_script(dir.path(), "forker", &forker_body(&pidfile));
         let binary = dir.path().join("forker");
 
-        // Generous enough that the script reaches its second line before the
-        // timeout fires, even on a machine where a fork is slow.
-        let out = run_with_timeout(&binary, &[], &[], Duration::from_secs(2));
+        // Long enough that the script records its child's pid before the
+        // timeout fires, even on a cold and loaded machine.
+        let out = run_with_timeout(&binary, &[], &[], PROBE_TIMEOUT);
         assert!(
             matches!(out, Err(DetectError::Timeout { .. })),
             "expected a timeout, got {out:?}"
         );
-        let pid = match fs::read_to_string(&pidfile) {
-            Ok(pid) => pid.trim().to_owned(),
-            Err(error) => panic!("reading {}: {error}", pidfile.display()),
-        };
-        assert!(
-            !pid.is_empty(),
-            "the script should have written its child pid"
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while alive(&pid) && Instant::now() < deadline {
-            thread::sleep(POLL_INTERVAL);
-        }
-        assert!(
-            !alive(&pid),
-            "the background child {pid} survived the timeout"
-        );
+        let pid = script_child_pid(&pidfile);
+        assert_grandchild_dead(&pid);
     }
 
     /// Carries the fixture directory from
@@ -728,10 +760,11 @@ project_dirs = []
             Err(error) => panic!("{POISON_ENV} is not set: {error}"),
         };
         let pidfile = dir.join("child.pid");
-        let body = format!("sleep 30 &\necho $! > {}\nsleep 30", pidfile.display());
-        write_script(&dir, "forker", &body);
+        write_script(&dir, "forker", &forker_body(&pidfile));
 
-        let out = run_with_timeout(&dir.join("forker"), &[], &[], Duration::from_secs(2));
+        // Long enough for the script to record its child's pid under load; the
+        // parent test polls for that file and for the grandchild's death.
+        let out = run_with_timeout(&dir.join("forker"), &[], &[], PROBE_TIMEOUT);
         assert!(
             matches!(out, Err(DetectError::Timeout { .. })),
             "expected a timeout, got {out:?}"
@@ -774,18 +807,7 @@ project_dirs = []
             !marker.exists(),
             "a kill earlier on PATH ran during cleanup"
         );
-        let pidfile = fixture.join("child.pid");
-        let pid = match fs::read_to_string(&pidfile) {
-            Ok(pid) => pid.trim().to_owned(),
-            Err(error) => panic!("reading {}: {error}", pidfile.display()),
-        };
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while alive(&pid) && Instant::now() < deadline {
-            thread::sleep(POLL_INTERVAL);
-        }
-        assert!(
-            !alive(&pid),
-            "the background child {pid} survived the timeout"
-        );
+        let pid = script_child_pid(&fixture.join("child.pid"));
+        assert_grandchild_dead(&pid);
     }
 }
