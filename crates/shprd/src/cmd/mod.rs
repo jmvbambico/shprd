@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod dagr;
 pub mod doctor;
+pub mod handoff;
 pub mod janitor;
 pub mod keys;
 pub mod launch;
