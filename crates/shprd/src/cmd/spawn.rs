@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use shprd_core::config::Skills;
@@ -64,6 +65,10 @@ pub struct SpawnEnv<'a> {
     pub compat: Vec<CompatEntry>,
     /// The environment the launched CLI would inherit.
     pub base_env: BTreeMap<String, String>,
+    /// How long a freshly launched worker gets to be detected as an agent
+    /// before its brief counts as undelivered. Production reads it from the
+    /// environment; tests set it explicitly.
+    pub ready_wait: Duration,
 }
 
 /// What the caller asked for.
@@ -253,6 +258,29 @@ fn open_agent(
     let tab = mux
         .create_tab(&workspace.id, &title, &worktree.path)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the agent tab")))?;
+    start_in_tab(
+        mux, env, pick, effort, brief, brief_path, worktree, task, &title, &tab,
+    )?;
+    Ok((tab.id, title))
+}
+
+/// Starts the agent's CLI in `tab` and hands it the brief.
+///
+/// A brief that does not arrive is reported, never fatal: the CLI is running,
+/// and the human can resend the brief into the tab.
+#[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
+fn start_in_tab(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+    pick: &Pick,
+    effort: Option<&str>,
+    brief: &str,
+    brief_path: &Path,
+    worktree: &Worktree,
+    task: &str,
+    title: &str,
+    tab: &shprd_mux::Tab,
+) -> Result<(), CliError> {
     let (argv, brief_in_args) = launch_argv(
         &pick.launch,
         pick.model.as_deref(),
@@ -272,11 +300,26 @@ fn open_agent(
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the agent CLI")))?;
-    if !brief_in_args {
-        mux.prompt(&tab.root_pane, brief)
-            .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))?;
+    if brief_in_args {
+        return Ok(());
     }
-    Ok((tab.id, title))
+    let delivery = super::launch::deliver_brief(mux, &tab.root_pane, brief, env.ready_wait);
+    let Some(reason) = delivery.reason() else {
+        return Ok(());
+    };
+    eprintln!(
+        "warning: brief not delivered to {title}: {reason}; resend with: shprd agent prompt --task {task} \"$(cat {})\"",
+        brief_path.display()
+    );
+    let escalation = EventKind::Escalated {
+        task: Some(task.to_string()),
+        body: "brief not delivered".to_string(),
+        default_action: "resend the brief".to_string(),
+    };
+    if let Err(err) = env.ctx.commit(escalation) {
+        eprintln!("warning: could not record the escalation: {err}");
+    }
+    Ok(())
 }
 
 /// Closes a tab this spawn opened, ignoring the failure for the same reason as
@@ -589,6 +632,7 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         skills: config.skills.clone(),
         compat,
         base_env,
+        ready_wait: super::launch::ready_wait(),
     })
 }
 
@@ -825,6 +869,9 @@ mod flow_tests {
                 },
                 compat: Vec::new(),
                 base_env,
+                // No wait: a fake pane that never reports an agent would
+                // otherwise stall every test that launches one.
+                ready_wait: Duration::ZERO,
             }
         }
     }
@@ -842,7 +889,7 @@ mod flow_tests {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
             .create_workspace(
                 &naming::workspace_name(&scratch.repo_name()),
@@ -1010,7 +1057,7 @@ mod flow_tests {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
-        let mux = NoTabs(FakeMux::default());
+        let mux = NoTabs(FakeMux::default().with_ready_agent());
         mux.create_workspace(
             &naming::workspace_name(&scratch.repo_name()),
             scratch.root(),
@@ -1035,11 +1082,92 @@ mod flow_tests {
     }
 
     #[test]
+    fn a_brief_lands_once_the_host_detects_the_agent() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env(&ctx);
+        // The host needs two polls to call the pane an agent; the wait covers it.
+        env.ready_wait = Duration::from_secs(5);
+        let mux = FakeMux::default();
+        let workspace = mux
+            .create_workspace(
+                &naming::workspace_name(&scratch.repo_name()),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let pane = shprd_mux::PaneId::new("pane-1");
+        mux.set_state_after(&pane, 2, shprd_mux::AgentState::Idle);
+        assert!(
+            mux.list_tabs(&workspace.id)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .is_empty(),
+            "the fake starts with no tabs"
+        );
+
+        let report = match spawn(&mux, &env, &request()) {
+            Ok(report) => report,
+            Err(err) => panic!("{err}"),
+        };
+        assert!(report.worktree.exists());
+        let prompted = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Prompt(pane, text) => Some((pane, text)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(prompted.len(), 1, "the brief is typed in exactly once");
+        assert!(
+            prompted[0].1.contains("Make spawn real"),
+            "{}",
+            prompted[0].1
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(state.escalations.is_empty(), "{:?}", state.escalations);
+    }
+
+    #[test]
+    fn a_brief_no_agent_ever_takes_is_a_warning_and_an_escalation() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        // No ready agent and no wait: the plain `sh` this fake hosts is never
+        // detected, which is the real OpenCode and Kilo case.
+        let mux = FakeMux::default();
+        mux.create_workspace(
+            &naming::workspace_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = match spawn(&mux, &env, &request()) {
+            Ok(report) => report,
+            Err(err) => panic!("an undelivered brief must not fail the spawn: {err}"),
+        };
+        assert!(report.worktree.exists(), "the worktree stays");
+        assert!(
+            mux.calls()
+                .iter()
+                .all(|call| !matches!(call, Call::Prompt(..))),
+            "nothing may be typed into an undetected pane"
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let escalation = state
+            .escalations
+            .first()
+            .unwrap_or_else(|| panic!("no escalation: {:?}", state.escalations));
+        assert_eq!(escalation.task.as_deref(), Some("T1"));
+        assert_eq!(escalation.body, "brief not delivered");
+        assert_eq!(escalation.default_action, "resend the brief");
+    }
+
+    #[test]
     fn spawn_without_a_workspace_says_to_run_up_first() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_ready_agent();
 
         let message = match spawn(&mux, &env, &request()) {
             Ok(report) => panic!("spawn should have failed, got {report:?}"),
@@ -1051,7 +1179,7 @@ mod flow_tests {
     #[test]
     fn prompt_reaches_the_right_pane() {
         let scratch = Scratch::new();
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
             .create_workspace(
                 &naming::workspace_name(&scratch.repo_name()),

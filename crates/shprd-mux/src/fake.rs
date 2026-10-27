@@ -67,6 +67,9 @@ struct Inner {
     panes: BTreeSet<PaneId>,
     screens: HashMap<PaneId, String>,
     states: HashMap<PaneId, AgentState>,
+    /// A scripted "not detected yet, then ready": how many more polls answer
+    /// [`AgentState::Unknown`], and the state that follows.
+    pending: HashMap<PaneId, (usize, AgentState)>,
     events: VecDeque<MuxEvent>,
     next_workspace: usize,
     next_tab: usize,
@@ -82,6 +85,7 @@ impl Inner {
             panes: BTreeSet::new(),
             screens: HashMap::new(),
             states: HashMap::new(),
+            pending: HashMap::new(),
             events: VecDeque::new(),
             next_workspace: 0,
             next_tab: 0,
@@ -126,6 +130,8 @@ pub struct FakeMux {
     caps: Capabilities,
     /// Whether a new workspace also gets the starter tab a real host makes.
     starter_tab: bool,
+    /// Whether a pane with no scripted state reports a detected agent.
+    ready: bool,
     inner: Mutex<Inner>,
 }
 
@@ -150,6 +156,7 @@ impl FakeMux {
         Self {
             caps,
             starter_tab: false,
+            ready: false,
             inner: Mutex::new(Inner::fresh()),
         }
     }
@@ -159,6 +166,14 @@ impl FakeMux {
     /// use this to see the tab a host would have left behind.
     pub fn with_starter_tab(mut self) -> Self {
         self.starter_tab = true;
+        self
+    }
+
+    /// Report every unscripted pane as [`AgentState::Idle`], i.e. as an agent
+    /// the host has already detected, so a caller waiting for readiness does
+    /// not have to script a state for ids it cannot predict.
+    pub fn with_ready_agent(mut self) -> Self {
+        self.ready = true;
         self
     }
 
@@ -191,6 +206,17 @@ impl FakeMux {
         if let Ok(mut inner) = self.lock() {
             inner.panes.insert(pane.clone());
             inner.states.insert(pane.clone(), state);
+        }
+    }
+
+    /// Script a pane that is not an agent yet: `polls` consecutive
+    /// [`Mux::agent_state`] calls answer [`AgentState::Unknown`], and every call
+    /// after them answers `state`. Later polls keep answering `state`, so a
+    /// waiter that sleeps between polls converges.
+    pub fn set_state_after(&self, pane: &PaneId, polls: usize, state: AgentState) {
+        if let Ok(mut inner) = self.lock() {
+            inner.panes.insert(pane.clone());
+            inner.pending.insert(pane.clone(), (polls, state));
         }
     }
 
@@ -370,11 +396,21 @@ impl Mux for FakeMux {
         let mut inner = self.lock()?;
         inner.calls.push(Call::AgentState(pane.clone()));
         inner.require_pane(pane)?;
-        Ok(inner
-            .states
-            .get(pane)
-            .copied()
-            .unwrap_or(AgentState::Unknown))
+        if let Some((polls, state)) = inner.pending.get_mut(pane) {
+            if *polls == 0 {
+                return Ok(*state);
+            }
+            *polls -= 1;
+            return Ok(AgentState::Unknown);
+        }
+        if let Some(state) = inner.states.get(pane) {
+            return Ok(*state);
+        }
+        Ok(if self.ready {
+            AgentState::Idle
+        } else {
+            AgentState::Unknown
+        })
     }
 
     /// Never blocks: everything queued is returned at once, and an empty queue

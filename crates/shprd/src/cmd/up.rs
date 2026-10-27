@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::Config;
@@ -74,6 +74,10 @@ pub struct UpEnv {
     pub specs: Vec<HarnessSpec>,
     /// The process environment the orchestrator is launched under.
     pub process_env: BTreeMap<String, String>,
+    /// How long a freshly launched orchestrator gets to be detected as an agent
+    /// before its brief counts as undelivered. Production reads it from the
+    /// environment; tests set it explicitly.
+    pub ready_wait: Duration,
 }
 
 /// What `up` did or found already done.
@@ -371,6 +375,7 @@ fn build_env(ctx: &Ctx, home: PathBuf) -> Result<UpEnv, CliError> {
         config,
         specs,
         process_env: std::env::vars().collect(),
+        ready_wait: super::launch::ready_wait(),
     })
 }
 
@@ -466,9 +471,17 @@ fn ensure_orchestrator_tab(
         .map_err(|err| CliError::other(anyhow!(err).context("creating the orchestrator tab")))?;
     mux.run(&tab.root_pane, &plan.argv, &plan.env)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the orchestrator")))?;
-    if let Some(prompt) = &plan.inline_prompt {
-        mux.prompt(&tab.root_pane, prompt)
-            .map_err(|err| CliError::other(anyhow!(err).context("prompting the orchestrator")))?;
+    if let Some(brief) = &plan.inline_prompt
+        && let Some(reason) =
+            super::launch::deliver_brief(mux, &tab.root_pane, brief, env.ready_wait).reason()
+    {
+        // The orchestrator is running either way, so a brief that never lands
+        // is a message to the human, not a failed `up`: they can paste it in.
+        eprintln!(
+            "warning: brief not delivered to {}: {reason}; resend the brief from: {}",
+            plan.title,
+            brief_path.display()
+        );
     }
     Ok((tab, true))
 }
@@ -689,6 +702,7 @@ mod tests {
                 process_env: [("PATH".to_string(), "/usr/bin:/bin".to_string())]
                     .into_iter()
                     .collect(),
+                ready_wait: Duration::ZERO,
             })
         }
     }
@@ -817,6 +831,38 @@ mod tests {
                 report.brief_path.display().to_string(),
             ],
             "an orchestrator with no model gets no model flags"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_orchestrator_never_detected_still_leaves_up_green() -> Result<()> {
+        let fixture = Fixture::new(Some("claude"))?;
+        let mut env = fixture.env()?;
+        // A CLI with no system-prompt flag takes the brief as its first turn,
+        // and this host never reports the pane as an agent: that is what a
+        // plain `sh`, OpenCode or Kilo looks like until detection lands.
+        for spec in &mut env.specs {
+            spec.launch.system_prompt_args = None;
+        }
+        let mux = mux();
+        let report = up(&mux, &env).map_err(failed)?;
+
+        assert!(
+            report.created_orchestrator_tab,
+            "up must still report success"
+        );
+        assert!(
+            mux.calls()
+                .iter()
+                .all(|call| !matches!(call, Call::Prompt(..))),
+            "nothing may be typed into an undetected pane"
+        );
+        // The human's resend path needs the brief on disk.
+        assert!(
+            report.brief_path.exists(),
+            "{}",
+            report.brief_path.display()
         );
         Ok(())
     }
@@ -1209,6 +1255,7 @@ mod tests {
             },
             specs: load_dir(&data)?,
             process_env: std::env::vars().collect(),
+            ready_wait: Duration::ZERO,
         };
         let mux = scratch.mux();
         let first = up(&mux, &env).map_err(failed)?;
