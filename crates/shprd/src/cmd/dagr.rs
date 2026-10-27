@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use shprd_core::log::{Clock, SystemClock};
-use shprd_views::dagr::{project, write_atomic};
+use shprd_views::dagr::{ViewError, project, write_atomic};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -71,15 +71,20 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The document projected from the current log, and the path it belongs at.
-fn project_run(ctx: &Ctx) -> Result<(serde_json::Value, PathBuf), CliError> {
+/// The document projected from the current log, or `None` when the run has
+/// not started yet.
+fn project_run(ctx: &Ctx) -> Result<Option<serde_json::Value>, CliError> {
     let (state, events) = ctx.load()?;
     let now_ms = SystemClock.now_ms();
-    let doc = project(&state, &events, now_ms);
-    Ok((doc, run_json_path(&ctx.root)))
+    match project(&state, &events, now_ms) {
+        Ok(doc) => Ok(Some(doc)),
+        Err(ViewError::NoRun) => Ok(None),
+        Err(err) => Err(CliError::other(anyhow!(err).context("projecting the run"))),
+    }
 }
 
-/// Projects the run and writes `<root>/.dagr/run.json`.
+/// Projects the run and writes `<root>/.dagr/run.json`, returning the path it
+/// wrote, or `None` when the run has not started.
 ///
 /// Writes unchecked and prints `dagr not found; wrote unchecked` on stderr when
 /// no checker is available. A checker that rejects the document is an error
@@ -89,15 +94,18 @@ fn project_run(ctx: &Ctx) -> Result<(serde_json::Value, PathBuf), CliError> {
 ///
 /// [`CliError::Other`] when the log cannot be read, the projection cannot be
 /// written, or the checker rejects it.
-pub fn sync(ctx: &Ctx) -> Result<(), CliError> {
-    let (doc, path) = project_run(ctx)?;
+pub fn sync(ctx: &Ctx) -> Result<Option<PathBuf>, CliError> {
+    let Some(doc) = project_run(ctx)? else {
+        return Ok(None);
+    };
+    let path = run_json_path(&ctx.root);
     let checker = find_checker();
     match write_atomic(&doc, &path, checker.as_deref()) {
         Ok(()) => {
             if checker.is_none() {
                 eprintln!("dagr not found; wrote unchecked");
             }
-            Ok(())
+            Ok(Some(path))
         }
         Err(err) => Err(CliError::other(
             anyhow!(err).context(format!("syncing {}", path.display())),
@@ -106,17 +114,23 @@ pub fn sync(ctx: &Ctx) -> Result<(), CliError> {
 }
 
 /// The body of `shprd dagr sync`: sync, and report where the document went.
+///
+/// With no run yet there is nothing to project, so this says so on stderr and
+/// succeeds.
 pub fn sync_verb(ctx: &Ctx) -> Result<(), CliError> {
-    sync(ctx)?;
+    let Some(path) = sync(ctx)? else {
+        eprintln!("no run yet; nothing to project");
+        return Ok(());
+    };
     if ctx.json {
         let doc = serde_json::json!({
-            "path": run_json_path(&ctx.root).display().to_string(),
+            "path": path.display().to_string(),
         });
         let text = serde_json::to_string(&doc)
             .map_err(|err| CliError::other(anyhow!(err).context("serializing the result")))?;
         println!("{text}");
     } else {
-        println!("wrote {}", run_json_path(&ctx.root).display());
+        println!("wrote {}", path.display());
     }
     Ok(())
 }

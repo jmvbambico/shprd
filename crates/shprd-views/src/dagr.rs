@@ -20,6 +20,9 @@
 //! - A report or a gate settles an attempt, so a task dagr draws as `review`
 //!   has a `done` attempt: dagr's attempt states have no `review`.
 //!
+//! - A state whose run has not started has no run identity to state, so
+//!   [`project`] returns [`ViewError::NoRun`] instead of inventing one.
+//!
 //! This projection is what `dagr view` draws; it never mutates run state.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,9 +40,13 @@ const DAGR_VERSION: u32 = 3;
 /// How many of the most recent events are projected.
 const MAX_EVENTS: usize = 50;
 
-/// Errors from [`write_atomic`].
+/// Errors from [`project`] and [`write_atomic`].
 #[derive(Debug, thiserror::Error)]
 pub enum ViewError {
+    /// The run has not started, so there is nothing to project and no run
+    /// identity to state.
+    #[error("the run has not started")]
+    NoRun,
     /// Creating the directory, writing the temporary document or moving it
     /// into place failed.
     #[error("writing {path}: {source}")]
@@ -73,19 +80,29 @@ struct Times {
 /// `generated_at`, dagr's staleness anchor. `events` supplies the run start
 /// time, per-attempt start and end times, and the document's `events[]`.
 /// Tasks are emitted in id order, so the document is deterministic.
-pub fn project(state: &RunState, events: &[Event], generated_at_ms: u64) -> Value {
+///
+/// The run's title is `<repo basename> · <run_id>`: both are recorded facts.
+/// `started_at` is the `RunStarted` event's time, or, when the log excerpt
+/// starts later, the earliest event's time.
+///
+/// # Errors
+///
+/// [`ViewError::NoRun`] when the run has not started.
+pub fn project(
+    state: &RunState,
+    events: &[Event],
+    generated_at_ms: u64,
+) -> Result<Value, ViewError> {
+    let run = state.run.as_ref().ok_or(ViewError::NoRun)?;
     let generated_at = rfc3339_utc(generated_at_ms);
     let started_at = events
         .iter()
         .find(|event| matches!(event.kind, EventKind::RunStarted { .. }))
-        .map(|event| rfc3339_utc(event.at_ms))
-        .unwrap_or_else(|| generated_at.clone());
-    let run_id = match &state.run {
-        Some(run) => run.run_id.clone(),
-        // `run.id` is required by dagr and a run that never started has none;
-        // the least-claiming placeholder beats an unreadable document.
-        None => "unstarted".to_string(),
-    };
+        .map(|event| event.at_ms)
+        .or_else(|| events.first().map(|event| event.at_ms))
+        .ok_or(ViewError::NoRun)?;
+    let run_id = run.run_id.clone();
+    let title = format!("{} · {run_id}", repo_basename(&run.repo));
     let times = times_by_attempt(events);
 
     let mut tasks: Vec<Value> = state
@@ -95,18 +112,27 @@ pub fn project(state: &RunState, events: &[Event], generated_at_ms: u64) -> Valu
         .collect();
     tasks.sort_by(|left, right| id_of(left).cmp(id_of(right)));
 
-    json!({
+    Ok(json!({
         "dagr": DAGR_VERSION,
         "run": {
             "id": run_id,
-            "title": run_id,
-            "started_at": started_at,
+            "title": title,
+            "started_at": rfc3339_utc(started_at),
         },
         "generated_at": generated_at,
         "projects": project_values(state),
         "tasks": tasks,
         "events": event_values(events),
-    })
+    }))
+}
+
+/// The last path component of a repository path, or the path itself when it
+/// has no components.
+fn repo_basename(repo: &str) -> &str {
+    Path::new(repo)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(repo)
 }
 
 /// The `id` of a projected JSON object, or `""` when it has none.
@@ -751,9 +777,26 @@ mod tests {
         }
     }
 
+    /// Projects, panicking on an error: every scenario here has a started run.
+    fn project_doc(state: &RunState, events: &[Event], generated_at_ms: u64) -> Value {
+        match project(state, events, generated_at_ms) {
+            Ok(doc) => doc,
+            Err(err) => panic!("projection failed: {err}"),
+        }
+    }
+
     fn projected() -> Value {
         let events = scenario();
-        project(&state(&events), &events, T0 + 10 * MINUTE)
+        project_doc(&state(&events), &events, T0 + 10 * MINUTE)
+    }
+
+    #[test]
+    fn refuses_to_project_a_run_that_never_started() {
+        let state = RunState::default();
+        match project(&state, &[], T0 + MINUTE) {
+            Err(ViewError::NoRun) => {}
+            other => panic!("expected NoRun, got {other:?}"),
+        }
     }
 
     fn task<'a>(doc: &'a Value, id: &str) -> &'a Value {
@@ -771,7 +814,7 @@ mod tests {
         let doc = projected();
         assert_eq!(doc["dagr"], 3);
         assert_eq!(doc["run"]["id"], "run-1");
-        assert_eq!(doc["run"]["title"], "run-1");
+        assert_eq!(doc["run"]["title"], "repo · run-1");
         assert_eq!(doc["run"]["started_at"], "2025-03-01T00:00:00Z");
         assert_eq!(doc["generated_at"], "2025-03-01T00:10:00Z");
     }
@@ -859,7 +902,7 @@ mod tests {
                 },
             ));
         }
-        let doc = project(&state, &events, T0 + 100 * MINUTE);
+        let doc = project_doc(&state, &events, T0 + 100 * MINUTE);
         let projected = doc["events"].as_array().map(Vec::len).unwrap_or_default();
         assert_eq!(projected, MAX_EVENTS);
     }
@@ -868,7 +911,10 @@ mod tests {
     fn is_deterministic() {
         let events = scenario();
         let state = state(&events);
-        assert_eq!(project(&state, &events, T0), project(&state, &events, T0));
+        assert_eq!(
+            project_doc(&state, &events, T0),
+            project_doc(&state, &events, T0)
+        );
     }
 
     #[test]
@@ -881,7 +927,7 @@ mod tests {
     #[test]
     fn maps_a_passed_task_to_review_awaiting_integration() {
         let events = passed_events();
-        let doc = project(&state(&events), &events, T0 + 5 * MINUTE);
+        let doc = project_doc(&state(&events), &events, T0 + 5 * MINUTE);
         let c = task(&doc, "c");
         assert_eq!(c["state"], "review");
         assert_eq!(c["kind"], "review");
@@ -894,7 +940,7 @@ mod tests {
     #[test]
     fn maps_a_live_attempt_with_locator_and_liveness() {
         let events = working_events();
-        let doc = project(&state(&events), &events, T0 + 3 * MINUTE);
+        let doc = project_doc(&state(&events), &events, T0 + 3 * MINUTE);
         let d = task(&doc, "d");
         assert_eq!(d["state"], "working");
         let d1 = &d["attempts"][0];
@@ -969,8 +1015,8 @@ mod tests {
         let working_events = working_events();
         let documents = [
             projected(),
-            project(&state(&passed_events), &passed_events, T0 + 5 * MINUTE),
-            project(&state(&working_events), &working_events, T0 + 3 * MINUTE),
+            project_doc(&state(&passed_events), &passed_events, T0 + 5 * MINUTE),
+            project_doc(&state(&working_events), &working_events, T0 + 3 * MINUTE),
         ];
         for (index, doc) in documents.iter().enumerate() {
             let path = dir.path().join(format!("run-{index}.json"));

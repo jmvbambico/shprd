@@ -584,6 +584,28 @@ fn a_failing_sync_does_not_undo_a_write() {
 }
 
 #[test]
+fn dagr_sync_before_run_start_says_there_is_nothing_to_project() {
+    let dir = repo();
+    let root = dir.path();
+    let output = run(root, &["dagr", "sync"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a run that has not started is not an error\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("no run yet; nothing to project"),
+        "{stderr}"
+    );
+    assert!(
+        !root.join(".dagr").join("run.json").exists(),
+        "nothing may be projected before the run starts"
+    );
+}
+
+#[test]
 fn no_dagr_flag_skips_the_sync() {
     let dir = repo();
     let root = dir.path();

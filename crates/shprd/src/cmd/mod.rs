@@ -70,6 +70,9 @@ fn print_event(ctx: &Ctx, event: &Event) -> Result<(), CliError> {
 }
 
 /// Rewrites the dagr document, warning on stderr when that fails.
+///
+/// With no run yet there is nothing to project, so this skips silently: an
+/// event written before `run started` is not a failure.
 fn auto_sync(ctx: &Ctx) {
     if ctx.no_dagr {
         return;
