@@ -648,6 +648,15 @@ pub fn review(
         degraded: reviewer.degraded,
     };
     spawn::write_brief(&brief_path, &render_review_brief(&brief))?;
+    // Who reviews, and whether the review can be independent, is a recorded
+    // fact before the reviewer exists: a refused event opens no tab, and
+    // `shprd land` reads this instead of guessing it out of prose.
+    env.spawn.ctx.commit(EventKind::ReviewRequested {
+        task: task.id.clone(),
+        attempt: attempt.n,
+        reviewer: reviewer.agent.clone(),
+        degraded: reviewer.degraded,
+    })?;
     let (tab_id, tab) = open_reviewer(mux, env, &task.id, &reviewer, &dir, &brief, &brief_path)?;
     spawn::write_tab(
         &tab_record_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n),
