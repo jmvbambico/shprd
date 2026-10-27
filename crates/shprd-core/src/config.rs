@@ -532,7 +532,7 @@ mod tests {
     fn review_section_is_merged_field_by_field() {
         let global = layer(GLOBAL);
         assert_eq!(
-            from_layers(&[global.clone()]).review,
+            from_layers(std::slice::from_ref(&global)).review,
             Review {
                 must_fix: Severity::Minor,
                 rounds: 3,
