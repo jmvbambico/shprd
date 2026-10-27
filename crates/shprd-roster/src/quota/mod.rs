@@ -20,6 +20,7 @@ use serde_json::Value;
 pub mod cache;
 pub mod claude;
 pub mod codex;
+pub mod kilo;
 /// Worst-case wall clock for one network probe (og `TIMEOUT_S`).
 pub const TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -128,6 +129,9 @@ pub enum QuotaError {
     /// A required local credential is missing or unusable.
     #[error("no usable credential: {0}")]
     Credential(&'static str),
+    /// A local command failed or could not be run (the `kilo` CLI).
+    #[error("{0}")]
+    Command(&'static str),
 }
 
 /// Minimal HTTP seam, so probes are testable without a network.
@@ -329,6 +333,7 @@ pub fn probe(agent: &str, ctx: &ProbeContext) -> QuotaReport {
     let result = match agent.trim().to_ascii_lowercase().as_str() {
         "claude" | "claude-code" => claude::probe(ctx),
         "codex" => codex::probe(ctx),
+        "kilo" => kilo::probe(ctx),
         _ => return QuotaReport::unknown(agent, "none", "no quota source", ctx.now_ms),
     };
     match result {
@@ -636,5 +641,16 @@ mod tests {
         assert_eq!(report.state, QuotaState::Unknown);
         assert!(report.detail.contains("OAuth token"), "{}", report.detail);
         assert!(!report.detail.contains("sk-"));
+    }
+
+    #[test]
+    fn kilo_dispatches_to_the_profile_probe() {
+        let dir = temp_dir();
+        let report = probe("kilo", &ctx(dir.path(), FakeHttp::new(200, "{}"), 1_000));
+        // No `kilo` binary in the test environment: a local failure, reported
+        // as unknown with a one-line reason and nothing cached.
+        assert_eq!(report.state, QuotaState::Unknown);
+        assert_eq!(report.detail, "kilo binary not found");
+        assert!(cache::Cache::new(dir.path()).load().is_empty());
     }
 }
