@@ -688,6 +688,7 @@ dependencies = [
  "shprd-mux-herdr",
  "shprd-roster",
  "shprd-views",
+ "shprd-watch",
  "tempfile",
  "toml",
  "toml_edit",
