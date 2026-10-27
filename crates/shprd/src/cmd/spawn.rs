@@ -806,15 +806,24 @@ fn prompt_in(
 ///
 /// A prompt outside a run has no tab to reach: the run id is half of every tab
 /// record's path.
+///
+/// A finished run counts as no run at all: after `shprd down` its tabs are
+/// gone, and its tab records are history rather than somewhere to type.
 fn active_run(ctx: &Ctx) -> Result<String, CliError> {
     let state = ctx.state()?;
+    if state.finished {
+        return Err(no_active_run());
+    }
     state
         .run
         .as_ref()
         .map(|run| run.run_id.clone())
-        .ok_or_else(|| {
-            CliError::Invalid(anyhow!("no active run: start one with `shprd run start`"))
-        })
+        .ok_or_else(no_active_run)
+}
+
+/// The refusal a prompt earns when no run is in flight.
+fn no_active_run() -> CliError {
+    CliError::Invalid(anyhow!("no active run: start one with `shprd run start`"))
 }
 
 /// The refusal a task with no reachable tab earns.
@@ -1685,6 +1694,43 @@ project_dirs = []
         let mux = FakeMux::default().with_ready_agent();
         let message = match prompt_in(&mux, scratch.home.path(), &ctx, "api", "hello") {
             Ok(()) => panic!("a prompt with no active run was sent"),
+            Err(err) => {
+                assert_eq!(err.exit_code(), 2);
+                err.to_string()
+            }
+        };
+        assert!(message.contains("no active run"), "{message}");
+    }
+
+    /// A finished run is over: its tab records are history, and a prompt after
+    /// `shprd down` has nowhere to go.
+    #[test]
+    fn prompt_after_the_run_finished_says_there_is_no_active_run() {
+        let scratch = Scratch::new();
+        let ctx = Ctx::new(scratch.root().to_path_buf(), Actor::Human, false, true);
+        ctx.commit(EventKind::RunStarted {
+            run_id: "run-done".to_string(),
+            repo: scratch.repo_name(),
+            base_branch: "main".to_string(),
+            integration_branch: "integration/m4".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default().with_ready_agent();
+        let workspace = mux
+            .create_workspace(
+                &naming::workspace_name(&scratch.repo_name()),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let tab = mux
+            .create_tab(&workspace.id, "api", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        record_tab(&scratch, "run-done", "api", 1, &tab.id);
+        ctx.commit(EventKind::RunFinished {})
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let message = match prompt_in(&mux, scratch.home.path(), &ctx, "api", "hello") {
+            Ok(()) => panic!("a prompt after the run finished was sent"),
             Err(err) => {
                 assert_eq!(err.exit_code(), 2);
                 err.to_string()
