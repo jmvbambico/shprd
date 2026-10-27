@@ -10,8 +10,9 @@ use shprd_core::state::{OverrideRecord, RunState, Task};
 /// The Markdown body describing `state`, as recorded in `events`.
 ///
 /// Sections: `## Tasks` (one row per task with agent, model, integrated
-/// commits, reported tests and skills used), `## Gates` (each gate with its
-/// pass or fail and its findings), `## Overrides` (every override event) and
+/// commits, reported tests and skills used), `## Gates` (every attempt's gates,
+/// each with its pass or fail and its findings), `## Overrides` (every override
+/// event) and
 /// `## Escalations` (the count, then the bodies). A section with nothing to
 /// report says `none`.
 pub fn pr_body(state: &RunState, events: &[Event]) -> String {
@@ -108,21 +109,27 @@ fn integrated_commits(id: &str, events: &[Event]) -> String {
     commits.join(", ")
 }
 
-/// The gates run on a task's latest attempt, each with its findings.
+/// Every gate run on every attempt of `task`, each with its findings.
+///
+/// Attempts are listed in the order they ran, so a retry shows both the gate
+/// that failed and the one that passed: `- <task> a<n> <gate>: pass|fail`,
+/// with each finding indented beneath it.
 fn gate_lines(task: &Task) -> Vec<String> {
     let mut lines = Vec::new();
-    let Some(attempt) = task.latest_attempt() else {
-        return lines;
-    };
-    for gate in &attempt.gates {
-        let verdict = if gate.passed { "pass" } else { "fail" };
-        lines.push(format!("- {} `{}`: {verdict}", task.id, gate.gate));
-        for finding in &gate.findings {
+    for attempt in &task.attempts {
+        for gate in &attempt.gates {
+            let verdict = if gate.passed { "pass" } else { "fail" };
             lines.push(format!(
-                "  - {}: {}",
-                severity_word(finding.severity),
-                cell(finding_text(finding))
+                "- {} a{} `{}`: {verdict}",
+                task.id, attempt.n, gate.gate
             ));
+            for finding in &gate.findings {
+                lines.push(format!(
+                    "  - {}: {}",
+                    severity_word(finding.severity),
+                    cell(finding_text(finding))
+                ));
+            }
         }
     }
     lines
@@ -187,6 +194,8 @@ fn blank_as_dash(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fixture;
+    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::state::RunState;
 
     /// The body for the fixture log.
     fn fixture_body() -> String {
@@ -219,9 +228,123 @@ mod tests {
     fn gates_show_their_verdict_and_findings() {
         let body = fixture_body();
         assert!(body.contains("## Gates"), "{body}");
-        assert!(body.contains("- M1.1 `lint`: pass"), "{body}");
-        assert!(body.contains("- M1.2 `clippy`: fail"), "{body}");
+        assert!(body.contains("- M1.1 a1 `lint`: pass"), "{body}");
+        assert!(body.contains("- M1.2 a1 `clippy`: fail"), "{body}");
         assert!(body.contains("  - major: unwrap used"), "{body}");
+    }
+
+    /// One event, stamped `at_ms` from its sequence number.
+    fn ev(seq: u64, kind: EventKind) -> Event {
+        Event {
+            seq,
+            at_ms: seq * 1_000,
+            actor: Actor::Engine,
+            kind,
+        }
+    }
+
+    /// `T1` reporting attempt `attempt`.
+    fn reported(seq: u64, attempt: u32) -> Event {
+        ev(
+            seq,
+            EventKind::Reported {
+                task: "T1".to_string(),
+                attempt,
+                status: ReportStatus::Completed,
+                summary: "did it".to_string(),
+                tests: vec![],
+                changed_paths: vec!["crates/shprd-views/src/pr.rs".to_string()],
+                commit: None,
+                skills_used: vec![],
+            },
+        )
+    }
+
+    /// A log where `T1`'s first attempt failed a gate and its retry passed.
+    fn retried_events() -> Vec<Event> {
+        vec![
+            ev(
+                1,
+                EventKind::RunStarted {
+                    run_id: "run-9".to_string(),
+                    repo: "/tmp/repo".to_string(),
+                    base_branch: "main".to_string(),
+                    integration_branch: "integration/m1".to_string(),
+                },
+            ),
+            ev(
+                2,
+                EventKind::TaskAdded {
+                    task: "T1".to_string(),
+                    title: "retries".to_string(),
+                    scope: vec!["crates/shprd-views".to_string()],
+                    acceptance: vec!["T1 is done".to_string()],
+                    tags: vec![],
+                    skills: vec![],
+                    deps: vec![],
+                },
+            ),
+            ev(
+                3,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    agent: "codex".to_string(),
+                    model: None,
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            ),
+            reported(4, 1),
+            ev(
+                5,
+                EventKind::GateFailed {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    gate: "review".to_string(),
+                    findings: vec![Finding {
+                        severity: Severity::Major,
+                        title: "unwrap used".to_string(),
+                        location: None,
+                        detail: "replace it".to_string(),
+                    }],
+                },
+            ),
+            ev(
+                6,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 2,
+                    agent: "codex".to_string(),
+                    model: None,
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            ),
+            reported(7, 2),
+            ev(
+                8,
+                EventKind::GatePassed {
+                    task: "T1".to_string(),
+                    attempt: 2,
+                    gate: "review".to_string(),
+                    findings: vec![],
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn gates_of_every_attempt_are_listed() {
+        let events = retried_events();
+        let state = match RunState::fold(&events) {
+            Ok(state) => state,
+            Err(err) => panic!("the retry log must fold: {err}"),
+        };
+        let body = pr_body(&state, &events);
+        assert!(body.contains("- T1 a1 `review`: fail"), "{body}");
+        assert!(body.contains("  - major: unwrap used"), "{body}");
+        assert!(body.contains("- T1 a2 `review`: pass"), "{body}");
     }
 
     #[test]
