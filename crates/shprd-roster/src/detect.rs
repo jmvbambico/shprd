@@ -202,10 +202,12 @@ pub fn run_with_timeout(
 /// The child leads its own process group (see [`run_with_timeout`]), so a group
 /// kill reaches the grandchildren too: a CLI that shelled out to its own child
 /// would otherwise leave it running after the probe is gone. `libc` is not a
-/// dependency, so the group is signalled with `kill -KILL -<pgid>`.
+/// dependency, so the group is signalled with `kill -KILL -- -<pgid>`.
 fn kill(child: &mut std::process::Child) {
+    // A group kill that fails is not fatal: the direct child kill and the reap
+    // below always run, so at worst the probe's grandchildren outlive it.
     #[cfg(unix)]
-    kill_group(child.id());
+    let _group_signalled = kill_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -227,20 +229,28 @@ fn kill_program() -> Option<&'static Path> {
 /// Kill the process group led by `leader`, ignoring a group that is already
 /// gone.
 ///
-/// A machine with no absolute `kill` skips the group kill: the direct child is
-/// still killed by [`kill`], so only the grandchildren outlive the probe.
+/// The target is `--`-separated from the signal because procps-ng `kill` on
+/// Linux parses a leading `-` as another option and never sees the negative
+/// process-group id; `--` ends option parsing so `-<pgid>` is read as the
+/// operand it is. macOS `kill` accepts the form either way.
+///
+/// Returns whether `kill` ran and reported success. A machine with no absolute
+/// `kill`, a `kill` that refuses the argument and a group that is already gone
+/// all return `false`: the direct child is still killed by [`kill`], so only
+/// the grandchildren outlive the probe.
 #[cfg(unix)]
-fn kill_group(leader: u32) {
+fn kill_group(leader: u32) -> bool {
     let Some(program) = kill_program() else {
-        return;
+        return false;
     };
-    let _ = Command::new(program)
-        .arg("-KILL")
-        .arg(format!("-{leader}"))
+    let group = format!("-{leader}");
+    Command::new(program)
+        .args(["-KILL", "--", group.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Runs the version probe and scrapes a version number out of its output.
