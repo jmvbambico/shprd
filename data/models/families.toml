@@ -1,0 +1,52 @@
+# Which vendor made a model, as opposed to which vendor ships a CLI.
+#
+# Cross-vendor review compares families, not CLI names: a pi worker running
+# DeepSeek may be reviewed by a pi reviewer running Claude, and a pi worker
+# running Claude may not. A prefix matches case-insensitively the model id's
+# last path segment and its first, so `openrouter/anthropic/claude-opus-5-5`
+# is anthropic and `deepseek/deepseek-v4.1-flash` is deepseek.
+schema = 1
+
+[[family]]
+name = "anthropic"
+prefixes = ["claude", "anthropic"]
+
+[[family]]
+name = "openai"
+prefixes = ["gpt", "o1", "o3", "o4", "codex", "openai"]
+
+[[family]]
+name = "deepseek"
+prefixes = ["deepseek"]
+
+[[family]]
+name = "google"
+prefixes = ["gemini", "gemma", "google"]
+
+[[family]]
+name = "zhipu"
+prefixes = ["glm", "zai", "z-ai"]
+
+[[family]]
+name = "moonshot"
+prefixes = ["kimi", "moonshot"]
+
+[[family]]
+name = "alibaba"
+prefixes = ["qwen"]
+
+[[family]]
+name = "xai"
+prefixes = ["grok", "xai"]
+
+[[family]]
+name = "minimax"
+prefixes = ["minimax"]
+
+[[family]]
+name = "mistral"
+prefixes = ["mistral", "codestral", "devstral"]
+
+[[family]]
+name = "meta"
+prefixes = ["llama", "meta"]

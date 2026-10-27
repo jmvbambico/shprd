@@ -94,6 +94,28 @@ pub enum Command {
     Down,
     /// Watch every working agent and hand work over when one goes dry.
     Watch(WatchArgs),
+    /// Run the integration branch's gate commands once, in its worktree.
+    Gate(FullGateArgs),
+    /// Push the integration branch and open its pull request; with `--merge`,
+    /// merge it when `[land]` allows.
+    Land(LandArgs),
+}
+
+/// Arguments for `gate`, the run-wide gate. The per-attempt gate is
+/// `shprd agent gate`, whose arguments are [`GateArgs`].
+#[derive(Debug, Args)]
+pub struct FullGateArgs {
+    /// How long one command may run before it is killed, in seconds.
+    #[arg(long = "timeout-secs", value_name = "SECS", default_value_t = 1800)]
+    pub timeout_secs: u64,
+}
+
+/// Arguments for `land`.
+#[derive(Debug, Args)]
+pub struct LandArgs {
+    /// Merge the pull request instead of only opening it.
+    #[arg(long)]
+    pub merge: bool,
 }
 
 /// Arguments for `watch`.
@@ -236,6 +258,8 @@ pub enum AgentCommand {
     Report(ReportArgs),
     /// Record a gate result for a task attempt.
     Gate(GateArgs),
+    /// Decide a review from its findings and record what happens next.
+    ReviewVerdict(ReviewVerdictArgs),
     /// Escalate something to a human.
     Escalate(EscalateArgs),
     /// Record a human overriding a rule.
@@ -244,6 +268,8 @@ pub enum AgentCommand {
     Integrate(IntegrateArgs),
     /// Hand a task from one agent to the next, keeping its worktree.
     Handoff(HandoffArgs),
+    /// Open a cross-vendor reviewer on a finished attempt's diff.
+    Review(ReviewArgs),
 }
 
 /// Plan verbs.
@@ -334,6 +360,21 @@ pub struct HandoffArgs {
     pub to: Option<String>,
 }
 
+/// Arguments for `agent review`.
+///
+/// The task and the log decide the rest: the attempt, the branch, the diff and
+/// the reviewer all come from the run, so the caller only chooses what to review
+/// and whether to accept a review that is not cross-vendor.
+#[derive(Debug, Args)]
+pub struct ReviewArgs {
+    /// The task whose latest attempt is reviewed.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// Review anyway when the reviewer shares the author's vendor.
+    #[arg(long)]
+    pub degraded: bool,
+}
+
 /// Arguments for `agent prompt`.
 #[derive(Debug, Args)]
 pub struct PromptArgs {
@@ -394,6 +435,20 @@ pub struct GateArgs {
     pub findings: Option<PathBuf>,
 }
 
+/// Arguments for `agent review-verdict`.
+#[derive(Debug, Args)]
+pub struct ReviewVerdictArgs {
+    /// The task under review.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// Attempt number.
+    #[arg(long, value_name = "N")]
+    pub attempt: u32,
+    /// JSON file holding an array of findings.
+    #[arg(long, value_name = "FILE")]
+    pub findings: PathBuf,
+}
+
 /// Arguments for `agent escalate`.
 #[derive(Debug, Args)]
 pub struct EscalateArgs {
@@ -428,9 +483,12 @@ pub struct IntegrateArgs {
     /// The task.
     #[arg(long, value_name = "ID")]
     pub task: String,
-    /// Commit that landed; repeatable, at least one.
-    #[arg(long = "commit", value_name = "SHA", required = true)]
-    pub commits: Vec<String>,
+    /// Record that the task landed without running git.
+    ///
+    /// This is the behaviour M1 shipped, kept for callers that land work by
+    /// hand and only need the ledger to know.
+    #[arg(long = "record-only", hide = true)]
+    pub record_only: bool,
 }
 
 /// The `--status` values.

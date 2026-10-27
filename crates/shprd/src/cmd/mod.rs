@@ -3,15 +3,20 @@
 pub mod agent;
 pub mod dagr;
 pub mod doctor;
+pub mod fullgate;
 pub mod handoff;
+pub mod integrate;
 pub mod janitor;
 pub mod keys;
+pub mod land;
 pub mod launch;
+pub mod review;
 pub mod roster;
 pub mod run;
 pub mod set;
 pub mod spawn;
 pub mod up;
+pub mod verdict;
 pub mod view;
 pub mod watch;
 
@@ -73,6 +78,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Down) => up::down(&ctx),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Land(args)) => land::land_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 
@@ -134,12 +141,16 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
+        EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
         EventKind::Override { .. } => "override",
         EventKind::Resource { .. } => "resource",
+        EventKind::FullGate { .. } => "full_gate",
+        EventKind::PrOpened { .. } => "pr_opened",
+        EventKind::PrMerged { .. } => "pr_merged",
         EventKind::RunFinished {} => "run_finished",
     }
 }

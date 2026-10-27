@@ -1764,6 +1764,7 @@ mod tests {
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             effort_args: None,
             auto_approve: None,
+            reviewer_args: None,
             system_prompt_args: None,
             resume_args: None,
             verified: true,
