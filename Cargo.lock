@@ -311,6 +311,7 @@ dependencies = [
  "serde_json",
  "shprd-core",
  "shprd-git",
+ "shprd-roster",
  "shprd-views",
  "tempfile",
 ]

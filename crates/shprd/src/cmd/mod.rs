@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod dagr;
 pub mod janitor;
+pub mod roster;
 pub mod run;
 pub mod view;
 
@@ -14,6 +15,10 @@ use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
 
 /// Runs whichever verb the command line asked for.
 pub fn dispatch(cli: Cli) -> Result<(), CliError> {
+    // `roster` reads no run log, so it answers outside a repository too.
+    if let Some(Command::Roster(args)) = &cli.command {
+        return roster::run(args, cli.global.json);
+    }
     let root = resolve_root(cli.global.repo.as_deref())?;
     let actor = resolve_actor(cli.global.actor.as_deref())?;
     let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr);
@@ -36,6 +41,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Restore(args)) => {
             janitor::restore_verb(&ctx, &args, cli.global.home.as_deref())
         }
+        Some(Command::Roster(args)) => roster::run(&args, ctx.json),
     }
 }
 

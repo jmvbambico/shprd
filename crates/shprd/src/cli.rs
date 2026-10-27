@@ -79,6 +79,8 @@ pub enum Command {
     Janitor(JanitorArgs),
     /// Recreate a task's branch from its archive ref.
     Restore(RestoreArgs),
+    /// Detect the agent CLIs installed here, their version and sign-in state.
+    Roster(RosterArgs),
 }
 
 /// Arguments for `janitor`.
@@ -103,6 +105,14 @@ pub struct RestoreArgs {
     /// The run, when the log holds more than one; defaults to the log's run.
     #[arg(long, value_name = "ID")]
     pub run: Option<String>,
+}
+
+/// Arguments for `roster`.
+#[derive(Debug, Args)]
+pub struct RosterArgs {
+    /// Print the detections as a JSON array instead of one line per CLI.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// dagr verbs.
