@@ -594,6 +594,22 @@ mod tests {
         )
     }
 
+    fn reported_with(seq: u64, id: &str, attempt: u32, outcome: ReportStatus) -> Event {
+        ev(
+            seq,
+            EventKind::Reported {
+                task: id.to_string(),
+                attempt,
+                status: outcome,
+                summary: "gave up".to_string(),
+                tests: Vec::new(),
+                changed_paths: strings(&["src/a"]),
+                commit: None,
+                skills_used: Vec::new(),
+            },
+        )
+    }
+
     fn gated(seq: u64, id: &str, attempt: u32, gate: &str, passed: bool) -> Event {
         let findings = if passed { Vec::new() } else { vec![finding()] };
         let kind = if passed {
@@ -901,6 +917,39 @@ mod tests {
             ]),
             RuleError::ReportNotCompleted { .. }
         ));
+    }
+
+    #[test]
+    fn failed_or_blocked_report_can_be_retried() {
+        for outcome in [ReportStatus::Failed, ReportStatus::Blocked] {
+            let log = vec![
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                reported_with(4, "a", 1, outcome),
+            ];
+            let state = folded(&log);
+            assert_eq!(status(&state, "a"), TaskStatus::Failed, "{outcome:?}");
+            match state
+                .tasks
+                .get("a")
+                .and_then(|task| task.attempts.first())
+                .and_then(|attempt| attempt.report.as_ref())
+            {
+                Some(report) => assert_eq!(report.status, outcome, "the report is kept"),
+                None => panic!("the report is recorded for {outcome:?}"),
+            }
+
+            let mut retried = log.clone();
+            retried.push(spawned(5, "a", 2, "agent-1"));
+            let retried = folded(&retried);
+            assert_eq!(status(&retried, "a"), TaskStatus::Working, "{outcome:?}");
+            assert_eq!(
+                retried.tasks.get("a").map(|task| task.attempts.len()),
+                Some(2),
+                "a second attempt is recorded for {outcome:?}"
+            );
+        }
     }
 
     #[test]

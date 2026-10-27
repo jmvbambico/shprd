@@ -79,11 +79,12 @@ pub enum TaskStatus {
     Queued,
     /// An agent is working on it.
     Working,
-    /// The agent reported an outcome for the current attempt.
+    /// The agent reported a completed outcome for the current attempt.
     Reported,
     /// Its gates passed.
     Passed,
-    /// It failed, and may be retried on a new attempt.
+    /// It failed, or an attempt reported blocked or failed, and it may be
+    /// retried on a new attempt.
     Failed,
     /// Its work landed on the integration branch.
     Integrated,
@@ -285,8 +286,16 @@ impl RunState {
                 skills_used,
                 ..
             } => {
+                // Only a completed report moves the task on to gating; a
+                // blocked or failed one leaves it retryable, so the task goes
+                // Failed even though the report itself is recorded below.
+                let next = if *status == ReportStatus::Completed {
+                    TaskStatus::Reported
+                } else {
+                    TaskStatus::Failed
+                };
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    entry.status = TaskStatus::Reported;
+                    entry.status = next;
                     if let Some(current) = entry.attempts.last_mut() {
                         current.report = Some(Report {
                             status: *status,
