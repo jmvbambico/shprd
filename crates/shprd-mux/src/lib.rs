@@ -11,6 +11,7 @@
 //! never turn into a command.
 
 pub mod fake;
+pub mod naming;
 pub mod types;
 
 use std::path::Path;
