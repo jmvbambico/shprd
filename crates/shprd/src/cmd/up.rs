@@ -290,7 +290,7 @@ fn ensure_integration(
         &boot.base_branch,
     )
     .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
-    record_integration(ctx, &worktree, state)
+    record_integration(ctx, &layout, repo_name, &boot.run_id, &worktree, state)
 }
 
 /// What `up` learned about the run before touching the multiplexer.
@@ -319,17 +319,32 @@ fn resume_target(state: &RunState) -> Option<shprd_core::state::RunInfo> {
     state.run.clone()
 }
 
-/// Appends the resources a fresh integration worktree owns.
+/// The layout segment that names the integration worktree's directory.
+const INTEGRATION_PATH_TASK: &str = "_int";
+
+/// The layout segment that names the integration branch.
+const INTEGRATION_BRANCH_TASK: &str = "int";
+
+/// Appends the resources the run's integration worktree owns.
 ///
-/// Only what this call created and the ledger does not already hold live is
-/// recorded: the ledger is what licenses the janitor to remove something, so a
-/// worktree that was already there is not shprd's to claim again.
+/// A resource is recorded when the ledger does not already hold it live *and*
+/// the worktree is provably this run's own: its path is the layout's
+/// `<root>/<repo>/<run>/_int` and its branch `<namespace><run>/int`. Whether
+/// this call created it does not matter — a crash between creating the
+/// worktree and appending its events leaves it unrecorded, and adoption is what
+/// heals that and what licenses the janitor to remove it. Anything that does
+/// not match the layout belongs to a human and is left alone.
 fn record_integration(
     ctx: &Ctx,
+    layout: &Layout,
+    repo_name: &str,
+    run_id: &str,
     worktree: &IntegrationWorktree,
     state: &RunState,
 ) -> Result<(), CliError> {
-    if !worktree.created {
+    let ours = worktree.path == layout.path(repo_name, run_id, INTEGRATION_PATH_TASK)
+        && worktree.branch == layout.branch_name(run_id, INTEGRATION_BRANCH_TASK);
+    if !ours {
         return Ok(());
     }
     for (kind, name) in [
@@ -1103,6 +1118,64 @@ mod tests {
             "a repeated up recorded the same resources twice"
         );
         Ok(())
+    }
+
+    /// A crash between "the worktree is on disk" and "the ledger knows it"
+    /// leaves a run whose integration worktree exists with `created: false`.
+    /// The next `up` must adopt it: it is this run's own, at the layout's own
+    /// path, and the janitor needs the record to own it.
+    #[test]
+    fn an_unrecorded_integration_worktree_is_adopted() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let run_id = new_run_id();
+        env.ctx
+            .commit(EventKind::RunStarted {
+                run_id: run_id.clone(),
+                repo: env.ctx.root.to_string_lossy().to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: integration_branch(&run_id),
+            })
+            .map_err(failed)?;
+        // The worktree lands without its events: what a crash between the two
+        // leaves behind.
+        let layout = Layout::default_for_home(&env.home);
+        let int =
+            integrate::open_integration(&env.ctx.root, &layout, &env.repo_name, &run_id, "main")
+                .map_err(|err| anyhow!("{err}"))?;
+        assert!(int.created, "the fixture worktree started out missing");
+        assert_eq!(
+            env.ctx.state().map_err(failed)?.resources.len(),
+            0,
+            "the ledger started out empty"
+        );
+
+        let report = up(&mux, &env).map_err(failed)?;
+        assert!(report.resumed, "the log already held a run");
+        assert_eq!(report.run_id, run_id);
+        let (state, events) = env.ctx.load().map_err(failed)?;
+        assert_eq!(state.resources.len(), 2, "the adoption recorded both");
+        assert_eq!(resource_events(&events), 2, "both resources were recorded");
+
+        // The second `up` finds both live, so it records nothing new.
+        up(&mux, &env).map_err(failed)?;
+        let (again, events) = env.ctx.load().map_err(failed)?;
+        assert_eq!(
+            again.resources.len(),
+            2,
+            "a repeated up recorded duplicates"
+        );
+        assert_eq!(resource_events(&events), 2, "a repeated up wrote events");
+        Ok(())
+    }
+
+    /// How many `Resource` events a loaded log holds.
+    fn resource_events(events: &[shprd_core::event::Event]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Resource { .. }))
+            .count()
     }
 
     #[test]
