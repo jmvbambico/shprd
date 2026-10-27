@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod changed;
+pub mod gate;
 pub mod git;
 pub mod integrate;
 pub mod janitor;
