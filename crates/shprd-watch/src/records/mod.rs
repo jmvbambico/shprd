@@ -16,6 +16,7 @@ use chrono::{DateTime, Datelike, TimeZone, Utc};
 pub mod claude;
 pub mod codex;
 pub mod pi;
+pub mod sqlite;
 
 /// What kind of provider trouble an error record describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
