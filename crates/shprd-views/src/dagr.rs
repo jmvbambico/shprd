@@ -57,6 +57,13 @@ pub enum ViewError {
         #[source]
         source: std::io::Error,
     },
+    /// The event log does not record a fact the dagr contract requires, so the
+    /// projection refuses rather than invent or borrow a value.
+    #[error("the event log does not record {what}")]
+    MissingFact {
+        /// The missing fact, named as the log would carry it.
+        what: String,
+    },
     /// `dagr check --strict` reported findings for the document.
     #[error("dagr check rejected the document: {output}")]
     Check {
@@ -82,12 +89,15 @@ struct Times {
 /// Tasks are emitted in id order, so the document is deterministic.
 ///
 /// The run's title is `<repo basename> · <run_id>`: both are recorded facts.
-/// `started_at` is the `RunStarted` event's time, or, when the log excerpt
-/// starts later, the earliest event's time.
+/// `started_at` is the `RunStarted` event's time. No other event stands in for
+/// it: an excerpt without `RunStarted` is refused, because a projector that
+/// guessed a start time would state a fact shprd never recorded.
 ///
 /// # Errors
 ///
-/// [`ViewError::NoRun`] when the run has not started.
+/// [`ViewError::NoRun`] when the run has not started, and
+/// [`ViewError::MissingFact`] when `events` does not record a time the
+/// document needs.
 pub fn project(
     state: &RunState,
     events: &[Event],
@@ -99,8 +109,9 @@ pub fn project(
         .iter()
         .find(|event| matches!(event.kind, EventKind::RunStarted { .. }))
         .map(|event| event.at_ms)
-        .or_else(|| events.first().map(|event| event.at_ms))
-        .ok_or(ViewError::NoRun)?;
+        .ok_or_else(|| ViewError::MissingFact {
+            what: "a RunStarted event".to_string(),
+        })?;
     let run_id = run.run_id.clone();
     let title = format!("{} · {run_id}", repo_basename(&run.repo));
     let times = times_by_attempt(events);
@@ -822,6 +833,22 @@ mod tests {
         match project(&state, &[], T0 + MINUTE) {
             Err(ViewError::NoRun) => {}
             other => panic!("expected NoRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_to_project_a_log_without_a_run_started_event() {
+        let events = scenario();
+        let state = state(&events);
+        let excerpt: Vec<Event> = events
+            .into_iter()
+            .filter(|event| !matches!(event.kind, EventKind::RunStarted { .. }))
+            .collect();
+        match project(&state, &excerpt, T0 + 10 * MINUTE) {
+            Err(ViewError::MissingFact { what }) => {
+                assert!(what.contains("RunStarted"), "{what}")
+            }
+            other => panic!("expected MissingFact, got {other:?}"),
         }
     }
 
