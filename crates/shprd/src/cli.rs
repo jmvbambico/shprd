@@ -88,6 +88,10 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Print, install or remove herdr's shprd keybinds.
     Keys(KeysArgs),
+    /// Start or resume the run and lay out this repository's workspace.
+    Up,
+    /// Finish the run; refuses while a task is still working.
+    Down,
 }
 
 /// Arguments for `janitor`.

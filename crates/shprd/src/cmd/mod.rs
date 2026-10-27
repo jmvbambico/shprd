@@ -9,6 +9,7 @@ pub mod roster;
 pub mod run;
 pub mod set;
 pub mod spawn;
+pub mod up;
 pub mod view;
 
 use anyhow::anyhow;
@@ -66,6 +67,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         ),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
         Some(Command::Keys(args)) => keys::run(&args, None),
+        Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
+        Some(Command::Down) => up::down(&ctx),
     }
 }
 
