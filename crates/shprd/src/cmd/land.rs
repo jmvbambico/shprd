@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use shprd_core::config::{self, Config};
+use shprd_core::config::{self, Config, MergePolicy};
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::state::{RunState, Task, TaskStatus};
@@ -76,9 +76,7 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
     check_full_gate(&state, &head)?;
 
     if args.merge {
-        return Err(CliError::other(anyhow!(
-            "landing with --merge lands in the next step"
-        )));
+        return merge(ctx, &config, &worktree, &head);
     }
     open(ctx, &state, &events, &worktree, &integrated)
 }
@@ -282,6 +280,67 @@ fn degraded_mentioned(events: &[Event]) -> bool {
 /// True when `text` says a review was degraded.
 fn mentions_degraded(text: &str) -> bool {
     text.to_lowercase().contains("degraded")
+}
+
+/// Merges the run's pull request when the policy allows it.
+fn merge(
+    ctx: &Ctx,
+    config: &Config,
+    worktree: &integrate::IntegrationWorktree,
+    head: &str,
+) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    let run = state
+        .run
+        .as_ref()
+        .ok_or_else(|| CliError::other(anyhow!("no run to merge")))?;
+    let pr = state.pr.as_ref().ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no pull request yet: run `shprd land` before `shprd land --merge`"
+        ))
+    })?;
+    let url = pr.url.clone();
+    let number = pr.number;
+    let base = run.base_branch.clone();
+    let forge = forge(&worktree.path)?;
+    let status = forge.status(number).map_err(|err| {
+        CliError::other(anyhow!(err).context("asking the forge for the pull request"))
+    })?;
+    if status.merged {
+        println!("merged {url}");
+        return Ok(());
+    }
+    if status.head_sha != head {
+        return Err(CliError::Invalid(anyhow!(
+            "the pull request is at head {}, but the integration branch is at {head}: push and \
+             run `shprd land` again",
+            status.head_sha
+        )));
+    }
+    if status.checks_passed != Some(true) {
+        return Err(CliError::Invalid(anyhow!(
+            "the pull request's checks have not passed on {head}: wait for CI and try again"
+        )));
+    }
+    let protected = config.land.protected.contains(&base);
+    let allowed = status.approved || (config.land.merge == MergePolicy::Allow && !protected);
+    if !allowed {
+        return Err(CliError::Invalid(anyhow!(
+            "waiting for your approval on {url}"
+        )));
+    }
+    forge
+        .merge(number)
+        .map_err(|err| CliError::other(anyhow!(err).context("merging the pull request")))?;
+    let event = ctx.commit(EventKind::PrMerged {
+        number,
+        head: head.to_string(),
+    })?;
+    crate::cmd::emit(ctx, &event)?;
+    if !ctx.json {
+        println!("merged {url}");
+    }
+    Ok(())
 }
 
 /// The forge to drive: `gh` here, or the script `SHPRD_FAKE_FORGE` names.
