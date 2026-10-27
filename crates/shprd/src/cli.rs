@@ -236,6 +236,8 @@ pub enum AgentCommand {
     Report(ReportArgs),
     /// Record a gate result for a task attempt.
     Gate(GateArgs),
+    /// Decide a review from its findings and record what happens next.
+    ReviewVerdict(ReviewVerdictArgs),
     /// Escalate something to a human.
     Escalate(EscalateArgs),
     /// Record a human overriding a rule.
@@ -392,6 +394,20 @@ pub struct GateArgs {
     /// JSON file holding an array of findings.
     #[arg(long, value_name = "FILE")]
     pub findings: Option<PathBuf>,
+}
+
+/// Arguments for `agent review-verdict`.
+#[derive(Debug, Args)]
+pub struct ReviewVerdictArgs {
+    /// The task under review.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// Attempt number.
+    #[arg(long, value_name = "N")]
+    pub attempt: u32,
+    /// JSON file holding an array of findings.
+    #[arg(long, value_name = "FILE")]
+    pub findings: PathBuf,
 }
 
 /// Arguments for `agent escalate`.

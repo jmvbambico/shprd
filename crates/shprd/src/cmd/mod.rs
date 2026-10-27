@@ -12,6 +12,7 @@ pub mod run;
 pub mod set;
 pub mod spawn;
 pub mod up;
+pub mod verdict;
 pub mod view;
 pub mod watch;
 

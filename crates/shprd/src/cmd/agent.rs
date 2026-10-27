@@ -29,6 +29,7 @@ pub fn dispatch(
         AgentCommand::Prompt(args) => prompt_cmd(ctx, &args),
         AgentCommand::Report(args) => report(ctx, &args),
         AgentCommand::Gate(args) => gate(ctx, &args),
+        AgentCommand::ReviewVerdict(args) => crate::cmd::verdict::verdict_verb(ctx, &args, home),
         AgentCommand::Escalate(args) => escalate(ctx, &args),
         AgentCommand::Override(args) => override_rule(ctx, &args),
         AgentCommand::Integrate(args) => integrate(ctx, &args),
