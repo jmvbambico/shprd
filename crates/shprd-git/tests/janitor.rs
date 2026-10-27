@@ -89,7 +89,7 @@ fn never_plans_a_branch_outside_the_namespace_or_a_worktree_outside_the_root() {
     let actions = janitor::plan(&state, &events, &layout, 1_000, DAYS);
     assert!(actions.is_empty(), "nothing may be planned: {actions:?}");
 
-    let outcomes = janitor::execute(&repo.path, &layout, "r1", &actions);
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
     assert!(outcomes.is_empty(), "{outcomes:?}");
     repo.git(&["branch", "feature/x", "main"]);
     assert!(
@@ -132,7 +132,7 @@ fn archives_before_deleting_and_restores_the_branch_afterwards() {
         "archive must come first: {actions:?}"
     );
 
-    let outcomes = janitor::execute(&repo.path, &layout, "r1", &actions);
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
     for outcome in &outcomes {
         assert!(outcome.result.is_ok(), "{outcome:?}");
     }
@@ -181,7 +181,7 @@ fn a_worktree_is_removed_without_deleting_an_unrecorded_branch() {
     );
 
     let actions = janitor::plan(&state, &events, &layout, 2_000, DAYS);
-    let outcomes = janitor::execute(&repo.path, &layout, "r1", &actions);
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
     for outcome in &outcomes {
         assert!(outcome.result.is_ok(), "{outcome:?}");
     }
@@ -316,7 +316,7 @@ fn a_failed_archive_skips_its_branch_deletion_and_the_rest_still_runs() {
     let actions = janitor::plan(&state, &events, &layout, 2_000, DAYS);
     assert!(actions.len() >= 4, "{actions:?}");
 
-    let outcomes = janitor::execute(&repo.path, &layout, "r1", &actions);
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
     let failed_delete = outcomes
         .iter()
         .find(|outcome| matches!(&outcome.action, Action::DeleteBranch { branch, .. } if branch == gone))
@@ -329,6 +329,45 @@ fn a_failed_archive_skips_its_branch_deletion_and_the_rest_still_runs() {
         repo.git(&["branch", "--list", kept]).is_empty(),
         "the other branch must still be cleaned up"
     );
+}
+
+#[test]
+fn two_live_branches_for_one_task_are_archived_to_distinct_refs() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let second = "shprd/r1/T1-retry";
+    let created = match worktree::create(&repo.path, &layout, "r1", "T1", "main") {
+        Ok(created) => created,
+        Err(err) => panic!("create must succeed: {err}"),
+    };
+    let tip = support::commit_in(&created.path, "work.txt", "work\n", "work");
+    repo.git(&["branch", second, &tip]);
+    let first = created.branch.as_str();
+    let events = integrated_run("r1", "T1", first, &created.path, 1_000);
+    let events = with_extra(&events, ResourceKind::Branch, second, "T1");
+    let state = fold(&events);
+
+    let actions = janitor::plan(&state, &events, &layout, 2_000, DAYS);
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
+    for outcome in &outcomes {
+        assert!(outcome.result.is_ok(), "{outcome:?}");
+    }
+    for branch in [first, second] {
+        assert!(
+            repo.git(&["branch", "--list", branch]).is_empty(),
+            "{branch} must be deleted"
+        );
+    }
+    let first_ref = "refs/shprd/archive/r1/T1";
+    let second_ref = "refs/shprd/archive/r1/T1-retry";
+    assert_ne!(first_ref, second_ref);
+    for ref_name in [first_ref, second_ref] {
+        assert_eq!(
+            repo.git(&["rev-parse", ref_name]),
+            tip,
+            "{ref_name} must hold the branch tip"
+        );
+    }
 }
 
 #[test]
@@ -348,7 +387,7 @@ fn execute_reports_the_event_for_each_step() {
             )
         })
         .collect();
-    let outcomes = janitor::execute(&repo.path, &layout, "r1", &actions);
+    let outcomes = janitor::execute(&repo.path, &layout, &actions);
     assert_eq!(outcomes.len(), 2, "{outcomes:?}");
     let first = match &outcomes[0].result {
         Ok(kinds) => kinds.clone(),
@@ -401,6 +440,6 @@ fn an_outside_worktree_path_is_never_executed_even_if_the_branch_is_ours() {
             .any(|action| matches!(action, Action::RemoveWorktree { .. })),
         "the worktree must not be planned: {actions:?}"
     );
-    let _ = janitor::execute(&repo.path, &layout, "r1", &actions);
+    let _ = janitor::execute(&repo.path, &layout, &actions);
     assert!(outside.is_dir(), "the worktree must survive");
 }

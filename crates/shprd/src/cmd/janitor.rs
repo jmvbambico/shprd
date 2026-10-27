@@ -29,7 +29,8 @@ pub fn plan_verb(
     let (loaded, layout) = config_and_layout(ctx, home)?;
     let archive_days = args.archive_days.unwrap_or(loaded.janitor.archive_days);
     let (state, events) = ctx.load()?;
-    let run = run_id(&state)?;
+    // A plan without a run would be empty; say so instead of printing nothing.
+    let _ = run_id(&state)?;
     let now_ms = SystemClock.now_ms();
     let actions = janitor::plan(&state, &events, &layout, now_ms, archive_days);
 
@@ -38,7 +39,7 @@ pub fn plan_verb(
         return Ok(());
     }
 
-    let outcomes = janitor::execute(&ctx.root, &layout, &run, &actions);
+    let outcomes = janitor::execute(&ctx.root, &layout, &actions);
     let mut failures = 0u32;
     for outcome in &outcomes {
         match &outcome.result {

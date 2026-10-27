@@ -23,10 +23,11 @@ pub const MILLIS_PER_DAY: u64 = 86_400_000;
 /// One step the janitor would take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Point the task's archive ref at its branch tip.
+    /// Point the branch's own archive ref at its tip.
+    ///
+    /// The ref is named after the branch, so two live branches for one task
+    /// are archived to two refs and never collide.
     ArchiveRef {
-        /// The run the task belongs to.
-        run: String,
         /// The task.
         task: TaskId,
         /// The branch to archive.
@@ -62,8 +63,8 @@ impl Action {
     /// A one-line, human-readable description of the step.
     pub fn describe(&self) -> String {
         match self {
-            Self::ArchiveRef { task, branch, .. } => {
-                format!("archive {task}: {branch} -> refs/shprd/archive")
+            Self::ArchiveRef { task, branch } => {
+                format!("archive {task}: {branch} -> refs/shprd/archive/")
             }
             Self::RemoveWorktree { task, path } => {
                 format!("remove worktree {task}: {}", path.display())
@@ -77,15 +78,17 @@ impl Action {
 
     /// The ledger events this step appends when it succeeds, in order.
     ///
-    /// Archiving records two: the archive ref now exists, and the branch is
-    /// archived — kept, but out of service.
-    pub fn events(&self) -> Vec<EventKind> {
+    /// Archiving records two: the branch's archive ref now exists, and the
+    /// branch is archived — kept, but out of service. `layout` names the ref,
+    /// because the ref is named after the branch.
+    pub fn events(&self, layout: &Layout) -> Vec<EventKind> {
         match self {
-            Self::ArchiveRef { run, task, branch } => vec![
+            Self::ArchiveRef { task, branch } => vec![
                 EventKind::Resource {
                     action: ResourceAction::Created,
                     kind: ResourceKind::ArchiveRef,
-                    name: archive::archive_ref_name(run, task),
+                    name: archive::archive_ref_for_branch(layout, branch)
+                        .unwrap_or_else(|_| archive::archive_ref_name("", branch)),
                     task: Some(task.clone()),
                 },
                 EventKind::Resource {
@@ -156,10 +159,9 @@ pub fn plan(
     now_ms: u64,
     archive_days: u32,
 ) -> Vec<Action> {
-    let run = match &state.run {
-        Some(info) => info.run_id.clone(),
-        None => return Vec::new(),
-    };
+    if state.run.is_none() {
+        return Vec::new();
+    }
     let mut per_task: BTreeMap<TaskId, DueResources> = BTreeMap::new();
     let mut stale: Vec<Action> = Vec::new();
     for ((kind, name), record) in &state.resources {
@@ -209,7 +211,6 @@ pub fn plan(
     for (task, due) in per_task {
         for branch in &due.branches {
             actions.push(Action::ArchiveRef {
-                run: run.clone(),
                 task: task.clone(),
                 branch: branch.clone(),
             });
@@ -254,13 +255,13 @@ struct DueResources {
 /// reason instead of an event. A branch deletion whose own archive failed is
 /// skipped, so a branch is never lost by a half-done cleanup — and only that
 /// branch: another task's, or another branch's, cleanup still runs.
-pub fn execute(repo: &Path, layout: &Layout, run: &str, actions: &[Action]) -> Vec<Outcome> {
+pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome> {
     let mut outcomes: Vec<Outcome> = Vec::with_capacity(actions.len());
     let mut failed_archive: Vec<String> = Vec::new();
     for action in actions {
         let result = match action {
-            Action::ArchiveRef { task, branch, .. } => archive::archive(repo, run, task, branch)
-                .map(|_| action.events())
+            Action::ArchiveRef { branch, .. } => archive::archive(repo, layout, branch)
+                .map(|_| action.events(layout))
                 .map_err(|err| {
                     failed_archive.push(branch.clone());
                     err.to_string()
@@ -272,17 +273,17 @@ pub fn execute(repo: &Path, layout: &Layout, run: &str, actions: &[Action]) -> V
                     Err(format!("branch {branch} is outside the shprd namespace"))
                 } else {
                     worktree::delete_branch(repo, layout, branch)
-                        .map(|()| action.events())
+                        .map(|()| action.events(layout))
                         .map_err(|err| err.to_string())
                 }
             }
             Action::RemoveWorktree { path, .. } => {
                 worktree::remove_worktree_only(repo, layout, path, false)
-                    .map(|()| action.events())
+                    .map(|()| action.events(layout))
                     .map_err(|err| err.to_string())
             }
             Action::ExpireArchive { ref_name, .. } => archive::expire(repo, ref_name)
-                .map(|()| action.events())
+                .map(|()| action.events(layout))
                 .map_err(|err| err.to_string()),
         };
         outcomes.push(Outcome {

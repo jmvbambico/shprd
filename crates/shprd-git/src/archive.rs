@@ -1,8 +1,12 @@
 //! Archive refs, bundles and restore.
 //!
-//! The janitor archives before it deletes: a task's branch is first pointed at
-//! by `refs/shprd/archive/<run>/<task>`, and only then removed. The ref holds
-//! the commits alive, so every deletion is reversible with [`restore`].
+//! The janitor archives before it deletes: a branch is first pointed at by its
+//! own ref, `refs/shprd/archive/<branch without the namespace>` — so
+//! `shprd/r1/t1` is held by `refs/shprd/archive/r1/t1` and a second attempt,
+//! `shprd/r1/t1-retry`, by `refs/shprd/archive/r1/t1-retry` — and only then
+//! removed. Two live branches for one task therefore never collide. The ref
+//! holds the commits alive, so every deletion is reversible with [`restore`],
+//! which rebuilds the task's conventional branch from its own ref.
 
 use std::path::{Path, PathBuf};
 
@@ -72,12 +76,47 @@ pub enum ArchiveError {
 
 /// The archive ref for one task of one run: `<refs/shprd/archive>/<run>/<task>`.
 ///
+/// That is the ref of the task's conventional branch
+/// `<namespace><run>/<task>`, so it is the ref [`restore`] reads. An extra
+/// attempt like `<namespace><run>/<task>-retry` archives to its own ref, named
+/// by [`archive_ref_for_branch`].
+///
 /// # Panics
 ///
-/// Never: the ids are validated by [`archive`] and [`restore`] before this is
-/// called, and the format cannot fail.
+/// Never: the ids are validated by [`restore`] before this is called, and the
+/// format cannot fail.
 pub fn archive_ref_name(run: &str, task: &str) -> String {
     format!("{ARCHIVE_PREFIX}{run}/{task}")
+}
+
+/// The archive ref that belongs to `branch`: `<refs/shprd/archive>/<branch
+/// without the namespace>`, so `shprd/r1/t1` maps to
+/// `refs/shprd/archive/r1/t1`.
+///
+/// Refuses a branch outside [`Layout::namespace`], and one whose remainder is
+/// not a plain ref path, so shprd can only ever write inside its own archive
+/// namespace.
+pub fn archive_ref_for_branch(layout: &Layout, branch: &str) -> Result<String, ArchiveError> {
+    let rest = match branch.strip_prefix(&layout.namespace) {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => return Err(invalid_branch(branch)),
+    };
+    if rest.contains("..")
+        || !rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+    {
+        return Err(invalid_branch(branch));
+    }
+    Ok(format!("{ARCHIVE_PREFIX}{rest}"))
+}
+
+/// The error for a branch shprd may not archive.
+fn invalid_branch(branch: &str) -> ArchiveError {
+    ArchiveError::InvalidId {
+        what: "branch",
+        id: branch.to_string(),
+    }
 }
 
 /// True when `name` is a ref shprd's own archive namespace holds.
@@ -85,17 +124,16 @@ pub fn is_archive_ref(name: &str) -> bool {
     name.starts_with(ARCHIVE_PREFIX)
 }
 
-/// Points the task's archive ref at the tip of `branch`.
+/// Points `branch`'s archive ref at its tip.
 ///
-/// Re-archiving the same commit is a no-op; archiving a different one is
-/// refused, because moving an archive ref would lose the recorded history it
-/// exists to keep.
-pub fn archive(repo: &Path, run: &str, task: &str, branch: &str) -> Result<Archived, ArchiveError> {
-    check_id("run", run)?;
-    check_id("task", task)?;
+/// Each branch archives to its own ref, so two live branches for one task never
+/// share one. Re-archiving the same commit is a no-op; archiving a different
+/// one is refused, because moving an archive ref would lose the recorded
+/// history it exists to keep.
+pub fn archive(repo: &Path, layout: &Layout, branch: &str) -> Result<Archived, ArchiveError> {
     let git = Git::new(repo);
     let wanted = git.rev_parse(branch)?;
-    let ref_name = archive_ref_name(run, task);
+    let ref_name = archive_ref_for_branch(layout, branch)?;
     if let Some(found) = ref_sha(&git, &ref_name)? {
         if found == wanted {
             return Ok(Archived {

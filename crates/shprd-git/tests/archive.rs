@@ -21,7 +21,7 @@ fn archive_then_restore_round_trips_the_same_commit() {
     let tip = repo.commit("work.txt", "work\n", "work");
     repo.git(&["branch", "-f", "shprd/r1/T1", &tip]);
 
-    let archived = match archive::archive(&repo.path, "r1", "T1", "shprd/r1/T1") {
+    let archived = match archive::archive(&repo.path, &layout, "shprd/r1/T1") {
         Ok(archived) => archived,
         Err(err) => panic!("archive must succeed: {err}"),
     };
@@ -39,12 +39,13 @@ fn archive_then_restore_round_trips_the_same_commit() {
 #[test]
 fn archiving_the_same_commit_twice_is_a_no_op() {
     let repo = Repo::new();
+    let layout = repo.layout();
     repo.git(&["branch", "shprd/r1/T1", "main"]);
-    let first = match archive::archive(&repo.path, "r1", "T1", "shprd/r1/T1") {
+    let first = match archive::archive(&repo.path, &layout, "shprd/r1/T1") {
         Ok(archived) => archived,
         Err(err) => panic!("archive must succeed: {err}"),
     };
-    let second = match archive::archive(&repo.path, "r1", "T1", "shprd/r1/T1") {
+    let second = match archive::archive(&repo.path, &layout, "shprd/r1/T1") {
         Ok(archived) => archived,
         Err(err) => panic!("a repeated archive must succeed: {err}"),
     };
@@ -54,16 +55,17 @@ fn archiving_the_same_commit_twice_is_a_no_op() {
 #[test]
 fn archive_refuses_to_move_an_existing_ref_to_a_different_commit() {
     let repo = Repo::new();
+    let layout = repo.layout();
     repo.git(&["branch", "shprd/r1/T1", "main"]);
     let first = repo.head_sha();
-    let moved = repo.commit_empty("second");
-    repo.git(&["branch", "-f", "shprd/r1/T1", &moved]);
 
-    let older = match archive::archive(&repo.path, "r1", "T1", &first) {
+    let older = match archive::archive(&repo.path, &layout, "shprd/r1/T1") {
         Ok(archived) => archived,
         Err(err) => panic!("archiving the seed commit must succeed: {err}"),
     };
-    let err = match archive::archive(&repo.path, "r1", "T1", &moved) {
+    let moved = repo.commit_empty("second");
+    repo.git(&["branch", "-f", "shprd/r1/T1", &moved]);
+    let err = match archive::archive(&repo.path, &layout, "shprd/r1/T1") {
         Ok(archived) => panic!("a moved archive ref must be refused, got {archived:?}"),
         Err(err) => err,
     };
@@ -80,7 +82,7 @@ fn restore_refuses_a_branch_that_already_exists() {
     let repo = Repo::new();
     let layout = repo.layout();
     repo.git(&["branch", "shprd/r1/T1", "main"]);
-    if let Err(err) = archive::archive(&repo.path, "r1", "T1", "shprd/r1/T1") {
+    if let Err(err) = archive::archive(&repo.path, &layout, "shprd/r1/T1") {
         panic!("archive must succeed: {err}");
     }
     let err = match archive::restore(&repo.path, &layout, "r1", "T1") {
@@ -137,11 +139,17 @@ fn an_archive_ref_must_be_an_archive_ref() {
     }
     assert!(!repo.git(&["branch", "--list", "main"]).is_empty());
 
-    for (run, task) in [("", "T1"), ("r1", ""), ("../escape", "T1"), ("r1", "a b")] {
-        if let Err(err) = archive::archive(&repo.path, run, task, "main") {
+    let layout = repo.layout();
+    for branch in ["main", "shprd/", "shprd/../escape", "other/r1/T1"] {
+        if let Err(err) = archive::archive_ref_for_branch(&layout, branch) {
             assert!(matches!(err, ArchiveError::InvalidId { .. }), "{err:?}");
         } else {
-            panic!("{run:?}/{task:?} must be refused");
+            panic!("{branch:?} must be refused");
         }
     }
+    assert_eq!(
+        archive::archive_ref_for_branch(&layout, "shprd/r1/T1-retry").ok(),
+        Some("refs/shprd/archive/r1/T1-retry".to_string()),
+        "an extra attempt names its own ref"
+    );
 }
