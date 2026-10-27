@@ -8,6 +8,7 @@ pub mod integrate;
 pub mod janitor;
 pub mod keys;
 pub mod launch;
+pub mod review;
 pub mod roster;
 pub mod run;
 pub mod set;
