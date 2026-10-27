@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 
 pub mod claude;
+pub mod codex;
 
 /// What kind of provider trouble an error record describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

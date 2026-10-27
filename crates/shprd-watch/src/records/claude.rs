@@ -9,8 +9,8 @@
 use std::path::Path;
 
 use super::{
-    ErrorKind, ReadError, RecordError, Scan, classify, each_json_line, parse_rfc3339_ms, truncate,
-    utc_year, zoned_ms,
+    ReadError, RecordError, Scan, classify, each_json_line, parse_rfc3339_ms, truncate, utc_year,
+    zoned_ms,
 };
 
 /// Scan one Claude session record for errors and usage.
@@ -151,6 +151,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::records::ErrorKind;
 
     /// Write `lines` to `name` inside a fresh temp dir and return its path.
     fn fixture(name: &str, lines: &[&str]) -> (tempfile::TempDir, PathBuf) {
