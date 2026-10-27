@@ -14,7 +14,7 @@ use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_git::worktree::Worktree;
-use shprd_mux::{Mux, TabId, Workspace};
+use shprd_mux::{Mux, MuxError, TabId, Workspace};
 use shprd_roster::models::AgentRef;
 
 use crate::cli::HandoffArgs;
@@ -379,7 +379,18 @@ pub fn handoff(
         },
     );
     spawn::write_brief(&brief_path, &brief)?;
-    close_old_tab(mux, env, &task.id, attempt);
+    if let Err(err) = close_old_tab(mux, env, &task.id, attempt) {
+        // Two agents in one worktree would both write the same files, so the
+        // hand-off stops here: the checkpoint commit is already the record of
+        // the work the newcomer was meant to continue.
+        escalate(
+            env,
+            &task.id,
+            &format!("could not stop {from}; hand-off aborted"),
+            "stop the run",
+        );
+        return Err(err);
+    }
     // The worktree is not created here: the newcomer continues in the one the
     // attempt already has, on the branch the checkpoint sits on.
     let continuing = Worktree {
@@ -447,19 +458,29 @@ pub fn handoff(
 /// Closes the outgoing agent's tab, from the record the attempt left.
 ///
 /// A host that no longer knows the tab (a human closed it, say) is not an
-/// error: that is the state the hand-off wanted anyway.
-fn close_old_tab(mux: &dyn Mux, env: &SpawnEnv<'_>, task: &str, attempt: &Attempt) {
+/// error: that is the state the hand-off wanted anyway. Any other failure is
+/// one, because launching the newcomer while the outgoing agent still runs
+/// would put two agents in one worktree.
+fn close_old_tab(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+    task: &str,
+    attempt: &Attempt,
+) -> Result<(), CliError> {
     let record = spawn::tab_path(&env.briefs_dir, &env.run, task, attempt.n);
     let Ok(id) = std::fs::read_to_string(record) else {
-        return;
+        return Ok(());
     };
     let id = id.trim().to_string();
     if id.is_empty() {
-        return;
+        return Ok(());
     }
     let tab = TabId::new(id);
-    if let Err(err) = mux.close_tab(&tab) {
-        eprintln!("warning: could not close tab {tab}: {err}");
+    match mux.close_tab(&tab) {
+        Ok(()) | Err(MuxError::NotFound { .. }) => Ok(()),
+        Err(err) => Err(CliError::other(anyhow!(
+            "the outgoing agent's tab {tab} is still open: {err}"
+        ))),
     }
 }
 
@@ -523,6 +544,7 @@ mod tests {
     use shprd_roster::spec::HarnessSpec;
     use tempfile::TempDir;
 
+    use crate::cmd::spawn::fault::{Fault, FlakyMux};
     use crate::cmd::spawn::{self, Program, SpawnRequest};
     use crate::ctx::Ctx;
 
@@ -902,6 +924,69 @@ project_dirs = []
                 .and_then(|task| task.latest_attempt())
                 .map(|attempt| attempt.agent.clone()),
             Some("sh".to_string())
+        );
+    }
+
+    /// The number of tabs the hand-off opened so far.
+    fn tabs_created(mux: &FakeMux) -> usize {
+        mux.calls()
+            .iter()
+            .filter(|call| matches!(call, Call::CreateTab(..)))
+            .count()
+    }
+
+    /// A helper around `handoff` that fails the test rather than returning.
+    fn run(
+        mux: &dyn Mux,
+        env: &SpawnEnv<'_>,
+        req: &HandoffRequest,
+    ) -> Result<HandoffReport, CliError> {
+        match handoff(mux, env, req) {
+            Ok(report) => Ok(report),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[test]
+    fn a_hand_off_that_cannot_stop_the_old_agent_starts_no_new_one() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        let worktree = seed(&mux, &env);
+        // Work the checkpoint has something to commit.
+        std::fs::write(worktree.join("half.rs"), "fn half() {}\n").unwrap_or_default();
+        let before = git_out(&worktree, &["rev-parse", "HEAD"]);
+        let flaky = FlakyMux::new(mux, Fault::CloseTab);
+        let opened = tabs_created(flaky.inner());
+
+        let err = match run(&flaky, &env, &request(None)) {
+            Ok(report) => panic!("handed off to {} anyway", report.to),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            tabs_created(flaky.inner()),
+            opened,
+            "a second agent was launched into the worktree"
+        );
+        let (state, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::HandedOff { .. })),
+            "the aborted hand-off was recorded as done"
+        );
+        let escalation = state
+            .escalations
+            .last()
+            .unwrap_or_else(|| panic!("nothing was escalated"));
+        assert_eq!(escalation.body, "could not stop sh; hand-off aborted");
+        assert_ne!(
+            git_out(&worktree, &["rev-parse", "HEAD"]),
+            before,
+            "the checkpoint commit should stay"
         );
     }
 }
