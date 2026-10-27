@@ -4,9 +4,13 @@
 //! [`Inputs`] with `now_ms` already filled in, which keeps the decision logic
 //! deterministic and testable with plain numbers.
 
-use crate::records::RecordError;
+use crate::records::{ErrorKind, RecordError};
 use crate::screen::ScreenSignal;
 use crate::serve::Status;
+use shprd_mux::AgentState;
+
+/// Backoff used when a [`Policy`] supplies an empty backoff list.
+const FALLBACK_BACKOFF_MS: u64 = 900_000;
 
 /// Where a dry verdict came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,4 +137,148 @@ impl Watch {
             dry_count: 0,
         }
     }
+
+    /// The next dry backoff, consuming one entry of the schedule.
+    fn next_dry_backoff(&mut self, p: &Policy) -> u64 {
+        let last = p.dry_backoff_ms.len().saturating_sub(1);
+        let step = p
+            .dry_backoff_ms
+            .get(self.dry_count.min(last))
+            .copied()
+            .unwrap_or(FALLBACK_BACKOFF_MS);
+        self.dry_count = self.dry_count.saturating_add(1);
+        step
+    }
+
+    /// Move into [`Health::Dry`] and report the actions that implies.
+    fn go_dry(
+        &mut self,
+        now_ms: u64,
+        source: Source,
+        reason: String,
+        reset_at_ms: Option<u64>,
+        p: &Policy,
+    ) -> Vec<Action> {
+        let backoff = self.next_dry_backoff(p);
+        let retry_at_ms = reset_at_ms.unwrap_or_else(|| now_ms.saturating_add(backoff));
+        self.transient_attempts = 0;
+        self.health = Health::Dry {
+            since_ms: now_ms,
+            reason: reason.clone(),
+            retry_at_ms,
+            source,
+            canary_sent: false,
+        };
+        vec![
+            Action::MarkDry {
+                reason,
+                reset_at_ms,
+            },
+            Action::HandOff,
+        ]
+    }
+
+    /// Fold one polling instant into the health verdict.
+    ///
+    /// Rules run in priority order: exit, unretryable provider error, serve
+    /// retries, a dry screen pattern, then silence. While already dry only the
+    /// canary is considered.
+    pub fn step(&mut self, i: &Inputs, p: &Policy) -> Vec<Action> {
+        if let Health::Dry {
+            retry_at_ms,
+            canary_sent,
+            ..
+        } = &mut self.health
+        {
+            if *canary_sent || i.now_ms < *retry_at_ms {
+                return Vec::new();
+            }
+            *canary_sent = true;
+            return vec![Action::Canary];
+        }
+
+        if i.process_exited {
+            let reason = String::from("agent process exited");
+            return self.go_dry(i.now_ms, Source::Exit, reason, None, p);
+        }
+
+        if let Some(err) = &i.record_error
+            && is_unretryable(err.kind)
+        {
+            let reason = err.message.clone();
+            return self.go_dry(i.now_ms, Source::Record, reason, err.resets_at_ms, p);
+        }
+
+        if let Some(Status::Retry { message, .. }) = &i.serve {
+            self.transient_attempts = self.transient_attempts.saturating_add(1);
+            if self.transient_attempts > p.transient_backoff_ms.len() {
+                let reason = message.clone();
+                return self.go_dry(i.now_ms, Source::Serve, reason, None, p);
+            }
+        }
+
+        let Some(screen) = &i.screen else {
+            return Vec::new();
+        };
+
+        if let Some(pattern) = &screen.dry_pattern {
+            let reason = pattern.clone();
+            return self.go_dry(i.now_ms, Source::Screen, reason, None, p);
+        }
+
+        if matches!(screen.agent_state, AgentState::Idle | AgentState::Done) {
+            self.health = Health::Working;
+            return Vec::new();
+        }
+
+        let suspect_since = match &self.health {
+            Health::Suspect { since_ms } => Some(*since_ms),
+            _ => None,
+        };
+
+        if let Some(since_ms) = suspect_since {
+            if screen.liveness.changed {
+                self.health = Health::Working;
+            } else if i.now_ms.saturating_sub(since_ms) >= p.dry_after_suspect_ms {
+                let reason = String::from("no output for too long");
+                return self.go_dry(i.now_ms, Source::Silence, reason, None, p);
+            }
+        } else if screen.liveness.unchanged_for_ms >= p.suspect_after_ms {
+            self.health = Health::Suspect { since_ms: i.now_ms };
+        }
+
+        Vec::new()
+    }
+
+    /// Record the outcome of a canary probe.
+    ///
+    /// Success clears the dry mark and every counter; failure keeps the agent
+    /// dry and schedules a later probe with the next backoff.
+    pub fn canary_result(&mut self, ok: bool, now_ms: u64, p: &Policy) -> Vec<Action> {
+        if ok {
+            self.health = Health::Available;
+            self.transient_attempts = 0;
+            self.dry_count = 0;
+            return vec![Action::MarkAvailable];
+        }
+        let backoff = self.next_dry_backoff(p);
+        if let Health::Dry {
+            retry_at_ms,
+            canary_sent,
+            ..
+        } = &mut self.health
+        {
+            *retry_at_ms = now_ms.saturating_add(backoff);
+            *canary_sent = false;
+        }
+        Vec::new()
+    }
+}
+
+/// Whether an error is one the agent cannot retry past by itself.
+fn is_unretryable(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::RateLimit | ErrorKind::Quota | ErrorKind::Auth
+    )
 }
