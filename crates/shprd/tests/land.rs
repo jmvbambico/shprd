@@ -1,0 +1,679 @@
+//! End-to-end tests for `shprd land`: the run's pull request, and its merge
+//! policy. They drive the real binary against a throwaway repository whose
+//! `origin` is a local bare repository, with a scripted forge standing in for
+//! `gh` through `SHPRD_FAKE_FORGE`.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use shprd_core::event::{Event, EventKind};
+use tempfile::TempDir;
+
+/// The binary under test, built by cargo for this integration test.
+const BIN: &str = env!("CARGO_BIN_EXE_shprd");
+
+/// The environment variable that points `land` at a scripted forge.
+const FAKE_FORGE: &str = "SHPRD_FAKE_FORGE";
+
+/// The branch the run pushes.
+const INT_BRANCH: &str = "shprd/r1/int";
+
+/// A repository, a bare `origin`, a home, and the temp directory holding them.
+struct Fixture {
+    /// Keeps the temp directory alive.
+    _temp: TempDir,
+    /// The repository the run works on.
+    root: PathBuf,
+    /// The home whose `.shprd` holds worktrees and locks.
+    home: PathBuf,
+    /// The bare repository that stands in for the remote.
+    origin: PathBuf,
+}
+
+/// Creates a directory, panicking on failure.
+fn mkdir(path: &Path) {
+    if let Err(err) = std::fs::create_dir_all(path) {
+        panic!("mkdir {}: {err}", path.display());
+    }
+}
+
+/// Writes a file, panicking on failure.
+fn write(path: &Path, body: &str) {
+    if let Err(err) = std::fs::write(path, body) {
+        panic!("write {}: {err}", path.display());
+    }
+}
+
+impl Fixture {
+    /// A repository on `main` with a seed commit, and an empty bare origin.
+    fn new() -> Fixture {
+        let temp = match TempDir::new() {
+            Ok(temp) => temp,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let root = temp.path().join("repo");
+        let home = temp.path().join("home");
+        let origin = temp.path().join("origin.git");
+        mkdir(&root);
+        mkdir(&home);
+        let fixture = Fixture {
+            _temp: temp,
+            root,
+            home,
+            origin,
+        };
+        fixture.git(&[
+            "init",
+            "--bare",
+            fixture.origin.to_str().unwrap_or("origin.git"),
+        ]);
+        fixture.git(&["init", "-b", "main"]);
+        fixture.git(&["config", "user.name", "shprd tests"]);
+        fixture.git(&["config", "user.email", "tests@example.invalid"]);
+        fixture.git(&["config", "commit.gpgsign", "false"]);
+        fixture.git(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.origin.to_str().unwrap_or("origin.git"),
+        ]);
+        write(&fixture.root.join("a.txt"), "one\n");
+        fixture.git(&["add", "--", "a.txt"]);
+        fixture.git(&["commit", "-m", "seed"]);
+        fixture.write_config("ask", None);
+        fixture
+    }
+
+    /// Runs git in the repository, asserting success, and returns its stdout.
+    fn git(&self, args: &[&str]) -> String {
+        let output = match Command::new("git")
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => panic!("git {args:?}: {err}"),
+        };
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Writes `.shprd/config.toml` with the givens.
+    fn write_config(&self, merge: &str, integration: Option<&str>) {
+        let dir = self.root.join(".shprd");
+        mkdir(&dir);
+        let gate = integration.unwrap_or("true");
+        let body = format!(
+            "[gates]\nworker = [\"true\"]\nintegration = [\"{gate}\"]\n\n[land]\nmerge = \"{merge}\"\n"
+        );
+        write(&dir.join("config.toml"), &body);
+    }
+
+    /// The scripted forge's file.
+    fn forge_script(&self) -> PathBuf {
+        self.home.join("forge.json")
+    }
+
+    /// Scripts the forge: `open`/`status` JSON, written before each call.
+    fn script_forge(&self, script: &str) {
+        write(&self.forge_script(), script);
+    }
+
+    /// Everything the scripted forge was asked by the most recent run, one call
+    /// per line: each process starts from its script and rewrites the journal.
+    fn forge_calls(&self) -> Vec<String> {
+        let path = PathBuf::from(format!("{}.calls", self.forge_script().display()));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => text.lines().map(str::to_string).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// One command against this fixture, with the scripted forge in place.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut all: Vec<String> = vec![
+            "--repo".to_string(),
+            self.root.display().to_string(),
+            "--home".to_string(),
+            self.home.display().to_string(),
+            "--no-dagr".to_string(),
+        ];
+        all.extend(args.iter().map(|arg| (*arg).to_string()));
+        let mut command = Command::new(BIN);
+        command
+            .args(&all)
+            .env(FAKE_FORGE, self.forge_script().display().to_string());
+        command
+    }
+
+    /// Runs the binary against this fixture.
+    fn run(&self, args: &[&str]) -> Output {
+        if !self.forge_script().exists() {
+            self.script_forge("{}");
+        }
+        match self.command(args).output() {
+            Ok(output) => output,
+            Err(err) => panic!("running {BIN}: {err}"),
+        }
+    }
+
+    /// Runs the binary and asserts it succeeded, returning stdout.
+    fn ok(&self, args: &[&str]) -> String {
+        let output = self.run(args);
+        assert!(
+            output.status.success(),
+            "{args:?} failed ({:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// Runs the binary and asserts it was refused with exit 2.
+    fn refused(&self, args: &[&str]) -> String {
+        let output = self.run(args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?} should have been refused, stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        String::from_utf8_lossy(&output.stderr).to_string()
+    }
+
+    /// Starts run `r1`, cut from `main`, integrating on `main`.
+    fn start(&self) {
+        self.ok(&[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "main",
+        ]);
+    }
+
+    /// Adds task `id` and leaves it working: spawned, never reported.
+    fn working_task(&self, id: &str) {
+        self.ok(&[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            id,
+            "--title",
+            "a task",
+            "--scope",
+            "a.txt",
+            "--acceptance",
+            "it works",
+        ]);
+        self.ok(&[
+            "agent",
+            "spawn",
+            "--record-only",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--agent",
+            "w1",
+            "--worktree",
+            "/tmp/wt",
+            "--branch",
+            "feature/t1",
+        ]);
+    }
+
+    /// Drives task `id` from added to passed, with a passing `review` gate.
+    fn passed_task(&self, id: &str) {
+        self.ok(&[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            id,
+            "--title",
+            "a task",
+            "--scope",
+            "a.txt",
+            "--acceptance",
+            "it works",
+        ]);
+        self.ok(&[
+            "agent",
+            "spawn",
+            "--record-only",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--agent",
+            "w1",
+            "--worktree",
+            "/tmp/wt",
+            "--branch",
+            "feature/t1",
+        ]);
+        self.ok(&[
+            "agent",
+            "report",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "done",
+            "--changed",
+            "a.txt",
+        ]);
+        self.ok(&[
+            "agent",
+            "gate",
+            "pass",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--gate",
+            "lint",
+        ]);
+        let findings = self.home.join("findings.json");
+        write(&findings, "[]");
+        self.ok(&[
+            "agent",
+            "review-verdict",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--findings",
+            findings.to_str().unwrap_or("findings.json"),
+        ]);
+    }
+
+    /// Commits one rewrite of `file` on `branch`, cut from `main`.
+    fn commit_on(&self, branch: &str, file: &str, body: &str, message: &str) {
+        self.git(&["checkout", "-b", branch, "main"]);
+        write(&self.root.join(file), body);
+        self.git(&["add", "--", file]);
+        self.git(&["commit", "-m", message]);
+        self.git(&["checkout", "main"]);
+    }
+
+    /// Passes `id`, lands its branch, then runs the full gate.
+    fn land_a_task(&self, id: &str) {
+        self.passed_task(id);
+        self.commit_on("feature/t1", "a.txt", "feature\n", "the task's work");
+        self.ok(&["agent", "integrate", "--task", id]);
+        self.ok(&["gate"]);
+    }
+
+    /// The integration worktree the run owns.
+    fn integration(&self) -> PathBuf {
+        shprd_git::worktree::Layout::default_for_home(&self.home).path("repo", "r1", "_int")
+    }
+
+    /// The integration worktree's head.
+    fn integration_head(&self) -> String {
+        self.git_in(&self.integration(), &["rev-parse", "HEAD"])
+    }
+
+    /// Runs git in `dir`, asserting success, and returns its stdout.
+    fn git_in(&self, dir: &Path, args: &[&str]) -> String {
+        let output = match Command::new("git").args(args).current_dir(dir).output() {
+            Ok(output) => output,
+            Err(err) => panic!("git {args:?} in {}: {err}", dir.display()),
+        };
+        assert!(
+            output.status.success(),
+            "git {args:?} in {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// The bare origin's head for `branch`, or `None` when it is absent.
+    fn origin_head(&self, branch: &str) -> Option<String> {
+        let output = match Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+            .current_dir(&self.origin)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => panic!("git rev-parse in the origin: {err}"),
+        };
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Every event in the log, oldest first.
+    fn events(&self) -> Vec<Event> {
+        let path = self.root.join(".shprd").join("events.jsonl");
+        let body = match std::fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(err) => panic!("read {}: {err}", path.display()),
+        };
+        let mut events = Vec::new();
+        for line in body.lines() {
+            match serde_json::from_str::<Event>(line) {
+                Ok(event) => events.push(event),
+                Err(err) => panic!("bad event line {line:?}: {err}"),
+            }
+        }
+        events
+    }
+
+    /// The pull request the log recorded opening, if any.
+    fn opened_pr(&self) -> Option<(u64, String)> {
+        for event in self.events().into_iter().rev() {
+            if let EventKind::PrOpened { number, url, .. } = event.kind {
+                return Some((number, url));
+            }
+        }
+        None
+    }
+
+    /// True when the log recorded a merge of `number`.
+    fn recorded_merge(&self, number: u64) -> bool {
+        self.events().iter().any(
+            |event| matches!(&event.kind, EventKind::PrMerged { number: n, .. } if *n == number),
+        )
+    }
+}
+
+/// The calls the scripted forge recorded that start with `prefix`.
+fn calls_with(calls: &[String], prefix: &str) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|call| call.starts_with(prefix))
+        .cloned()
+        .collect()
+}
+
+/// The body file of the last `create` or `edit_body` the scripted forge saw.
+fn body_of(call: &str) -> PathBuf {
+    let path = match call.rsplit_once(' ') {
+        Some((_, path)) => path,
+        None => panic!("a forge call with no body file: {call}"),
+    };
+    PathBuf::from(path)
+}
+
+/// A forge script whose pull request #1 has `status`.
+fn status_script(head: &str, approved: bool, checks: Option<bool>) -> String {
+    let script = serde_json::json!({
+        "status": [{
+            "number": 1,
+            "url": "https://example.invalid/pull/1",
+            "head": INT_BRANCH,
+            "approved": approved,
+            "checks_passed": checks,
+            "merged": false,
+            "head_sha": head,
+        }],
+    });
+    script.to_string()
+}
+
+#[test]
+fn every_precondition_refuses_and_writes_no_pull_request() {
+    let fixture = Fixture::new();
+    let message = fixture.refused(&["land"]);
+    assert!(message.contains("no run yet"), "{message}");
+
+    fixture.start();
+    let message = fixture.refused(&["land"]);
+    assert!(message.contains("no task is integrated"), "{message}");
+
+    let busy = Fixture::new();
+    busy.start();
+    busy.working_task("T1");
+    let message = busy.refused(&["land"]);
+    assert!(message.contains("is Working"), "{message}");
+
+    let ungated = Fixture::new();
+    ungated.start();
+    ungated.passed_task("T1");
+    ungated.commit_on("feature/t1", "a.txt", "feature\n", "the task's work");
+    ungated.ok(&["agent", "integrate", "--task", "T1"]);
+    let message = ungated.refused(&["land"]);
+    assert!(message.contains("no full gate has run"), "{message}");
+
+    assert!(
+        fixture.forge_calls().is_empty(),
+        "a refused land asks the forge nothing"
+    );
+}
+
+#[test]
+fn a_stale_gate_is_refused_after_the_head_moves() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    // A commit after the gate moves the integration head past the one it ran on.
+    let worktree = fixture.integration();
+    fixture.git_in(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "after the gate"],
+    );
+    fixture.script_forge("{}");
+    let message = fixture.refused(&["land"]);
+    assert!(message.contains("run `shprd gate` again"), "{message}");
+    assert!(fixture.opened_pr().is_none(), "nothing was opened");
+}
+
+#[test]
+fn a_full_run_pushes_the_branch_and_opens_one_pull_request() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    fixture.script_forge("{}");
+    let head = fixture.integration_head();
+
+    let printed = fixture.ok(&["land"]);
+    assert!(
+        printed.contains("https://example.invalid/pull/1"),
+        "the url is printed: {printed}"
+    );
+    assert_eq!(
+        fixture.origin_head(INT_BRANCH).as_deref(),
+        Some(head.as_str()),
+        "the branch reached the bare origin"
+    );
+    let calls = fixture.forge_calls();
+    let created = calls_with(&calls, "create ");
+    assert_eq!(created.len(), 1, "{calls:?}");
+    assert!(
+        created[0].starts_with("create main shprd/r1/int r1: a task "),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls_with(&calls, "edit_body ").len(),
+        0,
+        "nothing to edit yet: {calls:?}"
+    );
+    assert_eq!(
+        fixture.opened_pr(),
+        Some((1, "https://example.invalid/pull/1".to_string()))
+    );
+
+    // A second land refreshes the same pull request instead of opening another,
+    // which is what the forge reports once the first one exists.
+    fixture.script_forge(
+        r#"{"open":[{"number":1,"url":"https://example.invalid/pull/1","head":"shprd/r1/int"}]}"#,
+    );
+    fixture.ok(&["land"]);
+    let calls = fixture.forge_calls();
+    assert_eq!(
+        calls_with(&calls, "create ").len(),
+        0,
+        "the second land must not open a second pull request: {calls:?}"
+    );
+    let edits = calls_with(&calls, "edit_body ");
+    assert_eq!(edits.len(), 1, "{calls:?}");
+    assert!(edits[0].starts_with("edit_body 1 "), "{calls:?}");
+    let events = fixture.events();
+    let opens = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::PrOpened { .. }))
+        .count();
+    assert_eq!(opens, 2, "each land records what the forge holds");
+    let pushed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Resource {
+                    action: shprd_core::event::ResourceAction::Created,
+                    kind: shprd_core::event::ResourceKind::RemoteBranch,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        pushed, 1,
+        "the remote branch is recorded once, not per land"
+    );
+}
+
+#[test]
+fn the_body_records_the_review_marker_and_the_attribution() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    fixture.script_forge("{}");
+    fixture.ok(&["land"]);
+    let calls = fixture.forge_calls();
+    let opened = match calls_with(&calls, "create ").first() {
+        Some(call) => call.clone(),
+        None => panic!("no create call: {calls:?}"),
+    };
+    let body = match std::fs::read_to_string(body_of(&opened)) {
+        Ok(body) => body,
+        Err(err) => panic!("read the body: {err}"),
+    };
+    assert!(body.contains("## Tasks"), "{body}");
+    assert!(body.contains("cross-vendor-review: passed"), "{body}");
+    assert!(body.contains("https://claude.com/claude-code"), "{body}");
+
+    let degraded = Fixture::new();
+    degraded.start();
+    degraded.land_a_task("T1");
+    degraded.ok(&[
+        "agent",
+        "override",
+        "--task",
+        "T1",
+        "--rule",
+        "cross-vendor-review",
+        "--reason",
+        "degraded: the reviewer shares a vendor with the author",
+    ]);
+    degraded.script_forge("{}");
+    degraded.ok(&["land"]);
+    let calls = degraded.forge_calls();
+    let opened = match calls_with(&calls, "create ").first() {
+        Some(call) => call.clone(),
+        None => panic!("no create call: {calls:?}"),
+    };
+    let body = match std::fs::read_to_string(body_of(&opened)) {
+        Ok(body) => body,
+        Err(err) => panic!("read the body: {err}"),
+    };
+    assert!(body.contains("degraded-review"), "{body}");
+    assert!(!body.contains("cross-vendor-review: passed"), "{body}");
+}
+
+/// A fixture with one landed task and its pull request open.
+fn landed() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    fixture.script_forge("{}");
+    fixture.ok(&["land"]);
+    fixture
+}
+
+#[test]
+fn merge_without_an_opened_pull_request_is_refused() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    fixture.script_forge("{}");
+    let message = fixture.refused(&["land", "--merge"]);
+    assert!(message.contains("no pull request yet"), "{message}");
+}
+
+#[test]
+fn merge_waits_for_approval_and_merges_once_a_human_approves() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+
+    fixture.script_forge(&status_script(&head, false, Some(true)));
+    let message = fixture.refused(&["land", "--merge"]);
+    assert!(
+        message.contains("waiting for your approval on https://example.invalid/pull/1"),
+        "{message}"
+    );
+    assert!(calls_with(&fixture.forge_calls(), "merge ").is_empty());
+
+    fixture.script_forge(&status_script(&head, true, Some(true)));
+    let printed = fixture.ok(&["land", "--merge"]);
+    assert!(
+        printed.contains("merged https://example.invalid/pull/1"),
+        "{printed}"
+    );
+    assert_eq!(
+        calls_with(&fixture.forge_calls(), "merge "),
+        vec!["merge 1".to_string()]
+    );
+    assert!(fixture.recorded_merge(1), "the merge is in the log");
+}
+
+#[test]
+fn checks_that_have_not_passed_are_refused() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+    for checks in [None, Some(false)] {
+        fixture.script_forge(&status_script(&head, true, checks));
+        let message = fixture.refused(&["land", "--merge"]);
+        assert!(message.contains("checks have not passed"), "{message}");
+    }
+    assert!(calls_with(&fixture.forge_calls(), "merge ").is_empty());
+}
+
+#[test]
+fn a_stale_head_is_refused() {
+    let fixture = landed();
+    fixture.script_forge(&status_script("deadbeef", true, Some(true)));
+    let message = fixture.refused(&["land", "--merge"]);
+    assert!(message.contains("is at head deadbeef"), "{message}");
+    assert!(!fixture.recorded_merge(1));
+}
+
+#[test]
+fn allow_never_merges_into_a_protected_base() {
+    let fixture = landed();
+    fixture.write_config("allow", None);
+    let head = fixture.integration_head();
+    fixture.script_forge(&status_script(&head, false, Some(true)));
+    let message = fixture.refused(&["land", "--merge"]);
+    assert!(
+        message.contains("waiting for your approval on https://example.invalid/pull/1"),
+        "main is protected, so allow still waits: {message}"
+    );
+    assert!(!fixture.recorded_merge(1));
+}
