@@ -6,8 +6,8 @@ use anyhow::{Context, anyhow};
 use shprd_core::event::{EventKind, Finding};
 
 use crate::cli::{
-    AgentCommand, EscalateArgs, GateArgs, GateOutcome, IntegrateArgs, OverrideArgs, ReportArgs,
-    SpawnArgs, TaskAddArgs, TaskCommand,
+    AgentCommand, EscalateArgs, GateArgs, GateOutcome, IntegrateArgs, OverrideArgs, PromptArgs,
+    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand,
 };
 use crate::cmd::{emit, spawn};
 use crate::ctx::{CliError, Ctx};
@@ -26,6 +26,7 @@ pub fn dispatch(
             TaskCommand::Add(args) => task_add(ctx, &args),
         },
         AgentCommand::Spawn(args) => spawn_cmd(ctx, &args, home),
+        AgentCommand::Prompt(args) => prompt_cmd(ctx, &args),
         AgentCommand::Report(args) => report(ctx, &args),
         AgentCommand::Gate(args) => gate(ctx, &args),
         AgentCommand::Escalate(args) => escalate(ctx, &args),
@@ -133,6 +134,19 @@ fn sync_dagr(ctx: &Ctx) {
     if let Err(err) = crate::cmd::dagr::sync(ctx) {
         eprintln!("warning: dagr sync failed: {err}");
     }
+}
+
+/// Types one turn of input into the tab a spawned agent is working in.
+fn prompt_cmd(ctx: &Ctx, args: &PromptArgs) -> Result<(), CliError> {
+    let mux = spawn::real_mux();
+    spawn::prompt(&mux, &ctx.root, &args.task, &args.text)?;
+    if ctx.json {
+        let value = serde_json::json!({ "task": args.task, "prompted": true });
+        println!("{value}");
+    } else {
+        println!("ok prompted {} in its tab", args.task);
+    }
+    Ok(())
 }
 
 /// Records an agent's report for an attempt.

@@ -213,6 +213,8 @@ pub enum AgentCommand {
     },
     /// Spawn an agent for a task attempt: worktree, tab and launched CLI.
     Spawn(SpawnArgs),
+    /// Send one turn of input to the tab a spawned agent is working in.
+    Prompt(PromptArgs),
     /// Record an agent's report for a task attempt.
     Report(ReportArgs),
     /// Record a gate result for a task attempt.
@@ -292,6 +294,17 @@ pub struct SpawnArgs {
     /// Branch the agent commits on, for `--record-only` only.
     #[arg(long, value_name = "BRANCH")]
     pub branch: Option<String>,
+}
+
+/// Arguments for `agent prompt`.
+#[derive(Debug, Args)]
+pub struct PromptArgs {
+    /// The task whose agent tab is prompted.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// The text to submit as one turn of input; quote it.
+    #[arg(value_name = "TEXT")]
+    pub text: String,
 }
 
 /// Arguments for `agent report`.

@@ -773,3 +773,43 @@ fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
     pairs.extend(diff.remove.into_iter().map(|name| (name, None)));
     pairs
 }
+
+/// Sends one turn of input to the tab a task's agent runs in.
+///
+/// The tab is found by title inside the repository's workspace, so a prompt can
+/// only ever reach a tab this repository's shprd opened for that task.
+pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
+    let repo_name = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))?;
+    let name = naming::workspace_name(&repo_name);
+    let workspace = mux
+        .find_workspace(&name)
+        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
+        .ok_or_else(|| {
+            CliError::Invalid(anyhow!("no workspace {name:?} yet: run `shprd up` first"))
+        })?;
+    let tabs = mux
+        .list_tabs(&workspace.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
+    let tab = find_task_tab(&tabs, task).ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no tab for task {task:?} in {name:?}: spawn it with `shprd agent spawn --task {task}`"
+        ))
+    })?;
+    mux.prompt(&tab.root_pane, text)
+        .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// The tab a task's agent runs in.
+///
+/// A tab title is `<symbol> <cli>·<label>`, so the segment between the first and
+/// the second `·` is the task label; a disambiguated title keeps that segment
+/// and appends the task's short tag after another `·`.
+pub fn find_task_tab(tabs: &[shprd_mux::Tab], task: &str) -> Option<shprd_mux::Tab> {
+    let label = naming::truncate_label(task);
+    tabs.iter()
+        .find(|tab| tab.title.split('·').nth(1) == Some(label.as_str()))
+        .cloned()
+}
