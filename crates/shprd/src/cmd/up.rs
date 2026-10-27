@@ -134,6 +134,17 @@ pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
 /// A task that is still working refuses the event, and the refusal is the whole
 /// answer: nothing else is touched, and no tab is closed.
 pub fn down(ctx: &Ctx) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    if state.run.is_none() {
+        return Err(CliError::Invalid(anyhow!(
+            "no run in flight: run `shprd up` first"
+        )));
+    }
+    if state.finished {
+        return Err(CliError::Invalid(anyhow!(
+            "the run already finished; run `shprd up` to start the next one"
+        )));
+    }
     let event = ctx.commit(EventKind::RunFinished {})?;
     crate::cmd::emit(ctx, &event)
 }
