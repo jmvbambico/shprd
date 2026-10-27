@@ -23,6 +23,13 @@ use crate::worktree::{self, Layout};
 /// Milliseconds in a day, for the archive-expiry arithmetic.
 pub const MILLIS_PER_DAY: u64 = 86_400_000;
 
+/// The name the janitor groups the run's integration resources under.
+///
+/// They are not a task's: shprd records them with no task at all. This is the
+/// layout segment that names the integration worktree's directory, and no real
+/// task id starts with `_`, so the two cannot collide.
+const INTEGRATION_TASK: &str = "_int";
+
 /// One step the janitor would take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -106,26 +113,26 @@ impl Action {
                     action: ResourceAction::Created,
                     kind: ResourceKind::ArchiveRef,
                     name: archive::archive_ref_for_branch(layout, branch)?,
-                    task: Some(task.clone()),
+                    task: recorded_task(task),
                 },
                 EventKind::Resource {
                     action: ResourceAction::Archived,
                     kind: ResourceKind::Branch,
                     name: branch.clone(),
-                    task: Some(task.clone()),
+                    task: recorded_task(task),
                 },
             ],
             Self::RemoveWorktree { task, path } => vec![EventKind::Resource {
                 action: ResourceAction::Removed,
                 kind: ResourceKind::Worktree,
                 name: path.display().to_string(),
-                task: Some(task.clone()),
+                task: recorded_task(task),
             }],
             Self::DeleteBranch { task, branch } => vec![EventKind::Resource {
                 action: ResourceAction::Removed,
                 kind: ResourceKind::Branch,
                 name: branch.clone(),
-                task: Some(task.clone()),
+                task: recorded_task(task),
             }],
             Self::ExpireArchive { task, ref_name } => vec![EventKind::Resource {
                 action: ResourceAction::Removed,
@@ -179,6 +186,11 @@ pub struct Outcome {
 /// and nothing may be deleted before its commits are held by an archive ref.
 /// A task whose resources are being cleaned up never has its archive ref
 /// expired in the same plan, so cleanup cannot delete its own safety net.
+///
+/// Two things happen at the run's level rather than a task's. A merged pull
+/// request releases the integration worktree and its branch, cleaned up in the
+/// same order; and it releases the remote branches it pushed, deleted from
+/// `origin` once the forge already holds their commits.
 pub fn plan(
     state: &RunState,
     events: &[Event],
@@ -255,6 +267,32 @@ pub fn plan(
             });
         }
     }
+    // A merged pull request releases the run's own integration branch too: its
+    // commits are on the base branch, so the worktree that carried them and
+    // then the branch itself are spent. Archiving still comes first, as it does
+    // per task, so the branch stays recoverable.
+    if state.pr.as_ref().is_some_and(|pr| pr.merged)
+        && let Some(run) = &state.run
+        && layout.owns_branch(&run.integration_branch)
+    {
+        let branch_live = is_live(state, &ResourceKind::Branch, &run.integration_branch);
+        let task = || INTEGRATION_TASK.to_string();
+        if branch_live {
+            actions.push(Action::ArchiveRef {
+                task: task(),
+                branch: run.integration_branch.clone(),
+            });
+        }
+        if let Some(path) = integration_worktree(state, layout, &run.run_id) {
+            actions.push(Action::RemoveWorktree { task: task(), path });
+        }
+        if branch_live {
+            actions.push(Action::DeleteBranch {
+                task: task(),
+                branch: run.integration_branch.clone(),
+            });
+        }
+    }
     // A merged pull request releases what it pushed. The ledger must hold the
     // remote branch `Live` and the merge must name that exact branch as its
     // head: a stale or foreign name is never deleted from `origin`.
@@ -262,7 +300,7 @@ pub fn plan(
         && pr.merged
     {
         for ((kind, name), record) in &state.resources {
-            if kind != &ResourceKind::RemoteBranch
+            if *kind != ResourceKind::RemoteBranch
                 || record.status != ResourceStatus::Live
                 || !layout.owns_branch(name)
                 || is_protected_branch(name)
@@ -356,6 +394,50 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
         });
     }
     outcomes
+}
+
+/// The task a resource event records, or `None` for a run-level resource.
+///
+/// The integration worktree and its branch belong to the run, so their removal
+/// is recorded without a task, exactly as their creation was.
+fn recorded_task(task: &TaskId) -> Option<TaskId> {
+    if task == INTEGRATION_TASK {
+        None
+    } else {
+        Some(task.clone())
+    }
+}
+
+/// True when the ledger holds `name` of `kind` as a `Live` resource.
+fn is_live(state: &RunState, kind: &ResourceKind, name: &str) -> bool {
+    state
+        .resources
+        .get(&(*kind, name.to_string()))
+        .is_some_and(|record| record.status == ResourceStatus::Live)
+}
+
+/// The run's own integration worktree, when the ledger holds it `Live`.
+///
+/// It must sit at `<root>/<repo>/<run>/_int` inside the worktree root: anything
+/// else is a human's worktree that happens to end in the same segment.
+fn integration_worktree(state: &RunState, layout: &Layout, run_id: &str) -> Option<PathBuf> {
+    let name = INTEGRATION_TASK;
+    state
+        .resources
+        .iter()
+        .filter(|((kind, _), record)| {
+            *kind == ResourceKind::Worktree && record.status == ResourceStatus::Live
+        })
+        .map(|((_, path), _)| PathBuf::from(path))
+        .find(|path| {
+            path.file_name().and_then(|part| part.to_str()) == Some(name)
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|part| part.to_str())
+                    == Some(run_id)
+                && worktree::inside_root(&layout.root, path)
+        })
 }
 
 /// True for the branches a run is cut from, which shprd deletes nowhere.
