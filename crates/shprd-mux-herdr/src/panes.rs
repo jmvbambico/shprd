@@ -186,6 +186,9 @@ pub(crate) fn map_status(word: &str) -> AgentState {
 
 #[cfg(test)]
 mod tests {
+    // Tests may panic: a failed assertion is the point.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use serde_json::json;
 

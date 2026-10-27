@@ -12,29 +12,36 @@
 //! argv and this adapter quotes it element by element before handing it to the
 //! pane, so a branch name or a title is never re-parsed as shell syntax.
 //!
+//! Events come from [`shprd_mux::Mux::next_events`], which polls
+//! `herdr api snapshot` and diffs it: herdr 0.9.5 exposes `events.subscribe` and
+//! `events.wait` on the socket but nothing on the CLI, so events produced while
+//! nobody was polling are lost and [`shprd_mux::Capabilities::resumable_events`]
+//! is `false`.
 
+mod adapter;
 mod cli;
 pub mod keys;
-// Wired into the trait impl by the next commit.
-#[allow(dead_code)]
+mod events;
 mod panes;
 mod shell;
-#[allow(dead_code)]
 mod tabs;
-#[allow(dead_code)]
 mod workspaces;
 
 use std::path::{Path, PathBuf};
 
 /// Drives one herdr server through the `herdr` command line.
 ///
-/// It holds no connection, so every method is one independent process, and the
-/// adapter carries no mutable state beyond the configuration below.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// It holds no connection, so every method is one independent process; the only
+/// state is the last snapshot [`Mux::next_events`] saw, behind a mutex so the
+/// adapter is `Send + Sync` and can be shared by the scheduler and the event
+/// pump at once.
+#[derive(Debug)]
 pub struct HerdrMux {
     bin: PathBuf,
     socket: Option<PathBuf>,
     home: Option<PathBuf>,
+    /// Last snapshot this adapter saw, for [`Mux::next_events`].
+    seen: std::sync::Mutex<Option<events::Snapshot>>,
 }
 
 impl HerdrMux {
@@ -45,6 +52,7 @@ impl HerdrMux {
             bin: PathBuf::from("herdr"),
             socket: None,
             home: None,
+            seen: std::sync::Mutex::new(None),
         }
     }
 }

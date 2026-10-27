@@ -62,6 +62,9 @@ pub(crate) fn line(argv: &[String], env: &[(String, Option<String>)]) -> Result<
 
 #[cfg(test)]
 mod tests {
+    // Tests may panic: a failed assertion is the point.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use std::process::Command;
 
