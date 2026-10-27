@@ -15,6 +15,10 @@ pub const BEGIN: &str = "# >>> shprd (managed) >>>";
 /// The line that closes the block shprd owns.
 pub const END: &str = "# <<< shprd (managed) <<<";
 
+/// The comment the block opens with when the file it was installed into did not
+/// end with a newline.
+const NO_FINAL_NEWLINE: &str = "# shprd: original had no final newline";
+
 /// How herdr runs a bound command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -178,6 +182,22 @@ fn block_span(text: &str) -> Result<Option<Range<usize>>, KeysError> {
     }
 }
 
+/// `block` with [`NO_FINAL_NEWLINE`] as the first line inside the markers.
+fn marked_block(block: &str) -> String {
+    match block.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{NO_FINAL_NEWLINE}\n{rest}"),
+        None => block.to_owned(),
+    }
+}
+
+/// Whether `block`, markers included, records a file that had no final newline.
+fn keeps_no_final_newline(block: &str) -> bool {
+    block
+        .strip_prefix(BEGIN)
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .is_some_and(|rest| rest.starts_with(NO_FINAL_NEWLINE))
+}
+
 /// Installs (or refreshes) the managed block in `text`.
 ///
 /// An existing block is replaced in place, so everything outside it stays byte
@@ -185,11 +205,17 @@ fn block_span(text: &str) -> Result<Option<Range<usize>>, KeysError> {
 /// blank line. Nothing is written to disk here: the caller decides.
 ///
 /// A file whose last line had no newline gets one, because the block must start
-/// on a line of its own.
+/// on a line of its own, and the block records that in its first line so
+/// [`uninstall`] can give the original byte for byte back.
 pub fn install(text: &str, bindings: &[Binding]) -> Result<String, KeysError> {
     let block = render(bindings);
     let installed = match block_span(text)? {
         Some(span) => {
+            let block = if keeps_no_final_newline(&text[span.start..span.end]) {
+                marked_block(&block)
+            } else {
+                block
+            };
             let mut out = String::with_capacity(text.len() + block.len());
             out.push_str(&text[..span.start]);
             out.push_str(&block);
@@ -197,14 +223,18 @@ pub fn install(text: &str, bindings: &[Binding]) -> Result<String, KeysError> {
             out
         }
         None => {
+            let missing_newline = !text.is_empty() && !text.ends_with('\n');
             let mut out = text.to_owned();
             if !out.is_empty() {
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
+                // One newline either ends a last line that had none, or makes
+                // the blank line that separates the user's text from the block.
                 out.push('\n');
             }
-            out.push_str(&block);
+            out.push_str(&if missing_newline {
+                marked_block(&block)
+            } else {
+                block
+            });
             out
         }
     };
@@ -212,15 +242,21 @@ pub fn install(text: &str, bindings: &[Binding]) -> Result<String, KeysError> {
     Ok(installed)
 }
 
-/// Removes the managed block, and the blank line installing it added.
+/// Removes the managed block, and the newlines installing it added.
 ///
-/// A file without a block comes back unchanged.
+/// A file without a block comes back unchanged, and a file that had no final
+/// newline before the block was installed gets its last byte back.
 pub fn uninstall(text: &str) -> Result<String, KeysError> {
     let Some(span) = block_span(text)? else {
         return Ok(text.to_owned());
     };
     let mut start = span.start;
-    if text[..start].ends_with("\n\n") {
+    let marked = keeps_no_final_newline(&text[span.start..span.end]);
+    if marked && text[..start].ends_with('\n') {
+        // Only the newline synth made room for the block: the original had none.
+        start -= 1;
+    } else if !marked && text[..start].ends_with("\n\n") {
+        // The blank line installing the block added.
         start -= 1;
     }
     let mut out = String::with_capacity(text.len());
@@ -451,6 +487,34 @@ command = \"vim\"\ndescription = \"mine\"\n";
             install(broken, &default_bindings()),
             Err(KeysError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn install_and_uninstall_round_trip_every_ending() {
+        let bindings = default_bindings();
+        for original in ["", "# mine\n", "# mine", "[terminal]\nshell = \"zsh\""] {
+            let installed = ok(install(original, &bindings));
+            assert_ne!(installed, original, "install must add the block");
+            assert_eq!(
+                ok(uninstall(&installed)),
+                original,
+                "round trip {original:?}"
+            );
+            let twice = ok(install(&installed, &bindings));
+            assert_eq!(twice, installed, "a second install is a no-op {original:?}");
+            assert_eq!(ok(uninstall(&twice)), original, "twice {original:?}");
+        }
+    }
+
+    #[test]
+    fn the_marker_appears_only_for_a_file_without_a_final_newline() {
+        let bindings = default_bindings();
+        assert!(
+            ok(install("# mine", &bindings))
+                .starts_with(&format!("# mine\n{BEGIN}\n{NO_FINAL_NEWLINE}\n"))
+        );
+        assert!(!ok(install("# mine\n", &bindings)).contains(NO_FINAL_NEWLINE));
+        assert!(!ok(install("", &bindings)).contains(NO_FINAL_NEWLINE));
     }
 
     #[test]
