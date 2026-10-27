@@ -12,6 +12,7 @@ use anyhow::anyhow;
 use shprd_core::config::{self, Config};
 use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
+use shprd_roster::quota::{self, ProbeContext, QuotaReport, QuotaState};
 use shprd_roster::skills::{CompatList, VisibilityRules};
 use shprd_roster::spec::{HarnessSpec, Vendor, load_dir};
 
@@ -110,7 +111,7 @@ impl Section {
 
 /// Runs `shprd doctor`, printing the page and failing when a check failed.
 pub fn run(args: &DoctorArgs, json: bool, home: Option<&Path>) -> Result<(), CliError> {
-    let report = build(home);
+    let report = build(home, args.no_quota);
     if json || args.json {
         print_json(&report)?;
     } else {
@@ -125,7 +126,7 @@ pub fn run(args: &DoctorArgs, json: bool, home: Option<&Path>) -> Result<(), Cli
 }
 
 /// Builds the whole page, one section at a time.
-fn build(home_flag: Option<&Path>) -> Report {
+fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     let facts = Facts::resolve(home_flag);
     let mut report = Report::default();
     host(&mut report, &facts);
@@ -133,6 +134,9 @@ fn build(home_flag: Option<&Path>) -> Report {
     let config = config_section(&mut report, &facts);
     agents(&mut report, &facts, &specs, config.as_ref());
     review(&mut report, &facts, &specs, config.as_ref());
+    if !no_quota {
+        quota_section(&mut report, &facts, &specs, config.as_ref());
+    }
     report
 }
 
@@ -464,4 +468,74 @@ fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Op
             ),
         );
     }
+}
+
+/// Section 6: what quota each agent reports, never naming a credential.
+fn quota_section(
+    report: &mut Report,
+    facts: &Facts,
+    specs: &[HarnessSpec],
+    config: Option<&Config>,
+) {
+    let section = report.section("Quota");
+    let Some(home) = facts.home.clone() else {
+        section.add(
+            Level::Warn,
+            "no home directory, so no credential store to probe",
+        );
+        return;
+    };
+    let mut ctx = ProbeContext::new(home);
+    ctx.free_pin = free_pin(config);
+    for agent in ["claude", "codex", "kilo"] {
+        if !specs.iter().any(|spec| spec.id == agent) {
+            section.add(Level::Info, format!("{agent}  not in the harness table"));
+            continue;
+        }
+        let (level, text) = quota_line(&quota::probe(agent, &ctx));
+        section.add(level, text);
+    }
+}
+
+/// Whether a configured kilo agent string pins the free tier.
+fn free_pin(config: Option<&Config>) -> bool {
+    let Some(roster) = config.map(|config| &config.roster) else {
+        return false;
+    };
+    roster
+        .workers
+        .iter()
+        .chain(roster.orchestrator.iter())
+        .chain(roster.reviewer.iter())
+        .any(|agent| agent.starts_with("kilo/") && agent.contains("free"))
+}
+
+/// One quota report as a level and a line: state, binding window, reset.
+fn quota_line(report: &QuotaReport) -> (Level, String) {
+    let (level, state) = match report.state {
+        QuotaState::Ok => (Level::Ok, "ok"),
+        QuotaState::Dry => (Level::Fail, "dry"),
+        QuotaState::Unknown => (Level::Warn, "unknown"),
+    };
+    let mut text = format!("{}  {state}", report.agent);
+    match report.windows.first() {
+        Some(window) => text.push_str(&format!(
+            "  {} {:.0}% used",
+            window.name, window.used_percent
+        )),
+        None => text.push_str("  no window reported"),
+    }
+    if let Some(reset) = report.reset_at_ms {
+        text.push_str(&format!("  reset {}", clock(reset)));
+    }
+    if report.state == QuotaState::Unknown {
+        text.push_str(&format!("  ({})", report.detail));
+    }
+    (level, text)
+}
+
+/// A reset instant as UTC `HH:MM`, so the line never needs a locale.
+fn clock(ms: u64) -> String {
+    let of_day = (ms / 1000) % 86_400;
+    format!("{:02}:{:02}", of_day / 3600, (of_day % 3600) / 60)
 }
