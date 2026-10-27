@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod dagr;
 pub mod doctor;
+pub mod fullgate;
 pub mod handoff;
 pub mod integrate;
 pub mod janitor;
@@ -76,6 +77,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Down) => up::down(&ctx),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 

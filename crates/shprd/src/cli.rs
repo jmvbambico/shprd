@@ -94,6 +94,17 @@ pub enum Command {
     Down,
     /// Watch every working agent and hand work over when one goes dry.
     Watch(WatchArgs),
+    /// Run the integration branch's gate commands once, in its worktree.
+    Gate(FullGateArgs),
+}
+
+/// Arguments for `gate`, the run-wide gate. The per-attempt gate is
+/// `shprd agent gate`, whose arguments are [`GateArgs`].
+#[derive(Debug, Args)]
+pub struct FullGateArgs {
+    /// How long one command may run before it is killed, in seconds.
+    #[arg(long = "timeout-secs", value_name = "SECS", default_value_t = 1800)]
+    pub timeout_secs: u64,
 }
 
 /// Arguments for `watch`.
