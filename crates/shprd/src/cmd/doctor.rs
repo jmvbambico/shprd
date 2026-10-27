@@ -540,7 +540,7 @@ fn quota_line(report: &QuotaReport) -> (Level, String) {
         None => text.push_str("  no window reported"),
     }
     if let Some(reset) = report.reset_at_ms {
-        text.push_str(&format!("  reset {}", clock(reset)));
+        text.push_str(&format!("  reset {} UTC", clock(reset)));
     }
     if report.state == QuotaState::Unknown {
         text.push_str(&format!("  ({})", report.detail));
@@ -548,7 +548,8 @@ fn quota_line(report: &QuotaReport) -> (Level, String) {
     (level, text)
 }
 
-/// A reset instant as UTC `HH:MM`, so the line never needs a locale.
+/// A reset instant as `HH:MM` in UTC, so the line never needs a locale or a
+/// timezone crate. The line labels it, so the reader is never misled.
 fn clock(ms: u64) -> String {
     let of_day = (ms / 1000) % 86_400;
     format!("{:02}:{:02}", of_day / 3600, (of_day % 3600) / 60)
