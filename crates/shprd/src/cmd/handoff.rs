@@ -429,10 +429,19 @@ pub fn handoff(
     };
     // The record follows the tab: a later prompt must reach the newcomer, not
     // the tab this hand-off just closed.
-    spawn::write_tab(
-        &spawn::tab_path(&env.briefs_dir, &env.run, &task.id, attempt.n),
-        &tab_id,
-    );
+    let record = spawn::tab_path(&env.briefs_dir, &env.run, &task.id, attempt.n);
+    if let Err(err) = spawn::write_tab_checked(&record, &tab_id) {
+        // The newcomer is already running, but nothing would ever reach it: a
+        // prompt follows the record, not the label.
+        spawn::close_tab(mux, &tab_id);
+        escalate(
+            env,
+            &task.id,
+            &format!("hand-off to {} could not be recorded", to.agent),
+            "stop the run",
+        );
+        return Err(err);
+    }
     let kind = EventKind::HandedOff {
         task: task.id.clone(),
         from_agent: from.clone(),
@@ -987,6 +996,55 @@ project_dirs = []
             git_out(&worktree, &["rev-parse", "HEAD"]),
             before,
             "the checkpoint commit should stay"
+        );
+    }
+
+    /// A tab no record points at is a tab no prompt reaches, so a hand-off that
+    /// cannot write its record must not report success.
+    #[test]
+    fn a_hand_off_that_cannot_record_its_tab_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        // Readable, so the old tab is still closed, but not writable.
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o400))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = match run(&mux, &env, &request(None)) {
+            Ok(report) => panic!("handed off to {} anyway", report.to),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.exit_code(), 1);
+        let (state, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::HandedOff { .. })),
+            "an unrecorded hand-off was logged as done"
+        );
+        assert_eq!(
+            state
+                .escalations
+                .last()
+                .map(|escalation| escalation.body.as_str()),
+            Some("hand-off to pi could not be recorded")
+        );
+        let workspace = mux
+            .find_workspace(&naming::workspace_name(&scratch.repo_name()))
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no workspace"));
+        let tabs = mux
+            .list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            tabs.is_empty(),
+            "the newcomer's tab was left open: {tabs:?}"
         );
     }
 }
