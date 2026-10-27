@@ -18,6 +18,7 @@ shprd-core = { path = "../shprd-core" }
 shprd-git = { path = "../shprd-git" }
 shprd-roster = { path = "../shprd-roster" }
 shprd-views = { path = "../shprd-views" }
+toml.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]

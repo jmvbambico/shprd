@@ -472,6 +472,7 @@ dependencies = [
  "shprd-roster",
  "shprd-views",
  "tempfile",
+ "toml",
  "toml_edit",
 ]
 

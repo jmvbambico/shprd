@@ -2,13 +2,19 @@
 //!
 //! The file is edited rather than rewritten, so comments and keys the verb does
 //! not own survive. The agent strings are checked against the harness table
-//! before anything is written, and the merged config is loaded and validated
-//! afterwards: a change that would make it unusable (a reviewer equal to the
-//! orchestrator, say) is undone and the verb exits 2 with the reason.
+//! before anything is written. The edited text is then validated in memory,
+//! merged with the other config layer: a change that would make the
+//! config unusable (a reviewer equal to the orchestrator, say) exits 2 with the
+//! reason and writes nothing at all. A write that survives that check goes to a
+//! unique temp file, is fsynced, and is renamed over the target, so the config
+//! is never seen half-written and no restore step is needed. A file that changed
+//! between the read and the write is refused instead of replaced.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use shprd_core::config;
@@ -50,6 +56,10 @@ fn execute(
     };
     let path = target_path(local, &home, root.as_deref())?;
 
+    let (global, repo) = layers(&home, root.as_deref());
+
+    // Read and edit in memory: the file stays untouched until the edited text
+    // is known to be good.
     let previous = previous_text(&path)?;
     let mut document = match &previous {
         Some(text) => text.parse::<DocumentMut>().map_err(|err| {
@@ -58,16 +68,13 @@ fn execute(
         None => DocumentMut::new(),
     };
     apply(&mut document, &change)?;
-    write(&path, document.to_string().as_str())?;
+    let edited = document.to_string();
+    validate_edited(&path, &edited, &global, repo.as_deref())?;
 
-    let (global, repo) = layers(&home, root.as_deref());
-    if let Err(err) = config::load(Some(&global), repo.as_deref()) {
-        restore(&path, previous.as_deref())?;
-        return Err(CliError::Invalid(anyhow!(err).context(format!(
-            "{} would be invalid, so nothing was changed",
-            path.display()
-        ))));
-    }
+    // A file someone else saved in the meantime wins: replacing it would
+    // silently drop their edit.
+    ensure_unchanged(&path, previous.as_deref())?;
+    write_atomic(&path, &edited)?;
 
     let path_env = std::env::var("PATH").unwrap_or_default();
     for agent in &change.agents {
@@ -145,29 +152,120 @@ fn previous_text(path: &Path) -> Result<Option<String>, CliError> {
     }
 }
 
-/// Create the parent directory and write `text` to `path`.
-fn write(path: &Path, text: &str) -> Result<(), CliError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            CliError::other(anyhow!(error).context(format!("creating {}", parent.display())))
-        })?;
+/// Check the edited text without writing it: parse it as a config layer, merge
+/// it with the other layer the way [`config::load`] does, and validate the
+/// result. A refusal leaves the file exactly as it was.
+fn validate_edited(
+    path: &Path,
+    edited: &str,
+    global: &Path,
+    repo: Option<&Path>,
+) -> Result<(), CliError> {
+    let mut parsed = Vec::new();
+    for layer_path in [Some(global), repo].into_iter().flatten() {
+        let text = if layer_path == path {
+            Some(edited.to_owned())
+        } else {
+            previous_text(layer_path)?
+        };
+        let Some(text) = text else { continue };
+        let layer: config::ConfigLayer =
+            toml::from_str(&text).map_err(|err| unusable(path, anyhow!(err)))?;
+        parsed.push(layer);
     }
-    fs::write(path, text).map_err(|error| {
-        CliError::other(anyhow!(error).context(format!("writing {}", path.display())))
-    })
+    config::from_layers(&parsed)
+        .validate()
+        .map_err(|err| unusable(path, anyhow!(err)))
 }
 
-/// Put `previous` back, deleting the file when there was none.
-fn restore(path: &Path, previous: Option<&str>) -> Result<(), CliError> {
-    match previous {
-        Some(text) => write(path, text),
-        None => match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(CliError::other(
-                anyhow!(error).context(format!("removing {}", path.display())),
-            )),
-        },
+/// The refusal a change that would make the config unusable produces.
+fn unusable(path: &Path, err: anyhow::Error) -> CliError {
+    CliError::Invalid(err.context(format!(
+        "{} would be invalid, so nothing was changed",
+        path.display()
+    )))
+}
+
+/// Refuse when the file no longer holds the text that was read from it.
+fn ensure_unchanged(path: &Path, before: Option<&str>) -> Result<(), CliError> {
+    if previous_text(path)?.as_deref() == before {
+        return Ok(());
+    }
+    Err(CliError::Invalid(anyhow!(
+        "config changed while editing; try again"
+    )))
+}
+
+/// Write `text` to `path` through a unique temp file beside it, then rename.
+///
+/// The temp file shares the target's directory, so the rename stays inside one
+/// filesystem, and it is fsynced before the rename, so a crash cannot leave a
+/// half-written config behind.
+fn write_atomic(path: &Path, text: &str) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .map_or_else(|| Path::new("."), |parent| parent);
+    fs::create_dir_all(parent).map_err(|error| {
+        CliError::other(anyhow!(error).context(format!("creating {}", parent.display())))
+    })?;
+    let temp = temp_path(path);
+    let written = fs::File::create(&temp).and_then(|mut file| {
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(CliError::other(
+            anyhow!(error).context(format!("writing {}", temp.display())),
+        ));
+    }
+    fs::rename(&temp, path)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&temp);
+        })
+        .map_err(|error| {
+            CliError::other(anyhow!(error).context(format!("replacing {}", path.display())))
+        })
+}
+
+/// A temp path beside `path` that no two writers can pick at the same time.
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    parent.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        unique_nanos()
+    ))
+}
+
+/// The largest nanosecond timestamp this process has handed out so far.
+static LAST_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since the Unix epoch, at least one more than the previous call's
+/// value within this process.
+fn unique_nanos() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let mut previous = LAST_NANOS.load(Ordering::Relaxed);
+    loop {
+        let candidate = now.max(previous.saturating_add(1));
+        match LAST_NANOS.compare_exchange_weak(
+            previous,
+            candidate,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => previous = actual,
+        }
     }
 }
 
@@ -426,5 +524,70 @@ mod tests {
             text.contains("\"claude/claude-opus-5-5\" = \"high\""),
             "{text}"
         );
+    }
+
+    /// Every file beside `path` other than the config itself, so a refused or
+    /// failed write can prove it left no temp debris.
+    fn other_files_beside(path: &Path) -> Vec<String> {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        match fs::read_dir(parent) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name != "config.toml")
+                .collect(),
+            Err(error) => panic!("should read {}: {error}", parent.display()),
+        }
+    }
+
+    #[test]
+    fn an_invalid_change_leaves_the_file_untouched() {
+        let fixture = Fixture::new();
+        assert!(fixture.run(&orchestrator("claude/claude-opus-5-5")).is_ok());
+        let path = fixture.global();
+        let before = fs::read(&path).unwrap_or_default();
+
+        let refused = fixture.run(&reviewer("claude/claude-opus-5-5"));
+        assert_eq!(refusal_code(refused), 2);
+        assert_eq!(fs::read(&path).unwrap_or_default(), before);
+        let left = other_files_beside(&path);
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    #[test]
+    fn replaces_the_file_and_leaves_no_temp_file() {
+        let fixture = Fixture::new();
+        let path = fixture.global();
+        let parent = path.parent().unwrap_or(Path::new("."));
+        assert!(fs::create_dir_all(parent).is_ok());
+        let before = "# keep me\n[janitor]\narchive_days = 30\n";
+        assert!(fs::write(&path, before).is_ok());
+
+        assert!(fixture.run(&orchestrator("claude/claude-opus-5-5")).is_ok());
+        let text = text_of(&path);
+        assert!(text.contains("# keep me"), "{text}");
+        assert!(text.contains("archive_days = 30"), "{text}");
+        let left = other_files_beside(&path);
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    #[test]
+    fn refuses_a_file_that_changed_while_it_was_edited() {
+        let home = temp("guard");
+        let path = home.path().join("config.toml");
+        assert!(fs::write(&path, "mux = \"herdr\"\n").is_ok());
+        let before = previous_text(&path).unwrap_or_default();
+
+        assert!(ensure_unchanged(&path, before.as_deref()).is_ok());
+        assert!(fs::write(&path, "mux = \"tuios\"\n").is_ok());
+        match ensure_unchanged(&path, before.as_deref()) {
+            Err(ref err) => assert!(
+                format!("{err}").contains("config changed while editing; try again"),
+                "{err}"
+            ),
+            Ok(()) => panic!("a file edited underneath should be refused"),
+        }
+        assert_eq!(refusal_code(ensure_unchanged(&path, before.as_deref())), 2);
+        assert_eq!(text_of(&path), "mux = \"tuios\"\n");
     }
 }
