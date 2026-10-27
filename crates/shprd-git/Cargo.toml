@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 shprd-core = { path = "../shprd-core" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

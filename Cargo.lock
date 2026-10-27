@@ -709,6 +709,7 @@ dependencies = [
 name = "shprd-git"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
  "shprd-core",
  "tempfile",
  "thiserror",
