@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use shprd_core::event::{Event, EventKind};
+use shprd_core::event::{Actor, Event, EventKind};
 use tempfile::TempDir;
 
 /// The binary under test, built by cargo for this integration test.
@@ -231,8 +231,43 @@ impl Fixture {
         ]);
     }
 
-    /// Drives task `id` from added to passed, with a passing `review` gate.
+    /// Appends a recorded review dispatch to the run log.
+    ///
+    /// `shprd agent review` opens a reviewer tab in a multiplexer, which no
+    /// test here has, so the fact it would record is written directly.
+    fn review_requested(&self, id: &str, reviewer: &str, degraded: bool) {
+        let path = self.root.join(".shprd").join("events.jsonl");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => panic!("read {}: {err}", path.display()),
+        };
+        let seq = text.lines().count() as u64 + 1;
+        let event = Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Human,
+            kind: EventKind::ReviewRequested {
+                task: id.to_string(),
+                attempt: 1,
+                reviewer: reviewer.to_string(),
+                degraded,
+            },
+        };
+        let line = match serde_json::to_string(&event) {
+            Ok(line) => line,
+            Err(err) => panic!("serialize the review request: {err}"),
+        };
+        write(&path, &format!("{text}{line}\n"));
+    }
+
+    /// Drives task `id` from added to passed, with an independent review.
     fn passed_task(&self, id: &str) {
+        self.passed_task_with(id, false);
+    }
+
+    /// Drives task `id` from added to passed, with a review that is degraded or
+    /// not, and a passing `review` gate.
+    fn passed_task_with(&self, id: &str, degraded: bool) {
         self.ok(&[
             "agent",
             "task",
@@ -275,6 +310,7 @@ impl Fixture {
             "--changed",
             "a.txt",
         ]);
+        self.review_requested(id, "c1", degraded);
         self.ok(&[
             "agent",
             "gate",
@@ -311,7 +347,12 @@ impl Fixture {
 
     /// Passes `id`, lands its branch, then runs the full gate.
     fn land_a_task(&self, id: &str) {
-        self.passed_task(id);
+        self.land_a_task_with(id, false);
+    }
+
+    /// Lands `id` after a review that is degraded or not.
+    fn land_a_task_with(&self, id: &str, degraded: bool) {
+        self.passed_task_with(id, degraded);
         self.commit_on("feature/t1", "a.txt", "feature\n", "the task's work");
         self.ok(&["agent", "integrate", "--task", id]);
         self.ok(&["gate"]);
@@ -571,17 +612,7 @@ fn the_body_records_the_review_marker_and_the_attribution() {
 
     let degraded = Fixture::new();
     degraded.start();
-    degraded.land_a_task("T1");
-    degraded.ok(&[
-        "agent",
-        "override",
-        "--task",
-        "T1",
-        "--rule",
-        "cross-vendor-review",
-        "--reason",
-        "degraded: the reviewer shares a vendor with the author",
-    ]);
+    degraded.land_a_task_with("T1", true);
     degraded.script_forge("{}");
     degraded.ok(&["land"]);
     let calls = degraded.forge_calls();

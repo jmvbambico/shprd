@@ -221,7 +221,7 @@ fn render_body(state: &RunState, events: &[Event]) -> String {
         body.push('\n');
     }
     body.push('\n');
-    body.push_str(review_marker(state, events));
+    body.push_str(&review_marker(state));
     body.push('\n');
     body.push('\n');
     body.push_str(ATTRIBUTION);
@@ -229,57 +229,70 @@ fn render_body(state: &RunState, events: &[Event]) -> String {
     body
 }
 
-/// `cross-vendor-review: passed` only when every landed task's newest verdict
-/// is a passed review from an independent reviewer.
+/// The review marker for the body, followed by one line per task that made it
+/// degraded.
 ///
-/// A review that could not be independent says so — in its findings, in an
-/// escalation, or in the override a human wrote to accept it — so anything that
-/// mentions degraded downgrades the whole body's marker.
-fn review_marker(state: &RunState, events: &[Event]) -> &'static str {
-    if degraded_mentioned(events) {
-        return REVIEW_DEGRADED;
+/// `cross-vendor-review: passed` is a claim about recorded facts: every
+/// integrated task's latest attempt needs a review that was not degraded and a
+/// passed `review` gate. Anything else — no review requested, only degraded
+/// reviews, no passed review gate — is `degraded-review`, and the reasons say
+/// which tasks caused it and why.
+fn review_marker(state: &RunState) -> String {
+    let gaps = review_gaps(state);
+    if gaps.is_empty() {
+        return REVIEW_PASSED.to_string();
     }
+    let mut marker = String::from(REVIEW_DEGRADED);
+    for gap in gaps {
+        marker.push_str("\n- ");
+        marker.push_str(&gap);
+    }
+    marker
+}
+
+/// One line per integrated task whose latest attempt lacks an independent,
+/// passing review.
+fn review_gaps(state: &RunState) -> Vec<String> {
+    let mut gaps = Vec::new();
     for task in integrated_tasks(state) {
         let Some(attempt) = task.latest_attempt() else {
-            return REVIEW_DEGRADED;
+            gaps.push(format!("{}: no attempt to review", task.id));
+            continue;
         };
+        if attempt.reviews.is_empty() {
+            gaps.push(format!(
+                "{}: no review was requested for attempt {}",
+                task.id, attempt.n
+            ));
+            continue;
+        }
+        if !attempt.reviews.iter().any(|review| !review.degraded) {
+            let reviewers: Vec<&str> = attempt
+                .reviews
+                .iter()
+                .map(|review| review.reviewer.as_str())
+                .collect();
+            gaps.push(format!(
+                "{}: every review requested for attempt {} was degraded ({})",
+                task.id,
+                attempt.n,
+                reviewers.join(", ")
+            ));
+            continue;
+        }
         let verdict = attempt
             .gates
             .iter()
             .rev()
             .find(|gate| gate.gate == REVIEW_GATE);
-        match verdict {
-            Some(gate) if gate.passed => {}
-            _ => return REVIEW_DEGRADED,
-        }
-        if attempt
-            .gates
-            .iter()
-            .filter(|gate| gate.gate == REVIEW_GATE)
-            .flat_map(|gate| gate.findings.iter())
-            .any(|finding| mentions_degraded(&finding.title) || mentions_degraded(&finding.detail))
-        {
-            return REVIEW_DEGRADED;
+        if !matches!(verdict, Some(gate) if gate.passed) {
+            gaps.push(format!(
+                "{}: attempt {} has no passed review gate",
+                task.id, attempt.n
+            ));
         }
     }
-    REVIEW_PASSED
-}
-
-/// True when any escalation body or override reason says the review was
-/// degraded.
-fn degraded_mentioned(events: &[Event]) -> bool {
-    events.iter().any(|event| match &event.kind {
-        EventKind::Escalated { body, .. } => mentions_degraded(body),
-        EventKind::Override { reason, rule, .. } => {
-            mentions_degraded(reason) || mentions_degraded(rule)
-        }
-        _ => false,
-    })
-}
-
-/// True when `text` says a review was degraded.
-fn mentions_degraded(text: &str) -> bool {
-    text.to_lowercase().contains("degraded")
+    gaps
 }
 
 /// Merges the run's pull request when the policy allows it.
@@ -372,4 +385,170 @@ fn repo_name(ctx: &Ctx) -> Result<String, CliError> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", ctx.root.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shprd_core::event::{Actor, ReportStatus};
+
+    /// An event with `kind` at position `seq`.
+    fn ev(seq: u64, kind: EventKind) -> Event {
+        Event {
+            seq,
+            at_ms: seq * 1000,
+            actor: Actor::Engine,
+            kind,
+        }
+    }
+
+    /// A run with one task spawned and reported, ready to be reviewed.
+    fn reported_log(task: &str) -> Vec<Event> {
+        vec![
+            ev(
+                1,
+                EventKind::RunStarted {
+                    run_id: "r1".to_string(),
+                    repo: "/tmp/repo".to_string(),
+                    base_branch: "main".to_string(),
+                    integration_branch: "integration/m1".to_string(),
+                },
+            ),
+            ev(
+                2,
+                EventKind::TaskAdded {
+                    task: task.to_string(),
+                    title: "a task".to_string(),
+                    scope: vec!["a.txt".to_string()],
+                    acceptance: vec!["it works".to_string()],
+                    tags: Vec::new(),
+                    skills: Vec::new(),
+                    deps: Vec::new(),
+                },
+            ),
+            ev(
+                3,
+                EventKind::Spawned {
+                    task: task.to_string(),
+                    attempt: 1,
+                    agent: "w1".to_string(),
+                    model: None,
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            ),
+            ev(
+                4,
+                EventKind::Reported {
+                    task: task.to_string(),
+                    attempt: 1,
+                    status: ReportStatus::Completed,
+                    summary: "done".to_string(),
+                    tests: Vec::new(),
+                    changed_paths: vec!["a.txt".to_string()],
+                    commit: Some("abc123".to_string()),
+                    skills_used: Vec::new(),
+                },
+            ),
+        ]
+    }
+
+    /// Records a review dispatch at `seq`.
+    fn reviewed(seq: u64, task: &str, reviewer: &str, degraded: bool) -> Event {
+        ev(
+            seq,
+            EventKind::ReviewRequested {
+                task: task.to_string(),
+                attempt: 1,
+                reviewer: reviewer.to_string(),
+                degraded,
+            },
+        )
+    }
+
+    /// Records a passed `review` gate at `seq`.
+    fn review_passed(seq: u64, task: &str) -> Event {
+        ev(
+            seq,
+            EventKind::GatePassed {
+                task: task.to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+            },
+        )
+    }
+
+    /// Records the task landing at `seq`.
+    fn integrated(seq: u64, task: &str) -> Event {
+        ev(
+            seq,
+            EventKind::Integrated {
+                task: task.to_string(),
+                commits: vec!["abc123".to_string()],
+            },
+        )
+    }
+
+    /// Folds `events`, panicking on a rule error.
+    fn folded(events: &[Event]) -> RunState {
+        match RunState::fold(events) {
+            Ok(state) => state,
+            Err(err) => panic!("fold failed: {err}"),
+        }
+    }
+
+    #[test]
+    fn a_clean_review_reads_as_passed() {
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        log.push(review_passed(6, "T1"));
+        log.push(integrated(7, "T1"));
+        assert_eq!(review_marker(&folded(&log)), REVIEW_PASSED);
+    }
+
+    #[test]
+    fn one_degraded_review_names_the_task() {
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "w2", true));
+        log.push(review_passed(6, "T1"));
+        log.push(integrated(7, "T1"));
+        let marker = review_marker(&folded(&log));
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(!marker.contains(REVIEW_PASSED), "{marker}");
+        assert!(marker.contains("T1"), "{marker}");
+        assert!(marker.contains("every review requested"), "{marker}");
+        assert!(marker.contains("w2"), "{marker}");
+    }
+
+    #[test]
+    fn a_passed_review_gate_without_a_recorded_review_is_degraded() {
+        let mut log = reported_log("T1");
+        log.push(review_passed(5, "T1"));
+        log.push(integrated(6, "T1"));
+        let marker = review_marker(&folded(&log));
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(marker.contains("T1"), "{marker}");
+        assert!(marker.contains("no review was requested"), "{marker}");
+    }
+
+    #[test]
+    fn an_independent_review_without_a_passed_gate_is_degraded() {
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        // Its own gates passed; only the review gate is missing.
+        log.push(ev(
+            6,
+            EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: "lint".to_string(),
+                findings: Vec::new(),
+            },
+        ));
+        log.push(integrated(7, "T1"));
+        let marker = review_marker(&folded(&log));
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(marker.contains("no passed review gate"), "{marker}");
+    }
 }
