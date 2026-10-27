@@ -97,13 +97,13 @@ fn change_of(args: &SetArgs, specs: &[HarnessSpec]) -> Result<Change, CliError> 
     let mut parsed = Vec::with_capacity(agents.len());
     for agent in &agents {
         let found = AgentRef::parse(agent, specs).map_err(|err| {
-            CliError::other(anyhow!(err).context(format!("`{agent}` is not a usable agent")))
+            CliError::Invalid(anyhow!(err).context(format!("`{agent}` is not a usable agent")))
         })?;
         parsed.push(found.to_string());
     }
     let effort = match effort {
         Some(effort) => Some(parse_effort(&effort).map_err(|err| {
-            CliError::other(anyhow!(err).context("checking the effort".to_owned()))
+            CliError::Invalid(anyhow!(err).context("checking the effort".to_owned()))
         })?),
         None => None,
     };
@@ -118,7 +118,7 @@ fn change_of(args: &SetArgs, specs: &[HarnessSpec]) -> Result<Change, CliError> 
 fn target_path(local: bool, home: &Path, root: Option<&Path>) -> Result<PathBuf, CliError> {
     if local {
         let root = root.ok_or_else(|| {
-            CliError::other(anyhow!(
+            CliError::Invalid(anyhow!(
                 "`--repo` writes the repository's file, so run it inside a repository"
             ))
         })?;
@@ -339,14 +339,44 @@ mod tests {
         assert_eq!(text_of(&fixture.global()), before);
     }
 
+    /// Every refusal of a user's input exits 2, like the other verbs.
+    fn refusal_code(result: Result<(), CliError>) -> u8 {
+        match result {
+            Err(err @ CliError::Invalid(_)) => err.exit_code(),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn refuses_a_pi_model_without_its_provider() {
         let fixture = Fixture::new();
         let refused = fixture.run(&orchestrator("pi/deepseek-v4.1-flash"));
         match refused {
-            Err(err) => assert!(format!("{err}").contains("<provider>"), "{err}"),
+            Err(ref err) => assert!(format!("{err}").contains("<provider>"), "{err}"),
             Ok(()) => panic!("a bare pi model should be refused"),
         }
+        assert_eq!(
+            refusal_code(fixture.run(&orchestrator("pi/deepseek-v4.1-flash"))),
+            2
+        );
+        assert!(!fixture.global().exists());
+    }
+
+    #[test]
+    fn every_refused_set_exits_2() {
+        let fixture = Fixture::new();
+
+        assert_eq!(refusal_code(fixture.run(&orchestrator("nosuch/model"))), 2);
+        let at_turbo = SetArgs {
+            role: SetRole::Orchestrator(OneAgent {
+                agent: "claude/claude-opus-5-5".to_owned(),
+                effort: Some("turbo".to_owned()),
+            }),
+        };
+        assert_eq!(refusal_code(fixture.run(&at_turbo)), 2);
+
+        let outside_a_repo = target_path(true, fixture.home.path(), None);
+        assert_eq!(refusal_code(outside_a_repo.map(|_| ())), 2);
         assert!(!fixture.global().exists());
     }
 
