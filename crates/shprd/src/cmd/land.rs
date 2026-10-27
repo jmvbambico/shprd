@@ -356,17 +356,44 @@ fn merge(
     Ok(())
 }
 
-/// The forge to drive: `gh` here, or the script `SHPRD_FAKE_FORGE` names.
+/// Which forge a run drives.
+///
+/// The fake forge exists for tests only, so the choice is a pure function of
+/// the environment and the build: a release binary always drives `gh`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForgeChoice {
+    /// The script `SHPRD_FAKE_FORGE` names; debug builds only.
+    Fake(PathBuf),
+    /// The real `gh`, run against the worktree it is asked about.
+    Gh,
+}
+
+/// The forge the environment asks for, honoured only in a debug build.
+///
+/// `debug` is true in a build with debug assertions, which is every test
+/// binary; a release build ignores the variable entirely, so nothing but a
+/// real merge can be recorded as one.
+fn choose_forge(env_value: Option<String>, debug: bool) -> ForgeChoice {
+    match env_value {
+        Some(path) if debug && !path.is_empty() => ForgeChoice::Fake(PathBuf::from(path)),
+        _ => ForgeChoice::Gh,
+    }
+}
+
+/// The forge to drive: `gh` here, or, in a debug build, the script
+/// `SHPRD_FAKE_FORGE` names.
 fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
-    match std::env::var_os(FAKE_FORGE_ENV) {
-        Some(path) if !path.is_empty() => {
-            let script = PathBuf::from(path);
+    let env_value =
+        std::env::var_os(FAKE_FORGE_ENV).map(|value| value.to_string_lossy().into_owned());
+    match choose_forge(env_value, cfg!(debug_assertions)) {
+        ForgeChoice::Fake(script) => {
+            eprintln!("warning: using a fake forge ({FAKE_FORGE_ENV}); nothing reaches GitHub");
             let fake = FakeForge::from_script(&script).map_err(|err| {
                 CliError::other(anyhow!(err).context("reading the scripted forge"))
             })?;
             Ok(Box::new(fake))
         }
-        _ => Ok(Box::new(GhForge::new(dir))),
+        ForgeChoice::Gh => Ok(Box::new(GhForge::new(dir))),
     }
 }
 
@@ -550,5 +577,21 @@ mod tests {
         let marker = review_marker(&folded(&log));
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
         assert!(marker.contains("no passed review gate"), "{marker}");
+    }
+
+    #[test]
+    fn only_a_debug_build_honours_the_fake_forge() {
+        let script = "/tmp/forge.json".to_string();
+        assert_eq!(
+            choose_forge(Some(script.clone()), false),
+            ForgeChoice::Gh,
+            "a release build never trusts SHPRD_FAKE_FORGE"
+        );
+        assert_eq!(
+            choose_forge(Some(script.clone()), true),
+            ForgeChoice::Fake(PathBuf::from(&script))
+        );
+        assert_eq!(choose_forge(None, true), ForgeChoice::Gh);
+        assert_eq!(choose_forge(Some(String::new()), true), ForgeChoice::Gh);
     }
 }
