@@ -20,8 +20,9 @@ use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
 use shprd_core::state::{RunState, Task};
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{Mux, naming};
+use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
-use shprd_roster::spec::LaunchSpec;
+use shprd_roster::spec::{LaunchSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -127,7 +128,6 @@ pub fn spawn(
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
-    let tab = naming::tab_title(naming::Role::Worker, &pick.agent, &task.id, false);
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     let kind = EventKind::Spawned {
         task: task.id.clone(),
@@ -153,11 +153,31 @@ pub fn spawn(
         skills: &skills,
     });
     write_brief(&brief_path, &brief)?;
+    // The workspace must exist before a worktree does, so a repo the human has
+    // not opened in the multiplexer yet costs nothing to refuse.
+    let workspace = workspace_of(mux, env)?;
     let created = create_worktree(env, &task.id)?;
-    let _ = mux;
-    // The log is written last, so a failure here leaves nothing recorded and the
-    // worktree is taken back out.
+    // From here on every failure undoes everything: the tab first, then the
+    // worktree, and never an event.
+    let opened = open_agent(
+        mux,
+        env,
+        &workspace,
+        &brief,
+        &brief_path,
+        &pick,
+        req,
+        &created,
+    );
+    let (tab_id, tab) = match opened {
+        Ok(opened) => opened,
+        Err(err) => {
+            discard_worktree(env, &created);
+            return Err(err);
+        }
+    };
     if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
+        close_tab(mux, &tab_id);
         discard_worktree(env, &created);
         return Err(err);
     }
@@ -172,6 +192,76 @@ pub fn spawn(
         brief: brief_path,
         skills,
     })
+}
+
+/// The repository's workspace, or an error telling the human to create it.
+fn workspace_of(mux: &dyn Mux, env: &SpawnEnv<'_>) -> Result<shprd_mux::Workspace, CliError> {
+    let name = naming::workspace_name(&env.repo_name);
+    mux.find_workspace(&name)
+        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
+        .ok_or_else(|| {
+            CliError::Invalid(anyhow!("no workspace {name:?} yet: run `shprd up` first"))
+        })
+}
+
+/// Opens the agent's tab and starts its CLI in it.
+///
+/// Returns the tab's id and title. A host that has no `system_prompt_args`
+/// cannot take the brief as an argument, so the brief is typed in as the agent's
+/// first turn instead.
+fn open_agent(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+    workspace: &shprd_mux::Workspace,
+    brief: &str,
+    brief_path: &Path,
+    pick: &Pick,
+    req: &SpawnRequest,
+    created: &Worktree,
+) -> Result<(shprd_mux::TabId, String), CliError> {
+    let wanted = naming::tab_title(naming::Role::Worker, &pick.agent, &req.task, false);
+    let existing = mux
+        .list_tabs(&workspace.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?
+        .into_iter()
+        .map(|tab| tab.title)
+        .collect::<Vec<String>>();
+    let title = naming::disambiguate(&existing, &wanted, &req.task);
+    let tab = mux
+        .create_tab(&workspace.id, &title, &created.path)
+        .map_err(|err| CliError::other(anyhow!(err).context("creating the agent tab")))?;
+    let (argv, brief_in_args) = launch_argv(
+        &pick.launch,
+        pick.model.as_deref(),
+        req.effort.as_deref(),
+        brief,
+        brief_path,
+    )?;
+    let pairs = env_pairs(launch_env(
+        &env.base_env,
+        EnvRole::Worker,
+        &EnvContext {
+            actor: format!("agent:{}", pick.agent),
+            task: Some(req.task.clone()),
+            run: Some(env.run.clone()),
+            repo: created.path.clone(),
+        },
+    ));
+    mux.run(&tab.root_pane, &argv, &pairs)
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the agent CLI")))?;
+    if !brief_in_args {
+        mux.prompt(&tab.root_pane, brief)
+            .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))?;
+    }
+    Ok((tab.id, title))
+}
+
+/// Closes a tab this spawn opened, ignoring the failure for the same reason as
+/// [`discard_worktree`].
+fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
+    if let Err(err) = mux.close_tab(tab) {
+        eprintln!("warning: could not close tab {}: {err}", tab.as_str());
+    }
 }
 
 /// The ledger entries a spawn writes for its worktree and branch.
@@ -620,4 +710,66 @@ mod tests {
             );
         }
     }
+}
+
+/// Builds the argv the agent's CLI starts with.
+///
+/// The order is fixed by the launch spec: the base command, then the flags that
+/// suppress approval prompts, then the model, the effort and finally the system
+/// prompt. The second element of the result says whether the brief went in as an
+/// argument, which is also what says whether it has to be typed in instead.
+fn launch_argv(
+    launch: &LaunchSpec,
+    model: Option<&str>,
+    effort: Option<&str>,
+    brief: &str,
+    brief_path: &Path,
+) -> Result<(Vec<String>, bool), CliError> {
+    let mut argv = launch.interactive.clone();
+    if let Some(auto) = &launch.auto_approve {
+        argv.extend(auto.iter().cloned());
+    }
+    let values = Values {
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
+        prompt: Some(brief.to_string()),
+        prompt_file: Some(brief_path.display().to_string()),
+        session: None,
+    };
+    argv.extend(render(launch, &launch.model_args, &values)?);
+    if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
+        argv.extend(render(launch, effort_args, &values)?);
+    }
+    let mut brief_in_args = false;
+    if let Some(system_prompt_args) = &launch.system_prompt_args {
+        argv.extend(render(launch, system_prompt_args, &values)?);
+        brief_in_args = true;
+    }
+    Ok((argv, brief_in_args))
+}
+
+/// Renders one argument template, naming the template when it cannot be filled.
+fn render(
+    launch: &LaunchSpec,
+    template: &[String],
+    values: &Values,
+) -> Result<Vec<String>, CliError> {
+    render_args(template, values).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "filling the launch arguments {template:?} of {:?}",
+            launch.interactive
+        )))
+    })
+}
+
+/// Flattens a launch environment into the pairs [`Mux::run`] takes: set entries
+/// first, then the removals, both in name order.
+fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
+    let mut pairs: Vec<(String, Option<String>)> = diff
+        .set
+        .into_iter()
+        .map(|(name, value)| (name, Some(value)))
+        .collect();
+    pairs.extend(diff.remove.into_iter().map(|name| (name, None)));
+    pairs
 }
