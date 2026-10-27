@@ -54,6 +54,14 @@ pub enum SkillsError {
         #[source]
         source: serde_json::Error,
     },
+    /// A skills data file declares a `schema` version shprd does not know.
+    #[error("skills file {path} has unknown schema {schema}: shprd reads schema 1")]
+    UnknownSchema {
+        /// The file that declares it.
+        path: PathBuf,
+        /// The version it declares.
+        schema: u32,
+    },
     /// Two entries of the compatibility list share a name.
     #[error("duplicate skill name {name} in {path}")]
     DuplicateName {
@@ -245,16 +253,29 @@ pub struct IgnorePattern {
 }
 
 impl VisibilityRules {
+    /// The only schema version shprd understands.
+    pub const SCHEMA: u32 = 1;
+
     /// Load and validate visibility rules.
+    ///
+    /// A file declaring any [`schema`](Self::SCHEMA) but the one shprd reads is
+    /// refused rather than half-applied.
     pub fn load(path: &Path) -> Result<Self, SkillsError> {
         let text = fs::read_to_string(path).map_err(|source| SkillsError::ReadFile {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&text).map_err(|source| SkillsError::Parse {
+        let rules: Self = toml::from_str(&text).map_err(|source| SkillsError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        if rules.schema != Self::SCHEMA {
+            return Err(SkillsError::UnknownSchema {
+                path: path.to_path_buf(),
+                schema: rules.schema,
+            });
+        }
+        Ok(rules)
     }
 
     /// The ignore patterns as plain directory names, in file order.
@@ -854,6 +875,17 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].front_name, None);
         assert_eq!(found[0].display_name(), "late");
+    }
+
+    #[test]
+    fn rejects_an_unknown_visibility_schema() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let path = tmp.path().join("visibility.toml");
+        fs::write(&path, "schema = 2\n").must("visibility.toml");
+        match VisibilityRules::load(&path) {
+            Err(SkillsError::UnknownSchema { schema, .. }) => assert_eq!(schema, 2),
+            other => panic!("schema 2 must be refused, got {other:?}"),
+        }
     }
 
     /// The shipped visibility rules.
