@@ -495,9 +495,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// The document is written as pretty JSON to `<path>.tmp` in the same
 /// directory (created if missing). When `checker` is given it is run as
 /// `<checker> check <path>.tmp --strict --json`, and the document replaces
-/// `path` only if the checker exits 0 with no findings. A rejected document is
-/// deleted and its findings are returned, so a reader never sees a partial or
-/// unchecked `run.json`.
+/// `path` only if the checker exits 0 with no findings. Every failure after the
+/// temporary file exists — a rejected document, a failed rename — removes it,
+/// so a reader never sees a partial or unchecked `run.json` and no `.tmp`
+/// outlives a failed write.
 ///
 /// # Errors
 ///
@@ -505,7 +506,6 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// fails, and [`ViewError::Check`] when the checker rejects the document or
 /// cannot be run.
 pub fn write_atomic(doc: &Value, path: &Path, checker: Option<&Path>) -> Result<(), ViewError> {
-    let tmp = temp_path(path);
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -515,26 +515,52 @@ pub fn write_atomic(doc: &Value, path: &Path, checker: Option<&Path>) -> Result<
             source,
         })?;
     }
+    let tmp = TempFile::new(path);
     let text = serde_json::to_string_pretty(doc).map_err(|source| ViewError::Io {
-        path: tmp.clone(),
+        path: tmp.path().to_path_buf(),
         source: std::io::Error::other(source),
     })?;
-    fs::write(&tmp, text.as_bytes()).map_err(|source| ViewError::Io {
-        path: tmp.clone(),
+    fs::write(tmp.path(), text.as_bytes()).map_err(|source| ViewError::Io {
+        path: tmp.path().to_path_buf(),
         source,
     })?;
 
-    if let Some(checker) = checker
-        && let Err(failure) = check(checker, &tmp)
-    {
-        let _ = fs::remove_file(&tmp);
-        return Err(failure);
+    if let Some(checker) = checker {
+        check(checker, tmp.path())?;
     }
 
-    fs::rename(&tmp, path).map_err(|source| ViewError::Io {
+    fs::rename(tmp.path(), path).map_err(|source| ViewError::Io {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// The temporary file a write goes through, deleted on drop.
+///
+/// Renaming it into place makes the drop a no-op: the path is already gone.
+struct TempFile {
+    /// The `<path>.tmp` this write owns.
+    path: PathBuf,
+}
+
+impl TempFile {
+    /// The temporary path for `path`, which is not created yet.
+    fn new(path: &Path) -> TempFile {
+        TempFile {
+            path: temp_path(path),
+        }
+    }
+
+    /// The temporary path.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// `<path>.tmp`, in the same directory so the rename stays within one
@@ -962,6 +988,26 @@ mod tests {
         assert!(!temp_path(&path).exists());
         let text = fs::read_to_string(&path).unwrap_or_default();
         assert!(text.contains("\"dagr\": 3"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_rename_leaves_no_temporary_file() {
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let path = dir.path().join("run.json");
+        assert!(fs::create_dir_all(path.join("inside")).is_ok());
+        assert!(fs::write(path.join("inside").join("keep"), b"x").is_ok());
+        match write_atomic(&projected(), &path, None) {
+            Err(ViewError::Io { .. }) => {}
+            other => panic!("expected the rename to fail, got {other:?}"),
+        }
+        assert!(
+            !temp_path(&path).exists(),
+            "a failed write must not leave {}",
+            temp_path(&path).display()
+        );
     }
 
     /// A `dagr` stand-in that always reports one finding.
