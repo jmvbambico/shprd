@@ -187,17 +187,39 @@ fn review_refuses_when_no_reviewer_is_configured() {
 
 #[test]
 fn review_refuses_a_reviewer_from_the_authors_vendor() {
-    // `pi` wrote it, and the configured reviewer is the same vendor's `pi`, so
-    // the review would prove nothing.
-    let scratch = Scratch::new(Some("pi/provider/m2"));
+    // A `pi` worker on Claude and a `pi` reviewer on Claude run the same model
+    // family, so the review would prove nothing even though the two models are
+    // different.
+    let scratch = Scratch::new(Some("pi/anthropic/claude-opus-5-5"));
     plan(&scratch);
-    reported(&scratch, "pi/provider/m1");
+    reported(&scratch, "pi/anthropic/claude-sonnet-4");
 
-    let stderr = refused(&scratch, &["agent", "review", "--task", "T1"], "both Pi");
+    let stderr = refused(
+        &scratch,
+        &["agent", "review", "--task", "T1"],
+        "both run models from the anthropic family",
+    );
     assert!(stderr.contains("--degraded"), "{stderr}");
     // A refused review writes no packet.
     assert!(
         !scratch.home.path().join(".shprd").join("reviews").exists(),
         "a refused review must write nothing"
     );
+}
+
+#[test]
+fn review_refuses_a_worker_on_a_router() {
+    // `kilo/kilo-auto/free` names no model family, so nothing proves the
+    // reviewer is independent: the review is refused, never assumed.
+    let scratch = Scratch::new(Some("codex/gpt-5-codex"));
+    plan(&scratch);
+    reported(&scratch, "kilo/kilo-auto/free");
+
+    let stderr = refused(
+        &scratch,
+        &["agent", "review", "--task", "T1"],
+        "cannot prove the reviewer is a different vendor: kilo/kilo-auto/free has no known \
+         model family",
+    );
+    assert!(stderr.contains("--degraded"), "{stderr}");
 }

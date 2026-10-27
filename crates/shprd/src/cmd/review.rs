@@ -16,8 +16,9 @@ use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
+use shprd_roster::families::{Families, agent_vendor};
 use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, Vendor, render_args};
+use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
 use crate::cmd::launch;
@@ -305,12 +306,15 @@ pub struct Reviewer {
 ///
 /// The rule is the one AGENTS.md states: a change is reviewed by an agent from a
 /// different vendor than the one that wrote it, and a review that cannot meet
-/// that rule is labelled rather than pretended. So the vendor comes from the two
-/// harness specs, never from the program names, because two CLIs from one vendor
-/// share a vendor even when they share no binary.
+/// that rule is labelled rather than pretended. The vendor compared here is the
+/// vendor of the *model* each side runs, never the program name: a `pi` worker
+/// on DeepSeek reviewed by a `pi` reviewer on Claude is cross-vendor, and a `pi`
+/// worker on Claude reviewed by Claude Code is not. An agent whose family cannot
+/// be proven, such as one running a router, is never assumed independent.
 pub fn choose_reviewer(
     configured: Option<&str>,
     author: &str,
+    author_model: Option<&str>,
     programs: &[Program],
     degraded: bool,
 ) -> Result<Reviewer, CliError> {
@@ -334,52 +338,88 @@ pub fn choose_reviewer(
                 parsed.program
             ))
         })?;
-    let author_vendor = author_vendor(programs, author);
+    let families = families_table();
+    let author_vendor = author_vendor(&specs, author, author_model, &families);
+    let reviewer_vendor = agent_vendor(&parsed, &specs, &families);
     let mut reviewer = Reviewer {
         agent: parsed.program,
         model: parsed.model,
         launch: program.spec.launch.clone(),
         degraded,
     };
-    match author_vendor {
-        None => {
-            // Without the author's spec there is no way to prove the two differ,
-            // so the review is only degraded when the caller says it may be.
-            if !degraded {
-                return Err(CliError::Invalid(anyhow!(
-                    "no harness spec for `{author}`, the agent that wrote this change, so \
-                     cross-vendor review cannot be checked: pass --degraded to review anyway"
-                )));
-            }
-            eprintln!("warning: no harness spec for `{author}`: this review is {DEGRADED_LABEL}");
-            reviewer.degraded = true;
+    // The run log keeps the author's program and model apart; both name the
+    // agent in a message.
+    let author_label = match author_model {
+        Some(model) => format!("{author}/{model}"),
+        None => author.to_owned(),
+    };
+    // An agent whose family nothing proves is never independent: assuming
+    // otherwise would pass a review that may share the author's vendor.
+    let unknown = match (&author_vendor, &reviewer_vendor) {
+        (Some(_), Some(_)) => None,
+        (None, _) => Some(author_label.as_str()),
+        (_, None) => Some(raw),
+    };
+    if let Some(agent) = unknown {
+        if !degraded {
+            return Err(CliError::Invalid(anyhow!(
+                "cannot prove the reviewer is a different vendor: {agent} has no known model \
+                 family: set a reviewer with a known family with `shprd set reviewer`, or pass \
+                 --degraded to review anyway"
+            )));
         }
-        Some(vendor) if vendor == program.spec.vendor => {
-            if !degraded {
-                return Err(CliError::Invalid(anyhow!(
-                    "the reviewer `{raw}` and `{author}`, which wrote this change, are both \
-                     {vendor:?}: set a reviewer from another vendor with `shprd set reviewer`, \
-                     or pass --degraded to review anyway"
-                )));
-            }
-            eprintln!(
-                "warning: the reviewer `{raw}` shares the vendor {vendor:?} with `{author}`: \
-                 this review is {DEGRADED_LABEL}"
-            );
-            reviewer.degraded = true;
+        eprintln!(
+            "warning: cannot prove the reviewer is a different vendor: {agent} has no known \
+             model family: this review is {DEGRADED_LABEL}"
+        );
+        reviewer.degraded = true;
+    } else if author_vendor == reviewer_vendor {
+        let vendor = reviewer_vendor.as_deref().unwrap_or_default().to_owned();
+        if !degraded {
+            return Err(CliError::Invalid(anyhow!(
+                "the reviewer `{raw}` and `{author_label}`, which wrote this change, both run \
+                 models from the {vendor} family: set a reviewer from another vendor with \
+                 `shprd set reviewer`, or pass --degraded to review anyway"
+            )));
         }
-        Some(_) => {}
+        eprintln!(
+            "warning: the reviewer `{raw}` and `{author_label}` both run models from the \
+             {vendor} family: this review is {DEGRADED_LABEL}"
+        );
+        reviewer.degraded = true;
     }
     Ok(reviewer)
 }
 
-/// The vendor of `agent`'s harness spec, or `None` when the data directory has
-/// no spec for it.
-fn author_vendor(programs: &[Program], agent: &str) -> Option<Vendor> {
-    programs
-        .iter()
-        .find(|program| program.spec.id == agent)
-        .map(|program| program.spec.vendor)
+/// The model family table the data directory ships, or an empty one.
+///
+/// An empty table knows no family, so every vendor is unknown and every review
+/// must say so: a table that cannot be read may never make a reviewer look
+/// independent.
+fn families_table() -> Families {
+    let Ok(dir) = crate::cmd::roster::resolve_data_dir() else {
+        return Families::default();
+    };
+    Families::load(&dir.join("models").join("families.toml")).unwrap_or_default()
+}
+
+/// The family of the model the author wrote the change with.
+///
+/// The run log records the author's program and its model separately, and both
+/// are needed: `pi` on DeepSeek and `pi` on Claude are different families.
+/// [`None`] when the program names no harness, no model was recorded, or the
+/// model is one no family claims.
+fn author_vendor(
+    specs: &[HarnessSpec],
+    agent: &str,
+    model: Option<&str>,
+    families: &Families,
+) -> Option<String> {
+    let parsed = AgentRef {
+        program: agent.to_owned(),
+        model: model.map(str::to_owned),
+    };
+    agent_vendor(&parsed, specs, families)
 }
 
 /// What a reviewer's brief says, as data, so its rendering is testable alone.
@@ -631,6 +671,7 @@ pub fn review(
     let reviewer = choose_reviewer(
         env.reviewer.as_deref(),
         &attempt.agent,
+        attempt.model.as_deref(),
         &env.spawn.programs,
         req.degraded,
     )?;
@@ -735,11 +776,23 @@ mod tests {
     /// A harness spec for a fake CLI from `vendor`: the tests record the launch,
     /// never run it, so `interactive` is the harmless `sh`.
     fn fake_spec(id: &str, vendor: &str) -> HarnessSpec {
+        fake_model_spec(id, vendor, false, false)
+    }
+
+    /// A fake CLI that runs other vendors' models, when `multi_model` says so,
+    /// and wants the provider in the model name when `provider_qualified` does.
+    fn fake_model_spec(
+        id: &str,
+        vendor: &str,
+        multi_model: bool,
+        provider_qualified: bool,
+    ) -> HarnessSpec {
         let text = format!(
             r#"
 id = "{id}"
 name = "Fake {id}"
 vendor = "{vendor}"
+multi_model = {multi_model}
 verified_version = "1.0.0"
 dry_patterns = []
 
@@ -755,7 +808,7 @@ model_args = ["--model", "{{model}}"]
 verified = false
 
 [models]
-provider_qualified = false
+provider_qualified = {provider_qualified}
 
 [records]
 kind = "jsonl"
@@ -836,11 +889,21 @@ project_dirs = []
 
         /// Records the attempt `git` describes: `sh` worked on `feature/t1`.
         fn reported(&self, ctx: &Ctx) {
+            self.reported_as(ctx, "sh");
+        }
+
+        /// Records one completed attempt whose worker was `agent`.
+        fn reported_as(&self, ctx: &Ctx, agent: &str) {
+            self.reported_with(ctx, agent, None);
+        }
+
+        /// Records one completed attempt whose worker ran `model`.
+        fn reported_with(&self, ctx: &Ctx, agent: &str, model: Option<&str>) {
             ctx.commit(EventKind::Spawned {
                 task: "T1".to_string(),
                 attempt: 1,
-                agent: "sh".to_string(),
-                model: None,
+                agent: agent.to_string(),
+                model: model.map(str::to_owned),
                 worktree: "/tmp/wt/T1".to_string(),
                 branch: "feature/t1".to_string(),
             })
@@ -861,6 +924,33 @@ project_dirs = []
         /// The environment a review runs in, with three fake CLIs: two from one
         /// vendor and one from another.
         fn review_env<'a>(&self, ctx: &'a Ctx, reviewer: Option<&str>) -> ReviewEnv<'a> {
+            self.review_env_with(
+                ctx,
+                reviewer,
+                vec![
+                    Program {
+                        spec: fake_spec("sh", "pi"),
+                        installed: true,
+                    },
+                    Program {
+                        spec: fake_spec("pi", "pi"),
+                        installed: true,
+                    },
+                    Program {
+                        spec: fake_spec("codex", "openai"),
+                        installed: true,
+                    },
+                ],
+            )
+        }
+
+        /// The environment a review runs in, with the programs it should see.
+        fn review_env_with<'a>(
+            &self,
+            ctx: &'a Ctx,
+            reviewer: Option<&str>,
+            programs: Vec<Program>,
+        ) -> ReviewEnv<'a> {
             let mut base_env = BTreeMap::new();
             base_env.insert("GH_TOKEN".to_string(), "secret".to_string());
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
@@ -872,20 +962,7 @@ project_dirs = []
                     run: "t1".to_string(),
                     base_branch: "integration/m4".to_string(),
                     repo_name: self.repo_name(),
-                    programs: vec![
-                        Program {
-                            spec: fake_spec("sh", "pi"),
-                            installed: true,
-                        },
-                        Program {
-                            spec: fake_spec("pi", "pi"),
-                            installed: true,
-                        },
-                        Program {
-                            spec: fake_spec("codex", "openai"),
-                            installed: true,
-                        },
-                    ],
+                    programs,
                     workers: vec!["sh".to_string()],
                     skills: Skills::default(),
                     compat: Vec::new(),
@@ -977,8 +1054,9 @@ project_dirs = []
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         scratch.reported(&ctx);
-        // `pi` and `sh` are two CLIs from one vendor, so neither can review the
-        // other's work: the rule is about vendors, not programs.
+        // `pi` and `sh` are both single-vendor here and both read as `pi`, so
+        // neither can review the other's work: the rule is about the model's
+        // family, not the program.
         let env = scratch.review_env(&ctx, Some("pi/m1"));
         let mux = scratch.mux();
 
@@ -986,7 +1064,10 @@ project_dirs = []
 
         assert_eq!(err.exit_code(), 2);
         let message = format!("{err}");
-        assert!(message.contains("both Pi"), "{message}");
+        assert!(
+            message.contains("both run models from the pi family"),
+            "{message}"
+        );
         assert!(message.contains("--degraded"), "{message}");
         // Nothing was written and no tab was opened.
         assert!(!env.reviews_dir.exists(), "no packet may be written");
@@ -996,6 +1077,101 @@ project_dirs = []
                 .all(|call| !matches!(call, Call::CreateTab(..))),
             "no tab may be opened"
         );
+    }
+
+    /// The programs a family-aware review sees: pi and opencode run other
+    /// vendors' models, kilo is a free router, claude and codex are
+    /// single-vendor.
+    fn family_programs() -> Vec<Program> {
+        vec![
+            Program {
+                spec: fake_model_spec("pi", "pi", true, true),
+                installed: true,
+            },
+            Program {
+                spec: fake_model_spec("kilo", "kilo", true, false),
+                installed: true,
+            },
+            Program {
+                spec: fake_spec("opencode", "opencode"),
+                installed: true,
+            },
+            Program {
+                spec: fake_spec("claude", "anthropic"),
+                installed: true,
+            },
+            Program {
+                spec: fake_spec("codex", "openai"),
+                installed: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_pi_worker_on_deepseek_is_reviewed_by_a_pi_reviewer_on_claude() {
+        // Same CLI, two model families: this is cross-vendor review, and must
+        // not be refused just because `pi` wrote it and `pi` reviews it.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported_with(&ctx, "pi", Some("deepseek/deepseek-v4.1-flash"));
+        let env =
+            scratch.review_env_with(&ctx, Some("pi/claude/claude-opus-5-5"), family_programs());
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.degraded, "the review is cross-vendor");
+        assert_eq!(report.agent, "pi");
+        assert!(report.dir.is_dir(), "the packet was written");
+    }
+
+    #[test]
+    fn a_pi_worker_on_claude_cannot_be_reviewed_by_claude_code() {
+        // Two CLIs, one model family: this is not cross-vendor review, so it is
+        // refused rather than passed.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported_with(&ctx, "pi", Some("claude/claude-opus-5-5"));
+        let env = scratch.review_env_with(&ctx, Some("claude/claude-opus-5-5"), family_programs());
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &request(false)).unwrap_err();
+
+        assert_eq!(err.exit_code(), 2);
+        let message = format!("{err}");
+        assert!(
+            message.contains("both run models from the anthropic family"),
+            "{message}"
+        );
+        assert!(message.contains("--degraded"), "{message}");
+        assert!(!env.reviews_dir.exists(), "no packet may be written");
+    }
+
+    #[test]
+    fn a_worker_on_a_router_is_never_assumed_independent() {
+        // `kilo/kilo-auto/free` names no model family, so nothing proves the
+        // reviewer differs. A wrong-but-passing review is worse than a
+        // degraded one, so the review is refused unless it may be labelled.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported_with(&ctx, "kilo", Some("kilo-auto/free"));
+        let env = scratch.review_env_with(&ctx, Some("codex/gpt-5-codex"), family_programs());
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &request(false)).unwrap_err();
+
+        assert_eq!(err.exit_code(), 2);
+        let message = format!("{err}");
+        assert!(
+            message.contains(
+                "cannot prove the reviewer is a different vendor: kilo/kilo-auto/free \
+                 has no known model family"
+            ),
+            "{message}"
+        );
+
+        let degraded = review(&mux, &env, &request(true)).unwrap_or_else(|err| panic!("{err}"));
+        assert!(degraded.degraded, "a labelled review is allowed");
     }
 
     #[test]

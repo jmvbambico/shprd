@@ -145,8 +145,10 @@ fn stdout(output: &Output) -> String {
 
 #[test]
 fn reports_every_section_and_succeeds_on_a_clean_setup() {
+    // A pi reviewer on DeepSeek reviews a Claude worker: different model
+    // families, so the section passes.
     let setup = Setup::new(
-        "orchestrator = \"claude/opus\"\nreviewer = \"pi/anthropic/claude-sonnet\"\nworkers = [\"claude/opus\"]",
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
     );
     let output = setup.run(&[]);
     let text = stdout(&output);
@@ -207,7 +209,10 @@ fn fails_when_the_reviewer_shares_a_vendor_with_a_worker() {
         .lines()
         .find(|line| line.trim_start().starts_with("✗"))
         .unwrap_or_else(|| panic!("no failing line in {text}"));
-    assert!(fail.contains("same vendor"), "wrong failure: {fail}");
+    assert!(
+        fail.contains("runs the anthropic family: the same as worker(s)"),
+        "wrong failure: {fail}"
+    );
     assert!(
         fail.contains("claude"),
         "the reviewer should be named: {fail}"

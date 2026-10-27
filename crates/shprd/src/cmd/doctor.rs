@@ -12,10 +12,11 @@ use anyhow::anyhow;
 use shprd_core::config::{self, Config, Roster};
 use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
+use shprd_roster::families::{Families, agent_vendor};
 use shprd_roster::models::AgentRef;
 use shprd_roster::quota::{self, ProbeContext, QuotaReport, QuotaState};
 use shprd_roster::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
-use shprd_roster::spec::{HarnessSpec, Vendor, load_dir};
+use shprd_roster::spec::{HarnessSpec, load_dir};
 
 use crate::cli::DoctorArgs;
 use crate::ctx::{CliError, resolve_home};
@@ -428,13 +429,32 @@ fn describe(detection: &Detection) -> (Level, String) {
     (level, text)
 }
 
-/// The vendor `agent` names, or why the string names none.
-fn vendor_or_reason(specs: &[HarnessSpec], agent: &str) -> Result<Vendor, String> {
+/// The model family `agent` runs, or why nothing proves one.
+///
+/// The family, not the CLI's vendor: a `pi` worker on DeepSeek and a `pi`
+/// reviewer on Claude are different families, and a router that names no model
+/// family proves nothing at all.
+fn vendor_or_reason(
+    specs: &[HarnessSpec],
+    families: &Families,
+    agent: &str,
+) -> Result<String, String> {
     let named = AgentRef::parse(agent, specs).map_err(|error| error.to_string())?;
-    named
-        .spec(specs)
-        .map(|spec| spec.vendor)
-        .ok_or_else(|| format!("the harness table has no spec for `{}`", named.program))
+    agent_vendor(&named, specs, families).ok_or_else(|| match &named.model {
+        Some(model) => format!("`{model}` names no known model family"),
+        None => "it names no model".to_owned(),
+    })
+}
+
+/// The model family table the data directory ships, or an empty one.
+///
+/// An empty table knows no family, so every line about a family is a warning
+/// rather than a pass.
+fn families_table(facts: &Facts) -> Families {
+    let Some(data) = &facts.data else {
+        return Families::default();
+    };
+    Families::load(&data.join("models").join("families.toml")).unwrap_or_default()
 }
 
 /// Section 5: whether the reviewer comes from another vendor than every worker.
@@ -442,8 +462,9 @@ fn vendor_or_reason(specs: &[HarnessSpec], agent: &str) -> Result<Vendor, String
 /// An agent string that names no vendor is reported as a warning line rather
 /// than skipped, and a review with any such agent never claims independence:
 /// an unchecked worker could share the reviewer's vendor.
-fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
+fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
     let section = report.section("Review");
+    let families = families_table(facts);
     let Some(roster) = config.map(|config| &config.roster) else {
         section.add(Level::Warn, "no config loads, so no reviewer to check");
         return;
@@ -457,7 +478,7 @@ fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Op
         return;
     };
     let mut skipped = 0usize;
-    let vendor = match vendor_or_reason(specs, reviewer) {
+    let vendor = match vendor_or_reason(specs, &families, reviewer) {
         Ok(vendor) => Some(vendor),
         Err(reason) => {
             skipped += 1;
@@ -470,7 +491,7 @@ fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Op
     };
     let mut clashes: Vec<&str> = Vec::new();
     for worker in &roster.workers {
-        match vendor_or_reason(specs, worker) {
+        match vendor_or_reason(specs, &families, worker) {
             Ok(worker_vendor) => {
                 if vendor == Some(worker_vendor) {
                     clashes.push(worker.as_str());
@@ -488,16 +509,12 @@ fn review(report: &mut Report, _facts: &Facts, specs: &[HarnessSpec], config: Op
     match vendor {
         Some(vendor) if clashes.is_empty() && skipped == 0 => section.add(
             Level::Ok,
-            format!(
-                "reviewer {reviewer} is {}, independent of every worker",
-                vendor_name(vendor)
-            ),
+            format!("reviewer {reviewer} runs the {vendor} family, independent of every worker"),
         ),
         Some(vendor) if !clashes.is_empty() => section.add(
             Level::Fail,
             format!(
-                "reviewer {reviewer} is {}: the same vendor as worker(s) {}",
-                vendor_name(vendor),
+                "reviewer {reviewer} runs the {vendor} family: the same as worker(s) {}",
                 clashes.join(", ")
             ),
         ),
@@ -820,6 +837,58 @@ mod tests {
         review(&mut page, &Facts::resolve(None), &specs, Some(&config));
         let text = render(&page);
         assert!(text.contains("cannot check vendor of gemini/pro"), "{text}");
+        assert!(!text.contains("independent of every worker"), "{text}");
+    }
+
+    #[test]
+    fn a_pi_reviewer_on_claude_is_independent_of_a_pi_worker_on_deepseek() {
+        // The CLI is the same on both sides; the model families are not.
+        let specs = harness_specs();
+        let mut config = config(None, &["pi/Command Code/deepseek/deepseek-v4.1-flash"]);
+        config.roster.reviewer = Some("pi/openrouter/anthropic/claude-opus-5-5".to_owned());
+        let mut page = Report::default();
+        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        let text = render(&page);
+        assert!(
+            text.contains("runs the anthropic family, independent of every worker"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_reviewer_from_the_workers_model_family_fails_the_section() {
+        // A pi worker on Claude and Claude Code are the same family, so the
+        // section fails even though the two CLIs differ.
+        let specs = harness_specs();
+        let mut config = config(None, &["pi/claude/claude-opus-5-5"]);
+        config.roster.reviewer = Some("claude/claude-opus-5-5".to_owned());
+        let mut page = Report::default();
+        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        let text = render(&page);
+        assert!(
+            text.contains("✗ reviewer claude/claude-opus-5-5 runs the anthropic family"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the same as worker(s) pi/claude/claude-opus-5-5"),
+            "{text}"
+        );
+        assert!(!text.contains("independent of every worker"), "{text}");
+    }
+
+    #[test]
+    fn a_worker_on_a_router_is_reported_and_never_called_independent() {
+        let specs = harness_specs();
+        let mut config = config(None, &["kilo/kilo-auto/free"]);
+        config.roster.reviewer = Some("codex/gpt-5-codex".to_owned());
+        let mut page = Report::default();
+        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        let text = render(&page);
+        assert!(
+            text.contains("! cannot check vendor of kilo/kilo-auto/free"),
+            "{text}"
+        );
+        assert!(text.contains("names no known model family"), "{text}");
         assert!(!text.contains("independent of every worker"), "{text}");
     }
 
