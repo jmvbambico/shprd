@@ -262,10 +262,23 @@ struct Transfer<'a> {
     pane_tail: Option<&'a str>,
 }
 
+/// The brief the attempt started with, as the agent that read it saw it.
+///
+/// The file the attempt was launched with is the record of what it was told, so
+/// a hand-off continues that text instead of re-rendering it from state that
+/// has moved on since. Only a missing or empty file falls back to the render.
+fn base_brief(env: &SpawnEnv<'_>, task: &str, attempt: u32, input: &BriefInput<'_>) -> String {
+    let path = spawn::brief_path(&env.briefs_dir, &env.run, task, attempt);
+    match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => text,
+        _ => spawn::render_brief(input),
+    }
+}
+
 /// Renders the hand-off brief: the brief the attempt started with, then what
 /// the newcomer needs that the outgoing agent did not have.
-fn handoff_brief(base: &BriefInput<'_>, transfer: &Transfer<'_>) -> String {
-    let mut out = spawn::render_brief(base);
+fn handoff_brief(base: &str, transfer: &Transfer<'_>) -> String {
+    let mut out = base.to_string();
     out.push_str("\n## You are taking over\n\n");
     out.push_str(&format!(
         "- this attempt was handed from `{}` to `{}`\n",
@@ -357,17 +370,18 @@ pub fn handoff(
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
     let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
+    let start = BriefInput {
+        task,
+        run: &env.run,
+        attempt: attempt.n,
+        agent: &to.agent,
+        model: to.model.as_deref(),
+        branch: &attempt.branch,
+        worktree: &attempt.worktree,
+        skills: &skills,
+    };
     let brief = handoff_brief(
-        &BriefInput {
-            task,
-            run: &env.run,
-            attempt: attempt.n,
-            agent: &to.agent,
-            model: to.model.as_deref(),
-            branch: &attempt.branch,
-            worktree: &attempt.worktree,
-            skills: &skills,
-        },
+        &base_brief(env, &task.id, attempt.n, &start),
         &Transfer {
             from: &from,
             to: &to.agent,
@@ -1046,5 +1060,28 @@ project_dirs = []
             tabs.is_empty(),
             "the newcomer's tab was left open: {tabs:?}"
         );
+    }
+
+    /// The newcomer continues the brief the attempt actually ran with, not a
+    /// rendering of the state as it looks now.
+    #[test]
+    fn the_hand_off_brief_starts_from_the_attempt_s_real_brief() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let original = spawn::brief_path(&env.briefs_dir, &env.run, "T1", 1);
+        std::fs::write(&original, "# the brief this attempt ran with\n")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = handoff(&mux, &env, &request(None)).unwrap_or_else(|err| panic!("{err}"));
+
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(
+            brief.starts_with("# the brief this attempt ran with"),
+            "the hand-off did not continue the attempt's brief: {brief:?}"
+        );
+        assert!(brief.contains("## You are taking over"), "{brief:?}");
     }
 }

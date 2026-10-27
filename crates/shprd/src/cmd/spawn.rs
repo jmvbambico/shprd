@@ -598,7 +598,7 @@ pub fn select_skills(skills: &Skills, compat: &[CompatEntry], tags: &[String]) -
 }
 
 /// Where a brief file lives: `<briefs>/<run>/<task>-a<attempt>.md`.
-fn brief_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+pub(crate) fn brief_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
     briefs.join(run).join(format!("{task}-a{attempt}.md"))
 }
 
@@ -851,15 +851,20 @@ pub(crate) fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> Pa
 /// A failure is only a warning: the agent is running, and a prompt that cannot
 /// find the record says so.
 pub(crate) fn write_tab(path: &Path, tab: &shprd_mux::TabId) {
-    if let Some(parent) = path.parent()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        eprintln!("warning: could not create {}: {err}", parent.display());
-        return;
+    if let Err(err) = write_tab_checked(path, tab) {
+        eprintln!("warning: {err}");
     }
-    if let Err(err) = std::fs::write(path, tab.as_str()) {
-        eprintln!("warning: could not write {}: {err}", path.display());
+}
+
+/// Records the tab an attempt opened, reporting why it could not.
+pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!("creating {}", parent.display())))
+        })?;
     }
+    std::fs::write(path, tab.as_str())
+        .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
 /// The tab record of a task's latest attempt in one run.
