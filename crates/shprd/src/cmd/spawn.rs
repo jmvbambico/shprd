@@ -108,13 +108,13 @@ pub struct SpawnReport {
 
 /// The agent a spawn picked, with everything needed to start it.
 #[derive(Debug, Clone)]
-struct Pick {
+pub(crate) struct Pick {
     /// The program name, which is the harness spec id.
-    agent: String,
+    pub(crate) agent: String,
     /// The model to select, when the agent string carried one.
-    model: Option<String>,
+    pub(crate) model: Option<String>,
     /// How to start the program.
-    launch: LaunchSpec,
+    pub(crate) launch: LaunchSpec,
 }
 
 /// Spawns an agent for one task attempt.
@@ -203,7 +203,10 @@ pub fn spawn(
 }
 
 /// The repository's workspace, or an error telling the human to create it.
-fn workspace_of(mux: &dyn Mux, env: &SpawnEnv<'_>) -> Result<shprd_mux::Workspace, CliError> {
+pub(crate) fn workspace_of(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+) -> Result<shprd_mux::Workspace, CliError> {
     let name = naming::workspace_name(&env.repo_name);
     mux.find_workspace(&name)
         .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
@@ -218,22 +221,22 @@ fn workspace_of(mux: &dyn Mux, env: &SpawnEnv<'_>) -> Result<shprd_mux::Workspac
 /// cannot take the brief as an argument, so the brief is typed in as the agent's
 /// first turn instead.
 /// What [`open_agent`] needs to start one attempt's CLI.
-struct Launching<'a> {
+pub(crate) struct Launching<'a> {
     /// The agent that was picked.
-    pick: &'a Pick,
+    pub(crate) pick: &'a Pick,
     /// The task it works on.
-    task: &'a str,
+    pub(crate) task: &'a str,
     /// The effort it runs at, when one was asked for.
-    effort: Option<&'a str>,
+    pub(crate) effort: Option<&'a str>,
     /// The brief the agent reads.
-    brief: &'a str,
+    pub(crate) brief: &'a str,
     /// The brief file's path.
-    brief_path: &'a Path,
+    pub(crate) brief_path: &'a Path,
     /// The worktree the agent works in.
-    worktree: &'a Worktree,
+    pub(crate) worktree: &'a Worktree,
 }
 
-fn open_agent(
+pub(crate) fn open_agent(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
     workspace: &shprd_mux::Workspace,
@@ -331,7 +334,7 @@ fn start_in_tab(
 
 /// Closes a tab this spawn opened, ignoring the failure for the same reason as
 /// [`discard_worktree`].
-fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
+pub(crate) fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
     if let Err(err) = mux.close_tab(tab) {
         eprintln!("warning: could not close tab {}: {err}", tab.as_str());
     }
@@ -469,7 +472,7 @@ fn record_attempt(
 }
 
 /// The task `id` names, or an error saying the run plan has no such task.
-fn task_of<'a>(state: &'a RunState, id: &str) -> Result<&'a Task, CliError> {
+pub(crate) fn task_of<'a>(state: &'a RunState, id: &str) -> Result<&'a Task, CliError> {
     state.tasks.get(id).ok_or_else(|| {
         CliError::other(anyhow!(
             "no task {id:?} in this run: add it with `shprd agent task add`"
@@ -482,7 +485,7 @@ fn task_of<'a>(state: &'a RunState, id: &str) -> Result<&'a Task, CliError> {
 /// [`AgentRef::parse`] takes borrowed specs, so this copies the ones the
 /// environment already holds rather than making the caller hand both a program
 /// list and a spec list.
-fn spec_table(programs: &[Program]) -> Vec<HarnessSpec> {
+pub(crate) fn spec_table(programs: &[Program]) -> Vec<HarnessSpec> {
     programs
         .iter()
         .map(|program| program.spec.clone())
@@ -491,7 +494,10 @@ fn spec_table(programs: &[Program]) -> Vec<HarnessSpec> {
 
 /// The program the parser named, or an error when the data directory has no
 /// spec for it.
-fn program_of<'a>(programs: &'a [Program], agent: &str) -> Result<&'a Program, CliError> {
+pub(crate) fn program_of<'a>(
+    programs: &'a [Program],
+    agent: &str,
+) -> Result<&'a Program, CliError> {
     programs
         .iter()
         .find(|program| program.spec.id == agent)
@@ -592,12 +598,12 @@ pub fn select_skills(skills: &Skills, compat: &[CompatEntry], tags: &[String]) -
 }
 
 /// Where a brief file lives: `<briefs>/<run>/<task>-a<attempt>.md`.
-fn brief_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+pub(crate) fn brief_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
     briefs.join(run).join(format!("{task}-a{attempt}.md"))
 }
 
 /// Writes a brief file, creating its directory first.
-fn write_brief(path: &Path, text: &str) -> Result<(), CliError> {
+pub(crate) fn write_brief(path: &Path, text: &str) -> Result<(), CliError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
             CliError::other(anyhow!(err).context(format!("creating {}", parent.display())))
@@ -835,7 +841,7 @@ fn no_open_tab(task: &str) -> CliError {
 
 /// Where an attempt records the id of the tab it opened:
 /// `<briefs>/<run>/<task>-a<attempt>.tab`, next to its brief.
-fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+pub(crate) fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
     briefs.join(run).join(format!("{task}-a{attempt}.tab"))
 }
 
@@ -844,16 +850,21 @@ fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
 ///
 /// A failure is only a warning: the agent is running, and a prompt that cannot
 /// find the record says so.
-fn write_tab(path: &Path, tab: &shprd_mux::TabId) {
-    if let Some(parent) = path.parent()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        eprintln!("warning: could not create {}: {err}", parent.display());
-        return;
+pub(crate) fn write_tab(path: &Path, tab: &shprd_mux::TabId) {
+    if let Err(err) = write_tab_checked(path, tab) {
+        eprintln!("warning: {err}");
     }
-    if let Err(err) = std::fs::write(path, tab.as_str()) {
-        eprintln!("warning: could not write {}: {err}", path.display());
+}
+
+/// Records the tab an attempt opened, reporting why it could not.
+pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!("creating {}", parent.display())))
+        })?;
     }
+    std::fs::write(path, tab.as_str())
+        .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
 /// The tab record of a task's latest attempt in one run.
@@ -1898,6 +1909,149 @@ mod tests {
                 text.contains(needle),
                 "brief is missing {needle:?}:\n{text}"
             );
+        }
+    }
+}
+
+/// Test-only host behaviour: a [`FakeMux`] that fails one call kind.
+///
+/// A transient host error and a closed tab are the same value to a caller that
+/// swallows errors, so the tests that must tell them apart make exactly one
+/// call fail here.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use shprd_mux::fake::FakeMux;
+    use shprd_mux::{
+        AgentState, Capabilities, Direction, Mux, MuxError, MuxEvent, PaneId, Tab, TabId,
+        Workspace, WorkspaceId,
+    };
+
+    /// The call a [`FlakyMux`] makes fail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Fault {
+        /// [`Mux::list_tabs`] answers [`MuxError::Command`].
+        ListTabs,
+        /// [`Mux::close_tab`] answers [`MuxError::Command`].
+        CloseTab,
+    }
+
+    /// A [`FakeMux`] whose `fault` call fails with a host error that is not
+    /// [`MuxError::NotFound`], i.e. one a caller must not read as "gone".
+    pub(crate) struct FlakyMux {
+        /// The fake host that answers every other call.
+        inner: FakeMux,
+        /// The call that fails.
+        fault: Fault,
+    }
+
+    impl FlakyMux {
+        /// Wraps `inner`, failing `fault`.
+        pub(crate) fn new(inner: FakeMux, fault: Fault) -> Self {
+            Self { inner, fault }
+        }
+
+        /// The fake underneath, so a test can script panes and read the calls.
+        pub(crate) fn inner(&self) -> &FakeMux {
+            &self.inner
+        }
+
+        /// The host error the failing call answers, if this is it.
+        fn failure(&self, call: Fault) -> Option<MuxError> {
+            if self.fault == call {
+                return Some(MuxError::command("the fake host", "the host went away"));
+            }
+            None
+        }
+    }
+
+    impl Mux for FlakyMux {
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+
+        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<Workspace>> {
+            self.inner.find_workspace(name)
+        }
+
+        fn create_workspace(&self, name: &str, cwd: &Path) -> shprd_mux::Result<Workspace> {
+            self.inner.create_workspace(name, cwd)
+        }
+
+        fn focus_workspace(&self, workspace: &WorkspaceId) -> shprd_mux::Result<()> {
+            self.inner.focus_workspace(workspace)
+        }
+
+        fn list_tabs(&self, workspace: &WorkspaceId) -> shprd_mux::Result<Vec<Tab>> {
+            match self.failure(Fault::ListTabs) {
+                Some(err) => Err(err),
+                None => self.inner.list_tabs(workspace),
+            }
+        }
+
+        fn create_tab(
+            &self,
+            workspace: &WorkspaceId,
+            title: &str,
+            cwd: &Path,
+        ) -> shprd_mux::Result<Tab> {
+            self.inner.create_tab(workspace, title, cwd)
+        }
+
+        fn rename_tab(&self, tab: &TabId, title: &str) -> shprd_mux::Result<()> {
+            self.inner.rename_tab(tab, title)
+        }
+
+        fn focus_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+            self.inner.focus_tab(tab)
+        }
+
+        fn close_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+            match self.failure(Fault::CloseTab) {
+                Some(err) => Err(err),
+                None => self.inner.close_tab(tab),
+            }
+        }
+
+        fn split(
+            &self,
+            pane: &PaneId,
+            direction: Direction,
+            ratio: f32,
+            cwd: &Path,
+        ) -> shprd_mux::Result<PaneId> {
+            self.inner.split(pane, direction, ratio, cwd)
+        }
+
+        fn run(
+            &self,
+            pane: &PaneId,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+        ) -> shprd_mux::Result<()> {
+            self.inner.run(pane, argv, env)
+        }
+
+        fn send_text(&self, pane: &PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.send_text(pane, text)
+        }
+
+        fn prompt(&self, pane: &PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.prompt(pane, text)
+        }
+
+        fn read(&self, pane: &PaneId, lines: usize) -> shprd_mux::Result<String> {
+            self.inner.read(pane, lines)
+        }
+
+        fn agent_state(&self, pane: &PaneId) -> shprd_mux::Result<AgentState> {
+            self.inner.agent_state(pane)
+        }
+
+        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<MuxEvent>> {
+            self.inner.next_events(timeout)
         }
     }
 }

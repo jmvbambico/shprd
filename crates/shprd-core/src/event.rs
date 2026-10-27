@@ -224,6 +224,13 @@ pub enum EventKind {
         /// When it is expected back, ms since the Unix epoch.
         reset_at_ms: Option<u64>,
     },
+    /// A dry agent was re-admitted (its cooldown was cleared).
+    Available {
+        /// The agent.
+        agent: AgentId,
+        /// Why it is usable again.
+        reason: String,
+    },
     /// A task was handed from one agent to another.
     HandedOff {
         /// The task.

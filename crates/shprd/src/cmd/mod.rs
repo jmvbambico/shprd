@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod dagr;
 pub mod doctor;
+pub mod handoff;
 pub mod janitor;
 pub mod keys;
 pub mod launch;
@@ -12,6 +13,7 @@ pub mod set;
 pub mod spawn;
 pub mod up;
 pub mod view;
+pub mod watch;
 
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
@@ -70,6 +72,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Keys(args)) => keys::run(&args, None),
         Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Down) => up::down(&ctx),
+        Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 
@@ -132,6 +135,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::Dry { .. } => "dry",
+        EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
         EventKind::Override { .. } => "override",

@@ -92,6 +92,19 @@ pub enum Command {
     Up,
     /// Finish the run; refuses while a task is still working.
     Down,
+    /// Watch every working agent and hand work over when one goes dry.
+    Watch(WatchArgs),
+}
+
+/// Arguments for `watch`.
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    /// Run one polling pass and exit, instead of watching until stopped.
+    #[arg(long)]
+    pub once: bool,
+    /// How long to wait between polling passes, in milliseconds.
+    #[arg(long = "interval-ms", value_name = "MS", default_value_t = 10_000)]
+    pub interval_ms: u64,
 }
 
 /// Arguments for `janitor`.
@@ -229,6 +242,8 @@ pub enum AgentCommand {
     Override(OverrideArgs),
     /// Record that a task's commits landed.
     Integrate(IntegrateArgs),
+    /// Hand a task from one agent to the next, keeping its worktree.
+    Handoff(HandoffArgs),
 }
 
 /// Plan verbs.
@@ -298,6 +313,25 @@ pub struct SpawnArgs {
     /// Branch the agent commits on, for `--record-only` only.
     #[arg(long, value_name = "BRANCH")]
     pub branch: Option<String>,
+}
+
+/// Arguments for `agent handoff`.
+///
+/// The task keeps its attempt, its worktree and its branch; only the agent in
+/// the tab changes, so the hand-over is a checkpoint plus a new brief.
+#[derive(Debug, Args)]
+pub struct HandoffArgs {
+    /// The task to hand over.
+    #[arg(long, value_name = "ID")]
+    pub task: String,
+    /// Why it is being handed over; the next agent reads this.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+    /// The agent taking it over, as `<program>/<model>`.
+    ///
+    /// Defaults to the next configured worker after the current one.
+    #[arg(long, value_name = "PROGRAM/MODEL")]
+    pub to: Option<String>,
 }
 
 /// Arguments for `agent prompt`.

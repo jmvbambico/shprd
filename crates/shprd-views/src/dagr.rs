@@ -417,6 +417,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::Dry { .. } => "dry",
+        EventKind::Available { .. } => "available",
         EventKind::HandedOff { .. } => "handed_off",
         EventKind::Escalated { .. } => "escalated",
         EventKind::Override { .. } => "override",

@@ -1076,3 +1076,22 @@ fn janitor_takes_the_namespace_from_the_repo_config() {
         "the configured namespace owns {branch}: {configured}"
     );
 }
+
+#[test]
+fn handoff_needs_a_task_and_a_reason() {
+    let root = repo();
+    let root = root.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    let help = ok(root, &["agent", "handoff", "--help"]);
+    assert!(help.contains("--task"), "{help}");
+    assert!(help.contains("--reason"), "{help}");
+    assert!(help.contains("--to"), "{help}");
+    let missing = run(root, &["agent", "handoff", "--task", "T1"]);
+    assert_eq!(
+        missing.status.code(),
+        Some(2),
+        "a hand-off without a reason must be a usage error: {}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}

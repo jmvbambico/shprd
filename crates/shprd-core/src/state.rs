@@ -385,6 +385,12 @@ impl RunState {
                 info.dry_until_ms = *reset_at_ms;
                 info.dry_reason = Some(reason.clone());
             }
+            EventKind::Available { agent, .. } => {
+                let info = self.agents.entry(agent.clone()).or_default();
+                info.dry = false;
+                info.dry_until_ms = None;
+                info.dry_reason = None;
+            }
             EventKind::HandedOff { task, to_agent, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task)
                     && let Some(current) = entry.attempts.last_mut()

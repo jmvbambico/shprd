@@ -104,6 +104,12 @@ pub enum RuleError {
         /// The agent.
         agent: AgentId,
     },
+    /// The agent is not on cooldown, so there is nothing to clear.
+    #[error("agent {agent:?} is not dry")]
+    AgentNotDry {
+        /// The agent.
+        agent: AgentId,
+    },
     /// The task's scope clashes with another task's.
     #[error("task {task:?} path {path:?} overlaps task {other:?}")]
     ScopeConflict {
@@ -214,6 +220,16 @@ pub(crate) fn is_dry(info: Option<&AgentInfo>, now_ms: u64) -> bool {
     }
 }
 
+/// Whether `agent` may be re-admitted: only an agent the log has on cooldown.
+fn check_available(state: &RunState, agent: &str) -> Result<(), RuleError> {
+    match state.agents.get(agent) {
+        Some(info) if info.dry => Ok(()),
+        _ => Err(RuleError::AgentNotDry {
+            agent: agent.to_string(),
+        }),
+    }
+}
+
 /// Checks one event kind against `state` as of `now_ms`.
 pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(), RuleError> {
     if let EventKind::RunStarted { .. } = kind {
@@ -254,6 +270,7 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
         | EventKind::GateFailed { task, attempt, .. } => check_gate(state, task, *attempt),
         EventKind::Integrated { task, .. } => check_integrated(state, task),
         EventKind::Dry { .. } => Ok(()),
+        EventKind::Available { agent, .. } => check_available(state, agent),
         EventKind::HandedOff { task, to_agent, .. } => {
             check_handed_off(state, task, to_agent, now_ms)
         }
@@ -784,6 +801,16 @@ mod tests {
         )
     }
 
+    fn available(seq: u64, agent: &str) -> Event {
+        ev(
+            seq,
+            EventKind::Available {
+                agent: agent.to_string(),
+                reason: "quota reset".to_string(),
+            },
+        )
+    }
+
     fn finished(seq: u64) -> Event {
         ev(seq, EventKind::RunFinished {})
     }
@@ -1165,6 +1192,36 @@ mod tests {
             spawned(4, "a", 1, "agent-1"),
         ];
         assert!(matches!(refused(&log), RuleError::AgentDry { .. }));
+    }
+
+    #[test]
+    fn available_readmits_a_dry_agent() {
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            dried(3, "agent-1", None),
+            spawned(4, "a", 1, "agent-1"),
+        ];
+        assert!(matches!(refused(&log), RuleError::AgentDry { .. }));
+        let readmitted = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            dried(3, "agent-1", None),
+            available(4, "agent-1"),
+            spawned(5, "a", 1, "agent-1"),
+        ];
+        assert_eq!(status(&folded(&readmitted), "a"), TaskStatus::Working);
+        assert!(!folded(&readmitted).agents["agent-1"].dry);
+    }
+
+    #[test]
+    fn available_is_refused_for_an_agent_that_is_not_dry() {
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            available(3, "agent-1"),
+        ];
+        assert!(matches!(refused(&log), RuleError::AgentNotDry { .. }));
     }
 
     #[test]
