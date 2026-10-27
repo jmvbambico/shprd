@@ -1,0 +1,16 @@
+{
+  "id": "cli:workspace:focus",
+  "result": {
+    "type": "workspace_info",
+    "workspace": {
+      "active_tab_id": "w1:t2",
+      "agent_status": "working",
+      "focused": true,
+      "label": "probe ws",
+      "number": 1,
+      "pane_count": 2,
+      "tab_count": 2,
+      "workspace_id": "w1"
+    }
+  }
+}

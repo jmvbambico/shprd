@@ -1,0 +1,19 @@
+{
+  "id": "cli:agent:get",
+  "result": {
+    "agent": {
+      "agent": "claude",
+      "agent_status": "working",
+      "cwd": "/tmp/fixture",
+      "focused": false,
+      "foreground_cwd": "/tmp/fixture",
+      "pane_id": "w1:p1",
+      "revision": 0,
+      "state_change_seq": 1,
+      "tab_id": "w1:t1",
+      "terminal_id": "term_fixture",
+      "workspace_id": "w1"
+    },
+    "type": "agent_info"
+  }
+}
