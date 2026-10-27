@@ -781,3 +781,36 @@ fn a_merge_done_on_the_forge_is_recorded_once() {
         "a second land records no second merge"
     );
 }
+
+#[test]
+fn an_outside_merge_counts_only_at_the_integration_head() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+    let stale = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    fixture.script_forge(&merged_script(stale));
+    let message = fixture.refused(&["land", "--merge"]);
+    assert!(
+        message.contains(
+            "the pull request was merged at deadbee, but the integration branch is now at "
+        ) && message.contains(&head[..7]),
+        "{message}"
+    );
+    assert!(
+        message.contains("open a new pull request with `shprd land`"),
+        "{message}"
+    );
+    assert!(
+        merged_heads(&fixture).is_empty(),
+        "a merge at an older head is not in the log"
+    );
+
+    let fresh = landed();
+    let head = fresh.integration_head();
+    fresh.script_forge(&merged_script(&head));
+    fresh.ok(&["land", "--merge"]);
+    assert_eq!(
+        merged_heads(&fresh),
+        vec![INT_BRANCH.to_string()],
+        "a merge at the integration head is in the log"
+    );
+}

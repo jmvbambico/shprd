@@ -39,6 +39,9 @@ const REVIEW_DEGRADED: &str = "degraded-review";
 /// The attribution line every generated pull request ends with.
 const ATTRIBUTION: &str = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 
+/// How much of a sha a human line shows.
+const SHORT_SHA: usize = 7;
+
 /// Opens the run's pull request, or with `--merge` applies the merge policy.
 pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), CliError> {
     let config = load_config(ctx, home)?;
@@ -295,6 +298,11 @@ fn review_gaps(state: &RunState) -> Vec<String> {
     gaps
 }
 
+/// The short form of a sha, for the human line.
+fn short(sha: &str) -> &str {
+    sha.get(..SHORT_SHA).unwrap_or(sha)
+}
+
 /// Merges the run's pull request when the policy allows it.
 fn merge(
     ctx: &Ctx,
@@ -323,8 +331,20 @@ fn merge(
         CliError::other(anyhow!(err).context("asking the forge for the pull request"))
     })?;
     if status.merged {
-        // The forge closed the pull request without shprd: the merge is still a
-        // fact about this run, recorded once and never twice.
+        // The forge merged the pull request without shprd. That is a fact
+        // about this branch only when the forge merged the very commit the
+        // integration branch is at now: a merge at an older head leaves
+        // commits the pull request never contained, and recording them as
+        // merged would let the janitor delete them.
+        if status.head_sha != head {
+            return Err(CliError::Invalid(anyhow!(
+                "the pull request was merged at {}, but the integration branch is now at {}: \
+                 open a new pull request with `shprd land`",
+                short(&status.head_sha),
+                short(head)
+            )));
+        }
+        // The merge is recorded once and never twice.
         if !pr.merged {
             let event = ctx.commit(EventKind::PrMerged {
                 number,
