@@ -203,7 +203,10 @@ pub fn spawn(
 }
 
 /// The repository's workspace, or an error telling the human to create it.
-pub(crate) fn workspace_of(mux: &dyn Mux, env: &SpawnEnv<'_>) -> Result<shprd_mux::Workspace, CliError> {
+pub(crate) fn workspace_of(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+) -> Result<shprd_mux::Workspace, CliError> {
     let name = naming::workspace_name(&env.repo_name);
     mux.find_workspace(&name)
         .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
@@ -491,7 +494,10 @@ pub(crate) fn spec_table(programs: &[Program]) -> Vec<HarnessSpec> {
 
 /// The program the parser named, or an error when the data directory has no
 /// spec for it.
-pub(crate) fn program_of<'a>(programs: &'a [Program], agent: &str) -> Result<&'a Program, CliError> {
+pub(crate) fn program_of<'a>(
+    programs: &'a [Program],
+    agent: &str,
+) -> Result<&'a Program, CliError> {
     programs
         .iter()
         .find(|program| program.spec.id == agent)
