@@ -158,8 +158,11 @@ fn preconditions(repo: &Path, config: &Config) -> Result<String, CliError> {
             repo.display()
         )));
     }
-    let branch = git_stdout(repo, &["symbolic-ref", "--short", "HEAD"])?;
-    if branch.trim().is_empty() {
+    // `rev-parse` answers `HEAD` for a detached HEAD instead of failing, so a
+    // human mid-bisect gets the reason a human can act on.
+    let branch = git_stdout(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
         return Err(CliError::Invalid(anyhow!(
             "HEAD is detached: check out the branch to base the run on"
         )));
@@ -169,7 +172,7 @@ fn preconditions(repo: &Path, config: &Config) -> Result<String, CliError> {
             "no orchestrator configured: run `shprd set orchestrator <agent>`"
         )));
     }
-    Ok(branch.trim().to_string())
+    Ok(branch.to_string())
 }
 
 /// Runs one git command in `repo` and returns its stdout.
@@ -299,6 +302,15 @@ fn new_run_id() -> String {
 /// The binary's `up`: build the real environment, drive the real host, print
 /// what happened.
 pub fn up_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
+    let home = crate::ctx::resolve_home(home)?;
+    // Decide the one refusal a human can fix before loading the harness table:
+    // on a fresh machine the missing orchestrator is the real problem, and the
+    // missing spec is only a symptom of it.
+    if load_config(ctx, &home)?.roster.orchestrator.is_none() {
+        return Err(CliError::Invalid(anyhow!(
+            "no orchestrator configured: run `shprd set orchestrator <agent>`"
+        )));
+    }
     let env = build_env(ctx, home)?;
     let mux = shprd_mux_herdr::HerdrMux::new();
     let report = up(&mux, &env)?;
@@ -306,8 +318,7 @@ pub fn up_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
 }
 
 /// Collects the config, the harness specs and the process environment.
-fn build_env(ctx: &Ctx, home: Option<&Path>) -> Result<UpEnv, CliError> {
-    let home = crate::ctx::resolve_home(home)?;
+fn build_env(ctx: &Ctx, home: PathBuf) -> Result<UpEnv, CliError> {
     let repo_name = ctx
         .root
         .file_name()
@@ -318,10 +329,7 @@ fn build_env(ctx: &Ctx, home: Option<&Path>) -> Result<UpEnv, CliError> {
                 ctx.root.display()
             ))
         })?;
-    let global = home.join(".config").join("shprd").join("config.toml");
-    let repo = ctx.root.join(".shprd").join("config.toml");
-    let config = shprd_core::config::load(Some(&global), Some(&repo))
-        .map_err(|err| CliError::other(anyhow!(err).context("reading the config")))?;
+    let config = load_config(ctx, &home)?;
     let dir = crate::cmd::roster::resolve_data_dir()?;
     let specs = shprd_roster::spec::load_dir(&dir.join("harness")).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("loading {}", dir.display())))
@@ -334,6 +342,14 @@ fn build_env(ctx: &Ctx, home: Option<&Path>) -> Result<UpEnv, CliError> {
         specs,
         process_env: std::env::vars().collect(),
     })
+}
+
+/// The merged global and repository config.
+fn load_config(ctx: &Ctx, home: &Path) -> Result<Config, CliError> {
+    let global = home.join(".config").join("shprd").join("config.toml");
+    let repo = ctx.root.join(".shprd").join("config.toml");
+    shprd_core::config::load(Some(&global), Some(&repo))
+        .map_err(|err| CliError::other(anyhow!(err).context("reading the config")))
 }
 
 /// Prints what `up` did: JSON when asked, else one short human line.
@@ -544,4 +560,540 @@ Load them before planning; they carry the conventions this repository runs on.\n
         base = base_branch,
         integration = integration_branch(run_id),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path as StdPath;
+
+    use anyhow::{Context, Result};
+    use shprd_core::config::{Config, Skills};
+    use shprd_core::event::Actor;
+    use shprd_mux::Capabilities;
+    use shprd_mux::fake::{Call, FakeMux};
+    use shprd_roster::spec::load_dir;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// Turns a verb's failure into an [`anyhow::Error`], which is what a test
+    /// returns so a failing assertion prints the verb's own message.
+    fn failed(err: CliError) -> anyhow::Error {
+        anyhow!("{err}")
+    }
+
+    /// A temp repository, a temp home and the environment `up` reads.
+    struct Fixture {
+        /// Temp home: worktrees and briefs land here.
+        home: TempDir,
+        /// Temp repository, the run's root.
+        repo: TempDir,
+        /// Configured as the orchestrator, when the test wants one.
+        orchestrator: Option<String>,
+    }
+
+    impl Fixture {
+        /// A committed repository on `main`, so HEAD names a branch.
+        fn new(orchestrator: Option<&str>) -> Result<Self> {
+            let repo = TempDir::new()?;
+            git(repo.path(), &["init", "-b", "main"])?;
+            git(repo.path(), &["add", "-A"])?;
+            git(
+                repo.path(),
+                &[
+                    "-c",
+                    "user.name=shprd test",
+                    "-c",
+                    "user.email=shprd@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "first",
+                ],
+            )?;
+            Ok(Self {
+                home: TempDir::new()?,
+                repo,
+                orchestrator: orchestrator.map(str::to_string),
+            })
+        }
+
+        /// The environment `up` takes, with the real bundled harness table.
+        fn env(&self) -> Result<UpEnv> {
+            let data = StdPath::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
+            let config = Config {
+                roster: shprd_core::config::Roster {
+                    orchestrator: self.orchestrator.clone(),
+                    effort: self
+                        .orchestrator
+                        .iter()
+                        .map(|line| (line.clone(), "high".to_string()))
+                        .collect(),
+                    ..Default::default()
+                },
+                skills: Skills::default(),
+                ..Default::default()
+            };
+            Ok(UpEnv {
+                ctx: Ctx::new(self.repo.path().to_path_buf(), Actor::Human, false, true),
+                repo_name: "repo".to_string(),
+                home: self.home.path().to_path_buf(),
+                config,
+                specs: load_dir(&data)?,
+                process_env: [("PATH".to_string(), "/usr/bin:/bin".to_string())]
+                    .into_iter()
+                    .collect(),
+            })
+        }
+    }
+
+    /// Runs one git command in `dir`, failing the test when git refuses.
+    fn git(dir: &StdPath, args: &[&str]) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .context("running git")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    /// The tabs the fake was asked to create, in order.
+    fn created_titles(mux: &FakeMux) -> Vec<String> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CreateTab(_, title, _) => Some(title),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The argv of every program the fake was asked to start.
+    fn started_argvs(mux: &FakeMux) -> Vec<Vec<String>> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A fake host that claims every capability.
+    fn mux() -> FakeMux {
+        FakeMux::new(Capabilities {
+            split_ratio: true,
+            pane_grants: true,
+            human_ask: true,
+            resumable_events: true,
+            agent_state: true,
+        })
+    }
+
+    #[test]
+    fn first_up_creates_the_workspace_and_starts_a_run() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let report = up(&mux, &env).map_err(failed)?;
+
+        assert!(!report.resumed, "a fresh log cannot resume");
+        assert!(report.created_workspace, "the workspace is new");
+        assert!(report.created_chat_tab, "the chat tab is new");
+        assert!(
+            report.created_orchestrator_tab,
+            "the orchestrator tab is new"
+        );
+        assert_eq!(report.base_branch, "main");
+        assert_eq!(
+            report.integration_branch,
+            format!("shprd/{}/int", report.run_id)
+        );
+        assert_eq!(report.run_id.len(), 7);
+        assert!(report.run_id.starts_with('r'), "{}", report.run_id);
+        assert!(
+            report.run_id[1..].chars().all(|c| c.is_ascii_hexdigit()),
+            "{}",
+            report.run_id
+        );
+
+        // One workspace named after the repo, two tabs: the human's and the
+        // orchestrator's, in that order.
+        assert!(mux.calls().iter().any(|call| matches!(
+            call,
+            Call::CreateWorkspace(name, cwd)
+                if name == "shprd · repo" && cwd == fixture.repo.path()
+        )));
+        assert_eq!(
+            created_titles(&mux),
+            vec![
+                "shprd·chat".to_string(),
+                "★ claude·orchestrator".to_string()
+            ]
+        );
+
+        // The chat placeholder and the orchestrator CLI, with the brief in its
+        // system prompt and the run in its environment.
+        let argvs = started_argvs(&mux);
+        assert_eq!(argvs.len(), 2);
+        assert_eq!(argvs[0], CHAT_ARGV.map(str::to_string).to_vec());
+        assert_eq!(
+            argvs[1][..5],
+            ["claude", "--model", "claude-opus-5-5", "--effort", "high"]
+        );
+        assert_eq!(argvs[1][5], "--append-system-prompt-file");
+        assert!(argvs[1][6].ends_with("orchestrator.md"));
+        let orchestrator_env = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Run(_, argv, env) if argv.first().map(String::as_str) == Some("claude") => {
+                    Some(env)
+                }
+                _ => None,
+            })
+            .next()
+            .context("the orchestrator was started")?;
+        assert!(orchestrator_env.contains(&("SHPRD_RUN".to_string(), Some(report.run_id.clone()))));
+
+        // The brief is on disk, and the run owns an integration worktree and
+        // the branch checked out in it.
+        let brief = std::fs::read_to_string(&report.brief_path)?;
+        assert!(brief.contains(&report.run_id));
+        assert!(brief.contains("shprd agent spawn"), "{brief}");
+        assert!(report.brief_path.ends_with("orchestrator.md"));
+        let integration = fixture
+            .home
+            .path()
+            .join(".shprd")
+            .join("wt")
+            .join("repo")
+            .join(&report.run_id)
+            .join("_int");
+        assert!(integration.is_dir(), "{} is missing", integration.display());
+        assert_eq!(env.ctx.state().map_err(failed)?.resources.len(), 2);
+
+        // The chat tab is focused last, so the human lands where they type.
+        assert!(matches!(
+            mux.calls().last(),
+            Some(Call::FocusTab(tab)) if tab == &report.chat_tab
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn second_up_resumes_without_touching_the_host() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(second.resumed, "an unfinished run is resumed");
+        assert_eq!(second.run_id, first.run_id);
+        assert_eq!(second.integration_branch, first.integration_branch);
+        assert!(!second.created_workspace);
+        assert!(!second.created_chat_tab);
+        assert!(!second.created_orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.iter().all(|call| !matches!(
+                call,
+                Call::CreateWorkspace(..) | Call::CreateTab(..) | Call::Run(..) | Call::Prompt(..)
+            )),
+            "second up changed the host: {later:?}"
+        );
+        assert!(
+            later
+                .iter()
+                .any(|call| matches!(call, Call::FindWorkspace(_))),
+            "second up should look for the workspace: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn up_refuses_without_an_orchestrator() -> Result<()> {
+        let fixture = Fixture::new(None)?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let err = up(&mux, &env).err().context("up must refuse")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("shprd set orchestrator"), "{err}");
+        assert!(mux.calls().is_empty(), "nothing may reach the host");
+        assert!(
+            env.ctx.state().map_err(failed)?.run.is_none(),
+            "nothing may be written"
+        );
+        Ok(())
+    }
+
+    /// Starts a run, then adds one task and spawns an agent for it.
+    fn working_task(ctx: &Ctx) -> Result<()> {
+        ctx.commit(EventKind::RunStarted {
+            run_id: "rabc123".to_string(),
+            repo: "/tmp/repo".to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "shprd/rabc123/int".to_string(),
+        })
+        .map_err(failed)?;
+        ctx.commit(EventKind::TaskAdded {
+            task: "M4.1".to_string(),
+            title: "up and down".to_string(),
+            scope: vec!["crates/shprd".to_string()],
+            acceptance: vec!["up works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        })
+        .map_err(failed)?;
+        ctx.commit(EventKind::Spawned {
+            task: "M4.1".to_string(),
+            attempt: 1,
+            agent: "claude/claude-opus-5-5".to_string(),
+            model: None,
+            worktree: "/tmp/repo/wt".to_string(),
+            branch: "feature/m4-up".to_string(),
+        })
+        .map_err(failed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn down_refuses_while_a_task_is_working() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        working_task(&env.ctx)?;
+        let err = down(&env.ctx).err().context("down must refuse")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("Working"), "{err}");
+        assert!(
+            !env.ctx.state().map_err(failed)?.finished,
+            "a refused finish writes nothing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn down_finishes_a_run_with_nothing_in_flight() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        env.ctx
+            .commit(EventKind::RunStarted {
+                run_id: "rabc123".to_string(),
+                repo: "/tmp/repo".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "shprd/rabc123/int".to_string(),
+            })
+            .map_err(failed)?;
+        down(&env.ctx).map_err(failed)?;
+        assert!(env.ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    #[test]
+    fn up_refuses_on_a_detached_head() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        git(fixture.repo.path(), &["checkout", "--detach"])?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let err = up(&mux, &env).err().context("up must refuse")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("detached"), "{err}");
+        assert!(mux.calls().is_empty());
+        Ok(())
+    }
+
+    /// A private `herdr server`, in a fresh directory, stopped on drop.
+    ///
+    /// The test is `#[ignore]` because it starts a real server. It is isolated
+    /// twice over: `HOME` and `HERDR_SOCKET_PATH` both point into the temp
+    /// directory, so it cannot see or touch the human's own multiplexer.
+    struct Scratch {
+        /// Temp home: config, briefs, worktrees and the server's state.
+        home: TempDir,
+        /// The private server's socket.
+        socket: PathBuf,
+        /// The server process, stopped on drop.
+        server: Option<std::process::Child>,
+    }
+
+    impl Scratch {
+        /// Starts a server and waits until it answers.
+        fn start() -> Result<Self> {
+            let home = TempDir::new()?;
+            let socket = home.path().join("h.sock");
+            let log = std::fs::File::create(home.path().join("server.log"))?;
+            let child = std::process::Command::new("herdr")
+                .arg("server")
+                .env("HOME", home.path())
+                .env("HERDR_SOCKET_PATH", &socket)
+                .stdout(std::process::Stdio::null())
+                .stderr(log)
+                .spawn()
+                .context("herdr must be installed to run this test")?;
+            let scratch = Self {
+                home,
+                socket,
+                server: Some(child),
+            };
+            let mux = scratch.mux();
+            let started = std::time::Instant::now();
+            while mux.find_workspace("does-not-exist").is_err() {
+                anyhow::ensure!(
+                    started.elapsed() < std::time::Duration::from_secs(20),
+                    "the herdr server never answered: {}",
+                    std::fs::read_to_string(scratch.home.path().join("server.log"))
+                        .unwrap_or_default()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Ok(scratch)
+        }
+
+        /// An adapter pointed at this scratch server, never at the human's.
+        fn mux(&self) -> shprd_mux_herdr::HerdrMux {
+            shprd_mux_herdr::HerdrMux::new().with_environment(&self.socket, self.home.path())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if let Some(mut server) = self.server.take() {
+                let _ = std::process::Command::new("herdr")
+                    .args(["server", "stop"])
+                    .env("HOME", self.home.path())
+                    .env("HERDR_SOCKET_PATH", &self.socket)
+                    .status();
+                let _ = server.kill();
+                let _ = server.wait();
+            }
+        }
+    }
+
+    /// A harness spec for `sh`: a fake orchestrator CLI that starts a shell.
+    ///
+    /// Its only model flag is a `-c` that execs a plain shell, and it has no
+    /// system-prompt flag, so the pane runs an interactive `sh` and the brief
+    /// stays in the file. That way no real agent CLI is ever started.
+    fn sh_spec_dir(home: &StdPath) -> Result<PathBuf> {
+        let source =
+            StdPath::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness/claude.toml");
+        let text = std::fs::read_to_string(&source)?;
+        let mut kept: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let dropped = [
+                "effort_args",
+                "model_args",
+                "auto_approve",
+                "system_prompt_args",
+            ]
+            .iter()
+            .any(|key| line.trim_start().starts_with(key));
+            if dropped {
+                continue;
+            }
+            if line.starts_with("id = ") {
+                kept.push("id = \"sh\"".to_string());
+                continue;
+            }
+            if line.starts_with("interactive = ") {
+                kept.push("interactive = [\"sh\"]".to_string());
+                kept.push("model_args = [\"-c\", \"exec sh\", \"{model}\"]".to_string());
+                kept.push("system_prompt_args = []".to_string());
+                continue;
+            }
+            kept.push(line.to_string());
+        }
+        let dir = home.join("data").join("harness");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("sh.toml"), kept.join("\n"))?;
+        Ok(dir)
+    }
+
+    /// `up` twice against an isolated server leaves exactly two tabs.
+    ///
+    /// Run by hand with `cargo test -p shprd --bin shprd -- --ignored`.
+    #[test]
+    #[ignore = "starts a real herdr server; run by hand"]
+    fn up_twice_lays_out_one_workspace_on_a_private_server() -> Result<()> {
+        let scratch = Scratch::start()?;
+        let repo = scratch.home.path().join("repo");
+        std::fs::create_dir_all(&repo)?;
+        git(&repo, &["init", "-b", "main"])?;
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=shprd test",
+                "-c",
+                "user.email=shprd@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        )?;
+
+        let data = sh_spec_dir(scratch.home.path())?;
+        let env = UpEnv {
+            ctx: Ctx::new(repo.clone(), Actor::Human, false, true),
+            repo_name: "repo".to_string(),
+            home: scratch.home.path().to_path_buf(),
+            config: Config {
+                roster: shprd_core::config::Roster {
+                    orchestrator: Some("sh/fake-model".to_string()),
+                    ..Default::default()
+                },
+                skills: Skills::default(),
+                ..Default::default()
+            },
+            specs: load_dir(&data)?,
+            process_env: std::env::vars().collect(),
+        };
+        let mux = scratch.mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        assert!(first.created_workspace && first.created_chat_tab);
+        let second = up(&mux, &env).map_err(failed)?;
+        assert!(second.resumed);
+        assert_eq!(second.run_id, first.run_id);
+
+        // The host itself agrees: one chat tab, one orchestrator tab.
+        let listed = mux
+            .list_tabs(&shprd_mux::WorkspaceId::new(
+                mux.find_workspace("shprd · repo")
+                    .map_err(|err| anyhow!("{err}"))?
+                    .context("the workspace exists")?
+                    .id
+                    .as_str(),
+            ))
+            .map_err(|err| anyhow!("{err}"))?;
+        for title in ["shprd·chat", "★ sh·orchestrator"] {
+            let count = listed.iter().filter(|tab| tab.title == title).count();
+            assert_eq!(count, 1, "{title} appears {count} times in {listed:?}");
+        }
+        let output = std::process::Command::new("herdr")
+            .args(["tab", "list"])
+            .env("HOME", scratch.home.path())
+            .env("HERDR_SOCKET_PATH", &scratch.socket)
+            .output()?;
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        for title in ["shprd·chat", "★ sh·orchestrator"] {
+            assert_eq!(
+                text.matches(title).count(),
+                1,
+                "herdr tab list shows {title} {} times:\n{text}",
+                text.matches(title).count()
+            );
+        }
+        Ok(())
+    }
 }
