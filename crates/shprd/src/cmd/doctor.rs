@@ -601,19 +601,10 @@ fn skills_section(
             format!("{}  {} skill(s) visible", spec.id, seen.skills.len()),
         );
         hidden_now(section, &spec.id, &rules, &facts.current, &clean_env);
-        if !seen.junk.is_empty() {
-            let names: Vec<String> = seen
-                .junk
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect();
+        for junk in top_junk(&seen.junk) {
             section.add(
                 Level::Warn,
-                format!(
-                    "{}  junk in a skills directory: {}",
-                    spec.id,
-                    names.join(", ")
-                ),
+                format!("{}  junk folder {}", spec.id, tilde(junk, home)),
             );
         }
     }
@@ -692,5 +683,28 @@ fn launch_env_section(report: &mut Report, facts: &Facts, clean: &LaunchEnv) {
             Level::Info,
             format!("worker launches drop {}", dropped.join(", ")),
         );
+    }
+}
+
+/// The junk entries that are not inside another junk entry.
+///
+/// The scanner reports an ignored folder and everything under it; a report
+/// wants the folder once, so a nested path is dropped.
+fn top_junk(junk: &[PathBuf]) -> Vec<&Path> {
+    junk.iter()
+        .map(PathBuf::as_path)
+        .filter(|path| {
+            !junk
+                .iter()
+                .any(|other| other.as_path() != *path && path.starts_with(other))
+        })
+        .collect()
+}
+
+/// A path spelled with `~` for the home directory, so a line stays short.
+fn tilde(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
     }
 }

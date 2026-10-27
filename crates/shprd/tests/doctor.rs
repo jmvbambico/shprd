@@ -94,6 +94,8 @@ impl Setup {
         let skills = home.join(".agents").join("skills");
         write_skill(&skills, "alpha");
         write_skill(&skills, "beta");
+        // An ignored folder with a skill inside it: junk, reported once.
+        write_skill(&skills.join(".trash"), "old");
         let lock = home.join(".agents").join(".skill-lock.json");
         let body = "{\"skills\":{\"alpha\":{\"source\":\"x/y\",\"skillFolderHash\":\"abc\"}}}";
         if let Err(error) = fs::write(&lock, body) {
@@ -172,6 +174,24 @@ fn reports_every_section_and_succeeds_on_a_clean_setup() {
     assert!(
         unknown.trim_start().starts_with('!'),
         "an unknown sign-in must warn, not pass: {unknown}"
+    );
+    let junk: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("junk folder"))
+        .collect();
+    assert!(
+        !junk.is_empty(),
+        "the junk folder should be reported: {text}"
+    );
+    for line in junk {
+        assert!(
+            line.trim_end().ends_with("~/.agents/skills/.trash"),
+            "a junk line names the folder itself: {line}"
+        );
+    }
+    assert!(
+        !text.contains(".trash/"),
+        "no file inside a junk folder may be listed: {text}"
     );
 }
 
