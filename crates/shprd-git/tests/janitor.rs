@@ -146,6 +146,48 @@ fn archives_before_deleting_and_restores_the_branch_afterwards() {
 }
 
 #[test]
+fn a_worktree_is_removed_without_deleting_an_unrecorded_branch() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let created = match worktree::create(&repo.path, &layout, "r1", "T1", "main") {
+        Ok(created) => created,
+        Err(err) => panic!("create must succeed: {err}"),
+    };
+    // The ledger knows the worktree but never recorded the branch.
+    let events: Vec<Event> = integrated_run("r1", "T1", &created.branch, &created.path, 1_000)
+        .into_iter()
+        .filter(|event| {
+            !matches!(
+                &event.kind,
+                EventKind::Resource {
+                    action: ResourceAction::Created,
+                    kind: ResourceKind::Branch,
+                    ..
+                }
+            )
+        })
+        .collect();
+    let state = fold(&events);
+    assert!(
+        !state
+            .resources
+            .contains_key(&(ResourceKind::Branch, created.branch.clone())),
+        "the fixture must not record the branch"
+    );
+
+    let actions = janitor::plan(&state, &events, &layout, 2_000, DAYS);
+    let outcomes = janitor::execute(&repo.path, &layout, "r1", &actions);
+    for outcome in &outcomes {
+        assert!(outcome.result.is_ok(), "{outcome:?}");
+    }
+    assert!(!created.path.exists(), "the worktree must be gone");
+    assert!(
+        !repo.git(&["branch", "--list", &created.branch]).is_empty(),
+        "a branch the ledger never recorded must survive"
+    );
+}
+
+#[test]
 fn plans_nothing_while_the_task_is_still_working() {
     let repo = Repo::new();
     let layout = repo.layout();

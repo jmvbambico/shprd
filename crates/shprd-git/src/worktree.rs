@@ -158,12 +158,13 @@ pub fn create(
     })
 }
 
-/// Removes a worktree and its branch.
+/// Removes a worktree and, with it, the branch it has checked out.
 ///
-/// Refuses any branch outside [`Layout::namespace`], so a worktree a human
-/// made by hand is never touched; refuses a path outside [`Layout::root`], so a
-/// directory shprd did not create is never deleted; and refuses a dirty
-/// worktree unless `force`.
+/// Refuses any branch outside [`Layout::namespace`], so a branch a human made
+/// by hand is never touched, and otherwise does exactly what
+/// [`remove_worktree_only`] does. Only a caller whose ledger recorded the
+/// branch may take this path; the janitor does not, because a worktree can
+/// exist for a branch the ledger never recorded.
 pub fn remove(
     repo: &Path,
     layout: &Layout,
@@ -176,26 +177,43 @@ pub fn remove(
             namespace: layout.namespace.clone(),
         });
     }
-    if !inside_root(&layout.root, &wt.path) {
+    remove_worktree_only(repo, layout, &wt.path, force)?;
+    Git::new(repo).run(&["branch", "-D", &wt.branch])?;
+    Ok(())
+}
+
+/// Removes a worktree and leaves its branch alone.
+///
+/// Refuses a path outside [`Layout::root`], so a directory shprd did not
+/// create is never deleted, and refuses a dirty worktree unless `force`. No
+/// branch is ever deleted here: `git worktree remove` keeps the branch, and a
+/// branch is only removed by a step the ledger planned from a recorded
+/// `branch` resource.
+pub fn remove_worktree_only(
+    repo: &Path,
+    layout: &Layout,
+    path: &Path,
+    force: bool,
+) -> Result<(), WorktreeError> {
+    if !inside_root(&layout.root, path) {
         return Err(WorktreeError::OutsideRoot {
-            path: wt.path.clone(),
+            path: path.to_path_buf(),
             root: layout.root.clone(),
         });
     }
-    if wt.path.exists() && !Git::new(&wt.path).is_clean()? && !force {
+    if path.exists() && !Git::new(path).is_clean()? && !force {
         return Err(WorktreeError::Dirty {
-            path: wt.path.clone(),
+            path: path.to_path_buf(),
         });
     }
     let git = Git::new(repo);
-    let path_text = path_string(&wt.path)?;
+    let path_text = path_string(path)?;
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
     }
     args.push(&path_text);
     git.run(&args)?;
-    git.run(&["branch", "-D", &wt.branch])?;
     Ok(())
 }
 

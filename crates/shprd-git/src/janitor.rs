@@ -4,7 +4,9 @@
 //! pure — folded state plus the event log in, a list of [`Action`]s out — and
 //! only names that are already in the ledger *and* inside shprd's namespace and
 //! worktree root are ever planned. Archiving always precedes the branch
-//! deletion that follows it, so a deleted branch stays recoverable.
+//! deletion that follows it, so a deleted branch stays recoverable, and a
+//! worktree removal never deletes a branch: only a `Live` `Branch` resource
+//! earns a [`Action::DeleteBranch`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +16,7 @@ use shprd_core::state::{ResourceStatus, RunState, TaskStatus};
 
 use crate::archive;
 use crate::git::Git;
-use crate::worktree::{self, Layout, Worktree, WorktreeError};
+use crate::worktree::{self, Layout};
 
 /// Milliseconds in a day, for the archive-expiry arithmetic.
 pub const MILLIS_PER_DAY: u64 = 86_400_000;
@@ -31,14 +33,15 @@ pub enum Action {
         /// The branch to archive.
         branch: String,
     },
-    /// Remove a worktree shprd created.
+    /// Remove a worktree shprd created, keeping its branch.
+    ///
+    /// The branch is not deleted here: it may be one the ledger never recorded
+    /// creating. A recorded branch goes through [`Action::DeleteBranch`].
     RemoveWorktree {
         /// The task it was created for.
         task: TaskId,
         /// Where it lives.
         path: PathBuf,
-        /// The branch checked out in it.
-        branch: String,
     },
     /// Delete a local branch shprd created, after it was archived.
     DeleteBranch {
@@ -63,7 +66,7 @@ impl Action {
             Self::ArchiveRef { task, branch, .. } => {
                 format!("archive {task}: {branch} -> refs/shprd/archive")
             }
-            Self::RemoveWorktree { task, path, .. } => {
+            Self::RemoveWorktree { task, path } => {
                 format!("remove worktree {task}: {}", path.display())
             }
             Self::DeleteBranch { task, branch } => format!("delete branch {task}: {branch}"),
@@ -93,7 +96,7 @@ impl Action {
                     task: Some(task.clone()),
                 },
             ],
-            Self::RemoveWorktree { task, path, .. } => vec![EventKind::Resource {
+            Self::RemoveWorktree { task, path } => vec![EventKind::Resource {
                 action: ResourceAction::Removed,
                 kind: ResourceKind::Worktree,
                 name: path.display().to_string(),
@@ -213,15 +216,9 @@ pub fn plan(
             });
         }
         if let Some(path) = due.worktree {
-            let branch = due
-                .branches
-                .first()
-                .cloned()
-                .unwrap_or_else(|| layout.branch_name(&run, &task));
             actions.push(Action::RemoveWorktree {
                 task: task.clone(),
                 path,
-                branch,
             });
         }
         for branch in due.branches {
@@ -278,13 +275,10 @@ pub fn execute(repo: &Path, layout: &Layout, run: &str, actions: &[Action]) -> V
                     delete_branch(repo, branch).map(|()| action.events())
                 }
             }
-            Action::RemoveWorktree { path, branch, .. } => {
-                let wt = Worktree {
-                    path: path.clone(),
-                    branch: branch.clone(),
-                    base_sha: String::new(),
-                };
-                remove_worktree(repo, layout, &wt).map(|()| action.events())
+            Action::RemoveWorktree { path, .. } => {
+                worktree::remove_worktree_only(repo, layout, path, false)
+                    .map(|()| action.events())
+                    .map_err(|err| err.to_string())
             }
             Action::ExpireArchive { ref_name, .. } => archive::expire(repo, ref_name)
                 .map(|()| action.events())
@@ -300,9 +294,10 @@ pub fn execute(repo: &Path, layout: &Layout, run: &str, actions: &[Action]) -> V
 
 /// Deletes a branch, treating "already gone" as success.
 ///
-/// A removed worktree takes its branch with it, so the branch step that follows
-/// it in the plan finds nothing to delete; that is the finished state, not a
-/// failure, and the ledger records it either way.
+/// This is the only path that deletes a branch, and the plan only reaches it
+/// from a `Live` `Branch` resource the ledger recorded. A branch that is
+/// already gone — a re-run of a half-applied plan — is the finished state, not
+/// a failure, and the ledger records it either way.
 fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
     let git = Git::new(repo);
     match git.branch_exists(branch) {
@@ -313,12 +308,6 @@ fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
             .map_err(|err| err.to_string()),
         Err(err) => Err(err.to_string()),
     }
-}
-
-/// Removes a worktree without forcing: the janitor never discards uncommitted
-/// work.
-fn remove_worktree(repo: &Path, layout: &Layout, wt: &Worktree) -> Result<(), String> {
-    worktree::remove(repo, layout, wt, false).map_err(|err: WorktreeError| err.to_string())
 }
 
 /// True when the task's resources are free to go: it landed, or the run is over
