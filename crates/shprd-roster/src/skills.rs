@@ -162,6 +162,9 @@ pub struct NativeEntry {
 }
 
 impl CompatList {
+    /// The only schema version shprd understands.
+    pub const SCHEMA: u32 = 1;
+
     /// Load and validate a compatibility list.
     ///
     /// Validation rejects unknown fields, repeated `name`s, empty
@@ -180,7 +183,16 @@ impl CompatList {
     }
 
     /// Check the invariants a curated list must hold.
+    ///
+    /// A file declaring any schema but [`SCHEMA`](Self::SCHEMA) is refused
+    /// rather than half-applied.
     pub fn validate(&self, path: &Path) -> Result<(), SkillsError> {
+        if self.schema != Self::SCHEMA {
+            return Err(SkillsError::UnknownSchema {
+                path: path.to_path_buf(),
+                schema: self.schema,
+            });
+        }
         let mut seen = BTreeMap::new();
         for entry in &self.skills {
             if seen.insert(entry.name.as_str(), ()).is_some() {
@@ -883,6 +895,17 @@ mod tests {
         let path = tmp.path().join("visibility.toml");
         fs::write(&path, "schema = 2\n").must("visibility.toml");
         match VisibilityRules::load(&path) {
+            Err(SkillsError::UnknownSchema { schema, .. }) => assert_eq!(schema, 2),
+            other => panic!("schema 2 must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_an_unknown_compat_schema() {
+        let tmp = tempfile::tempdir().must("tempdir");
+        let path = tmp.path().join("compat.toml");
+        fs::write(&path, "schema = 2\n").must("compat.toml");
+        match CompatList::load(&path) {
             Err(SkillsError::UnknownSchema { schema, .. }) => assert_eq!(schema, 2),
             other => panic!("schema 2 must be refused, got {other:?}"),
         }
