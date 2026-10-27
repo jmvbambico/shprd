@@ -298,7 +298,9 @@ fn is_cleanup(kind: &EventKind) -> bool {
 ///
 /// shprd may only ever clean up what it recorded creating, so an archive or a
 /// removal has to name a resource this run created, and a creation has to be
-/// either new or a re-creation after removal.
+/// either new or a re-creation after removal. An archive takes a resource out
+/// of service, so it needs one that is still `Live`: archiving twice is a
+/// mistake in the plan, not a no-op.
 fn check_resource(
     state: &RunState,
     action: ResourceAction,
@@ -327,7 +329,7 @@ fn check_resource(
             Some(ResourceStatus::Removed) | None => Ok(()),
         },
         ResourceAction::Archived => match found {
-            Some(ResourceStatus::Live | ResourceStatus::Archived) => Ok(()),
+            Some(ResourceStatus::Live) => Ok(()),
             Some(found) => Err(RuleError::WrongResourceStatus {
                 kind,
                 name: name.to_string(),
@@ -786,6 +788,19 @@ mod tests {
         ev(seq, EventKind::RunFinished {})
     }
 
+    /// A resource-ledger event for task `a`.
+    fn res(seq: u64, action: ResourceAction, kind: ResourceKind, name: &str) -> Event {
+        ev(
+            seq,
+            EventKind::Resource {
+                action,
+                kind,
+                name: name.to_string(),
+                task: Some("a".to_string()),
+            },
+        )
+    }
+
     fn folded(events: &[Event]) -> RunState {
         match RunState::fold(events) {
             Ok(state) => state,
@@ -1213,6 +1228,42 @@ mod tests {
     fn nothing_follows_run_finished() {
         let log = vec![started(1), finished(2), added(3, "a", &["src/a"], &[])];
         assert!(matches!(refused(&log), RuleError::RunFinished));
+    }
+
+    #[test]
+    fn archiving_needs_a_live_resource() {
+        let created = res(
+            3,
+            ResourceAction::Created,
+            ResourceKind::Branch,
+            "shprd/r1/a",
+        );
+        let archived = res(
+            4,
+            ResourceAction::Archived,
+            ResourceKind::Branch,
+            "shprd/r1/a",
+        );
+        let head = vec![started(1), added(2, "a", &["src/a"], &[]), created];
+        let state = folded(&[head.clone(), vec![archived.clone()]].concat());
+        assert_eq!(
+            state
+                .resources
+                .get(&(ResourceKind::Branch, "shprd/r1/a".to_string()))
+                .map(|record| record.status),
+            Some(ResourceStatus::Archived)
+        );
+        let again = res(
+            5,
+            ResourceAction::Archived,
+            ResourceKind::Branch,
+            "shprd/r1/a",
+        );
+        let log = [head, vec![archived, again]].concat();
+        assert!(matches!(
+            refused(&log),
+            RuleError::WrongResourceStatus { .. }
+        ));
     }
 
     #[test]
