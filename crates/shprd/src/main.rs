@@ -30,6 +30,7 @@ fn main() -> ExitCode {
 fn report(err: &CliError) {
     match err {
         CliError::Refused(rule) => eprintln!("refused: {rule}"),
+        CliError::Invalid(source) => eprintln!("{source:#}"),
         CliError::Other(source) => eprintln!("error: {source:#}"),
     }
 }

@@ -81,6 +81,9 @@ pub enum Command {
     Restore(RestoreArgs),
     /// Detect the agent CLIs installed here, their version and sign-in state.
     Roster(RosterArgs),
+    /// Write a roster role into the global config, or with `--repo <PATH>`
+    /// into that repository's `.shprd/config.toml`.
+    Set(SetArgs),
 }
 
 /// Arguments for `janitor`.
@@ -113,6 +116,44 @@ pub struct RosterArgs {
     /// Print the detections as a JSON array instead of one line per CLI.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `set`.
+#[derive(Debug, Args)]
+pub struct SetArgs {
+    /// Which role to write.
+    #[command(subcommand)]
+    pub role: SetRole,
+}
+
+/// The roster role `set` writes.
+#[derive(Debug, Subcommand)]
+pub enum SetRole {
+    /// The agent that plans the run.
+    Orchestrator(OneAgent),
+    /// The agent that reviews, which must differ from the orchestrator.
+    Reviewer(OneAgent),
+    /// The agents workers fall back through, in order; replaces the list.
+    Workers(ManyAgents),
+}
+
+/// One agent string with the effort it runs at.
+#[derive(Debug, Args)]
+pub struct OneAgent {
+    /// `<program>/<model>`, e.g. `claude/claude-opus-5-5`.
+    #[arg(value_name = "AGENT")]
+    pub agent: String,
+    /// Effort for this agent: low, medium, high, xhigh or max.
+    #[arg(long, value_name = "EFFORT")]
+    pub effort: Option<String>,
+}
+
+/// The agent strings for `set workers`, in fallback order.
+#[derive(Debug, Args)]
+pub struct ManyAgents {
+    /// `<program>/<model>`, repeated in fallback order.
+    #[arg(value_name = "AGENT", required = true)]
+    pub agents: Vec<String>,
 }
 
 /// dagr verbs.

@@ -5,6 +5,7 @@ pub mod dagr;
 pub mod janitor;
 pub mod roster;
 pub mod run;
+pub mod set;
 pub mod view;
 
 use anyhow::anyhow;
@@ -18,6 +19,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // `roster` reads no run log, so it answers outside a repository too.
     if let Some(Command::Roster(args)) = &cli.command {
         return roster::run(args, cli.global.json);
+    }
+    // `set` writes a config file, not a log, so it too needs no repository.
+    if let Some(Command::Set(args)) = &cli.command {
+        return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
     }
     let root = resolve_root(cli.global.repo.as_deref())?;
     let actor = resolve_actor(cli.global.actor.as_deref())?;
@@ -42,6 +47,12 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             janitor::restore_verb(&ctx, &args, cli.global.home.as_deref())
         }
         Some(Command::Roster(args)) => roster::run(&args, ctx.json),
+        // Unreachable in practice: `set` returns above, before any log is read.
+        Some(Command::Set(args)) => set::run(
+            &args,
+            cli.global.home.as_deref(),
+            cli.global.repo.as_deref(),
+        ),
     }
 }
 

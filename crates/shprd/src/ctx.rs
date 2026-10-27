@@ -27,6 +27,9 @@ pub const EXIT_ERROR: u8 = 1;
 pub enum CliError {
     /// A transition rule refused the event; nothing was written.
     Refused(RuleError),
+    /// A change was refused because it would leave the state unusable; the
+    /// caller undid it, and the process exits 2 as it does for a rule.
+    Invalid(anyhow::Error),
     /// Anything else: I/O, a bad flag, a corrupt log.
     Other(anyhow::Error),
 }
@@ -40,7 +43,7 @@ impl CliError {
     /// The process exit code this failure maps to.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::Refused(_) => EXIT_REFUSED,
+            Self::Refused(_) | Self::Invalid(_) => EXIT_REFUSED,
             Self::Other(_) => EXIT_ERROR,
         }
     }
@@ -51,6 +54,7 @@ impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(rule) => write!(f, "{rule}"),
+            Self::Invalid(source) => write!(f, "invalid: {source:#}"),
             Self::Other(source) => write!(f, "{source:#}"),
         }
     }

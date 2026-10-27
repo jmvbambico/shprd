@@ -56,7 +56,7 @@ fn models(specs: &[HarnessSpec]) -> BTreeMap<String, String> {
 
 /// The data directory: `$SHPRD_DATA_DIR`, else `<git root>/data`, else the
 /// `../share/shprd/data` a packaged install puts next to the binary.
-fn resolve_data_dir() -> Result<PathBuf, CliError> {
+pub(crate) fn resolve_data_dir() -> Result<PathBuf, CliError> {
     if let Some(dir) = std::env::var_os(DATA_ENV).filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
