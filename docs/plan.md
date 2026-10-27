@@ -123,6 +123,7 @@ Goal: shprd knows which agents exist, can run, and have quota.
 
 | ID | Task | Scope | Size |
 |---|---|---|---|
+| M3.0 | Harden `spec.rs` (from the M0 review): reject empty locations and misplaced `*`; reject an unmatched `{` in templates; validate launch templates at load (placeholder fits its field, `model_args` uses `{model}`); `load_dir` runs `validate` | `shprd-roster/src/spec.rs` | S |
 | M3.1 | Detection: binary, version, sign-in probes per harness file; `shprd roster` | `shprd-roster/src/detect.rs` | M |
 | M3.2 | Models: list per CLI where possible; `program/model` + effort parsing; `shprd set` | `shprd-roster/src/models.rs`, `shprd/src/cmd/set.rs` | S |
 | M3.3 | Quota probes: Claude OAuth usage and Codex wham usage ported from og (`installer/og_quota.py:168-318`, credited); kilo profile; cache and 429 fallback | `shprd-roster/src/quota/` | M |
@@ -130,7 +131,7 @@ Goal: shprd knows which agents exist, can run, and have quota.
 | M3.5 | Clean launch environment builder (strip push credentials, drop og-style overrides) | `shprd-roster/src/env.rs` | S |
 | M3.6 | `shprd doctor` | `shprd/src/cmd/doctor.rs` | S |
 
-Lanes: M3.1 ∥ M3.3 ∥ M3.4 ∥ M3.5; then M3.2 ∥ M3.6.
+Lanes: M3.0 first (same file as later roster work); then M3.1 ∥ M3.3 ∥ M3.4 ∥ M3.5; then M3.2 ∥ M3.6.
 
 **Gate:** `shprd roster` and `shprd doctor` on this machine correctly report the
 five CLIs, their sign-in state, Claude and Codex quota, and which skills each CLI
@@ -239,6 +240,41 @@ from the phone via the relay.
 | M9.2 | Install paths: `cargo install`, Homebrew tap, release binaries via CI | M |
 | M9.3 | herdr thin plugin (actions → `shprd <verb>`), marketplace listing | S |
 | M9.4 | `THIRD_PARTY_NOTICES.md` audit, README status table updated, release notes | S |
+| M9.5 | Release on every merge (below) | M |
+
+### Releases after v0.1.0
+
+From v0.1.0 on, **every PR merged into `main` produces a tagged, published
+release.** No release PRs and no manual tagging.
+
+- **Trigger:** a GitHub Actions workflow on `push` to `main`. Merging an
+  approved PR is the only way anything reaches `main`.
+- **Next version** comes from the Conventional Commits in the merge since the
+  last tag:
+
+  | Commits contain | Before 1.0 | From 1.0 |
+  |---|---|---|
+  | `feat!` or `BREAKING CHANGE` | minor | major |
+  | `feat` | minor | minor |
+  | `fix`, `perf` | patch | patch |
+  | only `docs`, `chore`, `ci`, `test`, `refactor` | patch | patch |
+
+  Every merge releases, so a docs-only PR still ships a patch. Its notes say
+  "no functional change".
+- **Tag, don't commit.** The workflow creates and pushes tag `vX.Y.Z` and does
+  **not** push a version-bump commit. That way protected `main` never needs a
+  bot that bypasses the PR rule. The build stamps the version from the tag
+  (`SHPRD_VERSION` env read in `build.rs`, falling back to `Cargo.toml`), so
+  `shprd --version` matches the release. `Cargo.toml` stays at the last minor
+  version and is bumped by hand only when publishing to crates.io.
+- **Publish:** build release binaries (macOS arm64 + x86_64, Linux x86_64 +
+  arm64), attach them with checksums to a GitHub Release, and write notes
+  grouped by commit type with each merged PR linked. Then update the Homebrew
+  tap formula.
+- **Safety:** the workflow refuses to tag if the CI run for that commit didn't
+  pass, or if the tag already exists. A failed publish leaves no tag behind.
+- **Before v0.1.0:** no automatic releases. Milestone merges stay untagged
+  until M9 ships v0.1.0.
 
 ---
 
