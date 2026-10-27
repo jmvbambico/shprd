@@ -5,7 +5,7 @@
 //! guesses.
 
 use shprd_core::event::{Event, EventKind, Finding, Severity};
-use shprd_core::state::{RunState, Task};
+use shprd_core::state::{OverrideRecord, RunState, Task};
 
 /// The Markdown body describing `state`, as recorded in `events`.
 ///
@@ -45,7 +45,7 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
     out.push(String::new());
     out.push("## Overrides".to_string());
     out.push(String::new());
-    let overrides = override_lines(events);
+    let overrides = override_lines(state);
     if overrides.is_empty() {
         out.push("none".to_string());
     } else {
@@ -128,16 +128,26 @@ fn gate_lines(task: &Task) -> Vec<String> {
     lines
 }
 
-/// Every override in the log, as `task rule reason` (run-wide ones say so).
-fn override_lines(events: &[Event]) -> Vec<String> {
-    let mut lines = Vec::new();
-    for event in events {
-        if let EventKind::Override { task, rule, reason } = &event.kind {
-            let task = if task.is_empty() { "run-wide" } else { task };
-            lines.push(format!("- {task} `{rule}`: {}", cell(reason)));
+/// Every override the state holds, as `task rule reason` (run-wide ones say
+/// so), oldest first.
+///
+/// Task overrides are read off each task and run-wide ones off the run, then
+/// merged by event sequence so the body lists them in the order they happened.
+fn override_lines(state: &RunState) -> Vec<String> {
+    let mut records: Vec<(u64, &str, &OverrideRecord)> = Vec::new();
+    for task in state.tasks.values() {
+        for record in &task.overrides {
+            records.push((record.seq, task.id.as_str(), record));
         }
     }
-    lines
+    for record in &state.run_overrides {
+        records.push((record.seq, "run-wide", record));
+    }
+    records.sort_by_key(|(seq, _, _)| *seq);
+    records
+        .into_iter()
+        .map(|(_, task, record)| format!("- {task} `{}`: {}", record.rule, cell(&record.reason)))
+        .collect()
 }
 
 /// The word printed for a finding's severity.

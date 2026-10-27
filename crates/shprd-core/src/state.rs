@@ -22,6 +22,12 @@ pub struct RunState {
     pub agents: BTreeMap<AgentId, AgentInfo>,
     /// Escalations raised during the run, in order.
     pub escalations: Vec<Escalation>,
+    /// Rule overrides that name no task, so they apply to the whole run.
+    ///
+    /// Per-task overrides live on [`Task::overrides`]; these have no task to
+    /// hang off, and dropping them would lose the only record of a run-wide
+    /// override. Newest last, in event order.
+    pub run_overrides: Vec<OverrideRecord>,
     /// Whether the run has finished.
     pub finished: bool,
     /// Sequence number of the last applied event, 0 before the first.
@@ -360,17 +366,107 @@ impl RunState {
                 });
             }
             EventKind::Override { task, rule, reason } => {
-                // A run-wide override names no task, so it has no home in the
-                // per-task override list yet.
-                if let Some(entry) = self.tasks.get_mut(task) {
-                    entry.overrides.push(OverrideRecord {
-                        rule: rule.clone(),
-                        reason: reason.clone(),
-                        seq: event.seq,
-                    });
+                // An override with an empty task is run-wide: it belongs to the
+                // run, not to any one task.
+                let record = OverrideRecord {
+                    rule: rule.clone(),
+                    reason: reason.clone(),
+                    seq: event.seq,
+                };
+                if task.is_empty() {
+                    self.run_overrides.push(record);
+                } else if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.overrides.push(record);
                 }
             }
             EventKind::RunFinished {} => self.finished = true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Actor;
+
+    /// An event with `kind` at position `seq`.
+    fn ev(seq: u64, kind: EventKind) -> Event {
+        Event {
+            seq,
+            at_ms: seq * 1000,
+            actor: Actor::Human,
+            kind,
+        }
+    }
+
+    /// A started run, a task `a`, and an override of `rule` on `task`
+    /// (run-wide when `task` is empty).
+    fn log(task: &str, rule: &str) -> Vec<Event> {
+        vec![
+            ev(
+                1,
+                EventKind::RunStarted {
+                    run_id: "r1".to_string(),
+                    repo: "/repo".to_string(),
+                    base_branch: "main".to_string(),
+                    integration_branch: "integration/m1".to_string(),
+                },
+            ),
+            ev(
+                2,
+                EventKind::TaskAdded {
+                    task: "a".to_string(),
+                    title: "task a".to_string(),
+                    scope: vec!["src/a".to_string()],
+                    acceptance: vec!["it works".to_string()],
+                    tags: Vec::new(),
+                    skills: Vec::new(),
+                    deps: Vec::new(),
+                },
+            ),
+            ev(
+                3,
+                EventKind::Override {
+                    task: task.to_string(),
+                    rule: rule.to_string(),
+                    reason: "shipping anyway".to_string(),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_run_wide_override_lands_on_the_run() {
+        let folded = RunState::fold(&log("", "no_main_push"));
+        let state = match folded {
+            Ok(state) => state,
+            Err(err) => panic!("a run-wide override must fold: {err}"),
+        };
+        assert_eq!(state.run_overrides.len(), 1, "{state:?}");
+        assert_eq!(state.run_overrides[0].rule, "no_main_push");
+        assert_eq!(state.run_overrides[0].reason, "shipping anyway");
+        assert_eq!(state.run_overrides[0].seq, 3);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(task.overrides.is_empty(), "{task:?}");
+    }
+
+    #[test]
+    fn a_task_override_still_lands_on_the_task() {
+        let folded = RunState::fold(&log("a", "integrate_after_failed_gate"));
+        let state = match folded {
+            Ok(state) => state,
+            Err(err) => panic!("a task override must fold: {err}"),
+        };
+        assert!(state.run_overrides.is_empty(), "{state:?}");
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert_eq!(task.overrides.len(), 1, "{task:?}");
+        assert_eq!(task.overrides[0].rule, "integrate_after_failed_gate");
+        assert_eq!(task.overrides[0].seq, 3);
     }
 }

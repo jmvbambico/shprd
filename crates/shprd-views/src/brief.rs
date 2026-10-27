@@ -4,8 +4,8 @@
 //! longer than [`BRIEF_MAX_LINES`] lines, so it fits in a prompt next to the
 //! task it describes. No model writes any of it.
 
-use shprd_core::event::{Event, EventKind, Finding, Severity};
-use shprd_core::state::{RunState, Task, TaskStatus};
+use shprd_core::event::{Event, Finding, Severity};
+use shprd_core::state::{OverrideRecord, RunState, Task, TaskStatus};
 
 use crate::clock;
 
@@ -21,14 +21,19 @@ const TEXT_CHARS: usize = 80;
 /// Largest number of escalations shown, most recent last.
 const ESCALATIONS_SHOWN: usize = 3;
 
-/// The rehydration block for `state`, rendered from `events`.
+/// The rehydration block for `state`.
+///
+/// The event log is accepted for symmetry with the other projectors, but every
+/// fact in a brief now lives in the folded state, including run-wide overrides,
+/// so the log is not consulted. Pass the log anyway: callers have it, and the
+/// argument keeps the projector signatures interchangeable.
 ///
 /// It carries a header line with the run and its branches, then the sections
 /// that have content: the task table, the tasks waiting at a gate, the failed
 /// gates, the dry agents, the most recent escalations and every override. Over
 /// [`BRIEF_MAX_LINES`] lines, lists are cut and marked `… and N more`, so the
 /// same state always renders the same brief and it always fits.
-pub fn brief(state: &RunState, events: &[Event]) -> String {
+pub fn brief(state: &RunState, _events: &[Event]) -> String {
     let Some(run) = &state.run else {
         return "no run".to_string();
     };
@@ -42,7 +47,7 @@ pub fn brief(state: &RunState, events: &[Event]) -> String {
         Section::new("failed gates:", failed_lines(state)),
         Section::new("dry agents:", dry_lines(state)),
         Section::new("escalations:", escalation_lines(state)),
-        Section::new("overrides:", override_lines(events)),
+        Section::new("overrides:", override_lines(state)),
     ];
     sections.retain(|section| !section.lines.is_empty());
     assemble(&header, &sections).join("\n")
@@ -185,16 +190,26 @@ fn escalation_lines(state: &RunState) -> Vec<String> {
     lines
 }
 
-/// Every override in the log, newest last, as recorded by a human.
-fn override_lines(events: &[Event]) -> Vec<String> {
-    let mut lines = Vec::new();
-    for event in events {
-        if let EventKind::Override { task, rule, reason } = &event.kind {
-            let task = if task.is_empty() { "-" } else { task.as_str() };
-            lines.push(format!("  {task} {rule}: {reason}"));
+/// Every override the state holds, oldest first, as recorded by a human.
+///
+/// Task overrides come from each task; run-wide ones have no task and print as
+/// `-`. The two lists are merged by event sequence so the order is the order
+/// they happened in, not the order tasks happen to be named.
+fn override_lines(state: &RunState) -> Vec<String> {
+    let mut records: Vec<(u64, &str, &OverrideRecord)> = Vec::new();
+    for task in state.tasks.values() {
+        for record in &task.overrides {
+            records.push((record.seq, task.id.as_str(), record));
         }
     }
-    lines
+    for record in &state.run_overrides {
+        records.push((record.seq, "-", record));
+    }
+    records.sort_by_key(|(seq, _, _)| *seq);
+    records
+        .into_iter()
+        .map(|(_, task, record)| format!("  {task} {}: {}", record.rule, record.reason))
+        .collect()
 }
 
 /// The word printed for a task status in the task table.
