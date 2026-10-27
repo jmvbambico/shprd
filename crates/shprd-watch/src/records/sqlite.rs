@@ -25,32 +25,26 @@ const ABORTED: &str = "MessageAbortedError";
 pub fn scan_sqlite(db: &Path, session_dir: &Path, since_ms: u64) -> Result<Scan, ReadError> {
     let connection = open_read_only(db)?;
     let directory = session_dir.to_string_lossy().to_string();
-    let mut sessions = connection
-        .prepare("SELECT id FROM session WHERE directory = ?1")
-        .map_err(|e| ReadError::storage(db, e))?;
-    let ids: Vec<String> = sessions
-        .query_map([&directory], |row| row.get::<_, String>(0))
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .map_err(|e| ReadError::storage(db, e))?;
-
     let since = i64::try_from(since_ms).unwrap_or(i64::MAX);
+    // One query over message and session, ordered by time: the last error seen
+    // is then the newest, whatever order the sessions happen to sit in.
+    let mut messages = connection
+        .prepare(
+            "SELECT m.data, m.time_created FROM message m \
+             JOIN session s ON m.session_id = s.id \
+             WHERE s.directory = ?1 AND m.time_created >= ?2 \
+             ORDER BY m.time_created, m.id",
+        )
+        .map_err(|e| ReadError::storage(db, e))?;
+    let rows = messages
+        .query_map((&directory, since), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| ReadError::storage(db, e))?;
     let mut scan = Scan::default();
-    for id in ids {
-        let mut messages = connection
-            .prepare(
-                "SELECT data, time_created FROM message \
-                 WHERE session_id = ?1 AND time_created >= ?2 ORDER BY time_created",
-            )
-            .map_err(|e| ReadError::storage(db, e))?;
-        let rows = messages
-            .query_map((&id, since), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|e| ReadError::storage(db, e))?;
-        for row in rows {
-            let (data, created) = row.map_err(|e| ReadError::storage(db, e))?;
-            apply_message(&mut scan, &data, created);
-        }
+    for row in rows {
+        let (data, created) = row.map_err(|e| ReadError::storage(db, e))?;
+        apply_message(&mut scan, &data, created);
     }
     Ok(scan)
 }
@@ -198,6 +192,25 @@ mod tests {
 
         let scan = scan_opencode(&path, worktree, 0).unwrap();
         assert_eq!(scan.last_error.unwrap().kind, ErrorKind::Auth);
+    }
+
+    #[test]
+    fn the_newest_error_wins_across_sessions() {
+        let worktree = Path::new("/tmp/worktree");
+        // The session inserted first holds the newer error, so scanning
+        // sessions one by one would let the later, older error win.
+        let (_dir, path) = fixture(
+            "opencode.db",
+            &[
+                ("newer", "/tmp/worktree", 1_793_077_200_000, QUOTA),
+                ("older", "/tmp/worktree", 1_793_073_600_000, AUTH),
+            ],
+        );
+        let scan = scan_sqlite(&path, worktree, 0).unwrap();
+        let error = scan.last_error.unwrap();
+        assert_eq!(error.kind, ErrorKind::Quota);
+        assert_eq!(error.message, "insufficient credit");
+        assert_eq!(error.at_ms, Some(1_793_077_200_000));
     }
 
     #[test]
