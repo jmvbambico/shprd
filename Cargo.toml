@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/shprd-core",
+    "crates/shprd-views",
+    "crates/shprd-git",
+    "crates/shprd-roster",
+    "crates/shprd-watch",
+    "crates/shprd-mux",
+    "crates/shprd-mux-herdr",
+    "crates/shprd-mux-tuios",
+    "crates/shprd-tui",
+    "crates/shprd",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/jmvbambico/shprd"
+version = "0.0.0"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
