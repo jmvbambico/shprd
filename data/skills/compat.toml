@@ -1,0 +1,274 @@
+# shprd skills compatibility list. MAINTAINER-CURATED: agents must not edit (AGENTS.md).
+#
+# verdict: allow  = offered and pre-ticked in setup for the listed roles
+#          opt-in = offered, not pre-ticked
+#          deny   = not offered by default; setup shows `reason` if the user overrides
+# roles: orchestrator | worker | reviewer.  tags: task tags that pull the skill in automatically.
+# reviewed_hash: the `skillFolderHash` from ~/.agents/.skill-lock.json when this entry was reviewed.
+#   `shprd doctor` flags a skill whose current hash differs ("changed upstream, needs re-review").
+# Reviewed 2026-10-27.
+
+schema = 1
+
+[[skill]]
+name = "brainstorming"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["orchestrator"]
+tags = []
+reason = "Kickoff only, with the human present. It asks questions one at a time, so workers (unattended) must never run it."
+reviewed_hash = "3d8a23691e919f5acfd31d45f76bdc168d24ca1b"
+
+[[skill]]
+name = "writing-plans"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["orchestrator"]
+tags = []
+reason = "Turns the human's ask into tasks; its output feeds `shprd agent task add`."
+reviewed_hash = "cc97fa00eb2ccd4f283e34eb2ba06a48e1e679f7"
+
+[[skill]]
+name = "dispatching-parallel-agents"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["orchestrator"]
+tags = []
+reason = "Its independence checks are exactly the decomposition judgment."
+reviewed_hash = "15697cb0726c26a66bff737494e8b5266667ba0c"
+
+[[skill]]
+name = "requesting-code-review"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["orchestrator"]
+tags = []
+reason = "Composing review requests and the review contract."
+reviewed_hash = "f4a6749898702895ea4fd57c7f186cf43205b99a"
+
+[[skill]]
+name = "receiving-code-review"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["orchestrator", "worker", "reviewer"]
+tags = []
+reason = "Triage findings and fix sent-back work without performative agreement."
+reviewed_hash = "b5e154fc3ec7a6a0b1e710eebacc2168620cc428"
+
+[[skill]]
+name = "verification-before-completion"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["worker"]
+tags = []
+reason = "Always on for workers: cuts fake 'done' reports; checkable against tests the engine saw run."
+reviewed_hash = "a4cb0b69aaefeab540947a7f1642bdaad810e37a"
+
+[[skill]]
+name = "systematic-debugging"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["worker"]
+tags = ["bug"]
+reviewed_hash = "108961c080a6837ad8a188a553e593cc5e6df62d"
+
+[[skill]]
+name = "test-driven-development"
+source = "obra/superpowers"
+verdict = "allow"
+roles = ["worker"]
+tags = ["feature", "bug"]
+reason = "Checkable: a test commit precedes the implementation commit."
+reviewed_hash = "847144cf0824095922c0d4875648b9fa74877e1a"
+
+[[skill]]
+name = "design-taste-frontend"
+source = "Leonxlnx/taste-skill"
+verdict = "allow"
+roles = ["worker"]
+tags = ["ui"]
+reason = "Primary UI skill."
+reviewed_hash = "844f3cf223d25a29e75f7965d095a093938282df"
+
+[[skill]]
+name = "make-interfaces-feel-better"
+source = "jakubkrehel/make-interfaces-feel-better"
+verdict = "allow"
+roles = ["worker", "reviewer"]
+tags = ["ui"]
+reviewed_hash = "e880ad90e8a0a8384f5cfae2cdd6a854e2de5d89"
+
+[[skill]]
+name = "web-design-guidelines"
+source = "vercel-labs/agent-skills"
+verdict = "allow"
+roles = ["reviewer"]
+tags = ["ui"]
+reason = "Review-shaped."
+reviewed_hash = "3116f3e62dbd02b44a598b1aa690d2a8938e8f89"
+
+[[skill]]
+name = "simplify"
+source = "brianlovin/claude-config"
+verdict = "allow"
+roles = ["reviewer"]
+tags = []
+reason = "A cleanup pass fits review."
+reviewed_hash = "83566973442dc05bcf5abbe83053e8a8e5f50b6b"
+
+[[skill]]
+name = "frontend-design"
+source = "anthropics/skills"
+verdict = "opt-in"
+roles = ["worker"]
+tags = ["ui"]
+reason = "Overlaps design-taste-frontend; enable one primary design skill, not three."
+reviewed_hash = "d79e2a5bb4df4a386c2adcdd9ab8709bba28c3f6"
+
+[[skill]]
+name = "ui-ux-pro-max"
+source = "nextlevelbuilder/ui-ux-pro-max-skill"
+verdict = "opt-in"
+roles = ["worker"]
+tags = ["ui"]
+reason = "Large; use when a task needs palettes or stack-specific guidance."
+reviewed_hash = "829c4dab53f10cde51f0ff58b0bb13fe870f7e94"
+
+[[skill]]
+name = "agent-browser"
+source = "vercel-labs/agent-browser"
+verdict = "opt-in"
+roles = ["worker"]
+tags = ["ui"]
+reason = "Lets a worker verify UI in a real browser; needs a browser on the machine."
+reviewed_hash = "82def67855a0d2aad7794207951820fa5422fdb0"
+
+[[skill]]
+name = "better-icons"
+source = "better-auth/better-icons"
+verdict = "opt-in"
+roles = ["worker"]
+tags = ["ui"]
+reviewed_hash = "49c97e1227b9611b44248acd341c7f188582f937"
+
+[[skill]]
+name = "web-perf"
+source = "cloudflare/skills"
+verdict = "opt-in"
+roles = ["worker", "reviewer"]
+tags = ["perf"]
+reviewed_hash = "c4c15a909ae86c00d4fbf841238bbf56eb505ac8"
+
+[[skill]]
+name = "ce-brainstorm"
+source = "everyinc/compound-engineering-plugin"
+verdict = "opt-in"
+roles = ["orchestrator"]
+tags = []
+reason = "Alternative to brainstorming; do not enable both."
+reviewed_hash = "3790bbdd1847adb539e77c216c1d3488a06aa891"
+
+[[skill]]
+name = "subagent-driven-development"
+source = "obra/superpowers"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Spawns the agent's own hidden sub-agents, outside shprd's scope locks, review gate and fallback."
+reviewed_hash = "98c875856cf40765616a4565f09b437f0c58992b"
+
+[[skill]]
+name = "using-git-worktrees"
+source = "obra/superpowers"
+verdict = "deny"
+roles = []
+tags = []
+reason = "shprd owns worktrees; an agent making its own is the blast-radius problem."
+reviewed_hash = "d2b8357b922667a091bfe967840abf5ae84ce99c"
+
+[[skill]]
+name = "finishing-a-development-branch"
+source = "obra/superpowers"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Decides merge/PR/discard; shprd owns landing and cleanup."
+reviewed_hash = "3b1205aa5038c71946077dd63b9e71b447729e70"
+
+[[skill]]
+name = "executing-plans"
+source = "obra/superpowers"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Assumes one implementer runs the whole plan inline; shprd splits plans across workers."
+reviewed_hash = "1374506e051a95c35f04654ebde9c5d845d7c7cb"
+
+[[skill]]
+name = "planning-with-files"
+source = "othmanadi/planning-with-files"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Writes plan files into the repo and installs lifecycle hooks; shprd's event log does this."
+reviewed_hash = "890d9cf56d5f5192418ab6a46ad635ae9d5d5938"
+
+[[skill]]
+name = "using-superpowers"
+source = "obra/superpowers"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Forces a skill check before every reply; shprd's tag rules route skills deterministically."
+reviewed_hash = "4c777432715fe58984d212a36aedc6a18472e512"
+
+[[skill]]
+name = "find-skills"
+source = "vercel-labs/skills"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Installs skills mid-run: a side effect on the user's machine."
+reviewed_hash = "76a98a285cb0434f3d39e1a873823556330e398b"
+
+[[skill]]
+name = "writing-skills"
+source = "obra/superpowers"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Not a swarm task."
+reviewed_hash = "660ede63b84ce5d07ef28cccc2973165e2ca06e2"
+
+[[skill]]
+name = "customer-research"
+source = "coreyhaines31/marketingskills"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Off-domain for a coding swarm; opt in per repo."
+reviewed_hash = "8f5ba9a5187f4c9c4a92ad13b3b77f05710597b3"
+
+[[skill]]
+name = "marketing-psychology"
+source = "coreyhaines31/marketingskills"
+verdict = "deny"
+roles = []
+tags = []
+reason = "Off-domain for a coding swarm; opt in per repo."
+reviewed_hash = "0a527bd6cff5ab2fe2b5a60b97d86013a385326a"
+
+# CLI-native skills (not managed by npx skills): never hidden, but flagged in setup
+# when they teach a workflow that conflicts with shprd.
+
+[[native]]
+name = "herdr-projects"
+reason = "Teaches delegating through the herdr-projects board instead of shprd."
+
+[[native]]
+name = "ralph-loop"
+reason = "Runs an autonomous self-loop that bypasses shprd's review gate."
+
+[[native]]
+name = "cancel-ralph"
+reason = "Companion to ralph-loop."
