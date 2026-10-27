@@ -6,7 +6,9 @@
 //! worktree root are ever planned. Archiving always precedes the branch
 //! deletion that follows it, so a deleted branch stays recoverable, and a
 //! worktree removal never deletes a branch: only a `Live` `Branch` resource
-//! earns a [`Action::DeleteBranch`].
+//! earns a [`Action::DeleteBranch`]. The one remote shprd touches is `origin`,
+//! and only to delete a `Live` `RemoteBranch` that the merged pull request names
+//! as its head.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
 use shprd_core::state::{ResourceStatus, RunState, TaskStatus};
 
 use crate::archive::{self, ArchiveError};
+use crate::git::Git;
 use crate::worktree::{self, Layout};
 
 /// Milliseconds in a day, for the archive-expiry arithmetic.
@@ -57,6 +60,16 @@ pub enum Action {
         /// The ref.
         ref_name: String,
     },
+    /// Delete a branch on `origin` that was pushed for a merged pull request.
+    ///
+    /// This is the only action that talks to a remote, and it is only ever
+    /// planned for a branch the ledger recorded `Live` *and* that the merged
+    /// pull request names as its head — so shprd deletes a remote branch only
+    /// when the forge has already taken its commits.
+    DeleteRemoteBranch {
+        /// The branch, as it is named on the remote.
+        branch: String,
+    },
 }
 
 impl Action {
@@ -73,6 +86,7 @@ impl Action {
             Self::ExpireArchive { task, ref_name } => {
                 format!("expire archive {task}: {ref_name}")
             }
+            Self::DeleteRemoteBranch { branch } => format!("delete remote branch {branch}"),
         }
     }
 
@@ -119,16 +133,26 @@ impl Action {
                 name: ref_name.clone(),
                 task: Some(task.clone()),
             }],
+            Self::DeleteRemoteBranch { branch } => vec![EventKind::Resource {
+                action: ResourceAction::Removed,
+                kind: ResourceKind::RemoteBranch,
+                name: branch.clone(),
+                task: None,
+            }],
         })
     }
 
-    /// The task this step is about.
-    pub fn task(&self) -> &TaskId {
+    /// The task this step is about, when it is about one.
+    ///
+    /// A remote branch belongs to the run rather than to a task, so it has
+    /// none.
+    pub fn task(&self) -> Option<&TaskId> {
         match self {
             Self::ArchiveRef { task, .. }
             | Self::RemoveWorktree { task, .. }
             | Self::DeleteBranch { task, .. }
-            | Self::ExpireArchive { task, .. } => task,
+            | Self::ExpireArchive { task, .. } => Some(task),
+            Self::DeleteRemoteBranch { .. } => None,
         }
     }
 }
@@ -231,6 +255,26 @@ pub fn plan(
             });
         }
     }
+    // A merged pull request releases what it pushed. The ledger must hold the
+    // remote branch `Live` and the merge must name that exact branch as its
+    // head: a stale or foreign name is never deleted from `origin`.
+    if let Some(pr) = &state.pr
+        && pr.merged
+    {
+        for ((kind, name), record) in &state.resources {
+            if kind != &ResourceKind::RemoteBranch
+                || record.status != ResourceStatus::Live
+                || !layout.owns_branch(name)
+                || is_protected_branch(name)
+                || pr.head != *name
+            {
+                continue;
+            }
+            actions.push(Action::DeleteRemoteBranch {
+                branch: name.clone(),
+            });
+        }
+    }
     for action in stale {
         if actions
             .iter()
@@ -290,6 +334,17 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                     .map_err(|err| err.to_string())
                     .and_then(|events| events.map_err(|err| err.to_string()))
             }
+            Action::DeleteRemoteBranch { branch } => {
+                if !layout.owns_branch(branch) || is_protected_branch(branch) {
+                    Err(format!("branch {branch} may not be deleted from origin"))
+                } else {
+                    Git::new(repo)
+                        .run(&["push", "origin", "--delete", branch])
+                        .map(|_| action.events(layout))
+                        .map_err(|err| err.to_string())
+                        .and_then(|events| events.map_err(|err| err.to_string()))
+                }
+            }
             Action::ExpireArchive { ref_name, .. } => archive::expire(repo, ref_name)
                 .map(|()| action.events(layout))
                 .map_err(|err| err.to_string())
@@ -301,6 +356,11 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
         });
     }
     outcomes
+}
+
+/// True for the branches a run is cut from, which shprd deletes nowhere.
+fn is_protected_branch(branch: &str) -> bool {
+    matches!(branch, "main" | "master")
 }
 
 /// True when the task's resources are free to go: it landed, or the run is over
