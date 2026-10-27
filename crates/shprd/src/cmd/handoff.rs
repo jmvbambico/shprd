@@ -958,18 +958,6 @@ project_dirs = []
             .count()
     }
 
-    /// A helper around `handoff` that fails the test rather than returning.
-    fn run(
-        mux: &dyn Mux,
-        env: &SpawnEnv<'_>,
-        req: &HandoffRequest,
-    ) -> Result<HandoffReport, CliError> {
-        match handoff(mux, env, req) {
-            Ok(report) => Ok(report),
-            Err(err) => Err(err),
-        }
-    }
-
     #[test]
     fn a_hand_off_that_cannot_stop_the_old_agent_starts_no_new_one() {
         let scratch = Scratch::new();
@@ -983,7 +971,7 @@ project_dirs = []
         let flaky = FlakyMux::new(mux, Fault::CloseTab);
         let opened = tabs_created(flaky.inner());
 
-        let err = match run(&flaky, &env, &request(None)) {
+        let err = match handoff(&flaky, &env, &request(None)) {
             Ok(report) => panic!("handed off to {} anyway", report.to),
             Err(err) => err,
         };
@@ -1029,7 +1017,7 @@ project_dirs = []
         std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o400))
             .unwrap_or_else(|err| panic!("{err}"));
 
-        let err = match run(&mux, &env, &request(None)) {
+        let err = match handoff(&mux, &env, &request(None)) {
             Ok(report) => panic!("handed off to {} anyway", report.to),
             Err(err) => err,
         };
