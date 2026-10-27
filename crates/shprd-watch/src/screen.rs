@@ -4,6 +4,9 @@
 //! Everything here reads through [`shprd_mux::Mux`], so the same code runs
 //! against herdr, tuios and [`shprd_mux::fake::FakeMux`].
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 /// How many trailing screen lines a signal looks at. Anything further up has
 /// scrolled out of the agent's current turn.
 pub const WINDOW_LINES: usize = 40;
@@ -76,4 +79,76 @@ pub fn reset_hint(screen: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The screen with trailing whitespace trimmed on each line and trailing blank
+/// lines dropped, so a blinking cursor or a resize's padding is not a change.
+fn normalized(screen: &str) -> String {
+    let mut lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// A hash of [`normalized`]`(screen)`: equal screens hash equal.
+fn screen_hash(screen: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    normalized(screen).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Whether a pane's screen is still moving, and how long it has not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Liveness {
+    /// The screen differs from the last observation. The first observation
+    /// counts as a change: it is what establishes the baseline.
+    pub changed: bool,
+    /// Milliseconds the screen has been byte-identical (after [`normalized`])
+    /// to the last observation; zero when it just changed.
+    pub unchanged_for_ms: u64,
+}
+
+/// Remembers one pane's last screen so a caller can tell "still working" from
+/// "stuck on the same output".
+///
+/// Only a hash is kept, so holding a sampler costs nothing however large the
+/// screen is, and a screen that goes back to an earlier state still counts as
+/// a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sampler {
+    /// Hash of the last normalized screen, if any.
+    last_hash: Option<u64>,
+    /// When the current screen first appeared.
+    unchanged_since_ms: Option<u64>,
+}
+
+impl Sampler {
+    /// A sampler that has seen nothing yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one observation of `screen` taken at `now_ms` into the sampler and
+    /// report what changed.
+    pub fn observe(&mut self, screen: &str, now_ms: u64) -> Liveness {
+        let hash = screen_hash(screen);
+        match self.last_hash {
+            Some(previous) if previous == hash => {
+                let since = *self.unchanged_since_ms.get_or_insert(now_ms);
+                Liveness {
+                    changed: false,
+                    unchanged_for_ms: now_ms.saturating_sub(since),
+                }
+            }
+            _ => {
+                self.last_hash = Some(hash);
+                self.unchanged_since_ms = Some(now_ms);
+                Liveness {
+                    changed: true,
+                    unchanged_for_ms: 0,
+                }
+            }
+        }
+    }
 }
