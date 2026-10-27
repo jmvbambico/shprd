@@ -506,7 +506,8 @@ fn quota_section(
             section.add(Level::Info, format!("{agent}  not in the harness table"));
             continue;
         }
-        let (level, text) = quota_line(&quota::probe(agent, &ctx));
+        let in_role = fills_a_role(config, agent);
+        let (level, text) = quota_line(&quota::probe(agent, &ctx), in_role);
         section.add(level, text);
     }
 }
@@ -540,12 +541,27 @@ fn every_agent(roster: &Roster) -> impl Iterator<Item = &String> {
         .chain(roster.reviewer.iter())
 }
 
+/// Whether `agent`'s program fills at least one role in the loaded config.
+fn fills_a_role(config: Option<&Config>, agent: &str) -> bool {
+    let Some(roster) = config.map(|config| &config.roster) else {
+        return false;
+    };
+    let prefix = format!("{agent}/");
+    every_agent(roster).any(|pinned| pinned.starts_with(&prefix))
+}
+
 /// One quota report as a level and a line: state, binding window, reset.
-fn quota_line(report: &QuotaReport) -> (Level, String) {
-    let (level, state) = match report.state {
-        QuotaState::Ok => (Level::Ok, "ok"),
-        QuotaState::Dry => (Level::Fail, "dry"),
-        QuotaState::Unknown => (Level::Warn, "unknown"),
+///
+/// A dry or unknown agent fails the verb only when a role actually dispatches
+/// it; an agent nothing uses is a warning, so nobody is blocked by a probe for
+/// a program they never run.
+fn quota_line(report: &QuotaReport, in_role: bool) -> (Level, String) {
+    let (level, state) = match (report.state, in_role) {
+        (QuotaState::Ok, _) => (Level::Ok, "ok"),
+        (QuotaState::Dry, true) => (Level::Fail, "dry"),
+        (QuotaState::Dry, false) => (Level::Warn, "dry"),
+        (QuotaState::Unknown, true) => (Level::Fail, "unknown"),
+        (QuotaState::Unknown, false) => (Level::Warn, "unknown"),
     };
     let mut text = format!("{}  {state}", report.agent);
     match report.windows.first() {
@@ -731,6 +747,21 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use shprd_roster::quota::Tier;
+
+    /// A report in `state`, as a probe would return it.
+    fn report(agent: &str, state: QuotaState) -> QuotaReport {
+        QuotaReport {
+            agent: agent.to_owned(),
+            state,
+            tier: Tier::Measured,
+            windows: Vec::new(),
+            reset_at_ms: None,
+            source: "kilo-profile".to_owned(),
+            detail: "a zero balance".to_owned(),
+            checked_at_ms: 0,
+        }
+    }
 
     /// A config whose roles are the given agents.
     fn config(orchestrator: Option<&str>, workers: &[&str]) -> Config {
@@ -738,6 +769,52 @@ mod tests {
         config.roster.orchestrator = orchestrator.map(str::to_owned);
         config.roster.workers = workers.iter().map(|agent| (*agent).to_owned()).collect();
         config
+    }
+
+    /// A report holding only this one quota line, and the level it carries.
+    fn line_level(config: Option<&Config>, agent: &str, state: QuotaState) -> (Level, bool) {
+        let (level, text) = quota_line(&report(agent, state), fills_a_role(config, agent));
+        let mut report = Report::default();
+        report.section("Quota").add(level, text);
+        (level, report.has_fail())
+    }
+
+    #[test]
+    fn a_dry_agent_no_role_uses_is_a_warning_and_the_verb_succeeds() {
+        let (level, fails) = line_level(None, "kilo", QuotaState::Dry);
+        assert_eq!(level, Level::Warn);
+        assert_eq!(level.glyph(), '!');
+        assert!(!fails, "an unused dry agent must not fail the verb");
+    }
+
+    #[test]
+    fn a_dry_agent_a_worker_uses_fails_the_verb() {
+        let config = config(Some("claude/opus"), &["kilo/kilo-auto/free"]);
+        let (level, fails) = line_level(Some(&config), "kilo", QuotaState::Dry);
+        assert_eq!(level, Level::Fail);
+        assert_eq!(level.glyph(), '✗');
+        assert!(fails, "a dry worker must fail the verb");
+    }
+
+    #[test]
+    fn an_unknown_agent_outside_every_role_only_warns() {
+        let config = config(Some("claude/opus"), &["claude/opus"]);
+        let (level, fails) = line_level(Some(&config), "codex", QuotaState::Unknown);
+        assert_eq!(level, Level::Warn);
+        assert!(!fails);
+    }
+
+    #[test]
+    fn an_ok_agent_is_ok_whatever_the_roster_says() {
+        assert_eq!(
+            line_level(None, "codex", QuotaState::Ok),
+            (Level::Ok, false)
+        );
+        let config = config(None, &["codex/gpt-6"]);
+        assert_eq!(
+            line_level(Some(&config), "codex", QuotaState::Ok),
+            (Level::Ok, false)
+        );
     }
 
     #[test]
