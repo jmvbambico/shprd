@@ -132,6 +132,9 @@ pub struct FakeMux {
     starter_tab: bool,
     /// Whether a pane with no scripted state reports a detected agent.
     ready: bool,
+    /// The reason [`Mux::run`] fails, when a test wants a host that cannot
+    /// start a program.
+    run_failure: Option<String>,
     inner: Mutex<Inner>,
 }
 
@@ -157,6 +160,7 @@ impl FakeMux {
             caps,
             starter_tab: false,
             ready: false,
+            run_failure: None,
             inner: Mutex::new(Inner::fresh()),
         }
     }
@@ -174,6 +178,13 @@ impl FakeMux {
     /// not have to script a state for ids it cannot predict.
     pub fn with_ready_agent(mut self) -> Self {
         self.ready = true;
+        self
+    }
+
+    /// Make [`Mux::run`] fail with `reason` after recording the call, which is
+    /// how a host that cannot start the CLI looks to a caller.
+    pub fn failing_run(mut self, reason: impl Into<String>) -> Self {
+        self.run_failure = Some(reason.into());
         self
     }
 
@@ -366,6 +377,9 @@ impl Mux for FakeMux {
         inner
             .calls
             .push(Call::Run(pane.clone(), argv.to_vec(), env.to_vec()));
+        if let Some(reason) = &self.run_failure {
+            return Err(MuxError::command("run", reason.clone()));
+        }
         inner.require_pane(pane)
     }
 

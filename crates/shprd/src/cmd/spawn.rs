@@ -258,10 +258,17 @@ fn open_agent(
     let tab = mux
         .create_tab(&workspace.id, &title, &worktree.path)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the agent tab")))?;
-    start_in_tab(
+    // The tab exists from here on, so every failure closes it again: a tab left
+    // open points at a worktree the failing spawn is about to remove.
+    match start_in_tab(
         mux, env, pick, effort, brief, brief_path, worktree, task, &title, &tab,
-    )?;
-    Ok((tab.id, title))
+    ) {
+        Ok(()) => Ok((tab.id, title)),
+        Err(err) => {
+            close_tab(mux, &tab.id);
+            Err(err)
+        }
+    }
 }
 
 /// Starts the agent's CLI in `tab` and hands it the brief.
@@ -1160,6 +1167,47 @@ mod flow_tests {
         assert_eq!(escalation.task.as_deref(), Some("T1"));
         assert_eq!(escalation.body, "brief not delivered");
         assert_eq!(escalation.default_action, "resend the brief");
+    }
+
+    #[test]
+    fn a_failing_run_closes_the_tab_and_removes_the_worktree() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default()
+            .with_ready_agent()
+            .failing_run("the host refused");
+        let workspace = mux
+            .create_workspace(
+                &naming::workspace_name(&scratch.repo_name()),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let failure = spawn(&mux, &env, &request());
+        assert!(failure.is_err(), "spawn should have failed");
+
+        let worktree = env.layout.path(&env.repo_name, "t1", "T1");
+        assert!(
+            !worktree.exists(),
+            "worktree {} survived",
+            worktree.display()
+        );
+        let tabs = mux
+            .list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(tabs.is_empty(), "the tab it opened survived: {tabs:?}");
+        assert!(
+            mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::CloseTab(_))),
+            "the tab must be closed, not abandoned"
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(state.resources.is_empty(), "{:?}", state.resources);
+        let task = state.tasks.get("T1").unwrap_or_else(|| panic!("no task"));
+        assert!(task.attempts.is_empty());
+        assert!(state.escalations.is_empty(), "{:?}", state.escalations);
     }
 
     #[test]
