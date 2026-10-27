@@ -131,8 +131,10 @@ fn is_executable(path: &Path) -> bool {
 ///
 /// `env` starts from the current process environment: a [`Some`] entry sets a
 /// variable and a [`None`] entry removes one. The child's stdin is `/dev/null`
-/// so a CLI that asks a question fails instead of hanging, and it is killed at
-/// `timeout`. Output is captured for the caller and never logged.
+/// so a CLI that asks a question fails instead of hanging. At `timeout` the
+/// probe and the whole process group it leads are killed, so a CLI that started
+/// children of its own leaves nothing running. Output is captured for the
+/// caller and never logged.
 pub fn run_with_timeout(
     program: &Path,
     args: &[String],
@@ -150,6 +152,14 @@ pub fn run_with_timeout(
             Some(value) => command.env(key, value),
             None => command.env_remove(key),
         };
+    }
+
+    // The probe leads its own process group, so a timeout can take down the
+    // children a CLI started for itself as well as the CLI.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
     }
 
     let mut child = command.spawn().map_err(|source| DetectError::Spawn {
@@ -186,11 +196,31 @@ pub fn run_with_timeout(
         })
 }
 
-/// Kills a probe that timed out or failed, ignoring the error of a child that
-/// has already exited.
+/// Kills a probe that timed out or failed, and every process it started, then
+/// reaps it.
+///
+/// The child leads its own process group (see [`run_with_timeout`]), so a group
+/// kill reaches the grandchildren too: a CLI that shelled out to its own child
+/// would otherwise leave it running after the probe is gone. `libc` is not a
+/// dependency, so the group is signalled with `kill -KILL -<pgid>`.
 fn kill(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    kill_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Kill the process group led by `leader`, ignoring a group that is already
+/// gone.
+#[cfg(unix)]
+fn kill_group(leader: u32) {
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{leader}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Runs the version probe and scrapes a version number out of its output.
@@ -611,5 +641,53 @@ project_dirs = []
         assert_eq!(found[0].version.as_deref(), Some("1.0"));
         assert_eq!(found[1].version.as_deref(), Some("2.0"));
         assert_eq!(found[0].signin, SignIn::SignedIn);
+    }
+
+    /// Whether `pid` is still a live process.
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn a_timeout_kills_what_the_probe_started() {
+        let dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
+        let pidfile = dir.path().join("child.pid");
+        let body = format!("sleep 30 &\necho $! > {}\nsleep 30", pidfile.display());
+        write_script(dir.path(), "forker", &body);
+        let binary = dir.path().join("forker");
+
+        // Generous enough that the script reaches its second line before the
+        // timeout fires, even on a machine where a fork is slow.
+        let out = run_with_timeout(&binary, &[], &[], Duration::from_secs(2));
+        assert!(
+            matches!(out, Err(DetectError::Timeout { .. })),
+            "expected a timeout, got {out:?}"
+        );
+        let pid = match fs::read_to_string(&pidfile) {
+            Ok(pid) => pid.trim().to_owned(),
+            Err(error) => panic!("reading {}: {error}", pidfile.display()),
+        };
+        assert!(
+            !pid.is_empty(),
+            "the script should have written its child pid"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(&pid) && Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            !alive(&pid),
+            "the background child {pid} survived the timeout"
+        );
     }
 }
