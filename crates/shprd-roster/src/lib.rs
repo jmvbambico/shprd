@@ -2,6 +2,6 @@
 
 pub mod detect;
 pub mod env;
-pub mod skills;
 pub mod quota;
+pub mod skills;
 pub mod spec;
