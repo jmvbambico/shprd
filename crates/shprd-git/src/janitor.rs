@@ -194,7 +194,7 @@ pub fn plan(
                 if !archive::is_archive_ref(name) {
                     continue;
                 }
-                let created = created_at(events, ResourceKind::ArchiveRef, name);
+                let created = created_at(events, record.created_seq);
                 if created.is_some_and(|at_ms| is_expired(at_ms, now_ms, archive_days)) {
                     stale.push(Action::ExpireArchive {
                         task,
@@ -305,18 +305,17 @@ fn cleanup_due(state: &RunState, task: &TaskId) -> bool {
     }
 }
 
-/// When the `Created` event for `(kind, name)` was appended, if the log has
-/// one.
-fn created_at(events: &[Event], kind: ResourceKind, name: &str) -> Option<u64> {
-    events.iter().find_map(|event| match &event.kind {
-        EventKind::Resource {
-            action: ResourceAction::Created,
-            kind: found_kind,
-            name: found_name,
-            ..
-        } if *found_kind == kind && found_name == name => Some(event.at_ms),
-        _ => None,
-    })
+/// When the creation that made the current record was appended, if the log
+/// still holds it.
+///
+/// The record carries the seq of its own `Created` event, so a resource that
+/// was removed and created again is aged from the re-creation rather than from
+/// the first time it existed.
+fn created_at(events: &[Event], seq: u64) -> Option<u64> {
+    events
+        .iter()
+        .find(|event| event.seq == seq)
+        .map(|event| event.at_ms)
 }
 
 /// True when an archive ref created at `created_ms` has outlived

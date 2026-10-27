@@ -73,6 +73,11 @@ fn archived_task(events: &[Event], task: &str, ref_name: &str) -> Vec<Event> {
     all
 }
 
+/// The `at_ms` of the last event in `events`.
+fn all_at(events: &[Event]) -> u64 {
+    events.last().map(|event| event.at_ms).unwrap_or(0)
+}
+
 #[test]
 fn never_plans_a_branch_outside_the_namespace_or_a_worktree_outside_the_root() {
     let repo = Repo::new();
@@ -239,6 +244,62 @@ fn expires_an_archive_ref_only_after_the_retention_window() {
             .iter()
             .any(|action| matches!(action, Action::ExpireArchive { .. })),
         "a ref past the window must expire: {stale:?}"
+    );
+}
+
+#[test]
+fn archive_age_is_measured_from_the_current_creation() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let ref_name = archive::archive_ref_name("r1", "T2");
+    let base = integrated_run(
+        "r1",
+        "T1",
+        "shprd/r1/T1",
+        &layout.root.join("repo/r1/T1"),
+        1_000,
+    );
+    let mut events = archived_task(&base, "T2", &ref_name);
+    let mut seq = events.len() as u64 + 1;
+    let at_ms = all_at(&events);
+    events.push(event(
+        seq,
+        at_ms,
+        EventKind::Resource {
+            action: ResourceAction::Removed,
+            kind: ResourceKind::ArchiveRef,
+            name: ref_name.clone(),
+            task: Some("T2".to_string()),
+        },
+    ));
+    seq += 1;
+    let recreated_ms = 9_000;
+    events.push(event(
+        seq,
+        recreated_ms,
+        EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::ArchiveRef,
+            name: ref_name.clone(),
+            task: Some("T2".to_string()),
+        },
+    ));
+    let state = fold(&events);
+    let window = u64::from(DAYS) * janitor::MILLIS_PER_DAY;
+
+    let fresh = janitor::plan(&state, &events, &layout, recreated_ms + window, DAYS);
+    assert!(
+        !fresh
+            .iter()
+            .any(|action| matches!(action, Action::ExpireArchive { .. })),
+        "age counts from the re-creation: {fresh:?}"
+    );
+    let stale = janitor::plan(&state, &events, &layout, recreated_ms + window + 1, DAYS);
+    assert!(
+        stale
+            .iter()
+            .any(|action| matches!(action, Action::ExpireArchive { .. })),
+        "a re-created ref still expires: {stale:?}"
     );
 }
 
