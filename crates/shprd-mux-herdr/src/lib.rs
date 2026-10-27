@@ -20,8 +20,8 @@
 
 mod adapter;
 mod cli;
-pub mod keys;
 mod events;
+pub mod keys;
 mod panes;
 mod shell;
 mod tabs;
