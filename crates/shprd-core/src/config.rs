@@ -35,6 +35,35 @@ pub enum Mux {
     Tuios,
 }
 
+/// When `shprd land --merge` may merge the run's pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergePolicy {
+    /// Merge only after a human approved the pull request.
+    #[default]
+    Ask,
+    /// Merge without approval, unless the base branch is protected.
+    Allow,
+}
+
+/// How a run's pull request is landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Land {
+    /// Whether a merge needs a human's approval.
+    pub merge: MergePolicy,
+    /// Branches `allow` never merges into without approval.
+    pub protected: Vec<String>,
+}
+
+impl Default for Land {
+    fn default() -> Self {
+        Self {
+            merge: MergePolicy::Ask,
+            protected: vec!["main".to_string(), "master".to_string()],
+        }
+    }
+}
+
 /// Which agent fills each role, and at what effort.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Roster {
@@ -114,6 +143,8 @@ pub struct Config {
     pub gates: Gates,
     /// Review policy: what blocks, and how many rounds are allowed.
     pub review: Review,
+    /// Land policy: whether a merge needs a human's approval.
+    pub land: Land,
 }
 
 impl Default for Config {
@@ -135,6 +166,7 @@ impl Default for Config {
                 must_fix: Severity::Major,
                 rounds: 2,
             },
+            land: Land::default(),
         }
     }
 }
@@ -212,6 +244,14 @@ impl Config {
                 self.review.rounds = rounds;
             }
         }
+        if let Some(land) = &layer.land {
+            if let Some(merge) = land.merge {
+                self.land.merge = merge;
+            }
+            if let Some(protected) = &land.protected {
+                self.land.protected = protected.clone();
+            }
+        }
     }
 }
 
@@ -233,6 +273,8 @@ pub struct ConfigLayer {
     pub gates: Option<GatesLayer>,
     /// The `[review]` section.
     pub review: Option<ReviewLayer>,
+    /// The `[land]` section.
+    pub land: Option<LandLayer>,
 }
 
 /// The `[roster]` section of a config file.
@@ -301,6 +343,16 @@ pub struct ReviewLayer {
     pub must_fix: Option<Severity>,
     /// Failed review rounds allowed before the review escalates.
     pub rounds: Option<u32>,
+}
+
+/// The `[land]` section of a config file.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandLayer {
+    /// Whether a merge needs a human's approval.
+    pub merge: Option<MergePolicy>,
+    /// Branches `allow` never merges into without approval.
+    pub protected: Option<Vec<String>>,
 }
 
 /// Everything that can go wrong loading configuration.
@@ -426,8 +478,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ConfigError, ConfigLayer, Janitor, Mux, Review, Roster, Skills, Workspace,
-        WorkspaceMode, from_layers, load,
+        Config, ConfigError, ConfigLayer, Janitor, Land, MergePolicy, Mux, Review, Roster, Skills,
+        Workspace, WorkspaceMode, from_layers, load,
     };
     use crate::event::Severity;
 
@@ -502,7 +554,55 @@ mod tests {
                 rounds: 2,
             }
         );
+        assert_eq!(config.land, Land::default());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn land_defaults_to_asking_and_protects_main_and_master() {
+        let config = Config::default();
+        assert_eq!(config.land.merge, MergePolicy::Ask);
+        assert_eq!(
+            config.land.protected,
+            vec!["main".to_string(), "master".to_string()]
+        );
+    }
+
+    #[test]
+    fn land_section_is_merged_field_by_field() {
+        let global = layer(
+            r#"
+            [land]
+            merge = "allow"
+            "#,
+        );
+        let config = from_layers(std::slice::from_ref(&global));
+        assert_eq!(config.land.merge, MergePolicy::Allow);
+        assert_eq!(
+            config.land.protected,
+            vec!["main".to_string(), "master".to_string()],
+            "the defaults survive a section that only sets the policy"
+        );
+        let repo = layer(
+            r#"
+            [land]
+            protected = ["trunk"]
+            "#,
+        );
+        let config = from_layers(&[global, repo]);
+        assert_eq!(config.land.merge, MergePolicy::Allow);
+        assert_eq!(config.land.protected, vec!["trunk".to_string()]);
+    }
+
+    #[test]
+    fn an_unknown_merge_policy_is_rejected() {
+        let parsed: Result<ConfigLayer, _> = toml::from_str(
+            r#"
+            [land]
+            merge = "always"
+            "#,
+        );
+        assert!(parsed.is_err(), "only ask and allow are policies");
     }
 
     #[test]

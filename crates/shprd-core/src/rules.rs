@@ -192,6 +192,12 @@ pub enum RuleError {
         /// The resource kind.
         kind: ResourceKind,
     },
+    /// A merge was recorded for a pull request the log has not seen opened.
+    #[error("pull request #{number} was never opened, so it cannot be merged")]
+    UnknownPullRequest {
+        /// The number the event named.
+        number: u64,
+    },
     /// Integration was requested while the latest attempt has a failed gate and
     /// no override recorded after it.
     #[error("task {task:?} cannot be integrated: gate {gate:?} failed and no override followed")]
@@ -294,6 +300,13 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
             task,
         } => check_resource(state, *action, *kind, name, task.as_deref()),
         EventKind::FullGate { .. } => Ok(()),
+        // An open pull request may be re-recorded at any time: the run's
+        // branch is pushed once, but its body is refreshed on every `land`.
+        EventKind::PrOpened { .. } => Ok(()),
+        EventKind::PrMerged { number, .. } => match &state.pr {
+            Some(pr) if pr.number == *number => Ok(()),
+            _ => Err(RuleError::UnknownPullRequest { number: *number }),
+        },
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }

@@ -423,6 +423,8 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::Override { .. } => "override",
         EventKind::Resource { .. } => "resource",
         EventKind::FullGate { .. } => "full_gate",
+        EventKind::PrOpened { .. } => "pr_opened",
+        EventKind::PrMerged { .. } => "pr_merged",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }
@@ -1047,6 +1049,23 @@ mod tests {
         assert_eq!(events[7]["task"], "a");
         assert_eq!(events[7]["attempt"], "a·a1");
         assert_eq!(events[9]["detail"], "gate_failed");
+    }
+
+    #[test]
+    fn pull_request_events_project_as_notes() {
+        let opened = EventKind::PrOpened {
+            number: 7,
+            url: "https://example.invalid/pr/7".to_string(),
+            head: "shprd/r1/int".to_string(),
+        };
+        let merged = EventKind::PrMerged {
+            number: 7,
+            head: "abc1234".to_string(),
+        };
+        assert_eq!(dagr_event_type(&opened), "note");
+        assert_eq!(dagr_event_type(&merged), "note");
+        assert_eq!(event_label(&opened), "pr_opened");
+        assert_eq!(event_label(&merged), "pr_merged");
     }
 
     #[test]

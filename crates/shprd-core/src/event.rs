@@ -311,6 +311,23 @@ pub enum EventKind {
         /// The steps it ran, in order.
         steps: Vec<GateStep>,
     },
+    /// A pull request was opened, or its body refreshed, for the run's
+    /// integration branch.
+    PrOpened {
+        /// The forge's number for the pull request.
+        number: u64,
+        /// The URL a human opens to read, approve or merge it.
+        url: String,
+        /// The branch the pull request proposes to merge.
+        head: String,
+    },
+    /// The run's pull request was merged.
+    PrMerged {
+        /// The forge's number for the pull request.
+        number: u64,
+        /// The head that was merged.
+        head: String,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -439,6 +456,15 @@ mod tests {
                     },
                 ],
             },
+            EventKind::PrOpened {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "shprd/r1/int".to_string(),
+            },
+            EventKind::PrMerged {
+                number: 7,
+                head: "abc1234".to_string(),
+            },
             EventKind::RunFinished {},
         ]
     }
@@ -446,7 +472,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 14, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 16, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

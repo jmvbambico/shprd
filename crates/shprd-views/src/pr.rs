@@ -457,6 +457,35 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_events_add_nothing_to_the_body() {
+        let events = vec![
+            ev(
+                1,
+                EventKind::PrOpened {
+                    number: 7,
+                    url: "https://example.invalid/pr/7".to_string(),
+                    head: "shprd/r1/int".to_string(),
+                },
+            ),
+            ev(
+                2,
+                EventKind::PrMerged {
+                    number: 7,
+                    head: "abc1234".to_string(),
+                },
+            ),
+        ];
+        let body = pr_body(&RunState::default(), &events);
+        assert_eq!(
+            body,
+            pr_body(&RunState::default(), &[]),
+            "the forge's facts are not the reader's facts: the log is"
+        );
+        assert!(!body.contains("example.invalid"), "{body}");
+        assert!(!body.contains("abc1234"), "{body}");
+    }
+
+    #[test]
     fn escalations_show_the_count_and_every_body() {
         let body = fixture_body();
         assert!(body.contains("## Escalations"), "{body}");

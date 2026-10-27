@@ -43,8 +43,26 @@ pub struct RunState {
     ///
     /// Only the newest one is kept: the full history is the log's job.
     pub last_full_gate: Option<(String, bool, u64)>,
+    /// The run's pull request, once `shprd land` opened one.
+    ///
+    /// One run proposes one pull request, so the newest `PrOpened` wins and a
+    /// merge only flips [`PrInfo::merged`].
+    pub pr: Option<PrInfo>,
     /// Sequence number of the last applied event, 0 before the first.
     pub last_seq: u64,
+}
+
+/// What the run knows about its pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrInfo {
+    /// The forge's number for it.
+    pub number: u64,
+    /// The URL a human opens to read, approve or merge it.
+    pub url: String,
+    /// The branch it proposes to merge.
+    pub head: String,
+    /// Whether the forge has merged it.
+    pub merged: bool,
 }
 
 /// The run's identity.
@@ -462,6 +480,26 @@ impl RunState {
             EventKind::FullGate { head, passed, .. } => {
                 self.last_full_gate = Some((head.clone(), *passed, event.seq));
             }
+            EventKind::PrOpened { number, url, head } => {
+                self.pr = Some(PrInfo {
+                    number: *number,
+                    url: url.clone(),
+                    head: head.clone(),
+                    merged: false,
+                });
+            }
+            EventKind::PrMerged { number, head } => {
+                self.pr = Some(PrInfo {
+                    number: *number,
+                    url: self
+                        .pr
+                        .as_ref()
+                        .map(|pr| pr.url.clone())
+                        .unwrap_or_default(),
+                    head: head.clone(),
+                    merged: true,
+                });
+            }
             EventKind::RunFinished {} => self.finished = true,
         }
     }
@@ -699,6 +737,79 @@ mod tests {
             Some(("bbb222".to_string(), true, 4)),
             "the later event wins"
         );
+    }
+
+    #[test]
+    fn a_pull_request_is_opened_then_merged() {
+        let state = match fold_extra(vec![
+            ev(
+                3,
+                EventKind::PrOpened {
+                    number: 7,
+                    url: "https://example.invalid/pr/7".to_string(),
+                    head: "shprd/r1/int".to_string(),
+                },
+            ),
+            ev(
+                4,
+                EventKind::PrMerged {
+                    number: 7,
+                    head: "bbb222".to_string(),
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("open then merge must fold: {err}"),
+        };
+        assert_eq!(
+            state.pr,
+            Some(PrInfo {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "bbb222".to_string(),
+                merged: true,
+            }),
+            "the merge keeps the url and records the merged head"
+        );
+    }
+
+    #[test]
+    fn a_merge_without_an_opened_pull_request_is_refused() {
+        let state = match fold_extra(vec![]) {
+            Ok(state) => state,
+            Err(err) => panic!("the bare run must fold: {err}"),
+        };
+        let kind = EventKind::PrMerged {
+            number: 7,
+            head: "abc1234".to_string(),
+        };
+        assert!(matches!(
+            state.check(&kind, 3_000),
+            Err(RuleError::UnknownPullRequest { number: 7 })
+        ));
+    }
+
+    #[test]
+    fn a_merge_of_another_pull_request_is_refused() {
+        let state = match fold_extra(vec![ev(
+            3,
+            EventKind::PrOpened {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "shprd/r1/int".to_string(),
+            },
+        )]) {
+            Ok(state) => state,
+            Err(err) => panic!("opening a pull request must fold: {err}"),
+        };
+        let kind = EventKind::PrMerged {
+            number: 8,
+            head: "abc1234".to_string(),
+        };
+        assert!(matches!(
+            state.check(&kind, 4_000),
+            Err(RuleError::UnknownPullRequest { number: 8 })
+        ));
     }
 
     #[test]
