@@ -339,12 +339,19 @@ pub fn run_verb(ctx: &Ctx, args: &WatchArgs, home: Option<&Path>) -> Result<(), 
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::process::Command;
 
+    use shprd_core::config::Skills;
+    use shprd_core::event::Actor;
+    use shprd_git::worktree::Layout;
+    use shprd_mux::fake::FakeMux;
+    use shprd_mux::{AgentState, PaneId};
+    use shprd_roster::spec::HarnessSpec;
     use tempfile::TempDir;
 
-    use super::{claude_record, pi_record};
+    use crate::cmd::spawn::SpawnRequest;
+
+    use super::*;
 
     /// A worktree path with both a dot and several separators in it.
     const WORKTREE: &str = "/repos/.worktrees/shprd/m5-watch";
@@ -409,5 +416,279 @@ mod tests {
         let home = home();
         assert_eq!(claude_record(home.path(), Path::new(WORKTREE)), None);
         assert_eq!(pi_record(home.path(), Path::new(WORKTREE)), None);
+    }
+
+    /// A harness spec for a fake CLI: the tests record the launch, never run
+    /// it, so `interactive` is the harmless `sh`.
+    fn fake_spec(id: &str) -> HarnessSpec {
+        let text = format!(
+            r#"
+id = "{id}"
+name = "Fake {id}"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "{id}"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["sh"]
+model_args = ["--model", "{{model}}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{{session}}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+"#
+        );
+        toml::from_str::<HarnessSpec>(&text).unwrap_or_else(|err| panic!("the test spec: {err}"))
+    }
+
+    /// A repository with one commit, the integration branch, and a home for
+    /// briefs and worktrees.
+    struct Scratch {
+        repo: TempDir,
+        home: TempDir,
+    }
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            git_out(repo.path(), &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.path().join("README.md"), "scratch\n").unwrap_or_default();
+            git_out(repo.path(), &["add", "."]);
+            git_out(repo.path(), &["commit", "-q", "-m", "first"]);
+            git_out(repo.path(), &["branch", "integration/m5"]);
+            Scratch { repo, home }
+        }
+
+        fn root(&self) -> &Path {
+            self.repo.path()
+        }
+
+        fn repo_name(&self) -> String {
+            self.root()
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+
+        /// A context with a started run and one task `T1` in its plan.
+        fn ctx(&self) -> Ctx {
+            let ctx = Ctx::new(self.root().to_path_buf(), Actor::Human, false, true);
+            ctx.commit(EventKind::RunStarted {
+                run_id: "t1".to_string(),
+                repo: self.repo_name(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m5".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "Watch a task".to_string(),
+                scope: vec!["crates/shprd".to_string()],
+                acceptance: vec!["the watchdog acts".to_string()],
+                tags: vec!["rust".to_string()],
+                skills: Vec::new(),
+                deps: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx
+        }
+
+        /// The environment a watch pass runs in, with `workers` configured.
+        fn env<'a>(&self, ctx: &'a Ctx, workers: &[&str]) -> SpawnEnv<'a> {
+            let mut base_env = BTreeMap::new();
+            base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            SpawnEnv {
+                ctx,
+                layout: Layout::default_for_home(self.home.path()),
+                briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                run: "t1".to_string(),
+                base_branch: "integration/m5".to_string(),
+                repo_name: self.repo_name(),
+                programs: workers
+                    .iter()
+                    .map(|id| Program {
+                        spec: fake_spec(id),
+                        installed: true,
+                    })
+                    .collect(),
+                workers: workers.iter().map(|id| (*id).to_string()).collect(),
+                skills: Skills {
+                    workers: vec!["tdd".to_string()],
+                    ..Skills::default()
+                },
+                compat: Vec::new(),
+                base_env,
+                // No wait: a fake pane that never reports an agent would
+                // otherwise stall every test that launches one.
+                ready_wait: Duration::ZERO,
+            }
+        }
+    }
+
+    /// Runs one git command in `dir`, returning its trimmed stdout.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A fake multiplexer holding the repo's workspace.
+    fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(
+            &naming::workspace_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        mux
+    }
+
+    /// Spawns the fake `sh` agent on `T1`.
+    fn seed(mux: &FakeMux, env: &SpawnEnv<'_>) {
+        let request = SpawnRequest {
+            task: "T1".to_string(),
+            agent: Some("sh".to_string()),
+            effort: None,
+        };
+        spawn::spawn(mux, env, &request).unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// The tab id `T1`'s first attempt recorded.
+    fn tab_id(env: &SpawnEnv<'_>) -> String {
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        std::fs::read_to_string(record)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    /// The pane the tab `tab` holds.
+    fn pane_of_tab(mux: &FakeMux, scratch: &Scratch, tab: &str) -> PaneId {
+        let name = naming::workspace_name(&scratch.repo_name());
+        let workspace = mux
+            .find_workspace(&name)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no workspace"));
+        mux.list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .into_iter()
+            .find(|listed| listed.id.as_str() == tab)
+            .unwrap_or_else(|| panic!("no tab {tab}"))
+            .root_pane
+    }
+
+    /// The events the run log holds now.
+    fn events(ctx: &Ctx) -> Vec<Event> {
+        ctx.load().unwrap_or_else(|err| panic!("{err}")).1
+    }
+
+    /// True when `fresh` holds an event matching `wanted`.
+    fn appended(fresh: &[Event], wanted: fn(&EventKind) -> bool) -> bool {
+        fresh.iter().any(|event| wanted(&event.kind))
+    }
+
+    /// The M5 gate: a stuck agent is marked dry and handed off, in one tick.
+    #[test]
+    fn a_stalled_agent_goes_dry_and_is_handed_off_in_one_tick() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        // The same screen on every poll, and an agent the host still calls
+        // working: only silence can explain the lack of movement.
+        mux.set_screen(&pane, "step 1\nstep 2\n");
+        mux.set_state(&pane, AgentState::Working);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let t0 = 1_700_000_000_000u64;
+        let mut dry_after_ms = None;
+        for step in 0..=30u64 {
+            let before = events(&ctx).len();
+            watcher
+                .tick(&mux, &env, t0 + 10_000 * step)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let log = events(&ctx);
+            let fresh = &log[before..];
+            if appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })) {
+                dry_after_ms = Some(10_000 * step);
+                eprintln!("DRY_AT {dry_after_ms:?}");
+                assert!(
+                    appended(fresh, |kind| matches!(kind, EventKind::HandedOff { .. })),
+                    "the tick that marks the agent dry must hand the task off too"
+                );
+                break;
+            }
+        }
+        assert_eq!(
+            dry_after_ms,
+            Some(300_000),
+            "the agent must go dry 120s after it is merely suspect"
+        );
+    }
+
+    /// A pane the host closed is a dead agent: the next tick acts on it.
+    #[test]
+    fn a_closed_pane_goes_dry_and_is_handed_off_on_the_next_tick() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let tab = tab_id(&env);
+        let pane = pane_of_tab(&mux, &scratch, &tab);
+        mux.set_state(&pane, AgentState::Working);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let t0 = 1_700_000_000_000u64;
+        watcher
+            .tick(&mux, &env, t0)
+            .unwrap_or_else(|err| panic!("{err}"));
+        mux.close_tab(&shprd_mux::TabId::new(tab))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, t0 + 10_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let log = events(&ctx);
+        let fresh = &log[before..];
+        assert!(
+            appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
+            "a closed pane must mark the agent dry"
+        );
+        assert!(
+            appended(fresh, |kind| matches!(kind, EventKind::HandedOff { .. })),
+            "a closed pane must hand the task off"
+        );
     }
 }
