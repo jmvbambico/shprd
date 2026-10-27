@@ -6,17 +6,20 @@
 //! decision is made before the first side effect, the way [`spawn`] does it.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
-use shprd_mux::{Mux, Workspace};
+use shprd_git::worktree::Worktree;
+use shprd_mux::{Mux, TabId, Workspace};
 use shprd_roster::models::AgentRef;
 
-use crate::cmd::spawn::{self, BriefInput, Pick, Program, SpawnEnv};
-use crate::ctx::CliError;
+use crate::cli::HandoffArgs;
+use crate::cmd::spawn::{self, BriefInput, Launching, Pick, Program, SpawnEnv};
+use crate::ctx::{CliError, Ctx};
 
 /// What the caller asked for.
 #[derive(Debug, Clone)]
@@ -30,8 +33,8 @@ pub struct HandoffRequest {
     pub to: Option<String>,
 }
 
-/// The agent handing the task over: the one its latest attempt ran.
-fn from_agent(task: &Task) -> Result<String, CliError> {
+/// The attempt being handed over: the latest one, which must be Working.
+fn working_attempt(task: &Task) -> Result<&Attempt, CliError> {
     if task.status != TaskStatus::Working {
         return Err(CliError::Invalid(anyhow!(
             "task {:?} is {:?}, not Working: only a task an agent is working on can be handed off",
@@ -40,7 +43,6 @@ fn from_agent(task: &Task) -> Result<String, CliError> {
         )));
     }
     task.latest_attempt()
-        .map(|attempt| attempt.agent.clone())
         .ok_or_else(|| CliError::Invalid(anyhow!("task {:?} has no attempt to hand off", task.id)))
 }
 
@@ -282,4 +284,225 @@ fn handoff_brief(base: &BriefInput<'_>, transfer: &Transfer<'_>) -> String {
         None => out.push_str("(not available: that tab is gone)\n"),
     }
     out
+}
+
+/// What a successful hand-off did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffReport {
+    /// The task that changed hands.
+    pub task: String,
+    /// The attempt number that continues.
+    pub attempt: u32,
+    /// The agent that handed it over.
+    pub from: String,
+    /// The agent that took it over.
+    pub to: String,
+    /// The commit the incoming agent resumes from.
+    pub checkpoint: String,
+    /// The title of the new agent's tab.
+    pub tab: String,
+    /// The hand-off brief the incoming agent reads.
+    pub brief: PathBuf,
+    /// How long the hand-off took, from call to launched agent.
+    pub elapsed_ms: u64,
+}
+
+/// Hands a task's attempt from one agent to the next.
+///
+/// The order is [`spawn`]'s: every decision is made and the log is asked before
+/// the first side effect, so a refused hand-off leaves nothing behind. The
+/// outgoing work is checkpointed first, because that commit is the only record
+/// of what the human is asking someone else to finish.
+pub fn handoff(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+    req: &HandoffRequest,
+) -> Result<HandoffReport, CliError> {
+    let started = Instant::now();
+    let (state, events) = env.ctx.load()?;
+    let task = spawn::task_of(&state, &req.task)?;
+    let attempt = working_attempt(task)?;
+    let from = attempt.agent.clone();
+    let Some(to) = pick_to(
+        &state,
+        &env.programs,
+        &env.workers,
+        &from,
+        req.to.as_deref(),
+    )?
+    else {
+        escalate(
+            env,
+            &task.id,
+            "no worker available to take over",
+            "wait for an agent to come back",
+        );
+        return Err(CliError::Invalid(anyhow!(
+            "no worker available to take over {:?}",
+            task.id
+        )));
+    };
+    // Refuse before any effect: a refused hand-off must leave nothing behind.
+    env.ctx.check(&EventKind::HandedOff {
+        task: task.id.clone(),
+        from_agent: from.clone(),
+        to_agent: to.agent.clone(),
+        checkpoint: "<pending>".to_string(),
+    })?;
+    let worktree = PathBuf::from(&attempt.worktree);
+    let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
+    let brief_path = handoff_brief_path(&env.briefs_dir, &env.run, &task.id, attempt.n, handoff_no);
+    let checkpoint = checkpoint(&worktree, &from)?;
+    let workspace = spawn::workspace_of(mux, env)?;
+    let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
+    let stats = diffstat(&worktree, &env.base_branch);
+    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
+    let brief = handoff_brief(
+        &BriefInput {
+            task,
+            run: &env.run,
+            attempt: attempt.n,
+            agent: &to.agent,
+            model: to.model.as_deref(),
+            branch: &attempt.branch,
+            worktree: &attempt.worktree,
+            skills: &skills,
+        },
+        &Transfer {
+            from: &from,
+            to: &to.agent,
+            reason: &req.reason,
+            checkpoint: &checkpoint,
+            base_branch: &env.base_branch,
+            diffstat: &stats,
+            pane_tail: pane_tail.as_deref(),
+        },
+    );
+    spawn::write_brief(&brief_path, &brief)?;
+    close_old_tab(mux, env, &task.id, attempt);
+    // The worktree is not created here: the newcomer continues in the one the
+    // attempt already has, on the branch the checkpoint sits on.
+    let continuing = Worktree {
+        path: worktree,
+        branch: attempt.branch.clone(),
+        base_sha: checkpoint.clone(),
+    };
+    let opened = spawn::open_agent(
+        mux,
+        env,
+        &workspace,
+        &Launching {
+            pick: &to,
+            task: &task.id,
+            effort: None,
+            brief: &brief,
+            brief_path: &brief_path,
+            worktree: &continuing,
+        },
+    );
+    let (tab_id, title) = match opened {
+        Ok(opened) => opened,
+        Err(err) => {
+            escalate(
+                env,
+                &task.id,
+                &format!("hand-off to {} failed: {err}", to.agent),
+                "retry the hand-off",
+            );
+            return Err(CliError::other(anyhow!(
+                "handing {:?} to {}: {err}",
+                task.id,
+                to.agent
+            )));
+        }
+    };
+    // The record follows the tab: a later prompt must reach the newcomer, not
+    // the tab this hand-off just closed.
+    spawn::write_tab(
+        &spawn::tab_path(&env.briefs_dir, &env.run, &task.id, attempt.n),
+        &tab_id,
+    );
+    let kind = EventKind::HandedOff {
+        task: task.id.clone(),
+        from_agent: from.clone(),
+        to_agent: to.agent.clone(),
+        checkpoint: checkpoint.clone(),
+    };
+    if let Err(err) = env.ctx.commit(kind) {
+        spawn::close_tab(mux, &tab_id);
+        return Err(err);
+    }
+    Ok(HandoffReport {
+        task: task.id.clone(),
+        attempt: attempt.n,
+        from,
+        to: to.agent.clone(),
+        checkpoint,
+        tab: title,
+        brief: brief_path,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+/// Closes the outgoing agent's tab, from the record the attempt left.
+///
+/// A host that no longer knows the tab (a human closed it, say) is not an
+/// error: that is the state the hand-off wanted anyway.
+fn close_old_tab(mux: &dyn Mux, env: &SpawnEnv<'_>, task: &str, attempt: &Attempt) {
+    let record = spawn::tab_path(&env.briefs_dir, &env.run, task, attempt.n);
+    let Ok(id) = std::fs::read_to_string(record) else {
+        return;
+    };
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return;
+    }
+    let tab = TabId::new(id);
+    if let Err(err) = mux.close_tab(&tab) {
+        eprintln!("warning: could not close tab {tab}: {err}");
+    }
+}
+
+/// Records something a human has to decide, warning when the log refuses it.
+fn escalate(env: &SpawnEnv<'_>, task: &str, body: &str, default_action: &str) {
+    let kind = EventKind::Escalated {
+        task: Some(task.to_string()),
+        body: body.to_string(),
+        default_action: default_action.to_string(),
+    };
+    if let Err(err) = env.ctx.commit(kind) {
+        eprintln!("warning: could not record the escalation: {err}");
+    }
+}
+
+/// The `shprd agent handoff` verb: builds the environment, hands the task over
+/// and prints what happened.
+pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Result<(), CliError> {
+    let mux = spawn::real_mux();
+    let env = spawn::build_env(ctx, home)?;
+    let request = HandoffRequest {
+        task: args.task.clone(),
+        reason: args.reason.clone(),
+        to: args.to.clone(),
+    };
+    let report = handoff(&mux, &env, &request)?;
+    if ctx.json {
+        let value = serde_json::json!({
+            "task": report.task,
+            "attempt": report.attempt,
+            "from": report.from,
+            "to": report.to,
+            "checkpoint": report.checkpoint,
+            "tab": report.tab,
+            "brief": report.brief.display().to_string(),
+            "elapsed_ms": report.elapsed_ms,
+        });
+        println!("{value}");
+        return Ok(());
+    }
+    println!(
+        "ok handed {} attempt {} from {} to {} at {} (tab {:?})",
+        report.task, report.attempt, report.from, report.to, report.checkpoint, report.tab
+    );
+    Ok(())
 }

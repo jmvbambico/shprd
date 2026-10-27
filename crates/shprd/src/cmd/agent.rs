@@ -6,10 +6,10 @@ use anyhow::{Context, anyhow};
 use shprd_core::event::{EventKind, Finding};
 
 use crate::cli::{
-    AgentCommand, EscalateArgs, GateArgs, GateOutcome, IntegrateArgs, OverrideArgs, PromptArgs,
-    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand,
+    AgentCommand, EscalateArgs, GateArgs, GateOutcome, HandoffArgs, IntegrateArgs, OverrideArgs,
+    PromptArgs, ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand,
 };
-use crate::cmd::{emit, spawn};
+use crate::cmd::{emit, handoff, spawn};
 use crate::ctx::{CliError, Ctx};
 
 /// Dispatches one of the agent verbs.
@@ -32,6 +32,7 @@ pub fn dispatch(
         AgentCommand::Escalate(args) => escalate(ctx, &args),
         AgentCommand::Override(args) => override_rule(ctx, &args),
         AgentCommand::Integrate(args) => integrate(ctx, &args),
+        AgentCommand::Handoff(args) => handoff_cmd(ctx, &args, home),
     }
 }
 
@@ -66,6 +67,11 @@ fn spawn_cmd(ctx: &Ctx, args: &SpawnArgs, home: Option<&Path>) -> Result<(), Cli
     print_report(ctx, &report);
     sync_dagr(ctx);
     Ok(())
+}
+
+/// Hands a task from one agent to the next.
+fn handoff_cmd(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Result<(), CliError> {
+    handoff::handoff_verb(ctx, args, home)
 }
 
 /// Records an attempt whose worktree and tab a human set up, with no side
