@@ -677,6 +677,31 @@ fn ensure_orchestrator_tab(
 ) -> Result<(Tab, bool), CliError> {
     let plan = OrchestratorPlan::resolve(env, brief_path, run_id)?;
     if let Some(found) = titled(tabs, &plan.title) {
+        if started_elsewhere(mux, env, &found.root_pane) {
+            // The pane's process is not the one shprd started: a host that
+            // restored the tab with its own `--resume`, with none of the
+            // environment, model or auto-approve flag shprd launches with, and
+            // whose every action would be logged as a human's. Nothing typed
+            // into that pane reaches a shell — `run` types a shell line, which
+            // a live agent would read as a prompt — so the tab is closed and
+            // reopened in its place, which is the only state shprd can start a
+            // program in without depending on what the stranger is doing with
+            // the keyboard.
+            mux.close_tab(&found.id).map_err(|err| {
+                CliError::other(anyhow!(err).context("closing the foreign orchestrator tab"))
+            })?;
+            let tab = mux
+                .create_tab(&workspace.id, &plan.title, &env.ctx.root)
+                .map_err(|err| {
+                    CliError::other(anyhow!(err).context("reopening the orchestrator tab"))
+                })?;
+            launch_orchestrator(mux, &tab.root_pane, &plan, env, brief_path)?;
+            eprintln!(
+                "relaunched the orchestrator in {}: its process was not started by shprd",
+                plan.title
+            );
+            return Ok((tab, true));
+        }
         if orchestrator_is_running(mux, &found.root_pane, env.detect_wait) {
             return Ok((found, false));
         }
@@ -719,7 +744,51 @@ fn launch_orchestrator(
             brief_path.display()
         );
     }
+    // Recorded last, once the brief has had its wait: by then the pane's
+    // foreground group is the agent's, not the shell's the line was typed at.
+    record_process_group(mux, env, &plan.title, pane);
     Ok(())
+}
+
+/// Records the process group shprd launched the orchestrator under.
+///
+/// A host that cannot tell, or a pane that is already gone, records nothing:
+/// there is no identity to compare against later, and pretending there is one
+/// would make the next `up` relaunch a session shprd did start.
+fn record_process_group(mux: &dyn Mux, env: &UpEnv, title: &str, pane: &PaneId) {
+    let group = match mux.pane_process_group(pane) {
+        Ok(Some(group)) => group,
+        Ok(None) | Err(_) => return,
+    };
+    let kind = EventKind::OrchestratorLaunched {
+        title: title.to_string(),
+        pane: pane.as_str().to_string(),
+        process_group: group,
+    };
+    if let Err(err) = env.ctx.commit(kind) {
+        // The orchestrator is running either way; a missing record only means
+        // the next `up` cannot recognise it, which is a message to the human.
+        eprintln!("warning: could not record the orchestrator's process group: {err}");
+    }
+}
+
+/// Whether the process in `pane` is not the one shprd started for this run.
+///
+/// Only a group the host actually reported can make a pane foreign. `None`
+/// means the host cannot tell, and an error means the pane is gone: neither is
+/// evidence against the tab, so both keep it as it is.
+fn started_elsewhere(mux: &dyn Mux, env: &UpEnv, pane: &PaneId) -> bool {
+    let observed = match mux.pane_process_group(pane) {
+        Ok(Some(group)) => group,
+        Ok(None) | Err(_) => return false,
+    };
+    let recorded = env
+        .ctx
+        .state()
+        .ok()
+        .and_then(|state| state.orchestrator)
+        .map(|orchestrator| orchestrator.process_group);
+    recorded != Some(observed)
 }
 
 /// Whether an orchestrator is still running in `pane`, polling for up to
@@ -1521,6 +1590,165 @@ mod tests {
                 Call::Run(..) | Call::CreateTab(..) | Call::Prompt(..)
             )),
             "a running orchestrator is not restarted: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_matching_process_group_leaves_the_orchestrator_alone() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        // Every pane answers with the same group, so the second `up` sees the
+        // process the first one started.
+        let mux = mux().with_process_group(88158);
+        let first = up(&mux, &env).map_err(failed)?;
+        assert_eq!(
+            env.ctx
+                .state()
+                .map_err(failed)?
+                .orchestrator
+                .map(|orchestrator| orchestrator.process_group),
+            Some(88158),
+            "the first up records the group it launched under"
+        );
+        mux.set_state(&pane_of(&mux, &first.orchestrator_tab)?, AgentState::Idle);
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(!second.created_orchestrator_tab);
+        assert_eq!(second.orchestrator_tab, first.orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.iter().all(|call| !matches!(
+                call,
+                Call::Run(..)
+                    | Call::CreateTab(..)
+                    | Call::CloseTab(..)
+                    | Call::SendText(..)
+                    | Call::Prompt(..)
+            )),
+            "a session shprd started is not restarted: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_pane_started_by_the_host_is_relaunched_in_a_fresh_tab() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux().with_process_group(88158);
+        let first = up(&mux, &env).map_err(failed)?;
+        let old_pane = pane_of(&mux, &first.orchestrator_tab)?;
+        // herdr restored the tab with its own `claude --resume`: a live agent,
+        // and a process group shprd never launched.
+        mux.set_state(&old_pane, AgentState::Idle);
+        mux.set_process_group(&old_pane, Some(90001));
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        // Closing and reopening the tab hands back a new tab id, which is the
+        // price of never typing into a process shprd does not own.
+        assert_ne!(second.orchestrator_tab, first.orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        let plan = orchestrator_argv(&mux)?;
+        let closed = later
+            .iter()
+            .position(|call| call == &Call::CloseTab(first.orchestrator_tab.clone()));
+        let reopened = later
+            .iter()
+            .position(|call| matches!(call, Call::CreateTab(_, title, _) if title.ends_with(ORCHESTRATOR_LABEL)));
+        assert!(
+            matches!((closed, reopened), (Some(closed), Some(reopened)) if closed < reopened),
+            "the foreign tab is closed before it is reopened: {later:?}"
+        );
+        assert!(
+            later
+                .iter()
+                .all(|call| !matches!(call, Call::SendText(..) | Call::Prompt(..))),
+            "nothing is typed into the stranger: {later:?}"
+        );
+        let runs: Vec<PaneId> = later
+            .iter()
+            .filter_map(|call| match call {
+                Call::Run(pane, argv, _) if argv == &plan => Some(pane.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 1, "exactly one launch: {later:?}");
+        let new_pane = pane_of(&mux, &second.orchestrator_tab)?;
+        assert_eq!(runs[0], new_pane, "the orchestrator starts in a new pane");
+        assert_ne!(runs[0], old_pane, "the foreign process is not reused");
+        assert_eq!(
+            env.ctx
+                .state()
+                .map_err(failed)?
+                .orchestrator
+                .map(|orchestrator| orchestrator.pane),
+            Some(new_pane.as_str().to_string()),
+            "the relaunch records the pane it started"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_with_no_recorded_group_does_not_trust_the_tab() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        // A host that cannot tell while the first `up` runs records nothing.
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        assert!(
+            env.ctx.state().map_err(failed)?.orchestrator.is_none(),
+            "no group was recorded"
+        );
+        let old_pane = pane_of(&mux, &first.orchestrator_tab)?;
+        mux.set_state(&old_pane, AgentState::Idle);
+        mux.set_process_group(&old_pane, Some(777));
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(
+            second.created_orchestrator_tab,
+            "an unrecorded pane is not shprd's to keep"
+        );
+        let later = mux.calls();
+        assert!(
+            later.contains(&Call::CloseTab(first.orchestrator_tab)),
+            "the unclaimed pane is closed: {later:?}"
+        );
+        assert_ne!(
+            pane_of(&mux, &second.orchestrator_tab)?,
+            old_pane,
+            "the orchestrator starts in a pane of its own"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_host_that_cannot_tell_keeps_todays_relaunch() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux_without_agent();
+        let first = up(&mux, &env).map_err(failed)?;
+        let pane = pane_of(&mux, &first.orchestrator_tab)?;
+        mux.set_state(&pane, AgentState::Unknown);
+        mux.set_process_group(&pane, None);
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert_eq!(second.orchestrator_tab, first.orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.iter().all(|call| !matches!(
+                call,
+                Call::CloseTab(..) | Call::CreateTab(..) | Call::SendText(..)
+            )),
+            "a host that cannot tell keeps the tab: {later:?}"
+        );
+        assert!(
+            later
+                .iter()
+                .any(|call| matches!(call, Call::Run(run_pane, ..) if run_pane == &pane)),
+            "the orchestrator restarts in its own pane: {later:?}"
         );
         Ok(())
     }
