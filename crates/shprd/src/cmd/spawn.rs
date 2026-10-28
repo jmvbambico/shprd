@@ -353,6 +353,19 @@ pub(crate) fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
     }
 }
 
+/// Closes a pane shprd opened, counting a pane the host has forgotten as
+/// closed.
+///
+/// The same rule [`close_recorded`] applies to a tab, for the panes a run
+/// splits off a tab it keeps: a pane a human already closed is in the state
+/// the caller wanted, and a refusal is warned about rather than fatal.
+pub(crate) fn close_pane(mux: &dyn Mux, pane: &shprd_mux::PaneId) {
+    match mux.close_pane(pane) {
+        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+        Err(err) => eprintln!("warning: could not close pane {}: {err}", pane.as_str()),
+    }
+}
+
 /// Closes the tabs a run recorded for `task`, once no attempt can use them.
 ///
 /// The records beside the briefs are the only list of tabs a run opened:

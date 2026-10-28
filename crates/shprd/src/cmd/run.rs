@@ -26,6 +26,7 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
 pub fn finish(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
     let event = ctx.commit(EventKind::RunFinished {})?;
     spawn::close_run_tabs(mux, ctx, home);
+    crate::cmd::up::close_watch_pane(mux, ctx);
     emit(ctx, &event)
 }
 
