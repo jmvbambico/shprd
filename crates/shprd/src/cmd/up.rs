@@ -990,6 +990,11 @@ fn orchestrator_is_running(mux: &dyn Mux, pane: &PaneId, wait: Duration) -> bool
 ///
 /// A host that cannot split is not a failed `up`: the run works without a
 /// watchdog, so the human is told to start one and `up` carries on.
+///
+/// A replacement is only ever started where the old pane can be taken down. Two
+/// watchdogs in one chat tab would both record verdicts and both hand off
+/// workers, which is worse than a run with none, so a host that cannot close a
+/// pane is told so instead of being split twice.
 fn ensure_watch_pane(mux: &dyn Mux, env: &UpEnv, chat: &Tab, run_id: &str) -> Result<(), CliError> {
     let stale = match watch_pane_state(mux, env) {
         WatchPane::Running => return Ok(()),
@@ -997,6 +1002,14 @@ fn ensure_watch_pane(mux: &dyn Mux, env: &UpEnv, chat: &Tab, run_id: &str) -> Re
         WatchPane::Missing => None,
         WatchPane::Foreign(pane) => Some(pane),
     };
+    if let Some(stale) = &stale
+        && !mux.capabilities().close_pane
+    {
+        // The pane stays whether or not a second watchdog starts in it, so no
+        // second watchdog starts.
+        eprintln!("{}", not_shprds_watch_pane(stale));
+        return Ok(());
+    }
     let pane = match mux.split(&chat.root_pane, Direction::Down, WATCH_RATIO, &env.ctx.root) {
         Ok(pane) => pane,
         // [`MuxError::Unsupported`] is the trait's "this host cannot split".
@@ -1030,7 +1043,21 @@ fn ensure_watch_pane(mux: &dyn Mux, env: &UpEnv, chat: &Tab, run_id: &str) -> Re
     if let Some(stale) = stale
         && stale != pane
     {
-        spawn::close_pane(mux, &stale);
+        match mux.close_pane(&stale) {
+            // A pane the host forgot is already closed.
+            Ok(()) | Err(MuxError::NotFound { .. }) => {}
+            Err(err) => {
+                // Two watchdogs is the one outcome `up` must not leave behind,
+                // so the replacement goes rather than the pane it could not
+                // retire. The record stays on the old pane, so the next `up`
+                // sees the same obstacle and says so again instead of splitting
+                // a third watchdog beside it.
+                eprintln!("warning: could not close the watchdog pane {stale}: {err}");
+                spawn::close_pane(mux, &pane);
+                eprintln!("{}", not_shprds_watch_pane(&stale));
+                return Ok(());
+            }
+        }
     }
     record_watch(mux, env, &pane);
     Ok(())
@@ -1039,6 +1066,16 @@ fn ensure_watch_pane(mux: &dyn Mux, env: &UpEnv, chat: &Tab, run_id: &str) -> Re
 /// The advice a human gets when `up` could not leave a watchdog running.
 fn no_watch_pane() {
     eprintln!("{NO_WATCH_ADVICE}");
+}
+
+/// The line `up` prints when a watchdog pane stands in the way and the host
+/// cannot take it down.
+fn not_shprds_watch_pane(pane: &PaneId) -> String {
+    format!(
+        "the watchdog pane {} is not shprd's and this host cannot close it: close it, then run \
+         shprd watch",
+        pane.as_str()
+    )
 }
 
 /// The line `up` prints when it could not start the watchdog itself.
@@ -2645,6 +2682,94 @@ mod tests {
                 .map(|watch| watch.pane),
             Some(pane),
             "the recorded pane stays the one shprd is watching"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_host_that_cannot_close_the_stale_watchdog_starts_no_second_one() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux().with_process_group(4242).without_close_pane();
+        up(&mux, &env).map_err(failed)?;
+        let stale = env
+            .ctx
+            .state()
+            .map_err(failed)?
+            .watch
+            .context("the watchdog's pane is recorded")?
+            .pane;
+        // A host that restored the workspace runs its own process in the pane.
+        mux.set_process_group(&PaneId::new(stale.clone()), Some(999));
+        let before = mux.calls().len();
+        up(&mux, &env).map_err(failed)?;
+
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.iter().all(|call| !matches!(call, Call::Split(..))),
+            "the foreign pane cannot be closed, so nothing is split beside it: {later:?}"
+        );
+        assert_eq!(watch_runs(&mux).len(), 1, "{:?}", mux.calls());
+        assert_eq!(
+            env.ctx
+                .state()
+                .map_err(failed)?
+                .watch
+                .map(|watch| watch.pane),
+            Some(stale.clone()),
+            "no new watchdog is recorded"
+        );
+        // The human is told what to do about the pane in the way.
+        let line = not_shprds_watch_pane(&PaneId::new(stale));
+        assert!(line.contains("cannot close it"), "{line}");
+        assert!(line.contains("shprd watch"), "{line}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_watchdog_whose_stale_pane_will_not_close_is_taken_back_down() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux()
+            .with_process_group(4242)
+            .failing_close_pane("the pane is busy");
+        up(&mux, &env).map_err(failed)?;
+        let stale = env
+            .ctx
+            .state()
+            .map_err(failed)?
+            .watch
+            .context("the watchdog's pane is recorded")?
+            .pane;
+        mux.set_process_group(&PaneId::new(stale.clone()), Some(999));
+        let before = mux.calls().len();
+        up(&mux, &env).map_err(failed)?;
+
+        let later = mux.calls()[before..].to_vec();
+        let runs = watch_runs(&mux);
+        assert_eq!(runs.len(), 2, "a replacement is started: {later:?}");
+        let fresh = &runs[1].0;
+        assert_ne!(fresh.as_str(), stale, "the replacement is in a new pane");
+        let closed = later
+            .iter()
+            .position(|call| call == &Call::ClosePane(PaneId::new(stale.clone())))
+            .context("the stale pane is closed")?;
+        let closed_again = later
+            .iter()
+            .position(|call| call == &Call::ClosePane(fresh.clone()))
+            .context("the replacement is closed again")?;
+        assert!(
+            closed < closed_again,
+            "exactly one watchdog is left running: {later:?}"
+        );
+        assert_eq!(
+            env.ctx
+                .state()
+                .map_err(failed)?
+                .watch
+                .map(|watch| watch.pane),
+            Some(stale),
+            "the record stays on the pane that is still there"
         );
         Ok(())
     }
