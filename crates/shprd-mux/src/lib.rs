@@ -70,6 +70,16 @@ pub trait Mux: Send + Sync {
     /// [`MuxError::NotFound`]; callers that race a human should ignore it.
     fn close_tab(&self, tab: &TabId) -> Result<()>;
 
+    /// Close one pane, leaving its tab and its siblings alone.
+    ///
+    /// Used to retire a pane whose program shprd did not start, once a
+    /// replacement is running beside it. A host that cannot close a pane on
+    /// its own answers [`MuxError::Unsupported`], which is the trait's "this
+    /// host cannot do that" signal; callers must degrade rather than retry.
+    fn close_pane(&self, _pane: &PaneId) -> Result<()> {
+        Err(MuxError::Unsupported("close pane"))
+    }
+
     /// Split `pane`, returning the new pane. `ratio` is the share of the split
     /// axis the *existing* pane keeps, in `0.0..=1.0`; hosts without
     /// [`Capabilities::split_ratio`] ignore it and split evenly. The new pane

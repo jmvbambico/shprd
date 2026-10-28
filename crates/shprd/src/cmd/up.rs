@@ -23,7 +23,7 @@ use shprd_core::state::{ResourceStatus, RunState};
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
 use shprd_mux::naming::{self, Role as TabRole};
-use shprd_mux::{AgentState, Mux, PaneId, Tab, TabId, Workspace};
+use shprd_mux::{AgentState, Direction, Mux, MuxError, PaneId, Tab, TabId, Workspace};
 use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
@@ -683,24 +683,15 @@ fn ensure_orchestrator_tab(
             // environment, model or auto-approve flag shprd launches with, and
             // whose every action would be logged as a human's. Nothing typed
             // into that pane reaches a shell — `run` types a shell line, which
-            // a live agent would read as a prompt — so the tab is closed and
-            // reopened in its place, which is the only state shprd can start a
-            // program in without depending on what the stranger is doing with
-            // the keyboard.
-            mux.close_tab(&found.id).map_err(|err| {
-                CliError::other(anyhow!(err).context("closing the foreign orchestrator tab"))
-            })?;
-            let tab = mux
-                .create_tab(&workspace.id, &plan.title, &env.ctx.root)
-                .map_err(|err| {
-                    CliError::other(anyhow!(err).context("reopening the orchestrator tab"))
-                })?;
-            launch_orchestrator(mux, &tab.root_pane, &plan, env, brief_path)?;
+            // a live agent would read as a prompt — so a fresh pane is split
+            // off it and the orchestrator started there instead.
+            let (tab, created) =
+                replace_orchestrator_pane(mux, env, workspace, &found, &plan, brief_path)?;
             eprintln!(
                 "relaunched the orchestrator in {}: its process was not started by shprd",
                 plan.title
             );
-            return Ok((tab, true));
+            return Ok((tab, created));
         }
         if orchestrator_is_running(mux, &found.root_pane, env.detect_wait) {
             return Ok((found, false));
@@ -715,6 +706,75 @@ fn ensure_orchestrator_tab(
         .create_tab(&workspace.id, &plan.title, &env.ctx.root)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the orchestrator tab")))?;
     launch_orchestrator(mux, &tab.root_pane, &plan, env, brief_path)?;
+    Ok((tab, true))
+}
+
+/// Puts the orchestrator back into a tab whose process is not shprd's.
+///
+/// The tab keeps its place in the tab bar: closing and reopening it would move
+/// it to the end, and `up` promises the orchestrator sits right after the chat
+/// tab. So a fresh pane is split off the foreign one, the orchestrator starts
+/// there, and only then is the foreign pane closed — closing it first would
+/// leave the tab empty, and a host closes a tab with nothing left in it.
+///
+/// A host that cannot close a pane would end up with two processes in the tab,
+/// so it takes the older route instead: close the whole tab and reopen it.
+fn replace_orchestrator_pane(
+    mux: &dyn Mux,
+    env: &UpEnv,
+    workspace: &Workspace,
+    found: &Tab,
+    plan: &OrchestratorPlan,
+    brief_path: &Path,
+) -> Result<(Tab, bool), CliError> {
+    let fresh = match mux.split(&found.root_pane, Direction::Down, 0.5, &env.ctx.root) {
+        Ok(pane) => pane,
+        // [`MuxError::Unsupported`] is the trait's "this host cannot split",
+        // the one capability signal a host has for it.
+        Err(MuxError::Unsupported(_)) => {
+            return reopen_orchestrator_tab(mux, env, workspace, found, plan, brief_path);
+        }
+        Err(err) => {
+            return Err(CliError::other(
+                anyhow!(err).context("splitting the orchestrator tab"),
+            ));
+        }
+    };
+    launch_orchestrator(mux, &fresh, plan, env, brief_path)?;
+    if let Err(err) = mux.close_pane(&found.root_pane) {
+        // The orchestrator is running in its own pane either way; a pane that
+        // outlived its replacement is a message to the human, not a failed up.
+        eprintln!("warning: could not close the orchestrator's old pane: {err}");
+    }
+    Ok((
+        Tab {
+            root_pane: fresh,
+            ..found.clone()
+        },
+        false,
+    ))
+}
+
+/// Closes the orchestrator's tab and reopens it under the same title.
+///
+/// The fallback for a host that cannot split or cannot close a single pane.
+/// The reopened tab is new to the host and lands at the end of the tab bar,
+/// which is why it is not the first choice.
+fn reopen_orchestrator_tab(
+    mux: &dyn Mux,
+    env: &UpEnv,
+    workspace: &Workspace,
+    found: &Tab,
+    plan: &OrchestratorPlan,
+    brief_path: &Path,
+) -> Result<(Tab, bool), CliError> {
+    mux.close_tab(&found.id).map_err(|err| {
+        CliError::other(anyhow!(err).context("closing the foreign orchestrator tab"))
+    })?;
+    let tab = mux
+        .create_tab(&workspace.id, &plan.title, &env.ctx.root)
+        .map_err(|err| CliError::other(anyhow!(err).context("reopening the orchestrator tab")))?;
+    launch_orchestrator(mux, &tab.root_pane, plan, env, brief_path)?;
     Ok((tab, true))
 }
 
@@ -1633,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_started_by_the_host_is_relaunched_in_a_fresh_tab() -> Result<()> {
+    fn a_pane_started_by_the_host_is_replaced_in_the_same_tab() -> Result<()> {
         let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
         let env = fixture.env()?;
         let mux = mux().with_process_group(88158);
@@ -1646,20 +1706,20 @@ mod tests {
         let before = mux.calls().len();
         let second = up(&mux, &env).map_err(failed)?;
 
-        // Closing and reopening the tab hands back a new tab id, which is the
-        // price of never typing into a process shprd does not own.
-        assert_ne!(second.orchestrator_tab, first.orchestrator_tab);
-        let later = mux.calls()[before..].to_vec();
-        let plan = orchestrator_argv(&mux)?;
-        let closed = later
-            .iter()
-            .position(|call| call == &Call::CloseTab(first.orchestrator_tab.clone()));
-        let reopened = later
-            .iter()
-            .position(|call| matches!(call, Call::CreateTab(_, title, _) if title.ends_with(ORCHESTRATOR_LABEL)));
+        assert_eq!(
+            second.orchestrator_tab, first.orchestrator_tab,
+            "the tab keeps its id, and so its place in the tab bar"
+        );
         assert!(
-            matches!((closed, reopened), (Some(closed), Some(reopened)) if closed < reopened),
-            "the foreign tab is closed before it is reopened: {later:?}"
+            !second.created_orchestrator_tab,
+            "the tab was reused, not recreated"
+        );
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later
+                .iter()
+                .all(|call| !matches!(call, Call::CloseTab(..) | Call::CreateTab(..))),
+            "the tab is never closed and reopened: {later:?}"
         );
         assert!(
             later
@@ -1667,24 +1727,36 @@ mod tests {
                 .all(|call| !matches!(call, Call::SendText(..) | Call::Prompt(..))),
             "nothing is typed into the stranger: {later:?}"
         );
-        let runs: Vec<PaneId> = later
+
+        let plan = orchestrator_argv(&mux)?;
+        let split = later
             .iter()
-            .filter_map(|call| match call {
-                Call::Run(pane, argv, _) if argv == &plan => Some(pane.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(runs.len(), 1, "exactly one launch: {later:?}");
-        let new_pane = pane_of(&mux, &second.orchestrator_tab)?;
-        assert_eq!(runs[0], new_pane, "the orchestrator starts in a new pane");
-        assert_ne!(runs[0], old_pane, "the foreign process is not reused");
+            .position(|call| matches!(call, Call::Split(pane, ..) if pane == &old_pane))
+            .context("the foreign pane is split")?;
+        let run = later
+            .iter()
+            .position(|call| matches!(call, Call::Run(_, argv, _) if argv == &plan))
+            .context("the orchestrator is launched")?;
+        let fresh = match &later[run] {
+            Call::Run(pane, ..) => pane.clone(),
+            _ => unreachable!("position found a run"),
+        };
+        let closed = later
+            .iter()
+            .position(|call| call == &Call::ClosePane(old_pane.clone()))
+            .context("the foreign pane is closed")?;
+        assert!(
+            split < run && run < closed,
+            "split, launch, then close the stranger: {later:?}"
+        );
+        assert_ne!(fresh, old_pane, "the foreign process is not reused");
         assert_eq!(
             env.ctx
                 .state()
                 .map_err(failed)?
                 .orchestrator
                 .map(|orchestrator| orchestrator.pane),
-            Some(new_pane.as_str().to_string()),
+            Some(fresh.as_str().to_string()),
             "the relaunch records the pane it started"
         );
         Ok(())
@@ -1704,21 +1776,54 @@ mod tests {
         let old_pane = pane_of(&mux, &first.orchestrator_tab)?;
         mux.set_state(&old_pane, AgentState::Idle);
         mux.set_process_group(&old_pane, Some(777));
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert_eq!(
+            second.orchestrator_tab, first.orchestrator_tab,
+            "an unrecorded pane is replaced without moving the tab"
+        );
+        assert!(!second.created_orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.contains(&Call::ClosePane(old_pane.clone())),
+            "the unclaimed pane is closed: {later:?}"
+        );
+        assert!(
+            later
+                .iter()
+                .all(|call| !matches!(call, Call::CloseTab(..) | Call::CreateTab(..))),
+            "the tab is kept: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_host_without_splits_reopens_the_orchestrator_tab_instead() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux().with_process_group(88158).without_split();
+        let first = up(&mux, &env).map_err(failed)?;
+        let old_pane = pane_of(&mux, &first.orchestrator_tab)?;
+        mux.set_state(&old_pane, AgentState::Idle);
+        mux.set_process_group(&old_pane, Some(90001));
+        let before = mux.calls().len();
         let second = up(&mux, &env).map_err(failed)?;
 
         assert!(
             second.created_orchestrator_tab,
-            "an unrecorded pane is not shprd's to keep"
+            "the fallback reopens the tab, so up made it"
         );
-        let later = mux.calls();
+        let later = mux.calls()[before..].to_vec();
         assert!(
             later.contains(&Call::CloseTab(first.orchestrator_tab)),
-            "the unclaimed pane is closed: {later:?}"
+            "the tab is closed: {later:?}"
         );
-        assert_ne!(
-            pane_of(&mux, &second.orchestrator_tab)?,
-            old_pane,
-            "the orchestrator starts in a pane of its own"
+        assert!(
+            later
+                .iter()
+                .any(|call| matches!(call, Call::CreateTab(_, title, _) if title.ends_with(ORCHESTRATOR_LABEL))),
+            "and reopened under the same title: {later:?}"
         );
         Ok(())
     }

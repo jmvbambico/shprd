@@ -41,6 +41,8 @@ pub enum Call {
     FocusTab(TabId),
     /// `close_tab(tab)`.
     CloseTab(TabId),
+    /// `close_pane(pane)`.
+    ClosePane(PaneId),
     /// `split(pane, direction, ratio, cwd)`.
     Split(PaneId, Direction, f32, PathBuf),
     /// `run(pane, argv, env)`.
@@ -142,6 +144,8 @@ pub struct FakeMux {
     run_failure: Option<String>,
     /// The group every pane reports until a test scripts its own.
     default_group: Option<u32>,
+    /// Whether [`Mux::split`] answers as a host that cannot split.
+    split_refused: bool,
     inner: Mutex<Inner>,
 }
 
@@ -169,6 +173,7 @@ impl FakeMux {
             ready: false,
             run_failure: None,
             default_group: None,
+            split_refused: false,
             inner: Mutex::new(Inner::fresh()),
         }
     }
@@ -212,6 +217,13 @@ impl FakeMux {
             inner.panes.insert(pane.clone());
             inner.process_groups.insert(pane.clone(), group);
         }
+    }
+
+    /// Make [`Mux::split`] answer [`MuxError::Unsupported`], which is how a
+    /// host without splits looks to a caller that checks the capability.
+    pub fn without_split(mut self) -> Self {
+        self.split_refused = true;
+        self
     }
 
     /// Every call made so far, oldest first.
@@ -389,11 +401,24 @@ impl Mux for FakeMux {
         Ok(())
     }
 
+    fn close_pane(&self, pane: &PaneId) -> Result<()> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::ClosePane(pane.clone()));
+        inner.require_pane(pane)?;
+        inner.panes.remove(pane);
+        inner.screens.remove(pane);
+        inner.states.remove(pane);
+        Ok(())
+    }
+
     fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId> {
         let mut inner = self.lock()?;
         inner
             .calls
             .push(Call::Split(pane.clone(), direction, ratio, cwd.into()));
+        if self.split_refused {
+            return Err(MuxError::Unsupported("split pane"));
+        }
         inner.require_pane(pane)?;
         Ok(inner.new_pane())
     }

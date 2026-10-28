@@ -158,6 +158,23 @@ impl HerdrMux {
         Ok(Self::status_from(result.as_ref()))
     }
 
+    /// Close `pane` and nothing else: the tab and every other pane in it stay.
+    ///
+    /// `herdr pane close <pane_id>` takes the id positionally. A pane the host
+    /// no longer knows is already closed, which is what the caller wanted, so
+    /// [`MuxError::NotFound`] is success here.
+    pub(crate) fn close_pane_of(&self, pane: &PaneId) -> Result<()> {
+        match self.call_as(
+            "pane",
+            pane.as_str(),
+            "close pane",
+            &["pane", "close", pane.as_str()],
+        ) {
+            Ok(_) | Err(MuxError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The process group in the foreground of `pane`.
     ///
     /// `pane process-info` answers with the process and the process group

@@ -57,6 +57,10 @@ impl Mux for HerdrMux {
         self.kill_tab(tab)
     }
 
+    fn close_pane(&self, pane: &PaneId) -> Result<()> {
+        self.close_pane_of(pane)
+    }
+
     fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId> {
         self.split_pane(pane, direction, ratio, cwd)
     }
