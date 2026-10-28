@@ -76,6 +76,8 @@ pub trait Mux: Send + Sync {
     /// replacement is running beside it. A host that cannot close a pane on
     /// its own answers [`MuxError::Unsupported`], which is the trait's "this
     /// host cannot do that" signal; callers must degrade rather than retry.
+    /// Such a host reports [`Capabilities::close_pane`] as false, so a caller
+    /// that would be left with an unwanted process can tell before planning.
     fn close_pane(&self, _pane: &PaneId) -> Result<()> {
         Err(MuxError::Unsupported("close pane"))
     }

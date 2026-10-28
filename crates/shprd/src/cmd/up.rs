@@ -728,8 +728,12 @@ fn ensure_orchestrator_tab(
 /// there, and only then is the foreign pane closed — closing it first would
 /// leave the tab empty, and a host closes a tab with nothing left in it.
 ///
-/// A host that cannot close a pane would end up with two processes in the tab,
-/// so it takes the older route instead: close the whole tab and reopen it.
+/// The route is chosen before anything is split. A host that cannot close a
+/// pane ([`shprd_mux::Capabilities::close_pane`]) would end up with two
+/// processes in the tab, so it takes the older route instead: close the whole
+/// tab and reopen it. A host that promised the capability and refused it at
+/// runtime gets the same fallback, and if even that fails `up` fails rather
+/// than report a tab that still runs a process shprd did not start.
 fn replace_orchestrator_pane(
     mux: &dyn Mux,
     env: &UpEnv,
@@ -738,6 +742,9 @@ fn replace_orchestrator_pane(
     plan: &OrchestratorPlan,
     brief_path: &Path,
 ) -> Result<(Tab, bool), CliError> {
+    if !mux.capabilities().close_pane {
+        return reopen_orchestrator_tab(mux, env, workspace, found, plan, brief_path);
+    }
     let fresh = match mux.split(&found.root_pane, Direction::Down, 0.5, &env.ctx.root) {
         Ok(pane) => pane,
         // [`MuxError::Unsupported`] is the trait's "this host cannot split",
@@ -752,18 +759,37 @@ fn replace_orchestrator_pane(
         }
     };
     launch_orchestrator(mux, &fresh, plan, env, brief_path)?;
-    if let Err(err) = mux.close_pane(&found.root_pane) {
-        // The orchestrator is running in its own pane either way; a pane that
-        // outlived its replacement is a message to the human, not a failed up.
-        eprintln!("warning: could not close the orchestrator's old pane: {err}");
+    match mux.close_pane(&found.root_pane) {
+        // A pane the host no longer knows is already gone.
+        Ok(()) | Err(MuxError::NotFound { .. }) => Ok((
+            Tab {
+                root_pane: fresh,
+                ..found.clone()
+            },
+            false,
+        )),
+        Err(err) => {
+            // The foreign process is still running beside the new orchestrator.
+            // The only thing left that is certain to take it down is closing
+            // the whole tab, so the tab loses its place rather than keeping a
+            // second, unlabelled agent alive.
+            eprintln!(
+                "warning: could not close the orchestrator's old pane {}: {err}; \
+                 reopening the tab instead",
+                found.root_pane
+            );
+            reopen_orchestrator_tab(mux, env, workspace, found, plan, brief_path).map_err(
+                |fallback| {
+                    CliError::other(anyhow!(
+                        "could not close the foreign orchestrator pane {} ({err}) and could not \
+                         reopen its tab either ({fallback}); that pane still runs a process \
+                         shprd did not start, so close it by hand",
+                        found.root_pane
+                    ))
+                },
+            )
+        }
     }
-    Ok((
-        Tab {
-            root_pane: fresh,
-            ..found.clone()
-        },
-        false,
-    ))
 }
 
 /// Closes the orchestrator's tab and reopens it under the same title.
@@ -1334,6 +1360,7 @@ mod tests {
         FakeMux::new(Capabilities {
             split_ratio: true,
             pane_grants: true,
+            close_pane: true,
             human_ask: true,
             resumable_events: true,
             agent_state: true,
@@ -1835,6 +1862,81 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, Call::CreateTab(_, title, _) if title.ends_with(ORCHESTRATOR_LABEL))),
             "and reopened under the same title: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_host_without_pane_closes_reopens_the_orchestrator_tab() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux().with_process_group(88158).without_close_pane();
+        let first = up(&mux, &env).map_err(failed)?;
+        let old_pane = pane_of(&mux, &first.orchestrator_tab)?;
+        mux.set_state(&old_pane, AgentState::Idle);
+        mux.set_process_group(&old_pane, Some(90001));
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(
+            second.created_orchestrator_tab,
+            "a host that cannot close the pane takes the reopen route"
+        );
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.iter().all(|call| !matches!(call, Call::Split(..))),
+            "nothing is split into a tab that cannot be cleaned up: {later:?}"
+        );
+        assert!(
+            later.contains(&Call::CloseTab(first.orchestrator_tab)),
+            "the tab is closed, and the foreign process with it: {later:?}"
+        );
+        assert!(
+            later
+                .iter()
+                .any(|call| matches!(call, Call::CreateTab(_, title, _) if title.ends_with(ORCHESTRATOR_LABEL))),
+            "and reopened under the same title: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_pane_close_that_fails_after_the_launch_takes_the_tab_with_it() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux()
+            .with_process_group(88158)
+            .failing_close_pane("the host lost the pane");
+        let first = up(&mux, &env).map_err(failed)?;
+        let old_pane = pane_of(&mux, &first.orchestrator_tab)?;
+        mux.set_state(&old_pane, AgentState::Idle);
+        mux.set_process_group(&old_pane, Some(90001));
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(
+            second.created_orchestrator_tab,
+            "the fallback reopens the tab rather than leave the stranger running"
+        );
+        assert_ne!(
+            second.orchestrator_tab, first.orchestrator_tab,
+            "the replacement is a new tab, not the one with two processes"
+        );
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.contains(&Call::ClosePane(old_pane.clone())),
+            "closing the one pane is tried first: {later:?}"
+        );
+        assert!(
+            later.contains(&Call::CloseTab(first.orchestrator_tab)),
+            "and the whole tab goes when that close fails: {later:?}"
+        );
+        let plan = orchestrator_argv(&mux)?;
+        assert!(
+            later
+                .iter()
+                .any(|call| matches!(call, Call::Run(_, argv, _) if argv == &plan)),
+            "the orchestrator runs in the reopened tab: {later:?}"
         );
         Ok(())
     }

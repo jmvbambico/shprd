@@ -146,6 +146,11 @@ pub struct FakeMux {
     default_group: Option<u32>,
     /// Whether [`Mux::split`] answers as a host that cannot split.
     split_refused: bool,
+    /// Whether [`Mux::close_pane`] answers as a host that cannot close one.
+    close_pane_refused: bool,
+    /// The reason [`Mux::close_pane`] fails with a host error, when a test
+    /// wants a host whose capability and runtime disagree.
+    close_pane_failure: Option<String>,
     inner: Mutex<Inner>,
 }
 
@@ -156,6 +161,7 @@ impl Default for FakeMux {
         Self::new(Capabilities {
             split_ratio: true,
             pane_grants: true,
+            close_pane: true,
             human_ask: true,
             resumable_events: true,
             agent_state: true,
@@ -174,6 +180,8 @@ impl FakeMux {
             run_failure: None,
             default_group: None,
             split_refused: false,
+            close_pane_refused: false,
+            close_pane_failure: None,
             inner: Mutex::new(Inner::fresh()),
         }
     }
@@ -223,6 +231,23 @@ impl FakeMux {
     /// host without splits looks to a caller that checks the capability.
     pub fn without_split(mut self) -> Self {
         self.split_refused = true;
+        self
+    }
+
+    /// Make the fake a host without single-pane closes: the capability says so
+    /// and [`Mux::close_pane`] answers [`MuxError::Unsupported`], the two
+    /// agreeing the way a real adapter's do.
+    pub fn without_close_pane(mut self) -> Self {
+        self.caps.close_pane = false;
+        self.close_pane_refused = true;
+        self
+    }
+
+    /// Keep [`Capabilities::close_pane`] true but make [`Mux::close_pane`] fail
+    /// with `reason` anyway, which is how a host that lost the pane its
+    /// capability promised looks to a caller.
+    pub fn failing_close_pane(mut self, reason: impl Into<String>) -> Self {
+        self.close_pane_failure = Some(reason.into());
         self
     }
 
@@ -404,6 +429,12 @@ impl Mux for FakeMux {
     fn close_pane(&self, pane: &PaneId) -> Result<()> {
         let mut inner = self.lock()?;
         inner.calls.push(Call::ClosePane(pane.clone()));
+        if self.close_pane_refused {
+            return Err(MuxError::Unsupported("close pane"));
+        }
+        if let Some(reason) = &self.close_pane_failure {
+            return Err(MuxError::command("the fake host", reason.clone()));
+        }
         inner.require_pane(pane)?;
         inner.panes.remove(pane);
         inner.screens.remove(pane);

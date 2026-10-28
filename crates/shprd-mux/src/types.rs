@@ -87,6 +87,9 @@ pub struct Capabilities {
     /// Panes can be handed extra permissions (e.g. pre-approved tool grants)
     /// at creation time.
     pub pane_grants: bool,
+    /// A pane can be closed on its own, leaving its tab and its siblings
+    /// alone. Without it, retiring one pane costs the whole tab.
+    pub close_pane: bool,
     /// A pane can ask a human for input and wait for the answer.
     pub human_ask: bool,
     /// `next_events` replays events that happened while nobody was reading.
