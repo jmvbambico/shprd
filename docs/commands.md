@@ -25,7 +25,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd roster` | show agents, roles, models, availability |
 | `shprd restore <task>` | bring back archived work |
 
-Every command supports `--json`. `shprd completion zsh` prints shell completion.
+Every command supports `--json`. Shell completion (`shprd completion zsh`) is planned, not built yet.
 
 Agent and model strings use the CLI's own model names: `program/model`, e.g.
 `opencode/deepseek-v4.1-flash-free` or `claude/claude-opus-5-5`, with effort set
