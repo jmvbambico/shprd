@@ -54,6 +54,13 @@ pub struct RunState {
     /// own session: a pane whose foreground group is not this one was
     /// relaunched by the host, not by shprd.
     pub orchestrator: Option<OrchestratorInfo>,
+    /// The watchdog shprd started, once `up` launched one.
+    ///
+    /// The watchdog is the run's automation rather than an agent: it turns a
+    /// reviewer's findings into a verdict and hands off a dry worker. `up`
+    /// keeps it alive across invocations, which is what the pane and its
+    /// process group are for.
+    pub watch: Option<WatchInfo>,
     /// Sequence number of the last applied event, 0 before the first.
     pub last_seq: u64,
 }
@@ -86,6 +93,16 @@ pub struct OrchestratorInfo {
     pub pane: String,
     /// The pane's foreground process group when shprd started it.
     pub process_group: u32,
+}
+
+/// The watchdog shprd started for this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchInfo {
+    /// The pane it runs in, inside the human's chat tab.
+    pub pane: String,
+    /// The pane's foreground process group when shprd started it, when the
+    /// host could report one.
+    pub process_group: Option<u32>,
 }
 
 /// The run's identity.
@@ -573,6 +590,15 @@ impl RunState {
             } => {
                 self.orchestrator = Some(OrchestratorInfo {
                     title: title.clone(),
+                    pane: pane.clone(),
+                    process_group: *process_group,
+                });
+            }
+            EventKind::WatchLaunched {
+                pane,
+                process_group,
+            } => {
+                self.watch = Some(WatchInfo {
                     pane: pane.clone(),
                     process_group: *process_group,
                 });

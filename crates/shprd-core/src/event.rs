@@ -369,6 +369,22 @@ pub enum EventKind {
         /// The pane's foreground process group at launch.
         process_group: u32,
     },
+    /// shprd started the watchdog in a pane.
+    ///
+    /// The watchdog is the process that turns a reviewer's findings into a
+    /// verdict and hands off a dry worker, so `up` starts it the way it starts
+    /// the orchestrator: the pane and its process group are what a later `up`
+    /// checks before it trusts the pane, and what run end closes.
+    WatchLaunched {
+        /// The pane the watchdog runs in.
+        pane: String,
+        /// The pane's foreground process group at launch.
+        ///
+        /// `None` is a host that cannot tell. It is not evidence against the
+        /// pane, so a later `up` leaves it alone rather than splitting a second
+        /// watchdog off the chat tab.
+        process_group: Option<u32>,
+    },
     /// The run finished.
     RunFinished {},
 }

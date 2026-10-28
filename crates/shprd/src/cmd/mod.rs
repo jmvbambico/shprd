@@ -157,6 +157,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::PrMerged { .. } => "pr_merged",
         EventKind::Approved { .. } => "approved",
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
+        EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::RunFinished {} => "run_finished",
     }
 }

@@ -355,6 +355,7 @@ pub(crate) fn check_as(
         },
         EventKind::Approved { number, head_sha } => check_approved(state, actor, *number, head_sha),
         EventKind::OrchestratorLaunched { .. } => Ok(()),
+        EventKind::WatchLaunched { .. } => Ok(()),
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }
