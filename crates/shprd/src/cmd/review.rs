@@ -136,7 +136,7 @@ pub fn brief_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf
 pub fn tab_record_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
     briefs
         .join(run)
-        .join(format!("{task}-a{attempt}-review.tab"))
+        .join(format!("{task}-a{attempt}{}", spawn::REVIEW_TAB_SUFFIX))
 }
 
 /// Closes the reviewer tab an attempt's review left open.
@@ -152,88 +152,13 @@ pub fn close_reviewer(
     task: &str,
     attempt: u32,
 ) -> Result<(), CliError> {
-    let record = tab_record_path(briefs, run, task, attempt);
     // A reviewer that never opened a tab is a review that never got that far:
     // no record is nothing to close, not a failure.
-    let Ok(id) = std::fs::read_to_string(&record) else {
-        return Ok(());
-    };
-    close_recorded(mux, &id)
-}
-
-/// Closes every reviewer tab the run still has open.
-///
-/// Run end has no task in hand, so the run's `-review.tab` records are the
-/// whole list. One host refusal stops the sweep rather than being swallowed:
-/// the caller reports it.
-pub fn close_reviewers(mux: &dyn Mux, briefs: &Path, run: &str) -> Result<(), CliError> {
-    let dir = briefs.join(run);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        // No run directory is no reviews: nothing was ever opened to close.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => {
-            return Err(CliError::other(anyhow!(err).context(format!(
-                "reading the reviewer tab records in {}",
-                dir.display()
-            ))));
-        }
-    };
-    for entry in entries {
-        let path = entry
-            .map_err(|err| CliError::other(anyhow!(err).context("reading a tab record name")))?
-            .path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if !name.ends_with("-review.tab") {
-            continue;
-        }
-        let Ok(id) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        close_recorded(mux, &id)?;
-    }
-    Ok(())
-}
-
-/// Closes every reviewer tab the run left open, as the run's last act.
-///
-/// A reviewer can outlive the task it reviewed: one whose review never reached
-/// a verdict, or whose close a host refused, leaves its tab behind, so run end
-/// is the backstop that stops every reviewer the run started. A host refusal is
-/// warned about, never fatal: the run has ended either way, and failing here
-/// would leave the log saying otherwise.
-pub fn close_run_reviewers(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) {
-    let Ok(home) = crate::ctx::resolve_home(home) else {
-        return;
-    };
-    let Ok(state) = ctx.state() else {
-        return;
-    };
-    let Some(run) = state.run.as_ref().map(|run| run.run_id.clone()) else {
-        return;
-    };
-    let briefs = home.join(".shprd").join("briefs");
-    if let Err(err) = close_reviewers(mux, &briefs, &run) {
-        eprintln!("warning: {err}");
-    }
-}
-
-/// Closes one recorded tab, counting a tab the host no longer has as closed.
-fn close_recorded(mux: &dyn Mux, id: &str) -> Result<(), CliError> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Ok(());
-    }
-    let tab = shprd_mux::TabId::new(id);
-    match mux.close_tab(&tab) {
-        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => Ok(()),
-        Err(err) => Err(CliError::other(anyhow!(
-            "the reviewer's tab {tab} is still open: {err}"
-        ))),
-    }
+    spawn::close_recorded(
+        mux,
+        "reviewer's",
+        &tab_record_path(briefs, run, task, attempt),
+    )
 }
 
 /// What a `contract.md` says, as data, so the rendering is testable on its own.
@@ -1723,13 +1648,13 @@ project_dirs = []
     }
 
     #[test]
-    fn run_end_closes_the_reviewer_tab_and_leaves_the_worker_tab() {
+    fn run_end_closes_the_reviewer_and_worker_tabs() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         scratch.reported(&ctx);
         let (env, mux, reviewer) = reviewed(&scratch, &ctx);
         // A worker's record sits beside the reviewer's in the same run folder:
-        // run end stops reviewers, never an agent a human may be talking to.
+        // both are tabs this run opened, so run end closes both.
         let workspace = spawn::workspace_of(&mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
         let worker = mux
             .create_tab(&workspace.id, "worker", scratch.root())
@@ -1753,8 +1678,8 @@ project_dirs = []
             "a reviewer tab outlived the run: {open:?}"
         );
         assert!(
-            open.contains(&worker.id.to_string()),
-            "run end closed a worker tab: {open:?}"
+            !open.contains(&worker.id.to_string()),
+            "a worker tab outlived the run: {open:?}"
         );
     }
 

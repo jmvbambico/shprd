@@ -11,7 +11,8 @@
 //! `down` finishes the run. Neither verb closes a tab a human is working in: a
 //! human's shell is not shprd's to kill. The one exception is the reviewer
 //! tabs the run opened itself, which `down` closes once the run's last event is
-//! recorded — a reviewer has no work to finish once its task is decided.
+//! recorded — a reviewer has no work to finish once its task is decided, and
+//! every other tab the run recorded is closed with them.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -30,7 +31,6 @@ use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
 
-use crate::cmd::review;
 use crate::cmd::spawn;
 use crate::ctx::{CliError, Ctx};
 
@@ -222,7 +222,7 @@ pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Result<(), CliErro
         )));
     }
     let event = ctx.commit(EventKind::RunFinished {})?;
-    review::close_run_reviewers(mux, ctx, home);
+    spawn::close_run_tabs(mux, ctx, home);
     crate::cmd::emit(ctx, &event)
 }
 
@@ -2134,6 +2134,54 @@ mod tests {
         let second = runs.join(format!("{}-2.jsonl", first.run_id));
         assert!(second.is_file(), "{} is missing", second.display());
         assert_eq!(std::fs::read_to_string(&taken)?, "# an earlier archive\n");
+        Ok(())
+    }
+
+    #[test]
+    fn run_end_closes_the_tabs_it_recorded_and_leaves_the_humans_tabs() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let report = up(&mux, &env).map_err(failed)?;
+        let workspace = mux
+            .find_workspace(&naming::workspace_name(&env.repo_name))
+            .map_err(|err| anyhow!("{err}"))?
+            .context("up must leave a workspace")?;
+        // One tab per attempt record, as a spawn and a review would leave them.
+        let worker = mux
+            .create_tab(&workspace.id, "worker", fixture.repo.path())
+            .map_err(|err| anyhow!("{err}"))?;
+        let reviewer = mux
+            .create_tab(&workspace.id, "reviewer", fixture.repo.path())
+            .map_err(|err| anyhow!("{err}"))?;
+        let briefs = env.home.join(".shprd").join("briefs").join(&report.run_id);
+        std::fs::create_dir_all(&briefs)?;
+        std::fs::write(briefs.join("T1-a1.tab"), worker.id.as_str())?;
+        std::fs::write(briefs.join("T1-a1-review.tab"), reviewer.id.as_str())?;
+
+        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
+
+        let open = mux
+            .list_tabs(&workspace.id)
+            .map_err(|err| anyhow!("{err}"))?;
+        let ids: Vec<String> = open.iter().map(|tab| tab.id.to_string()).collect();
+        assert!(
+            !ids.contains(&worker.id.to_string()),
+            "a worker tab outlived the run: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&reviewer.id.to_string()),
+            "a reviewer tab outlived the run: {ids:?}"
+        );
+        // The two tabs shprd never recorded are the human's and the agent's.
+        assert!(
+            ids.contains(&report.chat_tab.to_string()),
+            "run end closed the chat tab: {ids:?}"
+        );
+        assert!(
+            ids.contains(&report.orchestrator_tab.to_string()),
+            "run end closed the orchestrator tab: {ids:?}"
+        );
         Ok(())
     }
 

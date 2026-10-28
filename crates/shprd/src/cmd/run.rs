@@ -6,7 +6,7 @@ use shprd_core::event::EventKind;
 use shprd_mux::Mux;
 
 use crate::cli::RunStartArgs;
-use crate::cmd::{emit, review, spawn};
+use crate::cmd::{emit, spawn};
 use crate::ctx::{CliError, Ctx};
 
 /// Records the run's first event.
@@ -22,10 +22,10 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     emit(ctx, &event)
 }
 
-/// Records that the run is over, closing the reviewer tabs it left open.
+/// Records that the run is over, closing the tabs it left open.
 pub fn finish(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
     let event = ctx.commit(EventKind::RunFinished {})?;
-    review::close_run_reviewers(mux, ctx, home);
+    spawn::close_run_tabs(mux, ctx, home);
     emit(ctx, &event)
 }
 

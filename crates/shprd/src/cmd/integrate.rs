@@ -12,9 +12,10 @@ use shprd_core::state::Task;
 use shprd_git::git::Git;
 use shprd_git::integrate::{self, IntegrateError, TaskCommits};
 use shprd_git::worktree::Layout;
+use shprd_mux::Mux;
 
 use crate::cli::IntegrateArgs;
-use crate::cmd::emit;
+use crate::cmd::{emit, spawn};
 use crate::ctx::{CliError, Ctx, resolve_home};
 
 /// How many characters of a sha the human line shows.
@@ -24,9 +25,14 @@ const SHORT_SHA: usize = 7;
 ///
 /// The task has to be `Passed` with no unanswered failed gate, which is what
 /// the `Integrated` rule checks, so a refused task touches no git state.
-pub fn verb(ctx: &Ctx, args: &IntegrateArgs, home: Option<&Path>) -> Result<(), CliError> {
+pub fn verb(
+    mux: &dyn Mux,
+    ctx: &Ctx,
+    args: &IntegrateArgs,
+    home: Option<&Path>,
+) -> Result<(), CliError> {
     if args.record_only {
-        return record_only(ctx, args);
+        return record_only(mux, ctx, args, home);
     }
     let landed = EventKind::Integrated {
         task: args.task.clone(),
@@ -75,6 +81,7 @@ pub fn verb(ctx: &Ctx, args: &IntegrateArgs, home: Option<&Path>) -> Result<(), 
         task: args.task.clone(),
         commits: picked.picked.clone(),
     })?;
+    close_worker_tab(mux, ctx, Some(&home), &args.task);
     emit(ctx, &event)?;
     println!(
         "integrated {}: {} commit(s), head {}",
@@ -89,12 +96,41 @@ pub fn verb(ctx: &Ctx, args: &IntegrateArgs, home: Option<&Path>) -> Result<(), 
 ///
 /// This is the M1 path: the caller did the merge and only needs the ledger to
 /// know about it, so no commit list is invented here.
-fn record_only(ctx: &Ctx, args: &IntegrateArgs) -> Result<(), CliError> {
+fn record_only(
+    mux: &dyn Mux,
+    ctx: &Ctx,
+    args: &IntegrateArgs,
+    home: Option<&Path>,
+) -> Result<(), CliError> {
     let event = ctx.commit(EventKind::Integrated {
         task: args.task.clone(),
         commits: Vec::new(),
     })?;
+    close_worker_tab(mux, ctx, home, &args.task);
     emit(ctx, &event)
+}
+
+/// Closes the worker tab an integrated task can no longer come back to.
+///
+/// Integration is the one event after which no attempt of the task can run in
+/// its tab again: a failed review sends a task back only while it is not yet
+/// integrated. That is why the tab outlives `reported` and ends here. A close
+/// the host refuses is warned about, never fatal — the landing is recorded, and
+/// run end sweeps whatever a refusal leaves behind.
+fn close_worker_tab(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, task: &str) {
+    let Ok(home) = resolve_home(home) else {
+        return;
+    };
+    let Ok(state) = ctx.state() else {
+        return;
+    };
+    let Some(run) = state.run.as_ref().map(|run| run.run_id.clone()) else {
+        return;
+    };
+    let briefs = home.join(".shprd").join("briefs");
+    if let Err(err) = spawn::close_worker(mux, &briefs, &run, task) {
+        eprintln!("warning: {err}");
+    }
 }
 
 /// The branch the task's latest attempt committed on.
@@ -226,4 +262,223 @@ fn send_back(
         args.task,
         files.len()
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::gate::REVIEW_GATE;
+    use shprd_mux::fake::FakeMux;
+    use shprd_mux::{TabId, naming};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// Runs one git command in `dir`, panicking on failure.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repository with `main`, a task branch one commit ahead, and a home.
+    struct Scratch {
+        repo: TempDir,
+        home: TempDir,
+    }
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+            let root = repo.path();
+            git(root, &["init", "-q", "-b", "main"]);
+            git(root, &["config", "user.name", "shprd tests"]);
+            git(root, &["config", "user.email", "tests@example.invalid"]);
+            git(root, &["config", "commit.gpgsign", "false"]);
+            std::fs::write(root.join("README.md"), "scratch\n").unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-q", "-m", "first"]);
+            git(root, &["checkout", "-q", "-b", "feature/t1"]);
+            std::fs::write(root.join("README.md"), "scratch\nand the work\n").unwrap();
+            git(root, &["commit", "-q", "-a", "-m", "t1 work"]);
+            git(root, &["checkout", "-q", "main"]);
+            Scratch { repo, home }
+        }
+
+        fn root(&self) -> &Path {
+            self.repo.path()
+        }
+
+        fn repo_name(&self) -> String {
+            self.root()
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+
+        /// The briefs directory the run records its tabs under.
+        fn briefs(&self) -> PathBuf {
+            self.home.path().join(".shprd").join("briefs")
+        }
+
+        /// A run with `T1` spawned on the task branch, unreported.
+        fn ctx(&self) -> Ctx {
+            let ctx = Ctx::new(self.root().to_path_buf(), Actor::Human, false, true);
+            ctx.commit(EventKind::RunStarted {
+                run_id: "t1".to_string(),
+                repo: self.repo_name(),
+                base_branch: "main".to_string(),
+                integration_branch: "shprd/t1/int".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "Land the work".to_string(),
+                scope: vec!["README.md".to_string()],
+                acceptance: vec!["it lands".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx.commit(EventKind::Spawned {
+                task: "T1".to_string(),
+                attempt: 1,
+                agent: "sh".to_string(),
+                model: None,
+                worktree: "/tmp/wt/T1".to_string(),
+                branch: "feature/t1".to_string(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            ctx
+        }
+
+        /// Records the attempt's report, the step that must not close the tab.
+        fn reported(&self, ctx: &Ctx) {
+            ctx.commit(EventKind::Reported {
+                task: "T1".to_string(),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: "did the work".to_string(),
+                tests: vec!["cargo test".to_string()],
+                changed_paths: vec!["README.md".to_string()],
+                commit: None,
+                skills_used: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        }
+
+        /// Records the review pass that makes the task integrable.
+        fn passed(&self, ctx: &Ctx) {
+            self.reported(ctx);
+            ctx.commit(EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        }
+
+        /// A host with this repository's workspace, and the worker tab the
+        /// attempt recorded beside its brief.
+        fn mux_with_worker(&self) -> (FakeMux, String) {
+            let mux = FakeMux::default();
+            let workspace = mux
+                .create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
+                .unwrap_or_else(|err| panic!("{err}"));
+            let tab = mux
+                .create_tab(&workspace.id, "worker", self.root())
+                .unwrap_or_else(|err| panic!("{err}"));
+            let record = spawn::tab_path(&self.briefs(), "t1", "T1", 1);
+            std::fs::create_dir_all(self.briefs().join("t1")).unwrap_or_else(|err| panic!("{err}"));
+            std::fs::write(record, tab.id.as_str()).unwrap_or_else(|err| panic!("{err}"));
+            (mux, tab.id.to_string())
+        }
+
+        /// Whether `tab` is still open on `mux`.
+        fn still_open(&self, mux: &FakeMux, tab: &str) -> bool {
+            let workspace = mux
+                .find_workspace(&naming::workspace_name(&self.repo_name()))
+                .unwrap_or_else(|err| panic!("{err}"))
+                .unwrap_or_else(|| panic!("the workspace is gone"));
+            mux.list_tabs(&workspace.id)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .iter()
+                .any(|open| open.id == TabId::new(tab))
+        }
+    }
+
+    /// The one-shot args a test integrates `T1` with.
+    fn args() -> IntegrateArgs {
+        IntegrateArgs {
+            task: "T1".to_string(),
+            record_only: false,
+        }
+    }
+
+    #[test]
+    fn a_reported_task_keeps_its_worker_tab() {
+        // A failed review sends the task back to the same worker, so the report
+        // cannot end its tab: only integration takes that possibility away.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let (mux, tab) = scratch.mux_with_worker();
+
+        assert!(
+            scratch.still_open(&mux, &tab),
+            "a reported task's worker tab must stay open"
+        );
+    }
+
+    #[test]
+    fn integrating_a_task_closes_its_worker_tab() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.passed(&ctx);
+        let (mux, tab) = scratch.mux_with_worker();
+        assert!(
+            scratch.still_open(&mux, &tab),
+            "the attempt left no worker tab to close"
+        );
+
+        verb(&mux, &ctx, &args(), Some(scratch.home.path())).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            ctx.state().unwrap_or_else(|err| panic!("{err}")).tasks["T1"].status,
+            shprd_core::state::TaskStatus::Integrated,
+            "the landing was not recorded"
+        );
+        assert!(
+            !scratch.still_open(&mux, &tab),
+            "the worker tab {tab} outlived the task's integration"
+        );
+    }
+
+    #[test]
+    fn a_vanished_worker_tab_does_not_fail_the_integration() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.passed(&ctx);
+        let (mux, tab) = scratch.mux_with_worker();
+        // A human closed the tab first: that is the state integration wants.
+        mux.close_tab(&TabId::new(&tab))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        verb(&mux, &ctx, &args(), Some(scratch.home.path())).unwrap_or_else(|err| panic!("{err}"));
+    }
 }
