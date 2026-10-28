@@ -565,7 +565,7 @@ pub struct ReviewBrief<'a> {
 /// It names the three files the reviewer may read, says plainly that the
 /// repository is off limits, and ends by telling the reviewer to write its
 /// findings and stop: the reviewer runs no `shprd` command, because its folder
-/// is outside the repository and the orchestration submits the verdict instead.
+/// is outside the repository and the engine records the verdict instead.
 pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -921,7 +921,7 @@ mod tests {
     use std::time::Duration;
 
     use shprd_core::config::Skills;
-    use shprd_core::event::Actor;
+    use shprd_core::event::{Actor, ReviewSource};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
     use shprd_mux::naming;
@@ -1271,7 +1271,8 @@ project_dirs = []
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
         // The reviewer writes and stops: no shprd verb is asked of it, because
-        // its folder is outside the repository and the orchestrator submits.
+        // its folder is outside the repository and the engine records the
+        // verdict.
         assert!(!brief.contains("shprd agent"), "{brief}");
         assert!(brief.contains("findings.json` and stop"), "{brief}");
         assert!(brief.contains("REVIEWER"), "{brief}");
@@ -1696,13 +1697,20 @@ project_dirs = []
         let env = scratch.review_env(&ctx, Some("codex/m1"));
         let mux = scratch.mux();
         review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
-        ctx.commit(EventKind::GatePassed {
-            task: "T1".to_string(),
-            attempt: 1,
-            gate: REVIEW_GATE.to_string(),
-            findings: Vec::new(),
-        })
-        .unwrap_or_else(|err| panic!("{err}"));
+        // A verdict is the engine's to record, from the packet the reviewer
+        // wrote: exactly what `verdict` records, which is what the restart sees.
+        ctx.as_actor(Actor::Engine)
+            .commit(EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+                source: Some(ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf".to_string(),
+                }),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
 
         let err = review(&mux, &env, &restart()).expect_err("a decided review cannot restart");
         let message = format!("{err}");

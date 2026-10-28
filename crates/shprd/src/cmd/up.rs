@@ -965,7 +965,7 @@ fn orchestrator_is_running(mux: &dyn Mux, pane: &PaneId, wait: Duration) -> bool
 ///
 /// `up` owns the watchdog the way it owns the orchestrator: `shprd watch` is
 /// what turns a reviewer's findings into a verdict and hands off a dry worker,
-/// and a run whose watchdog is not running records its verdicts by hand. So the
+/// and a run whose watchdog is not running cannot settle a review at all. So the
 /// pane is split off the human's chat tab, never off an agent's tab, and it is
 /// only ever started when the log has no live watchdog of this run's.
 ///
@@ -1204,16 +1204,17 @@ const FLOW: &str = r#"## How a run works
    and `shprd brief`; send a worker a message with
    `shprd agent prompt --task <ID> "…"`. `shprd up` already runs the watchdog
    (`shprd watch`) in a pane of the chat tab, so do not start another one:
-   never record a review verdict yourself, and when a review is stuck, escalate
-   instead of deciding it.
+   never record a review verdict yourself. A stuck review is step 5's job:
+   restart it first, and escalate only if the restart is stuck too.
 
 5. **Review.** When a task is reported: `shprd agent review --task <ID>`. The
-   reviewer submits its verdict; code decides. If the review fails, start the
-   next attempt with `shprd agent spawn --task <ID>`: the new brief carries the
-   findings. After repeated failures shprd escalates to the human. If a review
-   is stuck or its brief never arrived, run
-   `shprd agent review --task <ID> --again`; never type into the reviewer's tab
-   yourself.
+   reviewer writes its findings and the engine records the verdict; code
+   decides. If the review fails, start the next attempt with
+   `shprd agent spawn --task <ID>`: the new brief carries the findings. After
+   repeated failures shprd escalates to the human. If a review is stuck or its
+   brief never arrived, restart it with
+   `shprd agent review --task <ID> --again`; escalate only if that restart is
+   stuck too, and never type into the reviewer's tab yourself.
 
 6. **Integrate.** When a task passed review: `shprd agent integrate --task <ID>`.
    A conflict sends it back like a failed review.
@@ -1773,6 +1774,18 @@ mod tests {
         assert!(
             brief.contains("never record a review verdict yourself"),
             "the brief forbids hand-recorded verdicts: {brief}"
+        );
+        assert!(
+            brief.contains("`shprd agent review --task <ID> --again`"),
+            "the brief says how to restart a stuck review: {brief}"
+        );
+        assert!(
+            brief.contains("restart it first, and escalate only if the restart"),
+            "a stuck review is restarted before it is escalated: {brief}"
+        );
+        assert!(
+            !brief.contains("instead of deciding it"),
+            "no step escalates a stuck review instead of restarting it: {brief}"
         );
         assert!(!brief.contains("--commit"), "{brief}");
         assert!(report.brief_path.ends_with("orchestrator.md"));
