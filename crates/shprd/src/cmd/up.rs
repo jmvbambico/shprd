@@ -12,6 +12,7 @@
 //! shprd's to kill.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +35,9 @@ const CHAT_TITLE: &str = "shprd·chat";
 
 /// The label the orchestrator tab carries after its role glyph and CLI id.
 const ORCHESTRATOR_LABEL: &str = "orchestrator";
+
+/// The directory under `.shprd` a finished run's log is moved to.
+const RUNS_DIR: &str = "runs";
 
 /// The argv the chat tab runs: print the status, then hand over to a shell.
 ///
@@ -228,8 +232,8 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, CliError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Reuses the run in flight, or starts a fresh one, and opens its integration
-/// worktree either way.
+/// Archives a finished run, reuses the run in flight, or starts a fresh one,
+/// and opens its integration worktree either way.
 ///
 /// Returns the run id, whether it was resumed, and its integration branch.
 fn begin_run(
@@ -238,7 +242,13 @@ fn begin_run(
     repo_name: &str,
     base_branch: &str,
 ) -> Result<RunBoot, CliError> {
-    let state = ctx.state()?;
+    let mut state = ctx.state()?;
+    if state.finished {
+        // A finished run's log refuses the next `RunStarted`, so it is archived
+        // first and the run after it starts in a fresh, empty log.
+        archive_finished_run(ctx, &state)?;
+        state = ctx.state()?;
+    }
     let boot = match resume_target(&state) {
         Some(run) => RunBoot {
             run_id: run.run_id,
@@ -268,6 +278,65 @@ fn begin_run(
     // is healed by the retry instead of being resumed as if it were whole.
     ensure_integration(ctx, home, repo_name, &boot, &state)?;
     Ok(boot)
+}
+
+/// Moves a finished run's log aside so `up` can start the next run.
+///
+/// A repository keeps one live log, `.shprd/events.jsonl`, and a log whose run
+/// has finished refuses the next `RunStarted`. The old log is renamed under
+/// `.shprd/runs/` while its own lock is held, so no other shprd process is
+/// appending to it as it moves, and an archive already there is never
+/// overwritten: the name grows a `-2`, `-3`... suffix instead.
+///
+/// Returns where the log went, or `None` when the run is not finished.
+fn archive_finished_run(ctx: &Ctx, state: &RunState) -> Result<Option<PathBuf>, CliError> {
+    let Some(run) = state.run.as_ref().filter(|_| state.finished) else {
+        return Ok(None);
+    };
+    let parent = ctx.log_path.parent().ok_or_else(|| {
+        CliError::other(anyhow!(
+            "no directory to archive into: {}",
+            ctx.log_path.display()
+        ))
+    })?;
+    let dir = parent.join(RUNS_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| CliError::other(anyhow!(err).context("creating the run archive")))?;
+    let target = archive_target(&dir, &run.run_id);
+    let file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&ctx.log_path)
+        .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
+    file.lock()
+        .map_err(|err| CliError::other(anyhow!(err).context("locking the event log")))?;
+    let moved = std::fs::rename(&ctx.log_path, &target)
+        .map_err(|err| CliError::other(anyhow!(err).context("archiving the event log")));
+    let unlocked = file
+        .unlock()
+        .map_err(|err| CliError::other(anyhow!(err).context("unlocking the event log")));
+    moved?;
+    unlocked?;
+    let shown = target.strip_prefix(&ctx.root).unwrap_or(&target);
+    println!(
+        "archived finished run {} to {}",
+        run.run_id,
+        shown.display()
+    );
+    Ok(Some(target))
+}
+
+/// Where `run_id`'s log is archived: `<dir>/<run_id>.jsonl`, or the first free
+/// `-2`, `-3`... suffix when that name is taken.
+fn archive_target(dir: &Path, run_id: &str) -> PathBuf {
+    let first = dir.join(format!("{run_id}.jsonl"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| dir.join(format!("{run_id}-{n}.jsonl")))
+        .find(|path| !path.exists())
+        .unwrap_or(first)
 }
 
 /// Opens the run's integration worktree and records the resources it owns.
@@ -832,6 +901,41 @@ mod tests {
         Ok(())
     }
 
+    /// Runs one git command in `dir` and returns its stdout.
+    fn git_text(dir: &StdPath, args: &[&str]) -> Result<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .context("running git")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// `git status --porcelain` in `dir`, so a test sees the checkout as a
+    /// human would.
+    fn status(dir: &StdPath) -> Result<String> {
+        git_text(dir, &["status", "--porcelain"])
+    }
+
+    /// Where git keeps the repo-local exclude file, resolved the way git
+    /// resolves it so a worktree's exclude is the one found.
+    fn exclude_path(dir: &StdPath) -> Result<PathBuf> {
+        let text = git_text(dir, &["rev-parse", "--git-path", "info/exclude"])?;
+        let path = PathBuf::from(text.trim());
+        Ok(if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        })
+    }
+
     /// The tabs the fake was asked to create, in order.
     fn created_titles(mux: &FakeMux) -> Vec<String> {
         mux.calls()
@@ -1377,6 +1481,82 @@ mod tests {
             .map_err(failed)?;
         down(&env.ctx).map_err(failed)?;
         assert!(env.ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    #[test]
+    fn a_finished_run_is_archived_so_up_starts_the_next_one() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        down(&env.ctx).map_err(failed)?;
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(!second.resumed, "a finished run is never resumed");
+        assert_ne!(second.run_id, first.run_id, "up must mint a new run");
+        let archive = fixture
+            .repo
+            .path()
+            .join(".shprd")
+            .join("runs")
+            .join(format!("{}.jsonl", first.run_id));
+        assert!(archive.is_file(), "{} is missing", archive.display());
+        let (state, events) = env.ctx.load().map_err(failed)?;
+        assert_eq!(
+            state.run.as_ref().map(|run| run.run_id.clone()),
+            Some(second.run_id.clone()),
+            "the fresh log holds the new run"
+        );
+        assert!(!state.finished, "the new run is in flight");
+        assert_eq!(
+            events.first().map(|event| event.seq),
+            Some(1),
+            "the fresh log starts at seq 1"
+        );
+        assert!(
+            matches!(
+                events.first().map(|event| &event.kind),
+                Some(EventKind::RunStarted { .. })
+            ),
+            "{events:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_archived_run_is_never_overwritten() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        down(&env.ctx).map_err(failed)?;
+        let runs = fixture.repo.path().join(".shprd").join("runs");
+        std::fs::create_dir_all(&runs)?;
+        let taken = runs.join(format!("{}.jsonl", first.run_id));
+        std::fs::write(&taken, "# an earlier archive\n")?;
+        up(&mux, &env).map_err(failed)?;
+        let second = runs.join(format!("{}-2.jsonl", first.run_id));
+        assert!(second.is_file(), "{} is missing", second.display());
+        assert_eq!(std::fs::read_to_string(&taken)?, "# an earlier archive\n");
+        Ok(())
+    }
+
+    #[test]
+    fn up_keeps_its_run_state_out_of_git_status() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        up(&mux, &env).map_err(failed)?;
+        std::fs::create_dir_all(fixture.repo.path().join(".dagr"))?;
+        assert!(fixture.repo.path().join(".shprd").is_dir());
+        assert_eq!(status(fixture.repo.path())?, "", "the checkout looks dirty");
+        up(&mux, &env).map_err(failed)?;
+        let exclude = exclude_path(fixture.repo.path())?;
+        let text = std::fs::read_to_string(&exclude)?;
+        assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
+        assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
+        assert_eq!(text.matches("# shprd run state").count(), 1, "{text}");
         Ok(())
     }
 
