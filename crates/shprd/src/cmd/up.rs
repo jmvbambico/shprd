@@ -1046,7 +1046,10 @@ const FLOW: &str = r#"## How a run works
 5. **Review.** When a task is reported: `shprd agent review --task <ID>`. The
    reviewer submits its verdict; code decides. If the review fails, start the
    next attempt with `shprd agent spawn --task <ID>`: the new brief carries the
-   findings. After repeated failures shprd escalates to the human.
+   findings. After repeated failures shprd escalates to the human. If a review
+   is stuck or its brief never arrived, run
+   `shprd agent review --task <ID> --again`; never type into the reviewer's tab
+   yourself.
 
 6. **Integrate.** When a task passed review: `shprd agent integrate --task <ID>`.
    A conflict sends it back like a failed review.
