@@ -343,6 +343,18 @@ pub enum EventKind {
         /// The head that was merged.
         head: String,
     },
+    /// A human approved the run's pull request in shprd itself.
+    ///
+    /// A solo maintainer cannot approve their own pull request on GitHub, so
+    /// the approval a merge policy waits for can also be recorded here. It
+    /// names the head it was given for: an approval of an older head says
+    /// nothing about the commits now on top of it.
+    Approved {
+        /// The forge's number for the pull request.
+        number: u64,
+        /// The integration head the human approved.
+        head_sha: String,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -486,6 +498,10 @@ mod tests {
                 number: 7,
                 head: "abc1234".to_string(),
             },
+            EventKind::Approved {
+                number: 7,
+                head_sha: "abc1234".to_string(),
+            },
             EventKind::RunFinished {},
         ]
     }
@@ -493,7 +509,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 17, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 18, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

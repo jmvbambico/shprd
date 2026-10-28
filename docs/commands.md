@@ -15,6 +15,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd gate` | run the repository's full checks (`[gates] integration`) once on the integration branch |
 | `shprd land` | push the integration branch and open or update the pull request |
 | `shprd land --merge` | merge it: only with green checks, the reviewed head, and your approval |
+| `shprd approve [--yes]` | approve the open pull request at the integration branch's current head, for a solo maintainer who can't approve their own PR on GitHub; humans only, and a new commit needs a new approval |
 | `shprd watch` | the watchdog loop: marks stuck or rate-limited agents dry and hands their tasks off |
 | `shprd janitor [--apply]` | show (or apply) cleanup of what the run created: worktrees, branches, the merged remote branch |
 | `shprd keys show\|install\|uninstall` | the `prefix+alt+…` key bindings in your herdr config |
@@ -74,7 +75,7 @@ must_fix = "major"   # findings this severe or worse fail the review
 rounds = 2           # failed reviews before shprd escalates to you
 
 [land]
-merge = "ask"        # "ask": merge only after your approval; "allow": also without it, never into a protected branch
+merge = "ask"        # "ask": merge only after your approval (GitHub or `shprd approve`); "allow": also without it, never into a protected branch
 protected = ["main", "master"]
 ```
 

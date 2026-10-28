@@ -99,6 +99,9 @@ pub enum Command {
     /// Push the integration branch and open its pull request; with `--merge`,
     /// merge it when `[land]` allows.
     Land(LandArgs),
+    /// Approve the run's pull request in shprd, for a maintainer whose forge
+    /// will not let them approve their own.
+    Approve(ApproveArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -116,6 +119,15 @@ pub struct LandArgs {
     /// Merge the pull request instead of only opening it.
     #[arg(long)]
     pub merge: bool,
+}
+
+/// Arguments for `approve`.
+#[derive(Debug, Args)]
+pub struct ApproveArgs {
+    /// Approve without asking, for a script or a test. `SHPRD_ACTOR` still has
+    /// to be unset or `human`.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Arguments for `watch`.

@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::Config;
@@ -23,7 +23,7 @@ use shprd_core::state::{ResourceStatus, RunState};
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
 use shprd_mux::naming::{self, Role as TabRole};
-use shprd_mux::{Mux, Tab, TabId, Workspace};
+use shprd_mux::{AgentState, Mux, PaneId, Tab, TabId, Workspace};
 use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
@@ -35,6 +35,17 @@ const CHAT_TITLE: &str = "shprd·chat";
 
 /// The label the orchestrator tab carries after its role glyph and CLI id.
 const ORCHESTRATOR_LABEL: &str = "orchestrator";
+
+/// How long `up` keeps asking the host whether an existing orchestrator tab
+/// still has an agent in it.
+///
+/// A restored workspace keeps the tab but not always the session: herdr's
+/// `--resume` can fail and leave a bare shell, which only the absence of an
+/// agent tells apart from a live one.
+const DETECT_WAIT: Duration = Duration::from_secs(5);
+
+/// The step between [`Mux::agent_state`] polls while detecting that agent.
+const DETECT_POLL: Duration = Duration::from_millis(250);
 
 /// The directory under `.shprd` a finished run's log is moved to.
 const RUNS_DIR: &str = "runs";
@@ -93,6 +104,10 @@ pub struct UpEnv {
     /// before its brief counts as undelivered. Production reads it from the
     /// environment; tests set it explicitly.
     pub ready_wait: Duration,
+    /// How long `up` waits for an orchestrator tab it did not create to report
+    /// an agent before it relaunches the orchestrator in that tab. Production
+    /// uses [`DETECT_WAIT`]; tests set it explicitly.
+    pub detect_wait: Duration,
 }
 
 /// What `up` did or found already done.
@@ -569,6 +584,7 @@ fn build_env(ctx: &Ctx, home: PathBuf) -> Result<UpEnv, CliError> {
         specs,
         process_env: std::env::vars().collect(),
         ready_wait: super::launch::ready_wait(),
+        detect_wait: DETECT_WAIT,
     })
 }
 
@@ -642,11 +658,15 @@ fn find_or_create_workspace(
     Ok((created, true))
 }
 
-/// Opens the orchestrator's tab unless it is already there.
+/// Opens the orchestrator's tab unless it is already there and running.
 ///
-/// An existing tab is never recreated and never re-prompted: a human may be
-/// mid-conversation in it, and a second start would replace the session they
-/// are typing into.
+/// An existing tab with an agent in it is never recreated and never
+/// re-prompted: a human may be mid-conversation in it, and a second start
+/// would replace the session they are typing into. A tab without an agent is
+/// the other case, and the one a herdr restart leaves behind: the workspace
+/// and its tabs come back, herdr's `--resume` fails, and the pane holds a bare
+/// shell. That pane gets the orchestrator started in it, so a resumed run is
+/// never left without one.
 fn ensure_orchestrator_tab(
     mux: &dyn Mux,
     env: &UpEnv,
@@ -657,22 +677,39 @@ fn ensure_orchestrator_tab(
 ) -> Result<(Tab, bool), CliError> {
     let plan = OrchestratorPlan::resolve(env, brief_path, run_id)?;
     if let Some(found) = titled(tabs, &plan.title) {
+        if orchestrator_is_running(mux, &found.root_pane, env.detect_wait) {
+            return Ok((found, false));
+        }
+        // The tab outlived the agent: the run has no orchestrator at all, so
+        // one is started where the old one was instead of in a second tab.
+        launch_orchestrator(mux, &found.root_pane, &plan, env, brief_path)?;
+        eprintln!("relaunched the orchestrator in {}", plan.title);
         return Ok((found, false));
     }
     let tab = mux
         .create_tab(&workspace.id, &plan.title, &env.ctx.root)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the orchestrator tab")))?;
-    mux.run(&tab.root_pane, &plan.argv, &plan.env)
+    launch_orchestrator(mux, &tab.root_pane, &plan, env, brief_path)?;
+    Ok((tab, true))
+}
+
+/// Starts the orchestrator in `pane` and hands it the brief.
+///
+/// A fresh tab and a relaunched one go through here, so both start the same
+/// program with the same argv, environment and brief for the current run.
+fn launch_orchestrator(
+    mux: &dyn Mux,
+    pane: &PaneId,
+    plan: &OrchestratorPlan,
+    env: &UpEnv,
+    brief_path: &Path,
+) -> Result<(), CliError> {
+    mux.run(pane, &plan.argv, &plan.env)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the orchestrator")))?;
     if let Some(brief) = &plan.inline_prompt
-        && let Some(reason) = super::launch::deliver_brief(
-            mux,
-            &tab.root_pane,
-            brief,
-            &plan.blocking_prompts,
-            env.ready_wait,
-        )
-        .reason()
+        && let Some(reason) =
+            super::launch::deliver_brief(mux, pane, brief, &plan.blocking_prompts, env.ready_wait)
+                .reason()
     {
         // The orchestrator is running either way, so a brief that never lands
         // is a message to the human, not a failed `up`: they can paste it in.
@@ -682,7 +719,30 @@ fn ensure_orchestrator_tab(
             brief_path.display()
         );
     }
-    Ok((tab, true))
+    Ok(())
+}
+
+/// Whether an orchestrator is still running in `pane`, polling for up to
+/// `wait`.
+///
+/// Only an answer that is not [`AgentState::Unknown`] counts as running, and
+/// [`DETECT_POLL`] spaces the polls so a CLI that is merely slow to be detected
+/// is not mistaken for an absent one. Everything else — a detected agent, or a
+/// host that cannot tell — leaves the tab alone: replacing a session a human
+/// may be typing into is worse than a stale tab.
+fn orchestrator_is_running(mux: &dyn Mux, pane: &PaneId, wait: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        match mux.agent_state(pane) {
+            Ok(AgentState::Unknown) => {}
+            Ok(_) | Err(_) => return true,
+        }
+        let waited = start.elapsed();
+        if waited >= wait {
+            return false;
+        }
+        std::thread::sleep(DETECT_POLL.min(wait - waited));
+    }
 }
 
 /// Everything one orchestrator launch needs: the title shprd finds it by
@@ -961,6 +1021,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 ready_wait: Duration::ZERO,
+                detect_wait: Duration::ZERO,
             })
         }
     }
@@ -1039,6 +1100,18 @@ mod tests {
             .collect()
     }
 
+    /// The pane a tab owns, as the fake host lists it.
+    fn pane_of(mux: &FakeMux, tab: &TabId) -> Result<PaneId> {
+        let listed = mux
+            .list_tabs(&shprd_mux::WorkspaceId::new("ws-1"))
+            .map_err(|err| anyhow!("{err}"))?;
+        let found = listed
+            .into_iter()
+            .find(|candidate| &candidate.id == tab)
+            .context("the tab exists")?;
+        Ok(found.root_pane)
+    }
+
     /// Where the run's integration worktree belongs on disk.
     fn integration_worktree(fixture: &Fixture, run_id: &str) -> PathBuf {
         fixture
@@ -1107,7 +1180,17 @@ mod tests {
     }
 
     /// A fake host that claims every capability.
+    ///
+    /// Its panes report an agent the host has already detected, which is the
+    /// steady state a second `up` meets. A test about detection scripts the
+    /// pane's state itself, or takes [`mux_without_agent`].
     fn mux() -> FakeMux {
+        mux_without_agent().with_ready_agent()
+    }
+
+    /// A fake host whose unscripted panes never report an agent, which is what
+    /// a pane a failed `--resume` left behind looks like.
+    fn mux_without_agent() -> FakeMux {
         FakeMux::new(Capabilities {
             split_ratio: true,
             pane_grants: true,
@@ -1214,7 +1297,7 @@ mod tests {
         for spec in &mut env.specs {
             spec.launch.system_prompt_args = None;
         }
-        let mux = mux();
+        let mux = mux_without_agent();
         let report = up(&mux, &env).map_err(failed)?;
 
         assert!(
@@ -1365,6 +1448,80 @@ mod tests {
             mux.calls().last(),
             Some(Call::FocusTab(tab)) if tab == &report.chat_tab
         ));
+        Ok(())
+    }
+
+    /// The orchestrator's argv as the first `up` started it.
+    fn orchestrator_argv(mux: &FakeMux) -> Result<Vec<String>> {
+        started_argvs(mux)
+            .into_iter()
+            .find(|argv| argv.first().map(String::as_str) == Some("claude"))
+            .context("the first up started the orchestrator")
+    }
+
+    #[test]
+    fn an_orchestrator_tab_without_an_agent_is_relaunched_in_its_pane() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        let pane = pane_of(&mux, &first.orchestrator_tab)?;
+        let launched = orchestrator_argv(&mux)?;
+        // A herdr restart restored the tab but not the agent: the pane holds a
+        // bare shell, which is what `Unknown` after the whole wait means.
+        mux.set_state(&pane, AgentState::Unknown);
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(
+            !second.created_orchestrator_tab,
+            "the orchestrator tab is reused, not recreated"
+        );
+        assert_eq!(second.orchestrator_tab, first.orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        let runs: Vec<(PaneId, Vec<String>)> = later
+            .iter()
+            .filter_map(|call| match call {
+                Call::Run(run_pane, argv, _) => Some((run_pane.clone(), argv.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 1, "exactly one launch: {later:?}");
+        assert_eq!(runs[0].0, pane, "the orchestrator restarts in its own pane");
+        assert_eq!(
+            runs[0].1, launched,
+            "a relaunch uses the same launch plan as a fresh up"
+        );
+        assert!(
+            later
+                .iter()
+                .all(|call| !matches!(call, Call::CreateTab(..))),
+            "no second tab is made: {later:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_orchestrator_tab_with_an_agent_is_left_alone() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        let pane = pane_of(&mux, &first.orchestrator_tab)?;
+        // An agent that is idle is an agent a human may be talking to.
+        mux.set_state(&pane, AgentState::Idle);
+        let before = mux.calls().len();
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(!second.created_orchestrator_tab);
+        let later = mux.calls()[before..].to_vec();
+        assert!(
+            later.iter().all(|call| !matches!(
+                call,
+                Call::Run(..) | Call::CreateTab(..) | Call::Prompt(..)
+            )),
+            "a running orchestrator is not restarted: {later:?}"
+        );
         Ok(())
     }
 
@@ -1867,6 +2024,7 @@ mod tests {
             specs: load_dir(&data)?,
             process_env: std::env::vars().collect(),
             ready_wait: Duration::ZERO,
+            detect_wait: Duration::ZERO,
         };
         let mux = scratch.mux();
         let first = up(&mux, &env).map_err(failed)?;

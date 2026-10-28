@@ -1,6 +1,7 @@
 //! Verb implementations, one module per verb family.
 
 pub mod agent;
+pub mod approve;
 pub mod dagr;
 pub mod doctor;
 pub mod fullgate;
@@ -80,6 +81,9 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Land(args)) => land::land_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Approve(args)) => {
+            approve::approve_verb(&ctx, &args, cli.global.home.as_deref())
+        }
     }
 }
 
@@ -151,6 +155,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::FullGate { .. } => "full_gate",
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
+        EventKind::Approved { .. } => "approved",
         EventKind::RunFinished {} => "run_finished",
     }
 }
