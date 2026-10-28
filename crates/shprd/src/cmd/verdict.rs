@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::{self, Review};
-use shprd_core::event::{EventKind, Finding, ReviewSource};
+use shprd_core::event::{Actor, EventKind, Finding, ReviewSource};
 use shprd_core::gate::{self, Next, REVIEW_GATE};
 use shprd_core::hash;
+use shprd_core::rules::RuleError;
 use shprd_mux::Mux;
 
 use crate::cli::ReviewVerdictArgs;
@@ -43,6 +44,7 @@ pub fn verdict_verb(
     args: &ReviewVerdictArgs,
     home: Option<&Path>,
 ) -> Result<(), CliError> {
+    require_engine(ctx, &args.task)?;
     let mux = spawn::real_mux();
     let outcome = submit_verdict(&mux, ctx, home, &args.task, args.attempt)?;
     match outcome {
@@ -125,6 +127,21 @@ pub fn submit_verdict(
             Ok(Outcome::Escalated { blocking })
         }
     }
+}
+
+/// Refuses the verb outright for any actor but the engine.
+///
+/// The rule in [`shprd_core::rules`] refuses the same thing when the event is
+/// appended; this says it before a file is read, and names the verb's own
+/// escape hatch for a human, so an orchestrator that tries to review itself is
+/// told what to do instead of watching a verdict it cannot record.
+fn require_engine(ctx: &Ctx, task: &str) -> Result<(), CliError> {
+    if matches!(ctx.actor, Actor::Engine) {
+        return Ok(());
+    }
+    Err(CliError::Refused(RuleError::VerdictNotFromReviewer {
+        task: task.to_string(),
+    }))
 }
 
 /// The provenance a review verdict carries: who reviewed, and what it read.

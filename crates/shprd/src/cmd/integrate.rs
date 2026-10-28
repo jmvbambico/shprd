@@ -272,7 +272,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
-    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::event::{Actor, ReportStatus, ReviewSource};
     use shprd_core::gate::REVIEW_GATE;
     use shprd_mux::fake::FakeMux;
     use shprd_mux::{TabId, naming};
@@ -385,14 +385,20 @@ mod tests {
         /// Records the review pass that makes the task integrable.
         fn passed(&self, ctx: &Ctx) {
             self.reported(ctx);
-            ctx.commit(EventKind::GatePassed {
-                task: "T1".to_string(),
-                attempt: 1,
-                gate: REVIEW_GATE.to_string(),
-                findings: Vec::new(),
-                source: None,
-            })
-            .unwrap_or_else(|err| panic!("{err}"));
+            // Only the engine records a review verdict, and it carries the
+            // reviewer's provenance, exactly as the verdict verb records it.
+            ctx.as_actor(Actor::Engine)
+                .commit(EventKind::GatePassed {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    gate: REVIEW_GATE.to_string(),
+                    findings: Vec::new(),
+                    source: Some(ReviewSource {
+                        reviewer: "codex/m1".to_string(),
+                        findings_sha256: "ba7816bf".to_string(),
+                    }),
+                })
+                .unwrap_or_else(|err| panic!("{err}"));
         }
 
         /// A host with this repository's workspace, and the worker tab the

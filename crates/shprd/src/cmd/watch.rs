@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use shprd_core::event::{Event, EventKind};
+use shprd_core::event::{Actor, Event, EventKind};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
@@ -168,6 +168,10 @@ impl Watcher {
         let Some(reviews) = reviews_dir(env) else {
             return Ok(());
         };
+        // A verdict is the engine's to record, whoever started the watch: the
+        // reviewer writes findings and nothing else, so the actor that folds
+        // them into a gate result is always the engine.
+        let engine = env.ctx.as_actor(Actor::Engine);
         for task in state.tasks.values() {
             let Some(attempt) = awaiting_review(task) else {
                 continue;
@@ -189,7 +193,7 @@ impl Watcher {
                 lines.push(format!("escalated {}: invalid findings.json", task.id));
                 continue;
             }
-            let outcome = verdict::submit_verdict(mux, env.ctx, home_of(env), &task.id, attempt)?;
+            let outcome = verdict::submit_verdict(mux, &engine, home_of(env), &task.id, attempt)?;
             let word = match outcome {
                 verdict::Outcome::Passed => "passed",
                 verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",
@@ -1052,6 +1056,24 @@ project_dirs = []
         assert!(
             lines.iter().any(|line| line == "\u{25c7} T1 review passed"),
             "{lines:?}"
+        );
+        // The watch records the verdict as the engine, whoever started it: the
+        // context here is a human's, and only the engine may record a review.
+        let verdict = fresh
+            .iter()
+            .find(|event| {
+                matches!(&event.kind, EventKind::GatePassed { gate, .. } if gate == REVIEW_GATE)
+            })
+            .unwrap_or_else(|| panic!("no verdict to inspect: {lines:?}"));
+        assert_eq!(verdict.actor, Actor::Engine, "the verdict's actor");
+        assert!(
+            matches!(
+                &verdict.kind,
+                EventKind::GatePassed { source: Some(source), .. }
+                    if !source.reviewer.is_empty() && !source.findings_sha256.is_empty()
+            ),
+            "the verdict carried no provenance: {:?}",
+            verdict.kind
         );
     }
 

@@ -453,6 +453,48 @@ fn the_verdict_records_the_reviewer_and_the_packet_hash() {
 }
 
 #[test]
+fn the_orchestrator_cannot_record_a_review_verdict() {
+    // The bug this guards against: the orchestrator ran the verb itself and the
+    // pull request claimed a cross-vendor review nothing had performed. A
+    // review is the engine's to record from the reviewer's packet, and a human
+    // who wants past one uses `shprd override`, which says so in the log.
+    for actor in ["orchestrator", "human", "agent:claude"] {
+        let fixture = Fixture::new();
+        fixture.add_task("T1");
+        fixture.attempt("T1", 1);
+        fixture.review_requested("T1", 1, "c1");
+        fixture.packet("T1", 1, &finding("minor"));
+        let output = fixture.run(&[
+            "--as",
+            actor,
+            "agent",
+            "review-verdict",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{actor} recorded a verdict: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("a review verdict is the engine's to record"),
+            "{actor}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let kinds = kinds(&fixture.root);
+        assert!(
+            !kinds.contains(&String::from("gate_passed")),
+            "{actor} left a pass in the log: {kinds:?}"
+        );
+    }
+}
+
+#[test]
 fn findings_outside_the_packet_are_not_a_verdict() {
     // There is no `--findings`: the only file a verdict reads is the one the
     // reviewer wrote into its packet.

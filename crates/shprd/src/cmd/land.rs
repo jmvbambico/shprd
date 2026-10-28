@@ -454,7 +454,7 @@ pub(crate) fn repo_name(ctx: &Ctx) -> Result<String, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::event::{Actor, ReportStatus, ReviewSource};
 
     /// An event with `kind` at position `seq`.
     fn ev(seq: u64, kind: EventKind) -> Event {
@@ -530,7 +530,16 @@ mod tests {
         )
     }
 
-    /// Records a passed `review` gate at `seq`.
+    /// The provenance a real verdict carries.
+    fn provenance(reviewer: &str) -> ReviewSource {
+        ReviewSource {
+            reviewer: reviewer.to_string(),
+            findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                .to_string(),
+        }
+    }
+
+    /// Records a passed `review` gate at `seq`, with its provenance.
     fn review_passed(seq: u64, task: &str) -> Event {
         ev(
             seq,
@@ -539,7 +548,7 @@ mod tests {
                 attempt: 1,
                 gate: REVIEW_GATE.to_string(),
                 findings: Vec::new(),
-                source: None,
+                source: Some(provenance("c1")),
             },
         )
     }

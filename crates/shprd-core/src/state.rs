@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind, ReviewSource,
-    TaskId,
+    Actor, AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind,
+    ReviewSource, TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -314,6 +314,15 @@ impl RunState {
     /// action is refused, not recorded.
     pub fn check(&self, kind: &EventKind, now_ms: u64) -> Result<(), RuleError> {
         rules::check(self, kind, now_ms)
+    }
+
+    /// Checks `kind` as `actor` caused it against the rules, applying nothing.
+    ///
+    /// This is the check a verb about to write wants: the rules read the actor
+    /// — only the engine may record a review verdict — so a pre-check that
+    /// assumed a human would refuse what the append would accept.
+    pub fn check_as(&self, actor: &Actor, kind: &EventKind, now_ms: u64) -> Result<(), RuleError> {
+        rules::check_as(self, actor, kind, now_ms)
     }
 
     /// Checks `event` against the rules, then applies it and records its seq.

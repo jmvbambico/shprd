@@ -242,7 +242,7 @@ fn blank_as_dash(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fixture;
-    use shprd_core::event::{Actor, GateStep, ReportStatus};
+    use shprd_core::event::{Actor, GateStep, ReportStatus, ReviewSource};
     use shprd_core::state::RunState;
 
     /// The body for the fixture log.
@@ -356,7 +356,10 @@ mod tests {
                         location: None,
                         detail: "replace it".to_string(),
                     }],
-                    source: None,
+                    source: Some(ReviewSource {
+                        reviewer: "codex/m1".to_string(),
+                        findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    }),
                 },
             ),
             ev(
@@ -378,7 +381,10 @@ mod tests {
                     attempt: 2,
                     gate: "review".to_string(),
                     findings: vec![],
-                    source: None,
+                    source: Some(ReviewSource {
+                        reviewer: "codex/m1".to_string(),
+                        findings_sha256: "ba7816bf8f01cfea".to_string(),
+                    }),
                 },
             ),
         ]

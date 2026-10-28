@@ -6,7 +6,9 @@
 
 use thiserror::Error;
 
-use crate::event::{Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, TaskId};
+use crate::event::{
+    Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, ReviewSource, TaskId,
+};
 use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
 use crate::state::{AgentInfo, ResourceStatus, RunState, Task, TaskStatus};
@@ -227,6 +229,28 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
+    /// A review verdict was recorded by something that is not the engine.
+    ///
+    /// Only the engine decides a review, from the reviewer's packet. An
+    /// orchestrator or agent that recorded its own verdict would make the
+    /// review meaningless, and a human who wants past a review uses
+    /// [`EventKind::Override`], which says so in the log.
+    #[error(
+        "task {task:?}: a review verdict is the engine's to record, from the reviewer's packet"
+    )]
+    VerdictNotFromReviewer {
+        /// The task.
+        task: TaskId,
+    },
+    /// A review verdict carried no provenance.
+    ///
+    /// The source is what proves a reviewer wrote the findings, so a verdict
+    /// without one is a claim about a review nothing can check.
+    #[error("task {task:?}: a review verdict must name the reviewer and the findings it read")]
+    UnprovenVerdict {
+        /// The task.
+        task: TaskId,
+    },
     /// Integration was requested while the latest attempt has a failed gate and
     /// no override recorded after it.
     #[error("task {task:?} cannot be integrated: gate {gate:?} failed and no override followed")]
@@ -315,8 +339,23 @@ pub(crate) fn check_as(
             changed_paths,
             ..
         } => check_reported(state, task, *attempt, changed_paths),
-        EventKind::GatePassed { task, attempt, .. }
-        | EventKind::GateFailed { task, attempt, .. } => check_gate(state, task, *attempt),
+        EventKind::GatePassed {
+            task,
+            attempt,
+            gate,
+            source,
+            ..
+        }
+        | EventKind::GateFailed {
+            task,
+            attempt,
+            gate,
+            source,
+            ..
+        } => {
+            check_gate(state, task, *attempt)?;
+            check_verdict(actor, task, gate, source)
+        }
         EventKind::ReviewRequested { task, attempt, .. } => {
             check_review_requested(state, task, *attempt)
         }
@@ -660,6 +699,37 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
     }
 }
 
+/// Rules for a review verdict: who may record one, and what must prove it.
+///
+/// A gate that is not the review gate is free: any actor may record lint or
+/// tests. A review verdict is the engine's alone, because only the engine reads
+/// the reviewer's packet, and it must carry the provenance that reading gave it.
+fn check_verdict(
+    actor: &Actor,
+    task: &str,
+    gate: &str,
+    source: &Option<ReviewSource>,
+) -> Result<(), RuleError> {
+    if gate != REVIEW_GATE {
+        return Ok(());
+    }
+    if !matches!(actor, Actor::Engine) {
+        return Err(RuleError::VerdictNotFromReviewer {
+            task: task.to_string(),
+        });
+    }
+    match source {
+        Some(source)
+            if !source.reviewer.trim().is_empty() && !source.findings_sha256.trim().is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err(RuleError::UnprovenVerdict {
+            task: task.to_string(),
+        }),
+    }
+}
+
 /// Rules for recording a review dispatch.
 ///
 /// Only a finished attempt can be reviewed: the task has to be Reported, and
@@ -971,6 +1041,57 @@ mod tests {
                 task: Some("a".to_string()),
             },
         )
+    }
+
+    /// The provenance a real verdict carries.
+    fn provenance() -> ReviewSource {
+        ReviewSource {
+            reviewer: "codex/m1".to_string(),
+            findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                .to_string(),
+        }
+    }
+
+    /// A `review` gate result for task `a`, with `source` as its provenance.
+    fn review_gate(passed: bool, source: Option<ReviewSource>) -> EventKind {
+        let findings = if passed { Vec::new() } else { vec![finding()] };
+        if passed {
+            EventKind::GatePassed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings,
+                source,
+            }
+        } else {
+            EventKind::GateFailed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings,
+                source,
+            }
+        }
+    }
+
+    /// An event caused by `actor`, not the engine.
+    fn by(seq: u64, actor: Actor, kind: EventKind) -> Event {
+        Event {
+            seq,
+            at_ms: seq * 1000,
+            actor,
+            kind,
+        }
+    }
+
+    /// A run whose task `a` reported attempt 1 and waits for a gate.
+    fn reviewable() -> Vec<Event> {
+        vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+        ]
     }
 
     fn folded(events: &[Event]) -> RunState {
@@ -1594,5 +1715,70 @@ mod tests {
             state.check(&integrated(3, "a").kind, 3_000),
             Err(RuleError::NotPassed { .. })
         ));
+    }
+    #[test]
+    fn only_the_engine_records_a_review_verdict() {
+        let others = [
+            Actor::Orchestrator,
+            Actor::Human,
+            Actor::Agent {
+                id: "claude".to_string(),
+            },
+        ];
+        for actor in others {
+            let mut log = reviewable();
+            log.push(by(5, actor.clone(), review_gate(true, Some(provenance()))));
+            match refused(&log) {
+                RuleError::VerdictNotFromReviewer { task } => assert_eq!(task, "a"),
+                other => panic!("{actor:?} recorded a verdict: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_review_verdict_without_provenance_is_refused() {
+        for passed in [true, false] {
+            let mut log = reviewable();
+            log.push(ev(5, review_gate(passed, None)));
+            match refused(&log) {
+                RuleError::UnprovenVerdict { task } => assert_eq!(task, "a"),
+                other => panic!("an unproven verdict folded (passed: {passed}): {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_proven_review_verdict_folds_into_its_attempt() {
+        let mut log = reviewable();
+        log.push(ev(5, review_gate(true, Some(provenance()))));
+        let state = folded(&log);
+        let gate = state
+            .tasks
+            .get("a")
+            .and_then(|task| task.attempts.last())
+            .and_then(|attempt| attempt.gates.last())
+            .unwrap_or_else(|| panic!("no gate recorded: {state:?}"));
+        assert!(gate.passed);
+        assert_eq!(gate.source, Some(provenance()));
+        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+    }
+
+    #[test]
+    fn a_gate_that_is_not_a_review_is_any_actor_s_to_record() {
+        // The rule is about review verdicts only: a human recording a lint
+        // result is a fact about lint, not a claim about a review.
+        let mut log = reviewable();
+        log.push(by(
+            5,
+            Actor::Human,
+            EventKind::GatePassed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "lint".to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+        ));
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
     }
 }
