@@ -376,12 +376,52 @@ fn restartable_attempt(task: &Task) -> Result<&Attempt, CliError> {
     reviewed_attempt(task)
 }
 
+/// Refuses a restart the findings file says is a mistake.
+///
+/// The watchdog reads the reviewer's `findings.json` once it settles, so a
+/// restart that deletes the file destroys finished work when the reviewer was
+/// only just ahead of the watch. Two states are therefore refused, and both
+/// leave the packet exactly as it was:
+///
+/// - findings that parse: the review is decided, and the next tick records the
+///   verdict, so there is nothing to restart;
+/// - a file younger than the watchdog's settle window: the reviewer may still
+///   be writing, so what is on disk is not yet the review's last word.
+///
+/// A settled file that does not parse is the one case a restart may clear: the
+/// watchdog escalates an invalid packet instead of deciding from it, so the
+/// review genuinely has to be started over.
+fn check_restartable_findings(
+    reviews: &Path,
+    run: &str,
+    task: &str,
+    attempt: u32,
+) -> Result<(), CliError> {
+    let path = findings_path(reviews, run, task, attempt);
+    if !path.exists() {
+        return Ok(());
+    }
+    if crate::cmd::verdict::read_findings(&path).is_ok() {
+        return Err(CliError::Invalid(anyhow!(
+            "the reviewer already wrote its findings: the watchdog will record the verdict"
+        )));
+    }
+    if crate::cmd::watch::settled_mtime(&path).is_none() {
+        return Err(CliError::Invalid(anyhow!(
+            "the reviewer is still writing its findings; try again shortly"
+        )));
+    }
+    Ok(())
+}
+
 /// Removes the findings file a previous reviewer may have left behind.
 ///
 /// A reviewer writes `findings.json` when it is done, and the watchdog acts on
 /// that file. A restart must not let a half-written file from the review it
 /// replaces be read as the new review's verdict, so the packet is cleared of it
-/// before the fresh reviewer starts. No file is the normal case, not a failure.
+/// before the fresh reviewer starts. No file is the normal case, not a failure;
+/// a file worth keeping never reaches here, because
+/// [`check_restartable_findings`] refuses the restart first.
 fn clear_findings(reviews: &Path, run: &str, task: &str, attempt: u32) -> Result<(), CliError> {
     let path = findings_path(reviews, run, task, attempt);
     match std::fs::remove_file(&path) {
@@ -837,6 +877,9 @@ pub fn review(
     // closed and any findings it half-wrote are removed before the packet is
     // rebuilt, so nothing reads a stale verdict as this review's.
     if req.again {
+        // Refused before the first side effect, because a closed tab and a
+        // removed file are not undone by an error on the next line.
+        check_restartable_findings(&env.reviews_dir, &env.spawn.run, &task.id, attempt.n)?;
         close_reviewer(
             mux,
             &env.spawn.briefs_dir,
@@ -918,7 +961,7 @@ mod tests {
 
     use std::collections::BTreeMap;
     use std::process::Command;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use shprd_core::config::Skills;
     use shprd_core::event::{Actor, ReviewSource};
@@ -1595,6 +1638,26 @@ project_dirs = []
         }
     }
 
+    /// Writes `T1`'s `findings.json` and ages it by `age`, so a test says
+    /// whether the watch would already have read it.
+    fn wrote_findings(env: &ReviewEnv<'_>, text: &str, age: Duration) -> PathBuf {
+        let path = findings_path(&env.reviews_dir, &env.spawn.run, "T1", 1);
+        std::fs::create_dir_all(path.parent().unwrap_or(&env.reviews_dir))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&path, text).unwrap_or_else(|err| panic!("{err}"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|err| panic!("{err}"));
+        file.set_modified(SystemTime::now() - age)
+            .unwrap_or_else(|err| panic!("{err}"));
+        path
+    }
+
+    /// A findings file a reviewer wrote and finished: one minor finding.
+    const WRITTEN_FINDINGS: &str = r#"[{"severity":"minor","title":"a nit","location":null,
+        "detail":"worth a look"}]"#;
+
     /// Every tab the host was asked to close, oldest first.
     fn closed_tabs(mux: &FakeMux) -> Vec<String> {
         mux.calls()
@@ -1644,9 +1707,10 @@ project_dirs = []
             "the record names the tab the first review opened"
         );
         // A reviewer that got as far as writing a findings file leaves it in
-        // the packet; a restart must not let the watchdog read it.
-        let findings = findings_path(&env.reviews_dir, "t1", "T1", 1);
-        std::fs::write(&findings, "[").unwrap_or_else(|err| panic!("{err}"));
+        // the packet; a restart must not let the watchdog read it. The file is
+        // aged past the settle window, because a fresh one may still be being
+        // written: a restart refuses that case instead of clearing it.
+        let findings = wrote_findings(&env, "[", Duration::from_secs(60));
         // The fresh reviewer's pane is an agent from its first poll.
         let fresh = PaneId::new("pane-2");
         mux.set_state_after(&fresh, 0, AgentState::Idle);
@@ -1728,6 +1792,102 @@ project_dirs = []
             closed_tabs(&mux).is_empty(),
             "the decided reviewer stays open"
         );
+    }
+
+    /// A restart never deletes findings the reviewer finished writing.
+    ///
+    /// The reviewer can be ahead of the watch: the file is written and valid,
+    /// and the next tick will record its verdict. Deleting it would throw away
+    /// a finished review, so the restart is refused and the file stays.
+    #[test]
+    fn a_restart_never_discards_written_findings() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let findings = wrote_findings(&env, WRITTEN_FINDINGS, Duration::ZERO);
+
+        let err = review(&mux, &env, &restart()).expect_err("finished findings are not stale");
+
+        assert_eq!(err.exit_code(), 2, "a refusal exits 2: {err}");
+        let message = format!("{err}");
+        assert!(
+            message.contains("the reviewer already wrote its findings"),
+            "{message}"
+        );
+        assert!(
+            message.contains("the watchdog will record the verdict"),
+            "{message}"
+        );
+        assert!(
+            findings.exists(),
+            "written findings must survive the refusal"
+        );
+        assert_eq!(opened_tabs(&mux).len(), 1, "no fresh reviewer is opened");
+        assert!(
+            closed_tabs(&mux).is_empty(),
+            "the reviewer that wrote the findings stays open"
+        );
+    }
+
+    /// A restart never clears a findings file the reviewer may still be writing.
+    ///
+    /// Inside the watch's settle window the file on disk is not yet the
+    /// review's last word, so it is neither readable nor deletable: the restart
+    /// is refused and the human is told to come back.
+    #[test]
+    fn a_restart_never_clears_a_file_still_being_written() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        // Half a JSON array: a reviewer caught mid-write.
+        let findings = wrote_findings(&env, "[", Duration::ZERO);
+
+        let err = review(&mux, &env, &restart()).expect_err("a fresh file is still being written");
+
+        assert_eq!(err.exit_code(), 2, "a refusal exits 2: {err}");
+        let message = format!("{err}");
+        assert!(
+            message.contains("the reviewer is still writing its findings"),
+            "{message}"
+        );
+        assert!(message.contains("try again shortly"), "{message}");
+        assert!(findings.exists(), "a file mid-write must not be deleted");
+        assert_eq!(opened_tabs(&mux).len(), 1, "no fresh reviewer is opened");
+        assert!(
+            closed_tabs(&mux).is_empty(),
+            "the writing reviewer's tab stays open"
+        );
+    }
+
+    /// A settled findings file that does not parse is the one a restart clears.
+    ///
+    /// The watch escalates that packet instead of deciding from it, so the
+    /// review really has to be started over, and the file left by the reviewer
+    /// it replaces must not be read as the new review's verdict.
+    #[test]
+    fn a_restart_clears_a_settled_invalid_packet() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let findings = wrote_findings(&env, "not json at all", Duration::from_secs(60));
+
+        let report = review(&mux, &env, &restart()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.attempt, 1, "a restart keeps the attempt");
+        assert!(
+            !findings.exists(),
+            "a settled invalid file is cleared for the fresh reviewer"
+        );
+        assert_eq!(opened_tabs(&mux).len(), 2, "the fresh reviewer is opened");
     }
 
     #[test]

@@ -425,7 +425,10 @@ const FINDINGS_SETTLE: Duration = Duration::from_secs(2);
 const INVALID_FINDINGS_ACTION: &str = "read the packet and decide the review by hand";
 
 /// The mtime of `path`, when the file is old enough for the watchdog to read.
-fn settled_mtime(path: &Path) -> Option<SystemTime> {
+///
+/// A restart asks the same question: findings that are not settled yet may
+/// still be being written, so `review --again` must not delete them.
+pub(crate) fn settled_mtime(path: &Path) -> Option<SystemTime> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let age = SystemTime::now().duration_since(modified).ok()?;
     (age >= FINDINGS_SETTLE).then_some(modified)
