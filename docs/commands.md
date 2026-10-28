@@ -16,7 +16,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd land` | push the integration branch and open or update the pull request |
 | `shprd land --merge` | merge it: only with green checks, the reviewed head, and your approval |
 | `shprd approve` | approve the open pull request at the integration branch's current head, for a solo maintainer who can't approve their own PR on GitHub; humans only, needs a terminal, and a new commit needs a new approval |
-| `shprd watch` | the watchdog loop: marks stuck or rate-limited agents dry and hands their tasks off |
+| `shprd watch` | the watchdog loop: records review verdicts and hands off stuck or rate-limited agents. `shprd up` runs it in a pane of tab 1, so you rarely start it yourself |
 | `shprd janitor [--apply]` | show (or apply) cleanup of what the run created: worktrees, branches, the merged remote branch |
 | `shprd keys show\|install\|uninstall` | the `prefix+alt+…` key bindings in your herdr config |
 | `shprd doctor` | check CLIs, sign-ins, skill visibility, mux, relay, git and gh |
@@ -59,7 +59,8 @@ engine validates every one:
 | `shprd agent prompt --task` | orchestrator | send a message to a task's agent |
 | `shprd agent report` | worker | submit status, tests, changed paths, commit, skills used |
 | `shprd agent review --task [--degraded]` | orchestrator | open a reviewer of a different model family on the task's diff |
-| `shprd agent review-verdict` | reviewer | submit findings; code decides pass or fail |
+| `shprd agent review --task <ID> --again` | orchestrator | restart a stuck review (brief never arrived, reviewer hung): fresh reviewer tab, same attempt; refused once a verdict exists |
+| `shprd agent review-verdict --task --attempt` | engine | record the verdict from the reviewer's own `findings.json`; code decides pass or fail. The watchdog runs it; anyone else is refused |
 | `shprd agent integrate --task` | orchestrator | cherry-pick a passed task onto the integration branch |
 | `shprd agent handoff --task` | engine (`watch`) | move a task to the next worker, keeping its work |
 | `shprd agent escalate` | any | non-blocking note for a human, always with a stated default |
