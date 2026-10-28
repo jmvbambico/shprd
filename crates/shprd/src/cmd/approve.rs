@@ -3,8 +3,13 @@
 //! GitHub never lets a pull request's author approve it, so a solo maintainer
 //! cannot satisfy the approval `land --merge` waits for there. This verb
 //! records the approval in the run log instead, and it is deliberately the
-//! human's verb only: an agent pane always has `SHPRD_ACTOR` set, and without
-//! `--yes` the question is asked of the terminal.
+//! human's verb only: an agent pane always has `SHPRD_ACTOR` set, and the
+//! question is asked of a terminal, which no agent shell tool has.
+//!
+//! The terminal check is the barrier that survives a missing `SHPRD_ACTOR`:
+//! a pane restored without its environment still has no TTY. Only a debug
+//! build may answer for the record with `--yes`, which is how the end-to-end
+//! tests drive this verb; a release binary always asks.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -53,7 +58,9 @@ pub fn approve_verb(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Resul
     let head = Git::new(&worktree.path)
         .head_sha()
         .map_err(|err| CliError::other(anyhow!(err).context("reading the integration head")))?;
-    if !args.yes && !asked(&format!("approve {url} at {}? [y/N] ", land::short(&head)))? {
+    if !may_skip_tty(args.yes)
+        && !asked(&format!("approve {url} at {}? [y/N] ", land::short(&head)))?
+    {
         return Err(CliError::Invalid(anyhow!(
             "not approved: {url} still waits for one"
         )));
@@ -69,10 +76,21 @@ pub fn approve_verb(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Resul
     Ok(())
 }
 
+/// Whether the terminal may go unasked, which only a debug build allows.
+///
+/// `--yes` answers the question on the human's behalf, so it needs no
+/// terminal, but it is a test affordance: a release build ignores it and
+/// always asks. That keeps `--yes` unable to turn a pane into a human, and
+/// leaves the TTY check as the barrier that holds when `SHPRD_ACTOR` is
+/// missing.
+fn may_skip_tty(yes: bool) -> bool {
+    yes && cfg!(debug_assertions)
+}
+
 /// Refuses unless a human is the one acting.
 ///
-/// `--yes` answers the question, so it does not need a terminal, but it never
-/// makes an agent a human: `SHPRD_ACTOR` is the check that survives it.
+/// `SHPRD_ACTOR` names the actor, so an agent pane fails here whatever it
+/// passes; this is the check that does not depend on the terminal.
 fn require_human() -> Result<(), CliError> {
     let named = std::env::var(ACTOR_ENV).unwrap_or_default();
     let named = named.trim();
@@ -92,8 +110,8 @@ fn require_human() -> Result<(), CliError> {
 fn asked(question: &str) -> Result<bool, CliError> {
     if !std::io::stdin().is_terminal() {
         return Err(CliError::Invalid(anyhow!(
-            "approving asks a human, but stdin is not a terminal: run it yourself, \
-             or answer for the record with `shprd approve --yes`"
+            "approving asks a human at a terminal, but stdin is not a terminal: \
+             run `shprd approve` yourself in yours"
         )));
     }
     print!("{question}");
@@ -106,4 +124,38 @@ fn asked(question: &str) -> Result<bool, CliError> {
         .read_line(&mut answer)
         .map_err(|err| CliError::other(anyhow!(err).context("reading the answer")))?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_skip_tty;
+
+    /// The terminal check, from the inside: only a debug build may skip it.
+    #[test]
+    fn only_a_debug_build_may_skip_the_terminal() {
+        assert!(
+            !may_skip_tty(false),
+            "without --yes the question is always asked"
+        );
+        assert_eq!(
+            may_skip_tty(true),
+            cfg!(debug_assertions),
+            "a release build ignores --yes and still asks"
+        );
+    }
+
+    /// The same statement the way a release build reads it, so the assertion
+    /// above cannot be satisfied by a `true` that only tests provide.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_build_cannot_be_told_to_skip_the_terminal() {
+        assert!(!may_skip_tty(true), "--yes does not bypass the TTY check");
+    }
+
+    /// A debug build does honour `--yes`, which is what `tests/land.rs` uses.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_debug_build_honours_yes_for_the_tests() {
+        assert!(may_skip_tty(true));
+    }
 }

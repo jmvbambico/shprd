@@ -10,8 +10,10 @@ use anyhow::{Context, anyhow};
 use shprd_core::config::{self, Review};
 use shprd_core::event::{EventKind, Finding};
 use shprd_core::gate::{self, Next, REVIEW_GATE};
+use shprd_mux::Mux;
 
 use crate::cli::ReviewVerdictArgs;
+use crate::cmd::{review, spawn};
 use crate::ctx::{CliError, Ctx};
 
 /// What a human is asked to decide when a review escalates.
@@ -40,7 +42,8 @@ pub fn verdict_verb(
     args: &ReviewVerdictArgs,
     home: Option<&Path>,
 ) -> Result<(), CliError> {
-    let outcome = submit_verdict(ctx, home, &args.task, args.attempt, &args.findings)?;
+    let mux = spawn::real_mux();
+    let outcome = submit_verdict(&mux, ctx, home, &args.task, args.attempt, &args.findings)?;
     match outcome {
         Outcome::Passed => println!("review passed"),
         Outcome::SentBack { blocking } => {
@@ -57,15 +60,19 @@ pub fn verdict_verb(
 ///
 /// The reviewer only writes findings; the call to pass or fail is made here, by
 /// [`gate`], so a verdict is reproducible from the file alone. `home` picks the
-/// config the policy comes from, as `--home` does for every other verb.
+/// config the policy comes from, as `--home` does for every other verb. The
+/// verdict is also the reviewer's last word: once it is recorded, the reviewer's
+/// tab is closed, and `mux` is the host that closes it.
 pub fn submit_verdict(
+    mux: &dyn Mux,
     ctx: &Ctx,
     home: Option<&Path>,
     task: &str,
     attempt: u32,
     findings_path: &Path,
 ) -> Result<Outcome, CliError> {
-    let policy = review_policy(ctx, home)?;
+    let home = crate::ctx::resolve_home(home)?;
+    let policy = review_policy(ctx, Some(&home))?;
     let findings = read_findings(findings_path)?;
     let decided = gate::verdict(&findings, policy.must_fix);
     if decided.passed {
@@ -78,6 +85,7 @@ pub fn submit_verdict(
             findings,
         };
         record(ctx, kind)?;
+        close_reviewer(mux, ctx, &home, task, attempt);
         return Ok(Outcome::Passed);
     }
     let blocking = decided.blocking.len();
@@ -88,6 +96,10 @@ pub fn submit_verdict(
         findings,
     };
     record(ctx, kind)?;
+    // The verdict is the review's last word, so the reviewer's tab is done:
+    // closing it before the consequence is recorded keeps the tab's life tied
+    // to the review, never to what the failure costs.
+    close_reviewer(mux, ctx, &home, task, attempt);
     let reviewed = reviewed_task(ctx, task)?;
     match gate::after_failure(&reviewed, policy.rounds) {
         Next::SendBack => Ok(Outcome::SentBack { blocking }),
@@ -102,6 +114,28 @@ pub fn submit_verdict(
             Ok(Outcome::Escalated { blocking })
         }
     }
+}
+
+/// Closes the reviewer's tab for one attempt, once its verdict is recorded.
+///
+/// A close the host refuses is warned about, never fatal: the verdict the run
+/// waits for is already in the log, and failing here would tell the caller the
+/// review decided nothing. A run that has already finished has no reviewer left
+/// to stop.
+fn close_reviewer(mux: &dyn Mux, ctx: &Ctx, home: &Path, task: &str, attempt: u32) {
+    let Some(run) = active_run(ctx) else {
+        return;
+    };
+    let briefs = home.join(".shprd").join("briefs");
+    if let Err(err) = review::close_reviewer(mux, &briefs, &run, task, attempt) {
+        eprintln!("warning: {err}");
+    }
+}
+
+/// The run in flight's id, whether or not it has finished: a verdict for a
+/// finished run still names the run whose records hold the reviewer's tab.
+fn active_run(ctx: &Ctx) -> Option<String> {
+    ctx.state().ok()?.run.as_ref().map(|run| run.run_id.clone())
 }
 
 /// The review policy in force: the global file, then the repo override.

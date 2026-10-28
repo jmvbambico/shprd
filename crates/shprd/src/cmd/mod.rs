@@ -53,7 +53,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         None => view::status(&ctx),
         Some(Command::Run { cmd }) => match cmd {
             RunCommand::Start(args) => run::start(&ctx, &args),
-            RunCommand::Finish => run::finish(&ctx),
+            RunCommand::Finish => run::finish_verb(&ctx, cli.global.home.as_deref()),
         },
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::State) => dump(&ctx),
@@ -77,7 +77,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
         Some(Command::Keys(args)) => keys::run(&args, None),
         Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
-        Some(Command::Down) => up::down(&ctx),
+        Some(Command::Down) => up::down_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Land(args)) => land::land_verb(&ctx, &args, cli.global.home.as_deref()),
@@ -156,6 +156,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
         EventKind::Approved { .. } => "approved",
+        EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::RunFinished {} => "run_finished",
     }
 }

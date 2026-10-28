@@ -136,7 +136,29 @@ pub fn brief_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf
 pub fn tab_record_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
     briefs
         .join(run)
-        .join(format!("{task}-a{attempt}-review.tab"))
+        .join(format!("{task}-a{attempt}{}", spawn::REVIEW_TAB_SUFFIX))
+}
+
+/// Closes the reviewer tab an attempt's review left open.
+///
+/// The record the review wrote is the only thing that names the tab, so a
+/// missing record means there is nothing to close. A host that no longer knows
+/// the tab counts as closed: that is the state the caller wanted anyway, the
+/// way [`handoff`](super::handoff) treats a vanished old tab.
+pub fn close_reviewer(
+    mux: &dyn Mux,
+    briefs: &Path,
+    run: &str,
+    task: &str,
+    attempt: u32,
+) -> Result<(), CliError> {
+    // A reviewer that never opened a tab is a review that never got that far:
+    // no record is nothing to close, not a failure.
+    spawn::close_recorded(
+        mux,
+        "reviewer's",
+        &tab_record_path(briefs, run, task, attempt),
+    )
 }
 
 /// What a `contract.md` says, as data, so the rendering is testable on its own.
@@ -1548,6 +1570,116 @@ project_dirs = []
             argv.windows(2)
                 .any(|pair| pair == ["--sandbox".to_string(), "workspace-write".to_string()]),
             "the codex reviewer is not sandboxed: {argv:?}"
+        );
+    }
+
+    /// The tab a review recorded, so a test names the tab it asserts about.
+    fn recorded_tab(env: &ReviewEnv<'_>, task: &str, attempt: u32) -> String {
+        let path = tab_record_path(&env.spawn.briefs_dir, &env.spawn.run, task, attempt);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .trim()
+            .to_string()
+    }
+
+    /// Every tab the fake host still has open in this repository's workspace.
+    fn open_tabs(mux: &FakeMux, env: &ReviewEnv<'_>) -> Vec<String> {
+        let workspace = spawn::workspace_of(mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
+        mux.list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .into_iter()
+            .map(|tab| tab.id.to_string())
+            .collect()
+    }
+
+    /// Opens a review of `T1` on `ctx`'s run: its environment, host and tab.
+    fn reviewed<'a>(scratch: &Scratch, ctx: &'a Ctx) -> (ReviewEnv<'a>, FakeMux, String) {
+        let env = scratch.review_env(ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let tab = recorded_tab(&env, "T1", 1);
+        (env, mux, tab)
+    }
+
+    #[test]
+    fn a_verdict_closes_the_reviewer_tab() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let (env, mux, tab) = reviewed(&scratch, &ctx);
+        let findings = packet_dir(&env.reviews_dir, "t1", "T1", 1).join("findings.json");
+        std::fs::write(&findings, "[]").unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            open_tabs(&mux, &env).contains(&tab),
+            "the review left no tab for the verdict to close"
+        );
+
+        let outcome = crate::cmd::verdict::submit_verdict(
+            &mux,
+            &ctx,
+            Some(scratch.home.path()),
+            "T1",
+            1,
+            &findings,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(outcome, crate::cmd::verdict::Outcome::Passed);
+        assert!(
+            !open_tabs(&mux, &env).contains(&tab),
+            "the reviewer tab {tab} outlived its verdict"
+        );
+    }
+
+    #[test]
+    fn a_vanished_reviewer_tab_is_already_closed() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let (env, mux, tab) = reviewed(&scratch, &ctx);
+        // A human closed the tab before the verdict: the state the close wants.
+        mux.close_tab(&shprd_mux::TabId::new(&tab))
+            .unwrap_or_else(|err| panic!("{err}"));
+        close_reviewer(&mux, &env.spawn.briefs_dir, &env.spawn.run, "T1", 1)
+            .unwrap_or_else(|err| panic!("{err}"));
+        // An attempt with no record at all has nothing to close either.
+        close_reviewer(&mux, &env.spawn.briefs_dir, &env.spawn.run, "T1", 2)
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    #[test]
+    fn run_end_closes_the_reviewer_and_worker_tabs() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let (env, mux, reviewer) = reviewed(&scratch, &ctx);
+        // A worker's record sits beside the reviewer's in the same run folder:
+        // both are tabs this run opened, so run end closes both.
+        let workspace = spawn::workspace_of(&mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
+        let worker = mux
+            .create_tab(&workspace.id, "worker", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(
+            spawn::tab_path(&env.spawn.briefs_dir, &env.spawn.run, "T1", 1),
+            worker.id.to_string(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(
+            open_tabs(&mux, &env).contains(&reviewer),
+            "the run has no reviewer tab to end"
+        );
+        crate::cmd::up::down(&mux, &ctx, Some(scratch.home.path()))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let open = open_tabs(&mux, &env);
+        assert!(
+            !open.contains(&reviewer),
+            "a reviewer tab outlived the run: {open:?}"
+        );
+        assert!(
+            !open.contains(&worker.id.to_string()),
+            "a worker tab outlived the run: {open:?}"
         );
     }
 

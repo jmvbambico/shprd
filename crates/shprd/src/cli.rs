@@ -100,7 +100,8 @@ pub enum Command {
     /// merge it when `[land]` allows.
     Land(LandArgs),
     /// Approve the run's pull request in shprd, for a maintainer whose forge
-    /// will not let them approve their own.
+    /// will not let them approve their own. It asks on the terminal, which an
+    /// agent's shell tool never has.
     Approve(ApproveArgs),
 }
 
@@ -124,9 +125,10 @@ pub struct LandArgs {
 /// Arguments for `approve`.
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
-    /// Approve without asking, for a script or a test. `SHPRD_ACTOR` still has
-    /// to be unset or `human`.
-    #[arg(long)]
+    /// Answer the question for the record without asking, in a debug build
+    /// only: a release binary ignores it and still needs a terminal.
+    /// `SHPRD_ACTOR` still has to be unset or `human`.
+    #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
 }
 

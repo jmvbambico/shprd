@@ -353,6 +353,111 @@ pub(crate) fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
     }
 }
 
+/// Closes the tabs a run recorded for `task`, once no attempt can use them.
+///
+/// The records beside the briefs are the only list of tabs a run opened:
+/// `<task>-a<n>.tab` for a worker and `<task>-a<n>-review.tab` for a reviewer
+/// both live in `<briefs>/<run>/`, and the task id prefix keeps one task's
+/// records from matching another's (`T1-a1.tab` is not `T10-a1.tab`).
+pub fn close_worker(mux: &dyn Mux, briefs: &Path, run: &str, task: &str) -> Result<(), CliError> {
+    let prefix = format!("{task}-a");
+    close_records(mux, briefs, run, "worker's", move |name| {
+        name.starts_with(&prefix) && !name.ends_with(REVIEW_TAB_SUFFIX)
+    })
+}
+
+/// Closes every tab the run recorded, as the run's last act.
+///
+/// Run end has no task in hand, so it sweeps the lot: every `.tab` record under
+/// the run's briefs names a tab shprd opened, and nothing shprd did not open has
+/// a record there — which is why the chat and orchestrator tabs are never in
+/// reach. A refusal is warned about, never fatal: the run's last event is
+/// already recorded, and its tabs are cleanup, not the point.
+pub fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) {
+    let Ok(home) = crate::ctx::resolve_home(home) else {
+        return;
+    };
+    let Ok(state) = ctx.state() else {
+        return;
+    };
+    let Some(run) = state.run.as_ref().map(|run| run.run_id.clone()) else {
+        return;
+    };
+    let briefs = home.join(".shprd").join("briefs");
+    if let Err(err) = close_records(mux, &briefs, &run, "", |_| true) {
+        eprintln!("warning: {err}");
+    }
+}
+
+/// The suffix a reviewer's tab record carries, which tells its records apart
+/// from a worker's in the same run folder.
+pub const REVIEW_TAB_SUFFIX: &str = "-review.tab";
+
+/// Closes the tab one record names, counting a tab the host has forgotten as
+/// closed.
+///
+/// A host that no longer knows a tab (a human closed it, say) is not an error:
+/// that is the state the caller wanted anyway. `what` names the tab's owner in
+/// the error, and an unreadable record names no tab at all.
+pub(crate) fn close_recorded(mux: &dyn Mux, what: &str, record: &Path) -> Result<(), CliError> {
+    let Ok(id) = std::fs::read_to_string(record) else {
+        return Ok(());
+    };
+    let id = id.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+    let tab = shprd_mux::TabId::new(id);
+    match mux.close_tab(&tab) {
+        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => Ok(()),
+        Err(err) => Err(CliError::other(anyhow!(
+            "the {what} tab {tab} recorded in {} is still open: {err}",
+            record.display()
+        ))),
+    }
+}
+
+/// Closes every tab record in the run's folder that `wanted` picks out.
+fn close_records(
+    mux: &dyn Mux,
+    briefs: &Path,
+    run: &str,
+    what: &str,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<(), CliError> {
+    let dir = briefs.join(run);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // No run folder is no records: nothing was ever opened to close.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(CliError::other(
+                anyhow!(err).context(format!("reading the tab records in {}", dir.display())),
+            ));
+        }
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|err| CliError::other(anyhow!(err).context("reading a tab record name")))?
+            .path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.ends_with(".tab") && wanted(name) {
+            records.push(path);
+        }
+    }
+    // In name order: a directory read promises nothing, and two sweeps of one
+    // run should close the same tabs in the same order.
+    records.sort();
+    for record in records {
+        close_recorded(mux, what, &record)?;
+    }
+    Ok(())
+}
+
 /// The ledger entries a spawn writes for its worktree and branch.
 fn resource_kinds(task: &str, worktree: &Path, branch: &str) -> [EventKind; 2] {
     [

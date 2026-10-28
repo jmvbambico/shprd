@@ -32,7 +32,9 @@ pub fn dispatch(
         AgentCommand::ReviewVerdict(args) => crate::cmd::verdict::verdict_verb(ctx, &args, home),
         AgentCommand::Escalate(args) => escalate(ctx, &args),
         AgentCommand::Override(args) => override_rule(ctx, &args),
-        AgentCommand::Integrate(args) => crate::cmd::integrate::verb(ctx, &args, home),
+        AgentCommand::Integrate(args) => {
+            crate::cmd::integrate::verb(&spawn::real_mux(), ctx, &args, home)
+        }
         AgentCommand::Handoff(args) => handoff_cmd(ctx, &args, home),
         AgentCommand::Review(args) => crate::cmd::review::review_verb(ctx, &args, home),
     }

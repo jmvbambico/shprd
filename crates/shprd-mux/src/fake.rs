@@ -41,6 +41,8 @@ pub enum Call {
     FocusTab(TabId),
     /// `close_tab(tab)`.
     CloseTab(TabId),
+    /// `close_pane(pane)`.
+    ClosePane(PaneId),
     /// `split(pane, direction, ratio, cwd)`.
     Split(PaneId, Direction, f32, PathBuf),
     /// `run(pane, argv, env)`.
@@ -53,6 +55,8 @@ pub enum Call {
     Read(PaneId, usize),
     /// `agent_state(pane)`.
     AgentState(PaneId),
+    /// `pane_process_group(pane)`.
+    PaneProcessGroup(PaneId),
     /// `next_events(timeout)`.
     NextEvents(Duration),
 }
@@ -70,6 +74,8 @@ struct Inner {
     /// A scripted "not detected yet, then ready": how many more polls answer
     /// [`AgentState::Unknown`], and the state that follows.
     pending: HashMap<PaneId, (usize, AgentState)>,
+    /// Scripted foreground process group per pane; absent means "no group".
+    process_groups: HashMap<PaneId, Option<u32>>,
     events: VecDeque<MuxEvent>,
     next_workspace: usize,
     next_tab: usize,
@@ -86,6 +92,7 @@ impl Inner {
             screens: HashMap::new(),
             states: HashMap::new(),
             pending: HashMap::new(),
+            process_groups: HashMap::new(),
             events: VecDeque::new(),
             next_workspace: 0,
             next_tab: 0,
@@ -135,6 +142,15 @@ pub struct FakeMux {
     /// The reason [`Mux::run`] fails, when a test wants a host that cannot
     /// start a program.
     run_failure: Option<String>,
+    /// The group every pane reports until a test scripts its own.
+    default_group: Option<u32>,
+    /// Whether [`Mux::split`] answers as a host that cannot split.
+    split_refused: bool,
+    /// Whether [`Mux::close_pane`] answers as a host that cannot close one.
+    close_pane_refused: bool,
+    /// The reason [`Mux::close_pane`] fails with a host error, when a test
+    /// wants a host whose capability and runtime disagree.
+    close_pane_failure: Option<String>,
     inner: Mutex<Inner>,
 }
 
@@ -145,6 +161,7 @@ impl Default for FakeMux {
         Self::new(Capabilities {
             split_ratio: true,
             pane_grants: true,
+            close_pane: true,
             human_ask: true,
             resumable_events: true,
             agent_state: true,
@@ -161,6 +178,10 @@ impl FakeMux {
             starter_tab: false,
             ready: false,
             run_failure: None,
+            default_group: None,
+            split_refused: false,
+            close_pane_refused: false,
+            close_pane_failure: None,
             inner: Mutex::new(Inner::fresh()),
         }
     }
@@ -185,6 +206,48 @@ impl FakeMux {
     /// how a host that cannot start the CLI looks to a caller.
     pub fn failing_run(mut self, reason: impl Into<String>) -> Self {
         self.run_failure = Some(reason.into());
+        self
+    }
+
+    /// Report `group` as the foreground process group of every pane that has
+    /// no scripted group of its own, which is how a test gives panes an
+    /// identity before their ids exist.
+    pub fn with_process_group(mut self, group: u32) -> Self {
+        self.default_group = Some(group);
+        self
+    }
+
+    /// Script what [`Mux::pane_process_group`] reports for `pane`: `Some` is a
+    /// host that can tell, `None` a host that cannot. Registers the pane as
+    /// existing if it was not already.
+    pub fn set_process_group(&self, pane: &PaneId, group: Option<u32>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.panes.insert(pane.clone());
+            inner.process_groups.insert(pane.clone(), group);
+        }
+    }
+
+    /// Make [`Mux::split`] answer [`MuxError::Unsupported`], which is how a
+    /// host without splits looks to a caller that checks the capability.
+    pub fn without_split(mut self) -> Self {
+        self.split_refused = true;
+        self
+    }
+
+    /// Make the fake a host without single-pane closes: the capability says so
+    /// and [`Mux::close_pane`] answers [`MuxError::Unsupported`], the two
+    /// agreeing the way a real adapter's do.
+    pub fn without_close_pane(mut self) -> Self {
+        self.caps.close_pane = false;
+        self.close_pane_refused = true;
+        self
+    }
+
+    /// Keep [`Capabilities::close_pane`] true but make [`Mux::close_pane`] fail
+    /// with `reason` anyway, which is how a host that lost the pane its
+    /// capability promised looks to a caller.
+    pub fn failing_close_pane(mut self, reason: impl Into<String>) -> Self {
+        self.close_pane_failure = Some(reason.into());
         self
     }
 
@@ -363,11 +426,30 @@ impl Mux for FakeMux {
         Ok(())
     }
 
+    fn close_pane(&self, pane: &PaneId) -> Result<()> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::ClosePane(pane.clone()));
+        if self.close_pane_refused {
+            return Err(MuxError::Unsupported("close pane"));
+        }
+        if let Some(reason) = &self.close_pane_failure {
+            return Err(MuxError::command("the fake host", reason.clone()));
+        }
+        inner.require_pane(pane)?;
+        inner.panes.remove(pane);
+        inner.screens.remove(pane);
+        inner.states.remove(pane);
+        Ok(())
+    }
+
     fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId> {
         let mut inner = self.lock()?;
         inner
             .calls
             .push(Call::Split(pane.clone(), direction, ratio, cwd.into()));
+        if self.split_refused {
+            return Err(MuxError::Unsupported("split pane"));
+        }
         inner.require_pane(pane)?;
         Ok(inner.new_pane())
     }
@@ -404,6 +486,16 @@ impl Mux for FakeMux {
         inner.calls.push(Call::Read(pane.clone(), lines));
         inner.require_pane(pane)?;
         Ok(inner.screens.get(pane).cloned().unwrap_or_default())
+    }
+
+    fn pane_process_group(&self, pane: &PaneId) -> Result<Option<u32>> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::PaneProcessGroup(pane.clone()));
+        inner.require_pane(pane)?;
+        if let Some(group) = inner.process_groups.get(pane) {
+            return Ok(*group);
+        }
+        Ok(self.default_group)
     }
 
     fn agent_state(&self, pane: &PaneId) -> Result<AgentState> {

@@ -30,7 +30,10 @@ signin_args = ["login", "status"]
 [launch]
 # herdr-projects starts codex for work with --no-daemon as well; it belongs to
 # the base command, not to approval handling.
-interactive = ["codex", "--no-daemon"]
+# The update check is off for every codex launch, worker and reviewer: 0.164
+# opens an "Update available!" screen before it accepts a turn, and a brief
+# typed into that screen is never delivered.
+interactive = ["codex", "--no-daemon", "-c", "check_for_update_on_startup=false"]
 model_args = ["-m", "{model}"]
 effort_args = ["-c", "model_reasoning_effort={effort}"]
 auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -58,3 +61,11 @@ source = "codex_wham"
 [skills]
 home_dirs = ["~/.codex/skills", "~/.agents/skills"]
 project_dirs = [".agents/skills"]
+
+# Codex 0.164 offers an update on startup ("Update available!" ... "Skip until
+# next version") and waits for an answer, so a brief typed in then is lost.
+# `launch.interactive` switches the check off; this catches a build that
+# ignores the flag.
+[[blocking_prompts]]
+name = "update available"
+pattern = "Update available!"

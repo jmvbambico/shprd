@@ -70,6 +70,18 @@ pub trait Mux: Send + Sync {
     /// [`MuxError::NotFound`]; callers that race a human should ignore it.
     fn close_tab(&self, tab: &TabId) -> Result<()>;
 
+    /// Close one pane, leaving its tab and its siblings alone.
+    ///
+    /// Used to retire a pane whose program shprd did not start, once a
+    /// replacement is running beside it. A host that cannot close a pane on
+    /// its own answers [`MuxError::Unsupported`], which is the trait's "this
+    /// host cannot do that" signal; callers must degrade rather than retry.
+    /// Such a host reports [`Capabilities::close_pane`] as false, so a caller
+    /// that would be left with an unwanted process can tell before planning.
+    fn close_pane(&self, _pane: &PaneId) -> Result<()> {
+        Err(MuxError::Unsupported("close pane"))
+    }
+
     /// Split `pane`, returning the new pane. `ratio` is the share of the split
     /// axis the *existing* pane keeps, in `0.0..=1.0`; hosts without
     /// [`Capabilities::split_ratio`] ignore it and split evenly. The new pane
@@ -100,6 +112,20 @@ pub trait Mux: Send + Sync {
     /// [`AgentState::Unknown`] — not an error — when the host has no opinion or
     /// does not support state at all (see [`Capabilities::agent_state`]).
     fn agent_state(&self, pane: &PaneId) -> Result<AgentState>;
+
+    /// The process group the host sees in the foreground of `pane`.
+    ///
+    /// This is the identity shprd uses to tell a process *it* started from one
+    /// something else did — a host that restored the pane with a plain
+    /// `--resume`, say. A process group survives an `exec`, so a pane whose
+    /// shell replaced itself with an agent still reports that agent's group.
+    ///
+    /// `Ok(None)` means the host cannot tell, which is not an error: callers
+    /// keep their conservative behaviour (leave the pane alone) rather than
+    /// read "no group" as "not mine".
+    fn pane_process_group(&self, _pane: &PaneId) -> Result<Option<u32>> {
+        Ok(None)
+    }
 
     /// Wait up to `timeout` for events and return everything queued so far.
     ///

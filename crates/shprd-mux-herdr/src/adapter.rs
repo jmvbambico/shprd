@@ -12,13 +12,14 @@ use shprd_mux::{
 use crate::HerdrMux;
 
 impl Mux for HerdrMux {
-    /// Always the same answer: herdr 0.9.5 splits with a ratio, cannot grant
-    /// extra permissions to a pane, cannot wait for a human answer in a pane,
-    /// reports agent state, and does not replay lost events.
+    /// Always the same answer: herdr 0.9.5 splits with a ratio, closes a single
+    /// pane, cannot grant extra permissions to a pane, cannot wait for a human
+    /// answer in a pane, reports agent state, and does not replay lost events.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             split_ratio: true,
             pane_grants: false,
+            close_pane: true,
             human_ask: false,
             resumable_events: false,
             agent_state: true,
@@ -57,6 +58,10 @@ impl Mux for HerdrMux {
         self.kill_tab(tab)
     }
 
+    fn close_pane(&self, pane: &PaneId) -> Result<()> {
+        self.close_pane_of(pane)
+    }
+
     fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId> {
         self.split_pane(pane, direction, ratio, cwd)
     }
@@ -79,6 +84,10 @@ impl Mux for HerdrMux {
 
     fn agent_state(&self, pane: &PaneId) -> Result<AgentState> {
         self.state_of(pane)
+    }
+
+    fn pane_process_group(&self, pane: &PaneId) -> Result<Option<u32>> {
+        self.process_group_of(pane)
     }
 
     fn next_events(&self, timeout: Duration) -> Result<Vec<MuxEvent>> {

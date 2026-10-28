@@ -343,6 +343,7 @@ pub(crate) fn check_as(
             _ => Err(RuleError::UnknownPullRequest { number: *number }),
         },
         EventKind::Approved { number, head_sha } => check_approved(state, actor, *number, head_sha),
+        EventKind::OrchestratorLaunched { .. } => Ok(()),
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }

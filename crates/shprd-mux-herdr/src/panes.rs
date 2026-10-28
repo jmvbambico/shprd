@@ -158,6 +158,54 @@ impl HerdrMux {
         Ok(Self::status_from(result.as_ref()))
     }
 
+    /// Close `pane` and nothing else: the tab and every other pane in it stay.
+    ///
+    /// `herdr pane close <pane_id>` takes the id positionally. A pane the host
+    /// no longer knows is already closed, which is what the caller wanted, so
+    /// [`MuxError::NotFound`] is success here.
+    pub(crate) fn close_pane_of(&self, pane: &PaneId) -> Result<()> {
+        match self.call_as(
+            "pane",
+            pane.as_str(),
+            "close pane",
+            &["pane", "close", pane.as_str()],
+        ) {
+            Ok(_) | Err(MuxError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The process group in the foreground of `pane`.
+    ///
+    /// `pane process-info` answers with the process and the process group
+    /// herdr sees in the pane; the group is what shprd compares against the
+    /// one it recorded, so a pane a host restored with its own command is
+    /// recognisable. A pane herdr no longer knows, or an answer without a
+    /// group, is `Ok(None)` — "cannot tell", which callers read as "leave it
+    /// alone".
+    pub(crate) fn process_group_of(&self, pane: &PaneId) -> Result<Option<u32>> {
+        let result = match self.call_as(
+            "pane",
+            pane.as_str(),
+            "pane process group",
+            &["pane", "process-info", "--pane", pane.as_str()],
+        ) {
+            Ok(result) => result,
+            Err(MuxError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Self::process_group_from(result.as_ref()))
+    }
+
+    /// The `foreground_process_group_id` out of a `process_info` result.
+    pub(crate) fn process_group_from(result: Option<&Value>) -> Option<u32> {
+        result
+            .and_then(|result| result.get("process_info"))
+            .and_then(|info| info.get("foreground_process_group_id"))
+            .and_then(Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok())
+    }
+
     /// The state in an `agent_info` result; `None` or a missing field is
     /// [`AgentState::Unknown`].
     pub(crate) fn status_from(result: Option<&Value>) -> AgentState {
@@ -197,6 +245,7 @@ mod tests {
     const NO_AGENT: &str = include_str!("../tests/fixtures/agent_get_not_found.json");
     const NOT_FOUND: &str = include_str!("../tests/fixtures/pane_read_not_found.json");
     const READ: &str = include_str!("../tests/fixtures/pane_read.txt");
+    const PROCESS_INFO: &str = include_str!("../tests/fixtures/pane_process_info.json");
 
     fn result(text: &str) -> Value {
         serde_json::from_str::<Value>(text).unwrap()["result"].clone()
@@ -242,6 +291,32 @@ mod tests {
         assert!(answer.object().unwrap_err().is_not_found());
         assert_eq!(HerdrMux::status_from(None), AgentState::Unknown);
         assert_eq!(HerdrMux::status_from(Some(&json!({}))), AgentState::Unknown);
+    }
+
+    #[test]
+    fn process_info_reports_the_foreground_process_group() {
+        assert_eq!(
+            HerdrMux::process_group_from(Some(&result(PROCESS_INFO))),
+            Some(88158)
+        );
+    }
+
+    #[test]
+    fn a_process_info_without_a_group_says_cannot_tell() {
+        assert_eq!(HerdrMux::process_group_from(None), None);
+        assert_eq!(HerdrMux::process_group_from(Some(&json!({}))), None);
+        assert_eq!(
+            HerdrMux::process_group_from(Some(
+                &json!({"process_info": {"foreground_process_group_id": null}})
+            )),
+            None
+        );
+        assert_eq!(
+            HerdrMux::process_group_from(Some(
+                &json!({"process_info": {"foreground_process_group_id": -1}})
+            )),
+            None
+        );
     }
 
     #[test]
