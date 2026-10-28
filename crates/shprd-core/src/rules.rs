@@ -297,13 +297,47 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
 /// Checks one event kind caused by `actor` against `state` as of `now_ms`.
 ///
 /// A bare [`check`] is the human's: a verb that consults the log before an
-/// outside effect has no other actor to offer. Folding an event passes the
-/// actor the log actually records, which is what an approval's rule reads.
+/// outside effect has no other actor to offer. A verb about to append passes
+/// its own actor, which is what an approval's and a review verdict's rule read.
 pub(crate) fn check_as(
     state: &RunState,
     actor: &Actor,
     kind: &EventKind,
     now_ms: u64,
+) -> Result<(), RuleError> {
+    check_with(state, actor, kind, now_ms, Provenance::Required)
+}
+
+/// Checks one event already in the log, as the fold replays it.
+///
+/// History is not re-judged: a review verdict recorded before provenance
+/// existed would otherwise stop a run's log from folding at all. Every other
+/// rule still holds, because a log that broke one of those was never valid.
+pub(crate) fn replay_as(
+    state: &RunState,
+    actor: &Actor,
+    kind: &EventKind,
+    now_ms: u64,
+) -> Result<(), RuleError> {
+    check_with(state, actor, kind, now_ms, Provenance::Historical)
+}
+
+/// Whether a review verdict has to prove where it came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    /// A verdict being recorded now must be the engine's, with a source.
+    Required,
+    /// A verdict read back out of the log keeps whatever it was recorded with.
+    Historical,
+}
+
+/// Checks one event kind caused by `actor`, with `provenance` in force.
+fn check_with(
+    state: &RunState,
+    actor: &Actor,
+    kind: &EventKind,
+    now_ms: u64,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
     if let EventKind::RunStarted { .. } = kind {
         return match state.run {
@@ -354,7 +388,7 @@ pub(crate) fn check_as(
             ..
         } => {
             check_gate(state, task, *attempt)?;
-            check_verdict(actor, task, gate, source)
+            check_verdict(provenance, actor, task, gate, source)
         }
         EventKind::ReviewRequested { task, attempt, .. } => {
             check_review_requested(state, task, *attempt)
@@ -705,12 +739,13 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
 /// tests. A review verdict is the engine's alone, because only the engine reads
 /// the reviewer's packet, and it must carry the provenance that reading gave it.
 fn check_verdict(
+    provenance: Provenance,
     actor: &Actor,
     task: &str,
     gate: &str,
     source: &Option<ReviewSource>,
 ) -> Result<(), RuleError> {
-    if gate != REVIEW_GATE {
+    if gate != REVIEW_GATE || provenance == Provenance::Historical {
         return Ok(());
     }
     if !matches!(actor, Actor::Engine) {
@@ -1718,6 +1753,7 @@ mod tests {
     }
     #[test]
     fn only_the_engine_records_a_review_verdict() {
+        let state = folded(&reviewable());
         let others = [
             Actor::Orchestrator,
             Actor::Human,
@@ -1726,25 +1762,47 @@ mod tests {
             },
         ];
         for actor in others {
-            let mut log = reviewable();
-            log.push(by(5, actor.clone(), review_gate(true, Some(provenance()))));
-            match refused(&log) {
-                RuleError::VerdictNotFromReviewer { task } => assert_eq!(task, "a"),
+            match state.check_as(&actor, &review_gate(true, Some(provenance())), 5_000) {
+                Err(RuleError::VerdictNotFromReviewer { task }) => assert_eq!(task, "a"),
                 other => panic!("{actor:?} recorded a verdict: {other:?}"),
+            }
+        }
+        // The engine may, because it is the one that reads the packet.
+        state
+            .check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance())),
+                5_000,
+            )
+            .unwrap_or_else(|err| panic!("the engine was refused: {err}"));
+    }
+
+    #[test]
+    fn a_review_verdict_without_provenance_is_refused() {
+        let state = folded(&reviewable());
+        for passed in [true, false] {
+            match state.check_as(&Actor::Engine, &review_gate(passed, None), 5_000) {
+                Err(RuleError::UnprovenVerdict { task }) => assert_eq!(task, "a"),
+                other => panic!("an unproven verdict was recorded (passed: {passed}): {other:?}"),
             }
         }
     }
 
     #[test]
-    fn a_review_verdict_without_provenance_is_refused() {
-        for passed in [true, false] {
-            let mut log = reviewable();
-            log.push(ev(5, review_gate(passed, None)));
-            match refused(&log) {
-                RuleError::UnprovenVerdict { task } => assert_eq!(task, "a"),
-                other => panic!("an unproven verdict folded (passed: {passed}): {other:?}"),
-            }
-        }
+    fn a_review_verdict_recorded_before_provenance_still_folds() {
+        // Old logs hold verdicts no engine recorded and no source proves.
+        // Replay keeps them: reading a run's history is not recording it.
+        let mut log = reviewable();
+        log.push(by(5, Actor::Orchestrator, review_gate(true, None)));
+        let state = folded(&log);
+        let gate = state
+            .tasks
+            .get("a")
+            .and_then(|task| task.attempts.last())
+            .and_then(|attempt| attempt.gates.last())
+            .unwrap_or_else(|| panic!("no gate recorded: {state:?}"));
+        assert!(gate.passed);
+        assert_eq!(gate.source, None);
     }
 
     #[test]

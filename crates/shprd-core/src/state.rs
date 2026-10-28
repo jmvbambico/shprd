@@ -327,7 +327,7 @@ impl RunState {
 
     /// Checks `event` against the rules, then applies it and records its seq.
     pub fn apply(&mut self, event: &Event) -> Result<(), RuleError> {
-        rules::check_as(self, &event.actor, &event.kind, event.at_ms)?;
+        rules::replay_as(self, &event.actor, &event.kind, event.at_ms)?;
         self.mutate(event);
         self.last_seq = event.seq;
         Ok(())
