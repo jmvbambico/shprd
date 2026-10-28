@@ -294,6 +294,17 @@ impl Watch {
         }
     }
 
+    /// Parks the watch: this attempt is a human's now, so nothing more is
+    /// decided for it until the log changes.
+    ///
+    /// A [`Action::HandOff`] that failed is not retried here: the same call
+    /// would fail the same way, so a tick would record an escalation a minute
+    /// until the run drowned in them.
+    pub fn park(&mut self, since_ms: u64, reason: String) {
+        self.health = Health::Escalated { since_ms, reason };
+        self.transient_since_ms = None;
+    }
+
     /// The attempt was handed on: a new worker continues it.
     ///
     /// The fresh process has proved nothing yet, so health starts over, but the
