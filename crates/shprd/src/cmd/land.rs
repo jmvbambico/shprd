@@ -572,6 +572,19 @@ mod tests {
     }
 
     #[test]
+    fn a_restarted_review_still_reads_as_one_clean_review() {
+        // A brief that never arrived is requested again for the same attempt:
+        // both requests describe the one review, so the marker still reads a
+        // pass rather than a task reviewed twice.
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        log.push(reviewed(6, "T1", "c1", false));
+        log.push(review_passed(7, "T1"));
+        log.push(integrated(8, "T1"));
+        assert_eq!(review_marker(&folded(&log)), REVIEW_PASSED);
+    }
+
+    #[test]
     fn one_degraded_review_names_the_task() {
         let mut log = reported_log("T1");
         log.push(reviewed(5, "T1", "w2", true));
