@@ -193,6 +193,13 @@ pub struct Watch {
     /// makes a worker that dies every time escalate instead of being replaced
     /// for ever.
     exit_count: usize,
+    /// True while the health is an escalation this watch wrote for a parked
+    /// attempt: a spent exit budget or a hand-off that failed.
+    ///
+    /// Only a parking is lifted when the log moves past it, because that is a
+    /// human retrying the hand-off or a fresh worker taking the attempt. An
+    /// escalation from any other cause stays until a human acts on it.
+    parked: bool,
 }
 
 impl Default for Watch {
@@ -209,6 +216,7 @@ impl Watch {
             transient_since_ms: None,
             dry_count: 0,
             exit_count: 0,
+            parked: false,
         }
     }
 
@@ -271,6 +279,7 @@ impl Watch {
                 since_ms: now_ms,
                 reason: reason.clone(),
             };
+            self.parked = true;
             return vec![Action::Escalate {
                 reason: exit_escalation_reason(self.exit_count),
             }];
@@ -285,11 +294,24 @@ impl Watch {
     /// in from the log rather than counted from zero: a crash loop must not
     /// survive the watchdog's own restart. An escalation the log already holds
     /// for the attempt parks the watch, so nothing is handed off or escalated
-    /// twice for it.
+    /// twice for it, and one the log has moved past - a later `Spawned` or
+    /// `HandedOff` - un-parks it again, so a run that was retried by hand is
+    /// watched without the watchdog being restarted.
     pub fn resume(&mut self, exits: usize, parked: Option<(u64, String)>) {
         self.exit_count = exits;
         if let Some((since_ms, reason)) = parked {
             self.health = Health::Escalated { since_ms, reason };
+            self.parked = true;
+            self.transient_since_ms = None;
+        } else if self.parked {
+            // The log moved past the parking - a human retried the hand-off, or
+            // a new spawn took the attempt - so this is no longer a human's to
+            // pick up. Monitoring resumes on the current worker, whose start
+            // and grace come from the log's newest `Spawned`/`HandedOff`. The
+            // streak stays as the log counts it: a human's hand-off reason is
+            // not an exit, so it adds nothing to it.
+            self.health = Health::Working;
+            self.parked = false;
             self.transient_since_ms = None;
         }
     }
@@ -302,6 +324,7 @@ impl Watch {
     /// until the run drowned in them.
     pub fn park(&mut self, since_ms: u64, reason: String) {
         self.health = Health::Escalated { since_ms, reason };
+        self.parked = true;
         self.transient_since_ms = None;
     }
 
@@ -312,6 +335,7 @@ impl Watch {
     /// the next entry in the same streak.
     pub fn after_handoff(&mut self) {
         self.health = Health::Working;
+        self.parked = false;
         self.transient_since_ms = None;
     }
 
@@ -830,6 +854,54 @@ mod tests {
             w.step(&exited(NOW + 3_000), &p).as_slice(),
             [Action::Escalate { .. }]
         ));
+    }
+
+    /// A parking belongs to the log, not to this process: once the log records
+    /// a later worker, a watchdog that kept running stops waiting for a human.
+    #[test]
+    fn a_parked_watch_unparks_when_the_log_moves_past_the_escalation() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        for round in 0..=p.exit_budget {
+            let acts = w.step(&exited(NOW + round as u64 * 1_000), &p);
+            if matches!(acts.as_slice(), [Action::HandOff { .. }]) {
+                w.after_handoff();
+            }
+        }
+        assert!(matches!(w.health, Health::Escalated { .. }));
+
+        // The log still holds the escalation: a human was asked, so nothing is
+        // decided here twice.
+        w.resume(w.exit_count, Some((NOW, String::from(EXIT_REASON))));
+        assert!(matches!(w.health, Health::Escalated { .. }));
+        assert_eq!(w.step(&exited(NOW + 4_000), &p), Vec::new());
+
+        // A worker started since then, so the attempt is monitored again and
+        // the streak is whatever the log now counts for it.
+        w.resume(0, None);
+        assert_eq!(w.health, Health::Working);
+        assert_eq!(
+            w.step(&exited(NOW + 5_000), &p),
+            vec![Action::HandOff {
+                reason: String::from(EXIT_REASON),
+                dry: false,
+            }]
+        );
+    }
+
+    /// A failed hand-off is a parking as well, and the same "the log moved on"
+    /// lifts it: without that, a human's retry is never watched.
+    #[test]
+    fn a_failed_hand_off_parks_only_while_the_log_holds_it() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        w.park(NOW, String::from("hand-off failed"));
+        w.resume(0, Some((NOW, String::from("hand-off failed"))));
+        assert!(matches!(w.health, Health::Escalated { .. }));
+
+        w.resume(0, None);
+        assert_eq!(w.health, Health::Working);
+        assert_eq!(w.step(&exited(NOW + 1_000), &p).len(), 1);
     }
 
     /// Drive `w` into a dry verdict through a screen pattern.
