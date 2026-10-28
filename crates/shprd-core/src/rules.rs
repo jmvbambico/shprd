@@ -6,9 +6,12 @@
 
 use thiserror::Error;
 
-use crate::event::{Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, TaskId};
+use crate::event::{
+    Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, ReviewSource, TaskId,
+};
+use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
-use crate::state::{AgentInfo, ResourceStatus, RunState, Task, TaskStatus};
+use crate::state::{AgentInfo, ResourceStatus, ReviewRequest, RunState, Task, TaskStatus};
 
 /// Why an event was refused.
 #[derive(Debug, Error)]
@@ -146,6 +149,16 @@ pub enum RuleError {
         /// What it reported.
         status: ReportStatus,
     },
+    /// The attempt's review already has a verdict, so it cannot be restarted.
+    #[error(
+        "task {task:?} attempt {attempt} already has a review verdict and cannot be reviewed again"
+    )]
+    ReviewDecided {
+        /// The task.
+        task: TaskId,
+        /// The attempt.
+        attempt: u32,
+    },
     /// Integration was requested for a task that has not passed its gates.
     #[error("task {task:?} is {found:?} and cannot be integrated")]
     NotPassed {
@@ -216,6 +229,43 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
+    /// A review verdict was recorded by something that is not the engine.
+    ///
+    /// Only the engine decides a review, from the reviewer's packet. An
+    /// orchestrator or agent that recorded its own verdict would make the
+    /// review meaningless, and a human who wants past a review uses
+    /// [`EventKind::Override`], which says so in the log.
+    #[error(
+        "task {task:?}: a review verdict is the engine's to record, from the reviewer's packet"
+    )]
+    VerdictNotFromReviewer {
+        /// The task.
+        task: TaskId,
+    },
+    /// A review verdict carried no provenance.
+    ///
+    /// The source is what proves a reviewer wrote the findings, so a verdict
+    /// without one is a claim about a review nothing can check.
+    #[error("task {task:?}: a review verdict must name the reviewer and the findings it read")]
+    UnprovenVerdict {
+        /// The task.
+        task: TaskId,
+    },
+    /// A review verdict answered a review request that is no longer the latest.
+    ///
+    /// A restart records a fresh request for the same attempt, possibly naming
+    /// a different reviewer. A verdict written before that request is about
+    /// work the current review has not looked at, so accepting it would back
+    /// the pull request's passed marker with the review it replaced.
+    #[error(
+        "task {task:?} attempt {attempt}: a review verdict must answer the latest review request"
+    )]
+    StaleReviewVerdict {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+    },
     /// Integration was requested while the latest attempt has a failed gate and
     /// no override recorded after it.
     #[error("task {task:?} cannot be integrated: gate {gate:?} failed and no override followed")]
@@ -262,13 +312,47 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
 /// Checks one event kind caused by `actor` against `state` as of `now_ms`.
 ///
 /// A bare [`check`] is the human's: a verb that consults the log before an
-/// outside effect has no other actor to offer. Folding an event passes the
-/// actor the log actually records, which is what an approval's rule reads.
+/// outside effect has no other actor to offer. A verb about to append passes
+/// its own actor, which is what an approval's and a review verdict's rule read.
 pub(crate) fn check_as(
     state: &RunState,
     actor: &Actor,
     kind: &EventKind,
     now_ms: u64,
+) -> Result<(), RuleError> {
+    check_with(state, actor, kind, now_ms, Provenance::Required)
+}
+
+/// Checks one event already in the log, as the fold replays it.
+///
+/// History is not re-judged: a review verdict recorded before provenance
+/// existed would otherwise stop a run's log from folding at all. Every other
+/// rule still holds, because a log that broke one of those was never valid.
+pub(crate) fn replay_as(
+    state: &RunState,
+    actor: &Actor,
+    kind: &EventKind,
+    now_ms: u64,
+) -> Result<(), RuleError> {
+    check_with(state, actor, kind, now_ms, Provenance::Historical)
+}
+
+/// Whether a review verdict has to prove where it came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    /// A verdict being recorded now must be the engine's, with a source.
+    Required,
+    /// A verdict read back out of the log keeps whatever it was recorded with.
+    Historical,
+}
+
+/// Checks one event kind caused by `actor`, with `provenance` in force.
+fn check_with(
+    state: &RunState,
+    actor: &Actor,
+    kind: &EventKind,
+    now_ms: u64,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
     if let EventKind::RunStarted { .. } = kind {
         return match state.run {
@@ -304,8 +388,23 @@ pub(crate) fn check_as(
             changed_paths,
             ..
         } => check_reported(state, task, *attempt, changed_paths),
-        EventKind::GatePassed { task, attempt, .. }
-        | EventKind::GateFailed { task, attempt, .. } => check_gate(state, task, *attempt),
+        EventKind::GatePassed {
+            task,
+            attempt,
+            gate,
+            source,
+            ..
+        }
+        | EventKind::GateFailed {
+            task,
+            attempt,
+            gate,
+            source,
+            ..
+        } => {
+            check_gate(state, task, *attempt)?;
+            check_verdict(provenance, state, actor, task, *attempt, gate, source)
+        }
         EventKind::ReviewRequested { task, attempt, .. } => {
             check_review_requested(state, task, *attempt)
         }
@@ -344,6 +443,7 @@ pub(crate) fn check_as(
         },
         EventKind::Approved { number, head_sha } => check_approved(state, actor, *number, head_sha),
         EventKind::OrchestratorLaunched { .. } => Ok(()),
+        EventKind::WatchLaunched { .. } => Ok(()),
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }
@@ -648,14 +748,102 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
     }
 }
 
+/// Rules for a review verdict: who may record one, and what must prove it.
+///
+/// A gate that is not the review gate is free: any actor may record lint or
+/// tests. A review verdict is the engine's alone, because only the engine reads
+/// the reviewer's packet, and it must carry the provenance that reading gave it.
+///
+/// The verdict must also answer the *latest* review request for the attempt.
+/// Reading the reviewer's packet and appending the verdict are not one step,
+/// and `shprd agent review --again` may record a fresh request in between,
+/// possibly naming a different reviewer. The old review's verdict would then be
+/// about work the current review never read, so it is refused rather than
+/// backing the pull request's passed marker. Only the request's seq tells the
+/// two apart: the same reviewer may be asked twice for one attempt.
+///
+/// History is not re-judged: a replayed verdict keeps whatever it was recorded
+/// with. A log written before requests carried a seq cannot answer the
+/// question, and one written before this rule holds verdicts this rule would
+/// refuse, so replay keeps them all.
+fn check_verdict(
+    provenance: Provenance,
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    attempt: u32,
+    gate: &str,
+    source: &Option<ReviewSource>,
+) -> Result<(), RuleError> {
+    if gate != REVIEW_GATE || provenance == Provenance::Historical {
+        return Ok(());
+    }
+    if !matches!(actor, Actor::Engine) {
+        return Err(RuleError::VerdictNotFromReviewer {
+            task: task.to_string(),
+        });
+    }
+    let source = match source {
+        Some(source)
+            if !source.reviewer.trim().is_empty() && !source.findings_sha256.trim().is_empty() =>
+        {
+            source
+        }
+        _ => {
+            return Err(RuleError::UnprovenVerdict {
+                task: task.to_string(),
+            });
+        }
+    };
+    match latest_review(state, task, attempt) {
+        Some(request)
+            if request.reviewer == source.reviewer && request.seq == source.request_seq =>
+        {
+            Ok(())
+        }
+        _ => Err(RuleError::StaleReviewVerdict {
+            task: task.to_string(),
+            attempt,
+        }),
+    }
+}
+
+/// The newest review request the log holds for `task`'s attempt `attempt`.
+///
+/// `None` means no review was ever handed out for that attempt, which a
+/// verdict cannot answer either: it would name a reviewer nothing dispatched.
+fn latest_review<'a>(state: &'a RunState, task: &str, attempt: u32) -> Option<&'a ReviewRequest> {
+    let current = state
+        .tasks
+        .get(task)?
+        .attempts
+        .iter()
+        .find(|current| current.n == attempt)?;
+    current.reviews.last()
+}
+
 /// Rules for recording a review dispatch.
 ///
 /// Only a finished attempt can be reviewed: the task has to be Reported, and
 /// the attempt named has to be the one that reported. Refusing here is what
 /// makes `shprd agent review` open no reviewer tab for a task that has
 /// nothing to review.
+///
+/// A second request for one attempt is allowed while the review is undecided,
+/// which is what `shprd agent review --again` records when a brief never
+/// arrived and the reviewer has to be started over. Once the review gate has a
+/// verdict the attempt is decided, and a second request would be a review of
+/// work the run has already judged: it is refused here rather than left to the
+/// task's status alone, so the refusal names the real reason.
 fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
     let found = task_in(state, task)?;
+    let current = expect_current_attempt(task, found, attempt)?;
+    if current.gates.iter().any(|gate| gate.gate == REVIEW_GATE) {
+        return Err(RuleError::ReviewDecided {
+            task: task.to_string(),
+            attempt,
+        });
+    }
     if found.status != TaskStatus::Reported {
         return Err(RuleError::WrongStatus {
             task: task.to_string(),
@@ -663,7 +851,7 @@ fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<
             found: found.status,
         });
     }
-    expect_current_attempt(task, found, attempt).map(|_| ())
+    Ok(())
 }
 
 /// Rules for integrating a passed task: a failed gate needs a later override.
@@ -854,6 +1042,7 @@ mod tests {
                 attempt,
                 gate: gate.to_string(),
                 findings,
+                source: None,
             }
         } else {
             EventKind::GateFailed {
@@ -861,6 +1050,7 @@ mod tests {
                 attempt,
                 gate: gate.to_string(),
                 findings,
+                source: None,
             }
         };
         ev(seq, kind)
@@ -943,6 +1133,65 @@ mod tests {
                 task: Some("a".to_string()),
             },
         )
+    }
+
+    /// The provenance a real verdict carries.
+    fn provenance() -> ReviewSource {
+        // The request `reviewable()` records at seq 5.
+        provenance_for("codex/m1", 5)
+    }
+
+    /// The provenance a verdict answers `reviewer`'s request at `request_seq`.
+    fn provenance_for(reviewer: &str, request_seq: u64) -> ReviewSource {
+        ReviewSource {
+            reviewer: reviewer.to_string(),
+            findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                .to_string(),
+            request_seq,
+        }
+    }
+
+    /// A `review` gate result for task `a`, with `source` as its provenance.
+    fn review_gate(passed: bool, source: Option<ReviewSource>) -> EventKind {
+        let findings = if passed { Vec::new() } else { vec![finding()] };
+        if passed {
+            EventKind::GatePassed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings,
+                source,
+            }
+        } else {
+            EventKind::GateFailed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "review".to_string(),
+                findings,
+                source,
+            }
+        }
+    }
+
+    /// An event caused by `actor`, not the engine.
+    fn by(seq: u64, actor: Actor, kind: EventKind) -> Event {
+        Event {
+            seq,
+            at_ms: seq * 1000,
+            actor,
+            kind,
+        }
+    }
+
+    /// A run whose task `a` reported attempt 1 and waits for a gate.
+    fn reviewable() -> Vec<Event> {
+        vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            review_requested(5, "a", 1, "codex/m1", false),
+        ]
     }
 
     fn folded(events: &[Event]) -> RunState {
@@ -1240,6 +1489,53 @@ mod tests {
         assert!(reviews[0].degraded);
     }
 
+    /// A review may be requested twice for one undecided attempt, which is how
+    /// a restart is recorded, and never a third time once it has a verdict.
+    #[test]
+    fn a_review_can_be_requested_again_until_it_is_decided() {
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a"]),
+            review_requested(5, "a", 1, "agent-2", false),
+            // The brief never arrived, so the review is started again.
+            review_requested(6, "a", 1, "agent-2", false),
+        ];
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Reported);
+        let attempt = match state.tasks.get("a").and_then(|task| task.latest_attempt()) {
+            Some(attempt) => attempt,
+            None => panic!("the attempt is missing"),
+        };
+        assert_eq!(attempt.reviews.len(), 2, "one row per request");
+        assert!(
+            attempt.reviews.iter().all(|review| !review.degraded),
+            "both requests describe the same, undegraded review"
+        );
+    }
+
+    #[test]
+    fn a_decided_review_cannot_be_requested_again() {
+        // Both verdicts close the door: a pass and a fail are equally final for
+        // this attempt, and a restart names the verdict rather than the status.
+        for passed in [true, false] {
+            let log = vec![
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                reported(4, "a", 1, &["src/a"]),
+                review_requested(5, "a", 1, "agent-2", false),
+                gated(6, "a", 1, "review", passed),
+                review_requested(7, "a", 1, "agent-2", false),
+            ];
+            assert!(
+                matches!(refused(&log), RuleError::ReviewDecided { .. }),
+                "a verdict of passed={passed} must refuse a second request"
+            );
+        }
+    }
+
     #[test]
     fn failed_or_blocked_report_can_be_retried() {
         for outcome in [ReportStatus::Failed, ReportStatus::Blocked] {
@@ -1519,5 +1815,183 @@ mod tests {
             state.check(&integrated(3, "a").kind, 3_000),
             Err(RuleError::NotPassed { .. })
         ));
+    }
+    #[test]
+    fn only_the_engine_records_a_review_verdict() {
+        let state = folded(&reviewable());
+        let others = [
+            Actor::Orchestrator,
+            Actor::Human,
+            Actor::Agent {
+                id: "claude".to_string(),
+            },
+        ];
+        for actor in others {
+            match state.check_as(&actor, &review_gate(true, Some(provenance())), 5_000) {
+                Err(RuleError::VerdictNotFromReviewer { task }) => assert_eq!(task, "a"),
+                other => panic!("{actor:?} recorded a verdict: {other:?}"),
+            }
+        }
+        // The engine may, because it is the one that reads the packet.
+        state
+            .check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance())),
+                5_000,
+            )
+            .unwrap_or_else(|err| panic!("the engine was refused: {err}"));
+    }
+
+    #[test]
+    fn a_review_verdict_without_provenance_is_refused() {
+        let state = folded(&reviewable());
+        for passed in [true, false] {
+            match state.check_as(&Actor::Engine, &review_gate(passed, None), 5_000) {
+                Err(RuleError::UnprovenVerdict { task }) => assert_eq!(task, "a"),
+                other => panic!("an unproven verdict was recorded (passed: {passed}): {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_review_verdict_recorded_before_provenance_still_folds() {
+        // Old logs hold verdicts no engine recorded and no source proves.
+        // Replay keeps them: reading a run's history is not recording it.
+        let mut log = reviewable();
+        log.push(by(6, Actor::Orchestrator, review_gate(true, None)));
+        let state = folded(&log);
+        let gate = state
+            .tasks
+            .get("a")
+            .and_then(|task| task.attempts.last())
+            .and_then(|attempt| attempt.gates.last())
+            .unwrap_or_else(|| panic!("no gate recorded: {state:?}"));
+        assert!(gate.passed);
+        assert_eq!(gate.source, None);
+    }
+
+    #[test]
+    fn a_proven_review_verdict_folds_into_its_attempt() {
+        let mut log = reviewable();
+        log.push(ev(6, review_gate(true, Some(provenance()))));
+        let state = folded(&log);
+        let gate = state
+            .tasks
+            .get("a")
+            .and_then(|task| task.attempts.last())
+            .and_then(|attempt| attempt.gates.last())
+            .unwrap_or_else(|| panic!("no gate recorded: {state:?}"));
+        assert!(gate.passed);
+        assert_eq!(gate.source, Some(provenance()));
+        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+    }
+
+    /// A verdict that answers a request a restart has superseded is refused.
+    ///
+    /// Reading the packet and appending the verdict are two steps, and
+    /// `review --again` can record a fresh request in between. The old review's
+    /// verdict then names the request it read, which is no longer the latest.
+    #[test]
+    fn a_verdict_for_a_superseded_review_request_is_refused() {
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "codex/m1", false));
+        let state = folded(&log);
+        assert_eq!(state.last_seq, 6);
+        match state.check_as(
+            &Actor::Engine,
+            &review_gate(true, Some(provenance())),
+            7_000,
+        ) {
+            Err(RuleError::StaleReviewVerdict { task, attempt }) => {
+                assert_eq!(task, "a");
+                assert_eq!(attempt, 1);
+            }
+            other => panic!("a superseded request was answered: {other:?}"),
+        }
+        // The restart may name another reviewer, which the superseded verdict
+        // names too: the request's seq is what refuses it either way.
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "claude/m1", false));
+        let state = folded(&log);
+        assert!(matches!(
+            state.check_as(
+                &Actor::Engine,
+                &review_gate(false, Some(provenance())),
+                7_000
+            ),
+            Err(RuleError::StaleReviewVerdict { .. })
+        ));
+    }
+
+    /// A verdict for the latest request is accepted, whoever it names.
+    #[test]
+    fn a_verdict_for_the_latest_review_request_is_accepted() {
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "claude/m1", false));
+        let state = folded(&log);
+        state
+            .check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance_for("claude/m1", 6))),
+                7_000,
+            )
+            .unwrap_or_else(|err| panic!("the latest request's verdict was refused: {err}"));
+        // The same reviewer asked twice is two requests, and only the newer one
+        // is still answerable.
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "codex/m1", false));
+        let state = folded(&log);
+        state
+            .check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance_for("codex/m1", 6))),
+                7_000,
+            )
+            .unwrap_or_else(|err| panic!("the latest request's verdict was refused: {err}"));
+    }
+
+    /// A verdict from before requests carried a seq still folds.
+    ///
+    /// The field defaults to `0`, which no request has, so such a verdict can
+    /// never be recorded now; replay keeps it because a run's history is read,
+    /// not re-judged, exactly as a verdict without provenance is kept.
+    #[test]
+    fn a_legacy_verdict_without_a_request_seq_still_folds() {
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(true, Some(provenance_for("codex/m1", 0))),
+        ));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+        // Recording the same thing now is refused: absence is a legacy reading,
+        // never a way past the rule.
+        assert!(matches!(
+            state.check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance_for("codex/m1", 0))),
+                7_000
+            ),
+            Err(RuleError::StaleReviewVerdict { .. })
+        ));
+    }
+
+    #[test]
+    fn a_gate_that_is_not_a_review_is_any_actor_s_to_record() {
+        // The rule is about review verdicts only: a human recording a lint
+        // result is a fact about lint, not a claim about a review.
+        let mut log = reviewable();
+        log.push(by(
+            6,
+            Actor::Human,
+            EventKind::GatePassed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "lint".to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+        ));
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
     }
 }

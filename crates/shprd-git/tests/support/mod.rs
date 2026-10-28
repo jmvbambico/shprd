@@ -220,6 +220,7 @@ pub fn integrated_run(
             attempt: 1,
             gate: "lint".to_string(),
             findings: Vec::new(),
+            source: None,
         },
         EventKind::Integrated {
             task: task.to_string(),

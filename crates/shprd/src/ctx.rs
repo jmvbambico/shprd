@@ -98,6 +98,18 @@ impl Ctx {
         }
     }
 
+    /// The same context, acting as `actor`.
+    ///
+    /// The watch records what the engine decides — a review verdict, a gate
+    /// result — no matter who started it, so it commits those with an engine
+    /// context rather than whatever `$SHPRD_ACTOR` says.
+    pub fn as_actor(&self, actor: Actor) -> Self {
+        Self {
+            actor,
+            ..self.clone()
+        }
+    }
+
     /// The folded state of the run, or the empty state when no log exists yet.
     pub fn state(&self) -> Result<RunState, CliError> {
         Ok(self.load()?.0)
@@ -127,7 +139,7 @@ impl Ctx {
     pub fn check(&self, kind: &EventKind) -> Result<(), CliError> {
         let state = self.state()?;
         state
-            .check(kind, SystemClock.now_ms())
+            .check_as(&self.actor, kind, SystemClock.now_ms())
             .map_err(CliError::Refused)
     }
 

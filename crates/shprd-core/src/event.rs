@@ -140,6 +140,34 @@ pub enum ResourceKind {
     Bundle,
 }
 
+/// Where a review verdict came from: the reviewer, and the findings it decided.
+///
+/// A verdict is only a verdict when something proves a reviewer wrote it, so the
+/// gate result carries the reviewer the dispatch named and the SHA-256 of the
+/// exact findings bytes the engine read. A caller that records a review gate
+/// without this is refused, and a verdict recorded before this field existed
+/// folds with `None` and reads as unproven.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSource {
+    /// The agent the review was dispatched to, as [`EventKind::ReviewRequested`]
+    /// recorded it.
+    pub reviewer: AgentId,
+    /// SHA-256 of the findings file's bytes, as lowercase hex.
+    pub findings_sha256: String,
+    /// The `seq` of the [`EventKind::ReviewRequested`] this verdict answers.
+    ///
+    /// A restarted review records a fresh request for the same attempt, and it
+    /// may name the same reviewer, so who reviewed does not tell the two
+    /// requests apart. The request's position does: a verdict written for a
+    /// request that has since been superseded is refused instead of being read
+    /// as the current review's own.
+    ///
+    /// Defaulted to `0` so a log written before this field existed still
+    /// folds; no request has that seq, so a verdict recorded now names one.
+    #[serde(default)]
+    pub request_seq: u64,
+}
+
 /// What happened. Serialized with a `kind` tag alongside the [`Event`] fields.
 ///
 /// Unknown-field rejection is not enabled here: `deny_unknown_fields` cannot
@@ -220,6 +248,11 @@ pub enum EventKind {
         gate: String,
         /// Findings the gate raised, if any.
         findings: Vec<Finding>,
+        /// Provenance, for a review gate only.
+        ///
+        /// Defaulted so a log written before provenance existed still folds.
+        #[serde(default)]
+        source: Option<ReviewSource>,
     },
     /// A gate failed for an attempt.
     GateFailed {
@@ -231,6 +264,11 @@ pub enum EventKind {
         gate: String,
         /// Why it failed.
         findings: Vec<Finding>,
+        /// Provenance, for a review gate only.
+        ///
+        /// Defaulted so a log written before provenance existed still folds.
+        #[serde(default)]
+        source: Option<ReviewSource>,
     },
     /// A task's work was integrated.
     Integrated {
@@ -369,6 +407,22 @@ pub enum EventKind {
         /// The pane's foreground process group at launch.
         process_group: u32,
     },
+    /// shprd started the watchdog in a pane.
+    ///
+    /// The watchdog is the process that turns a reviewer's findings into a
+    /// verdict and hands off a dry worker, so `up` starts it the way it starts
+    /// the orchestrator: the pane and its process group are what a later `up`
+    /// checks before it trusts the pane, and what run end closes.
+    WatchLaunched {
+        /// The pane the watchdog runs in.
+        pane: String,
+        /// The pane's foreground process group at launch.
+        ///
+        /// `None` is a host that cannot tell. It is not evidence against the
+        /// pane, so a later `up` leaves it alone rather than splitting a second
+        /// watchdog off the chat tab.
+        process_group: Option<u32>,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -439,14 +493,21 @@ mod tests {
             EventKind::GatePassed {
                 task: "M1.1".to_string(),
                 attempt: 1,
-                gate: "lint".to_string(),
+                gate: "review".to_string(),
                 findings: vec![],
+                source: Some(ReviewSource {
+                    reviewer: "codex/m1".to_string(),
+                    findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb41"
+                        .to_string(),
+                    request_seq: 5,
+                }),
             },
             EventKind::GateFailed {
                 task: "M1.1".to_string(),
                 attempt: 2,
                 gate: "tests".to_string(),
                 findings: vec![finding()],
+                source: None,
             },
             EventKind::Integrated {
                 task: "M1.1".to_string(),
@@ -544,6 +605,21 @@ mod tests {
             );
             let back: Event = from_json(&text);
             assert_eq!(event, back, "round trip changed the event: {text}");
+        }
+    }
+
+    #[test]
+    fn a_gate_recorded_before_provenance_still_parses() {
+        // Old logs predate `source`: the field defaults to None, and a review
+        // gate from then is an unproven verdict, not a parse failure.
+        let text = r#"{"seq":7,"at_ms":5,"actor":{"type":"engine"},"kind":"gate_passed","task":"M1.1","attempt":1,"gate":"review","findings":[]}"#;
+        let event: Event = from_json(text);
+        match &event.kind {
+            EventKind::GatePassed { source, gate, .. } => {
+                assert_eq!(gate, "review");
+                assert_eq!(*source, None);
+            }
+            other => panic!("expected a passed gate, got {other:?}"),
         }
     }
 

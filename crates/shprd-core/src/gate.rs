@@ -106,6 +106,7 @@ mod tests {
             gate: String::from(name),
             passed,
             findings: Vec::new(),
+            source: None,
             seq: 1,
         }
     }

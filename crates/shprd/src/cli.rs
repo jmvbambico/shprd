@@ -291,7 +291,10 @@ pub enum AgentCommand {
     Report(ReportArgs),
     /// Record a gate result for a task attempt.
     Gate(GateArgs),
-    /// Decide a review from its findings and record what happens next.
+    /// Decide a review from the reviewer's packet and record what follows.
+    ///
+    /// Engine-only: the findings are read from the packet folder the reviewer
+    /// wrote, and the verdict carries that reviewer's provenance.
     ReviewVerdict(ReviewVerdictArgs),
     /// Escalate something to a human.
     Escalate(EscalateArgs),
@@ -406,6 +409,10 @@ pub struct ReviewArgs {
     /// Review anyway when the reviewer shares the author's vendor.
     #[arg(long)]
     pub degraded: bool,
+    /// Restart a review that is stuck: close its reviewer tab and hand the
+    /// brief to a fresh one, for the same attempt and only before a verdict.
+    #[arg(long)]
+    pub again: bool,
 }
 
 /// Arguments for `agent prompt`.
@@ -477,9 +484,6 @@ pub struct ReviewVerdictArgs {
     /// Attempt number.
     #[arg(long, value_name = "N")]
     pub attempt: u32,
-    /// JSON file holding an array of findings.
-    #[arg(long, value_name = "FILE")]
-    pub findings: PathBuf,
 }
 
 /// Arguments for `agent escalate`.

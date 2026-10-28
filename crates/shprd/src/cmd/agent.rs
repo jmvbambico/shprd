@@ -187,12 +187,14 @@ fn gate(ctx: &Ctx, args: &GateArgs) -> Result<(), CliError> {
             attempt: args.attempt,
             gate: args.gate.clone(),
             findings,
+            source: None,
         },
         GateOutcome::Fail => EventKind::GateFailed {
             task: args.task.clone(),
             attempt: args.attempt,
             gate: args.gate.clone(),
             findings,
+            source: None,
         },
     };
     let event = ctx.commit(kind)?;

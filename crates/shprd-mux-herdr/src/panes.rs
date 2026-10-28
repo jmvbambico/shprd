@@ -180,20 +180,18 @@ impl HerdrMux {
     /// `pane process-info` answers with the process and the process group
     /// herdr sees in the pane; the group is what shprd compares against the
     /// one it recorded, so a pane a host restored with its own command is
-    /// recognisable. A pane herdr no longer knows, or an answer without a
-    /// group, is `Ok(None)` — "cannot tell", which callers read as "leave it
-    /// alone".
+    /// recognisable. An answer without a group is `Ok(None)` — "cannot tell",
+    /// which callers read as "leave it alone". A pane herdr no longer knows is
+    /// not that: `pane_not_found` becomes [`MuxError::NotFound`], because a
+    /// pane that is gone is a process that stopped, and a caller that reads it
+    /// as "cannot tell" never replaces it.
     pub(crate) fn process_group_of(&self, pane: &PaneId) -> Result<Option<u32>> {
-        let result = match self.call_as(
+        let result = self.call_as(
             "pane",
             pane.as_str(),
             "pane process group",
             &["pane", "process-info", "--pane", pane.as_str()],
-        ) {
-            Ok(result) => result,
-            Err(MuxError::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
+        )?;
         Ok(Self::process_group_from(result.as_ref()))
     }
 
@@ -316,6 +314,34 @@ mod tests {
                 &json!({"process_info": {"foreground_process_group_id": -1}})
             )),
             None
+        );
+    }
+
+    /// A `herdr` that answers every command with the JSON herdr prints for a
+    /// pane it no longer knows, which is how a pane a human closed looks.
+    #[cfg(unix)]
+    fn herdr_without_the_pane(dir: &Path) -> HerdrMux {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = dir.join("herdr");
+        let script = format!(
+            "#!/bin/sh\ncat >&2 <<'JSON'\n{}\nJSON\nexit 1\n",
+            NOT_FOUND.trim()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        HerdrMux::with_bin(&bin)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pane_the_host_forgot_is_not_found_not_cannot_tell() {
+        let dir = tempfile::tempdir().unwrap();
+        let mux = herdr_without_the_pane(dir.path());
+        let err = mux.process_group_of(&PaneId::new("nope:p9")).unwrap_err();
+        assert!(
+            matches!(err, MuxError::NotFound { .. }),
+            "a vanished pane is gone, not a host that cannot tell: {err}"
         );
     }
 

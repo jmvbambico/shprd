@@ -84,6 +84,7 @@ pub fn events() -> Vec<Event> {
                 attempt: 1,
                 gate: "lint".to_string(),
                 findings: vec![],
+                source: None,
             },
         ),
         ev(
@@ -129,6 +130,7 @@ pub fn events() -> Vec<Event> {
                     location: Some("crates/shprd-views/src/brief.rs:9".to_string()),
                     detail: "replace the unwrap with a match".to_string(),
                 }],
+                source: None,
             },
         ),
         ev(

@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use serde_json::{Value, json};
 use shprd_core::event::{EventKind, ReportStatus};
+use shprd_core::gate::REVIEW_GATE;
 use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_mux::{Mux, naming};
@@ -85,6 +86,8 @@ pub struct ReviewRequest {
     pub task: String,
     /// Review even when the reviewer shares the author's vendor.
     pub degraded: bool,
+    /// Restart a review that is already requested and not yet decided.
+    pub again: bool,
 }
 
 /// What a review did.
@@ -334,6 +337,102 @@ fn reviewed_attempt(task: &Task) -> Result<&Attempt, CliError> {
     }
 }
 
+/// The attempt a review may restart, or the refusal saying why not.
+///
+/// A restart is for a review that exists and is not decided: the attempt needs
+/// a recorded request and no verdict, because once the review gate has passed or
+/// failed, the review is over and the way forward is the next attempt, not a
+/// second reviewer on this one.
+fn restartable_attempt(task: &Task) -> Result<&Attempt, CliError> {
+    // The request and the verdict are read before the status, because a verdict
+    // is what moved the task to Passed or Failed: the caller needs to hear that
+    // the review is decided, not that the task is no longer Reported.
+    let attempt = task
+        .attempts
+        .last()
+        .ok_or_else(|| CliError::Invalid(anyhow!("task {:?} has no attempt to review", task.id)))?;
+    if attempt.reviews.is_empty() {
+        return Err(CliError::Invalid(anyhow!(
+            "task {:?} attempt {} has no review to restart: run `shprd agent review --task {}` first",
+            task.id,
+            attempt.n,
+            task.id
+        )));
+    }
+    if let Some(gate) = attempt
+        .gates
+        .iter()
+        .rev()
+        .find(|gate| gate.gate == REVIEW_GATE)
+    {
+        let decided = if gate.passed { "passed" } else { "failed" };
+        return Err(CliError::Invalid(anyhow!(
+            "task {:?} attempt {} already has a review verdict that {decided}: there is nothing to \
+             restart, so start the next attempt instead",
+            task.id,
+            attempt.n
+        )));
+    }
+    reviewed_attempt(task)
+}
+
+/// Refuses a restart the findings file says is a mistake.
+///
+/// The watchdog reads the reviewer's `findings.json` once it settles, so a
+/// restart that deletes the file destroys finished work when the reviewer was
+/// only just ahead of the watch. Two states are therefore refused, and both
+/// leave the packet exactly as it was:
+///
+/// - findings that parse: the review is decided, and the next tick records the
+///   verdict, so there is nothing to restart;
+/// - a file younger than the watchdog's settle window: the reviewer may still
+///   be writing, so what is on disk is not yet the review's last word.
+///
+/// A settled file that does not parse is the one case a restart may clear: the
+/// watchdog escalates an invalid packet instead of deciding from it, so the
+/// review genuinely has to be started over.
+fn check_restartable_findings(
+    reviews: &Path,
+    run: &str,
+    task: &str,
+    attempt: u32,
+) -> Result<(), CliError> {
+    let path = findings_path(reviews, run, task, attempt);
+    if !path.exists() {
+        return Ok(());
+    }
+    if crate::cmd::verdict::read_findings(&path).is_ok() {
+        return Err(CliError::Invalid(anyhow!(
+            "the reviewer already wrote its findings: the watchdog will record the verdict"
+        )));
+    }
+    if crate::cmd::watch::settled_mtime(&path).is_none() {
+        return Err(CliError::Invalid(anyhow!(
+            "the reviewer is still writing its findings; try again shortly"
+        )));
+    }
+    Ok(())
+}
+
+/// Removes the findings file a previous reviewer may have left behind.
+///
+/// A reviewer writes `findings.json` when it is done, and the watchdog acts on
+/// that file. A restart must not let a half-written file from the review it
+/// replaces be read as the new review's verdict, so the packet is cleared of it
+/// before the fresh reviewer starts. No file is the normal case, not a failure;
+/// a file worth keeping never reaches here, because
+/// [`check_restartable_findings`] refuses the restart first.
+fn clear_findings(reviews: &Path, run: &str, task: &str, attempt: u32) -> Result<(), CliError> {
+    let path = findings_path(reviews, run, task, attempt);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(CliError::other(
+            anyhow!(err).context(format!("removing {}", path.display())),
+        )),
+    }
+}
+
 /// The agent a review runs on, with everything needed to start it.
 #[derive(Debug, Clone)]
 pub struct Reviewer {
@@ -506,7 +605,7 @@ pub struct ReviewBrief<'a> {
 /// It names the three files the reviewer may read, says plainly that the
 /// repository is off limits, and ends by telling the reviewer to write its
 /// findings and stop: the reviewer runs no `shprd` command, because its folder
-/// is outside the repository and the orchestration submits the verdict instead.
+/// is outside the repository and the engine records the verdict instead.
 pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -547,8 +646,8 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str("## Then\n\n");
     out.push_str(
         "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
-         not a repository, so no command of yours would reach the run log. The orchestrator reads \
-         your file and records the verdict itself.\n",
+         not a repository, so no command of yours would reach the run log. The engine reads your \
+         file and records the verdict itself, naming you and the hash of what you wrote.\n",
     );
     out
 }
@@ -642,7 +741,10 @@ fn start_in_tab(
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
         body: "review brief not delivered".to_string(),
-        default_action: "resend the review brief into the reviewer tab".to_string(),
+        default_action: format!(
+            "run `shprd agent review --task {task} --again`, which closes the reviewer \
+             tab and delivers the brief again; never type into the reviewer's tab"
+        ),
     };
     if let Err(err) = env.spawn.ctx.commit(escalation) {
         eprintln!("warning: could not record the escalation: {err}");
@@ -756,7 +858,11 @@ pub fn review(
 ) -> Result<ReviewReport, CliError> {
     let state = env.spawn.ctx.state()?;
     let task = spawn::task_of(&state, &req.task)?;
-    let attempt = reviewed_attempt(task)?;
+    let attempt = if req.again {
+        restartable_attempt(task)?
+    } else {
+        reviewed_attempt(task)?
+    };
     let reviewer = choose_reviewer(
         env.reviewer.as_deref(),
         &attempt.agent,
@@ -766,6 +872,22 @@ pub fn review(
     )?;
     if let Some(note) = &reviewer.note {
         eprintln!("{note}");
+    }
+    // A restart replaces the review it restarts: the old reviewer's tab is
+    // closed and any findings it half-wrote are removed before the packet is
+    // rebuilt, so nothing reads a stale verdict as this review's.
+    if req.again {
+        // Refused before the first side effect, because a closed tab and a
+        // removed file are not undone by an error on the next line.
+        check_restartable_findings(&env.reviews_dir, &env.spawn.run, &task.id, attempt.n)?;
+        close_reviewer(
+            mux,
+            &env.spawn.briefs_dir,
+            &env.spawn.run,
+            &task.id,
+            attempt.n,
+        )?;
+        clear_findings(&env.reviews_dir, &env.spawn.run, &task.id, attempt.n)?;
     }
     let dir = write_packet(env, task, attempt)?;
     let brief_path = brief_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n);
@@ -812,6 +934,7 @@ pub fn review_verb(ctx: &Ctx, args: &ReviewArgs, home: Option<&Path>) -> Result<
     let request = ReviewRequest {
         task: args.task.clone(),
         degraded: args.degraded,
+        again: args.again,
     };
     let report = review(&mux, &env, &request)?;
     if ctx.json {
@@ -838,10 +961,10 @@ mod tests {
 
     use std::collections::BTreeMap;
     use std::process::Command;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use shprd_core::config::Skills;
-    use shprd_core::event::Actor;
+    use shprd_core::event::{Actor, ReviewSource};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
     use shprd_mux::naming;
@@ -1141,6 +1264,7 @@ project_dirs = []
         ReviewRequest {
             task: "T1".to_string(),
             degraded,
+            again: false,
         }
     }
 
@@ -1190,7 +1314,8 @@ project_dirs = []
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
         // The reviewer writes and stops: no shprd verb is asked of it, because
-        // its folder is outside the repository and the orchestrator submits.
+        // its folder is outside the repository and the engine records the
+        // verdict.
         assert!(!brief.contains("shprd agent"), "{brief}");
         assert!(brief.contains("findings.json` and stop"), "{brief}");
         assert!(brief.contains("REVIEWER"), "{brief}");
@@ -1493,7 +1618,8 @@ project_dirs = []
         assert_eq!(body, "review brief not delivered");
         assert_eq!(
             default_action,
-            "resend the review brief into the reviewer tab"
+            "run `shprd agent review --task T1 --again`, which closes the reviewer tab and \
+             delivers the brief again; never type into the reviewer's tab"
         );
         assert_eq!(
             detection_polls(&mux),
@@ -1501,6 +1627,282 @@ project_dirs = []
             "the brief was retried exactly once before the escalation"
         );
         assert!(prompts(&mux).is_empty(), "nothing may be typed in");
+    }
+
+    /// A review request that restarts the review it replaces.
+    fn restart() -> ReviewRequest {
+        ReviewRequest {
+            task: "T1".to_string(),
+            degraded: false,
+            again: true,
+        }
+    }
+
+    /// Writes `T1`'s `findings.json` and ages it by `age`, so a test says
+    /// whether the watch would already have read it.
+    fn wrote_findings(env: &ReviewEnv<'_>, text: &str, age: Duration) -> PathBuf {
+        let path = findings_path(&env.reviews_dir, &env.spawn.run, "T1", 1);
+        std::fs::create_dir_all(path.parent().unwrap_or(&env.reviews_dir))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&path, text).unwrap_or_else(|err| panic!("{err}"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|err| panic!("{err}"));
+        file.set_modified(SystemTime::now() - age)
+            .unwrap_or_else(|err| panic!("{err}"));
+        path
+    }
+
+    /// A findings file a reviewer wrote and finished: one minor finding.
+    const WRITTEN_FINDINGS: &str = r#"[{"severity":"minor","title":"a nit","location":null,
+        "detail":"worth a look"}]"#;
+
+    /// Every tab the host was asked to close, oldest first.
+    fn closed_tabs(mux: &FakeMux) -> Vec<String> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CloseTab(tab) => Some(tab.as_str().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every tab the host was asked to open, oldest first.
+    fn opened_tabs(mux: &FakeMux) -> Vec<String> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CreateTab(_, title, _) => Some(title),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The review requests the run log holds for `T1` attempt 1.
+    fn recorded_reviews(ctx: &Ctx) -> Vec<shprd_core::state::ReviewRequest> {
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        match state.tasks.get("T1").and_then(|task| task.latest_attempt()) {
+            Some(attempt) => attempt.reviews.clone(),
+            None => panic!("the attempt is missing"),
+        }
+    }
+
+    #[test]
+    fn a_restart_replaces_an_undelivered_reviewer() {
+        // The first review's brief never lands, so the human would see the
+        // escalation. A restart closes that reviewer, clears whatever it left
+        // behind and hands the brief to a fresh tab, for the same attempt.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.unready_mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let first = recorded_tab(&env, "T1", 1);
+        assert_eq!(
+            open_tabs(&mux, &env),
+            vec![first.clone()],
+            "the record names the tab the first review opened"
+        );
+        // A reviewer that got as far as writing a findings file leaves it in
+        // the packet; a restart must not let the watchdog read it. The file is
+        // aged past the settle window, because a fresh one may still be being
+        // written: a restart refuses that case instead of clearing it.
+        let findings = wrote_findings(&env, "[", Duration::from_secs(60));
+        // The fresh reviewer's pane is an agent from its first poll.
+        let fresh = PaneId::new("pane-2");
+        mux.set_state_after(&fresh, 0, AgentState::Idle);
+
+        let report = review(&mux, &env, &restart()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.attempt, 1, "a restart keeps the attempt");
+        assert_eq!(
+            closed_tabs(&mux),
+            vec![first.clone()],
+            "the old reviewer's tab is the one closed"
+        );
+        let fresh_tab = recorded_tab(&env, "T1", 1);
+        assert_ne!(fresh_tab, first, "the record names the new tab");
+        assert_eq!(
+            open_tabs(&mux, &env),
+            vec![fresh_tab],
+            "only the fresh reviewer is open, and the record names it"
+        );
+        assert_eq!(opened_tabs(&mux).len(), 2, "one reviewer tab per request");
+        assert!(
+            !findings.exists(),
+            "a restart clears a partial findings file"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            brief.contains("REVIEWER"),
+            "the brief still points at the packet"
+        );
+        assert!(
+            mux.calls()
+                .into_iter()
+                .any(|call| matches!(call, Call::Prompt(pane, text) if pane == fresh && text.contains("REVIEWER"))),
+            "the brief is delivered to the fresh reviewer"
+        );
+        assert_eq!(
+            recorded_reviews(&ctx).len(),
+            2,
+            "the restart records a second request for the same attempt"
+        );
+    }
+
+    #[test]
+    fn a_restart_after_a_verdict_is_refused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let request = recorded_reviews(&ctx)
+            .last()
+            .cloned()
+            .unwrap_or_else(|| panic!("the review request is missing"));
+        // A verdict is the engine's to record, from the packet the reviewer
+        // wrote: exactly what `verdict` records, which is what the restart sees.
+        ctx.as_actor(Actor::Engine)
+            .commit(EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+                source: Some(ReviewSource {
+                    reviewer: request.reviewer.clone(),
+                    findings_sha256: "ba7816bf".to_string(),
+                    request_seq: request.seq,
+                }),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let err = review(&mux, &env, &restart()).expect_err("a decided review cannot restart");
+        let message = format!("{err}");
+        assert!(
+            message.contains("already has a review verdict"),
+            "{message}"
+        );
+        assert_eq!(opened_tabs(&mux).len(), 1, "no second reviewer tab opened");
+        assert!(
+            closed_tabs(&mux).is_empty(),
+            "the decided reviewer stays open"
+        );
+    }
+
+    /// A restart never deletes findings the reviewer finished writing.
+    ///
+    /// The reviewer can be ahead of the watch: the file is written and valid,
+    /// and the next tick will record its verdict. Deleting it would throw away
+    /// a finished review, so the restart is refused and the file stays.
+    #[test]
+    fn a_restart_never_discards_written_findings() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let findings = wrote_findings(&env, WRITTEN_FINDINGS, Duration::ZERO);
+
+        let err = review(&mux, &env, &restart()).expect_err("finished findings are not stale");
+
+        assert_eq!(err.exit_code(), 2, "a refusal exits 2: {err}");
+        let message = format!("{err}");
+        assert!(
+            message.contains("the reviewer already wrote its findings"),
+            "{message}"
+        );
+        assert!(
+            message.contains("the watchdog will record the verdict"),
+            "{message}"
+        );
+        assert!(
+            findings.exists(),
+            "written findings must survive the refusal"
+        );
+        assert_eq!(opened_tabs(&mux).len(), 1, "no fresh reviewer is opened");
+        assert!(
+            closed_tabs(&mux).is_empty(),
+            "the reviewer that wrote the findings stays open"
+        );
+    }
+
+    /// A restart never clears a findings file the reviewer may still be writing.
+    ///
+    /// Inside the watch's settle window the file on disk is not yet the
+    /// review's last word, so it is neither readable nor deletable: the restart
+    /// is refused and the human is told to come back.
+    #[test]
+    fn a_restart_never_clears_a_file_still_being_written() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        // Half a JSON array: a reviewer caught mid-write.
+        let findings = wrote_findings(&env, "[", Duration::ZERO);
+
+        let err = review(&mux, &env, &restart()).expect_err("a fresh file is still being written");
+
+        assert_eq!(err.exit_code(), 2, "a refusal exits 2: {err}");
+        let message = format!("{err}");
+        assert!(
+            message.contains("the reviewer is still writing its findings"),
+            "{message}"
+        );
+        assert!(message.contains("try again shortly"), "{message}");
+        assert!(findings.exists(), "a file mid-write must not be deleted");
+        assert_eq!(opened_tabs(&mux).len(), 1, "no fresh reviewer is opened");
+        assert!(
+            closed_tabs(&mux).is_empty(),
+            "the writing reviewer's tab stays open"
+        );
+    }
+
+    /// A settled findings file that does not parse is the one a restart clears.
+    ///
+    /// The watch escalates that packet instead of deciding from it, so the
+    /// review really has to be started over, and the file left by the reviewer
+    /// it replaces must not be read as the new review's verdict.
+    #[test]
+    fn a_restart_clears_a_settled_invalid_packet() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let findings = wrote_findings(&env, "not json at all", Duration::from_secs(60));
+
+        let report = review(&mux, &env, &restart()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.attempt, 1, "a restart keeps the attempt");
+        assert!(
+            !findings.exists(),
+            "a settled invalid file is cleared for the fresh reviewer"
+        );
+        assert_eq!(opened_tabs(&mux).len(), 2, "the fresh reviewer is opened");
+    }
+
+    #[test]
+    fn a_restart_without_a_review_is_refused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &restart()).expect_err("there is no review to restart");
+        let message = format!("{err}");
+        assert!(message.contains("has no review to restart"), "{message}");
+        assert!(opened_tabs(&mux).is_empty(), "no reviewer tab opened");
+        assert!(!env.reviews_dir.exists(), "no packet may be written");
     }
 
     /// The shipped `data/harness` directory.
@@ -1614,15 +2016,12 @@ project_dirs = []
             "the review left no tab for the verdict to close"
         );
 
-        let outcome = crate::cmd::verdict::submit_verdict(
-            &mux,
-            &ctx,
-            Some(scratch.home.path()),
-            "T1",
-            1,
-            &findings,
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        // The engine records the verdict, not the human default: only the
+        // engine may turn a reviewer's packet into a gate result.
+        let engine = Ctx::new(ctx.root.clone(), Actor::Engine, ctx.json, ctx.no_dagr);
+        let outcome =
+            crate::cmd::verdict::submit_verdict(&mux, &engine, Some(scratch.home.path()), "T1", 1)
+                .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(outcome, crate::cmd::verdict::Outcome::Passed);
         assert!(

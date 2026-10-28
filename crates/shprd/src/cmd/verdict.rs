@@ -4,12 +4,14 @@
 //! policy in [`shprd_core::gate`] — so the pass/fail call always comes from
 //! code — and records either the pass, or the failure plus its consequence.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::{self, Review};
-use shprd_core::event::{EventKind, Finding};
+use shprd_core::event::{Actor, EventKind, Finding, ReviewSource};
 use shprd_core::gate::{self, Next, REVIEW_GATE};
+use shprd_core::hash;
+use shprd_core::rules::RuleError;
 use shprd_mux::Mux;
 
 use crate::cli::ReviewVerdictArgs;
@@ -42,8 +44,9 @@ pub fn verdict_verb(
     args: &ReviewVerdictArgs,
     home: Option<&Path>,
 ) -> Result<(), CliError> {
+    require_engine(ctx, &args.task)?;
     let mux = spawn::real_mux();
-    let outcome = submit_verdict(&mux, ctx, home, &args.task, args.attempt, &args.findings)?;
+    let outcome = submit_verdict(&mux, ctx, home, &args.task, args.attempt)?;
     match outcome {
         Outcome::Passed => println!("review passed"),
         Outcome::SentBack { blocking } => {
@@ -56,24 +59,32 @@ pub fn verdict_verb(
     Ok(())
 }
 
-/// Applies the review policy to `findings_path` and records what it decides.
+/// Applies the review policy to the reviewer's packet and records what it
+/// decides.
 ///
 /// The reviewer only writes findings; the call to pass or fail is made here, by
-/// [`gate`], so a verdict is reproducible from the file alone. `home` picks the
-/// config the policy comes from, as `--home` does for every other verb. The
-/// verdict is also the reviewer's last word: once it is recorded, the reviewer's
-/// tab is closed, and `mux` is the host that closes it.
+/// [`gate`], so a verdict is reproducible from the file alone. The file is the
+/// packet's own [`review::findings_path`], never one a caller names: a verdict
+/// must come from the reviewer, so the only findings that can decide a review
+/// are the ones written into its packet. `home` picks the config the policy
+/// comes from, as `--home` does for every other verb. The verdict is also the
+/// reviewer's last word: once it is recorded, the reviewer's tab is closed, and
+/// `mux` is the host that closes it.
 pub fn submit_verdict(
     mux: &dyn Mux,
     ctx: &Ctx,
     home: Option<&Path>,
     task: &str,
     attempt: u32,
-    findings_path: &Path,
 ) -> Result<Outcome, CliError> {
     let home = crate::ctx::resolve_home(home)?;
     let policy = review_policy(ctx, Some(&home))?;
-    let findings = read_findings(findings_path)?;
+    let findings_path = packet_path(ctx, &home, task, attempt)?;
+    let bytes = std::fs::read(&findings_path)
+        .with_context(|| format!("reading findings from {}", findings_path.display()))
+        .map_err(CliError::Invalid)?;
+    let findings = parse_findings(&bytes, &findings_path)?;
+    let source = provenance(ctx, task, attempt, &bytes)?;
     let decided = gate::verdict(&findings, policy.must_fix);
     if decided.passed {
         // A pass keeps every finding it was given: minor advice is still worth
@@ -83,6 +94,7 @@ pub fn submit_verdict(
             attempt,
             gate: REVIEW_GATE.to_string(),
             findings,
+            source: Some(source),
         };
         record(ctx, kind)?;
         close_reviewer(mux, ctx, &home, task, attempt);
@@ -94,6 +106,7 @@ pub fn submit_verdict(
         attempt,
         gate: REVIEW_GATE.to_string(),
         findings,
+        source: Some(source),
     };
     record(ctx, kind)?;
     // The verdict is the review's last word, so the reviewer's tab is done:
@@ -114,6 +127,66 @@ pub fn submit_verdict(
             Ok(Outcome::Escalated { blocking })
         }
     }
+}
+
+/// Refuses the verb outright for any actor but the engine.
+///
+/// The rule in [`shprd_core::rules`] refuses the same thing when the event is
+/// appended; this says it before a file is read, and names the verb's own
+/// escape hatch for a human, so an orchestrator that tries to review itself is
+/// told what to do instead of watching a verdict it cannot record.
+fn require_engine(ctx: &Ctx, task: &str) -> Result<(), CliError> {
+    if matches!(ctx.actor, Actor::Engine) {
+        return Ok(());
+    }
+    Err(CliError::Refused(RuleError::VerdictNotFromReviewer {
+        task: task.to_string(),
+    }))
+}
+
+/// The provenance a review verdict carries: who reviewed, and what it read.
+///
+/// The reviewer is the one the review dispatch recorded, never the actor that
+/// ran the verb: the engine decides, but the finding's author is the reviewer.
+/// The hash pins the exact bytes folded into the gate result, so a reader can
+/// tell whether the packet still says what the verdict decided.
+fn provenance(ctx: &Ctx, task: &str, attempt: u32, bytes: &[u8]) -> Result<ReviewSource, CliError> {
+    let state = ctx.state()?;
+    let found = state
+        .tasks
+        .get(task)
+        .ok_or_else(|| CliError::Invalid(anyhow!("no such task: {task}")))?;
+    let current = found
+        .attempts
+        .last()
+        .filter(|current| current.n == attempt)
+        .ok_or_else(|| CliError::Invalid(anyhow!("task {task} has no attempt {attempt}")))?;
+    let request = current.reviews.last().ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
+        ))
+    })?;
+    Ok(ReviewSource {
+        // The request's own seq travels with the verdict, so a request recorded
+        // after this read supersedes it instead of being answered by it.
+        request_seq: request.seq,
+        reviewer: request.reviewer.clone(),
+        findings_sha256: hash::sha256_hex(bytes),
+    })
+}
+
+/// The findings file the reviewer for one attempt wrote.
+///
+/// It is derived, never passed in: the packet folder names the run, the task and
+/// the attempt, and only a reviewer writes inside it.
+fn packet_path(ctx: &Ctx, home: &Path, task: &str, attempt: u32) -> Result<PathBuf, CliError> {
+    let run = active_run(ctx).ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no run has started: there is no review packet for {task} attempt {attempt}"
+        ))
+    })?;
+    let reviews = home.join(".shprd").join("reviews");
+    Ok(review::findings_path(&reviews, &run, task, attempt))
 }
 
 /// Closes the reviewer's tab for one attempt, once its verdict is recorded.
@@ -153,10 +226,15 @@ fn review_policy(ctx: &Ctx, home: Option<&Path>) -> Result<Review, CliError> {
 /// Unreadable or invalid findings are the caller's mistake, so they exit 2 as
 /// a rule refusal does, naming the file.
 pub(crate) fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
-    let text = std::fs::read_to_string(path)
+    let bytes = std::fs::read(path)
         .with_context(|| format!("reading findings from {}", path.display()))
         .map_err(CliError::Invalid)?;
-    serde_json::from_str(&text)
+    parse_findings(&bytes, path)
+}
+
+/// Parses the JSON array of findings the reviewer reported.
+fn parse_findings(bytes: &[u8], path: &Path) -> Result<Vec<Finding>, CliError> {
+    serde_json::from_slice(bytes)
         .with_context(|| format!("parsing findings in {}", path.display()))
         .map_err(CliError::Invalid)
 }

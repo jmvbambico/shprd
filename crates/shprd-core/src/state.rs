@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind, TaskId,
+    Actor, AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind,
+    ReviewSource, TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -54,6 +55,13 @@ pub struct RunState {
     /// own session: a pane whose foreground group is not this one was
     /// relaunched by the host, not by shprd.
     pub orchestrator: Option<OrchestratorInfo>,
+    /// The watchdog shprd started, once `up` launched one.
+    ///
+    /// The watchdog is the run's automation rather than an agent: it turns a
+    /// reviewer's findings into a verdict and hands off a dry worker. `up`
+    /// keeps it alive across invocations, which is what the pane and its
+    /// process group are for.
+    pub watch: Option<WatchInfo>,
     /// Sequence number of the last applied event, 0 before the first.
     pub last_seq: u64,
 }
@@ -86,6 +94,16 @@ pub struct OrchestratorInfo {
     pub pane: String,
     /// The pane's foreground process group when shprd started it.
     pub process_group: u32,
+}
+
+/// The watchdog shprd started for this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchInfo {
+    /// The pane it runs in, inside the human's chat tab.
+    pub pane: String,
+    /// The pane's foreground process group when shprd started it, when the
+    /// host could report one.
+    pub process_group: Option<u32>,
 }
 
 /// The run's identity.
@@ -175,6 +193,12 @@ pub struct ReviewRequest {
     pub reviewer: AgentId,
     /// True when the reviewer shares the author's vendor.
     pub degraded: bool,
+    /// The `seq` of the event that recorded this request.
+    ///
+    /// A restart records a second request for the same attempt, so the two are
+    /// told apart by position: a verdict answers the request whose seq it
+    /// carries, and only the latest one is still answerable.
+    pub seq: u64,
 }
 
 /// What an agent reported about an attempt.
@@ -203,6 +227,12 @@ pub struct GateResult {
     pub passed: bool,
     /// What it found.
     pub findings: Vec<Finding>,
+    /// Provenance of a review verdict, when the gate was `review`.
+    ///
+    /// A review gate with no source was recorded by something other than the
+    /// reviewer's packet, which is exactly what a landing decision must not
+    /// read as an independent review.
+    pub source: Option<ReviewSource>,
     /// Sequence number of the event that recorded it.
     pub seq: u64,
 }
@@ -292,9 +322,18 @@ impl RunState {
         rules::check(self, kind, now_ms)
     }
 
+    /// Checks `kind` as `actor` caused it against the rules, applying nothing.
+    ///
+    /// This is the check a verb about to write wants: the rules read the actor
+    /// — only the engine may record a review verdict — so a pre-check that
+    /// assumed a human would refuse what the append would accept.
+    pub fn check_as(&self, actor: &Actor, kind: &EventKind, now_ms: u64) -> Result<(), RuleError> {
+        rules::check_as(self, actor, kind, now_ms)
+    }
+
     /// Checks `event` against the rules, then applies it and records its seq.
     pub fn apply(&mut self, event: &Event) -> Result<(), RuleError> {
-        rules::check_as(self, &event.actor, &event.kind, event.at_ms)?;
+        rules::replay_as(self, &event.actor, &event.kind, event.at_ms)?;
         self.mutate(event);
         self.last_seq = event.seq;
         Ok(())
@@ -406,12 +445,14 @@ impl RunState {
                 task,
                 gate,
                 findings,
+                source,
                 ..
             }
             | EventKind::GateFailed {
                 task,
                 gate,
                 findings,
+                source,
                 ..
             } => {
                 let passed = matches!(event.kind, EventKind::GatePassed { .. });
@@ -426,6 +467,7 @@ impl RunState {
                             gate: gate.clone(),
                             passed,
                             findings: findings.clone(),
+                            source: source.clone(),
                             seq: event.seq,
                         });
                     }
@@ -445,6 +487,7 @@ impl RunState {
                     current.reviews.push(ReviewRequest {
                         reviewer: reviewer.clone(),
                         degraded: *degraded,
+                        seq: event.seq,
                     });
                 }
             }
@@ -573,6 +616,15 @@ impl RunState {
             } => {
                 self.orchestrator = Some(OrchestratorInfo {
                     title: title.clone(),
+                    pane: pane.clone(),
+                    process_group: *process_group,
+                });
+            }
+            EventKind::WatchLaunched {
+                pane,
+                process_group,
+            } => {
+                self.watch = Some(WatchInfo {
                     pane: pane.clone(),
                     process_group: *process_group,
                 });

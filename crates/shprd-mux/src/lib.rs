@@ -122,7 +122,10 @@ pub trait Mux: Send + Sync {
     ///
     /// `Ok(None)` means the host cannot tell, which is not an error: callers
     /// keep their conservative behaviour (leave the pane alone) rather than
-    /// read "no group" as "not mine".
+    /// read "no group" as "not mine". A pane the host does not know is
+    /// [`MuxError::NotFound`], never `Ok(None)`: the pane's process is gone,
+    /// which is a different answer from a live pane with no group to report,
+    /// and the one callers replace.
     fn pane_process_group(&self, _pane: &PaneId) -> Result<Option<u32>> {
         Ok(None)
     }

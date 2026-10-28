@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use shprd_core::event::{Event, EventKind};
+use shprd_core::event::{Actor, Event, EventKind};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
@@ -168,6 +168,10 @@ impl Watcher {
         let Some(reviews) = reviews_dir(env) else {
             return Ok(());
         };
+        // A verdict is the engine's to record, whoever started the watch: the
+        // reviewer writes findings and nothing else, so the actor that folds
+        // them into a gate result is always the engine.
+        let engine = env.ctx.as_actor(Actor::Engine);
         for task in state.tasks.values() {
             let Some(attempt) = awaiting_review(task) else {
                 continue;
@@ -189,8 +193,7 @@ impl Watcher {
                 lines.push(format!("escalated {}: invalid findings.json", task.id));
                 continue;
             }
-            let outcome =
-                verdict::submit_verdict(mux, env.ctx, home_of(env), &task.id, attempt, &path)?;
+            let outcome = verdict::submit_verdict(mux, &engine, home_of(env), &task.id, attempt)?;
             let word = match outcome {
                 verdict::Outcome::Passed => "passed",
                 verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",
@@ -422,7 +425,10 @@ const FINDINGS_SETTLE: Duration = Duration::from_secs(2);
 const INVALID_FINDINGS_ACTION: &str = "read the packet and decide the review by hand";
 
 /// The mtime of `path`, when the file is old enough for the watchdog to read.
-fn settled_mtime(path: &Path) -> Option<SystemTime> {
+///
+/// A restart asks the same question: findings that are not settled yet may
+/// still be being written, so `review --again` must not delete them.
+pub(crate) fn settled_mtime(path: &Path) -> Option<SystemTime> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let age = SystemTime::now().duration_since(modified).ok()?;
     (age >= FINDINGS_SETTLE).then_some(modified)
@@ -495,12 +501,64 @@ fn spawned_at_ms(events: &[Event], task: &str, attempt: u32) -> u64 {
         .unwrap_or(0)
 }
 
+/// The line a watchdog prints when the run already has one.
+const ALREADY_WATCHING: &str = "another watchdog is already running for this run";
+
+/// The file a run's single watchdog holds: `watch.lock` beside the event log,
+/// so one run's claim is never another's.
+fn lock_path(log_path: &Path) -> PathBuf {
+    log_path.with_file_name("watch.lock")
+}
+
+/// Claims the run's watchdog slot, holding it until the process exits.
+///
+/// One watchdog per run is what makes the verdicts and the hand-offs add up,
+/// and `up` cannot promise it alone: when a host refuses to close both the
+/// stale pane and its replacement, two `shprd watch` processes are left in one
+/// run. The kernel's lock settles that without one polling the other: the OS
+/// drops it when the process dies, so a crashed watchdog never leaves a claim
+/// behind, and a duplicate gets `Ok(None)` and steps aside.
+///
+/// `Ok(None)` is not an error: the duplicate is harmless once it exits.
+fn claim_run(log_path: &Path) -> Result<Option<std::fs::File>, CliError> {
+    let path = lock_path(log_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| lock_error(&path, source))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|source| lock_error(&path, source))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(source)) => Err(lock_error(&path, source)),
+    }
+}
+
+/// The failure a lock file's I/O maps to, naming the file.
+fn lock_error(path: &Path, source: std::io::Error) -> CliError {
+    CliError::other(anyhow::anyhow!(
+        "could not lock {}: {source}",
+        path.display()
+    ))
+}
+
 /// The `watch` verb: poll every working agent once per interval.
 ///
 /// The loop only ends when the caller stops it: an unattended run wants the
 /// watchdog up for as long as the run lasts, and `--once` is how a caller asks
 /// for a single pass.
 pub fn run_verb(ctx: &Ctx, args: &WatchArgs, home: Option<&Path>) -> Result<(), CliError> {
+    // The claim comes first, before the watchdog reads anything: a duplicate
+    // must do nothing but step aside, and a second reading of the run's state
+    // is already a second watchdog's work.
+    let Some(_claim) = claim_run(&ctx.log_path)? else {
+        println!("{ALREADY_WATCHING}");
+        return Ok(());
+    };
     let mux = spawn::real_mux();
     let env = spawn::build_env(ctx, home)?;
     let mut watcher = Watcher::new(Policy::default());
@@ -549,6 +607,57 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, "{}\n").unwrap_or_else(|err| panic!("{err}"));
         path
+    }
+
+    #[test]
+    fn the_lock_sits_beside_the_event_log() {
+        assert_eq!(
+            lock_path(Path::new("/repos/shprd/.shprd/events.jsonl")),
+            Path::new("/repos/shprd/.shprd/watch.lock")
+        );
+        // The duplicate is told why it exits, in the words the human reads.
+        assert!(
+            ALREADY_WATCHING.contains("another watchdog is already running"),
+            "{ALREADY_WATCHING}"
+        );
+    }
+
+    #[test]
+    fn only_one_watchdog_claims_one_run() {
+        let home = home();
+        let log = home.path().join(".shprd").join("events.jsonl");
+        let first = claim_run(&log)
+            .expect("the first claim is taken")
+            .expect("nothing else holds the run");
+        assert!(
+            claim_run(&log)
+                .expect("the second claim is tried")
+                .is_none(),
+            "the second watchdog steps aside"
+        );
+        drop(first);
+        assert!(
+            claim_run(&log)
+                .expect("a claim after the first is gone")
+                .is_some(),
+            "the lock dies with the process that held it"
+        );
+    }
+
+    #[test]
+    fn one_runs_claim_is_not_anothers() {
+        let home = home();
+        let first = home.path().join("one/.shprd/events.jsonl");
+        let second = home.path().join("two/.shprd/events.jsonl");
+        let _claimed = claim_run(&first)
+            .expect("the first run's claim is taken")
+            .expect("nothing else holds it");
+        assert!(
+            claim_run(&second)
+                .expect("the second run's claim is taken")
+                .is_some(),
+            "a run's watchdog does not keep another run's from starting"
+        );
     }
 
     #[test]
@@ -1053,6 +1162,24 @@ project_dirs = []
         assert!(
             lines.iter().any(|line| line == "\u{25c7} T1 review passed"),
             "{lines:?}"
+        );
+        // The watch records the verdict as the engine, whoever started it: the
+        // context here is a human's, and only the engine may record a review.
+        let verdict = fresh
+            .iter()
+            .find(|event| {
+                matches!(&event.kind, EventKind::GatePassed { gate, .. } if gate == REVIEW_GATE)
+            })
+            .unwrap_or_else(|| panic!("no verdict to inspect: {lines:?}"));
+        assert_eq!(verdict.actor, Actor::Engine, "the verdict's actor");
+        assert!(
+            matches!(
+                &verdict.kind,
+                EventKind::GatePassed { source: Some(source), .. }
+                    if !source.reviewer.is_empty() && !source.findings_sha256.is_empty()
+            ),
+            "the verdict carried no provenance: {:?}",
+            verdict.kind
         );
     }
 
