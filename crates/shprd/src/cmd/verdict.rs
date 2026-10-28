@@ -118,7 +118,7 @@ fn review_policy(ctx: &Ctx, home: Option<&Path>) -> Result<Review, CliError> {
 ///
 /// Unreadable or invalid findings are the caller's mistake, so they exit 2 as
 /// a rule refusal does, naming the file.
-fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
+pub(crate) fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading findings from {}", path.display()))
         .map_err(CliError::Invalid)?;
