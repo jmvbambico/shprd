@@ -210,7 +210,8 @@ From this point, shprd is built with shprd.
 | M7.1 | Transcript readers for the orchestrator CLIs (claude and codex first) | `shprd-tui/src/transcript/` | M |
 | M7.2 | `shprd·chat`, Transcript design: messages, event cards, pinned attention, composer, `/` commands | `shprd-tui/src/chat/` | L |
 | M7.3 | Right column: `dagr view` split + remote box (collapsed, expanded, invite with countdown via the relay's `setup-link`) | `shprd-tui/src/{layout,remote}.rs` | M |
-| M7.4 | `shprd setup` wizard: agents → skills → remote & layout → write | `shprd-tui/src/setup/` | L |
+| M7.4 | `shprd setup` wizard: agents → skills → **security (autonomy style, see [governance](governance.md#autonomy-styles-chosen-in-shprd-setup))** → remote & layout → write | `shprd-tui/src/setup/` | L |
+| M7.5 | `[autonomy] style` preset in config + `shprd set autonomy <style>` (the switches it sets stay individually overridable) | `shprd-core/src/config.rs`, `shprd/src/cmd/set.rs` | S |
 
 Lanes: M7.1 ∥ M7.3 ∥ M7.4; then M7.2.
 
