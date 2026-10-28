@@ -39,6 +39,12 @@ const ORCHESTRATOR_LABEL: &str = "orchestrator";
 /// The directory under `.shprd` a finished run's log is moved to.
 const RUNS_DIR: &str = "runs";
 
+/// The paths shprd writes inside the repository, which git must not see.
+const EXCLUDES: [&str; 2] = [".shprd/", ".dagr/"];
+
+/// The comment the shprd entries are appended under.
+const EXCLUDE_COMMENT: &str = "# shprd run state";
+
 /// The argv the chat tab runs: print the status, then hand over to a shell.
 ///
 /// The status comes from this very binary rather than from `PATH`, so the tab
@@ -113,6 +119,7 @@ pub struct UpReport {
 pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
     let repo = env.ctx.root.clone();
     let base_branch = preconditions(&repo, &env.config)?;
+    ensure_git_excludes(&repo)?;
     let boot = begin_run(&env.ctx, &env.home, &env.repo_name, &base_branch)?;
     let run_id = boot.run_id;
     let resumed = boot.resumed;
@@ -211,6 +218,60 @@ fn preconditions(repo: &Path, config: &Config) -> Result<String, CliError> {
         )));
     }
     Ok(branch.to_string())
+}
+
+/// Keeps shprd's own state out of `git status`.
+///
+/// shprd writes `.shprd/` and `.dagr/` inside the repository. Untracked, they
+/// make a clean checkout look dirty and block integration, so whichever of the
+/// two is missing is appended to the repository's own exclude file. That file
+/// is `git rev-parse --git-path info/exclude`, which is where git keeps
+/// per-repository ignores and what a worktree resolves to its own git dir —
+/// `.gitignore` belongs to the human and is never touched.
+fn ensure_git_excludes(repo: &Path) -> Result<(), CliError> {
+    let raw = git_stdout(repo, &["rev-parse", "--git-path", "info/exclude"])?;
+    let resolved = PathBuf::from(raw.trim());
+    let path = if resolved.is_absolute() {
+        resolved
+    } else {
+        repo.join(resolved)
+    };
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(CliError::other(
+                anyhow!(err).context(format!("reading {}", path.display())),
+            ));
+        }
+    };
+    let present: Vec<&str> = existing.lines().map(str::trim).collect();
+    let missing: Vec<&str> = EXCLUDES
+        .iter()
+        .copied()
+        .filter(|line| !present.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut text = existing.clone();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !present.contains(&EXCLUDE_COMMENT) {
+        text.push_str(EXCLUDE_COMMENT);
+        text.push('\n');
+    }
+    for line in missing {
+        text.push_str(line);
+        text.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| CliError::other(anyhow!(err).context("creating the info directory")))?;
+    }
+    std::fs::write(&path, text)
+        .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
 /// Runs one git command in `repo` and returns its stdout.
