@@ -606,8 +606,8 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str("## Then\n\n");
     out.push_str(
         "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
-         not a repository, so no command of yours would reach the run log. The orchestrator reads \
-         your file and records the verdict itself.\n",
+         not a repository, so no command of yours would reach the run log. The engine reads your \
+         file and records the verdict itself, naming you and the hash of what you wrote.\n",
     );
     out
 }

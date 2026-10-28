@@ -291,7 +291,10 @@ pub enum AgentCommand {
     Report(ReportArgs),
     /// Record a gate result for a task attempt.
     Gate(GateArgs),
-    /// Decide a review from its findings and record what happens next.
+    /// Decide a review from the reviewer's packet and record what follows.
+    ///
+    /// Engine-only: the findings are read from the packet folder the reviewer
+    /// wrote, and the verdict carries that reviewer's provenance.
     ReviewVerdict(ReviewVerdictArgs),
     /// Escalate something to a human.
     Escalate(EscalateArgs),
