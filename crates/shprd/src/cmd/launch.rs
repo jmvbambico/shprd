@@ -34,6 +34,14 @@ const DEFAULT_READY_WAIT: Duration = Duration::from_secs(60);
 /// milliseconds. Tests set it to `0` (deliver nothing, warn) or a small value.
 const READY_WAIT_ENV: &str = "SHPRD_AGENT_READY_TIMEOUT_MS";
 
+/// The one-line message an agent gets when its brief already arrived as an
+/// argument (a system prompt).
+///
+/// Such a CLI starts idle, waiting for a first turn, so the brief alone would
+/// leave it sitting there. One line, because it travels through the same
+/// prompt path a typed brief does.
+pub const KICKOFF: &str = "Start now: follow the brief in your system prompt.";
+
 /// How handing a brief to a freshly launched agent ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
