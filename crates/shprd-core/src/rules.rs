@@ -357,10 +357,12 @@ fn is_cleanup(kind: &EventKind) -> bool {
 
 /// Rules for a human's approval of the run's pull request.
 ///
-/// The approval must name the pull request the log knows, and only a human
-/// may give it: an agent that could approve its own work would make the
-/// approval meaningless, which is the same reason a forge refuses to let a
-/// pull request's author approve it.
+/// The approval must name the pull request the log knows, and that pull
+/// request must still be open: an approval that arrives after the merge could
+/// not have gated anything, so it is refused rather than recorded as if it
+/// had. Only a human may give it: an agent that could approve its own work
+/// would make the approval meaningless, which is the same reason a forge
+/// refuses to let a pull request's author approve it.
 fn check_approved(
     state: &RunState,
     actor: &Actor,
@@ -373,7 +375,7 @@ fn check_approved(
         });
     }
     match &state.pr {
-        Some(pr) if pr.number == number && !head_sha.trim().is_empty() => Ok(()),
+        Some(pr) if pr.number == number && !pr.merged && !head_sha.trim().is_empty() => Ok(()),
         _ => Err(RuleError::UnopenedPullRequest { number }),
     }
 }

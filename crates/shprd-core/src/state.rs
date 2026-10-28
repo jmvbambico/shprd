@@ -875,6 +875,31 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_of_a_merged_pull_request_is_refused() {
+        let state = match fold_extra(vec![
+            opened(3),
+            ev(
+                4,
+                EventKind::PrMerged {
+                    number: 7,
+                    head: "bbb222".to_string(),
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("open then merge must fold: {err}"),
+        };
+        let kind = EventKind::Approved {
+            number: 7,
+            head_sha: "bbb222".to_string(),
+        };
+        assert!(matches!(
+            state.check(&kind, 5_000),
+            Err(RuleError::UnopenedPullRequest { number: 7 })
+        ));
+    }
+
+    #[test]
     fn an_orchestrator_cannot_approve() {
         let mut events = log("a", "no_main_push");
         events.truncate(2);
