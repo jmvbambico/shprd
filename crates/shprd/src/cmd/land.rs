@@ -237,9 +237,10 @@ fn render_body(state: &RunState, events: &[Event]) -> String {
 ///
 /// `cross-vendor-review: passed` is a claim about recorded facts: every
 /// integrated task's latest attempt needs a review that was not degraded and a
-/// passed `review` gate. Anything else — no review requested, only degraded
-/// reviews, no passed review gate — is `degraded-review`, and the reasons say
-/// which tasks caused it and why.
+/// passed `review` gate that carries its reviewer provenance. Anything else —
+/// no review requested, only degraded reviews, no passed review gate, a verdict
+/// nothing proves, a review a human overrode — is `degraded-review`, and the
+/// reasons say which tasks caused it and why.
 fn review_marker(state: &RunState) -> String {
     let gaps = review_gaps(state);
     if gaps.is_empty() {
@@ -283,16 +284,37 @@ fn review_gaps(state: &RunState) -> Vec<String> {
             ));
             continue;
         }
+        // A human who overrode the review gate took the decision themselves:
+        // that is not a cross-vendor review, and the body has to say so.
+        if let Some(override_record) = task
+            .overrides
+            .iter()
+            .rev()
+            .find(|record| record.rule == REVIEW_GATE)
+        {
+            gaps.push(format!(
+                "{}: the review gate was overridden ({})",
+                task.id, override_record.reason
+            ));
+            continue;
+        }
         let verdict = attempt
             .gates
             .iter()
             .rev()
             .find(|gate| gate.gate == REVIEW_GATE);
-        if !matches!(verdict, Some(gate) if gate.passed) {
-            gaps.push(format!(
+        match verdict {
+            // A pass with no provenance proves only that something recorded a
+            // pass: no reviewer wrote the findings it names.
+            Some(gate) if gate.passed && gate.source.is_none() => gaps.push(format!(
+                "{}: review verdict has no reviewer provenance",
+                task.id
+            )),
+            Some(gate) if gate.passed => {}
+            _ => gaps.push(format!(
                 "{}: attempt {} has no passed review gate",
                 task.id, attempt.n
-            ));
+            )),
         }
     }
     gaps
@@ -553,6 +575,33 @@ mod tests {
         )
     }
 
+    /// Records a passed `review` gate with no provenance: a verdict recorded
+    /// before the engine started stamping the reviewer's findings.
+    fn review_passed_unproven(seq: u64, task: &str) -> Event {
+        ev(
+            seq,
+            EventKind::GatePassed {
+                task: task.to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+        )
+    }
+
+    /// Records a human overriding `rule` at `seq`.
+    fn overrode(seq: u64, task: &str, rule: &str, reason: &str) -> Event {
+        ev(
+            seq,
+            EventKind::Override {
+                task: task.to_string(),
+                rule: rule.to_string(),
+                reason: reason.to_string(),
+            },
+        )
+    }
+
     /// Records the task landing at `seq`.
     fn integrated(seq: u64, task: &str) -> Event {
         ev(
@@ -638,6 +687,52 @@ mod tests {
         let marker = review_marker(&folded(&log));
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
         assert!(marker.contains("no passed review gate"), "{marker}");
+    }
+
+    #[test]
+    fn an_unproven_verdict_degrades_the_marker() {
+        // A pass nothing proves is the bug the marker has to catch: the log
+        // says a review passed, but no reviewer wrote the findings it decided.
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        log.push(review_passed_unproven(6, "T1"));
+        log.push(integrated(7, "T1"));
+        let marker = review_marker(&folded(&log));
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(!marker.contains(REVIEW_PASSED), "{marker}");
+        assert!(
+            marker.contains("T1: review verdict has no reviewer provenance"),
+            "{marker}"
+        );
+    }
+
+    #[test]
+    fn a_proven_verdict_passes_the_marker() {
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        log.push(review_passed(6, "T1"));
+        log.push(integrated(7, "T1"));
+        assert_eq!(review_marker(&folded(&log)), REVIEW_PASSED);
+    }
+
+    #[test]
+    fn an_overridden_review_gate_degrades_the_marker_with_its_reason() {
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        log.push(review_passed(6, "T1"));
+        log.push(overrode(
+            7,
+            "T1",
+            REVIEW_GATE,
+            "the reviewer was unavailable",
+        ));
+        log.push(integrated(8, "T1"));
+        let marker = review_marker(&folded(&log));
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(
+            marker.contains("T1: the review gate was overridden (the reviewer was unavailable)"),
+            "{marker}"
+        );
     }
 
     #[test]
