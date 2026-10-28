@@ -1202,8 +1202,10 @@ const FLOW: &str = r#"## How a run works
 
 4. **Follow up.** Workers report themselves. Check progress with `shprd status`
    and `shprd brief`; send a worker a message with
-   `shprd agent prompt --task <ID> "…"`. Keep `shprd watch` running in a pane
-   so a stuck or rate-limited worker is handed off automatically.
+   `shprd agent prompt --task <ID> "…"`. `shprd up` already runs the watchdog
+   (`shprd watch`) in a pane of the chat tab, so do not start another one:
+   never record a review verdict yourself, and when a review is stuck, escalate
+   instead of deciding it.
 
 5. **Review.** When a task is reported: `shprd agent review --task <ID>`. The
    reviewer submits its verdict; code decides. If the review fails, start the
@@ -1764,6 +1766,14 @@ mod tests {
         assert!(brief.contains("## How a run works"), "{brief}");
         assert!(brief.contains("shprd agent review"), "{brief}");
         assert!(brief.contains("shprd land --merge"), "{brief}");
+        assert!(
+            brief.contains("`shprd up` already runs the watchdog"),
+            "the brief says up owns the watchdog: {brief}"
+        );
+        assert!(
+            brief.contains("never record a review verdict yourself"),
+            "the brief forbids hand-recorded verdicts: {brief}"
+        );
         assert!(!brief.contains("--commit"), "{brief}");
         assert!(report.brief_path.ends_with("orchestrator.md"));
         let integration = fixture
