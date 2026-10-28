@@ -15,6 +15,13 @@ const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 /// The environment variable that points `land` at a scripted forge.
 const FAKE_FORGE: &str = "SHPRD_FAKE_FORGE";
 
+/// The environment variable that names the actor.
+///
+/// These tests exercise the human path, so a worker's own `SHPRD_ACTOR` must
+/// not leak into the binary and make it think a human is an agent. A test that
+/// wants an agent actor sets it explicitly on its own command.
+const ACTOR_ENV: &str = "SHPRD_ACTOR";
+
 /// The branch the run pushes.
 const INT_BRANCH: &str = "shprd/r1/int";
 
@@ -146,7 +153,8 @@ impl Fixture {
         let mut command = Command::new(BIN);
         command
             .args(&all)
-            .env(FAKE_FORGE, self.forge_script().display().to_string());
+            .env(FAKE_FORGE, self.forge_script().display().to_string())
+            .env_remove(ACTOR_ENV);
         command
     }
 
