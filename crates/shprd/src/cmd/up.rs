@@ -45,16 +45,21 @@ const EXCLUDES: [&str; 2] = [".shprd/", ".dagr/"];
 /// The comment the shprd entries are appended under.
 const EXCLUDE_COMMENT: &str = "# shprd run state";
 
-/// The argv the chat tab runs: print the status, then hand over to a shell.
+/// The argv the chat tab runs: a live status view that never starts a shell.
 ///
 /// The status comes from this very binary rather than from `PATH`, so the tab
 /// reports the run `up` just laid out even when an older `shprd` is installed.
+/// The tab never hands over to `$SHELL`: a login shell re-runs the user's rc
+/// file, whose banner and errors make the placeholder look broken.
 fn chat_argv() -> Vec<String> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("shprd"));
     vec![
         "sh".to_string(),
         "-c".to_string(),
-        format!("{} status; exec \"${{SHELL:-sh}}\"", posix_quote(&exe)),
+        format!(
+            "while :; do clear; {} status; printf '\\n  shprd·chat arrives in M7 · talk to the ★ orchestrator tab · refreshes every 5 s\\n'; sleep 5; done",
+            posix_quote(&exe)
+        ),
     ]
 }
 
@@ -1225,9 +1230,20 @@ mod tests {
         };
         assert_eq!(argv[0], "sh");
         assert_eq!(argv[1], "-c");
+        let script = &argv[2];
         assert_eq!(
-            argv[2],
-            format!("'{}' status; exec \"${{SHELL:-sh}}\"", exe.display())
+            script,
+            &format!(
+                "while :; do clear; '{}' status; printf '\\n  shprd·chat arrives in M7 · talk to the ★ orchestrator tab · refreshes every 5 s\\n'; sleep 5; done",
+                exe.display()
+            )
+        );
+        assert!(script.starts_with("while :; do clear; "), "{script}");
+        assert!(script.contains(" status; "), "{script}");
+        assert!(script.ends_with("; sleep 5; done"), "{script}");
+        assert!(
+            !script.contains("SHELL"),
+            "the placeholder must not hand over to the user's login shell: {script}"
         );
         assert!(
             exe.is_absolute(),
