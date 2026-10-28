@@ -30,7 +30,10 @@ signin_args = ["login", "status"]
 [launch]
 # herdr-projects starts codex for work with --no-daemon as well; it belongs to
 # the base command, not to approval handling.
-interactive = ["codex", "--no-daemon"]
+# The update check is off for every codex launch, worker and reviewer: 0.164
+# opens an "Update available!" screen before it accepts a turn, and a brief
+# typed into that screen is never delivered.
+interactive = ["codex", "--no-daemon", "-c", "check_for_update_on_startup=false"]
 model_args = ["-m", "{model}"]
 effort_args = ["-c", "model_reasoning_effort={effort}"]
 auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
