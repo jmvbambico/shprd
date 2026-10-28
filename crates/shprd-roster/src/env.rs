@@ -17,6 +17,12 @@ use std::path::PathBuf;
 /// Who a launched CLI acts as, which decides how much the environment allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    /// The engine itself, in a pane of its own: the watchdog that turns a
+    /// reviewer's findings into a verdict and hands off a dry worker.
+    ///
+    /// It is not an agent and holds no session, but it acts as the engine, so
+    /// it gets the engine's environment rather than an agent's.
+    Engine,
     /// The engine's own agent: may push, so it keeps remote credentials.
     Orchestrator,
     /// A worker on one task: no remote credentials, no interactive prompts.
@@ -28,13 +34,14 @@ pub enum Role {
 impl Role {
     /// Whether this role may hold remote (push) credentials.
     fn may_push(self) -> bool {
-        matches!(self, Self::Orchestrator)
+        matches!(self, Self::Engine | Self::Orchestrator)
     }
 }
 
 /// Variables that let a CLI authenticate to, or prompt for, a remote.
 ///
-/// Removed for every role except [`Role::Orchestrator`].
+/// Removed for every role except the engine's own processes
+/// ([`Role::Engine`] and [`Role::Orchestrator`]).
 const CREDENTIAL_VARS: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -292,6 +299,28 @@ mod tests {
         }
         assert!(!applied.contains_key("OMNIGENT_SESSION"));
         assert!(!applied.contains_key("OG_PROFILE"));
+    }
+
+    #[test]
+    fn the_watchdog_gets_the_engines_environment() {
+        let base = base_env();
+        let engine = EnvContext {
+            actor: "engine".to_string(),
+            ..ctx()
+        };
+        let applied = launch_env(&base, Role::Engine, &engine).apply_to(&base);
+        for name in CREDENTIALS {
+            assert_eq!(
+                applied.get(*name),
+                base.get(*name),
+                "the engine lost {name}"
+            );
+        }
+        assert!(!applied.contains_key("GIT_TERMINAL_PROMPT"));
+        assert_eq!(
+            applied.get("SHPRD_ACTOR").map(String::as_str),
+            Some("engine")
+        );
     }
 
     #[test]
