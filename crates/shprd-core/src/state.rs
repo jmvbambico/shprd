@@ -61,6 +61,12 @@ pub struct PrInfo {
     pub url: String,
     /// The branch it proposes to merge.
     pub head: String,
+    /// The integration head a human approved in shprd, if one has.
+    ///
+    /// GitHub refuses a self-approval, so a solo maintainer's approval is
+    /// recorded here instead. It names one head: an approval of an older head
+    /// says nothing about the commits pushed since.
+    pub approved_head: Option<String>,
     /// Whether the forge has merged it.
     pub merged: bool,
 }
@@ -271,7 +277,7 @@ impl RunState {
 
     /// Checks `event` against the rules, then applies it and records its seq.
     pub fn apply(&mut self, event: &Event) -> Result<(), RuleError> {
-        rules::check(self, &event.kind, event.at_ms)?;
+        rules::check_as(self, &event.actor, &event.kind, event.at_ms)?;
         self.mutate(event);
         self.last_seq = event.seq;
         Ok(())
@@ -513,10 +519,15 @@ impl RunState {
                 self.last_full_gate = Some((head.clone(), *passed, event.seq));
             }
             EventKind::PrOpened { number, url, head } => {
+                // Refreshing the body is not a new approval. The sha it names
+                // is what counts, and landing honours it only while that sha
+                // is still the integration head.
+                let approved_head = self.pr.as_ref().and_then(|pr| pr.approved_head.clone());
                 self.pr = Some(PrInfo {
                     number: *number,
                     url: url.clone(),
                     head: head.clone(),
+                    approved_head,
                     merged: false,
                 });
             }
@@ -529,8 +540,14 @@ impl RunState {
                         .map(|pr| pr.url.clone())
                         .unwrap_or_default(),
                     head: head.clone(),
+                    approved_head: self.pr.as_ref().and_then(|pr| pr.approved_head.clone()),
                     merged: true,
                 });
+            }
+            EventKind::Approved { head_sha, .. } => {
+                if let Some(pr) = self.pr.as_mut() {
+                    pr.approved_head = Some(head_sha.clone());
+                }
             }
             EventKind::RunFinished {} => self.finished = true,
         }
@@ -799,10 +816,84 @@ mod tests {
                 number: 7,
                 url: "https://example.invalid/pr/7".to_string(),
                 head: "bbb222".to_string(),
+                approved_head: None,
                 merged: true,
             }),
             "the merge keeps the url and records the merged head"
         );
+    }
+
+    /// A `PrOpened` for pull request 7 at seq 3.
+    fn opened(seq: u64) -> Event {
+        ev(
+            seq,
+            EventKind::PrOpened {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "shprd/r1/int".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn an_approval_records_the_head_it_named() {
+        let state = match fold_extra(vec![
+            opened(3),
+            ev(
+                4,
+                EventKind::Approved {
+                    number: 7,
+                    head_sha: "bbb222".to_string(),
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("open then approve must fold: {err}"),
+        };
+        let pr = match state.pr {
+            Some(pr) => pr,
+            None => panic!("the pull request must be in the state"),
+        };
+        assert_eq!(pr.approved_head, Some("bbb222".to_string()));
+        assert!(!pr.merged, "an approval merges nothing by itself");
+    }
+
+    #[test]
+    fn an_approval_without_an_opened_pull_request_is_refused() {
+        let state = match fold_extra(vec![]) {
+            Ok(state) => state,
+            Err(err) => panic!("the bare run must fold: {err}"),
+        };
+        let kind = EventKind::Approved {
+            number: 7,
+            head_sha: "bbb222".to_string(),
+        };
+        assert!(matches!(
+            state.check(&kind, 3_000),
+            Err(RuleError::UnopenedPullRequest { number: 7 })
+        ));
+    }
+
+    #[test]
+    fn an_orchestrator_cannot_approve() {
+        let mut events = log("a", "no_main_push");
+        events.truncate(2);
+        events.push(opened(3));
+        events.push(Event {
+            seq: 4,
+            at_ms: 4_000,
+            actor: Actor::Orchestrator,
+            kind: EventKind::Approved {
+                number: 7,
+                head_sha: "bbb222".to_string(),
+            },
+        });
+        assert!(matches!(
+            RunState::fold(&events),
+            Err(RuleError::NotHuman {
+                actor: Actor::Orchestrator
+            })
+        ));
     }
 
     #[test]

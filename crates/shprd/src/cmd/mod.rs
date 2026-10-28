@@ -151,6 +151,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::FullGate { .. } => "full_gate",
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
+        EventKind::Approved { .. } => "approved",
         EventKind::RunFinished {} => "run_finished",
     }
 }

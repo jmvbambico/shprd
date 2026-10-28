@@ -6,7 +6,7 @@
 
 use thiserror::Error;
 
-use crate::event::{AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, TaskId};
+use crate::event::{Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, TaskId};
 use crate::scope::{self, ScopeError};
 use crate::state::{AgentInfo, ResourceStatus, RunState, Task, TaskStatus};
 
@@ -198,6 +198,18 @@ pub enum RuleError {
         /// The number the event named.
         number: u64,
     },
+    /// An approval named a pull request the log has not seen opened.
+    #[error("pull request #{number} was never opened, so it cannot be approved")]
+    UnopenedPullRequest {
+        /// The number the event named.
+        number: u64,
+    },
+    /// An approval was recorded by something that is not a human.
+    #[error("{actor:?} cannot approve a pull request: only a human can")]
+    NotHuman {
+        /// Who tried.
+        actor: Actor,
+    },
     /// Integration was requested while the latest attempt has a failed gate and
     /// no override recorded after it.
     #[error("task {task:?} cannot be integrated: gate {gate:?} failed and no override followed")]
@@ -238,6 +250,20 @@ fn check_available(state: &RunState, agent: &str) -> Result<(), RuleError> {
 
 /// Checks one event kind against `state` as of `now_ms`.
 pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(), RuleError> {
+    check_as(state, &Actor::Human, kind, now_ms)
+}
+
+/// Checks one event kind caused by `actor` against `state` as of `now_ms`.
+///
+/// A bare [`check`] is the human's: a verb that consults the log before an
+/// outside effect has no other actor to offer. Folding an event passes the
+/// actor the log actually records, which is what an approval's rule reads.
+pub(crate) fn check_as(
+    state: &RunState,
+    actor: &Actor,
+    kind: &EventKind,
+    now_ms: u64,
+) -> Result<(), RuleError> {
     if let EventKind::RunStarted { .. } = kind {
         return match state.run {
             None => Ok(()),
@@ -310,6 +336,7 @@ pub(crate) fn check(state: &RunState, kind: &EventKind, now_ms: u64) -> Result<(
             Some(pr) if pr.number == *number => Ok(()),
             _ => Err(RuleError::UnknownPullRequest { number: *number }),
         },
+        EventKind::Approved { number, head_sha } => check_approved(state, actor, *number, head_sha),
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }
@@ -326,6 +353,29 @@ fn is_cleanup(kind: &EventKind) -> bool {
             ..
         }
     )
+}
+
+/// Rules for a human's approval of the run's pull request.
+///
+/// The approval must name the pull request the log knows, and only a human
+/// may give it: an agent that could approve its own work would make the
+/// approval meaningless, which is the same reason a forge refuses to let a
+/// pull request's author approve it.
+fn check_approved(
+    state: &RunState,
+    actor: &Actor,
+    number: u64,
+    head_sha: &str,
+) -> Result<(), RuleError> {
+    if !matches!(actor, Actor::Human) {
+        return Err(RuleError::NotHuman {
+            actor: actor.clone(),
+        });
+    }
+    match &state.pr {
+        Some(pr) if pr.number == number && !head_sha.trim().is_empty() => Ok(()),
+        _ => Err(RuleError::UnopenedPullRequest { number }),
+    }
 }
 
 /// Rules for the resource ownership ledger.
