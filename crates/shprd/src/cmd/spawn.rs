@@ -354,15 +354,20 @@ pub(crate) fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
 }
 
 /// Closes a pane shprd opened, counting a pane the host has forgotten as
-/// closed.
+/// closed, and answers whether the pane is gone.
 ///
 /// The same rule [`close_recorded`] applies to a tab, for the panes a run
 /// splits off a tab it keeps: a pane a human already closed is in the state
-/// the caller wanted, and a refusal is warned about rather than fatal.
-pub(crate) fn close_pane(mux: &dyn Mux, pane: &shprd_mux::PaneId) {
+/// the caller wanted, and a refusal is warned about rather than fatal. A
+/// caller for which the refusal is not fatal but *decisive* — `up` taking a
+/// watchdog replacement back down — reads the answer instead of the warning.
+pub(crate) fn close_pane(mux: &dyn Mux, pane: &shprd_mux::PaneId) -> bool {
     match mux.close_pane(pane) {
-        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
-        Err(err) => eprintln!("warning: could not close pane {}: {err}", pane.as_str()),
+        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => true,
+        Err(err) => {
+            eprintln!("warning: could not close pane {}: {err}", pane.as_str());
+            false
+        }
     }
 }
 

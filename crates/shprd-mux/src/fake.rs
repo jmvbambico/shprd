@@ -76,6 +76,8 @@ struct Inner {
     pending: HashMap<PaneId, (usize, AgentState)>,
     /// Scripted foreground process group per pane; absent means "no group".
     process_groups: HashMap<PaneId, Option<u32>>,
+    /// Panes a test scripted [`Mux::close_pane`] to refuse, with the reason.
+    close_failures: HashMap<PaneId, String>,
     events: VecDeque<MuxEvent>,
     next_workspace: usize,
     next_tab: usize,
@@ -93,6 +95,7 @@ impl Inner {
             states: HashMap::new(),
             pending: HashMap::new(),
             process_groups: HashMap::new(),
+            close_failures: HashMap::new(),
             events: VecDeque::new(),
             next_workspace: 0,
             next_tab: 0,
@@ -224,6 +227,16 @@ impl FakeMux {
         if let Ok(mut inner) = self.lock() {
             inner.panes.insert(pane.clone());
             inner.process_groups.insert(pane.clone(), group);
+        }
+    }
+
+    /// Make [`Mux::close_pane`] refuse `pane` alone, with `reason`.
+    ///
+    /// Everything else about the host keeps working, which is a host that still
+    /// holds one pane it will not retire while the next close succeeds.
+    pub fn failing_close_of(&self, pane: &PaneId, reason: impl Into<String>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.close_failures.insert(pane.clone(), reason.into());
         }
     }
 
@@ -433,6 +446,9 @@ impl Mux for FakeMux {
             return Err(MuxError::Unsupported("close pane"));
         }
         if let Some(reason) = &self.close_pane_failure {
+            return Err(MuxError::command("the fake host", reason.clone()));
+        }
+        if let Some(reason) = inner.close_failures.get(pane) {
             return Err(MuxError::command("the fake host", reason.clone()));
         }
         inner.require_pane(pane)?;

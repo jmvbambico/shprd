@@ -1053,8 +1053,17 @@ fn ensure_watch_pane(mux: &dyn Mux, env: &UpEnv, chat: &Tab, run_id: &str) -> Re
                 // sees the same obstacle and says so again instead of splitting
                 // a third watchdog beside it.
                 eprintln!("warning: could not close the watchdog pane {stale}: {err}");
-                spawn::close_pane(mux, &pane);
-                eprintln!("{}", not_shprds_watch_pane(&stale));
+                if spawn::close_pane(mux, &pane) {
+                    eprintln!("{}", not_shprds_watch_pane(&stale));
+                    return Ok(());
+                }
+                // Neither pane can be taken down, so both watchdogs are
+                // running. The replacement is the one `up` can still point at,
+                // and the record follows it: left on the stale pane, every
+                // later `up` would split a third. The run's watch lock is what
+                // keeps only one of the two doing any work.
+                eprintln!("{}", two_watch_panes(&stale, &pane));
+                record_watch(mux, env, &pane);
                 return Ok(());
             }
         }
@@ -1075,6 +1084,17 @@ fn not_shprds_watch_pane(pane: &PaneId) -> String {
         "the watchdog pane {} is not shprd's and this host cannot close it: close it, then run \
          shprd watch",
         pane.as_str()
+    )
+}
+
+/// The line `up` prints when it could retire neither watchdog pane, and both
+/// are running.
+fn two_watch_panes(stale: &PaneId, replacement: &PaneId) -> String {
+    format!(
+        "the watchdog panes {} and {} cannot be closed: two watchdogs are running, and only one \
+         of them does any work — close the pane you do not want, then run shprd watch",
+        stale.as_str(),
+        replacement.as_str()
     )
 }
 
@@ -2730,9 +2750,7 @@ mod tests {
     fn a_new_watchdog_whose_stale_pane_will_not_close_is_taken_back_down() -> Result<()> {
         let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
         let env = fixture.env()?;
-        let mux = mux()
-            .with_process_group(4242)
-            .failing_close_pane("the pane is busy");
+        let mux = mux().with_process_group(4242);
         up(&mux, &env).map_err(failed)?;
         let stale = env
             .ctx
@@ -2741,26 +2759,37 @@ mod tests {
             .watch
             .context("the watchdog's pane is recorded")?
             .pane;
-        mux.set_process_group(&PaneId::new(stale.clone()), Some(999));
+        let stale = PaneId::new(stale);
+        // The host restored the workspace into the recorded pane, and will not
+        // let go of it, while any other pane closes as asked.
+        mux.set_process_group(&stale, Some(999));
+        mux.failing_close_of(&stale, "the pane is busy");
         let before = mux.calls().len();
         up(&mux, &env).map_err(failed)?;
 
         let later = mux.calls()[before..].to_vec();
         let runs = watch_runs(&mux);
         assert_eq!(runs.len(), 2, "a replacement is started: {later:?}");
-        let fresh = &runs[1].0;
-        assert_ne!(fresh.as_str(), stale, "the replacement is in a new pane");
+        let fresh = runs[1].0.clone();
+        assert_ne!(fresh, stale, "the replacement is in a new pane");
         let closed = later
             .iter()
-            .position(|call| call == &Call::ClosePane(PaneId::new(stale.clone())))
+            .position(|call| call == &Call::ClosePane(stale.clone()))
             .context("the stale pane is closed")?;
         let closed_again = later
             .iter()
             .position(|call| call == &Call::ClosePane(fresh.clone()))
-            .context("the replacement is closed again")?;
+            .context("the replacement is taken back down")?;
         assert!(
             closed < closed_again,
-            "exactly one watchdog is left running: {later:?}"
+            "the replacement goes only after the stale pane refuses: {later:?}"
+        );
+        // The end state, not just the attempt: the pane holding the watchdog is
+        // the recorded one, and the pane that was taken back down is gone.
+        assert!(
+            mux.pane_process_group(&fresh).is_err(),
+            "the replacement is closed, not merely asked to close: {:?}",
+            mux.calls()
         );
         assert_eq!(
             env.ctx
@@ -2768,8 +2797,69 @@ mod tests {
                 .map_err(failed)?
                 .watch
                 .map(|watch| watch.pane),
-            Some(stale),
+            Some(stale.as_str().to_string()),
             "the record stays on the pane that is still there"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn two_watchdog_panes_that_both_refuse_to_close_record_the_one_that_runs() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux()
+            .with_process_group(4242)
+            .failing_close_pane("the pane is busy");
+        up(&mux, &env).map_err(failed)?;
+        let stale = PaneId::new(
+            env.ctx
+                .state()
+                .map_err(failed)?
+                .watch
+                .context("the watchdog's pane is recorded")?
+                .pane,
+        );
+        mux.set_process_group(&stale, Some(999));
+        let before = mux.calls().len();
+        up(&mux, &env).map_err(failed)?;
+
+        let later = mux.calls()[before..].to_vec();
+        let runs = watch_runs(&mux);
+        assert_eq!(runs.len(), 2, "a replacement is started: {later:?}");
+        let fresh = runs[1].0.clone();
+        assert_ne!(fresh, stale);
+        // Both panes are still there, so both watchdogs are: the record follows
+        // the one `up` can point at from now on.
+        assert_eq!(
+            env.ctx
+                .state()
+                .map_err(failed)?
+                .watch
+                .map(|watch| watch.pane),
+            Some(fresh.as_str().to_string()),
+            "the record names the replacement, not the pane that would not go"
+        );
+        // The human is told about both panes.
+        let line = two_watch_panes(&stale, &fresh);
+        assert!(line.contains(stale.as_str()), "{line}");
+        assert!(line.contains(fresh.as_str()), "{line}");
+        assert!(line.contains("shprd watch"), "{line}");
+
+        // And no later `up` piles a third watchdog beside them.
+        let before = mux.calls().len();
+        up(&mux, &env).map_err(failed)?;
+        let afterwards = mux.calls()[before..].to_vec();
+        assert!(
+            afterwards
+                .iter()
+                .all(|call| !matches!(call, Call::Split(..))),
+            "the recorded pane is running, so nothing is split: {afterwards:?}"
+        );
+        assert_eq!(
+            watch_runs(&mux).len(),
+            2,
+            "no third watchdog is launched: {:?}",
+            mux.calls()
         );
         Ok(())
     }
