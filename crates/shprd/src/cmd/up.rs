@@ -8,8 +8,10 @@
 //! [`Mux`], so a test drives it with [`shprd_mux::fake::FakeMux`] and the
 //! binary drives it with a real host adapter.
 //!
-//! `down` finishes the run. Neither verb closes a tab: a human's shell is not
-//! shprd's to kill.
+//! `down` finishes the run. Neither verb closes a tab a human is working in: a
+//! human's shell is not shprd's to kill. The one exception is the reviewer
+//! tabs the run opened itself, which `down` closes once the run's last event is
+//! recorded — a reviewer has no work to finish once its task is decided.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -28,6 +30,8 @@ use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
 
+use crate::cmd::review;
+use crate::cmd::spawn;
 use crate::ctx::{CliError, Ctx};
 
 /// The tab title the human's own tab carries.
@@ -203,8 +207,9 @@ pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
 /// Runs `shprd down`: the run's last event.
 ///
 /// A task that is still working refuses the event, and the refusal is the whole
-/// answer: nothing else is touched, and no tab is closed.
-pub fn down(ctx: &Ctx) -> Result<(), CliError> {
+/// answer: nothing else is touched, and no tab is closed. Once the event is in,
+/// the reviewer tabs the run still has open are closed with it.
+pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
     let state = ctx.state()?;
     if state.run.is_none() {
         return Err(CliError::Invalid(anyhow!(
@@ -217,7 +222,13 @@ pub fn down(ctx: &Ctx) -> Result<(), CliError> {
         )));
     }
     let event = ctx.commit(EventKind::RunFinished {})?;
+    review::close_run_reviewers(mux, ctx, home);
     crate::cmd::emit(ctx, &event)
+}
+
+/// `shprd down` against the host the human is working in.
+pub fn down_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
+    down(&spawn::real_mux(), ctx, home)
 }
 
 /// Checks the three things `up` cannot work without, in the order a human
@@ -2039,7 +2050,9 @@ mod tests {
         let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
         let env = fixture.env()?;
         working_task(&env.ctx)?;
-        let err = down(&env.ctx).err().context("down must refuse")?;
+        let err = down(&mux(), &env.ctx, Some(&env.home))
+            .err()
+            .context("down must refuse")?;
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("Working"), "{err}");
         assert!(
@@ -2061,7 +2074,7 @@ mod tests {
                 integration_branch: "shprd/rabc123/int".to_string(),
             })
             .map_err(failed)?;
-        down(&env.ctx).map_err(failed)?;
+        down(&mux(), &env.ctx, Some(&env.home)).map_err(failed)?;
         assert!(env.ctx.state().map_err(failed)?.finished);
         Ok(())
     }
@@ -2072,7 +2085,7 @@ mod tests {
         let env = fixture.env()?;
         let mux = mux();
         let first = up(&mux, &env).map_err(failed)?;
-        down(&env.ctx).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
         let second = up(&mux, &env).map_err(failed)?;
 
         assert!(!second.resumed, "a finished run is never resumed");
@@ -2112,7 +2125,7 @@ mod tests {
         let env = fixture.env()?;
         let mux = mux();
         let first = up(&mux, &env).map_err(failed)?;
-        down(&env.ctx).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
         let runs = fixture.repo.path().join(".shprd").join("runs");
         std::fs::create_dir_all(&runs)?;
         let taken = runs.join(format!("{}.jsonl", first.run_id));

@@ -134,7 +134,7 @@ impl Watcher {
         let (state, events) = env.ctx.load()?;
         let mut lines = Vec::new();
         self.tick_cooldowns(env, &state, now_ms, &mut lines)?;
-        self.tick_reviews(env, &state, &mut lines)?;
+        self.tick_reviews(mux, env, &state, &mut lines)?;
         for task in state.tasks.values() {
             if task.status != TaskStatus::Working {
                 continue;
@@ -160,6 +160,7 @@ impl Watcher {
     /// that file into the gate result the run waits for.
     fn tick_reviews(
         &mut self,
+        mux: &dyn Mux,
         env: &SpawnEnv<'_>,
         state: &RunState,
         lines: &mut Vec<String>,
@@ -188,7 +189,8 @@ impl Watcher {
                 lines.push(format!("escalated {}: invalid findings.json", task.id));
                 continue;
             }
-            let outcome = verdict::submit_verdict(env.ctx, home_of(env), &task.id, attempt, &path)?;
+            let outcome =
+                verdict::submit_verdict(mux, env.ctx, home_of(env), &task.id, attempt, &path)?;
             let word = match outcome {
                 verdict::Outcome::Passed => "passed",
                 verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",
