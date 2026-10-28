@@ -1701,6 +1701,7 @@ mod tests {
                     from_agent: "agent-1".to_string(),
                     to_agent: "agent-2".to_string(),
                     checkpoint: "carry on".to_string(),
+                    reason: Some("rate limited".to_string()),
                 },
             ),
         ]);

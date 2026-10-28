@@ -306,6 +306,14 @@ fn tick_task(
         now_ms,
     );
     let since_ms = spawned_at_ms(events, &task.id, attempt.n);
+    // A pane that is not there yet is not a worker that died: a hand-off starts
+    // a new process, and reading the gap as an exit would spend the whole exit
+    // budget before the newcomer had a chance to run. A start the log places
+    // after `now_ms` means the two clocks disagree, which proves nothing
+    // either, so only a start this tick can measure counts.
+    let started_at = worker_started_at_ms(events, &task.id, attempt.n);
+    let starting_up = started_at <= now_ms && now_ms.saturating_sub(started_at) < EXIT_GRACE_MS;
+    let process_exited = process_exited && !starting_up;
     let record_error = home_of(env)
         .and_then(|home| record_error(program, home, Path::new(&attempt.worktree), since_ms));
     let inputs = Inputs {
@@ -316,7 +324,7 @@ fn tick_task(
         process_exited,
     };
     let mut queue = watch.step(&inputs, &watcher.policy);
-    let mut handed_off = false;
+    let mut handed_off: Option<(String, bool)> = None;
     queue.reverse();
     while let Some(action) = queue.pop() {
         match action {
@@ -334,17 +342,31 @@ fn tick_task(
                 })?;
                 lines.push(format!("dry {} ({agent}): {reason}", task.id));
             }
-            Action::HandOff => {
+            Action::HandOff { reason, dry } => {
                 let request = HandoffRequest {
                     task: task.id.clone(),
-                    reason: dry_reason(watch),
+                    reason,
                     to: None,
+                    // A dry agent needs a different worker; an agent whose
+                    // process died is still perfectly able to take its own
+                    // task back in a fresh process.
+                    same_worker: !dry,
                 };
-                handed_off = true;
                 match handoff(mux, env, &request) {
-                    Ok(report) => lines.push(format!("handed off {} to {}", task.id, report.to)),
+                    Ok(report) => {
+                        lines.push(format!("handed off {} to {}", task.id, report.to));
+                        handed_off = Some((report.to, dry));
+                    }
                     Err(err) => escalate(env, &task.id, &err, lines),
                 }
+            }
+            Action::Escalate { reason } => {
+                env.ctx.commit(EventKind::Escalated {
+                    task: Some(task.id.clone()),
+                    body: format!("{agent} {reason}"),
+                    default_action: String::from("pick the task up by hand"),
+                })?;
+                lines.push(format!("escalated {}: {reason}", task.id));
             }
             // No quota call is wired yet, so a probe that is due always reads
             // as recovered: the dry mark existed to make the agent wait, and
@@ -369,10 +391,23 @@ fn tick_task(
             }
         }
     }
-    // The attempt is over, but the outgoing agent's cooldown is not: its watch
-    // moves to the map that outlives the attempt.
-    if handed_off && let Some((cooldown, _)) = watcher.watches.remove(&key) {
-        watcher.cooldowns.insert(agent.clone(), cooldown);
+    // The attempt is over, but what the watch knows is not always done with.
+    if let Some((to, dry)) = handed_off
+        && let Some((mut watch, _)) = watcher.watches.remove(&key)
+    {
+        if dry {
+            // The outgoing agent's cooldown outlives the attempt: its watch
+            // moves to the map that clears the dry mark when the probe is due.
+            watcher.cooldowns.insert(agent.clone(), watch);
+        } else {
+            // A lost worker dry nothing, so the attempt simply continues under
+            // its new process. The watch follows it, because the count of exits
+            // is what turns a crash loop into an escalation.
+            watch.after_handoff();
+            watcher
+                .watches
+                .insert((task.id.clone(), attempt.n, to), (watch, Sampler::new()));
+        }
     }
     Ok(())
 }
@@ -390,13 +425,12 @@ fn escalate(env: &SpawnEnv<'_>, task: &str, err: &CliError, lines: &mut Vec<Stri
     }
 }
 
-/// Why the watchdog calls this attempt dry, for the hand-off brief.
-fn dry_reason(watch: &Watch) -> String {
-    match &watch.health {
-        Health::Dry { reason, .. } => reason.clone(),
-        _ => String::from("the agent stopped working"),
-    }
-}
+/// How long a worker may still show no pane after it started before the
+/// watchdog reads that as its process having exited.
+///
+/// A hand-off writes its event before the newcomer's tab answers, so without
+/// this every hand-off would look like two exits in a row.
+const EXIT_GRACE_MS: u64 = 60_000;
 
 /// The tab id an attempt recorded when it spawned, if the record is there.
 fn recorded_tab(env: &SpawnEnv<'_>, task: &str, attempt: u32) -> Option<String> {
@@ -482,6 +516,28 @@ fn observe(
         Err(MuxError::NotFound { .. }) => (None, true),
         Err(_) => (None, false),
     }
+}
+
+/// When the attempt's current worker started: its spawn, or the hand-off that
+/// replaced it, whichever is newer. Zero when the log says neither, which only
+/// errs towards believing the first observation.
+fn worker_started_at_ms(events: &[Event], task: &str, attempt: u32) -> u64 {
+    events
+        .iter()
+        .rev()
+        .find(|event| match &event.kind {
+            EventKind::Spawned {
+                task: id,
+                attempt: n,
+                ..
+            } => id == task && *n == attempt,
+            // A hand-off does not carry the attempt, but it cannot cross one
+            // either: a new attempt starts with a spawn.
+            EventKind::HandedOff { task: id, .. } => id == task,
+            _ => false,
+        })
+        .map(|event| event.at_ms)
+        .unwrap_or(0)
 }
 
 /// When the attempt's `spawned` event was written, or zero if the log lost it.
@@ -993,7 +1049,15 @@ project_dirs = []
                 .unwrap_or_else(|err| panic!("{err}"));
             let log = events(&ctx);
             let fresh = &log[before..];
-            if appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })) {
+            if let Some(EventKind::Dry { reset_at_ms, .. }) = fresh
+                .iter()
+                .map(|event| &event.kind)
+                .find(|kind| matches!(kind, EventKind::Dry { .. }))
+            {
+                assert!(
+                    reset_at_ms.is_some_and(|reset| reset > t0),
+                    "a dry mark with no reset would be dry for ever"
+                );
                 dry_after_ms = Some(10_000 * step);
                 eprintln!("DRY_AT {dry_after_ms:?}");
                 assert!(
@@ -1010,9 +1074,11 @@ project_dirs = []
         );
     }
 
-    /// A pane the host closed is a dead agent: the next tick acts on it.
+    /// A pane the host closed is a lost worker, not an unusable agent: the next
+    /// tick hands the task to a fresh process of the same agent, and nothing is
+    /// marked dry, so a one-agent roster is not dead-ended.
     #[test]
-    fn a_closed_pane_goes_dry_and_is_handed_off_on_the_next_tick() {
+    fn a_closed_pane_is_handed_off_to_the_same_agent_and_dries_nothing() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.env(&ctx, &["sh", "pi"]);
@@ -1037,13 +1103,75 @@ project_dirs = []
         let log = events(&ctx);
         let fresh = &log[before..];
         assert!(
-            appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
-            "a closed pane must mark the agent dry"
+            !appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
+            "a closed pane is a lost worker, not a dry program"
         );
-        assert!(
-            appended(fresh, |kind| matches!(kind, EventKind::HandedOff { .. })),
-            "a closed pane must hand the task off"
+        let handoffs: Vec<&EventKind> = fresh
+            .iter()
+            .map(|event| &event.kind)
+            .filter(|kind| matches!(kind, EventKind::HandedOff { .. }))
+            .collect();
+        assert_eq!(handoffs.len(), 1, "a closed pane hands the task off once");
+        match handoffs[0] {
+            EventKind::HandedOff {
+                from_agent,
+                to_agent,
+                reason,
+                ..
+            } => {
+                assert_eq!(from_agent, to_agent, "a fresh process of the same agent");
+                assert_eq!(reason.as_deref(), Some("agent process exited"));
+            }
+            other => panic!("not a hand-off: {other:?}"),
+        }
+    }
+
+    /// A worker that dies every time is not replaced for ever: once the
+    /// policy's exit budget is spent the watchdog asks a human, because a
+    /// fourth identical attempt would only die the same way. The roster here
+    /// holds one agent, which is the case a dry program used to dead-end.
+    #[test]
+    fn a_worker_that_keeps_dying_escalates_instead_of_looping() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let mut handoffs = 0;
+        let mut escalations = 0;
+        for round in 0..=policy.exit_budget {
+            // Each round's worker dies before it does anything.
+            let tab = tab_id(&env);
+            mux.close_tab(&shprd_mux::TabId::new(tab))
+                .unwrap_or_else(|err| panic!("{err}"));
+            let before = events(&ctx).len();
+            watcher
+                .tick(&mux, &env, t0 + 10_000 * round as u64)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let log = events(&ctx);
+            let fresh = &log[before..];
+            handoffs += fresh
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::HandedOff { .. }))
+                .count();
+            escalations += fresh
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::Escalated { .. }))
+                .count();
+            assert!(
+                !appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
+                "a lost worker never dries the agent"
+            );
+        }
+        assert_eq!(
+            handoffs, policy.exit_budget,
+            "the budget's worth of exits is still replaced silently"
         );
+        assert_eq!(escalations, 1, "the exit past the budget escalates");
     }
 
     /// A host that cannot list its tabs says nothing about the agent: no tick

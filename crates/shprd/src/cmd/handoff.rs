@@ -31,6 +31,12 @@ pub struct HandoffRequest {
     /// The agent taking it over, as `<program>/<model>`; `None` picks the next
     /// configured worker after the outgoing one.
     pub to: Option<String>,
+    /// True when a fresh process of the outgoing agent is a valid replacement.
+    ///
+    /// A worker whose process died is gone; the program is not. With this set
+    /// the picker may choose the same agent again (and does, before it looks
+    /// elsewhere), which is the only way a one-agent roster keeps working.
+    pub same_worker: bool,
 }
 
 /// The attempt being handed over: the latest one, which must be Working.
@@ -58,6 +64,7 @@ fn pick_to(
     workers: &[String],
     from: &str,
     explicit: Option<&str>,
+    same_worker: bool,
 ) -> Result<Option<Pick>, CliError> {
     let specs = spawn::spec_table(programs);
     let Some(raw) = explicit else {
@@ -67,6 +74,7 @@ fn pick_to(
             workers,
             from,
             SystemClock.now_ms(),
+            same_worker,
         ));
     };
     let parsed = AgentRef::parse(raw, &specs).map_err(|err| {
@@ -86,18 +94,24 @@ fn pick_to(
 /// A worker is skipped when it is the one handing over, when its string does
 /// not parse, when its CLI is not installed, or when the log has it dry right
 /// now: handing work to an agent that cannot take it would only cost a tab.
+///
+/// With `same_worker` the search starts at `from` itself and does not skip it:
+/// the outgoing agent's process died, which says nothing about the agent, and
+/// a fresh process of it is the cheapest replacement there is. It is still
+/// skipped when the log has it dry, because a dry agent cannot take work.
 fn next_worker(
     state: &RunState,
     programs: &[Program],
     workers: &[String],
     from: &str,
     now_ms: u64,
+    same_worker: bool,
 ) -> Option<Pick> {
     let specs = spawn::spec_table(programs);
     let start = workers
         .iter()
         .position(|raw| AgentRef::parse(raw, &specs).is_ok_and(|parsed| parsed.program == from))
-        .map(|index| index + 1)
+        .map(|index| if same_worker { index } else { index + 1 })
         .unwrap_or(0);
     for offset in 0..workers.len() {
         let raw = &workers[(start + offset) % workers.len()];
@@ -105,7 +119,7 @@ fn next_worker(
             eprintln!("warning: skipping configured worker `{raw}`");
             continue;
         };
-        if parsed.program == from || dry_now(state, &parsed.program, now_ms) {
+        if (parsed.program == from && !same_worker) || dry_now(state, &parsed.program, now_ms) {
             continue;
         }
         let found = programs
@@ -344,6 +358,7 @@ pub fn handoff(
         &env.workers,
         &from,
         req.to.as_deref(),
+        req.same_worker,
     )?
     else {
         escalate(
@@ -363,6 +378,7 @@ pub fn handoff(
         from_agent: from.clone(),
         to_agent: to.agent.clone(),
         checkpoint: "<pending>".to_string(),
+        reason: Some(req.reason.clone()),
     })?;
     let worktree = PathBuf::from(&attempt.worktree);
     let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
@@ -477,6 +493,7 @@ pub fn handoff(
         from_agent: from.clone(),
         to_agent: to.agent.clone(),
         checkpoint: checkpoint.clone(),
+        reason: Some(req.reason.clone()),
     };
     if let Err(err) = env.ctx.commit(kind) {
         spawn::close_tab(mux, &tab_id);
@@ -556,6 +573,7 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
         task: args.task.clone(),
         reason: args.reason.clone(),
         to: args.to.clone(),
+        same_worker: false,
     };
     let report = handoff(&mux, &env, &request)?;
     if ctx.json {
@@ -769,6 +787,7 @@ project_dirs = []
             task: "T1".to_string(),
             reason: "the agent hit its limit".to_string(),
             to: to.map(str::to_string),
+            same_worker: false,
         }
     }
 
