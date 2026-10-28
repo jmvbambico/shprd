@@ -803,6 +803,27 @@ project_dirs = []
         );
     }
 
+    /// If a codex build ignores the flag, the update screen still has to be
+    /// reported as a blocking prompt rather than swallowing the brief.
+    #[test]
+    fn codex_declares_its_update_screen_as_a_blocking_prompt() {
+        let specs = match load_dir(&harness_dir()) {
+            Ok(specs) => specs,
+            Err(error) => panic!("harness data should load: {error}"),
+        };
+        let Some(codex) = specs.iter().find(|spec| spec.id == "codex") else {
+            panic!("the codex spec should load");
+        };
+        let found = codex.blocking_prompts.iter().any(|prompt| {
+            prompt.name == "update available" && prompt.pattern == "Update available!"
+        });
+        assert!(
+            found,
+            "codex does not declare its update screen: {:?}",
+            codex.blocking_prompts
+        );
+    }
+
     fn parse_fixture(fixture: &str) -> HarnessSpec {
         match toml::from_str::<HarnessSpec>(fixture) {
             Ok(spec) => spec,

@@ -61,3 +61,11 @@ source = "codex_wham"
 [skills]
 home_dirs = ["~/.codex/skills", "~/.agents/skills"]
 project_dirs = [".agents/skills"]
+
+# Codex 0.164 offers an update on startup ("Update available!" ... "Skip until
+# next version") and waits for an answer, so a brief typed in then is lost.
+# `launch.interactive` switches the check off; this catches a build that
+# ignores the flag.
+[[blocking_prompts]]
+name = "update available"
+pattern = "Update available!"
