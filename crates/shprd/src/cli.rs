@@ -103,6 +103,9 @@ pub enum Command {
     /// will not let them approve their own. It asks on the terminal, which an
     /// agent's shell tool never has.
     Approve(ApproveArgs),
+    /// Re-admit a dry agent: record that the run may use it again, so a spawn
+    /// or a handoff stops refusing it. A human's verb, needing no terminal.
+    Readmit(ReadmitArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -130,6 +133,18 @@ pub struct ApproveArgs {
     /// `SHPRD_ACTOR` still has to be unset or `human`.
     #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
+}
+
+/// Arguments for `readmit`.
+#[derive(Debug, Args)]
+pub struct ReadmitArgs {
+    /// The agent to re-admit: the program shprd marked dry (`pi`), or the
+    /// `program/model` form the roster holds.
+    #[arg(value_name = "AGENT")]
+    pub agent: String,
+    /// Why the agent is usable again, recorded in the log.
+    #[arg(long, value_name = "TEXT", default_value = "re-admitted by a human")]
+    pub reason: String,
 }
 
 /// Arguments for `watch`.
