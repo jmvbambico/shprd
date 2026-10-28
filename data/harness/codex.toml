@@ -37,7 +37,9 @@ auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
 # A reviewer gets no auto-approval; it gets a sandbox instead. Its working
 # directory is the review packet, so workspace-write confines its writes to it.
 reviewer_args = ["--sandbox", "workspace-write"]
-system_prompt_args = ["-c", "developer_instructions={prompt}"]
+# No system-prompt arguments: `-c developer_instructions=` has no file form,
+# and herdr refuses an argument holding a newline, so a multi-line brief
+# can never travel that way. It is typed in as the first turn instead.
 resume_args = ["resume", "{session}"]
 verified = false
 
