@@ -7,6 +7,7 @@
 use thiserror::Error;
 
 use crate::event::{Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, TaskId};
+use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
 use crate::state::{AgentInfo, ResourceStatus, RunState, Task, TaskStatus};
 
@@ -145,6 +146,16 @@ pub enum RuleError {
         attempt: u32,
         /// What it reported.
         status: ReportStatus,
+    },
+    /// The attempt's review already has a verdict, so it cannot be restarted.
+    #[error(
+        "task {task:?} attempt {attempt} already has a review verdict and cannot be reviewed again"
+    )]
+    ReviewDecided {
+        /// The task.
+        task: TaskId,
+        /// The attempt.
+        attempt: u32,
     },
     /// Integration was requested for a task that has not passed its gates.
     #[error("task {task:?} is {found:?} and cannot be integrated")]
@@ -654,8 +665,22 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
 /// the attempt named has to be the one that reported. Refusing here is what
 /// makes `shprd agent review` open no reviewer tab for a task that has
 /// nothing to review.
+///
+/// A second request for one attempt is allowed while the review is undecided,
+/// which is what `shprd agent review --again` records when a brief never
+/// arrived and the reviewer has to be started over. Once the review gate has a
+/// verdict the attempt is decided, and a second request would be a review of
+/// work the run has already judged: it is refused here rather than left to the
+/// task's status alone, so the refusal names the real reason.
 fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
     let found = task_in(state, task)?;
+    let current = expect_current_attempt(task, found, attempt)?;
+    if current.gates.iter().any(|gate| gate.gate == REVIEW_GATE) {
+        return Err(RuleError::ReviewDecided {
+            task: task.to_string(),
+            attempt,
+        });
+    }
     if found.status != TaskStatus::Reported {
         return Err(RuleError::WrongStatus {
             task: task.to_string(),
@@ -663,7 +688,7 @@ fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<
             found: found.status,
         });
     }
-    expect_current_attempt(task, found, attempt).map(|_| ())
+    Ok(())
 }
 
 /// Rules for integrating a passed task: a failed gate needs a later override.
@@ -1238,6 +1263,53 @@ mod tests {
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].reviewer, "agent-2");
         assert!(reviews[0].degraded);
+    }
+
+    /// A review may be requested twice for one undecided attempt, which is how
+    /// a restart is recorded, and never a third time once it has a verdict.
+    #[test]
+    fn a_review_can_be_requested_again_until_it_is_decided() {
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a"]),
+            review_requested(5, "a", 1, "agent-2", false),
+            // The brief never arrived, so the review is started again.
+            review_requested(6, "a", 1, "agent-2", false),
+        ];
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Reported);
+        let attempt = match state.tasks.get("a").and_then(|task| task.latest_attempt()) {
+            Some(attempt) => attempt,
+            None => panic!("the attempt is missing"),
+        };
+        assert_eq!(attempt.reviews.len(), 2, "one row per request");
+        assert!(
+            attempt.reviews.iter().all(|review| !review.degraded),
+            "both requests describe the same, undegraded review"
+        );
+    }
+
+    #[test]
+    fn a_decided_review_cannot_be_requested_again() {
+        // Both verdicts close the door: a pass and a fail are equally final for
+        // this attempt, and a restart names the verdict rather than the status.
+        for passed in [true, false] {
+            let log = vec![
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                reported(4, "a", 1, &["src/a"]),
+                review_requested(5, "a", 1, "agent-2", false),
+                gated(6, "a", 1, "review", passed),
+                review_requested(7, "a", 1, "agent-2", false),
+            ];
+            assert!(
+                matches!(refused(&log), RuleError::ReviewDecided { .. }),
+                "a verdict of passed={passed} must refuse a second request"
+            );
+        }
     }
 
     #[test]
