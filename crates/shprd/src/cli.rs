@@ -178,6 +178,25 @@ pub enum SetRole {
     Reviewer(OneAgent),
     /// The agents workers fall back through, in order; replaces the list.
     Workers(ManyAgents),
+    /// Whether the orchestrator launches without permission prompts.
+    OrchestratorAutoApprove(Switch),
+}
+
+/// The `on|off` positional of a boolean setting.
+#[derive(Debug, Args)]
+pub struct Switch {
+    /// `on` turns the setting on, `off` turns it off.
+    #[arg(value_name = "on|off")]
+    pub state: Toggle,
+}
+
+/// The two states a [`Switch`] accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Toggle {
+    /// Turn the setting on.
+    On,
+    /// Turn the setting off.
+    Off,
 }
 
 /// One agent string with the effort it runs at.

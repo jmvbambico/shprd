@@ -26,7 +26,7 @@ use shprd_roster::models::{AgentRef, list_models, parse_effort};
 use shprd_roster::spec::{HarnessSpec, load_dir};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-use crate::cli::{SetArgs, SetRole};
+use crate::cli::{SetArgs, SetRole, Toggle};
 use crate::cmd::roster;
 use crate::ctx::{CliError, resolve_home, resolve_root};
 
@@ -89,26 +89,43 @@ fn execute(
     for agent in &change.agents {
         warn_unknown_model(agent, &specs, &path_env);
     }
-    println!("ok {} = {}", change.role, change.agents.join(" "));
+    match change.switch {
+        Some(on) => println!("ok {} = {}", change.role, if on { "on" } else { "off" }),
+        None => println!("ok {} = {}", change.role, change.agents.join(" ")),
+    }
     Ok(())
 }
 
 /// The validated change a command line asks for.
 struct Change {
-    /// The `[roster]` key to write, e.g. `orchestrator` or `workers`.
+    /// The role as the command line names it, e.g. `orchestrator`.
     role: &'static str,
-    /// The agent strings, in fallback order.
+    /// The `[roster]` key to write, e.g. `orchestrator` or `workers`.
+    key: &'static str,
+    /// The agent strings, in fallback order; empty for a switch.
     agents: Vec<String>,
     /// The effort for the single-agent roles, already checked.
     effort: Option<String>,
+    /// The boolean a switch role writes, when the role is one.
+    switch: Option<bool>,
 }
 
 /// Check every agent string and effort, and normalize the strings.
 fn change_of(args: &SetArgs, specs: &[HarnessSpec]) -> Result<Change, CliError> {
+    if let SetRole::OrchestratorAutoApprove(switch) = &args.role {
+        return Ok(Change {
+            role: "orchestrator-auto-approve",
+            key: "orchestrator_auto_approve",
+            agents: Vec::new(),
+            effort: None,
+            switch: Some(switch.state == Toggle::On),
+        });
+    }
     let (role, agents, effort) = match &args.role {
         SetRole::Orchestrator(one) => ("orchestrator", vec![one.agent.clone()], one.effort.clone()),
         SetRole::Reviewer(one) => ("reviewer", vec![one.agent.clone()], one.effort.clone()),
         SetRole::Workers(many) => ("workers", many.agents.clone(), None),
+        SetRole::OrchestratorAutoApprove(_) => unreachable!("handled above"),
     };
     let mut parsed = Vec::with_capacity(agents.len());
     for agent in &agents {
@@ -125,8 +142,10 @@ fn change_of(args: &SetArgs, specs: &[HarnessSpec]) -> Result<Change, CliError> 
     };
     Ok(Change {
         role,
+        key: role,
         agents: parsed,
         effort,
+        switch: None,
     })
 }
 
@@ -364,14 +383,16 @@ fn apply(document: &mut DocumentMut, change: &Change) -> Result<(), CliError> {
             "the config's `roster` key is not a table, so it cannot be set"
         ))
     })?;
-    if change.role == "workers" {
+    if let Some(on) = change.switch {
+        table[change.key] = value(on);
+    } else if change.key == "workers" {
         let mut array = Array::new();
         for agent in &change.agents {
             array.push(agent.as_str());
         }
         table["workers"] = value(array);
     } else if let Some(agent) = change.agents.first() {
-        table[change.role] = value(agent.as_str());
+        table[change.key] = value(agent.as_str());
     }
     if let (Some(effort), Some(agent)) = (&change.effort, change.agents.first()) {
         let effort_table = table["effort"].or_insert(Item::Table(Table::new()));
@@ -409,7 +430,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::OneAgent;
+    use crate::cli::{OneAgent, Switch};
 
     /// A temp home and repo, so nothing in the real checkout is ever written.
     struct Fixture {
@@ -510,6 +531,38 @@ mod tests {
         assert!(text.contains("reviewer = \"codex/gpt-6\""), "{text}");
         assert!(text.contains("archive_days = 30"), "{text}");
         assert!(text.contains("claude/claude-opus-5-5"), "{text}");
+    }
+
+    /// `set orchestrator-auto-approve on|off`.
+    fn auto_approve(state: Toggle) -> SetArgs {
+        SetArgs {
+            role: SetRole::OrchestratorAutoApprove(Switch { state }),
+        }
+    }
+
+    #[test]
+    fn writes_the_auto_approve_switch_under_roster() {
+        let fixture = Fixture::new();
+        assert!(fixture.run(&auto_approve(Toggle::On)).is_ok());
+        let text = text_of(&fixture.global());
+        assert!(text.contains("[roster]"), "{text}");
+        assert!(text.contains("orchestrator_auto_approve = true"), "{text}");
+
+        assert!(fixture.run(&auto_approve(Toggle::Off)).is_ok());
+        let text = text_of(&fixture.global());
+        assert!(text.contains("orchestrator_auto_approve = false"), "{text}");
+    }
+
+    #[test]
+    fn the_auto_approve_switch_keeps_the_roles_around_it() {
+        let fixture = Fixture::new();
+        assert!(fixture.run(&orchestrator("claude/claude-opus-5-5")).is_ok());
+        assert!(fixture.run(&auto_approve(Toggle::On)).is_ok());
+        let text = text_of(&fixture.global());
+        assert!(
+            text.contains("orchestrator = \"claude/claude-opus-5-5\""),
+            "{text}"
+        );
     }
 
     #[test]
