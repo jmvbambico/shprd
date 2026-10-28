@@ -247,10 +247,15 @@ impl Watcher {
             {
                 continue;
             }
-            env.ctx.commit(EventKind::Available {
-                agent: agent.clone(),
-                reason: String::from("reset time passed"),
-            })?;
+            // The watchdog is the engine, whatever actor started it: a
+            // re-admission is the engine's, and only the engine or a human
+            // may record one.
+            env.ctx
+                .as_actor(Actor::Engine)
+                .commit(EventKind::Available {
+                    agent: agent.clone(),
+                    reason: String::from("reset time passed"),
+                })?;
             lines.push(format!("available again: {agent}"));
             finished.push(agent.clone());
         }
