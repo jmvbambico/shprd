@@ -13,6 +13,10 @@ use shprd_mux::AgentState;
 const FALLBACK_BACKOFF_MS: u64 = 900_000;
 
 /// Where a dry verdict came from.
+///
+/// A worker's process exiting is deliberately not one of these: the agent may
+/// be perfectly usable, so an exit hands the attempt on instead of drying
+/// anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// A provider error record in the session's transcript.
@@ -23,12 +27,6 @@ pub enum Source {
     Screen,
     /// The agent stopped producing output for too long.
     Silence,
-    /// The agent's process is gone.
-    ///
-    /// The attempt has no worker any more, but the program may be perfectly
-    /// usable: a fresh process of the same agent is a valid replacement, so
-    /// this source hands off without drying anything.
-    Exit,
 }
 
 /// What the watchdog currently believes about one agent.
