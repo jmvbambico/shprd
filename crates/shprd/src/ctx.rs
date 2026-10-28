@@ -16,6 +16,10 @@ const ACTOR_ENV: &str = "SHPRD_ACTOR";
 /// Environment variable overriding the home directory shprd keeps state in.
 const HOME_ENV: &str = "SHPRD_HOME";
 
+/// Environment variable naming the repository root, for a caller whose working
+/// directory is not inside it — a reviewer's packet folder, for one.
+const REPO_ENV: &str = "SHPRD_REPO";
+
 /// Exit code for a command a transition rule refused.
 pub const EXIT_REFUSED: u8 = 2;
 
@@ -142,10 +146,18 @@ impl Ctx {
     }
 }
 
-/// Resolves the repo root: the explicit flag, else the git top level.
+/// Resolves the repo root: `--repo`, then `$SHPRD_REPO`, then the git top level.
+///
+/// The env var exists because a command run outside the repository still has to
+/// name it: asking git only works when the working directory is inside one.
 pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
-    match explicit {
-        Some(path) => Ok(path.to_path_buf()),
+    let named = explicit.map(|path| path.to_path_buf()).or_else(|| {
+        std::env::var_os(REPO_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    match named {
+        Some(path) => Ok(path),
         None => git_top_level(),
     }
 }
