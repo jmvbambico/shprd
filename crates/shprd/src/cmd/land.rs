@@ -552,17 +552,20 @@ mod tests {
         )
     }
 
-    /// The provenance a real verdict carries.
-    fn provenance(reviewer: &str) -> ReviewSource {
+    /// The provenance a real verdict carries, for `reviewer`'s request at
+    /// `request_seq` (`0` when the log records no request at all).
+    fn provenance(reviewer: &str, request_seq: u64) -> ReviewSource {
         ReviewSource {
             reviewer: reviewer.to_string(),
             findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
                 .to_string(),
+            request_seq,
         }
     }
 
-    /// Records a passed `review` gate at `seq`, with its provenance.
-    fn review_passed(seq: u64, task: &str) -> Event {
+    /// Records a passed `review` gate at `seq`, answering the request at
+    /// `request_seq`.
+    fn review_passed(seq: u64, task: &str, request_seq: u64) -> Event {
         ev(
             seq,
             EventKind::GatePassed {
@@ -570,7 +573,7 @@ mod tests {
                 attempt: 1,
                 gate: REVIEW_GATE.to_string(),
                 findings: Vec::new(),
-                source: Some(provenance("c1")),
+                source: Some(provenance("c1", request_seq)),
             },
         )
     }
@@ -625,7 +628,7 @@ mod tests {
     fn a_clean_review_reads_as_passed() {
         let mut log = reported_log("T1");
         log.push(reviewed(5, "T1", "c1", false));
-        log.push(review_passed(6, "T1"));
+        log.push(review_passed(6, "T1", 5));
         log.push(integrated(7, "T1"));
         assert_eq!(review_marker(&folded(&log)), REVIEW_PASSED);
     }
@@ -638,7 +641,7 @@ mod tests {
         let mut log = reported_log("T1");
         log.push(reviewed(5, "T1", "c1", false));
         log.push(reviewed(6, "T1", "c1", false));
-        log.push(review_passed(7, "T1"));
+        log.push(review_passed(7, "T1", 6));
         log.push(integrated(8, "T1"));
         assert_eq!(review_marker(&folded(&log)), REVIEW_PASSED);
     }
@@ -647,7 +650,7 @@ mod tests {
     fn one_degraded_review_names_the_task() {
         let mut log = reported_log("T1");
         log.push(reviewed(5, "T1", "w2", true));
-        log.push(review_passed(6, "T1"));
+        log.push(review_passed(6, "T1", 5));
         log.push(integrated(7, "T1"));
         let marker = review_marker(&folded(&log));
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
@@ -660,7 +663,7 @@ mod tests {
     #[test]
     fn a_passed_review_gate_without_a_recorded_review_is_degraded() {
         let mut log = reported_log("T1");
-        log.push(review_passed(5, "T1"));
+        log.push(review_passed(5, "T1", 0));
         log.push(integrated(6, "T1"));
         let marker = review_marker(&folded(&log));
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
@@ -710,7 +713,7 @@ mod tests {
     fn a_proven_verdict_passes_the_marker() {
         let mut log = reported_log("T1");
         log.push(reviewed(5, "T1", "c1", false));
-        log.push(review_passed(6, "T1"));
+        log.push(review_passed(6, "T1", 5));
         log.push(integrated(7, "T1"));
         assert_eq!(review_marker(&folded(&log)), REVIEW_PASSED);
     }
@@ -719,7 +722,7 @@ mod tests {
     fn an_overridden_review_gate_degrades_the_marker_with_its_reason() {
         let mut log = reported_log("T1");
         log.push(reviewed(5, "T1", "c1", false));
-        log.push(review_passed(6, "T1"));
+        log.push(review_passed(6, "T1", 5));
         log.push(overrode(
             7,
             "T1",

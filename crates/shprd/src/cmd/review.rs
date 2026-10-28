@@ -1697,6 +1697,10 @@ project_dirs = []
         let env = scratch.review_env(&ctx, Some("codex/m1"));
         let mux = scratch.mux();
         review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let request = recorded_reviews(&ctx)
+            .last()
+            .cloned()
+            .unwrap_or_else(|| panic!("the review request is missing"));
         // A verdict is the engine's to record, from the packet the reviewer
         // wrote: exactly what `verdict` records, which is what the restart sees.
         ctx.as_actor(Actor::Engine)
@@ -1706,8 +1710,9 @@ project_dirs = []
                 gate: REVIEW_GATE.to_string(),
                 findings: Vec::new(),
                 source: Some(ReviewSource {
-                    reviewer: "codex/m1".to_string(),
+                    reviewer: request.reviewer.clone(),
                     findings_sha256: "ba7816bf".to_string(),
+                    request_seq: request.seq,
                 }),
             })
             .unwrap_or_else(|err| panic!("{err}"));

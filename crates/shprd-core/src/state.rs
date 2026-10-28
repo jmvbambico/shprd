@@ -193,6 +193,12 @@ pub struct ReviewRequest {
     pub reviewer: AgentId,
     /// True when the reviewer shares the author's vendor.
     pub degraded: bool,
+    /// The `seq` of the event that recorded this request.
+    ///
+    /// A restart records a second request for the same attempt, so the two are
+    /// told apart by position: a verdict answers the request whose seq it
+    /// carries, and only the latest one is still answerable.
+    pub seq: u64,
 }
 
 /// What an agent reported about an attempt.
@@ -481,6 +487,7 @@ impl RunState {
                     current.reviews.push(ReviewRequest {
                         reviewer: reviewer.clone(),
                         degraded: *degraded,
+                        seq: event.seq,
                     });
                 }
             }

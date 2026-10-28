@@ -154,6 +154,18 @@ pub struct ReviewSource {
     pub reviewer: AgentId,
     /// SHA-256 of the findings file's bytes, as lowercase hex.
     pub findings_sha256: String,
+    /// The `seq` of the [`EventKind::ReviewRequested`] this verdict answers.
+    ///
+    /// A restarted review records a fresh request for the same attempt, and it
+    /// may name the same reviewer, so who reviewed does not tell the two
+    /// requests apart. The request's position does: a verdict written for a
+    /// request that has since been superseded is refused instead of being read
+    /// as the current review's own.
+    ///
+    /// Defaulted to `0` so a log written before this field existed still
+    /// folds; no request has that seq, so a verdict recorded now names one.
+    #[serde(default)]
+    pub request_seq: u64,
 }
 
 /// What happened. Serialized with a `kind` tag alongside the [`Event`] fields.
@@ -487,6 +499,7 @@ mod tests {
                     reviewer: "codex/m1".to_string(),
                     findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb41"
                         .to_string(),
+                    request_seq: 5,
                 }),
             },
             EventKind::GateFailed {

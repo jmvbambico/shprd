@@ -356,9 +356,12 @@ mod tests {
                         location: None,
                         detail: "replace it".to_string(),
                     }],
+                    // No `ReviewRequested` precedes these: the fixture is a log
+                    // from before a verdict had to name the request it answers.
                     source: Some(ReviewSource {
                         reviewer: "codex/m1".to_string(),
                         findings_sha256: "ba7816bf8f01cfea".to_string(),
+                        request_seq: 0,
                     }),
                 },
             ),
@@ -381,9 +384,12 @@ mod tests {
                     attempt: 2,
                     gate: "review".to_string(),
                     findings: vec![],
+                    // No `ReviewRequested` precedes these: the fixture is a log
+                    // from before a verdict had to name the request it answers.
                     source: Some(ReviewSource {
                         reviewer: "codex/m1".to_string(),
                         findings_sha256: "ba7816bf8f01cfea".to_string(),
+                        request_seq: 0,
                     }),
                 },
             ),

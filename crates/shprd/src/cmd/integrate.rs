@@ -385,6 +385,24 @@ mod tests {
         /// Records the review pass that makes the task integrable.
         fn passed(&self, ctx: &Ctx) {
             self.reported(ctx);
+            // A verdict answers a request, so the log records the dispatch
+            // first, exactly as `shprd agent review` does.
+            ctx.commit(EventKind::ReviewRequested {
+                task: "T1".to_string(),
+                attempt: 1,
+                reviewer: "codex/m1".to_string(),
+                degraded: false,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            let request_seq = ctx
+                .state()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .tasks
+                .get("T1")
+                .and_then(|task| task.attempts.last())
+                .and_then(|attempt| attempt.reviews.last())
+                .map(|request| request.seq)
+                .unwrap_or_else(|| panic!("no review request was recorded"));
             // Only the engine records a review verdict, and it carries the
             // reviewer's provenance, exactly as the verdict verb records it.
             ctx.as_actor(Actor::Engine)
@@ -396,6 +414,7 @@ mod tests {
                     source: Some(ReviewSource {
                         reviewer: "codex/m1".to_string(),
                         findings_sha256: "ba7816bf".to_string(),
+                        request_seq,
                     }),
                 })
                 .unwrap_or_else(|err| panic!("{err}"));

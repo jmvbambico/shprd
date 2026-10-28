@@ -161,14 +161,16 @@ fn provenance(ctx: &Ctx, task: &str, attempt: u32, bytes: &[u8]) -> Result<Revie
         .last()
         .filter(|current| current.n == attempt)
         .ok_or_else(|| CliError::Invalid(anyhow!("task {task} has no attempt {attempt}")))?;
-    let reviewer = current.reviews.last().map(|review| review.reviewer.clone());
-    let reviewer = reviewer.ok_or_else(|| {
+    let request = current.reviews.last().ok_or_else(|| {
         CliError::Invalid(anyhow!(
             "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
         ))
     })?;
     Ok(ReviewSource {
-        reviewer,
+        // The request's own seq travels with the verdict, so a request recorded
+        // after this read supersedes it instead of being answered by it.
+        request_seq: request.seq,
+        reviewer: request.reviewer.clone(),
         findings_sha256: hash::sha256_hex(bytes),
     })
 }

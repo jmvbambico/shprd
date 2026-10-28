@@ -11,7 +11,7 @@ use crate::event::{
 };
 use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
-use crate::state::{AgentInfo, ResourceStatus, RunState, Task, TaskStatus};
+use crate::state::{AgentInfo, ResourceStatus, ReviewRequest, RunState, Task, TaskStatus};
 
 /// Why an event was refused.
 #[derive(Debug, Error)]
@@ -251,6 +251,21 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
+    /// A review verdict answered a review request that is no longer the latest.
+    ///
+    /// A restart records a fresh request for the same attempt, possibly naming
+    /// a different reviewer. A verdict written before that request is about
+    /// work the current review has not looked at, so accepting it would back
+    /// the pull request's passed marker with the review it replaced.
+    #[error(
+        "task {task:?} attempt {attempt}: a review verdict must answer the latest review request"
+    )]
+    StaleReviewVerdict {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+    },
     /// Integration was requested while the latest attempt has a failed gate and
     /// no override recorded after it.
     #[error("task {task:?} cannot be integrated: gate {gate:?} failed and no override followed")]
@@ -388,7 +403,7 @@ fn check_with(
             ..
         } => {
             check_gate(state, task, *attempt)?;
-            check_verdict(provenance, actor, task, gate, source)
+            check_verdict(provenance, state, actor, task, *attempt, gate, source)
         }
         EventKind::ReviewRequested { task, attempt, .. } => {
             check_review_requested(state, task, *attempt)
@@ -738,10 +753,25 @@ fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleErro
 /// A gate that is not the review gate is free: any actor may record lint or
 /// tests. A review verdict is the engine's alone, because only the engine reads
 /// the reviewer's packet, and it must carry the provenance that reading gave it.
+///
+/// The verdict must also answer the *latest* review request for the attempt.
+/// Reading the reviewer's packet and appending the verdict are not one step,
+/// and `shprd agent review --again` may record a fresh request in between,
+/// possibly naming a different reviewer. The old review's verdict would then be
+/// about work the current review never read, so it is refused rather than
+/// backing the pull request's passed marker. Only the request's seq tells the
+/// two apart: the same reviewer may be asked twice for one attempt.
+///
+/// History is not re-judged: a replayed verdict keeps whatever it was recorded
+/// with. A log written before requests carried a seq cannot answer the
+/// question, and one written before this rule holds verdicts this rule would
+/// refuse, so replay keeps them all.
 fn check_verdict(
     provenance: Provenance,
+    state: &RunState,
     actor: &Actor,
     task: &str,
+    attempt: u32,
     gate: &str,
     source: &Option<ReviewSource>,
 ) -> Result<(), RuleError> {
@@ -753,16 +783,43 @@ fn check_verdict(
             task: task.to_string(),
         });
     }
-    match source {
+    let source = match source {
         Some(source)
             if !source.reviewer.trim().is_empty() && !source.findings_sha256.trim().is_empty() =>
         {
+            source
+        }
+        _ => {
+            return Err(RuleError::UnprovenVerdict {
+                task: task.to_string(),
+            });
+        }
+    };
+    match latest_review(state, task, attempt) {
+        Some(request)
+            if request.reviewer == source.reviewer && request.seq == source.request_seq =>
+        {
             Ok(())
         }
-        _ => Err(RuleError::UnprovenVerdict {
+        _ => Err(RuleError::StaleReviewVerdict {
             task: task.to_string(),
+            attempt,
         }),
     }
+}
+
+/// The newest review request the log holds for `task`'s attempt `attempt`.
+///
+/// `None` means no review was ever handed out for that attempt, which a
+/// verdict cannot answer either: it would name a reviewer nothing dispatched.
+fn latest_review<'a>(state: &'a RunState, task: &str, attempt: u32) -> Option<&'a ReviewRequest> {
+    let current = state
+        .tasks
+        .get(task)?
+        .attempts
+        .iter()
+        .find(|current| current.n == attempt)?;
+    current.reviews.last()
 }
 
 /// Rules for recording a review dispatch.
@@ -1080,10 +1137,17 @@ mod tests {
 
     /// The provenance a real verdict carries.
     fn provenance() -> ReviewSource {
+        // The request `reviewable()` records at seq 5.
+        provenance_for("codex/m1", 5)
+    }
+
+    /// The provenance a verdict answers `reviewer`'s request at `request_seq`.
+    fn provenance_for(reviewer: &str, request_seq: u64) -> ReviewSource {
         ReviewSource {
-            reviewer: "codex/m1".to_string(),
+            reviewer: reviewer.to_string(),
             findings_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
                 .to_string(),
+            request_seq,
         }
     }
 
@@ -1126,6 +1190,7 @@ mod tests {
             added(2, "a", &["src/a"], &[]),
             spawned(3, "a", 1, "agent-1"),
             reported(4, "a", 1, &["src/a/x.rs"]),
+            review_requested(5, "a", 1, "codex/m1", false),
         ]
     }
 
@@ -1793,7 +1858,7 @@ mod tests {
         // Old logs hold verdicts no engine recorded and no source proves.
         // Replay keeps them: reading a run's history is not recording it.
         let mut log = reviewable();
-        log.push(by(5, Actor::Orchestrator, review_gate(true, None)));
+        log.push(by(6, Actor::Orchestrator, review_gate(true, None)));
         let state = folded(&log);
         let gate = state
             .tasks
@@ -1808,7 +1873,7 @@ mod tests {
     #[test]
     fn a_proven_review_verdict_folds_into_its_attempt() {
         let mut log = reviewable();
-        log.push(ev(5, review_gate(true, Some(provenance()))));
+        log.push(ev(6, review_gate(true, Some(provenance()))));
         let state = folded(&log);
         let gate = state
             .tasks
@@ -1821,13 +1886,103 @@ mod tests {
         assert_eq!(status(&state, "a"), TaskStatus::Passed);
     }
 
+    /// A verdict that answers a request a restart has superseded is refused.
+    ///
+    /// Reading the packet and appending the verdict are two steps, and
+    /// `review --again` can record a fresh request in between. The old review's
+    /// verdict then names the request it read, which is no longer the latest.
+    #[test]
+    fn a_verdict_for_a_superseded_review_request_is_refused() {
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "codex/m1", false));
+        let state = folded(&log);
+        assert_eq!(state.last_seq, 6);
+        match state.check_as(
+            &Actor::Engine,
+            &review_gate(true, Some(provenance())),
+            7_000,
+        ) {
+            Err(RuleError::StaleReviewVerdict { task, attempt }) => {
+                assert_eq!(task, "a");
+                assert_eq!(attempt, 1);
+            }
+            other => panic!("a superseded request was answered: {other:?}"),
+        }
+        // The restart may name another reviewer, which the superseded verdict
+        // names too: the request's seq is what refuses it either way.
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "claude/m1", false));
+        let state = folded(&log);
+        assert!(matches!(
+            state.check_as(
+                &Actor::Engine,
+                &review_gate(false, Some(provenance())),
+                7_000
+            ),
+            Err(RuleError::StaleReviewVerdict { .. })
+        ));
+    }
+
+    /// A verdict for the latest request is accepted, whoever it names.
+    #[test]
+    fn a_verdict_for_the_latest_review_request_is_accepted() {
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "claude/m1", false));
+        let state = folded(&log);
+        state
+            .check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance_for("claude/m1", 6))),
+                7_000,
+            )
+            .unwrap_or_else(|err| panic!("the latest request's verdict was refused: {err}"));
+        // The same reviewer asked twice is two requests, and only the newer one
+        // is still answerable.
+        let mut log = reviewable();
+        log.push(review_requested(6, "a", 1, "codex/m1", false));
+        let state = folded(&log);
+        state
+            .check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance_for("codex/m1", 6))),
+                7_000,
+            )
+            .unwrap_or_else(|err| panic!("the latest request's verdict was refused: {err}"));
+    }
+
+    /// A verdict from before requests carried a seq still folds.
+    ///
+    /// The field defaults to `0`, which no request has, so such a verdict can
+    /// never be recorded now; replay keeps it because a run's history is read,
+    /// not re-judged, exactly as a verdict without provenance is kept.
+    #[test]
+    fn a_legacy_verdict_without_a_request_seq_still_folds() {
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(true, Some(provenance_for("codex/m1", 0))),
+        ));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+        // Recording the same thing now is refused: absence is a legacy reading,
+        // never a way past the rule.
+        assert!(matches!(
+            state.check_as(
+                &Actor::Engine,
+                &review_gate(true, Some(provenance_for("codex/m1", 0))),
+                7_000
+            ),
+            Err(RuleError::StaleReviewVerdict { .. })
+        ));
+    }
+
     #[test]
     fn a_gate_that_is_not_a_review_is_any_actor_s_to_record() {
         // The rule is about review verdicts only: a human recording a lint
         // result is a fact about lint, not a claim about a review.
         let mut log = reviewable();
         log.push(by(
-            5,
+            6,
             Actor::Human,
             EventKind::GatePassed {
                 task: "a".to_string(),
