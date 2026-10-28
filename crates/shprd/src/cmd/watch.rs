@@ -189,8 +189,7 @@ impl Watcher {
                 lines.push(format!("escalated {}: invalid findings.json", task.id));
                 continue;
             }
-            let outcome =
-                verdict::submit_verdict(mux, env.ctx, home_of(env), &task.id, attempt, &path)?;
+            let outcome = verdict::submit_verdict(mux, env.ctx, home_of(env), &task.id, attempt)?;
             let word = match outcome {
                 verdict::Outcome::Passed => "passed",
                 verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",

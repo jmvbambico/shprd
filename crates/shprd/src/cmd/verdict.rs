@@ -4,7 +4,7 @@
 //! policy in [`shprd_core::gate`] — so the pass/fail call always comes from
 //! code — and records either the pass, or the failure plus its consequence.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::{self, Review};
@@ -43,7 +43,7 @@ pub fn verdict_verb(
     home: Option<&Path>,
 ) -> Result<(), CliError> {
     let mux = spawn::real_mux();
-    let outcome = submit_verdict(&mux, ctx, home, &args.task, args.attempt, &args.findings)?;
+    let outcome = submit_verdict(&mux, ctx, home, &args.task, args.attempt)?;
     match outcome {
         Outcome::Passed => println!("review passed"),
         Outcome::SentBack { blocking } => {
@@ -56,24 +56,28 @@ pub fn verdict_verb(
     Ok(())
 }
 
-/// Applies the review policy to `findings_path` and records what it decides.
+/// Applies the review policy to the reviewer's packet and records what it
+/// decides.
 ///
 /// The reviewer only writes findings; the call to pass or fail is made here, by
-/// [`gate`], so a verdict is reproducible from the file alone. `home` picks the
-/// config the policy comes from, as `--home` does for every other verb. The
-/// verdict is also the reviewer's last word: once it is recorded, the reviewer's
-/// tab is closed, and `mux` is the host that closes it.
+/// [`gate`], so a verdict is reproducible from the file alone. The file is the
+/// packet's own [`review::findings_path`], never one a caller names: a verdict
+/// must come from the reviewer, so the only findings that can decide a review
+/// are the ones written into its packet. `home` picks the config the policy
+/// comes from, as `--home` does for every other verb. The verdict is also the
+/// reviewer's last word: once it is recorded, the reviewer's tab is closed, and
+/// `mux` is the host that closes it.
 pub fn submit_verdict(
     mux: &dyn Mux,
     ctx: &Ctx,
     home: Option<&Path>,
     task: &str,
     attempt: u32,
-    findings_path: &Path,
 ) -> Result<Outcome, CliError> {
     let home = crate::ctx::resolve_home(home)?;
     let policy = review_policy(ctx, Some(&home))?;
-    let findings = read_findings(findings_path)?;
+    let findings_path = packet_path(ctx, &home, task, attempt)?;
+    let findings = read_findings(&findings_path)?;
     let decided = gate::verdict(&findings, policy.must_fix);
     if decided.passed {
         // A pass keeps every finding it was given: minor advice is still worth
@@ -114,6 +118,20 @@ pub fn submit_verdict(
             Ok(Outcome::Escalated { blocking })
         }
     }
+}
+
+/// The findings file the reviewer for one attempt wrote.
+///
+/// It is derived, never passed in: the packet folder names the run, the task and
+/// the attempt, and only a reviewer writes inside it.
+fn packet_path(ctx: &Ctx, home: &Path, task: &str, attempt: u32) -> Result<PathBuf, CliError> {
+    let run = active_run(ctx).ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no run has started: there is no review packet for {task} attempt {attempt}"
+        ))
+    })?;
+    let reviews = home.join(".shprd").join("reviews");
+    Ok(review::findings_path(&reviews, &run, task, attempt))
 }
 
 /// Closes the reviewer's tab for one attempt, once its verdict is recorded.

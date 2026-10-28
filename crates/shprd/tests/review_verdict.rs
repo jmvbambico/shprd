@@ -11,6 +11,9 @@ use tempfile::TempDir;
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
+/// The run id every fixture starts, so a packet folder can be named.
+const RUN: &str = "m6";
+
 /// A throwaway repo root, plus the home directory shprd keeps config in.
 struct Fixture {
     _repo: TempDir,
@@ -108,19 +111,35 @@ impl Fixture {
         ]);
     }
 
-    /// Decides the review for one attempt from a JSON findings file.
-    fn review(&self, id: &str, n: u32, findings: &str) -> Output {
-        let path = self.root.join(format!("findings-{id}-{n}.json"));
+    /// Writes `findings` into the packet the reviewer for one attempt owns.
+    ///
+    /// This is the only file the verdict reads: the reviewer writes it and the
+    /// engine decides from it, so a test acts as both.
+    fn packet(&self, id: &str, n: u32, findings: &str) -> PathBuf {
+        let dir = self
+            .home
+            .join(".shprd")
+            .join("reviews")
+            .join(RUN)
+            .join(format!("{id}-a{n}"));
+        makedir(&dir);
+        let path = dir.join("findings.json");
         write(&path, findings);
+        path
+    }
+
+    /// Decides the review for one attempt from the packet its reviewer wrote.
+    fn review(&self, id: &str, n: u32, findings: &str) -> Output {
+        self.packet(id, n, findings);
         self.run(&[
+            "--as",
+            "engine",
             "agent",
             "review-verdict",
             "--task",
             id,
             "--attempt",
             &n.to_string(),
-            "--findings",
-            &path.display().to_string(),
         ])
     }
 
@@ -362,21 +381,20 @@ fn the_verdict_runs_from_a_directory_outside_the_repository() {
     // there fails: the verb has to be told where the run's log is, either with
     // `--repo` or with `SHPRD_REPO`.
     let elsewhere = temp("outside");
-    let findings = elsewhere.path().join("findings.json");
-    write(&findings, &finding("minor"));
     for repo_env in [false, true] {
         let fixture = Fixture::new();
         fixture.add_task("T1");
         fixture.attempt("T1", 1);
+        fixture.packet("T1", 1, &finding("minor"));
         let args = [
+            "--as",
+            "engine",
             "agent",
             "review-verdict",
             "--task",
             "T1",
             "--attempt",
             "1",
-            "--findings",
-            &findings.display().to_string(),
         ];
         // `--repo`, then the environment variable, then nothing.
         let (repo, env): (Option<&Path>, Vec<(&str, &str)>) = if repo_env {

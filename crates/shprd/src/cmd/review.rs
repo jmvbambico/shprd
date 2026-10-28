@@ -1843,15 +1843,12 @@ project_dirs = []
             "the review left no tab for the verdict to close"
         );
 
-        let outcome = crate::cmd::verdict::submit_verdict(
-            &mux,
-            &ctx,
-            Some(scratch.home.path()),
-            "T1",
-            1,
-            &findings,
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        // The engine records the verdict, not the human default: only the
+        // engine may turn a reviewer's packet into a gate result.
+        let engine = Ctx::new(ctx.root.clone(), Actor::Engine, ctx.json, ctx.no_dagr);
+        let outcome =
+            crate::cmd::verdict::submit_verdict(&mux, &engine, Some(scratch.home.path()), "T1", 1)
+                .unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(outcome, crate::cmd::verdict::Outcome::Passed);
         assert!(

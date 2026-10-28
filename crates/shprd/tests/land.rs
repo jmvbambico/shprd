@@ -330,17 +330,26 @@ impl Fixture {
             "--gate",
             "lint",
         ]);
-        let findings = self.home.join("findings.json");
-        write(&findings, "[]");
+        // The reviewer writes its packet; the engine decides from it.
+        let packet = self
+            .home
+            .join(".shprd")
+            .join("reviews")
+            .join("r1")
+            .join(format!("{id}-a1"));
+        if let Err(err) = std::fs::create_dir_all(&packet) {
+            panic!("mkdir {}: {err}", packet.display());
+        }
+        write(&packet.join("findings.json"), "[]");
         self.ok(&[
+            "--as",
+            "engine",
             "agent",
             "review-verdict",
             "--task",
             id,
             "--attempt",
             "1",
-            "--findings",
-            findings.to_str().unwrap_or("findings.json"),
         ]);
     }
 

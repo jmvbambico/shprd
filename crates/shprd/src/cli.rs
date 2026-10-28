@@ -481,9 +481,6 @@ pub struct ReviewVerdictArgs {
     /// Attempt number.
     #[arg(long, value_name = "N")]
     pub attempt: u32,
-    /// JSON file holding an array of findings.
-    #[arg(long, value_name = "FILE")]
-    pub findings: PathBuf,
 }
 
 /// Arguments for `agent escalate`.
