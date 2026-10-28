@@ -12,6 +12,28 @@ use shprd_mux::AgentState;
 /// Backoff used when a [`Policy`] supplies an empty backoff list.
 const FALLBACK_BACKOFF_MS: u64 = 900_000;
 
+/// Why a worker's process ending hands its attempt on.
+///
+/// The one spelling of the reason a `HandedOff` event carries, so the exit
+/// streak can be counted back out of the log by a watchdog that restarted.
+pub const EXIT_REASON: &str = "agent process exited";
+
+/// The tail every exit-budget escalation ends with.
+const EXIT_ESCALATION_TAIL: &str = "times in a row on this attempt: pick up by hand";
+
+/// The reason an attempt whose exit budget is spent is escalated with.
+fn exit_escalation_reason(exits: usize) -> String {
+    format!("{EXIT_REASON} {exits} {EXIT_ESCALATION_TAIL}")
+}
+
+/// True when `body` is the escalation of an attempt whose exit budget is spent.
+///
+/// A restarted watchdog finds its predecessor's verdict this way instead of
+/// escalating the same attempt a second time.
+pub fn is_exit_escalation(body: &str) -> bool {
+    body.contains(EXIT_REASON) && body.ends_with(EXIT_ESCALATION_TAIL)
+}
+
 /// Where a dry verdict came from.
 ///
 /// A worker's process exiting is deliberately not one of these: the agent may
@@ -243,21 +265,33 @@ impl Watch {
     fn on_exit(&mut self, now_ms: u64, p: &Policy) -> Vec<Action> {
         self.exit_count = self.exit_count.saturating_add(1);
         self.transient_since_ms = None;
-        let reason = String::from("agent process exited");
+        let reason = String::from(EXIT_REASON);
         if self.exit_count > p.exit_budget.max(1) {
             self.health = Health::Escalated {
                 since_ms: now_ms,
                 reason: reason.clone(),
             };
             return vec![Action::Escalate {
-                reason: format!(
-                    "{reason} {} times in a row on this attempt: pick up by hand",
-                    self.exit_count
-                ),
+                reason: exit_escalation_reason(self.exit_count),
             }];
         }
         self.health = Health::Working;
         vec![Action::HandOff { reason, dry: false }]
+    }
+
+    /// Rebuilds what this watch remembers from what the log already says.
+    ///
+    /// A restarted watchdog starts with no memory, so the exit streak is handed
+    /// in from the log rather than counted from zero: a crash loop must not
+    /// survive the watchdog's own restart. An escalation the log already holds
+    /// for the attempt parks the watch, so nothing is handed off or escalated
+    /// twice for it.
+    pub fn resume(&mut self, exits: usize, parked: Option<(u64, String)>) {
+        self.exit_count = exits;
+        if let Some((since_ms, reason)) = parked {
+            self.health = Health::Escalated { since_ms, reason };
+            self.transient_since_ms = None;
+        }
     }
 
     /// The attempt was handed on: a new worker continues it.

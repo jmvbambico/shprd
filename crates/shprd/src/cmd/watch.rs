@@ -10,7 +10,9 @@ use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_mux::{Mux, MuxError, PaneId, naming};
-use shprd_watch::machine::{Action, Health, Inputs, Policy, Watch};
+use shprd_watch::machine::{
+    Action, EXIT_REASON, Health, Inputs, Policy, Watch, is_exit_escalation,
+};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
 use shprd_watch::records::pi::scan_pi;
@@ -299,10 +301,16 @@ fn tick_task(
         }
     };
     let key = (task.id.clone(), attempt.n, agent.clone());
+    // What the log already knows outlives any one watchdog: a restart must not
+    // hand off a worker that already died its budget's worth of times, nor
+    // escalate an attempt a human has already been asked about.
+    let streak = exit_streak(events, &task.id, attempt.n);
+    let parked = parked_since_ms(events, &task.id, attempt.n);
     let (watch, sampler) = watcher
         .watches
         .entry(key.clone())
         .or_insert_with(|| (Watch::new(), Sampler::new()));
+    watch.resume(streak, parked);
     let (screen, process_exited) = observe(
         mux,
         pane.as_ref(),
@@ -543,6 +551,67 @@ fn worker_started_at_ms(events: &[Event], task: &str, attempt: u32) -> u64 {
         })
         .map(|event| event.at_ms)
         .unwrap_or(0)
+}
+
+/// The `seq` of the attempt's `Spawned` event, or zero when the log lost it,
+/// which errs towards counting everything the task's history holds.
+fn attempt_start_seq(events: &[Event], task: &str, attempt: u32) -> u64 {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Spawned { task: id, attempt: n, .. } if id == task && *n == attempt
+            )
+        })
+        .map(|event| event.seq)
+        .max()
+        .unwrap_or(0)
+}
+
+/// How many of this attempt's workers the log says have already exited.
+///
+/// The log is the one source of truth for the exit streak: a watchdog that
+/// restarts reads the count back instead of starting at zero, so a crash loop
+/// still meets the budget it earned. Only a `HandedOff` carrying
+/// [`EXIT_REASON`] is an exit; a hand-off for any other reason kept its worker.
+fn exit_streak(events: &[Event], task: &str, attempt: u32) -> usize {
+    let start = attempt_start_seq(events, task, attempt);
+    events
+        .iter()
+        .filter(|event| event.seq > start)
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::HandedOff { task: id, reason, .. }
+                    if id == task && reason.as_deref() == Some(EXIT_REASON)
+            )
+        })
+        .count()
+}
+
+/// The moment the log already parked this attempt, if a watchdog wrote one.
+///
+/// A spent exit budget stands for the whole attempt, because the streak does.
+fn parked_since_ms(events: &[Event], task: &str, attempt: u32) -> Option<(u64, String)> {
+    let attempt_start = attempt_start_seq(events, task, attempt);
+    events.iter().rev().find_map(|event| {
+        let EventKind::Escalated {
+            task: Some(id),
+            body,
+            ..
+        } = &event.kind
+        else {
+            return None;
+        };
+        if id != task {
+            return None;
+        }
+        if is_exit_escalation(body) && event.seq > attempt_start {
+            return Some((event.at_ms, String::from(EXIT_REASON)));
+        }
+        None
+    })
 }
 
 /// When the attempt's `spawned` event was written, or zero if the log lost it.
@@ -935,7 +1004,12 @@ project_dirs = []
 
     /// The tab id `T1`'s first attempt recorded.
     fn tab_id(env: &SpawnEnv<'_>) -> String {
-        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        tab_id_of(env, 1)
+    }
+
+    /// The tab id `T1`'s attempt `attempt` recorded.
+    fn tab_id_of(env: &SpawnEnv<'_>, attempt: u32) -> String {
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", attempt);
         std::fs::read_to_string(record)
             .unwrap_or_default()
             .trim()
@@ -955,6 +1029,43 @@ project_dirs = []
             .find(|listed| listed.id.as_str() == tab)
             .unwrap_or_else(|| panic!("no tab {tab}"))
             .root_pane
+    }
+
+    /// True when `kind` is a hand-off.
+    fn is_handoff(kind: &EventKind) -> bool {
+        matches!(kind, EventKind::HandedOff { .. })
+    }
+
+    /// True when `kind` is an escalation.
+    fn is_escalation(kind: &EventKind) -> bool {
+        matches!(kind, EventKind::Escalated { .. })
+    }
+
+    /// How many events in `fresh` match `wanted`.
+    fn count(fresh: &[Event], wanted: fn(&EventKind) -> bool) -> usize {
+        fresh.iter().filter(|event| wanted(&event.kind)).count()
+    }
+
+    /// Closes the attempt's tab - the host's way of saying the worker's process
+    /// is gone - and returns the events the next tick appended.
+    fn one_exit(
+        watcher: &mut Watcher,
+        ctx: &Ctx,
+        env: &SpawnEnv<'_>,
+        mux: &FakeMux,
+        attempt: u32,
+        now: u64,
+    ) -> Vec<Event> {
+        let before = events(ctx).len();
+        let tab = shprd_mux::TabId::new(tab_id_of(env, attempt));
+        match mux.close_tab(&tab) {
+            Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+            Err(err) => panic!("{err}"),
+        }
+        watcher
+            .tick(mux, env, now)
+            .unwrap_or_else(|err| panic!("{err}"));
+        events(ctx)[before..].to_vec()
     }
 
     /// The events the run log holds now.
@@ -1177,6 +1288,163 @@ project_dirs = []
             "the budget's worth of exits is still replaced silently"
         );
         assert_eq!(escalations, 1, "the exit past the budget escalates");
+    }
+
+    /// The exit streak is the log's, not a counter in memory: a watchdog that
+    /// restarts must not hand off an attempt whose budget is already spent.
+    #[test]
+    fn a_restarted_watcher_escalates_an_attempt_the_log_already_spent() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+
+        for round in 0..policy.exit_budget {
+            // Every round is a fresh watchdog: no memory but the log's.
+            let mut watcher = Watcher::new(policy.clone());
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            assert_eq!(
+                count(&fresh, is_handoff),
+                1,
+                "exit {} is still replaced silently",
+                round + 1
+            );
+            assert_eq!(count(&fresh, is_escalation), 0);
+        }
+
+        let mut watcher = Watcher::new(policy.clone());
+        let fresh = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert_eq!(
+            count(&fresh, is_handoff),
+            0,
+            "the budget the log already spent is not handed off again"
+        );
+        assert_eq!(
+            count(&fresh, is_escalation),
+            1,
+            "the exit past the budget escalates, restart or not"
+        );
+    }
+
+    /// A restarted watchdog reads the escalation its predecessor recorded and
+    /// leaves the attempt alone: one escalation per attempt, not one per run.
+    #[test]
+    fn a_restarted_watcher_does_nothing_for_an_attempt_the_log_escalated() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+
+        let mut spent = 0;
+        for round in 0..=policy.exit_budget {
+            let mut watcher = Watcher::new(policy.clone());
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            spent += count(&fresh, is_escalation);
+        }
+        assert_eq!(spent, 1, "the attempt escalates once");
+
+        for step in 0..2 {
+            let mut watcher = Watcher::new(policy.clone());
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 100_000 + 10_000 * step,
+            );
+            assert!(
+                fresh.is_empty(),
+                "a restarted watchdog retried an escalated attempt: {fresh:?}"
+            );
+        }
+    }
+
+    /// The streak and the escalation belong to their attempt, not their task:
+    /// the next attempt starts from zero and is watched again, which is what
+    /// un-parks a watch.
+    #[test]
+    fn a_new_attempt_starts_with_no_streak_and_no_escalation() {
+        let dealt = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Human,
+            kind,
+        };
+        let spawned = |seq: u64, attempt: u32| {
+            dealt(
+                seq,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt,
+                    agent: "sh".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            )
+        };
+        let exited = |seq: u64| {
+            dealt(
+                seq,
+                EventKind::HandedOff {
+                    task: "T1".to_string(),
+                    from_agent: "sh".to_string(),
+                    to_agent: "sh".to_string(),
+                    checkpoint: "c0".to_string(),
+                    reason: Some(EXIT_REASON.to_string()),
+                },
+            )
+        };
+        let mut events = vec![
+            spawned(1, 1),
+            exited(2),
+            exited(3),
+            exited(4),
+            dealt(
+                5,
+                EventKind::Escalated {
+                    task: Some("T1".to_string()),
+                    body: format!(
+                        "sh {EXIT_REASON} 4 times in a row on this attempt: pick up by hand"
+                    ),
+                    default_action: "pick the task up by hand".to_string(),
+                },
+            ),
+        ];
+        assert_eq!(exit_streak(&events, "T1", 1), 3);
+        assert!(parked_since_ms(&events, "T1", 1).is_some());
+
+        events.push(spawned(6, 2));
+        assert_eq!(
+            exit_streak(&events, "T1", 2),
+            0,
+            "a new attempt starts with a fresh budget"
+        );
+        assert!(
+            parked_since_ms(&events, "T1", 2).is_none(),
+            "a new attempt is a human's no longer"
+        );
     }
 
     /// A host that cannot list its tabs says nothing about the agent: no tick
