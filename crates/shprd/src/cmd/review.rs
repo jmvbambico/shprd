@@ -449,8 +449,6 @@ pub struct ReviewBrief<'a> {
     pub model: Option<&'a str>,
     /// The folder the reviewer reads and writes in.
     pub dir: &'a str,
-    /// The absolute path the reviewer writes its findings to.
-    pub findings: &'a str,
     /// Whether the review is degraded, and so must say so.
     pub degraded: bool,
 }
@@ -458,8 +456,9 @@ pub struct ReviewBrief<'a> {
 /// Renders the brief a reviewer reads before its first turn.
 ///
 /// It names the three files the reviewer may read, says plainly that the
-/// repository is off limits, and ends with the command that records the verdict,
-/// so the reviewer never has to guess how its work gets back into the run.
+/// repository is off limits, and ends by telling the reviewer to write its
+/// findings and stop: the reviewer runs no `shprd` command, because its folder
+/// is outside the repository and the orchestration submits the verdict instead.
 pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -498,11 +497,11 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str("Write `findings.json` in this folder, matching `findings.schema.json`: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write an empty array — `[]` — when nothing is wrong: an empty array is a clean review, and it is the answer to aim for.\n\n");
     out.push_str("Judge the diff against the acceptance criteria and the scope: what it does wrong, what it misses, what it changes that it may not touch. A critical or major finding blocks integration, so spend them on things that matter.\n\n");
     out.push_str("## Then\n\n");
-    out.push_str("Run this once `findings.json` is written:\n\n");
-    out.push_str(&format!(
-        "    shprd agent review-verdict --task {} --attempt {} --findings {}\n",
-        input.task.id, input.attempt, input.findings
-    ));
+    out.push_str(
+        "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
+         not a repository, so no command of yours would reach the run log. The orchestrator reads \
+         your file and records the verdict itself.\n",
+    );
     out
 }
 
@@ -696,7 +695,6 @@ pub fn review(
         eprintln!("{note}");
     }
     let dir = write_packet(env, task, attempt)?;
-    let findings = dir.join("findings.json");
     let brief_path = brief_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n);
     let brief = ReviewBrief {
         task,
@@ -705,7 +703,6 @@ pub fn review(
         agent: &reviewer.agent,
         model: reviewer.model.as_deref(),
         dir: &dir.display().to_string(),
-        findings: &findings.display().to_string(),
         degraded: reviewer.degraded,
     };
     spawn::write_brief(&brief_path, &render_review_brief(&brief))?;
@@ -1058,13 +1055,10 @@ project_dirs = []
         );
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
-        let findings = report.dir.join("findings.json").display().to_string();
-        assert!(
-            brief.contains(&format!(
-                "shprd agent review-verdict --task T1 --attempt 1 --findings {findings}"
-            )),
-            "{brief}"
-        );
+        // The reviewer writes and stops: no shprd verb is asked of it, because
+        // its folder is outside the repository and the orchestrator submits.
+        assert!(!brief.contains("shprd agent"), "{brief}");
+        assert!(brief.contains("findings.json` and stop"), "{brief}");
         assert!(brief.contains("REVIEWER"), "{brief}");
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
     }
