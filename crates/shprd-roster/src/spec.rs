@@ -49,6 +49,26 @@ pub struct HarnessSpec {
     pub skills: SkillsSpec,
     /// Case-insensitive screen substrings that mean rate limited or out of quota.
     pub dry_patterns: Vec<String>,
+    /// Prompts the CLI raises on its own and waits for a human to answer.
+    ///
+    /// Until one is answered the agent never reads a brief, so a launch that
+    /// meets one says so instead of waiting forever. An absent table means the
+    /// CLI raises no such prompt.
+    #[serde(default)]
+    pub blocking_prompts: Vec<BlockingPrompt>,
+}
+
+/// One question the CLI asks its own user and blocks on until they answer.
+///
+/// Claude Code asks whether a folder is trusted the first time it starts in
+/// it; shprd cannot answer that, so it only reports that the agent is waiting.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockingPrompt {
+    /// Short human-readable name, e.g. `folder trust`.
+    pub name: String,
+    /// Case-insensitive screen substring that means the prompt is showing.
+    pub pattern: String,
 }
 
 impl HarnessSpec {
@@ -73,6 +93,17 @@ impl HarnessSpec {
         for dir in &self.skills.project_dirs {
             if dir.is_empty() || dir.starts_with('/') || dir.starts_with('~') {
                 return Err(SpecError::InvalidSkillDir { dir: dir.clone() });
+            }
+        }
+
+        for prompt in &self.blocking_prompts {
+            if prompt.name.trim().is_empty() {
+                return Err(SpecError::EmptyBlockingPromptName);
+            }
+            if prompt.pattern.trim().is_empty() {
+                return Err(SpecError::EmptyBlockingPromptPattern {
+                    name: prompt.name.clone(),
+                });
             }
         }
 
@@ -430,6 +461,15 @@ pub enum SpecError {
     InvalidSkillDir {
         /// The directory that failed.
         dir: String,
+    },
+    /// A [`BlockingPrompt`] has an empty name.
+    #[error("blocking prompt name is empty")]
+    EmptyBlockingPromptName,
+    /// A [`BlockingPrompt`] has an empty screen pattern.
+    #[error("blocking prompt {name} has an empty pattern")]
+    EmptyBlockingPromptPattern {
+        /// The prompt whose pattern is empty.
+        name: String,
     },
 }
 
