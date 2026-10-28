@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use shprd_mux::{AgentState, Mux, PaneId};
-use shprd_roster::spec::LaunchSpec;
+use shprd_roster::spec::{BlockingPrompt, LaunchSpec};
 
 /// The model-argument template to render, empty when no model is chosen.
 ///
@@ -22,6 +22,9 @@ pub fn model_args<'a>(launch: &'a LaunchSpec, model: Option<&str>) -> &'a [Strin
         &[]
     }
 }
+
+/// How many lines of a pane the blocking-prompt check reads.
+const BLOCKING_PROMPT_LINES: usize = 40;
 
 /// How often the wait re-asks the host whether the agent is up yet.
 const READY_POLL: Duration = Duration::from_millis(250);
@@ -49,14 +52,26 @@ pub enum Delivery {
     Delivered,
     /// The brief never arrived; the string says why, for the caller's warning.
     NotDelivered(String),
+    /// The CLI is showing a prompt of its own and waits for a human to answer
+    /// it; the string names that prompt. Nothing was typed into the pane.
+    Blocked {
+        /// The [`BlockingPrompt::name`] the screen matched.
+        prompt: String,
+    },
 }
 
 impl Delivery {
     /// The reason the brief did not arrive, or `None` when it did.
-    pub fn reason(&self) -> Option<&str> {
+    ///
+    /// A blocked agent gets a sentence, not just the prompt's name: the human
+    /// reads it as a warning, and it says what to do about it.
+    pub fn reason(&self) -> Option<String> {
         match self {
             Self::Delivered => None,
-            Self::NotDelivered(reason) => Some(reason),
+            Self::NotDelivered(reason) => Some(reason.clone()),
+            Self::Blocked { prompt } => Some(format!(
+                "waiting on its \"{prompt}\" prompt: answer it in that tab, then resend the brief"
+            )),
         }
     }
 }
@@ -81,9 +96,17 @@ fn parse_wait(raw: Option<&str>) -> Duration {
 /// [`AgentState::Unknown`]. Nothing here is fatal — a brief that never lands is
 /// reported to the human, not turned into a failed launch, because the process
 /// itself is up either way.
-pub fn deliver_brief(mux: &dyn Mux, pane: &PaneId, text: &str, wait: Duration) -> Delivery {
-    if let Err(reason) = await_agent(mux, pane, wait) {
-        return Delivery::NotDelivered(reason);
+pub fn deliver_brief(
+    mux: &dyn Mux,
+    pane: &PaneId,
+    text: &str,
+    patterns: &[BlockingPrompt],
+    wait: Duration,
+) -> Delivery {
+    match await_agent(mux, pane, patterns, wait) {
+        Ok(None) => {}
+        Ok(Some(prompt)) => return Delivery::Blocked { prompt },
+        Err(reason) => return Delivery::NotDelivered(reason),
     }
     match mux.prompt(pane, text) {
         Ok(()) => Delivery::Delivered,
@@ -92,13 +115,27 @@ pub fn deliver_brief(mux: &dyn Mux, pane: &PaneId, text: &str, wait: Duration) -
 }
 
 /// Polls until `pane` reports a detected agent, or `wait` runs out.
-fn await_agent(mux: &dyn Mux, pane: &PaneId, wait: Duration) -> Result<(), String> {
+///
+/// `Ok(None)` means the agent is up and ready for its brief; `Ok(Some(name))`
+/// means the screen is showing a prompt that agent waits on a human to answer,
+/// named by the matching [`BlockingPrompt`].
+fn await_agent(
+    mux: &dyn Mux,
+    pane: &PaneId,
+    patterns: &[BlockingPrompt],
+    wait: Duration,
+) -> Result<Option<String>, String> {
     let start = Instant::now();
     loop {
+        // The CLI may ask its own user something before it ever becomes an
+        // agent, and wait there silently: report that instead of timing out.
+        if let Ok(prompt) = blocking_prompt(mux, pane, patterns) {
+            return Ok(Some(prompt));
+        }
         // A host that cannot report state answers `Unknown` forever; that is
         // "no signal" rather than a failure, so the wait alone decides.
         if matches!(mux.agent_state(pane), Ok(state) if state != AgentState::Unknown) {
-            return Ok(());
+            return Ok(None);
         }
         let waited = start.elapsed();
         if waited >= wait {
@@ -109,6 +146,30 @@ fn await_agent(mux: &dyn Mux, pane: &PaneId, wait: Duration) -> Result<(), Strin
         }
         std::thread::sleep(READY_POLL.min(wait - waited));
     }
+}
+
+/// The name of the first blocking prompt the pane's screen is showing, if any.
+///
+/// The match is case-insensitive, like [`shprd_roster::spec::HarnessSpec::dry_patterns`],
+/// and reads only the last [`BLOCKING_PROMPT_LINES`] lines: a prompt still
+/// waiting is on screen, and the scrollback above it may mention one long gone.
+fn blocking_prompt(
+    mux: &dyn Mux,
+    pane: &PaneId,
+    patterns: &[BlockingPrompt],
+) -> Result<String, ()> {
+    if patterns.is_empty() {
+        return Err(());
+    }
+    let Ok(screen) = mux.read(pane, BLOCKING_PROMPT_LINES) else {
+        return Err(());
+    };
+    let screen = screen.to_lowercase();
+    patterns
+        .iter()
+        .find(|pattern| screen.contains(&pattern.pattern.to_lowercase()))
+        .map(|pattern| pattern.name.clone())
+        .ok_or(())
 }
 
 #[cfg(test)]
@@ -182,7 +243,7 @@ mod tests {
         let (mux, pane) = fixture();
         // Not an agent for two polls, an idle agent from the third on.
         mux.set_state_after(&pane, 2, AgentState::Idle);
-        let delivery = deliver_brief(&mux, &pane, "the brief", Duration::from_secs(5));
+        let delivery = deliver_brief(&mux, &pane, "the brief", &[], Duration::from_secs(5));
         assert_eq!(delivery, Delivery::Delivered);
         assert_eq!(prompts(&mux), ["the brief".to_string()]);
     }
@@ -191,9 +252,9 @@ mod tests {
     fn an_agent_that_never_shows_up_is_a_warning_not_a_failure() {
         let (mux, pane) = fixture();
         // A zero wait: one poll, no sleep, and the agent is still undetected.
-        let delivery = deliver_brief(&mux, &pane, "the brief", Duration::ZERO);
+        let delivery = deliver_brief(&mux, &pane, "the brief", &[], Duration::ZERO);
         assert_eq!(
-            delivery.reason(),
+            delivery.reason().as_deref(),
             Some("the agent was not detected within 0 ms")
         );
         assert!(
@@ -201,5 +262,58 @@ mod tests {
             "{delivery:?}"
         );
         assert!(prompts(&mux).is_empty(), "nothing may be typed in");
+    }
+
+    /// The real Claude Code first-run text, as it appears on screen.
+    fn trust_patterns() -> Vec<BlockingPrompt> {
+        vec![BlockingPrompt {
+            name: "folder trust".to_string(),
+            pattern: "Is this a project you created or one you trust".to_string(),
+        }]
+    }
+
+    #[test]
+    fn a_folder_trust_prompt_is_reported_at_once() {
+        let (mux, pane) = fixture();
+        mux.set_screen(
+            &pane,
+            "Is this a project you created or one you trust?\n  > 1. Yes, I trust\n    2. No",
+        );
+        let patterns = trust_patterns();
+        let start = std::time::Instant::now();
+        // The screen answers before the first poll finds no agent, and long
+        // before the wait would run out.
+        let delivery = deliver_brief(&mux, &pane, "the brief", &patterns, Duration::from_secs(30));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the wait must not run out"
+        );
+        assert_eq!(
+            delivery,
+            Delivery::Blocked {
+                prompt: "folder trust".to_string()
+            }
+        );
+        assert_eq!(
+            delivery.reason().as_deref(),
+            Some(
+                "waiting on its \"folder trust\" prompt: answer it in that tab, then resend the brief"
+            )
+        );
+        assert!(
+            prompts(&mux).is_empty(),
+            "a prompt waiting on a human is never answered, and the brief is never typed over it"
+        );
+    }
+
+    #[test]
+    fn a_plain_screen_leaves_the_delivery_alone() {
+        let (mux, pane) = fixture();
+        mux.set_screen(&pane, "claude ready\n> ");
+        mux.set_state(&pane, AgentState::Idle);
+        let patterns = trust_patterns();
+        let delivery = deliver_brief(&mux, &pane, "the brief", &patterns, Duration::from_secs(5));
+        assert_eq!(delivery, Delivery::Delivered);
+        assert_eq!(prompts(&mux), ["the brief".to_string()]);
     }
 }

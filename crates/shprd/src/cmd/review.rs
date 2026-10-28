@@ -18,7 +18,7 @@ use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::families::{Families, agent_vendor};
 use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, render_args};
+use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
 use crate::cmd::launch;
@@ -306,6 +306,8 @@ pub struct Reviewer {
     pub model: Option<String>,
     /// How to start the program.
     pub launch: LaunchSpec,
+    /// The prompts the CLI waits on a human to answer before it reads anything.
+    pub blocking_prompts: Vec<BlockingPrompt>,
     /// Whether this review is cross-vendor or degraded.
     pub degraded: bool,
     /// A one-line note to show the human when a flag had no effect.
@@ -355,6 +357,7 @@ pub fn choose_reviewer(
         agent: parsed.program,
         model: parsed.model,
         launch: program.spec.launch.clone(),
+        blocking_prompts: program.spec.blocking_prompts.clone(),
         // `--degraded` is only recorded where the review needs the label: the
         // branches below set it, and it stays false for an independent review.
         degraded: false,
@@ -590,7 +593,13 @@ fn start_in_tab(
     if brief_in_args {
         return Ok(());
     }
-    let delivery = launch::deliver_brief(mux, &tab.root_pane, &text, env.spawn.ready_wait);
+    let delivery = launch::deliver_brief(
+        mux,
+        &tab.root_pane,
+        &text,
+        &reviewer.blocking_prompts,
+        env.spawn.ready_wait,
+    );
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };

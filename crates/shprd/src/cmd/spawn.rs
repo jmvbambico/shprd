@@ -24,7 +24,7 @@ use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::models::AgentRef;
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
-use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, render_args};
+use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -115,6 +115,8 @@ pub(crate) struct Pick {
     pub(crate) model: Option<String>,
     /// How to start the program.
     pub(crate) launch: LaunchSpec,
+    /// The prompts the CLI waits on a human to answer before it reads anything.
+    pub(crate) blocking_prompts: Vec<BlockingPrompt>,
 }
 
 /// Spawns an agent for one task attempt.
@@ -318,7 +320,13 @@ fn start_in_tab(
     } else {
         (brief, "brief")
     };
-    let delivery = super::launch::deliver_brief(mux, &tab.root_pane, text, env.ready_wait);
+    let delivery = super::launch::deliver_brief(
+        mux,
+        &tab.root_pane,
+        text,
+        &pick.blocking_prompts,
+        env.ready_wait,
+    );
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
@@ -537,6 +545,7 @@ fn choose_agent(
             agent: parsed.program,
             model: parsed.model,
             launch: program.spec.launch.clone(),
+            blocking_prompts: program.spec.blocking_prompts.clone(),
         });
     }
     for raw in workers {
@@ -555,6 +564,7 @@ fn choose_agent(
                 agent: parsed.program,
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
+                blocking_prompts: program.spec.blocking_prompts.clone(),
             });
         }
     }
@@ -1244,6 +1254,7 @@ project_dirs = []
             agent: "sh".to_string(),
             model: None,
             launch: fake_spec("sh").launch,
+            blocking_prompts: Vec::new(),
         }
     }
 

@@ -26,7 +26,7 @@ use shprd_mux::naming::{self, Role as TabRole};
 use shprd_mux::{Mux, Tab, TabId, Workspace};
 use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{HarnessSpec, Values, render_args};
+use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -659,8 +659,14 @@ fn ensure_orchestrator_tab(
     mux.run(&tab.root_pane, &plan.argv, &plan.env)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the orchestrator")))?;
     if let Some(brief) = &plan.inline_prompt
-        && let Some(reason) =
-            super::launch::deliver_brief(mux, &tab.root_pane, brief, env.ready_wait).reason()
+        && let Some(reason) = super::launch::deliver_brief(
+            mux,
+            &tab.root_pane,
+            brief,
+            &plan.blocking_prompts,
+            env.ready_wait,
+        )
+        .reason()
     {
         // The orchestrator is running either way, so a brief that never lands
         // is a message to the human, not a failed `up`: they can paste it in.
@@ -685,6 +691,8 @@ struct OrchestratorPlan {
     env: Vec<(String, Option<String>)>,
     /// The brief, when the CLI has no system-prompt flag to carry it.
     inline_prompt: Option<String>,
+    /// The prompts the CLI waits on a human to answer before it reads anything.
+    blocking_prompts: Vec<BlockingPrompt>,
 }
 
 impl OrchestratorPlan {
@@ -752,6 +760,7 @@ impl OrchestratorPlan {
             )
             .as_pairs(),
             inline_prompt,
+            blocking_prompts: spec.blocking_prompts.clone(),
         })
     }
 }
