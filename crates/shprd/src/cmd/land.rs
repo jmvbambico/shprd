@@ -368,10 +368,15 @@ fn merge(
         )));
     }
     let protected = config.land.protected.contains(&base);
-    let allowed = status.approved || (config.land.merge == MergePolicy::Allow && !protected);
+    // An approval recorded in shprd counts exactly like the forge's, as long as
+    // it names this head: what a human said about older commits says nothing
+    // about the ones pushed since.
+    let approved_here = pr.approved_head.as_deref() == Some(head);
+    let allowed =
+        status.approved || approved_here || (config.land.merge == MergePolicy::Allow && !protected);
     if !allowed {
         return Err(CliError::Invalid(anyhow!(
-            "waiting for your approval on {url}"
+            "waiting for your approval: run `shprd approve`, or approve {url} on GitHub"
         )));
     }
     forge

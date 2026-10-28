@@ -666,7 +666,7 @@ fn merge_waits_for_approval_and_merges_once_a_human_approves() {
     fixture.script_forge(&status_script(&head, false, Some(true)));
     let message = fixture.refused(&["land", "--merge"]);
     assert!(
-        message.contains("waiting for your approval on https://example.invalid/pull/1"),
+        message.contains("waiting for your approval: run `shprd approve`"),
         "{message}"
     );
     assert!(calls_with(&fixture.forge_calls(), "merge ").is_empty());
@@ -731,6 +731,46 @@ fn approve_without_a_pull_request_is_refused() {
 }
 
 #[test]
+fn a_shprd_approval_at_the_head_merges() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+    fixture.ok(&["approve", "--yes"]);
+    // The forge still calls the pull request unapproved: its author cannot
+    // approve it there, which is the whole point of `shprd approve`.
+    fixture.script_forge(&status_script(&head, false, Some(true)));
+    let printed = fixture.ok(&["land", "--merge"]);
+    assert!(
+        printed.contains("merged https://example.invalid/pull/1"),
+        "{printed}"
+    );
+    assert_eq!(
+        calls_with(&fixture.forge_calls(), "merge "),
+        vec!["merge 1".to_string()]
+    );
+    assert!(fixture.recorded_merge(1), "the merge is in the log");
+}
+
+#[test]
+fn an_approval_of_an_older_head_still_waits() {
+    let fixture = landed();
+    fixture.ok(&["approve", "--yes"]);
+    let approved = fixture.integration_head();
+    let worktree = fixture.integration();
+    fixture.git_in(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "after the approval"],
+    );
+    fixture.ok(&["gate"]);
+    let head = fixture.integration_head();
+    assert_ne!(head, approved, "the head moved past the approval");
+    fixture.script_forge(&status_script(&head, false, Some(true)));
+    let message = fixture.refused(&["land", "--merge"]);
+    assert!(message.contains("waiting for your approval"), "{message}");
+    assert!(calls_with(&fixture.forge_calls(), "merge ").is_empty());
+    assert!(!fixture.recorded_merge(1));
+}
+
+#[test]
 fn checks_that_have_not_passed_are_refused() {
     let fixture = landed();
     let head = fixture.integration_head();
@@ -759,7 +799,7 @@ fn allow_never_merges_into_a_protected_base() {
     fixture.script_forge(&status_script(&head, false, Some(true)));
     let message = fixture.refused(&["land", "--merge"]);
     assert!(
-        message.contains("waiting for your approval on https://example.invalid/pull/1"),
+        message.contains("waiting for your approval: run `shprd approve`"),
         "main is protected, so allow still waits: {message}"
     );
     assert!(!fixture.recorded_merge(1));
