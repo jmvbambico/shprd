@@ -427,6 +427,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
         EventKind::Approved { .. } => "approved",
+        EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }

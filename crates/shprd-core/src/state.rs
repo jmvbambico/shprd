@@ -48,6 +48,12 @@ pub struct RunState {
     /// One run proposes one pull request, so the newest `PrOpened` wins and a
     /// merge only flips [`PrInfo::merged`].
     pub pr: Option<PrInfo>,
+    /// The orchestrator shprd started, once `up` launched one.
+    ///
+    /// The process group it carries is what lets a later `up` recognise its
+    /// own session: a pane whose foreground group is not this one was
+    /// relaunched by the host, not by shprd.
+    pub orchestrator: Option<OrchestratorInfo>,
     /// Sequence number of the last applied event, 0 before the first.
     pub last_seq: u64,
 }
@@ -69,6 +75,17 @@ pub struct PrInfo {
     pub approved_head: Option<String>,
     /// Whether the forge has merged it.
     pub merged: bool,
+}
+
+/// The orchestrator shprd started for this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorInfo {
+    /// The title of its tab.
+    pub title: String,
+    /// The pane it runs in.
+    pub pane: String,
+    /// The pane's foreground process group when shprd started it.
+    pub process_group: u32,
 }
 
 /// The run's identity.
@@ -549,6 +566,17 @@ impl RunState {
                     pr.approved_head = Some(head_sha.clone());
                 }
             }
+            EventKind::OrchestratorLaunched {
+                title,
+                pane,
+                process_group,
+            } => {
+                self.orchestrator = Some(OrchestratorInfo {
+                    title: title.clone(),
+                    pane: pane.clone(),
+                    process_group: *process_group,
+                });
+            }
             EventKind::RunFinished {} => self.finished = true,
         }
     }
@@ -820,6 +848,29 @@ mod tests {
                 merged: true,
             }),
             "the merge keeps the url and records the merged head"
+        );
+    }
+
+    #[test]
+    fn an_orchestrator_launch_records_its_process_group() {
+        let state = match fold_extra(vec![ev(
+            3,
+            EventKind::OrchestratorLaunched {
+                title: "★ claude·orchestrator".to_string(),
+                pane: "w1:p2".to_string(),
+                process_group: 88158,
+            },
+        )]) {
+            Ok(state) => state,
+            Err(err) => panic!("a launch must fold: {err}"),
+        };
+        assert_eq!(
+            state.orchestrator,
+            Some(OrchestratorInfo {
+                title: "★ claude·orchestrator".to_string(),
+                pane: "w1:p2".to_string(),
+                process_group: 88158,
+            })
         );
     }
 

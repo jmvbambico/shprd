@@ -355,6 +355,20 @@ pub enum EventKind {
         /// The integration head the human approved.
         head_sha: String,
     },
+    /// shprd started the orchestrator in a pane.
+    ///
+    /// The process group is the orchestrator's identity for the rest of the
+    /// run: a host that restores the tab and relaunches the CLI itself gives
+    /// the pane a different group, which is how `up` tells a session it
+    /// started from one it did not.
+    OrchestratorLaunched {
+        /// The title of the orchestrator's tab.
+        title: String,
+        /// The pane the orchestrator runs in.
+        pane: String,
+        /// The pane's foreground process group at launch.
+        process_group: u32,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -502,6 +516,11 @@ mod tests {
                 number: 7,
                 head_sha: "abc1234".to_string(),
             },
+            EventKind::OrchestratorLaunched {
+                title: "★ claude·orchestrator".to_string(),
+                pane: "w1:p2".to_string(),
+                process_group: 88158,
+            },
             EventKind::RunFinished {},
         ]
     }
@@ -509,7 +528,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 18, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 19, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {
