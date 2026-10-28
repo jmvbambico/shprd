@@ -708,6 +708,37 @@ project_dirs = []
         }
     }
 
+    /// herdr refuses any argument containing a newline, so a brief may only
+    /// reach a CLI as a file path: no shipped spec may pass `{prompt}`.
+    #[test]
+    fn no_shipped_spec_passes_a_multi_line_brief_as_an_argument() {
+        let specs = match load_dir(&harness_dir()) {
+            Ok(specs) => specs,
+            Err(error) => panic!("harness data should load: {error}"),
+        };
+        let values = Values {
+            prompt: Some("line one\nline two\n".to_owned()),
+            prompt_file: Some("/tmp/brief.md".to_owned()),
+            ..Values::default()
+        };
+        for spec in &specs {
+            let Some(template) = &spec.launch.system_prompt_args else {
+                continue;
+            };
+            let rendered = match render_args(template, &values) {
+                Ok(rendered) => rendered,
+                Err(error) => panic!("{} should render: {error}", spec.id),
+            };
+            for arg in rendered {
+                assert!(
+                    !arg.contains('\n'),
+                    "{} passes a multi-line brief as an argument: {arg:?}",
+                    spec.id
+                );
+            }
+        }
+    }
+
     fn parse_fixture(fixture: &str) -> HarnessSpec {
         match toml::from_str::<HarnessSpec>(fixture) {
             Ok(spec) => spec,
