@@ -895,7 +895,7 @@ mod tests {
         };
         assert!(matches!(
             state.check(&kind, 5_000),
-            Err(RuleError::UnopenedPullRequest { number: 7 })
+            Err(RuleError::MergedPullRequest { number: 7 })
         ));
     }
 
