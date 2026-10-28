@@ -3,6 +3,7 @@
 pub mod config;
 pub mod event;
 pub mod gate;
+pub mod hash;
 pub mod log;
 pub mod rules;
 pub mod scope;

@@ -255,6 +255,7 @@ fn send_back(
         attempt,
         gate: "integrate".to_string(),
         findings: vec![finding],
+        source: None,
     })?;
     emit(ctx, &event)?;
     Err(CliError::Invalid(anyhow!(
@@ -389,6 +390,7 @@ mod tests {
                 attempt: 1,
                 gate: REVIEW_GATE.to_string(),
                 findings: Vec::new(),
+                source: None,
             })
             .unwrap_or_else(|err| panic!("{err}"));
         }

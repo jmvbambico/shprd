@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind, TaskId,
+    AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind, ReviewSource,
+    TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -220,6 +221,12 @@ pub struct GateResult {
     pub passed: bool,
     /// What it found.
     pub findings: Vec<Finding>,
+    /// Provenance of a review verdict, when the gate was `review`.
+    ///
+    /// A review gate with no source was recorded by something other than the
+    /// reviewer's packet, which is exactly what a landing decision must not
+    /// read as an independent review.
+    pub source: Option<ReviewSource>,
     /// Sequence number of the event that recorded it.
     pub seq: u64,
 }
@@ -423,12 +430,14 @@ impl RunState {
                 task,
                 gate,
                 findings,
+                source,
                 ..
             }
             | EventKind::GateFailed {
                 task,
                 gate,
                 findings,
+                source,
                 ..
             } => {
                 let passed = matches!(event.kind, EventKind::GatePassed { .. });
@@ -443,6 +452,7 @@ impl RunState {
                             gate: gate.clone(),
                             passed,
                             findings: findings.clone(),
+                            source: source.clone(),
                             seq: event.seq,
                         });
                     }

@@ -739,6 +739,7 @@ mod tests {
                 attempt,
                 gate,
                 findings,
+                source: None,
             }
         } else {
             EventKind::GateFailed {
@@ -746,6 +747,7 @@ mod tests {
                 attempt,
                 gate,
                 findings,
+                source: None,
             }
         }
     }

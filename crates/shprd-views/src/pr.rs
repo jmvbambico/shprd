@@ -356,6 +356,7 @@ mod tests {
                         location: None,
                         detail: "replace it".to_string(),
                     }],
+                    source: None,
                 },
             ),
             ev(
@@ -377,6 +378,7 @@ mod tests {
                     attempt: 2,
                     gate: "review".to_string(),
                     findings: vec![],
+                    source: None,
                 },
             ),
         ]

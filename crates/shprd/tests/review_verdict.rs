@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
+use shprd_core::event::{Actor, Event, EventKind};
 use tempfile::TempDir;
 
 /// The binary under test, built by cargo for this integration test.
@@ -128,8 +129,38 @@ impl Fixture {
         path
     }
 
+    /// Appends the review dispatch a verdict needs a reviewer from.
+    ///
+    /// `shprd agent review` opens a tab in a multiplexer, which no test here
+    /// has, so the fact it would record is written directly.
+    fn review_requested(&self, id: &str, n: u32, reviewer: &str) {
+        let path = self.root.join(".shprd").join("events.jsonl");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => panic!("read {}: {err}", path.display()),
+        };
+        let seq = text.lines().count() as u64 + 1;
+        let event = Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Human,
+            kind: EventKind::ReviewRequested {
+                task: id.to_string(),
+                attempt: n,
+                reviewer: reviewer.to_string(),
+                degraded: false,
+            },
+        };
+        let line = match serde_json::to_string(&event) {
+            Ok(line) => line,
+            Err(err) => panic!("serialize the review request: {err}"),
+        };
+        write(&path, &format!("{text}{line}\n"));
+    }
+
     /// Decides the review for one attempt from the packet its reviewer wrote.
     fn review(&self, id: &str, n: u32, findings: &str) -> Output {
+        self.review_requested(id, n, "c1");
         self.packet(id, n, findings);
         self.run(&[
             "--as",
@@ -376,6 +407,81 @@ fn a_passed_review_keeps_its_minor_findings() {
 }
 
 #[test]
+fn the_verdict_records_the_reviewer_and_the_packet_hash() {
+    // Provenance is the point: the gate result names the reviewer the dispatch
+    // recorded and pins the exact bytes it decided, so a reader can tell the
+    // verdict came from the reviewer's packet and not from a caller's file.
+    let fixture = Fixture::new();
+    fixture.add_task("T1");
+    fixture.attempt("T1", 1);
+    let text = finding("major");
+    fixture.review_requested("T1", 1, "c1");
+    fixture.packet("T1", 1, &text);
+    let output = fixture.run(&[
+        "--as",
+        "engine",
+        "agent",
+        "review-verdict",
+        "--task",
+        "T1",
+        "--attempt",
+        "1",
+    ]);
+    assert!(
+        output.status.success(),
+        "the verb records, it does not fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = events(&fixture.root);
+    let failed = log
+        .iter()
+        .find(|event| event.get("kind").and_then(Value::as_str) == Some("gate_failed"))
+        .unwrap_or_else(|| panic!("no gate_failed event in {log:?}"));
+    let source = failed
+        .get("source")
+        .unwrap_or_else(|| panic!("the verdict recorded no provenance: {failed:?}"));
+    assert_eq!(
+        source.get("reviewer").and_then(Value::as_str),
+        Some("c1"),
+        "{source:?}"
+    );
+    assert_eq!(
+        source.get("findings_sha256").and_then(Value::as_str),
+        Some(shprd_core::hash::sha256_hex(text.as_bytes()).as_str()),
+        "{source:?}"
+    );
+}
+
+#[test]
+fn findings_outside_the_packet_are_not_a_verdict() {
+    // There is no `--findings`: the only file a verdict reads is the one the
+    // reviewer wrote into its packet.
+    let fixture = Fixture::new();
+    fixture.add_task("T1");
+    fixture.attempt("T1", 1);
+    let outside = fixture.root.join("findings.json");
+    write(&outside, &finding("minor"));
+    let output = fixture.run(&[
+        "--as",
+        "engine",
+        "agent",
+        "review-verdict",
+        "--task",
+        "T1",
+        "--attempt",
+        "1",
+        "--findings",
+        &outside.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a caller-named findings file must be refused, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn the_verdict_runs_from_a_directory_outside_the_repository() {
     // A reviewer's packet folder is not a git repository, so `git rev-parse`
     // there fails: the verb has to be told where the run's log is, either with
@@ -385,6 +491,7 @@ fn the_verdict_runs_from_a_directory_outside_the_repository() {
         let fixture = Fixture::new();
         fixture.add_task("T1");
         fixture.attempt("T1", 1);
+        fixture.review_requested("T1", 1, "c1");
         fixture.packet("T1", 1, &finding("minor"));
         let args = [
             "--as",

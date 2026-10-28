@@ -880,6 +880,7 @@ mod tests {
                 attempt,
                 gate: gate.to_string(),
                 findings,
+                source: None,
             }
         } else {
             EventKind::GateFailed {
@@ -887,6 +888,7 @@ mod tests {
                 attempt,
                 gate: gate.to_string(),
                 findings,
+                source: None,
             }
         };
         ev(seq, kind)

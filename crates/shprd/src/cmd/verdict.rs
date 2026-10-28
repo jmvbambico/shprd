@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::{self, Review};
-use shprd_core::event::{EventKind, Finding};
+use shprd_core::event::{EventKind, Finding, ReviewSource};
 use shprd_core::gate::{self, Next, REVIEW_GATE};
+use shprd_core::hash;
 use shprd_mux::Mux;
 
 use crate::cli::ReviewVerdictArgs;
@@ -77,7 +78,11 @@ pub fn submit_verdict(
     let home = crate::ctx::resolve_home(home)?;
     let policy = review_policy(ctx, Some(&home))?;
     let findings_path = packet_path(ctx, &home, task, attempt)?;
-    let findings = read_findings(&findings_path)?;
+    let bytes = std::fs::read(&findings_path)
+        .with_context(|| format!("reading findings from {}", findings_path.display()))
+        .map_err(CliError::Invalid)?;
+    let findings = parse_findings(&bytes, &findings_path)?;
+    let source = provenance(ctx, task, attempt, &bytes)?;
     let decided = gate::verdict(&findings, policy.must_fix);
     if decided.passed {
         // A pass keeps every finding it was given: minor advice is still worth
@@ -87,6 +92,7 @@ pub fn submit_verdict(
             attempt,
             gate: REVIEW_GATE.to_string(),
             findings,
+            source: Some(source),
         };
         record(ctx, kind)?;
         close_reviewer(mux, ctx, &home, task, attempt);
@@ -98,6 +104,7 @@ pub fn submit_verdict(
         attempt,
         gate: REVIEW_GATE.to_string(),
         findings,
+        source: Some(source),
     };
     record(ctx, kind)?;
     // The verdict is the review's last word, so the reviewer's tab is done:
@@ -118,6 +125,35 @@ pub fn submit_verdict(
             Ok(Outcome::Escalated { blocking })
         }
     }
+}
+
+/// The provenance a review verdict carries: who reviewed, and what it read.
+///
+/// The reviewer is the one the review dispatch recorded, never the actor that
+/// ran the verb: the engine decides, but the finding's author is the reviewer.
+/// The hash pins the exact bytes folded into the gate result, so a reader can
+/// tell whether the packet still says what the verdict decided.
+fn provenance(ctx: &Ctx, task: &str, attempt: u32, bytes: &[u8]) -> Result<ReviewSource, CliError> {
+    let state = ctx.state()?;
+    let found = state
+        .tasks
+        .get(task)
+        .ok_or_else(|| CliError::Invalid(anyhow!("no such task: {task}")))?;
+    let current = found
+        .attempts
+        .last()
+        .filter(|current| current.n == attempt)
+        .ok_or_else(|| CliError::Invalid(anyhow!("task {task} has no attempt {attempt}")))?;
+    let reviewer = current.reviews.last().map(|review| review.reviewer.clone());
+    let reviewer = reviewer.ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
+        ))
+    })?;
+    Ok(ReviewSource {
+        reviewer,
+        findings_sha256: hash::sha256_hex(bytes),
+    })
 }
 
 /// The findings file the reviewer for one attempt wrote.
@@ -171,10 +207,15 @@ fn review_policy(ctx: &Ctx, home: Option<&Path>) -> Result<Review, CliError> {
 /// Unreadable or invalid findings are the caller's mistake, so they exit 2 as
 /// a rule refusal does, naming the file.
 pub(crate) fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
-    let text = std::fs::read_to_string(path)
+    let bytes = std::fs::read(path)
         .with_context(|| format!("reading findings from {}", path.display()))
         .map_err(CliError::Invalid)?;
-    serde_json::from_str(&text)
+    parse_findings(&bytes, path)
+}
+
+/// Parses the JSON array of findings the reviewer reported.
+fn parse_findings(bytes: &[u8], path: &Path) -> Result<Vec<Finding>, CliError> {
+    serde_json::from_slice(bytes)
         .with_context(|| format!("parsing findings in {}", path.display()))
         .map_err(CliError::Invalid)
 }

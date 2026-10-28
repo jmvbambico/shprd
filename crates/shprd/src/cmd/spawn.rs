@@ -2241,6 +2241,7 @@ mod tests {
                     location: Some("crates/shprd/src/cmd/spawn.rs:120".to_string()),
                     detail: "Return a CliError instead.".to_string(),
                 }],
+                source: None,
                 seq: 7,
             }],
             reviews: Vec::new(),

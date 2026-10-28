@@ -539,6 +539,7 @@ mod tests {
                 attempt: 1,
                 gate: REVIEW_GATE.to_string(),
                 findings: Vec::new(),
+                source: None,
             },
         )
     }
@@ -621,6 +622,7 @@ mod tests {
                 attempt: 1,
                 gate: "lint".to_string(),
                 findings: Vec::new(),
+                source: None,
             },
         ));
         log.push(integrated(7, "T1"));
