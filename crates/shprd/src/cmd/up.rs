@@ -578,6 +578,13 @@ impl OrchestratorPlan {
             session: None,
         };
         let mut argv = spec.launch.interactive.clone();
+        // The flags sit where `spawn` puts a worker's: right after the base
+        // command, before the model, the effort and the brief.
+        if env.config.roster.orchestrator_auto_approve
+            && let Some(auto) = &spec.launch.auto_approve
+        {
+            argv.extend(auto.iter().cloned());
+        }
         argv.extend(render(
             super::launch::model_args(&spec.launch, agent.model.as_deref()),
             &values,
@@ -676,6 +683,13 @@ const FLOW: &str = r#"## How a run works
 8. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
    --body "…" --default "what you will do if nobody answers"`.
 "#;
+/// The first rule a brief carries when the orchestrator runs with
+/// auto-approve: with no prompt left, the pull request is the gate.
+const AUTO_APPROVE_RULE: &str = "You run without permission prompts. The pull \
+request is the human's gate: never run git push, gh pr merge, gh pr review, or \
+any command that merges or approves; only shprd land and shprd land --merge, \
+and land --merge only after the human says the PR is approved.";
+
 /// The brief's text: who you are, where the branches are, how a run flows,
 /// and which skills to load.
 fn brief_text(env: &UpEnv, run_id: &str, base_branch: &str) -> String {
@@ -685,13 +699,18 @@ fn brief_text(env: &UpEnv, run_id: &str, base_branch: &str) -> String {
         env.config.skills.orchestrator.join(", ")
     };
     let repo = env.ctx.root.display();
+    let rules = if env.config.roster.orchestrator_auto_approve {
+        format!("## Rules\n\n1. {AUTO_APPROVE_RULE}\n\n")
+    } else {
+        String::new()
+    };
     format!(
         "# Orchestrator brief\n\n\
 You are the orchestrator for run `{run_id}` in `{repo}`.\n\n\
 ## Branches\n\n\
 - base: `{base}`\n\
 - integration: `{integration}`\n\n\
-{flow}\n## Skills\n\n\
+{rules}{flow}\n## Skills\n\n\
 Configured for you: {skills}\n\n\
 Load them before planning; they carry the conventions this repository runs on.\n",
         base = base_branch,
@@ -728,6 +747,8 @@ mod tests {
         repo: TempDir,
         /// Configured as the orchestrator, when the test wants one.
         orchestrator: Option<String>,
+        /// Whether the orchestrator launches with auto-approve.
+        auto_approve: bool,
     }
 
     impl Fixture {
@@ -753,7 +774,14 @@ mod tests {
                 home: TempDir::new()?,
                 repo,
                 orchestrator: orchestrator.map(str::to_string),
+                auto_approve: false,
             })
+        }
+
+        /// Turns auto-approve on for this fixture's orchestrator.
+        fn auto_approve(mut self) -> Self {
+            self.auto_approve = true;
+            self
         }
 
         /// The environment `up` takes, with the real bundled harness table.
@@ -767,6 +795,7 @@ mod tests {
                         .iter()
                         .map(|line| (line.clone(), "high".to_string()))
                         .collect(),
+                    orchestrator_auto_approve: self.auto_approve,
                     ..Default::default()
                 },
                 skills: Skills::default(),
@@ -922,6 +951,70 @@ mod tests {
                 report.brief_path.display().to_string(),
             ],
             "an orchestrator with no model gets no model flags"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn auto_approve_puts_the_flag_before_the_model_and_the_brief() -> Result<()> {
+        let fixture = Fixture::new(Some("claude"))?.auto_approve();
+        let env = fixture.env()?;
+        let mux = mux();
+        let report = up(&mux, &env).map_err(failed)?;
+
+        let argvs = started_argvs(&mux);
+        assert_eq!(
+            argvs[1][..2],
+            [
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string()
+            ],
+            "the flag sits right after the command: {argvs:?}"
+        );
+        assert!(
+            argvs[1].contains(&report.brief_path.display().to_string()),
+            "the brief still goes in as an argument: {argvs:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn without_auto_approve_the_orchestrator_keeps_its_prompts() -> Result<()> {
+        let fixture = Fixture::new(Some("claude"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        up(&mux, &env).map_err(failed)?;
+
+        let argvs = started_argvs(&mux);
+        assert!(
+            !argvs[1]
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"),
+            "no flag unless the config asks for one: {argvs:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_brief_states_the_pr_gate_when_auto_approve_is_on() -> Result<()> {
+        let plain = Fixture::new(Some("claude"))?;
+        let plain_env = plain.env()?;
+        let plain_mux = mux();
+        let report = up(&plain_mux, &plain_env).map_err(failed)?;
+        let text = std::fs::read_to_string(&report.brief_path)?;
+        assert!(
+            !text.contains("You run without permission prompts"),
+            "{text}"
+        );
+
+        let auto = Fixture::new(Some("claude"))?.auto_approve();
+        let auto_env = auto.env()?;
+        let auto_mux = mux();
+        let report = up(&auto_mux, &auto_env).map_err(failed)?;
+        let text = std::fs::read_to_string(&report.brief_path)?;
+        assert!(
+            text.contains("1. You run without permission prompts."),
+            "the extra rule leads the brief: {text}"
         );
         Ok(())
     }

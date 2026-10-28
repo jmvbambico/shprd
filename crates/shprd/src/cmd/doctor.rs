@@ -312,6 +312,12 @@ fn config_section(report: &mut Report, facts: &Facts) -> Option<Config> {
     }
     let roster = &loaded.roster;
     role(section, "orchestrator", roster.orchestrator.as_deref());
+    if roster.orchestrator_auto_approve {
+        section.add(
+            Level::Warn,
+            "orchestrator runs with auto-approve: the PR gate relies on its brief",
+        );
+    }
     role(section, "reviewer", roster.reviewer.as_deref());
     if roster.workers.is_empty() {
         section.add(Level::Warn, "workers not set");
@@ -909,6 +915,48 @@ mod tests {
         let mut report = Report::default();
         report.section("Quota").add(level, text);
         (level, report.has_fail())
+    }
+
+    /// A Config section read from a temp home holding `text` as its config.
+    fn config_section_text(text: &str) -> String {
+        let home = match TempDir::new() {
+            Ok(home) => home,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
+        let dir = home.path().join(".config").join("shprd");
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            panic!("creating {} failed: {error}", dir.display());
+        }
+        if let Err(error) = std::fs::write(dir.join("config.toml"), text) {
+            panic!("writing the config failed: {error}");
+        }
+        let facts = Facts {
+            current: BTreeMap::new(),
+            path_env: String::new(),
+            home: Some(home.path().to_path_buf()),
+            repo: None,
+            data: None,
+        };
+        let mut report = Report::default();
+        assert!(config_section(&mut report, &facts).is_some());
+        render(&report)
+    }
+
+    #[test]
+    fn an_auto_approving_orchestrator_is_named_in_the_config_section() {
+        let text = config_section_text(
+            "[roster]\norchestrator = \"claude/opus\"\norchestrator_auto_approve = true\n",
+        );
+        assert!(
+            text.contains("! orchestrator runs with auto-approve: the PR gate relies on its brief"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_orchestrator_with_prompts_has_no_auto_approve_line() {
+        let text = config_section_text("[roster]\norchestrator = \"claude/opus\"\n");
+        assert!(!text.contains("auto-approve"), "{text}");
     }
 
     #[test]

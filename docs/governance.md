@@ -34,6 +34,36 @@ it act freely inside that.
 5. **The janitor runs on events.** It runs when a PR merges or closes, when a
    task is abandoned, at `shprd up`, and nightly. It's code, not an agent.
 
+## Autonomy styles (chosen in `shprd setup`)
+
+Setup has a **Security** step that asks how much you want to approve by hand.
+Each style sets a few switches; you can override any of them later with
+`shprd set`.
+
+| Style | Orchestrator | Workers | Reviewer | Merge |
+|---|---|---|---|---|
+| **Hands-on** | asks before each command | ask before each tool use | asks (Codex: sandboxed) | you approve the PR |
+| **Supervised** | asks before each command | auto-approve | Codex sandboxed, others ask | you approve the PR |
+| **Autonomous to PR** *(recommended)* | auto-approve | auto-approve | Codex sandboxed, others ask | you approve the PR |
+| **Fully autonomous** | auto-approve | auto-approve | Codex sandboxed, others ask | merges itself when checks pass, **never into a protected branch** |
+
+What each style really guarantees, shown on the screen next to the choice:
+
+- **Hands-on / Supervised:** the orchestrator can't run anything you didn't
+  approve, so the PR gate is enforced by you at every step.
+- **Autonomous to PR:** the orchestrator runs unprompted. The PR gate is a rule
+  in its brief (never `git push`, `gh pr merge` or `gh pr review`; land only
+  through `shprd land`, merge only after you approve). Nothing outside shprd
+  enforces it unless `main` requires an approving review from someone other than
+  the PR's author.
+- **Fully autonomous:** as above, plus `[land] merge = "allow"`; protected
+  branches still need your approval.
+
+Switches behind the styles: `roster.orchestrator_auto_approve`,
+`roster.worker_auto_approve` (default on), and `land.merge`. Reviewers never
+auto-approve in any style. `shprd doctor` prints a `!` line whenever the
+orchestrator runs with auto-approve.
+
 ## Credentials
 
 Only the engine pushes. Worker panes start with an environment that strips push

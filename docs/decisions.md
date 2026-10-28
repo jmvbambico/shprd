@@ -46,3 +46,10 @@ truth; this log holds how we got there.
   and SSH access on tuios. Porting the relay would mean maintaining an AGPL fork.
 - **Leaving og.** shprd replaces og (Omnigent) with a pure-TUI harness. It keeps
   og's workflow without og's setup burden.
+
+## 2026-10-28
+
+- **Autonomy is chosen at setup.** A Security step offers four styles (hands-on,
+  supervised, autonomous to PR, fully autonomous). The default recommendation is
+  autonomous to PR. With an auto-approving orchestrator the PR gate is a brief
+  rule, not enforcement, and setup says so. Reviewers never auto-approve.

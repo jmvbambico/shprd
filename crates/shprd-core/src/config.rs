@@ -75,6 +75,11 @@ pub struct Roster {
     pub workers: Vec<String>,
     /// Effort level per agent string, e.g. `claude/claude-opus-5-5` -> `high`.
     pub effort: BTreeMap<String, String>,
+    /// Whether the orchestrator launches with its CLI's auto-approve flags.
+    ///
+    /// Off by default: the orchestrator runs unattended only when a human asks
+    /// for it, and then the pull request is the gate that replaces prompts.
+    pub orchestrator_auto_approve: bool,
 }
 
 /// Which skills each role gets.
@@ -192,6 +197,9 @@ impl Config {
                     .effort
                     .extend(effort.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
+            if let Some(auto_approve) = roster.orchestrator_auto_approve {
+                self.roster.orchestrator_auto_approve = auto_approve;
+            }
         }
         if let Some(skills) = &layer.skills {
             if let Some(orchestrator) = &skills.orchestrator {
@@ -289,6 +297,9 @@ pub struct RosterLayer {
     pub workers: Option<Vec<String>>,
     /// Effort level per agent string, from `[roster.effort]`.
     pub effort: Option<BTreeMap<String, String>>,
+    /// Whether the orchestrator launches with auto-approve, from
+    /// `[roster] orchestrator_auto_approve = true`.
+    pub orchestrator_auto_approve: Option<bool>,
 }
 
 /// The `[skills]` section of a config file.
@@ -678,6 +689,36 @@ mod tests {
             config.roster.orchestrator.as_deref(),
             Some("claude/claude-opus-5-5")
         );
+    }
+
+    #[test]
+    fn the_orchestrator_runs_without_prompts_only_when_asked() {
+        assert!(!Config::default().roster.orchestrator_auto_approve);
+        let on = layer(
+            r#"
+            [roster]
+            orchestrator_auto_approve = true
+            "#,
+        );
+        let config = from_layers(&[on]);
+        assert!(config.roster.orchestrator_auto_approve);
+    }
+
+    #[test]
+    fn a_later_layer_can_turn_auto_approve_off_again() {
+        let on = layer(
+            r#"
+            [roster]
+            orchestrator_auto_approve = true
+            "#,
+        );
+        let off = layer(
+            r#"
+            [roster]
+            orchestrator_auto_approve = false
+            "#,
+        );
+        assert!(!from_layers(&[on, off]).roster.orchestrator_auto_approve);
     }
 
     #[test]
