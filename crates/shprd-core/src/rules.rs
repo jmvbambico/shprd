@@ -198,6 +198,12 @@ pub enum RuleError {
         /// The number the event named.
         number: u64,
     },
+    /// An approval named the run's pull request after it had already merged.
+    #[error("pull request #{number} has already merged so it cannot be approved")]
+    MergedPullRequest {
+        /// The number of the pull request that already merged.
+        number: u64,
+    },
     /// An approval named a pull request the log has not seen opened.
     #[error("pull request #{number} was never opened, so it cannot be approved")]
     UnopenedPullRequest {
@@ -360,7 +366,10 @@ fn is_cleanup(kind: &EventKind) -> bool {
 /// The approval must name the pull request the log knows, and that pull
 /// request must still be open: an approval that arrives after the merge could
 /// not have gated anything, so it is refused rather than recorded as if it
-/// had. Only a human may give it: an agent that could approve its own work
+/// had. Such a late approval is refused as [`RuleError::MergedPullRequest`],
+/// which says what actually happened; every other refusal, including a pull
+/// request the log never opened, stays [`RuleError::UnopenedPullRequest`].
+/// Only a human may give an approval: an agent that could approve its own work
 /// would make the approval meaningless, which is the same reason a forge
 /// refuses to let a pull request's author approve it.
 fn check_approved(
@@ -375,7 +384,10 @@ fn check_approved(
         });
     }
     match &state.pr {
-        Some(pr) if pr.number == number && !pr.merged && !head_sha.trim().is_empty() => Ok(()),
+        Some(pr) if pr.number == number && pr.merged => {
+            Err(RuleError::MergedPullRequest { number })
+        }
+        Some(pr) if pr.number == number && !head_sha.trim().is_empty() => Ok(()),
         _ => Err(RuleError::UnopenedPullRequest { number }),
     }
 }

@@ -8,6 +8,7 @@
 //! environment or starts a process of its own.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use serde_json::{Value, json};
@@ -29,6 +30,13 @@ use crate::ctx::{CliError, Ctx};
 /// the pull request.
 pub const DEGRADED_LABEL: &str = "degraded-review";
 
+/// How long a review waits before offering a lost brief a second time.
+///
+/// A CLI that has just started can miss its first prompt while the host has not
+/// detected it as an agent yet, so one retry after a few seconds is worth making.
+/// A reviewer that is genuinely stuck still warns and escalates once, just later.
+const BRIEF_RETRY_WAIT: Duration = Duration::from_secs(3);
+
 /// Everything [`review`] needs from the caller's environment.
 ///
 /// It is plain data plus the run log, so a test builds one without touching a
@@ -41,6 +49,12 @@ pub struct ReviewEnv<'a> {
     pub reviews_dir: PathBuf,
     /// `roster.reviewer`: the agent a review runs on, when one is configured.
     pub reviewer: Option<String>,
+    /// How long to wait before retrying a brief the reviewer did not take.
+    ///
+    /// It is data rather than a constant so a test can set it to
+    /// [`Duration::ZERO`] and still exercise the retry: the wait is production's
+    /// patience, not the retry rule.
+    pub brief_retry_wait: Duration,
 }
 
 impl ReviewEnv<'_> {
@@ -59,6 +73,7 @@ impl ReviewEnv<'_> {
             spawn,
             reviews_dir: home.join(".shprd").join("reviews"),
             reviewer: config.roster.reviewer,
+            brief_retry_wait: BRIEF_RETRY_WAIT,
         })
     }
 }
@@ -558,7 +573,8 @@ fn open_reviewer(
 /// Starts the reviewer's CLI in `tab` and hands it the brief.
 ///
 /// A brief that does not arrive is reported, never fatal: the CLI is running,
-/// and the human can resend the brief into the tab.
+/// and the human can resend the brief into the tab. A lost first delivery is
+/// retried once by [`deliver_review_brief`] before it is reported.
 #[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
 fn start_in_tab(
     mux: &dyn Mux,
@@ -593,13 +609,7 @@ fn start_in_tab(
     if brief_in_args {
         return Ok(());
     }
-    let delivery = launch::deliver_brief(
-        mux,
-        &tab.root_pane,
-        &text,
-        &reviewer.blocking_prompts,
-        env.spawn.ready_wait,
-    );
+    let delivery = deliver_review_brief(mux, env, reviewer, tab, &text);
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
@@ -616,6 +626,30 @@ fn start_in_tab(
         eprintln!("warning: could not record the escalation: {err}");
     }
     Ok(())
+}
+
+/// Hands the reviewer its brief, giving a lost first delivery one more chance.
+///
+/// A freshly started CLI is not always ready for its first prompt: the host may
+/// not have detected the agent yet, or the pane may still be settling. Neither
+/// means the review is lost, so the brief is offered a second time after
+/// [`ReviewEnv::brief_retry_wait`] before the human is told. One retry covers a
+/// start-up race; a reviewer that is genuinely stuck still produces exactly one
+/// warning and one escalation, and they carry the reason the last attempt gave.
+fn deliver_review_brief(
+    mux: &dyn Mux,
+    env: &ReviewEnv<'_>,
+    reviewer: &Reviewer,
+    tab: &shprd_mux::Tab,
+    text: &str,
+) -> launch::Delivery {
+    let wait = env.spawn.ready_wait;
+    let first = launch::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait);
+    if matches!(first, launch::Delivery::Delivered) {
+        return first;
+    }
+    std::thread::sleep(env.brief_retry_wait);
+    launch::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait)
 }
 
 /// The argv a reviewer's CLI starts with.
@@ -789,6 +823,7 @@ mod tests {
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
     use shprd_mux::naming;
+    use shprd_mux::{AgentState, PaneId};
     use tempfile::TempDir;
 
     use super::*;
@@ -1007,16 +1042,76 @@ project_dirs = []
                 },
                 reviews_dir: self.home.path().join(".shprd").join("reviews"),
                 reviewer: reviewer.map(str::to_string),
+                // No wait before the retry either, so the two delivery tests run
+                // through the same path without sleeping.
+                brief_retry_wait: Duration::ZERO,
             }
         }
 
         /// A fake host that already has this repository's workspace.
         fn mux(&self) -> FakeMux {
-            let mux = FakeMux::default().with_ready_agent();
+            self.with_workspace(FakeMux::default().with_ready_agent())
+        }
+
+        /// A fake host with this repository's workspace that never detects an
+        /// agent, so a brief typed into it cannot arrive until the test
+        /// scripts the pane as ready.
+        fn unready_mux(&self) -> FakeMux {
+            self.with_workspace(FakeMux::default())
+        }
+
+        /// Records this repository's workspace in `mux`, as `shprd up` would.
+        fn with_workspace(&self, mux: FakeMux) -> FakeMux {
             mux.create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
             mux
         }
+    }
+
+    /// The pane id a review's reviewer tab gets as its root pane.
+    ///
+    /// Fake host ids are deterministic and the tests' workspace already exists,
+    /// so the first tab a review creates is the reviewer's and its root pane is
+    /// `pane-1`. Tests script state for this pane, and then assert the brief
+    /// landed in it, so a wrong guess fails loudly rather than silently.
+    fn reviewer_pane() -> PaneId {
+        PaneId::new("pane-1")
+    }
+
+    /// Every `Escalated` event in the run log, as (task, body, default action).
+    fn escalations(ctx: &Ctx) -> Vec<(Option<String>, String, String)> {
+        let (_, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        events
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Escalated {
+                    task,
+                    body,
+                    default_action,
+                } => Some((task, body, default_action)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The text of every prompt submitted to any pane, oldest first.
+    fn prompts(mux: &FakeMux) -> Vec<String> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Prompt(_, text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How often the host was asked whether the reviewer's pane is an agent,
+    /// which is one question per brief delivery attempt.
+    fn detection_polls(mux: &FakeMux) -> usize {
+        mux.calls()
+            .into_iter()
+            .filter(|call| matches!(call, Call::AgentState(_)))
+            .count()
     }
 
     /// A review request for `T1`.
@@ -1306,6 +1401,84 @@ project_dirs = []
                 .any(|call| matches!(call, Call::Prompt(_, text) if text.contains("REVIEWER"))),
             "the brief was never typed in: {calls:?}"
         );
+    }
+
+    #[test]
+    fn a_brief_whose_first_delivery_fails_is_retried_once() {
+        // A CLI that is not yet detected as an agent misses the first brief:
+        // the second delivery, a moment later, finds it ready and lands. A lost
+        // first delivery is a start-up race, not something to escalate.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.unready_mux();
+        let pane = reviewer_pane();
+        // Unknown for the first poll, an idle agent from the retry on.
+        mux.set_state_after(&pane, 1, AgentState::Idle);
+
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let delivered = prompts(&mux);
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the retried brief lands once: {delivered:?}"
+        );
+        assert!(delivered[0].contains("REVIEWER"), "{delivered:?}");
+        let landed = mux.calls().into_iter().find_map(|call| match call {
+            Call::Prompt(pane, _) => Some(pane),
+            _ => None,
+        });
+        assert_eq!(
+            landed,
+            Some(reviewer_pane()),
+            "the brief landed in the reviewer's tab, so the scripted pane is its root pane"
+        );
+        assert_eq!(
+            detection_polls(&mux),
+            2,
+            "one detection attempt for the first delivery and one for the retry"
+        );
+        assert!(
+            escalations(&ctx).is_empty(),
+            "a brief the retry delivered escalates nothing: {:?}",
+            escalations(&ctx)
+        );
+    }
+
+    #[test]
+    fn a_brief_that_fails_twice_is_escalated_once() {
+        // The reviewer's pane never becomes an agent, so neither the first
+        // delivery nor the retry lands: the human hears about it once, with the
+        // reason the last attempt gave.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.unready_mux();
+
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let escalations = escalations(&ctx);
+        assert_eq!(
+            escalations.len(),
+            1,
+            "exactly one escalation: {escalations:?}"
+        );
+        let (task, body, default_action) = &escalations[0];
+        assert_eq!(task.as_deref(), Some("T1"));
+        assert_eq!(body, "review brief not delivered");
+        assert_eq!(
+            default_action,
+            "resend the review brief into the reviewer tab"
+        );
+        assert_eq!(
+            detection_polls(&mux),
+            2,
+            "the brief was retried exactly once before the escalation"
+        );
+        assert!(prompts(&mux).is_empty(), "nothing may be typed in");
     }
 
     /// The shipped `data/harness` directory.
