@@ -299,7 +299,7 @@ fn review_gaps(state: &RunState) -> Vec<String> {
 }
 
 /// The short form of a sha, for the human line.
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     sha.get(..SHORT_SHA).unwrap_or(sha)
 }
 
@@ -430,7 +430,7 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
 }
 
 /// The config's `[land]`, with the repo file winning over the global one.
-fn load_config(ctx: &Ctx, home: Option<&Path>) -> Result<Config, CliError> {
+pub(crate) fn load_config(ctx: &Ctx, home: Option<&Path>) -> Result<Config, CliError> {
     let home = resolve_home(home)?;
     let global = home.join(".config").join("shprd").join("config.toml");
     let repo = ctx.root.join(".shprd").join("config.toml");
@@ -439,7 +439,7 @@ fn load_config(ctx: &Ctx, home: Option<&Path>) -> Result<Config, CliError> {
 }
 
 /// The name of the repository directory, which keeps repos apart on disk.
-fn repo_name(ctx: &Ctx) -> Result<String, CliError> {
+pub(crate) fn repo_name(ctx: &Ctx) -> Result<String, CliError> {
     ctx.root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

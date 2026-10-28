@@ -426,6 +426,16 @@ impl Fixture {
         None
     }
 
+    /// The head the log's last approval named, if any.
+    fn approved_head(&self) -> Option<String> {
+        for event in self.events().into_iter().rev() {
+            if let EventKind::Approved { head_sha, .. } = event.kind {
+                return Some(head_sha);
+            }
+        }
+        None
+    }
+
     /// True when the log recorded a merge of `number`.
     fn recorded_merge(&self, number: u64) -> bool {
         self.events().iter().any(
@@ -672,6 +682,52 @@ fn merge_waits_for_approval_and_merges_once_a_human_approves() {
         vec!["merge 1".to_string()]
     );
     assert!(fixture.recorded_merge(1), "the merge is in the log");
+}
+
+#[test]
+fn approve_records_the_human_approval_at_the_integration_head() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+    let printed = fixture.ok(&["approve", "--yes"]);
+    assert!(
+        printed.contains("approved https://example.invalid/pull/1"),
+        "{printed}"
+    );
+    assert_eq!(fixture.approved_head(), Some(head));
+}
+
+#[test]
+fn approve_without_a_terminal_and_without_yes_is_refused() {
+    let fixture = landed();
+    let message = fixture.refused(&["approve"]);
+    assert!(message.contains("stdin is not a terminal"), "{message}");
+    assert_eq!(fixture.approved_head(), None);
+}
+
+#[test]
+fn approve_is_refused_for_an_agent_actor_even_with_yes() {
+    let fixture = landed();
+    let output = match fixture
+        .command(&["approve", "--yes"])
+        .env("SHPRD_ACTOR", "orchestrator")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running the binary: {err}"),
+    };
+    assert_eq!(output.status.code(), Some(2));
+    let message = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(message.contains("only a human approves"), "{message}");
+    assert_eq!(fixture.approved_head(), None, "nothing was written");
+}
+
+#[test]
+fn approve_without_a_pull_request_is_refused() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    let message = fixture.refused(&["approve", "--yes"]);
+    assert!(message.contains("no pull request yet"), "{message}");
 }
 
 #[test]
