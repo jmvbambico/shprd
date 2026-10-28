@@ -406,6 +406,10 @@ pub struct ReviewArgs {
     /// Review anyway when the reviewer shares the author's vendor.
     #[arg(long)]
     pub degraded: bool,
+    /// Restart a review that is stuck: close its reviewer tab and hand the
+    /// brief to a fresh one, for the same attempt and only before a verdict.
+    #[arg(long)]
+    pub again: bool,
 }
 
 /// Arguments for `agent prompt`.
