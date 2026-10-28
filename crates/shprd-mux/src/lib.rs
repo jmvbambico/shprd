@@ -101,6 +101,20 @@ pub trait Mux: Send + Sync {
     /// does not support state at all (see [`Capabilities::agent_state`]).
     fn agent_state(&self, pane: &PaneId) -> Result<AgentState>;
 
+    /// The process group the host sees in the foreground of `pane`.
+    ///
+    /// This is the identity shprd uses to tell a process *it* started from one
+    /// something else did — a host that restored the pane with a plain
+    /// `--resume`, say. A process group survives an `exec`, so a pane whose
+    /// shell replaced itself with an agent still reports that agent's group.
+    ///
+    /// `Ok(None)` means the host cannot tell, which is not an error: callers
+    /// keep their conservative behaviour (leave the pane alone) rather than
+    /// read "no group" as "not mine".
+    fn pane_process_group(&self, _pane: &PaneId) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Wait up to `timeout` for events and return everything queued so far.
     ///
     /// An empty vector means the timeout expired with nothing to report, which

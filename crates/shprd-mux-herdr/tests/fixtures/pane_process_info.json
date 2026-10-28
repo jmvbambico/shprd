@@ -1,0 +1,15 @@
+{
+  "id": "cli:pane:process-info",
+  "result": {
+    "process_info": {
+      "foreground_process_group_id": 88158,
+      "foreground_processes": [
+        {
+          "pane_id": "w1:p2",
+          "process_group_id": 88158,
+          "argv": ["claude", "--resume", "8a1c0f2e-1a2b-4c3d-9e8f-7a6b5c4d3e2f"]
+        }
+      ]
+    }
+  }
+}

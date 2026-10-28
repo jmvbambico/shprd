@@ -53,6 +53,8 @@ pub enum Call {
     Read(PaneId, usize),
     /// `agent_state(pane)`.
     AgentState(PaneId),
+    /// `pane_process_group(pane)`.
+    PaneProcessGroup(PaneId),
     /// `next_events(timeout)`.
     NextEvents(Duration),
 }
@@ -70,6 +72,8 @@ struct Inner {
     /// A scripted "not detected yet, then ready": how many more polls answer
     /// [`AgentState::Unknown`], and the state that follows.
     pending: HashMap<PaneId, (usize, AgentState)>,
+    /// Scripted foreground process group per pane; absent means "no group".
+    process_groups: HashMap<PaneId, Option<u32>>,
     events: VecDeque<MuxEvent>,
     next_workspace: usize,
     next_tab: usize,
@@ -86,6 +90,7 @@ impl Inner {
             screens: HashMap::new(),
             states: HashMap::new(),
             pending: HashMap::new(),
+            process_groups: HashMap::new(),
             events: VecDeque::new(),
             next_workspace: 0,
             next_tab: 0,
@@ -135,6 +140,8 @@ pub struct FakeMux {
     /// The reason [`Mux::run`] fails, when a test wants a host that cannot
     /// start a program.
     run_failure: Option<String>,
+    /// The group every pane reports until a test scripts its own.
+    default_group: Option<u32>,
     inner: Mutex<Inner>,
 }
 
@@ -161,6 +168,7 @@ impl FakeMux {
             starter_tab: false,
             ready: false,
             run_failure: None,
+            default_group: None,
             inner: Mutex::new(Inner::fresh()),
         }
     }
@@ -186,6 +194,24 @@ impl FakeMux {
     pub fn failing_run(mut self, reason: impl Into<String>) -> Self {
         self.run_failure = Some(reason.into());
         self
+    }
+
+    /// Report `group` as the foreground process group of every pane that has
+    /// no scripted group of its own, which is how a test gives panes an
+    /// identity before their ids exist.
+    pub fn with_process_group(mut self, group: u32) -> Self {
+        self.default_group = Some(group);
+        self
+    }
+
+    /// Script what [`Mux::pane_process_group`] reports for `pane`: `Some` is a
+    /// host that can tell, `None` a host that cannot. Registers the pane as
+    /// existing if it was not already.
+    pub fn set_process_group(&self, pane: &PaneId, group: Option<u32>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.panes.insert(pane.clone());
+            inner.process_groups.insert(pane.clone(), group);
+        }
     }
 
     /// Every call made so far, oldest first.
@@ -404,6 +430,16 @@ impl Mux for FakeMux {
         inner.calls.push(Call::Read(pane.clone(), lines));
         inner.require_pane(pane)?;
         Ok(inner.screens.get(pane).cloned().unwrap_or_default())
+    }
+
+    fn pane_process_group(&self, pane: &PaneId) -> Result<Option<u32>> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::PaneProcessGroup(pane.clone()));
+        inner.require_pane(pane)?;
+        if let Some(group) = inner.process_groups.get(pane) {
+            return Ok(*group);
+        }
+        Ok(self.default_group)
     }
 
     fn agent_state(&self, pane: &PaneId) -> Result<AgentState> {

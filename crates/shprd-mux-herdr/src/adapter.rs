@@ -81,6 +81,10 @@ impl Mux for HerdrMux {
         self.state_of(pane)
     }
 
+    fn pane_process_group(&self, pane: &PaneId) -> Result<Option<u32>> {
+        self.process_group_of(pane)
+    }
+
     fn next_events(&self, timeout: Duration) -> Result<Vec<MuxEvent>> {
         self.poll_events(timeout)
     }
