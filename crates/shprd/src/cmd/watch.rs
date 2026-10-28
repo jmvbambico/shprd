@@ -816,10 +816,28 @@ mod tests {
             "the second watchdog steps aside"
         );
         drop(first);
+        // Another test in this process may be between `fork` and `exec` right
+        // now: the forked child holds a duplicate of the lock file's open file
+        // description, and `flock` locks belong to that description, so the
+        // lock can outlive `drop(first)` for as long as the child takes to
+        // exec. Production never forks mid-claim; only this immediate re-claim
+        // is racy, so poll for a bounded time rather than assume the lock dies
+        // the instant the file is closed.
+        let mut waited_ms = 0;
         assert!(
-            claim_run(&log)
-                .expect("a claim after the first is gone")
-                .is_some(),
+            loop {
+                if claim_run(&log)
+                    .expect("a claim after the first is gone")
+                    .is_some()
+                {
+                    break true;
+                }
+                if waited_ms >= 2_000 {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                waited_ms += 10;
+            },
             "the lock dies with the process that held it"
         );
     }
