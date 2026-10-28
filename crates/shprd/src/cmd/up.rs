@@ -123,8 +123,14 @@ pub struct UpReport {
 /// Runs `shprd up`: the run's lifecycle, then the workspace layout.
 pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
     let repo = env.ctx.root.clone();
+    // Excludes land first: an earlier run's `.shprd/` or `.dagr/` is already on
+    // disk, and any check that reads the checkout would otherwise see it as
+    // dirty. `preconditions` owns the "not a repository" answer, so the git
+    // call that resolves the exclude file waits for a real one.
+    if repo.join(".git").exists() {
+        ensure_git_excludes(&repo)?;
+    }
     let base_branch = preconditions(&repo, &env.config)?;
-    ensure_git_excludes(&repo)?;
     let boot = begin_run(&env.ctx, &env.home, &env.repo_name, &base_branch)?;
     let run_id = boot.run_id;
     let resumed = boot.resumed;
@@ -1643,6 +1649,61 @@ mod tests {
         assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
         assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
         assert_eq!(text.matches("# shprd run state").count(), 1, "{text}");
+        Ok(())
+    }
+
+    /// Leaves stale, unignored run state in `repo`, as an earlier run would.
+    fn stale_run_state(repo: &StdPath) -> Result<()> {
+        std::fs::create_dir_all(repo.join(".shprd/runs"))?;
+        std::fs::write(repo.join(".shprd/runs/x.jsonl"), "{}\n")?;
+        std::fs::create_dir_all(repo.join(".dagr"))?;
+        std::fs::write(repo.join(".dagr/run.json"), "{}\n")?;
+        Ok(())
+    }
+
+    #[test]
+    fn up_excludes_stale_run_state_before_reading_the_checkout() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let repo = fixture.repo.path();
+        stale_run_state(repo)?;
+        let env = fixture.env()?;
+        let mux = mux();
+        up(&mux, &env).map_err(failed)?;
+        assert_eq!(status(repo)?, "", "stale run state made the checkout dirty");
+        let exclude = exclude_path(repo)?;
+        let text = std::fs::read_to_string(&exclude)?;
+        assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
+        assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
+        up(&mux, &env).map_err(failed)?;
+        let text = std::fs::read_to_string(&exclude)?;
+        assert_eq!(
+            text.matches(".shprd/").count(),
+            1,
+            "second up duplicated: {text}"
+        );
+        assert_eq!(
+            text.matches(".dagr/").count(),
+            1,
+            "second up duplicated: {text}"
+        );
+        Ok(())
+    }
+
+    /// A checkout `up` refuses still gets its excludes, so the state an
+    /// earlier run left behind never counts as dirty while a human fixes it.
+    #[test]
+    fn a_refused_checkout_still_gets_its_excludes() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let repo = fixture.repo.path();
+        stale_run_state(repo)?;
+        git(repo, &["checkout", "--detach"])?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let err = up(&mux, &env).err().context("up must refuse")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let text = std::fs::read_to_string(exclude_path(repo)?)?;
+        assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
+        assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
         Ok(())
     }
 
