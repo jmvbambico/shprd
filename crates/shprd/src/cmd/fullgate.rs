@@ -144,14 +144,20 @@ fn load_config(ctx: &Ctx, home: Option<&Path>) -> Result<Config, CliError> {
         .map_err(|err| CliError::other(anyhow!(err).context("loading the config")))
 }
 
-/// The clean environment a worker CLI gets, as `Command` env pairs.
+/// The clean environment a gate's commands get, as `Command` env pairs.
 ///
 /// A gate is a worker's command in every sense that matters: it must not see a
 /// remote credential, and it must not wait on a git prompt.
+///
+/// The actor is `engine`, not `worker`: `worker` is no actor the CLI knows, so a
+/// nested `shprd` run inside a gate step would die on `unknown actor`. Gating is
+/// the engine's own work — spawning, gating, integrating — so `engine` names who
+/// is really acting; `agent:<ID>` would claim a specific agent ran the gate and
+/// the orchestrator did not.
 fn worker_env(worktree: &Path, run_id: &str) -> Vec<(String, Option<String>)> {
     let base: BTreeMap<String, String> = std::env::vars().collect();
     let ctx = EnvContext {
-        actor: "worker".to_string(),
+        actor: "engine".to_string(),
         task: None,
         run: Some(run_id.to_string()),
         repo: worktree.to_path_buf(),
@@ -168,5 +174,28 @@ fn print_steps(outcome: &GateRun) {
             "✗"
         };
         println!("{mark} {} ({}s)", step.command, step.duration_ms / 1000);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use shprd_core::event::Actor;
+
+    use super::*;
+    use crate::ctx::parse_actor;
+
+    /// The gate hands its commands a `SHPRD_ACTOR` the CLI itself accepts, so a
+    /// nested `shprd` run inside a gate step does not fail on an unknown actor.
+    #[test]
+    fn worker_env_sets_an_actor_the_cli_parses() {
+        let pairs = worker_env(Path::new("/repo"), "run-1");
+        let raw = pairs
+            .iter()
+            .find(|(name, _)| name == "SHPRD_ACTOR")
+            .and_then(|(_, value)| value.as_deref())
+            .unwrap_or_else(|| panic!("worker_env sets no SHPRD_ACTOR: {pairs:?}"));
+        let parsed = parse_actor(raw)
+            .unwrap_or_else(|err| panic!("worker_env sets SHPRD_ACTOR={raw:?}: {err}"));
+        assert_eq!(parsed, Actor::Engine);
     }
 }

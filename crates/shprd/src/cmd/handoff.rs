@@ -460,7 +460,9 @@ pub fn handoff(
         // is reported too, because a stray agent nobody has been told about is
         // one nobody stops.
         let body = match mux.close_tab(&tab_id) {
-            Ok(()) => format!("hand-off to {} could not be recorded", to.agent),
+            Ok(()) | Err(MuxError::NotFound { .. }) => {
+                format!("hand-off to {} could not be recorded", to.agent)
+            }
             Err(close_err) => format!(
                 "hand-off to {} could not be recorded; its tab could not be closed: \
                  {close_err}; stop it by hand",
@@ -1174,6 +1176,105 @@ project_dirs = []
         }
     }
 
+    /// A [`FakeMux`] that closes `keep` and reports every other tab as already
+    /// gone: the old agent's tab must still close, so the hand-off reaches the
+    /// record write, and the newcomer's cleanup close finds nothing to close.
+    struct VanishedNewcomerClose {
+        inner: FakeMux,
+        keep: TabId,
+    }
+
+    impl Mux for VanishedNewcomerClose {
+        fn capabilities(&self) -> shprd_mux::Capabilities {
+            self.inner.capabilities()
+        }
+
+        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<Workspace>> {
+            self.inner.find_workspace(name)
+        }
+
+        fn create_workspace(&self, name: &str, cwd: &Path) -> shprd_mux::Result<Workspace> {
+            self.inner.create_workspace(name, cwd)
+        }
+
+        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
+            self.inner.focus_workspace(workspace)
+        }
+
+        fn list_tabs(
+            &self,
+            workspace: &shprd_mux::WorkspaceId,
+        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
+            self.inner.list_tabs(workspace)
+        }
+
+        fn create_tab(
+            &self,
+            workspace: &shprd_mux::WorkspaceId,
+            title: &str,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::Tab> {
+            self.inner.create_tab(workspace, title, cwd)
+        }
+
+        fn rename_tab(&self, tab: &TabId, title: &str) -> shprd_mux::Result<()> {
+            self.inner.rename_tab(tab, title)
+        }
+
+        fn focus_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+            self.inner.focus_tab(tab)
+        }
+
+        fn close_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+            if *tab != self.keep {
+                return Err(MuxError::not_found("tab", tab));
+            }
+            self.inner.close_tab(tab)
+        }
+
+        fn split(
+            &self,
+            pane: &shprd_mux::PaneId,
+            direction: shprd_mux::Direction,
+            ratio: f32,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::PaneId> {
+            self.inner.split(pane, direction, ratio, cwd)
+        }
+
+        fn run(
+            &self,
+            pane: &shprd_mux::PaneId,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+        ) -> shprd_mux::Result<()> {
+            self.inner.run(pane, argv, env)
+        }
+
+        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.send_text(pane, text)
+        }
+
+        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.prompt(pane, text)
+        }
+
+        fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
+            self.inner.read(pane, lines)
+        }
+
+        fn agent_state(
+            &self,
+            pane: &shprd_mux::PaneId,
+        ) -> shprd_mux::Result<shprd_mux::AgentState> {
+            self.inner.agent_state(pane)
+        }
+
+        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
+            self.inner.next_events(timeout)
+        }
+    }
+
     /// A cleanup the host refused is the human's only clue that a stray agent is
     /// still running, so the escalation must say so rather than hide it.
     #[test]
@@ -1217,6 +1318,52 @@ project_dirs = []
                 "hand-off to pi could not be recorded; its tab could not be closed: \
                  close tab: the host refused; stop it by hand"
             )
+        );
+    }
+
+    /// A tab the host no longer knows is already closed, so the escalation must
+    /// not send the human looking for a newcomer that is gone.
+    #[test]
+    fn a_hand_off_that_cannot_record_and_finds_its_tab_already_gone_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        let old = std::fs::read_to_string(&record).unwrap_or_else(|err| panic!("{err}"));
+        // Readable, so the old tab is still closed, but not writable.
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o400))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mux = VanishedNewcomerClose {
+            inner: mux,
+            keep: TabId::new(old.trim()),
+        };
+
+        let err = match handoff(&mux, &env, &request(None)) {
+            Ok(report) => panic!("handed off to {} anyway", report.to),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.exit_code(), 1);
+        let (state, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::HandedOff { .. })),
+            "an unrecorded hand-off was logged as done"
+        );
+        let body = state
+            .escalations
+            .last()
+            .map(|escalation| escalation.body.as_str())
+            .unwrap_or_else(|| panic!("no escalation"));
+        assert_eq!(body, "hand-off to pi could not be recorded");
+        assert!(
+            !body.contains("stop it by hand") && !body.contains("could not be closed"),
+            "the escalation tells the human to clean up a tab that is gone: {body}"
         );
     }
 
