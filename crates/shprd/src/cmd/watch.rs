@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use shprd_core::event::{Event, EventKind};
+use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_mux::{Mux, MuxError, PaneId, naming};
@@ -19,6 +20,7 @@ use shprd_watch::screen::{Sampler, ScreenSignal, sample};
 use crate::cli::WatchArgs;
 use crate::cmd::handoff::{HandoffRequest, handoff};
 use crate::cmd::spawn::{self, Program, SpawnEnv};
+use crate::cmd::{review, verdict};
 use crate::ctx::{CliError, Ctx};
 
 /// The newest `*.jsonl` file in `dir`, if the directory holds one.
@@ -101,6 +103,11 @@ pub struct Watcher {
     cooldowns: BTreeMap<String, Watch>,
     /// The thresholds and backoffs the state machine runs under.
     policy: Policy,
+    /// Per rejected `findings.json`: the mtime already escalated.
+    ///
+    /// A reviewer's bad file is one escalation, not one per tick: the mark is
+    /// cleared by a rewrite, which is the reviewer's second chance.
+    rejected: BTreeMap<PathBuf, SystemTime>,
 }
 
 impl Watcher {
@@ -110,6 +117,7 @@ impl Watcher {
             watches: BTreeMap::new(),
             cooldowns: BTreeMap::new(),
             policy,
+            rejected: BTreeMap::new(),
         }
     }
 
@@ -126,6 +134,7 @@ impl Watcher {
         let (state, events) = env.ctx.load()?;
         let mut lines = Vec::new();
         self.tick_cooldowns(env, &state, now_ms, &mut lines)?;
+        self.tick_reviews(env, &state, &mut lines)?;
         for task in state.tasks.values() {
             if task.status != TaskStatus::Working {
                 continue;
@@ -142,6 +151,51 @@ impl Watcher {
         self.watches
             .retain(|key, _| working(&key.0, &key.1, &key.2));
         Ok(lines)
+    }
+
+    /// Records the verdict of every review that has finished writing.
+    ///
+    /// The reviewer runs outside the repository, so it cannot record anything
+    /// itself: it writes `findings.json` and stops, and this pass is what turns
+    /// that file into the gate result the run waits for.
+    fn tick_reviews(
+        &mut self,
+        env: &SpawnEnv<'_>,
+        state: &RunState,
+        lines: &mut Vec<String>,
+    ) -> Result<(), CliError> {
+        let Some(reviews) = reviews_dir(env) else {
+            return Ok(());
+        };
+        for task in state.tasks.values() {
+            let Some(attempt) = awaiting_review(task) else {
+                continue;
+            };
+            let path = review::findings_path(&reviews, &env.run, &task.id, attempt);
+            let Some(modified) = settled_mtime(&path) else {
+                continue;
+            };
+            if verdict::read_findings(&path).is_err() {
+                if self.rejected.get(&path) == Some(&modified) {
+                    continue;
+                }
+                self.rejected.insert(path, modified);
+                env.ctx.commit(EventKind::Escalated {
+                    task: Some(task.id.clone()),
+                    body: format!("reviewer wrote an invalid findings.json for {}", task.id),
+                    default_action: INVALID_FINDINGS_ACTION.to_string(),
+                })?;
+                lines.push(format!("escalated {}: invalid findings.json", task.id));
+                continue;
+            }
+            let outcome = verdict::submit_verdict(env.ctx, home_of(env), &task.id, attempt, &path)?;
+            let word = match outcome {
+                verdict::Outcome::Passed => "passed",
+                verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",
+            };
+            lines.push(format!("\u{25c7} {} review {word}", task.id));
+        }
+        Ok(())
     }
 
     /// Polls the agents a hand-off left behind, so their cooldown still ends.
@@ -350,6 +404,42 @@ fn home_of<'a>(env: &'a SpawnEnv<'_>) -> Option<&'a Path> {
     env.briefs_dir.parent()?.parent()
 }
 
+/// The directory review packets live under, `<home>/.shprd/reviews`.
+fn reviews_dir(env: &SpawnEnv<'_>) -> Option<PathBuf> {
+    Some(home_of(env)?.join(".shprd").join("reviews"))
+}
+
+/// How long a findings file must sit untouched before a tick trusts it.
+///
+/// A reviewer writes its file in one go, but a tick can fall between the open
+/// and the last byte: reading a file younger than this would decide a review
+/// from half of it.
+const FINDINGS_SETTLE: Duration = Duration::from_secs(2);
+
+/// What a human is asked to do about a reviewer's invalid findings file.
+const INVALID_FINDINGS_ACTION: &str = "read the packet and decide the review by hand";
+
+/// The mtime of `path`, when the file is old enough for the watchdog to read.
+fn settled_mtime(path: &Path) -> Option<SystemTime> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    (age >= FINDINGS_SETTLE).then_some(modified)
+}
+
+/// The attempt of `task` a review is still owed for, if there is one.
+///
+/// A review was asked for, and no review gate result is recorded yet: the task
+/// sits in `Reported` until that result arrives, however long the reviewer
+/// takes.
+fn awaiting_review(task: &Task) -> Option<u32> {
+    if task.status != TaskStatus::Reported {
+        return None;
+    }
+    let attempt = task.attempts.last()?;
+    let decided = attempt.gates.iter().any(|gate| gate.gate == REVIEW_GATE);
+    (!attempt.reviews.is_empty() && !decided).then_some(attempt.n)
+}
+
 /// The pane `tab` holds, or `None` when the host no longer has it.
 ///
 /// Only a host that answered without the tab says the agent is gone. A host
@@ -431,7 +521,7 @@ mod tests {
     use std::process::Command;
 
     use shprd_core::config::Skills;
-    use shprd_core::event::Actor;
+    use shprd_core::event::{Actor, ReportStatus};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::FakeMux;
     use shprd_mux::{AgentState, PaneId};
@@ -705,6 +795,69 @@ project_dirs = []
         fresh.iter().any(|event| wanted(&event.kind))
     }
 
+    /// Commits `T1` through a spawn and a report, then asks for a review: the
+    /// state the watchdog's review pass is written for.
+    fn awaiting_review_task(ctx: &Ctx) {
+        ctx.commit(EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "codex".to_string(),
+            model: None,
+            worktree: "/tmp/wt".to_string(),
+            branch: "feature/x".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "did it".to_string(),
+            tests: Vec::new(),
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::ReviewRequested {
+            task: "T1".to_string(),
+            attempt: 1,
+            reviewer: "codex".to_string(),
+            degraded: false,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Writes `T1`'s `findings.json`, optionally aged past the settle window.
+    fn write_findings(env: &SpawnEnv<'_>, scratch: &Scratch, text: &str, age: Duration) -> PathBuf {
+        let dir = scratch.home.path().join(".shprd").join("reviews");
+        let path = review::findings_path(&dir, &env.run, "T1", 1);
+        std::fs::create_dir_all(path.parent().unwrap_or(&dir))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&path, text).unwrap_or_else(|err| panic!("{err}"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|err| panic!("{err}"));
+        file.set_modified(SystemTime::now() - age)
+            .unwrap_or_else(|err| panic!("{err}"));
+        path
+    }
+
+    /// The events one tick appended, starting from the log's current length.
+    fn tick_events(
+        watcher: &mut Watcher,
+        ctx: &Ctx,
+        env: &SpawnEnv<'_>,
+        now: u64,
+    ) -> (Vec<String>, Vec<Event>) {
+        let before = events(ctx).len();
+        let mux = FakeMux::default();
+        let lines = watcher
+            .tick(&mux, env, now)
+            .unwrap_or_else(|err| panic!("{err}"));
+        (lines, events(ctx)[before..].to_vec())
+    }
+
     /// The M5 gate: a stuck agent is marked dry and handed off, in one tick.
     #[test]
     fn a_stalled_agent_goes_dry_and_is_handed_off_in_one_tick() {
@@ -866,6 +1019,98 @@ project_dirs = []
             )),
             "the handed-off agent stayed dry: {} events",
             fresh.len()
+        );
+    }
+    /// The reviewer writes findings and stops: the tick that sees them records
+    /// the pass, and a file still being written is left alone.
+    #[test]
+    fn a_finished_review_is_recorded_by_the_watchdog() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        let mut watcher = Watcher::new(Policy::default());
+        write_findings(&env, &scratch, "[]", Duration::from_millis(50));
+
+        let (lines, fresh) = tick_events(&mut watcher, &ctx, &env, 1_700_000_000_000);
+        assert!(
+            !appended(&fresh, |kind| matches!(kind, EventKind::GatePassed { .. })),
+            "a findings file a moment old was read: {lines:?}"
+        );
+
+        write_findings(&env, &scratch, "[]", Duration::from_secs(10));
+        let (lines, fresh) = tick_events(&mut watcher, &ctx, &env, 1_700_000_010_000);
+        assert!(
+            appended(&fresh, |kind| matches!(
+                kind,
+                EventKind::GatePassed { gate, attempt, .. }
+                    if gate == REVIEW_GATE && *attempt == 1
+            )),
+            "no review gate result was recorded: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "\u{25c7} T1 review passed"),
+            "{lines:?}"
+        );
+    }
+
+    /// A blocking finding fails the gate, and the line says so.
+    #[test]
+    fn a_failing_review_is_recorded_as_a_failed_gate() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        let findings = r#"[{"severity":"critical","title":"wrong","location":null,
+            "detail":"it does not do what the contract asks"}]"#;
+        write_findings(&env, &scratch, findings, Duration::from_secs(10));
+
+        let mut watcher = Watcher::new(Policy::default());
+        let (lines, fresh) = tick_events(&mut watcher, &ctx, &env, 1_700_000_000_000);
+        assert!(
+            appended(&fresh, |kind| matches!(
+                kind,
+                EventKind::GateFailed { gate, .. } if gate == REVIEW_GATE
+            )),
+            "no failed review gate was recorded: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "\u{25c7} T1 review failed"),
+            "{lines:?}"
+        );
+    }
+
+    /// An unreadable file is one escalation, not one per tick.
+    #[test]
+    fn an_invalid_findings_file_is_escalated_once() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        write_findings(&env, &scratch, "not json", Duration::from_secs(10));
+
+        let mut watcher = Watcher::new(Policy::default());
+        let (first, fresh) = tick_events(&mut watcher, &ctx, &env, 1_700_000_000_000);
+        assert!(
+            appended(&fresh, |kind| matches!(
+                kind,
+                EventKind::Escalated { task, body, .. }
+                    if task.as_deref() == Some("T1")
+                        && body.contains("invalid findings.json for T1")
+            )),
+            "an invalid file was not escalated: {first:?}"
+        );
+        let (_, fresh) = tick_events(&mut watcher, &ctx, &env, 1_700_000_010_000);
+        assert!(
+            !appended(&fresh, |kind| matches!(kind, EventKind::Escalated { .. })),
+            "the same invalid file was escalated twice"
+        );
+        assert!(
+            !appended(&fresh, |kind| matches!(
+                kind,
+                EventKind::GatePassed { .. } | EventKind::GateFailed { .. }
+            )),
+            "an invalid file decided a review"
         );
     }
 }

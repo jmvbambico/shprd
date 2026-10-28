@@ -51,3 +51,7 @@ source = "anthropic_oauth"
 [skills]
 home_dirs = ["~/.claude/skills"]
 project_dirs = []
+
+[[blocking_prompts]]
+name = "folder trust"
+pattern = "Is this a project you created or one you trust"

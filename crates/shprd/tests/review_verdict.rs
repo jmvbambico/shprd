@@ -124,6 +124,42 @@ impl Fixture {
         ])
     }
 
+    /// Runs the binary in `dir`, deciding for itself whether to name a repo.
+    ///
+    /// `repo` is `Some(path)` when the command names `--repo`, and `None` when
+    /// it must find the repository another way; `env` is added to the child's
+    /// environment. This is how a caller with a working directory outside the
+    /// repository is exercised.
+    fn run_in(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        repo: Option<&Path>,
+        env: &[(&str, &str)],
+    ) -> Output {
+        let mut all: Vec<String> = Vec::new();
+        if let Some(path) = repo {
+            all.push("--repo".into());
+            all.push(path.display().to_string());
+        }
+        all.push("--home".into());
+        all.push(self.home.display().to_string());
+        all.push("--no-dagr".into());
+        all.extend(args.iter().map(|arg| (*arg).to_string()));
+        let mut command = Command::new(BIN);
+        command.args(&all).current_dir(dir);
+        // Never inherit a repo from the test process: the point is where the
+        // child's own discovery lands when nothing names one.
+        command.env_remove("SHPRD_REPO");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        match command.output() {
+            Ok(output) => output,
+            Err(err) => panic!("running {BIN} failed: {err}"),
+        }
+    }
+
     /// Runs the binary against this fixture's repo and home.
     fn run(&self, args: &[&str]) -> Output {
         let mut all: Vec<String> = vec![
@@ -318,4 +354,46 @@ fn a_passed_review_keeps_its_minor_findings() {
         findings[0].get("title").and_then(Value::as_str),
         Some("a finding")
     );
+}
+
+#[test]
+fn the_verdict_runs_from_a_directory_outside_the_repository() {
+    // A reviewer's packet folder is not a git repository, so `git rev-parse`
+    // there fails: the verb has to be told where the run's log is, either with
+    // `--repo` or with `SHPRD_REPO`.
+    let elsewhere = temp("outside");
+    let findings = elsewhere.path().join("findings.json");
+    write(&findings, &finding("minor"));
+    for repo_env in [false, true] {
+        let fixture = Fixture::new();
+        fixture.add_task("T1");
+        fixture.attempt("T1", 1);
+        let args = [
+            "agent",
+            "review-verdict",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--findings",
+            &findings.display().to_string(),
+        ];
+        // `--repo`, then the environment variable, then nothing.
+        let (repo, env): (Option<&Path>, Vec<(&str, &str)>) = if repo_env {
+            (
+                None,
+                vec![("SHPRD_REPO", fixture.root.to_str().unwrap_or_default())],
+            )
+        } else {
+            (Some(fixture.root.as_path()), Vec::new())
+        };
+        let output = fixture.run_in(elsewhere.path(), &args, repo, &env);
+        assert!(
+            output.status.success(),
+            "the verdict failed outside a repository (repo: {repo:?}, env: {env:?}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(stdout.contains("review passed"), "{stdout:?}");
+    }
 }

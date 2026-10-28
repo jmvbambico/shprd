@@ -34,7 +34,9 @@ signin_args = ["auth", "check", "--model", "{model}", "--no-refresh", "--json"]
 interactive = ["pi"]
 model_args = ["--model", "{model}"]
 effort_args = ["--thinking", "{effort}"]
-system_prompt_args = ["--append-system-prompt", "{prompt}"]
+# herdr refuses an argument containing a newline, so the brief travels as a
+# path: `--append-system-prompt` reads a path as well as literal text.
+system_prompt_args = ["--append-system-prompt", "{prompt_file}"]
 resume_args = ["--session-id", "{session}"]
 verified = false
 

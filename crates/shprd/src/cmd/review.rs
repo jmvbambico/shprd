@@ -18,7 +18,7 @@ use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::families::{Families, agent_vendor};
 use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, render_args};
+use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
 use crate::cmd::launch;
@@ -96,6 +96,14 @@ pub struct ReviewReport {
 /// Where a review packet lives: `<reviews>/<run>/<task>-a<attempt>/`.
 pub fn packet_dir(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
     reviews.join(run).join(format!("{task}-a{attempt}"))
+}
+
+/// The file a reviewer writes its findings to, inside its packet folder.
+///
+/// It is the one file read back out of a packet: the watchdog watches it, so a
+/// finished review is picked up without the reviewer running any command.
+pub fn findings_path(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+    packet_dir(reviews, run, task, attempt).join("findings.json")
 }
 
 /// Where a reviewer's brief lives: `<briefs>/<run>/<task>-a<attempt>-review.md`.
@@ -298,6 +306,8 @@ pub struct Reviewer {
     pub model: Option<String>,
     /// How to start the program.
     pub launch: LaunchSpec,
+    /// The prompts the CLI waits on a human to answer before it reads anything.
+    pub blocking_prompts: Vec<BlockingPrompt>,
     /// Whether this review is cross-vendor or degraded.
     pub degraded: bool,
     /// A one-line note to show the human when a flag had no effect.
@@ -347,6 +357,7 @@ pub fn choose_reviewer(
         agent: parsed.program,
         model: parsed.model,
         launch: program.spec.launch.clone(),
+        blocking_prompts: program.spec.blocking_prompts.clone(),
         // `--degraded` is only recorded where the review needs the label: the
         // branches below set it, and it stays false for an independent review.
         degraded: false,
@@ -449,8 +460,6 @@ pub struct ReviewBrief<'a> {
     pub model: Option<&'a str>,
     /// The folder the reviewer reads and writes in.
     pub dir: &'a str,
-    /// The absolute path the reviewer writes its findings to.
-    pub findings: &'a str,
     /// Whether the review is degraded, and so must say so.
     pub degraded: bool,
 }
@@ -458,8 +467,9 @@ pub struct ReviewBrief<'a> {
 /// Renders the brief a reviewer reads before its first turn.
 ///
 /// It names the three files the reviewer may read, says plainly that the
-/// repository is off limits, and ends with the command that records the verdict,
-/// so the reviewer never has to guess how its work gets back into the run.
+/// repository is off limits, and ends by telling the reviewer to write its
+/// findings and stop: the reviewer runs no `shprd` command, because its folder
+/// is outside the repository and the orchestration submits the verdict instead.
 pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -498,11 +508,11 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str("Write `findings.json` in this folder, matching `findings.schema.json`: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write an empty array — `[]` — when nothing is wrong: an empty array is a clean review, and it is the answer to aim for.\n\n");
     out.push_str("Judge the diff against the acceptance criteria and the scope: what it does wrong, what it misses, what it changes that it may not touch. A critical or major finding blocks integration, so spend them on things that matter.\n\n");
     out.push_str("## Then\n\n");
-    out.push_str("Run this once `findings.json` is written:\n\n");
-    out.push_str(&format!(
-        "    shprd agent review-verdict --task {} --attempt {} --findings {}\n",
-        input.task.id, input.attempt, input.findings
-    ));
+    out.push_str(
+        "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
+         not a repository, so no command of yours would reach the run log. The orchestrator reads \
+         your file and records the verdict itself.\n",
+    );
     out
 }
 
@@ -583,7 +593,13 @@ fn start_in_tab(
     if brief_in_args {
         return Ok(());
     }
-    let delivery = launch::deliver_brief(mux, &tab.root_pane, &text, env.spawn.ready_wait);
+    let delivery = launch::deliver_brief(
+        mux,
+        &tab.root_pane,
+        &text,
+        &reviewer.blocking_prompts,
+        env.spawn.ready_wait,
+    );
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
@@ -696,7 +712,6 @@ pub fn review(
         eprintln!("{note}");
     }
     let dir = write_packet(env, task, attempt)?;
-    let findings = dir.join("findings.json");
     let brief_path = brief_path(&env.spawn.briefs_dir, &env.spawn.run, &task.id, attempt.n);
     let brief = ReviewBrief {
         task,
@@ -705,7 +720,6 @@ pub fn review(
         agent: &reviewer.agent,
         model: reviewer.model.as_deref(),
         dir: &dir.display().to_string(),
-        findings: &findings.display().to_string(),
         degraded: reviewer.degraded,
     };
     spawn::write_brief(&brief_path, &render_review_brief(&brief))?;
@@ -1058,13 +1072,10 @@ project_dirs = []
         );
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
-        let findings = report.dir.join("findings.json").display().to_string();
-        assert!(
-            brief.contains(&format!(
-                "shprd agent review-verdict --task T1 --attempt 1 --findings {findings}"
-            )),
-            "{brief}"
-        );
+        // The reviewer writes and stops: no shprd verb is asked of it, because
+        // its folder is outside the repository and the orchestrator submits.
+        assert!(!brief.contains("shprd agent"), "{brief}");
+        assert!(brief.contains("findings.json` and stop"), "{brief}");
         assert!(brief.contains("REVIEWER"), "{brief}");
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
     }

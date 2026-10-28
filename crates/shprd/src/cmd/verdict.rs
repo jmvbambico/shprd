@@ -17,51 +17,91 @@ use crate::ctx::{CliError, Ctx};
 /// What a human is asked to decide when a review escalates.
 const ESCALATION_DEFAULT: &str = "decide whether to accept, re-scope or drop";
 
+/// What a submitted verdict decided, so a caller can say so its own way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// No finding blocked: the review gate passed.
+    Passed,
+    /// The gate failed and the task goes back for another attempt.
+    SentBack {
+        /// How many findings blocked.
+        blocking: usize,
+    },
+    /// The gate failed and a human is now asked what to do.
+    Escalated {
+        /// How many findings blocked.
+        blocking: usize,
+    },
+}
+
 /// Decides the review for one attempt and records the outcome.
 pub fn verdict_verb(
     ctx: &Ctx,
     args: &ReviewVerdictArgs,
     home: Option<&Path>,
 ) -> Result<(), CliError> {
+    let outcome = submit_verdict(ctx, home, &args.task, args.attempt, &args.findings)?;
+    match outcome {
+        Outcome::Passed => println!("review passed"),
+        Outcome::SentBack { blocking } => {
+            println!("review failed: {blocking} blocking (send back)")
+        }
+        Outcome::Escalated { blocking } => {
+            println!("review failed: {blocking} blocking (escalated)");
+        }
+    }
+    Ok(())
+}
+
+/// Applies the review policy to `findings_path` and records what it decides.
+///
+/// The reviewer only writes findings; the call to pass or fail is made here, by
+/// [`gate`], so a verdict is reproducible from the file alone. `home` picks the
+/// config the policy comes from, as `--home` does for every other verb.
+pub fn submit_verdict(
+    ctx: &Ctx,
+    home: Option<&Path>,
+    task: &str,
+    attempt: u32,
+    findings_path: &Path,
+) -> Result<Outcome, CliError> {
     let policy = review_policy(ctx, home)?;
-    let findings = read_findings(&args.findings)?;
+    let findings = read_findings(findings_path)?;
     let decided = gate::verdict(&findings, policy.must_fix);
     if decided.passed {
         // A pass keeps every finding it was given: minor advice is still worth
         // printing in the pull request, so an empty list would lose it.
         let kind = EventKind::GatePassed {
-            task: args.task.clone(),
-            attempt: args.attempt,
+            task: task.to_string(),
+            attempt,
             gate: REVIEW_GATE.to_string(),
             findings,
         };
         record(ctx, kind)?;
-        println!("review passed");
-        return Ok(());
+        return Ok(Outcome::Passed);
     }
     let blocking = decided.blocking.len();
     let kind = EventKind::GateFailed {
-        task: args.task.clone(),
-        attempt: args.attempt,
+        task: task.to_string(),
+        attempt,
         gate: REVIEW_GATE.to_string(),
         findings,
     };
     record(ctx, kind)?;
-    let task = reviewed_task(ctx, &args.task)?;
-    match gate::after_failure(&task, policy.rounds) {
-        Next::SendBack => println!("review failed: {blocking} blocking (send back)"),
+    let reviewed = reviewed_task(ctx, task)?;
+    match gate::after_failure(&reviewed, policy.rounds) {
+        Next::SendBack => Ok(Outcome::SentBack { blocking }),
         Next::Escalate => {
-            let rounds = gate::failed_review_rounds(&task);
+            let rounds = gate::failed_review_rounds(&reviewed);
             let kind = EventKind::Escalated {
-                task: Some(args.task.clone()),
+                task: Some(task.to_string()),
                 body: format!("review failed {rounds} times"),
                 default_action: ESCALATION_DEFAULT.to_string(),
             };
             record(ctx, kind)?;
-            println!("review failed: {blocking} blocking (escalated)");
+            Ok(Outcome::Escalated { blocking })
         }
     }
-    Ok(())
 }
 
 /// The review policy in force: the global file, then the repo override.
@@ -78,7 +118,7 @@ fn review_policy(ctx: &Ctx, home: Option<&Path>) -> Result<Review, CliError> {
 ///
 /// Unreadable or invalid findings are the caller's mistake, so they exit 2 as
 /// a rule refusal does, naming the file.
-fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
+pub(crate) fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading findings from {}", path.display()))
         .map_err(CliError::Invalid)?;

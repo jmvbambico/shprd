@@ -12,6 +12,7 @@
 //! shprd's to kill.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +26,7 @@ use shprd_mux::naming::{self, Role as TabRole};
 use shprd_mux::{Mux, Tab, TabId, Workspace};
 use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{HarnessSpec, Values, render_args};
+use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -35,16 +36,30 @@ const CHAT_TITLE: &str = "shprd·chat";
 /// The label the orchestrator tab carries after its role glyph and CLI id.
 const ORCHESTRATOR_LABEL: &str = "orchestrator";
 
-/// The argv the chat tab runs: print the status, then hand over to a shell.
+/// The directory under `.shprd` a finished run's log is moved to.
+const RUNS_DIR: &str = "runs";
+
+/// The paths shprd writes inside the repository, which git must not see.
+const EXCLUDES: [&str; 2] = [".shprd/", ".dagr/"];
+
+/// The comment the shprd entries are appended under.
+const EXCLUDE_COMMENT: &str = "# shprd run state";
+
+/// The argv the chat tab runs: a live status view that never starts a shell.
 ///
 /// The status comes from this very binary rather than from `PATH`, so the tab
 /// reports the run `up` just laid out even when an older `shprd` is installed.
+/// The tab never hands over to `$SHELL`: a login shell re-runs the user's rc
+/// file, whose banner and errors make the placeholder look broken.
 fn chat_argv() -> Vec<String> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("shprd"));
     vec![
         "sh".to_string(),
         "-c".to_string(),
-        format!("{} status; exec \"${{SHELL:-sh}}\"", posix_quote(&exe)),
+        format!(
+            "while :; do clear; {} status; printf '\\n  shprd·chat arrives in M7 · talk to the ★ orchestrator tab · refreshes every 5 s\\n'; sleep 5; done",
+            posix_quote(&exe)
+        ),
     ]
 }
 
@@ -108,6 +123,13 @@ pub struct UpReport {
 /// Runs `shprd up`: the run's lifecycle, then the workspace layout.
 pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
     let repo = env.ctx.root.clone();
+    // Excludes land first: an earlier run's `.shprd/` or `.dagr/` is already on
+    // disk, and any check that reads the checkout would otherwise see it as
+    // dirty. `preconditions` owns the "not a repository" answer, so the git
+    // call that resolves the exclude file waits for a real one.
+    if repo.join(".git").exists() {
+        ensure_git_excludes(&repo)?;
+    }
     let base_branch = preconditions(&repo, &env.config)?;
     let boot = begin_run(&env.ctx, &env.home, &env.repo_name, &base_branch)?;
     let run_id = boot.run_id;
@@ -209,6 +231,60 @@ fn preconditions(repo: &Path, config: &Config) -> Result<String, CliError> {
     Ok(branch.to_string())
 }
 
+/// Keeps shprd's own state out of `git status`.
+///
+/// shprd writes `.shprd/` and `.dagr/` inside the repository. Untracked, they
+/// make a clean checkout look dirty and block integration, so whichever of the
+/// two is missing is appended to the repository's own exclude file. That file
+/// is `git rev-parse --git-path info/exclude`, which is where git keeps
+/// per-repository ignores and what a worktree resolves to its own git dir —
+/// `.gitignore` belongs to the human and is never touched.
+fn ensure_git_excludes(repo: &Path) -> Result<(), CliError> {
+    let raw = git_stdout(repo, &["rev-parse", "--git-path", "info/exclude"])?;
+    let resolved = PathBuf::from(raw.trim());
+    let path = if resolved.is_absolute() {
+        resolved
+    } else {
+        repo.join(resolved)
+    };
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(CliError::other(
+                anyhow!(err).context(format!("reading {}", path.display())),
+            ));
+        }
+    };
+    let present: Vec<&str> = existing.lines().map(str::trim).collect();
+    let missing: Vec<&str> = EXCLUDES
+        .iter()
+        .copied()
+        .filter(|line| !present.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut text = existing.clone();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !present.contains(&EXCLUDE_COMMENT) {
+        text.push_str(EXCLUDE_COMMENT);
+        text.push('\n');
+    }
+    for line in missing {
+        text.push_str(line);
+        text.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| CliError::other(anyhow!(err).context("creating the info directory")))?;
+    }
+    std::fs::write(&path, text)
+        .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
+}
+
 /// Runs one git command in `repo` and returns its stdout.
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, CliError> {
     let output = std::process::Command::new("git")
@@ -228,8 +304,8 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, CliError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Reuses the run in flight, or starts a fresh one, and opens its integration
-/// worktree either way.
+/// Archives a finished run, reuses the run in flight, or starts a fresh one,
+/// and opens its integration worktree either way.
 ///
 /// Returns the run id, whether it was resumed, and its integration branch.
 fn begin_run(
@@ -238,7 +314,13 @@ fn begin_run(
     repo_name: &str,
     base_branch: &str,
 ) -> Result<RunBoot, CliError> {
-    let state = ctx.state()?;
+    let mut state = ctx.state()?;
+    if state.finished {
+        // A finished run's log refuses the next `RunStarted`, so it is archived
+        // first and the run after it starts in a fresh, empty log.
+        archive_finished_run(ctx, &state)?;
+        state = ctx.state()?;
+    }
     let boot = match resume_target(&state) {
         Some(run) => RunBoot {
             run_id: run.run_id,
@@ -268,6 +350,65 @@ fn begin_run(
     // is healed by the retry instead of being resumed as if it were whole.
     ensure_integration(ctx, home, repo_name, &boot, &state)?;
     Ok(boot)
+}
+
+/// Moves a finished run's log aside so `up` can start the next run.
+///
+/// A repository keeps one live log, `.shprd/events.jsonl`, and a log whose run
+/// has finished refuses the next `RunStarted`. The old log is renamed under
+/// `.shprd/runs/` while its own lock is held, so no other shprd process is
+/// appending to it as it moves, and an archive already there is never
+/// overwritten: the name grows a `-2`, `-3`... suffix instead.
+///
+/// Returns where the log went, or `None` when the run is not finished.
+fn archive_finished_run(ctx: &Ctx, state: &RunState) -> Result<Option<PathBuf>, CliError> {
+    let Some(run) = state.run.as_ref().filter(|_| state.finished) else {
+        return Ok(None);
+    };
+    let parent = ctx.log_path.parent().ok_or_else(|| {
+        CliError::other(anyhow!(
+            "no directory to archive into: {}",
+            ctx.log_path.display()
+        ))
+    })?;
+    let dir = parent.join(RUNS_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| CliError::other(anyhow!(err).context("creating the run archive")))?;
+    let target = archive_target(&dir, &run.run_id);
+    let file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&ctx.log_path)
+        .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
+    file.lock()
+        .map_err(|err| CliError::other(anyhow!(err).context("locking the event log")))?;
+    let moved = std::fs::rename(&ctx.log_path, &target)
+        .map_err(|err| CliError::other(anyhow!(err).context("archiving the event log")));
+    let unlocked = file
+        .unlock()
+        .map_err(|err| CliError::other(anyhow!(err).context("unlocking the event log")));
+    moved?;
+    unlocked?;
+    let shown = target.strip_prefix(&ctx.root).unwrap_or(&target);
+    println!(
+        "archived finished run {} to {}",
+        run.run_id,
+        shown.display()
+    );
+    Ok(Some(target))
+}
+
+/// Where `run_id`'s log is archived: `<dir>/<run_id>.jsonl`, or the first free
+/// `-2`, `-3`... suffix when that name is taken.
+fn archive_target(dir: &Path, run_id: &str) -> PathBuf {
+    let first = dir.join(format!("{run_id}.jsonl"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| dir.join(format!("{run_id}-{n}.jsonl")))
+        .find(|path| !path.exists())
+        .unwrap_or(first)
 }
 
 /// Opens the run's integration worktree and records the resources it owns.
@@ -524,8 +665,14 @@ fn ensure_orchestrator_tab(
     mux.run(&tab.root_pane, &plan.argv, &plan.env)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the orchestrator")))?;
     if let Some(brief) = &plan.inline_prompt
-        && let Some(reason) =
-            super::launch::deliver_brief(mux, &tab.root_pane, brief, env.ready_wait).reason()
+        && let Some(reason) = super::launch::deliver_brief(
+            mux,
+            &tab.root_pane,
+            brief,
+            &plan.blocking_prompts,
+            env.ready_wait,
+        )
+        .reason()
     {
         // The orchestrator is running either way, so a brief that never lands
         // is a message to the human, not a failed `up`: they can paste it in.
@@ -550,6 +697,8 @@ struct OrchestratorPlan {
     env: Vec<(String, Option<String>)>,
     /// The brief, when the CLI has no system-prompt flag to carry it.
     inline_prompt: Option<String>,
+    /// The prompts the CLI waits on a human to answer before it reads anything.
+    blocking_prompts: Vec<BlockingPrompt>,
 }
 
 impl OrchestratorPlan {
@@ -617,6 +766,7 @@ impl OrchestratorPlan {
             )
             .as_pairs(),
             inline_prompt,
+            blocking_prompts: spec.blocking_prompts.clone(),
         })
     }
 }
@@ -830,6 +980,41 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         Ok(())
+    }
+
+    /// Runs one git command in `dir` and returns its stdout.
+    fn git_text(dir: &StdPath, args: &[&str]) -> Result<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .context("running git")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// `git status --porcelain` in `dir`, so a test sees the checkout as a
+    /// human would.
+    fn status(dir: &StdPath) -> Result<String> {
+        git_text(dir, &["status", "--porcelain"])
+    }
+
+    /// Where git keeps the repo-local exclude file, resolved the way git
+    /// resolves it so a worktree's exclude is the one found.
+    fn exclude_path(dir: &StdPath) -> Result<PathBuf> {
+        let text = git_text(dir, &["rev-parse", "--git-path", "info/exclude"])?;
+        let path = PathBuf::from(text.trim());
+        Ok(if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        })
     }
 
     /// The tabs the fake was asked to create, in order.
@@ -1060,9 +1245,20 @@ mod tests {
         };
         assert_eq!(argv[0], "sh");
         assert_eq!(argv[1], "-c");
+        let script = &argv[2];
         assert_eq!(
-            argv[2],
-            format!("'{}' status; exec \"${{SHELL:-sh}}\"", exe.display())
+            script,
+            &format!(
+                "while :; do clear; '{}' status; printf '\\n  shprd·chat arrives in M7 · talk to the ★ orchestrator tab · refreshes every 5 s\\n'; sleep 5; done",
+                exe.display()
+            )
+        );
+        assert!(script.starts_with("while :; do clear; "), "{script}");
+        assert!(script.contains(" status; "), "{script}");
+        assert!(script.ends_with("; sleep 5; done"), "{script}");
+        assert!(
+            !script.contains("SHELL"),
+            "the placeholder must not hand over to the user's login shell: {script}"
         );
         assert!(
             exe.is_absolute(),
@@ -1377,6 +1573,137 @@ mod tests {
             .map_err(failed)?;
         down(&env.ctx).map_err(failed)?;
         assert!(env.ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    #[test]
+    fn a_finished_run_is_archived_so_up_starts_the_next_one() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        down(&env.ctx).map_err(failed)?;
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(!second.resumed, "a finished run is never resumed");
+        assert_ne!(second.run_id, first.run_id, "up must mint a new run");
+        let archive = fixture
+            .repo
+            .path()
+            .join(".shprd")
+            .join("runs")
+            .join(format!("{}.jsonl", first.run_id));
+        assert!(archive.is_file(), "{} is missing", archive.display());
+        let (state, events) = env.ctx.load().map_err(failed)?;
+        assert_eq!(
+            state.run.as_ref().map(|run| run.run_id.clone()),
+            Some(second.run_id.clone()),
+            "the fresh log holds the new run"
+        );
+        assert!(!state.finished, "the new run is in flight");
+        assert_eq!(
+            events.first().map(|event| event.seq),
+            Some(1),
+            "the fresh log starts at seq 1"
+        );
+        assert!(
+            matches!(
+                events.first().map(|event| &event.kind),
+                Some(EventKind::RunStarted { .. })
+            ),
+            "{events:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_archived_run_is_never_overwritten() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        down(&env.ctx).map_err(failed)?;
+        let runs = fixture.repo.path().join(".shprd").join("runs");
+        std::fs::create_dir_all(&runs)?;
+        let taken = runs.join(format!("{}.jsonl", first.run_id));
+        std::fs::write(&taken, "# an earlier archive\n")?;
+        up(&mux, &env).map_err(failed)?;
+        let second = runs.join(format!("{}-2.jsonl", first.run_id));
+        assert!(second.is_file(), "{} is missing", second.display());
+        assert_eq!(std::fs::read_to_string(&taken)?, "# an earlier archive\n");
+        Ok(())
+    }
+
+    #[test]
+    fn up_keeps_its_run_state_out_of_git_status() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        up(&mux, &env).map_err(failed)?;
+        std::fs::create_dir_all(fixture.repo.path().join(".dagr"))?;
+        assert!(fixture.repo.path().join(".shprd").is_dir());
+        assert_eq!(status(fixture.repo.path())?, "", "the checkout looks dirty");
+        up(&mux, &env).map_err(failed)?;
+        let exclude = exclude_path(fixture.repo.path())?;
+        let text = std::fs::read_to_string(&exclude)?;
+        assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
+        assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
+        assert_eq!(text.matches("# shprd run state").count(), 1, "{text}");
+        Ok(())
+    }
+
+    /// Leaves stale, unignored run state in `repo`, as an earlier run would.
+    fn stale_run_state(repo: &StdPath) -> Result<()> {
+        std::fs::create_dir_all(repo.join(".shprd/runs"))?;
+        std::fs::write(repo.join(".shprd/runs/x.jsonl"), "{}\n")?;
+        std::fs::create_dir_all(repo.join(".dagr"))?;
+        std::fs::write(repo.join(".dagr/run.json"), "{}\n")?;
+        Ok(())
+    }
+
+    #[test]
+    fn up_excludes_stale_run_state_before_reading_the_checkout() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let repo = fixture.repo.path();
+        stale_run_state(repo)?;
+        let env = fixture.env()?;
+        let mux = mux();
+        up(&mux, &env).map_err(failed)?;
+        assert_eq!(status(repo)?, "", "stale run state made the checkout dirty");
+        let exclude = exclude_path(repo)?;
+        let text = std::fs::read_to_string(&exclude)?;
+        assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
+        assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
+        up(&mux, &env).map_err(failed)?;
+        let text = std::fs::read_to_string(&exclude)?;
+        assert_eq!(
+            text.matches(".shprd/").count(),
+            1,
+            "second up duplicated: {text}"
+        );
+        assert_eq!(
+            text.matches(".dagr/").count(),
+            1,
+            "second up duplicated: {text}"
+        );
+        Ok(())
+    }
+
+    /// A checkout `up` refuses still gets its excludes, so the state an
+    /// earlier run left behind never counts as dirty while a human fixes it.
+    #[test]
+    fn a_refused_checkout_still_gets_its_excludes() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let repo = fixture.repo.path();
+        stale_run_state(repo)?;
+        git(repo, &["checkout", "--detach"])?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let err = up(&mux, &env).err().context("up must refuse")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let text = std::fs::read_to_string(exclude_path(repo)?)?;
+        assert_eq!(text.matches(".shprd/").count(), 1, "{text}");
+        assert_eq!(text.matches(".dagr/").count(), 1, "{text}");
         Ok(())
     }
 

@@ -24,7 +24,7 @@ use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::models::AgentRef;
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
-use shprd_roster::spec::{HarnessSpec, LaunchSpec, Values, render_args};
+use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -115,6 +115,8 @@ pub(crate) struct Pick {
     pub(crate) model: Option<String>,
     /// How to start the program.
     pub(crate) launch: LaunchSpec,
+    /// The prompts the CLI waits on a human to answer before it reads anything.
+    pub(crate) blocking_prompts: Vec<BlockingPrompt>,
 }
 
 /// Spawns an agent for one task attempt.
@@ -310,15 +312,26 @@ fn start_in_tab(
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the agent CLI")))?;
-    if brief_in_args {
-        return Ok(());
-    }
-    let delivery = super::launch::deliver_brief(mux, &tab.root_pane, brief, env.ready_wait);
+    // A brief that arrived as a system prompt leaves the CLI idle, waiting for a
+    // first turn, so it gets a one-line kickoff; an agent with no system-prompt
+    // flag gets the whole brief typed in, as before.
+    let (text, what) = if brief_in_args {
+        (super::launch::KICKOFF, "kickoff")
+    } else {
+        (brief, "brief")
+    };
+    let delivery = super::launch::deliver_brief(
+        mux,
+        &tab.root_pane,
+        text,
+        &pick.blocking_prompts,
+        env.ready_wait,
+    );
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
     eprintln!(
-        "warning: brief not delivered to {title}: {reason}; resend with: shprd agent prompt --task {task} \"$(cat {})\"",
+        "warning: {what} not delivered to {title}: {reason}; resend with: shprd agent prompt --task {task} \"$(cat {})\"",
         brief_path.display()
     );
     let escalation = EventKind::Escalated {
@@ -532,6 +545,7 @@ fn choose_agent(
             agent: parsed.program,
             model: parsed.model,
             launch: program.spec.launch.clone(),
+            blocking_prompts: program.spec.blocking_prompts.clone(),
         });
     }
     for raw in workers {
@@ -550,6 +564,7 @@ fn choose_agent(
                 agent: parsed.program,
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
+                blocking_prompts: program.spec.blocking_prompts.clone(),
             });
         }
     }
@@ -1239,6 +1254,7 @@ project_dirs = []
             agent: "sh".to_string(),
             model: None,
             launch: fake_spec("sh").launch,
+            blocking_prompts: Vec::new(),
         }
     }
 
@@ -1371,6 +1387,69 @@ project_dirs = []
             })
             .unwrap_or_else(|| panic!("the brief was never typed in: {calls:?}"));
         assert!(prompt.contains("Make spawn real"), "{prompt}");
+    }
+
+    /// The calls spawn made for one worker spec, whose `system_prompt_args` are
+    /// the ones `--append-system-prompt` reads a file path from.
+    fn calls_after_spawn(system_prompt_args: Option<Vec<&str>>) -> Vec<Call> {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env(&ctx);
+        env.programs[0].spec.launch.system_prompt_args =
+            system_prompt_args.map(|args| args.into_iter().map(str::to_string).collect());
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(
+            &naming::workspace_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        mux.calls()
+    }
+
+    /// The prompts spawn typed into the tab, in order.
+    fn prompts(calls: &[Call]) -> Vec<String> {
+        calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::Prompt(_, text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An agent that took its brief as a system prompt starts idle, waiting for
+    /// a first turn, so it gets one line telling it to begin, not the brief again.
+    #[test]
+    fn an_agent_given_the_brief_as_a_system_prompt_gets_a_kickoff() {
+        let calls = calls_after_spawn(Some(vec!["--append-system-prompt", "{prompt_file}"]));
+        let argv = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"));
+        assert!(
+            argv.iter().any(|arg| arg.ends_with(".md")),
+            "the brief travels as a file path: {argv:?}"
+        );
+        assert_eq!(prompts(&calls), [crate::cmd::launch::KICKOFF.to_string()]);
+        assert!(
+            !crate::cmd::launch::KICKOFF.contains('\n'),
+            "the kickoff is one line"
+        );
+    }
+
+    /// An agent with no system-prompt flag still gets the whole brief typed in.
+    #[test]
+    fn an_agent_without_system_prompt_arguments_gets_the_whole_brief() {
+        let prompt = prompts(&calls_after_spawn(None))
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("the brief was never typed in"));
+        assert!(prompt.contains("Make spawn real"), "{prompt}");
+        assert!(prompt.contains("crates/shprd"), "{prompt}");
     }
 
     /// A [`Mux`] that delegates everything but refuses to open tabs, which is

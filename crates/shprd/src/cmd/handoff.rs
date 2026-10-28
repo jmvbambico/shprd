@@ -77,6 +77,7 @@ fn pick_to(
         agent: parsed.program,
         model: parsed.model,
         launch: program.spec.launch.clone(),
+        blocking_prompts: program.spec.blocking_prompts.clone(),
     }))
 }
 
@@ -115,6 +116,7 @@ fn next_worker(
                 agent: parsed.program,
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
+                blocking_prompts: program.spec.blocking_prompts.clone(),
             });
         }
     }
