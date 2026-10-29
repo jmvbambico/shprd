@@ -15,13 +15,14 @@ it act freely inside that.
    `shprd/<run>/int`, worktrees under `~/.shprd/wt/<repo>/<run>/<task>`. The
    engine's verbs refuse destructive git operations outside the namespace.
 3. **Archive before delete.** Before deleting a branch, the engine writes an
-   archive ref named after that branch (`shprd/<run>/<task>` →
-   `refs/shprd/archive/<run>/<task>`, so a retry branch gets its own ref). A
+   archive ref per attempt (`shprd/<run>/<task>` →
+   `refs/shprd/archive/<run>/<task>-a<n>`), so a retry and the janitor never
+   write the same ref; refs from before this scheme (no `-a<n>`) stay valid. A
    branch is deleted only if the ledger recorded creating it; removing a
    worktree never deletes a branch. Archive refs are kept for
    `janitor.archive_days` (14 by default), counted from the creation that is
    current in the ledger. `shprd restore <task>` brings the task's branch back
-   at the archived commit, and checks the ledger before creating anything.
+   at the newest attempt's archived commit (falling back to an old-style ref), and checks the ledger before creating anything.
    (Bundles for unpushed work exist but aren't used by the janitor yet.)
 4. **Tiers decided by code:**
 
