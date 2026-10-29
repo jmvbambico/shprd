@@ -430,6 +430,18 @@ pub enum EventKind {
         /// watchdog off the chat tab.
         process_group: Option<u32>,
     },
+    /// The watchdog told the orchestrator about the log up to this point.
+    ///
+    /// The orchestrator is an interactive CLI: it only acts when it is given
+    /// input, so the watchdog prompts its pane. Two workers can report and the
+    /// orchestrator sits idle until a human notices, unless something tells it.
+    /// This event is that delivery's watermark: it names the last sequence the
+    /// orchestrator was told about, so a restarted watchdog neither replays old
+    /// notices nor drops new ones.
+    OrchestratorNotified {
+        /// The last log sequence the orchestrator was told about.
+        up_to_seq: u64,
+    },
     /// The run finished.
     RunFinished {},
 }
@@ -590,6 +602,7 @@ mod tests {
                 pane: "w1:p2".to_string(),
                 process_group: 88158,
             },
+            EventKind::OrchestratorNotified { up_to_seq: 42 },
             EventKind::RunFinished {},
         ]
     }
@@ -597,7 +610,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 19, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 20, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

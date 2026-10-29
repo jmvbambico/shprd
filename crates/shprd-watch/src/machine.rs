@@ -381,6 +381,11 @@ impl Watch {
     /// the attempt on without drying anything; every other verdict dries the
     /// agent. While already dry only the canary is considered, and while
     /// escalated nothing is.
+    ///
+    /// The screen pattern is the fallback, not a peer of the others: a harness
+    /// whose record or serve instance reports something is judged by that, and
+    /// the screen decides only for a stopped agent, from the bottom lines of
+    /// its pane. Anything else lets a file the agent reads dry its program.
     pub fn step(&mut self, i: &Inputs, p: &Policy) -> Vec<Action> {
         if let Health::Dry {
             retry_at_ms,
@@ -432,7 +437,20 @@ impl Watch {
             return Vec::new();
         };
 
-        if let Some(pattern) = &screen.dry_pattern {
+        // A harness that reports its own errors is judged by them. The record
+        // and the serve instance were read and said nothing fatal, so words on
+        // the screen must not overrule them: the agent is often printing a
+        // file, a diff or a tool's output, and any of those may quote "quota".
+        let structured = i.record_error.is_some() || i.serve.is_some();
+        // And a screen pattern needs an agent that stopped. A CLI that runs out
+        // of quota stops at its own prompt with the message on screen; an agent
+        // still working, waiting on a human, or one the host cannot place
+        // (`Unknown`) proves nothing about its program from the text it shows.
+        let stopped = matches!(screen.agent_state, AgentState::Idle | AgentState::Done);
+        if let Some(pattern) = &screen.dry_pattern
+            && !structured
+            && stopped
+        {
             let reason = pattern.clone();
             return self.go_dry(i.now_ms, Source::Screen, reason, None, p);
         }
@@ -801,12 +819,13 @@ mod tests {
     }
 
     /// A screen whose dry pattern matches: a real "this agent is unusable"
-    /// signal, and one the provider gives no reset time for.
+    /// signal, and one the provider gives no reset time for. The CLI hit its
+    /// limit, so it stopped at its own prompt and printed the message there.
     fn dry_screen(now_ms: u64) -> Inputs {
         Inputs {
             screen: Some(ScreenSignal {
                 dry_pattern: Some(String::from("usage limit reached")),
-                ..still(AgentState::Working, 0)
+                ..still(AgentState::Idle, 0)
             }),
             ..inputs(now_ms)
         }
@@ -1033,7 +1052,7 @@ mod tests {
         let i = Inputs {
             screen: Some(ScreenSignal {
                 dry_pattern: Some(String::from("usage limit reached")),
-                ..still(AgentState::Working, 0)
+                ..still(AgentState::Idle, 0)
             }),
             ..inputs(NOW)
         };
@@ -1050,5 +1069,66 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The real false positive: a worker handed the watch and janitor code,
+    /// showing lines that contain "quota" and "429", was marked dry while both
+    /// workers kept working for another twenty minutes.
+    #[test]
+    fn a_working_agent_showing_a_quota_phrase_is_not_dry() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let i = Inputs {
+            screen: Some(ScreenSignal {
+                dry_pattern: Some(String::from("quota")),
+                ..still(AgentState::Working, 0)
+            }),
+            ..inputs(NOW)
+        };
+
+        assert_eq!(w.step(&i, &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+    }
+
+    /// The same text on a pane the host cannot place proves nothing either.
+    #[test]
+    fn an_agent_the_host_cannot_place_is_not_dry_from_its_screen() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let i = Inputs {
+            screen: Some(ScreenSignal {
+                dry_pattern: Some(String::from("usage limit reached")),
+                ..still(AgentState::Unknown, 0)
+            }),
+            ..inputs(NOW)
+        };
+
+        assert_eq!(w.step(&i, &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+    }
+
+    /// A harness that reports its own errors is judged by them: the record was
+    /// read and says only that the request was retryable, so a phrase on the
+    /// screen does not overrule it.
+    #[test]
+    fn a_record_error_outranks_a_screen_pattern() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        let i = Inputs {
+            record_error: Some(RecordError {
+                kind: ErrorKind::Overloaded,
+                message: String::from("the server is overloaded"),
+                at_ms: Some(NOW),
+                resets_at_ms: None,
+            }),
+            screen: Some(ScreenSignal {
+                dry_pattern: Some(String::from("usage limit reached")),
+                ..still(AgentState::Idle, 0)
+            }),
+            ..inputs(NOW)
+        };
+
+        assert_eq!(w.step(&i, &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
     }
 }

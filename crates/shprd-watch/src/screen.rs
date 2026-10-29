@@ -13,6 +13,17 @@ use shprd_mux::{AgentState, Mux, MuxError, PaneId};
 /// scrolled out of the agent's current turn.
 pub const WINDOW_LINES: usize = 40;
 
+/// How many trailing non-blank lines a dry pattern may match.
+///
+/// Far fewer than [`WINDOW_LINES`], because the two answer different
+/// questions. A reset hint is shown to a human and reads best from the whole
+/// window; a dry verdict hands work to another agent, so it must not be
+/// reached from a screen the agent is merely reading. A CLI that hits its
+/// limit prints its own error and status line at the bottom of the pane, so
+/// only that bottom is a verdict. Code, diffs and tool output higher up are
+/// content, and content quotes words like "quota" all the time.
+pub const VERDICT_LINES: usize = 6;
+
 /// How much of the text after a reset marker is worth showing a human.
 const HINT_CHARS: usize = 60;
 
@@ -22,6 +33,18 @@ const RESET_MARKERS: [&str; 3] = ["resets ", "reset at ", "try again in "];
 /// The last `count` lines of `screen`, oldest first.
 fn tail_lines(screen: &str, count: usize) -> Vec<&str> {
     let lines: Vec<&str> = screen.lines().collect();
+    lines[lines.len().saturating_sub(count)..].to_vec()
+}
+
+/// The last `count` non-blank lines of `screen`, oldest first.
+///
+/// Blank lines are dropped before counting, so a pane padded with empty rows
+/// still reads as the few lines of text it actually shows.
+fn tail_non_blank(screen: &str, count: usize) -> Vec<&str> {
+    let lines: Vec<&str> = screen
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     lines[lines.len().saturating_sub(count)..].to_vec()
 }
 
@@ -37,14 +60,20 @@ fn first_chars(text: &str, max: usize) -> String {
 }
 
 /// The entry of `patterns` that the screen shows, ASCII case-insensitively as
-/// a plain substring of one of the last [`WINDOW_LINES`] lines.
+/// a plain substring of one of the last [`VERDICT_LINES`] non-blank lines.
+///
+/// The window is the bottom of the pane and nothing above it: a CLI that runs
+/// out of quota or hits a rate limit stops there, so its own error line is
+/// among the last the pane shows. Scrollback above it is what the agent read
+/// last, and a file, a diff or a tool output quoting "quota" or "429" is
+/// content, not a verdict — a strict screen pattern must not decide one.
 ///
 /// Echo lines (`$ ` and `> `) are skipped, so a prompt shprd typed that
 /// happens to quote "rate limit" does not look like a real limit message.
 /// Returns the pattern as configured, so the caller can name the rule that
 /// fired.
 pub fn match_dry(screen: &str, patterns: &[String]) -> Option<String> {
-    for line in tail_lines(screen, WINDOW_LINES) {
+    for line in tail_non_blank(screen, VERDICT_LINES) {
         if is_echo(line) {
             continue;
         }
@@ -192,7 +221,7 @@ pub fn sample(
 
 #[cfg(test)]
 mod tests {
-    use super::{Sampler, match_dry, reset_hint, sample};
+    use super::{Sampler, VERDICT_LINES, match_dry, reset_hint, sample};
     use shprd_mux::fake::FakeMux;
     use shprd_mux::{AgentState, PaneId};
     use std::fmt::Display;
@@ -223,18 +252,77 @@ mod tests {
         assert_eq!(match_dry("still working", &patterns()), None);
     }
 
+    /// The patterns `data/harness/pi.toml` ships, so the cases below are the
+    /// ones the roster really configures.
+    fn pi_patterns() -> Vec<String> {
+        [
+            "429 Too Many Requests",
+            "rate limit exceeded",
+            "rate limit reached",
+            "insufficient credits",
+            "credit balance is too low",
+            "usage limit reached",
+        ]
+        .iter()
+        .map(|pattern| (*pattern).to_owned())
+        .collect()
+    }
+
     #[test]
-    fn matches_above_the_window_are_ignored() {
+    fn only_the_bottom_of_the_pane_is_a_verdict() {
         let mut escaped = vec!["rate limit hit".to_string()];
-        escaped.extend((0..40).map(|_| "working".to_string()));
+        escaped.extend((0..VERDICT_LINES).map(|_| "working".to_string()));
         assert_eq!(match_dry(&escaped.join("\n"), &patterns()), None);
 
         let mut inside = vec!["rate limit hit".to_string()];
-        inside.extend((0..39).map(|_| "working".to_string()));
+        inside.extend((0..VERDICT_LINES - 1).map(|_| "working".to_string()));
         assert_eq!(
             match_dry(&inside.join("\n"), &patterns()),
             Some("rate limit".to_string())
         );
+    }
+
+    #[test]
+    fn blank_padding_does_not_push_the_verdict_out_of_the_window() {
+        let mut lines = vec![
+            "pi".to_string(),
+            "API error: usage limit reached".to_string(),
+        ];
+        lines.extend((0..VERDICT_LINES).map(|_| String::new()));
+        assert_eq!(
+            match_dry(&lines.join("\n"), &pi_patterns()),
+            Some("usage limit reached".to_string())
+        );
+    }
+
+    /// The false positive that made the window strict: a working agent showing
+    /// its own source, a diff or a tool's output. shprd's source holds every
+    /// one of these words, and none of them is a verdict.
+    #[test]
+    fn a_working_agent_reading_content_is_not_dry() {
+        let screen = [
+            "-let quota = load()?;",
+            "-assert_eq!(response.status(), 429);",
+            "-// a rate limit here is retried by the caller",
+            "+fn dry_patterns() -> Vec<String> {",
+        ];
+        assert_eq!(match_dry(&screen.join("\n"), &pi_patterns()), None);
+    }
+
+    #[test]
+    fn a_pi_quota_error_on_the_last_line_is_a_verdict() {
+        let screen = "pi\nworking on the task\nError: credit balance is too low";
+        assert_eq!(
+            match_dry(screen, &pi_patterns()),
+            Some("credit balance is too low".to_string())
+        );
+    }
+
+    #[test]
+    fn a_quota_phrase_scrolled_out_of_the_window_is_not_a_verdict() {
+        let mut lines = vec!["Error: 429 Too Many Requests".to_string()];
+        lines.extend((0..VERDICT_LINES).map(|_| "reading src/main.rs".to_string()));
+        assert_eq!(match_dry(&lines.join("\n"), &pi_patterns()), None);
     }
 
     #[test]

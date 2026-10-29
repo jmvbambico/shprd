@@ -129,7 +129,7 @@ fn await_agent(
     loop {
         // The CLI may ask its own user something before it ever becomes an
         // agent, and wait there silently: report that instead of timing out.
-        if let Ok(prompt) = blocking_prompt(mux, pane, patterns) {
+        if let Some(prompt) = blocking_prompt(mux, pane, patterns) {
             return Ok(Some(prompt));
         }
         // A host that cannot report state answers `Unknown` forever; that is
@@ -150,26 +150,34 @@ fn await_agent(
 
 /// The name of the first blocking prompt the pane's screen is showing, if any.
 ///
+/// The watchdog asks the same question of the orchestrator's pane before it
+/// types a notice: a CLI waiting on its own prompt reads the next line as the
+/// answer to that prompt.
+///
+/// `Some` means a pattern actually matched, and is the only answer that counts
+/// as blocked. A screen the host handed over with no prompt on it (the normal
+/// case), a screen that cannot be read at all, and a spec with no patterns are
+/// every one of them `None`: a pane with nothing waiting on it is a pane a
+/// brief or a notice may be typed into. The return type says that much, because
+/// a `Result` let "the host answered" read like "a prompt is waiting".
+///
 /// The match is case-insensitive, like [`shprd_roster::spec::HarnessSpec::dry_patterns`],
 /// and reads only the last [`BLOCKING_PROMPT_LINES`] lines: a prompt still
 /// waiting is on screen, and the scrollback above it may mention one long gone.
-fn blocking_prompt(
+pub(crate) fn blocking_prompt(
     mux: &dyn Mux,
     pane: &PaneId,
     patterns: &[BlockingPrompt],
-) -> Result<String, ()> {
+) -> Option<String> {
     if patterns.is_empty() {
-        return Err(());
+        return None;
     }
-    let Ok(screen) = mux.read(pane, BLOCKING_PROMPT_LINES) else {
-        return Err(());
-    };
+    let screen = mux.read(pane, BLOCKING_PROMPT_LINES).ok()?;
     let screen = screen.to_lowercase();
     patterns
         .iter()
         .find(|pattern| screen.contains(&pattern.pattern.to_lowercase()))
         .map(|pattern| pattern.name.clone())
-        .ok_or(())
 }
 
 #[cfg(test)]

@@ -48,6 +48,12 @@ pub struct HarnessSpec {
     /// Skill directories the CLI reads.
     pub skills: SkillsSpec,
     /// Case-insensitive screen substrings that mean rate limited or out of quota.
+    ///
+    /// A fallback, for CLIs that print an error without recording it. The
+    /// watchdog prefers the record and the live retry signal, and reads these
+    /// only from the bottom lines of a stopped agent's pane, so each entry is a
+    /// whole phrase the CLI itself prints: a bare word like "quota" matches any
+    /// file the agent happens to be reading.
     pub dry_patterns: Vec<String>,
     /// Prompts the CLI raises on its own and waits for a human to answer.
     ///
@@ -744,6 +750,29 @@ project_dirs = []
         for spec in &specs {
             if let Err(error) = spec.validate() {
                 panic!("{} should validate: {error}", spec.id);
+            }
+        }
+    }
+
+    /// A dry pattern is read off an agent's screen, which is mostly the content
+    /// it is reading: a bare word like "quota" or a status code like "429"
+    /// matches shprd's own source, so every shipped pattern must be a phrase
+    /// (two or more words) or an API error identifier.
+    #[test]
+    fn every_dry_pattern_is_a_phrase_not_a_bare_word() {
+        let specs = match load_dir(&harness_dir()) {
+            Ok(specs) => specs,
+            Err(error) => panic!("harness data should load: {error}"),
+        };
+        for spec in &specs {
+            for pattern in &spec.dry_patterns {
+                let words = pattern.split_whitespace().count();
+                assert!(
+                    words >= 2 || pattern.contains('_'),
+                    "{}: the dry pattern `{pattern}` is a bare word, which any \
+                     file the agent reads can match",
+                    spec.id
+                );
             }
         }
     }

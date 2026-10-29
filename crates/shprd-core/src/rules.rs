@@ -468,6 +468,9 @@ fn check_with(
         EventKind::Approved { number, head_sha } => check_approved(state, actor, *number, head_sha),
         EventKind::OrchestratorLaunched { .. } => Ok(()),
         EventKind::WatchLaunched { .. } => Ok(()),
+        // A delivery record moves nothing: it is the watchdog's own bookmark,
+        // and any pass may record one.
+        EventKind::OrchestratorNotified { .. } => Ok(()),
         EventKind::RunFinished {} => check_run_finished(state),
     }
 }

@@ -62,6 +62,14 @@ pub struct RunState {
     /// keeps it alive across invocations, which is what the pane and its
     /// process group are for.
     pub watch: Option<WatchInfo>,
+    /// The last log sequence the orchestrator was told about, if it ever was.
+    ///
+    /// The watchdog prompts the orchestrator's pane when something needs it to
+    /// act, and records that delivery as this watermark. A restarted watchdog
+    /// reads it back and so neither replays old notices nor drops new ones.
+    /// `None` means nothing has been delivered yet: the next pass tells the
+    /// orchestrator only about the state as it is now, never the log's history.
+    pub notified_up_to_seq: Option<u64>,
     /// Sequence number of the last applied event, 0 before the first.
     pub last_seq: u64,
 }
@@ -628,6 +636,9 @@ impl RunState {
                     pane: pane.clone(),
                     process_group: *process_group,
                 });
+            }
+            EventKind::OrchestratorNotified { up_to_seq } => {
+                self.notified_up_to_seq = Some(*up_to_seq);
             }
             EventKind::RunFinished {} => self.finished = true,
         }
