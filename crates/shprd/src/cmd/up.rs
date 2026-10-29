@@ -1313,12 +1313,15 @@ const FLOW: &str = r#"## How a run works
    worker, the worktree and the tab. Independent tasks can run at the same
    time.
 
-4. **Follow up.** Workers report themselves. Check progress with `shprd status`
-   and `shprd brief`; send a worker a message with
-   `shprd agent prompt --task <ID> "…"`. `shprd up` already runs the watchdog
-   (`shprd watch`) in a pane of the chat tab, so do not start another one:
-   never record a review verdict yourself. A stuck review is step 5's job:
-   restart it first, and escalate only if the restart is stuck too.
+4. **Follow up: the watchdog messages you.** Workers report themselves, and
+   `shprd up` already runs the watchdog (`shprd watch`) in a pane of the chat
+   tab, so do not start another one. That watchdog prompts you when a task
+   reports, when a review decides, and when something needs the human: act on
+   those messages. Check `shprd status` and `shprd brief` when in doubt, and
+   send a worker a message with `shprd agent prompt --task <ID> "…"`. The
+   engine records verdicts, so never record a review verdict yourself. A stuck
+   review is step 5's job: restart it first, and escalate only if the restart
+   is stuck too.
 
 5. **Review.** When a task is reported: `shprd agent review --task <ID>`. The
    reviewer writes its findings and the engine records the verdict; code
