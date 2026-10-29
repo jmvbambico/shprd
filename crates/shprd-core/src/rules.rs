@@ -2397,6 +2397,38 @@ mod tests {
     }
 
     #[test]
+    fn removing_any_other_kind_the_ledger_never_held_is_still_refused() {
+        // The exception is review packets and nothing else: shprd still cleans
+        // up only what it recorded creating, even after the run has finished,
+        // where only the finished-run guard would have let a removal through.
+        for kind in [
+            ResourceKind::Worktree,
+            ResourceKind::Branch,
+            ResourceKind::RemoteBranch,
+            ResourceKind::ArchiveRef,
+            ResourceKind::Bundle,
+        ] {
+            let log = vec![
+                started(1),
+                finished(2),
+                res_run(
+                    3,
+                    ResourceAction::Removed,
+                    kind,
+                    "/tmp/shprd/never-recorded",
+                ),
+            ];
+            assert!(
+                matches!(
+                    refused(&log),
+                    RuleError::ResourceUnknown { kind: refused, .. } if refused == kind
+                ),
+                "{kind:?} must keep the rule that shprd cleans up only what it recorded"
+            );
+        }
+    }
+
+    #[test]
     fn check_refuses_without_mutating() {
         let state = folded(&[started(1), added(2, "a", &["src/a"], &[])]);
         let kind = EventKind::Spawned {
