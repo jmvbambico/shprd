@@ -85,6 +85,12 @@ pub enum RuleError {
         /// The status the task actually has.
         found: TaskStatus,
     },
+    /// A human dropped the task, so nothing may be appended for it.
+    #[error("task {task:?} was dropped by a human: no agent may record work for it again")]
+    TaskIsDropped {
+        /// The task.
+        task: TaskId,
+    },
     /// A dependency has not been integrated yet.
     #[error("task {task:?} depends on {dep:?}, which has not been integrated")]
     UnmetDependency {
@@ -558,13 +564,13 @@ fn check_with(
             attempt,
             agent,
             ..
-        } => check_spawned(state, task, *attempt, agent, now_ms),
+        } => check_spawned(state, task, *attempt, agent, now_ms, provenance),
         EventKind::Reported {
             task,
             attempt,
             changed_paths,
             ..
-        } => check_reported(state, task, *attempt, changed_paths),
+        } => check_reported(state, task, *attempt, changed_paths, provenance),
         EventKind::GatePassed {
             task,
             attempt,
@@ -579,20 +585,20 @@ fn check_with(
             source,
             ..
         } => {
-            check_gate(state, task, *attempt)?;
+            check_gate(state, task, *attempt, provenance)?;
             check_verdict(provenance, state, actor, task, *attempt, gate, source)
         }
         EventKind::ReviewRequested { task, attempt, .. } => {
-            check_review_requested(state, task, *attempt)
+            check_review_requested(state, task, *attempt, provenance)
         }
-        EventKind::Integrated { task, .. } => check_integrated(state, task),
+        EventKind::Integrated { task, .. } => check_integrated(state, task, provenance),
         EventKind::TaskDropped { task, reason } => {
             check_task_dropped(state, actor, task, reason, provenance)
         }
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
-            check_handed_off(state, task, to_agent, now_ms)
+            check_handed_off(state, task, to_agent, now_ms, provenance)
         }
         EventKind::Escalated { task, .. } => match task {
             Some(task) => task_in(state, task).map(|_| ()),
@@ -859,6 +865,36 @@ fn check_task_added(
     Ok(())
 }
 
+/// Refuses a late event from a task a human already dropped.
+///
+/// A drop takes the task out of the run's work, and `drop` closes the task's
+/// tabs before it records one. A worker that is somehow still running — a host
+/// that failed to close the tab, a shell the agent left behind — must not be
+/// able to append to a task nobody is waiting for: a report, a gate, a spawn, a
+/// hand-off or an integration after the drop would put work back into a run that
+/// has decided against it, and the janitor may already have archived the branch.
+///
+/// The same Provenance rule as the other actor-bound checks applies: this is a
+/// rule about what may be *appended* now. A log being folded is read, not
+/// re-judged, so the status rules alone decide what an old log already holds —
+/// and they refuse these events for a Dropped task anyway, which is why the
+/// guard stands down on replay rather than reporting a second reason.
+fn check_not_dropped(
+    state: &RunState,
+    task: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Historical {
+        return Ok(());
+    }
+    if task_in(state, task)?.status == TaskStatus::Dropped {
+        return Err(RuleError::TaskIsDropped {
+            task: task.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Rules for spawning an agent on a task attempt.
 fn check_spawned(
     state: &RunState,
@@ -866,7 +902,9 @@ fn check_spawned(
     attempt: u32,
     agent: &AgentId,
     now_ms: u64,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if !matches!(found.status, TaskStatus::Queued | TaskStatus::Failed) {
         return Err(RuleError::WrongStatus {
@@ -931,7 +969,9 @@ fn check_reported(
     task: &str,
     attempt: u32,
     changed_paths: &[String],
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if found.status != TaskStatus::Working {
         return Err(RuleError::WrongStatus {
@@ -969,7 +1009,13 @@ fn check_reported(
 }
 
 /// Rules for recording a gate outcome: it needs a completed report.
-fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
+fn check_gate(
+    state: &RunState,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     // A failed gate leaves the task Failed; a later gate on the same attempt is
     // still allowed, which is how a failed attempt gets re-gated after a fix.
@@ -1088,7 +1134,13 @@ fn latest_review<'a>(state: &'a RunState, task: &str, attempt: u32) -> Option<&'
 /// verdict the attempt is decided, and a second request would be a review of
 /// work the run has already judged: it is refused here rather than left to the
 /// task's status alone, so the refusal names the real reason.
-fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
+fn check_review_requested(
+    state: &RunState,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     let current = expect_current_attempt(task, found, attempt)?;
     if current.gates.iter().any(|gate| gate.gate == REVIEW_GATE) {
@@ -1108,7 +1160,8 @@ fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<
 }
 
 /// Rules for integrating a passed task: a failed gate needs a later override.
-fn check_integrated(state: &RunState, task: &str) -> Result<(), RuleError> {
+fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if found.status != TaskStatus::Passed {
         return Err(RuleError::NotPassed {
@@ -1144,7 +1197,9 @@ fn check_handed_off(
     task: &str,
     to_agent: &AgentId,
     now_ms: u64,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if found.status != TaskStatus::Working {
         return Err(RuleError::WrongStatus {
@@ -2981,6 +3036,79 @@ mod tests {
             Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Dropped),
             other => panic!("a dropped task was dropped twice: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_late_report_from_a_dropped_task_s_agent_is_refused() {
+        // The drop closes the worker's tab; an agent still running anyway must
+        // not put the task back into the run's work.
+        let actor = Actor::Agent {
+            id: "agent-1".to_string(),
+        };
+        let mut log = reported_run();
+        log.push(dropped(5, "changed their mind"));
+        let state = folded(&log);
+        let late = by(
+            6,
+            Actor::Agent {
+                id: "agent-1".to_string(),
+            },
+            EventKind::Reported {
+                task: "a".to_string(),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: "still here".to_string(),
+                tests: strings(&[]),
+                changed_paths: strings(&["src/a/x.rs"]),
+                commit: Some("abc123".to_string()),
+                skills_used: Vec::new(),
+            },
+        );
+        match state.check_as(&actor, &late.kind, 7_000) {
+            Err(RuleError::TaskIsDropped { task }) => assert_eq!(task, "a"),
+            other => panic!("a dropped task's agent recorded work: {other:?}"),
+        }
+        // Every other event a leftover worker could append is refused too.
+        for kind in [
+            EventKind::GatePassed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "tests".to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+            EventKind::ReviewRequested {
+                task: "a".to_string(),
+                attempt: 1,
+                reviewer: "agent-2".to_string(),
+                degraded: false,
+            },
+            EventKind::HandedOff {
+                task: "a".to_string(),
+                from_agent: "agent-1".to_string(),
+                to_agent: "agent-2".to_string(),
+                checkpoint: "the dropped attempt".to_string(),
+                reason: Some("a leftover worker".to_string()),
+            },
+        ] {
+            assert!(
+                matches!(
+                    state.check_as(&actor, &kind, 7_000),
+                    Err(RuleError::TaskIsDropped { .. })
+                ),
+                "{kind:?} was recorded for a dropped task"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_log_with_a_drop_still_folds() {
+        // The guard is about appending, not about history: a log a human
+        // already dropped a task in folds as it always did.
+        let mut log = reported_run();
+        log.push(dropped(5, "changed their mind"));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Dropped);
     }
 
     #[test]
