@@ -1635,6 +1635,12 @@ const FLOW: &str = r#"## How a run works
 
 8. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
    --body "…" --default "what you will do if nobody answers"`.
+
+9. **Never override.** `shprd override` is the human's verb: it sets a rule
+   aside, a failed review included, and only they may decide that. Never run
+   it, and never ask a worker to. When a gate or a review failed and the work
+   should land anyway, escalate it; the human runs
+   `shprd override --task <ID> --rule integrate_after_failed_gate --reason "…"`.
 "#;
 /// The first rule a brief carries when the orchestrator runs with
 /// auto-approve: with no prompt left, the pull request is the gate.
