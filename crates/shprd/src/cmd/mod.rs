@@ -5,6 +5,7 @@ pub mod approve;
 pub mod confirm;
 pub mod dagr;
 pub mod doctor;
+pub mod drop;
 pub mod fullgate;
 pub mod handoff;
 pub mod integrate;
@@ -91,6 +92,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         }
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
         Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
+        Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 

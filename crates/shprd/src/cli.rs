@@ -113,6 +113,10 @@ pub enum Command {
     /// Override a rule for a task, e.g. let it integrate although a gate
     /// failed. It asks on the terminal, which an agent's shell tool never has.
     Override(OverrideArgs),
+    /// Drop a task a human decided not to do: it stops blocking the run, and
+    /// its branch is kept. It asks on the terminal, which an agent's shell tool
+    /// never has.
+    Drop(DropArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -156,6 +160,23 @@ pub struct ApproveArgs {
     /// Answer the question for the record without asking, in a debug build
     /// only: a release binary ignores it and still needs a terminal.
     /// `SHPRD_ACTOR` still has to be unset or `human`.
+    #[arg(long, hide = !cfg!(debug_assertions))]
+    pub yes: bool,
+}
+
+/// Arguments for `drop`.
+#[derive(Debug, Args)]
+pub struct DropArgs {
+    /// The task to drop.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// Why it is dropped, in the human's words. The run's pull request lists it,
+    /// so a reader sees what is missing and why.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+    /// Answer the question for the record without asking, in a debug build only:
+    /// a release binary ignores it and still needs a terminal. `SHPRD_ACTOR`
+    /// still has to be unset or `human`.
     #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
 }
