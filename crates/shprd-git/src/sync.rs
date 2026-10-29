@@ -116,8 +116,9 @@ pub fn sync_base(int: &IntegrationWorktree, base: &str) -> Result<SyncOutcome, S
 /// does not.
 ///
 /// This is the hint `shprd land` gives instead of syncing: it reads the local
-/// remote-tracking ref and never fetches, because landing must not need the
-/// network to tell a human what to do next.
+/// remote-tracking ref and never fetches, so a caller that wants the remote's
+/// newest answer calls [`refresh_base`] first. Landing must not need the
+/// network to tell a human what to do next, so the two are separate.
 pub fn base_moved(git: &Git, base: &str) -> Result<bool, GitError> {
     let tracking = format!("refs/remotes/{}", remote_ref(base));
     if git
@@ -128,6 +129,16 @@ pub fn base_moved(git: &Git, base: &str) -> Result<bool, GitError> {
         return Ok(false);
     }
     Ok(!contains(git, &tracking)?)
+}
+
+/// Fetches `base` into its remote-tracking ref, ignoring a failure.
+///
+/// `shprd land` calls this before it reads the tracking ref, so a pull request
+/// merged since some earlier command last fetched is still noticed. The failure
+/// is silent on purpose: offline, or a repository with no `origin`, still has
+/// the local ref to read, and a hint must never fail the verb that asked for it.
+pub fn refresh_base(git: &Git, base: &str) {
+    let _ = fetch_base(git, base);
 }
 
 /// Fetches `base` into its remote-tracking ref and returns that commit.

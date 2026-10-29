@@ -5,7 +5,8 @@
 //! a local bare repository, and never against a real remote or the real home.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use shprd_core::event::{Actor, Event, EventKind};
 use tempfile::TempDir;
@@ -132,8 +133,8 @@ impl Fixture {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    /// Runs the binary against this fixture.
-    fn run(&self, args: &[&str]) -> Output {
+    /// The binary wired to this fixture, ready to spawn.
+    fn bin(&self, args: &[&str]) -> Command {
         let mut all: Vec<String> = vec![
             "--repo".to_string(),
             self.root.display().to_string(),
@@ -142,10 +143,66 @@ impl Fixture {
             "--no-dagr".to_string(),
         ];
         all.extend(args.iter().map(|arg| (*arg).to_string()));
-        match Command::new(BIN).args(&all).env_remove(ACTOR_ENV).output() {
+        let mut command = Command::new(BIN);
+        command.args(&all).env_remove(ACTOR_ENV);
+        command
+    }
+
+    /// Runs the binary against this fixture.
+    fn run(&self, args: &[&str]) -> Output {
+        match self.bin(args).output() {
             Ok(output) => output,
             Err(err) => panic!("running {BIN}: {err}"),
         }
+    }
+
+    /// Starts the binary without waiting for it, so a test can watch it block.
+    fn spawn(&self, args: &[&str]) -> Child {
+        match self
+            .bin(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) => panic!("spawning {BIN} {args:?}: {err}"),
+        }
+    }
+
+    /// Takes the run's integration lock, as a verb writing the worktree would.
+    ///
+    /// The path is the one `lock_run` names; a unit test in `cmd/run_lock.rs`
+    /// keeps that name honest, and a test here that stopped matching it would
+    /// fail rather than pass, because the verbs would stop waiting.
+    fn hold_lock(&self) -> std::fs::File {
+        let path = self.lock_path();
+        if let Some(dir) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(dir)
+        {
+            panic!("mkdir {}: {err}", dir.display());
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) => panic!("open {}: {err}", path.display()),
+        };
+        if let Err(err) = file.lock() {
+            panic!("lock {}: {err}", path.display());
+        }
+        file
+    }
+
+    /// The run's integration lock file, `<home>/.shprd/locks/repo-r1-int.lock`.
+    fn lock_path(&self) -> PathBuf {
+        self.home
+            .join(".shprd")
+            .join("locks")
+            .join("repo-r1-int.lock")
     }
 
     /// Runs the binary and asserts it succeeded, returning stdout.
@@ -312,6 +369,24 @@ impl Fixture {
         self.git(&["rev-parse", "main"])
     }
 
+    /// Moves `main` on the bare origin only, as a merge at the forge does.
+    ///
+    /// Nothing here pushes, so the repository's remote-tracking ref keeps
+    /// pointing at the old base: only a fetch can learn about the new one.
+    fn move_base_on_origin(&self, file: &str, body: &str) -> String {
+        write(&self.root.join(file), body);
+        self.git(&["add", "--", file]);
+        self.git(&["commit", "-m", "a merged pull request"]);
+        let sha = self.git(&["rev-parse", "main"]);
+        // The objects reach the remote through a ref nobody tracks, so the
+        // repository's own `refs/remotes/origin/main` stays where it was.
+        let to_tmp = format!("{sha}:refs/tmp/{sha}");
+        self.git(&["push", "origin", &to_tmp]);
+        self.git_in(&self.origin, &["update-ref", "refs/heads/main", &sha]);
+        self.git(&["reset", "--hard", "HEAD~1"]);
+        sha
+    }
+
     /// The integration worktree the run owns.
     fn integration(&self) -> PathBuf {
         shprd_git::worktree::Layout::default_for_home(&self.home).path("repo", "r1", "_int")
@@ -364,6 +439,88 @@ impl Fixture {
     }
 }
 
+/// True when `child` is still running, so the caller knows the verb blocked.
+fn still_running(child: &mut Child) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Ok(Some(_)) => return false,
+            Err(err) => panic!("waiting for the child: {err}"),
+        }
+    }
+    true
+}
+
+/// Collects the child's output, failing the test after `secs` instead of
+/// hanging: a verb that never gets the lock must fail here, not wedge CI.
+fn finish(child: Child, secs: u64) -> Output {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    match rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => panic!("collecting the child's output: {err}"),
+        Err(err) => panic!("the verb did not finish within {secs}s: {err}"),
+    }
+}
+
+#[test]
+fn a_sync_waits_for_the_runs_integration_lock() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    fixture.move_base("src/base.txt", "base\n");
+
+    // Another verb is cherry-picking onto the integration branch, so the sync
+    // must wait rather than merge over its index.
+    let held = fixture.hold_lock();
+    let mut child = fixture.spawn(&["--as", "orchestrator", "sync"]);
+    assert!(
+        still_running(&mut child),
+        "sync finished while another verb held the integration lock"
+    );
+    if let Err(err) = held.unlock() {
+        panic!("unlock {}: {err}", fixture.lock_path().display());
+    }
+    let output = finish(child, 30);
+    assert!(
+        output.status.success(),
+        "sync after the lock was released failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("synced shprd/r1/int with main at "),
+        "the sync merged once it had the lock: {stdout}"
+    );
+}
+
+#[test]
+fn a_gate_waits_for_the_runs_integration_lock() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.move_base("src/base.txt", "base\n");
+
+    let held = fixture.hold_lock();
+    let mut child = fixture.spawn(&["gate"]);
+    assert!(
+        still_running(&mut child),
+        "gate ran its commands while another verb held the integration lock"
+    );
+    if let Err(err) = held.unlock() {
+        panic!("unlock {}: {err}", fixture.lock_path().display());
+    }
+    let output = finish(child, 30);
+    assert!(
+        output.status.success(),
+        "gate after the lock was released failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn a_moved_base_is_merged_and_a_land_after_it_needs_a_new_gate() {
     let fixture = Fixture::new();
@@ -399,6 +556,31 @@ fn a_moved_base_is_merged_and_a_land_after_it_needs_a_new_gate() {
     // The gate ran on the old head, so landing has to ask for a fresh one.
     let message = fixture.refused(&["land"]);
     assert!(message.contains("run `shprd gate` again"), "{message}");
+}
+
+#[test]
+fn land_fetches_before_hinting_that_the_base_moved() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.land_a_task("T1");
+    fixture.ok(&["gate"]);
+    // A commit after the gate makes it stale, so land refuses after hinting.
+    fixture.git_in(
+        &fixture.integration(),
+        &["commit", "--allow-empty", "-m", "after the gate"],
+    );
+    let moved = fixture.move_base_on_origin("src/base.txt", "base\n");
+    assert_ne!(
+        fixture.git_in(&fixture.root, &["rev-parse", "refs/remotes/origin/main"]),
+        moved,
+        "the local tracking ref is stale, so only a fetch can see the move"
+    );
+
+    let message = fixture.refused(&["land"]);
+    assert!(
+        message.contains("main moved since this run started: run `shprd sync`, then `shprd gate`"),
+        "land fetched, then hinted at the sync it will not do: {message}"
+    );
 }
 
 #[test]

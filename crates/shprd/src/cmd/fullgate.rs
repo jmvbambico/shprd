@@ -20,6 +20,7 @@ use shprd_git::integrate;
 use shprd_roster::env::{EnvContext, Role, launch_env};
 
 use crate::cli::FullGateArgs;
+use crate::cmd::run_lock;
 use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 
 /// The final step recorded when the gate itself changed the worktree.
@@ -57,6 +58,9 @@ pub fn gate_verb(ctx: &Ctx, args: &FullGateArgs, home: Option<&Path>) -> Result<
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", ctx.root.display())))?;
+    // Held for the whole gate: a merge or a cherry-pick in flight would change
+    // the tree under the commands, and the head the verdict is pinned to.
+    let _lock = run_lock::lock_run(&home, &repo_name, &run.run_id)?;
     let worktree = integrate::open_integration(
         &ctx.root,
         &layout,

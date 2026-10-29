@@ -18,6 +18,7 @@ pub mod readmit;
 pub mod review;
 pub mod roster;
 pub mod run;
+pub mod run_lock;
 pub mod set;
 pub mod spawn;
 pub mod sync;

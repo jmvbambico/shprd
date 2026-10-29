@@ -21,6 +21,7 @@ use shprd_git::integrate;
 use shprd_git::sync::{self, SyncError, SyncOutcome};
 
 use crate::cmd::land::short;
+use crate::cmd::run_lock;
 use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 
 /// Merge the base branch into the integration branch.
@@ -50,6 +51,11 @@ pub fn sync_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
     let repo_name = crate::cmd::land::repo_name(ctx)?;
+    // Held for the fetch, the merge and any abort, so a cherry-pick or a gate
+    // never runs against a half-merged tree. The integration head is read only
+    // after this returns, so a pick that landed while this waited is merged on
+    // top of instead of being dropped.
+    let _lock = run_lock::lock_run(&home, &repo_name, &run_id)?;
     let worktree = integrate::open_integration(&ctx.root, &layout, &repo_name, &run_id, &base)
         .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
     let branch = worktree.branch.clone();

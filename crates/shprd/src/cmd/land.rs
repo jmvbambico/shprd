@@ -23,6 +23,7 @@ use shprd_git::integrate;
 use shprd_git::sync;
 
 use crate::cli::LandArgs;
+use crate::cmd::run_lock;
 use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 
 /// Environment variable naming a scripted forge, used by the integration tests.
@@ -66,8 +67,13 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
             "no task is integrated: land a task with `shprd agent integrate` first"
         )));
     }
-    let layout = resolve_layout(home, &config.janitor.namespace)?;
+    let home = resolve_home(home)?;
+    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
     let repo_name = repo_name(ctx)?;
+    // Held from the head read to the push: a sync or a cherry-pick landing
+    // meanwhile would move the head the gate is pinned to, and the branch would
+    // leave between the gate check and the push.
+    let _lock = run_lock::lock_run(&home, &repo_name, &run_id)?;
     let worktree =
         integrate::open_integration(&ctx.root, &layout, &repo_name, &run_id, &base_branch)
             .map_err(|err| {
@@ -119,8 +125,14 @@ fn integrated_tasks(state: &RunState) -> Vec<&Task> {
 /// what a gate is pinned to, so the decision to take that step is theirs.
 ///
 /// A missing remote-tracking ref reads as "did not move": a hint must not fail
-/// a landing, and a run with no `origin` has no base to compare with.
+/// a landing, and a run with no `origin` has no base to compare with. The
+/// fetch this does first is best-effort for the same reason.
 fn hint_moved_base(git: &Git, base: &str) {
+    // The local tracking ref only knows what some earlier command fetched, so
+    // ask the remote first: a merge since then is exactly what this hint is
+    // for. A fetch that fails, offline or with no `origin`, is silent and the
+    // local ref answers as it did before.
+    sync::refresh_base(git, base);
     match sync::base_moved(git, base) {
         Ok(true) => {
             eprintln!("{base} moved since this run started: run `shprd sync`, then `shprd gate`")

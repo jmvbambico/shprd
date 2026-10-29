@@ -56,6 +56,20 @@ impl Fixture {
     fn origin_main(&self) -> String {
         git_in(&self.origin, &["rev-parse", "refs/heads/main"])
     }
+
+    /// Moves `main` on the bare origin only, as a merge at the forge does.
+    ///
+    /// Nothing here pushes, so the repository's own remote-tracking ref keeps
+    /// pointing at the old base: only a fetch can learn about the new one.
+    fn move_origin_main(&self, file: &str, body: &str, message: &str) -> String {
+        let sha = commit_in(&self.repo.path, file, body, message);
+        // The objects reach the remote through a ref nobody tracks, so the
+        // repository's own `refs/remotes/origin/main` stays where it was.
+        let to_tmp = format!("{sha}:refs/tmp/{sha}");
+        git_in(&self.repo.path, &["push", "origin", &to_tmp]);
+        git_in(&self.origin, &["update-ref", "refs/heads/main", &sha]);
+        sha
+    }
 }
 
 /// Runs `sync` and returns its outcome, failing the test on error.
@@ -215,6 +229,40 @@ fn base_moved_reads_the_tracking_ref_without_fetching() {
     }
     match sync::base_moved(&git, "no-such-branch") {
         Ok(moved) => assert!(!moved, "a base nobody fetched says nothing"),
+        Err(err) => panic!("base_moved: {err}"),
+    }
+}
+
+#[test]
+fn refresh_base_picks_up_a_base_only_the_remote_has() {
+    let fixture = Fixture::new();
+    let int = fixture.integration();
+    let git = Git::new(&int.path);
+    let moved = fixture.move_origin_main("src/base.txt", "base\n", "a merged pull request");
+    match sync::base_moved(&git, "main") {
+        Ok(moved) => assert!(!moved, "the local tracking ref has not seen the new base"),
+        Err(err) => panic!("base_moved: {err}"),
+    }
+    sync::refresh_base(&git, "main");
+    match sync::base_moved(&git, "main") {
+        Ok(moved) => assert!(moved, "the refresh fetched the remote's newer base"),
+        Err(err) => panic!("base_moved: {err}"),
+    }
+    assert_eq!(fixture.origin_main(), moved, "the fetch wrote nothing else");
+}
+
+#[test]
+fn refresh_base_is_silent_when_the_remote_is_unreachable() {
+    let fixture = Fixture::new();
+    let int = fixture.integration();
+    let git = Git::new(&int.path);
+    fixture
+        .repo
+        .git(&["remote", "set-url", "origin", "/nonexistent/origin.git"]);
+    // Offline or without an `origin`, the hint still reads the local ref.
+    sync::refresh_base(&git, "main");
+    match sync::base_moved(&git, "main") {
+        Ok(moved) => assert!(!moved, "a failed fetch changes no verdict"),
         Err(err) => panic!("base_moved: {err}"),
     }
 }
