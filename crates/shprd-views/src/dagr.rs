@@ -430,6 +430,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
+        EventKind::BaseSynced { .. } => "base_synced",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }

@@ -122,6 +122,12 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
+    /// A base sync was recorded by something the run does not let run one.
+    #[error("{actor:?} cannot sync the base: only a human, the orchestrator or the engine can")]
+    SyncNotAllowed {
+        /// Who tried.
+        actor: Actor,
+    },
     /// The task's scope clashes with another task's.
     #[error("task {task:?} path {path:?} overlaps task {other:?}")]
     ScopeConflict {
@@ -596,6 +602,7 @@ fn check_with(
         // A delivery record moves nothing: it is the watchdog's own bookmark,
         // and any pass may record one.
         EventKind::OrchestratorNotified { .. } => Ok(()),
+        EventKind::BaseSynced { .. } => check_base_synced(actor, provenance),
         EventKind::RunFinished { abandoned } => {
             check_run_finished(state, actor, abandoned, provenance)
         }
@@ -614,6 +621,25 @@ fn is_cleanup(kind: &EventKind) -> bool {
             ..
         }
     )
+}
+
+/// Whether `actor` may record a base sync.
+///
+/// Merging the base into the run's own integration branch is operational
+/// housekeeping: a human runs it by hand, and the orchestrator runs it before
+/// the gate, which is the case this verb exists for. An agent never does: a
+/// worker's own branch is cut from the base by the engine, and an agent that
+/// could rewrite the integration branch would move the head the gate and the
+/// pull request are pinned to.
+fn check_base_synced(actor: &Actor, provenance: Provenance) -> Result<(), RuleError> {
+    if provenance == Provenance::Required
+        && !matches!(actor, Actor::Engine | Actor::Orchestrator | Actor::Human)
+    {
+        return Err(RuleError::SyncNotAllowed {
+            actor: actor.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Rules for a human's approval of the run's pull request.
@@ -2288,6 +2314,30 @@ mod tests {
         let state = folded(&log);
         assert!(state.finished);
         assert_eq!(state.abandoned, abandoned);
+    }
+
+    #[test]
+    fn a_base_sync_is_never_an_agent_s() {
+        // Merging the base into the run's own branch moves the head the gate
+        // and the pull request are pinned to, so a worker may not do it: the
+        // orchestrator runs it before the gate, and a human by hand.
+        let state = folded(&in_flight());
+        let kind = EventKind::BaseSynced {
+            base_sha: "abc1234".to_string(),
+            int_sha: "def5678".to_string(),
+        };
+        for actor in [Actor::Human, Actor::Orchestrator, Actor::Engine] {
+            state
+                .check_as(&actor, &kind, 13_000)
+                .unwrap_or_else(|err| panic!("{actor:?} may sync the base: {err}"));
+        }
+        let agent = Actor::Agent {
+            id: "claude".to_string(),
+        };
+        match state.check_as(&agent, &kind, 13_000) {
+            Err(err) => assert!(matches!(err, RuleError::SyncNotAllowed { .. }), "{err}"),
+            Ok(()) => panic!("an agent must not sync the base"),
+        }
     }
 
     #[test]

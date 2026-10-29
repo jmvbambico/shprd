@@ -451,6 +451,23 @@ pub enum EventKind {
         /// The last log sequence the orchestrator was told about.
         up_to_seq: u64,
     },
+    /// The base branch was merged into the run's integration branch.
+    ///
+    /// Recorded by `shprd sync` when the base moved under the run — a pull
+    /// request merged meanwhile — so the integration branch is not left behind
+    /// the branch it proposes to merge into. The merge is always a merge
+    /// commit, never a rebase, so a task's commits keep the ids the pull
+    /// request body lists.
+    ///
+    /// Both ends are recorded because the run-wide gate is keyed to the
+    /// integration head: a sync moves that head, so a gate that ran before it
+    /// no longer describes the commits that would land.
+    BaseSynced {
+        /// The base commit that was merged in.
+        base_sha: String,
+        /// The integration branch's head after the merge.
+        int_sha: String,
+    },
     /// The run finished.
     RunFinished {
         /// The tasks the run ended with unfinished, when a human abandoned
@@ -623,6 +640,10 @@ mod tests {
                 process_group: 88158,
             },
             EventKind::OrchestratorNotified { up_to_seq: 42 },
+            EventKind::BaseSynced {
+                base_sha: "abc1234".to_string(),
+                int_sha: "def5678".to_string(),
+            },
             EventKind::RunFinished {
                 abandoned: Vec::new(),
             },
@@ -632,7 +653,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 20, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 21, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

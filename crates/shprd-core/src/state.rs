@@ -50,6 +50,13 @@ pub struct RunState {
     ///
     /// Only the newest one is kept: the full history is the log's job.
     pub last_full_gate: Option<(String, bool, u64)>,
+    /// The last base sync: the base commit that was merged in, the integration
+    /// head it produced, and the sequence number that recorded it.
+    ///
+    /// Only the newest one is kept: the full history is the log's job. It says
+    /// whether the run was ever brought up to date, which a later reader of a
+    /// merged pull request wants to know.
+    pub last_sync: Option<(String, String, u64)>,
     /// The run's pull request, once `shprd land` opened one.
     ///
     /// One run proposes one pull request, so the newest `PrOpened` wins and a
@@ -646,6 +653,9 @@ impl RunState {
             EventKind::OrchestratorNotified { up_to_seq } => {
                 self.notified_up_to_seq = Some(*up_to_seq);
             }
+            EventKind::BaseSynced { base_sha, int_sha } => {
+                self.last_sync = Some((base_sha.clone(), int_sha.clone(), event.seq));
+            }
             EventKind::RunFinished { abandoned } => {
                 self.finished = true;
                 self.abandoned = abandoned.clone();
@@ -906,6 +916,33 @@ mod tests {
         assert_eq!(
             state.last_full_gate,
             Some(("bbb222".to_string(), true, 4)),
+            "the later event wins"
+        );
+    }
+
+    #[test]
+    fn the_newest_base_sync_is_the_one_kept() {
+        let first = ev(
+            3,
+            EventKind::BaseSynced {
+                base_sha: "aaa111".to_string(),
+                int_sha: "bbb222".to_string(),
+            },
+        );
+        let second = ev(
+            4,
+            EventKind::BaseSynced {
+                base_sha: "ccc333".to_string(),
+                int_sha: "ddd444".to_string(),
+            },
+        );
+        let state = match fold_extra(vec![first, second]) {
+            Ok(state) => state,
+            Err(err) => panic!("two base syncs must fold: {err}"),
+        };
+        assert_eq!(
+            state.last_sync,
+            Some(("ccc333".to_string(), "ddd444".to_string(), 4)),
             "the later event wins"
         );
     }
