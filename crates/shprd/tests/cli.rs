@@ -911,7 +911,9 @@ fn restore_refuses_a_finished_run_before_creating_the_branch() {
     integrated_task(&root, branch);
     let tip = git.git(&["rev-parse", "main"]);
     git.git(&["update-ref", "refs/shprd/archive/r1/T1", &tip]);
-    ok(&root, &["run", "finish"]);
+    // The task landed but no pull request merged, so the run only ends when a
+    // human says to end it anyway.
+    ok(&root, &["run", "finish", "--abandon"]);
 
     let output = run_with_home(&root, home.path(), &["restore", "T1"]);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

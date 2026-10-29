@@ -471,7 +471,7 @@ fn check_with(
         // A delivery record moves nothing: it is the watchdog's own bookmark,
         // and any pass may record one.
         EventKind::OrchestratorNotified { .. } => Ok(()),
-        EventKind::RunFinished {} => check_run_finished(state),
+        EventKind::RunFinished { abandoned } => check_run_finished(state, abandoned),
     }
 }
 
@@ -936,7 +936,14 @@ fn check_handed_off(
 }
 
 /// Rules for finishing a run: nothing may still be in flight.
-fn check_run_finished(state: &RunState) -> Result<(), RuleError> {
+fn check_run_finished(state: &RunState, abandoned: &[TaskId]) -> Result<(), RuleError> {
+    // A human's `--abandon` is the explicit choice to end a run that still has
+    // work in it, and the event's list is what records it. The rest of the
+    // refusal (which tasks, and how to proceed instead) belongs to the verb,
+    // which has the human's terminal to say it in.
+    if !abandoned.is_empty() {
+        return Ok(());
+    }
     for (id, task) in &state.tasks {
         if task.status == TaskStatus::Working {
             return Err(RuleError::WrongStatus {
@@ -1135,7 +1142,12 @@ mod tests {
     }
 
     fn finished(seq: u64) -> Event {
-        ev(seq, EventKind::RunFinished {})
+        ev(
+            seq,
+            EventKind::RunFinished {
+                abandoned: Vec::new(),
+            },
+        )
     }
 
     fn full_gate(seq: u64, passed: bool) -> Event {
@@ -1802,6 +1814,27 @@ mod tests {
             finished(4),
         ];
         assert!(matches!(refused(&log), RuleError::WrongStatus { .. }));
+    }
+
+    #[test]
+    fn abandoning_a_working_task_is_recorded_rather_than_refused() {
+        // `--abandon` is a human's explicit choice to end the run anyway, so
+        // the event carries the list of tasks it left; the fold keeps it.
+        let abandoned = vec!["a".to_string()];
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            ev(
+                4,
+                EventKind::RunFinished {
+                    abandoned: abandoned.clone(),
+                },
+            ),
+        ];
+        let state = folded(&log);
+        assert!(state.finished);
+        assert_eq!(state.abandoned, abandoned);
     }
 
     #[test]

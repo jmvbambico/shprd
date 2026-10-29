@@ -90,8 +90,8 @@ pub enum Command {
     Keys(KeysArgs),
     /// Start or resume the run and lay out this repository's workspace.
     Up,
-    /// Finish the run; refuses while a task is still working.
-    Down,
+    /// Finish the run; refuses while any task is still unfinished.
+    Down(EndRunArgs),
     /// Watch every working agent and hand work over when one goes dry.
     Watch(WatchArgs),
     /// Run the integration branch's gate commands once, in its worktree.
@@ -115,6 +115,18 @@ pub struct FullGateArgs {
     /// How long one command may run before it is killed, in seconds.
     #[arg(long = "timeout-secs", value_name = "SECS", default_value_t = 1800)]
     pub timeout_secs: u64,
+}
+
+/// Arguments for `down` and `run finish`: the two verbs that end a run.
+#[derive(Debug, Args)]
+pub struct EndRunArgs {
+    /// End the run even though tasks are unfinished, keeping their branches.
+    ///
+    /// A run whose every task landed and whose pull request merged needs no
+    /// flag. This is the explicit choice for the rest: the event records which
+    /// tasks were left behind, and their branches are kept.
+    #[arg(long)]
+    pub abandon: bool,
 }
 
 /// Arguments for `land`.
@@ -272,7 +284,7 @@ pub enum RunCommand {
     /// Start a run: the first event in the log.
     Start(RunStartArgs),
     /// Finish the run; nothing may follow.
-    Finish,
+    Finish(EndRunArgs),
 }
 
 /// Arguments for `run start`.

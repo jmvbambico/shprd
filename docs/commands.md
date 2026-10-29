@@ -8,7 +8,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 |---|---|
 | `shprd setup` | the setup wizard (TUI): agents, models, skills, remote, layout |
 | `shprd up` | start or resume this repo's run |
-| `shprd down` | finish the run; keeps branches until landed |
+| `shprd down` | finish the run; refuses (exit 2, nothing written) while any task is unfinished or the run's pull request has not merged, and names each task and how to proceed: `shprd up` restarts the orchestrator or watchdog and resumes this run. `shprd down --abandon` ends it anyway, records which tasks were left, and keeps their branches |
 | `shprd` / `shprd status` | tasks, agents, quota, and what needs you |
 | `shprd brief` | a short, paste-able summary of the run |
 | `shprd remote [--invite]` | remote access status; `--invite` shows a fresh pairing QR |

@@ -443,7 +443,18 @@ pub enum EventKind {
         up_to_seq: u64,
     },
     /// The run finished.
-    RunFinished {},
+    RunFinished {
+        /// The tasks the run ended with unfinished, when a human abandoned
+        /// them.
+        ///
+        /// Empty for a run that ended with its work landed. Non-empty is the
+        /// one explicit choice to end a run anyway (`--abandon`): the tasks
+        /// keep the branches their work sits on, and `up` says so when it
+        /// archives the run. Defaulted, so a log written before the field
+        /// existed still folds.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        abandoned: Vec<TaskId>,
+    },
 }
 
 #[cfg(test)]
@@ -603,7 +614,9 @@ mod tests {
                 process_group: 88158,
             },
             EventKind::OrchestratorNotified { up_to_seq: 42 },
-            EventKind::RunFinished {},
+            EventKind::RunFinished {
+                abandoned: Vec::new(),
+            },
         ]
     }
 
@@ -652,7 +665,9 @@ mod tests {
             actor: Actor::Agent {
                 id: "claude".to_string(),
             },
-            kind: EventKind::RunFinished {},
+            kind: EventKind::RunFinished {
+                abandoned: Vec::new(),
+            },
         };
         let text = to_json(&event);
         assert!(text.contains("\"kind\":\"run_finished\""), "{text}");
