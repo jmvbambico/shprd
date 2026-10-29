@@ -1081,6 +1081,14 @@ project_dirs = []
         matches!(kind, EventKind::Escalated { .. })
     }
 
+    /// True when `kind` is an escalation that parks a watch.
+    fn is_parking(kind: &EventKind) -> bool {
+        matches!(
+            kind,
+            EventKind::Escalated { body, .. } if ParkReason::of_body(body).is_some()
+        )
+    }
+
     /// How many events in `fresh` match `wanted`.
     fn count(fresh: &[Event], wanted: fn(&EventKind) -> bool) -> usize {
         fresh.iter().filter(|event| wanted(&event.kind)).count()
@@ -1716,6 +1724,190 @@ project_dirs = []
             1,
             "the new worker's exit is handed off, not parked: {fresh:?}"
         );
+
+        // The fresh attempt's streak started at its spawn, so the rest of its
+        // budget is still there to spend before a human is asked again.
+        let mut quiet = 0;
+        for round in 1..policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                2,
+                t0 + 120_000 + 10_000 * round as u64,
+            );
+            quiet += count(&fresh, is_handoff);
+            assert_eq!(
+                count(&fresh, is_escalation),
+                0,
+                "the new attempt's budget is whole: {fresh:?}"
+            );
+        }
+        assert_eq!(
+            quiet,
+            policy.exit_budget - 1,
+            "its budget is spent, not cut"
+        );
+        let spent = one_exit(&mut watcher, &ctx, &env, &mux, 2, t0 + 200_000);
+        assert_eq!(
+            count(&spent, is_escalation),
+            1,
+            "the new attempt's own budget ends it: {spent:?}"
+        );
+    }
+
+    /// A spent exit budget parks the watch. A human handing the same attempt to
+    /// another worker lifts the parking and gives that worker a whole budget:
+    /// the streak starts over at the human's hand-off, not three exits in. One
+    /// watcher runs throughout, and the log gives a restarted one the same
+    /// answer.
+    #[test]
+    fn a_human_hand_off_after_a_spent_budget_starts_a_fresh_streak() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let mut escalations = 0;
+        for round in 0..=policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            escalations += count(&fresh, is_parking);
+        }
+        assert_eq!(escalations, 1, "the exit past the budget escalates");
+        let parked = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert!(
+            parked.is_empty(),
+            "a parked watch kept deciding: {parked:?}"
+        );
+
+        // A human carries the hand-off out by hand: same attempt, new worker.
+        ctx.commit(EventKind::HandedOff {
+            task: "T1".to_string(),
+            from_agent: "sh".to_string(),
+            to_agent: "sh".to_string(),
+            checkpoint: "c0".to_string(),
+            reason: Some("a human handed it to a new worker".to_string()),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let mut handed = 0;
+        for round in 0..policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 110_000 + 10_000 * round as u64,
+            );
+            handed += count(&fresh, is_handoff);
+            assert_eq!(
+                count(&fresh, is_parking),
+                0,
+                "the newcomer's budget is fresh: {fresh:?}"
+            );
+        }
+        assert_eq!(
+            handed, policy.exit_budget,
+            "each of that budget's exits is handed off"
+        );
+        let spent = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 200_000);
+        assert_eq!(
+            count(&spent, is_parking),
+            1,
+            "its own budget is what ends the attempt: {spent:?}"
+        );
+
+        // The parking and the streak are the log's, so a restarted watchdog
+        // neither escalates again nor spends a budget the newcomer did not.
+        let mut restarted = Watcher::new(policy.clone());
+        let after = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 300_000);
+        assert!(
+            after.is_empty(),
+            "a restarted watchdog kept deciding: {after:?}"
+        );
+    }
+
+    /// Only a spawn or a hand-off lifts a parking. An escalation about anything
+    /// else is a human's to answer, so it leaves the watch parked, whether the
+    /// watchdog kept running or was restarted.
+    #[test]
+    fn a_non_parking_escalation_leaves_the_watch_parked() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        // The roster's one worker is dry, so the first hand-off cannot be made.
+        ctx.commit(EventKind::Dry {
+            agent: "sh".to_string(),
+            reason: "quota".to_string(),
+            reset_at_ms: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let first = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0);
+        assert_eq!(count(&first, is_handoff), 0, "no worker could take over");
+        assert_eq!(count(&first, is_parking), 1, "the failure parks the watch");
+
+        // An escalation about the dry agent lands in the log afterwards: it
+        // asks a human for something else and is not a parking.
+        ctx.commit(EventKind::Escalated {
+            task: Some("T1".to_string()),
+            body: "sh agent is dry: the quota is gone".to_string(),
+            default_action: String::from("pick the task up by hand"),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let running = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 10_000);
+        assert!(
+            running.is_empty(),
+            "a non-parking escalation un-parked a running watch: {running:?}"
+        );
+        let mut restarted = Watcher::new(policy.clone());
+        let fresh = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 20_000);
+        assert!(
+            fresh.is_empty(),
+            "a non-parking escalation un-parked a restarted watch: {fresh:?}"
+        );
+
+        // A human's hand-off still lifts it: the rule is the newest event, not
+        // the number of escalations the log holds.
+        ctx.commit(EventKind::Available {
+            agent: "sh".to_string(),
+            reason: "quota reset".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::HandedOff {
+            task: "T1".to_string(),
+            from_agent: "sh".to_string(),
+            to_agent: "sh".to_string(),
+            checkpoint: "c0".to_string(),
+            reason: Some("a human handed it on".to_string()),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let lifted = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 200_000);
+        assert_eq!(
+            count(&lifted, is_handoff),
+            1,
+            "a hand-off after the parking is watched: {lifted:?}"
+        );
+        assert_eq!(count(&lifted, is_escalation), 0);
     }
 
     /// One rule decides whether a watch is parked: the newest event among a
