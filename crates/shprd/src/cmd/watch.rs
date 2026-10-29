@@ -2199,6 +2199,48 @@ project_dirs = []
         );
     }
 
+    /// The dogfood false positive this rule exists for: a worker handed
+    /// shprd's own watch code, showing "quota", "429" and "rate limit" in a
+    /// diff, was marked dry 47s in while it kept working for twenty minutes.
+    #[test]
+    fn a_working_worker_reading_quota_text_dries_nothing() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.env(&ctx, &["sh"]);
+        // Three of the phrases `data/harness/pi.toml` ships.
+        env.programs[0].spec.dry_patterns = [
+            "429 Too Many Requests",
+            "rate limit exceeded",
+            "usage limit reached",
+        ]
+        .iter()
+        .map(|pattern| (*pattern).to_owned())
+        .collect();
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_screen(
+            &pane,
+            "-let quota = load()?;\n-assert_eq!(status, 429);\n+// a rate limit is retried",
+        );
+        mux.set_state(&pane, AgentState::Working);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let before = events(&ctx).len();
+        let t0 = 1_700_000_000_000u64;
+        for step in 0..5u64 {
+            watcher
+                .tick(&mux, &env, t0 + 10_000 * step)
+                .unwrap_or_else(|err| panic!("{err}"));
+        }
+
+        let log = events(&ctx);
+        assert!(
+            !appended(&log[before..], |kind| matches!(kind, EventKind::Dry { .. })),
+            "content on a working worker's screen dried its program"
+        );
+    }
+
     /// A hand-off ends the attempt, not the outgoing agent's cooldown: once its
     /// retry time passes, the roster must see it as available again.
     #[test]

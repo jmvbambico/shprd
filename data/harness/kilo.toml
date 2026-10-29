@@ -12,15 +12,19 @@ vendor = "kilo"
 # Runs other vendors' models, so the model names the vendor.
 multi_model = true
 verified_version = "7.7.3"
+# Whole phrases only, and always a fallback: the screen is read when the record
+# and the retry signal say nothing, and only from the bottom lines of a stopped
+# agent's pane. Bare "quota" and "429" are not patterns, because a file, a diff
+# or a tool output the agent is reading must never dry its program.
+# "429 Too Many Requests" is HTTP status text and the snake_case names are API
+# error types; the plain English lines are conservative guesses at the CLI's
+# own wording, not wording taken from a CLI's docs.
 dry_patterns = [
-    "rate limit",
-    "usage limit",
-    "quota",
-    "insufficient credits",
-    "429",
-    "resets at",
-    "insufficient_quota",
+    "429 Too Many Requests",
+    "rate limit exceeded",
     "rate_limit_exceeded",
+    "insufficient_quota",
+    "usage limit reached",
 ]
 
 [detect]
