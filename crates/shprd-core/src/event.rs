@@ -138,6 +138,15 @@ pub enum ResourceKind {
     ArchiveRef,
     /// An exported bundle.
     Bundle,
+    /// A run's review packet folder, `<home>/.shprd/reviews/<run>`.
+    ///
+    /// It is shprd's own directory, named by the layout and a validated run id
+    /// rather than by anything a repository holds, and the janitor copies it
+    /// aside before it deletes it. Unlike every other kind, a removal may name
+    /// a folder no earlier record ever held: shprd wrote packets there before it
+    /// kept this ledger, and a finished run can record no creation. The plan is
+    /// what proves the folder is shprd's own; the removal is its audit trail.
+    ReviewPackets,
 }
 
 /// Where a review verdict came from: the reviewer, and the findings it decided.

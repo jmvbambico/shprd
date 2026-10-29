@@ -578,6 +578,13 @@ fn check_approved(
 /// either new or a re-creation after removal. An archive takes a resource out
 /// of service, so it needs one that is still `Live`: archiving twice is a
 /// mistake in the plan, not a no-op.
+///
+/// A [`ResourceKind::ReviewPackets`] removal is the one exception: the folder's
+/// path comes from the layout and a validated run id, so the janitor's plan —
+/// not the ledger — is what proves it is shprd's own. shprd wrote packets there
+/// before it kept a record of them, and a run that has finished may record no
+/// creation, so without this a folder would be unremovable forever, or removable
+/// with nothing in the ledger to show it.
 fn check_resource(
     state: &RunState,
     action: ResourceAction,
@@ -624,6 +631,9 @@ fn check_resource(
                 name: name.to_string(),
                 found,
             }),
+            // Nothing to close, but the removal is still the record of a
+            // cleanup the plan proved was shprd's own.
+            None if kind == ResourceKind::ReviewPackets => Ok(()),
             None => Err(RuleError::ResourceUnknown {
                 kind,
                 name: name.to_string(),
@@ -1441,6 +1451,20 @@ mod tests {
                 kind,
                 name: name.to_string(),
                 task: Some("a".to_string()),
+            },
+        )
+    }
+
+    /// A run-level resource-ledger event, the way the janitor's review packet
+    /// steps record them: no task owns the run's own folder.
+    fn res_run(seq: u64, action: ResourceAction, kind: ResourceKind, name: &str) -> Event {
+        ev(
+            seq,
+            EventKind::Resource {
+                action,
+                kind,
+                name: name.to_string(),
+                task: None,
             },
         )
     }
@@ -2329,6 +2353,47 @@ mod tests {
             refused(&log),
             RuleError::WrongResourceStatus { .. }
         ));
+    }
+
+    #[test]
+    fn removing_review_packets_the_ledger_never_held_is_allowed_after_the_run_finished() {
+        // A review packet folder is shprd's own directory, named by the layout
+        // and a validated run id. An earlier shprd never recorded it, and a
+        // finished run cannot create a record, so the removal is the only way
+        // to close the book on a folder the janitor archived and deleted.
+        let log = vec![
+            started(1),
+            finished(2),
+            res_run(
+                3,
+                ResourceAction::Removed,
+                ResourceKind::ReviewPackets,
+                "/home/.shprd/reviews/r1",
+            ),
+        ];
+        let state = folded(&log);
+        assert!(state.finished, "the removal is legal once the run is over");
+        assert!(
+            state.resources.is_empty(),
+            "a folder that was never recorded has no record to close: {state:?}"
+        );
+    }
+
+    #[test]
+    fn archiving_review_packets_the_ledger_never_held_is_still_refused() {
+        // Only removal is the record of a cleanup: archiving something the
+        // ledger never held would claim shprd kept a record it never made.
+        let log = vec![
+            started(1),
+            finished(2),
+            res_run(
+                3,
+                ResourceAction::Archived,
+                ResourceKind::ReviewPackets,
+                "/home/.shprd/reviews/r1",
+            ),
+        ];
+        assert!(matches!(refused(&log), RuleError::ResourceUnknown { .. }));
     }
 
     #[test]
