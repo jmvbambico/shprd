@@ -353,6 +353,53 @@ pub(crate) fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
     }
 }
 
+/// A pane or tab shprd tried to close and the host kept.
+///
+/// Run end records the run's last event whether or not the mux lets go, so a
+/// refusal there is not an error the verb can return: it is collected instead,
+/// named the way a human needs it — what it was, and the id that closes it —
+/// and every leftover goes into one escalation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    /// What it is, in the human's words: `watchdog pane`, `worker tab for T1`.
+    pub what: String,
+    /// The mux id it still holds.
+    pub id: String,
+}
+
+impl Leftover {
+    /// A leftover of `what`, holding `id`.
+    pub(crate) fn new(what: impl Into<String>, id: impl std::fmt::Display) -> Self {
+        Self {
+            what: what.into(),
+            id: id.to_string(),
+        }
+    }
+
+    /// The one line a human reads: what it is, then the id that closes it.
+    pub(crate) fn line(&self) -> String {
+        format!("{} {}", self.what, self.id)
+    }
+}
+
+/// Closes a pane shprd opened, counting a pane the host has forgotten as
+/// closed, and answers what the host kept.
+///
+/// The same rule [`close_recorded`] applies to a tab, for a pane a caller can go
+/// on without: a pane a human already closed is in the state the caller wanted,
+/// and a pane the host keeps is handed back as a [`Leftover`] so the run's end
+/// can list everything still open in one place.
+pub(crate) fn close_pane_leftover(
+    mux: &dyn Mux,
+    what: &str,
+    pane: &shprd_mux::PaneId,
+) -> Option<Leftover> {
+    match mux.close_pane(pane) {
+        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => None,
+        Err(_) => Some(Leftover::new(what, pane.as_str())),
+    }
+}
+
 /// Closes a pane shprd opened, counting a pane the host has forgotten as
 /// closed, and answers whether the pane is gone.
 ///
@@ -389,21 +436,76 @@ pub fn close_worker(mux: &dyn Mux, briefs: &Path, run: &str, task: &str) -> Resu
 /// Run end has no task in hand, so it sweeps the lot: every `.tab` record under
 /// the run's briefs names a tab shprd opened, and nothing shprd did not open has
 /// a record there — which is why the chat and orchestrator tabs are never in
-/// reach. A refusal is warned about, never fatal: the run's last event is
-/// already recorded, and its tabs are cleanup, not the point.
-pub fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) {
+/// reach. A refusal is not fatal: the tabs are cleanup, not the point, so each
+/// one the host keeps comes back as a [`Leftover`].
+pub(crate) fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Vec<Leftover> {
     let Ok(home) = crate::ctx::resolve_home(home) else {
-        return;
+        return Vec::new();
     };
     let Ok(state) = ctx.state() else {
-        return;
+        return Vec::new();
     };
     let Some(run) = state.run.as_ref().map(|run| run.run_id.clone()) else {
-        return;
+        return Vec::new();
     };
     let briefs = home.join(".shprd").join("briefs");
-    if let Err(err) = close_records(mux, &briefs, &run, "", |_| true) {
+    let mut leftovers = Vec::new();
+    if let Err(err) = sweep_records(mux, &briefs, &run, |_| true, &mut leftovers) {
         eprintln!("warning: {err}");
+    }
+    leftovers
+}
+
+/// Ends the run's mux footprint: the tabs the run recorded, then the watchdog's
+/// pane.
+///
+/// Everything the host refuses is collected by name and id, printed for the
+/// human, and recorded as one [`EventKind::Escalated`]. The caller must have
+/// checked [`EventKind::RunFinished`] first and commit it after: the ledger
+/// refuses anything but cleanup once the run is finished, so this is the last
+/// point at which an escalation can land — and a refused run closes nothing.
+pub fn close_at_run_end(
+    mux: &dyn Mux,
+    ctx: &Ctx,
+    home: Option<&Path>,
+    watch_pane: Option<&shprd_mux::PaneId>,
+) -> Vec<Leftover> {
+    let mut leftovers = close_run_tabs(mux, ctx, home);
+    if let Some(pane) = watch_pane {
+        leftovers.extend(close_pane_leftover(mux, "watchdog pane", pane));
+    }
+    for leftover in &leftovers {
+        eprintln!(
+            "warning: could not close the {}: close it yourself",
+            leftover.line()
+        );
+    }
+    escalate_leftovers(ctx, &leftovers);
+    leftovers
+}
+
+/// Records what the host kept as the run's last escalation.
+///
+/// One event for the whole sweep, because the human has one job left: close what
+/// the line lists. Nothing left over means no event — an escalation nobody has
+/// to act on is noise in the ledger.
+fn escalate_leftovers(ctx: &Ctx, leftovers: &[Leftover]) {
+    if leftovers.is_empty() {
+        return;
+    }
+    let listed: Vec<String> = leftovers.iter().map(Leftover::line).collect();
+    let kind = EventKind::Escalated {
+        task: None,
+        body: format!(
+            "the run ended with {} still open: {}",
+            leftovers.len(),
+            listed.join("; ")
+        ),
+        default_action: "close them yourself: each entry names what it is and the mux id that                           closes it"
+            .to_string(),
+    };
+    if let Err(err) = ctx.commit(kind) {
+        eprintln!("warning: could not record the escalation: {err}");
     }
 }
 
@@ -443,11 +545,83 @@ fn close_records(
     what: &str,
     wanted: impl Fn(&str) -> bool,
 ) -> Result<(), CliError> {
+    for record in tab_records(briefs, run, wanted)? {
+        close_recorded(mux, what, &record)?;
+    }
+    Ok(())
+}
+
+/// Sweeps every tab record `wanted` picks out, collecting the tabs the host
+/// keeps instead of stopping at the first refusal.
+fn sweep_records(
+    mux: &dyn Mux,
+    briefs: &Path,
+    run: &str,
+    wanted: impl Fn(&str) -> bool,
+    leftovers: &mut Vec<Leftover>,
+) -> Result<(), CliError> {
+    for record in tab_records(briefs, run, wanted)? {
+        let Ok(id) = std::fs::read_to_string(&record) else {
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let tab = shprd_mux::TabId::new(id);
+        match mux.close_tab(&tab) {
+            Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+            Err(_) => leftovers.push(Leftover::new(tab_record_what(&record), &tab)),
+        }
+    }
+    Ok(())
+}
+
+/// What a tab record names, in the words a human needs to find it again.
+///
+/// A spawn writes `<task>-a<n>.tab` beside the brief and a review writes
+/// `<task>-a<n>-review.tab`, so the record's own name says whose tab it is and
+/// which task it belonged to. A name that is neither falls back to the path,
+/// which is still something the human can read.
+fn tab_record_what(record: &Path) -> String {
+    let name = record
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let unnamed = || format!("the tab recorded in {}", record.display());
+    let Some(stem) = name.strip_suffix(".tab") else {
+        return unnamed();
+    };
+    let (stem, role) = match stem.strip_suffix("-review") {
+        Some(stem) => (stem, "reviewer"),
+        None => (stem, "worker"),
+    };
+    match stem.rsplit_once("-a") {
+        Some((task, attempt))
+            if !task.is_empty()
+                && !attempt.is_empty()
+                && attempt.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            format!("{role} tab for {task}")
+        }
+        _ => unnamed(),
+    }
+}
+
+/// The tab records in the run's folder that `wanted` picks out, in name order.
+///
+/// A directory read promises nothing, and two sweeps of one run should close the
+/// same tabs in the same order.
+fn tab_records(
+    briefs: &Path,
+    run: &str,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<Vec<PathBuf>, CliError> {
     let dir = briefs.join(run);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         // No run folder is no records: nothing was ever opened to close.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
             return Err(CliError::other(
                 anyhow!(err).context(format!("reading the tab records in {}", dir.display())),
@@ -467,13 +641,8 @@ fn close_records(
             records.push(path);
         }
     }
-    // In name order: a directory read promises nothing, and two sweeps of one
-    // run should close the same tabs in the same order.
     records.sort();
-    for record in records {
-        close_recorded(mux, what, &record)?;
-    }
-    Ok(())
+    Ok(records)
 }
 
 /// The ledger entries a spawn writes for its worktree and branch.
