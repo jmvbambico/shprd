@@ -883,7 +883,7 @@ fn janitor_dry_run_changes_nothing_and_apply_appends_resource_events() {
     assert!(plan.contains(branch), "{plan}");
     assert!(git.has_ref(branch), "a dry run must not delete the branch");
     assert!(
-        !git.has_ref("refs/shprd/archive/r1/T1"),
+        !git.has_ref("refs/shprd/archive/r1/T1-a1"),
         "a dry run must not create the archive ref"
     );
     assert_eq!(resource_events(&root), before, "a dry run writes nothing");
@@ -892,7 +892,7 @@ fn janitor_dry_run_changes_nothing_and_apply_appends_resource_events() {
     assert!(applied.contains("ok "), "{applied}");
     assert!(!git.has_ref(branch), "the branch must be gone");
     assert_eq!(
-        git.git(&["rev-parse", "refs/shprd/archive/r1/T1"]),
+        git.git(&["rev-parse", "refs/shprd/archive/r1/T1-a1"]),
         tip,
         "the archive ref must hold the branch tip"
     );
@@ -910,6 +910,31 @@ fn janitor_dry_run_changes_nothing_and_apply_appends_resource_events() {
         "restore must bring the branch back at the same commit"
     );
     assert_eq!(resource_events(&root), before + 4, "restore is recorded");
+}
+
+#[test]
+fn restore_brings_back_the_newest_attempt_archive() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let home = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    let branch = "shprd/r1/T1";
+    integrated_task(&root, branch);
+    let older = git.git(&["rev-parse", "main"]);
+    git.git(&["commit", "--allow-empty", "-q", "-m", "attempt two"]);
+    let newer = git.git(&["rev-parse", "HEAD"]);
+    git.git(&["update-ref", "refs/shprd/archive/r1/T1-a1", &older]);
+    git.git(&["update-ref", "refs/shprd/archive/r1/T1-a2", &newer]);
+
+    let restored = ok_with_home(&root, home.path(), &["restore", "T1"]);
+    assert!(restored.contains("ok resource"), "{restored}");
+    assert_eq!(
+        git.git(&["rev-parse", branch]),
+        newer,
+        "restore brings back the newest attempt, not the first"
+    );
 }
 
 #[test]

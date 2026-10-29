@@ -77,7 +77,7 @@ pub enum Command {
     },
     /// Print the cleanup plan for this run, or apply it with `--apply`.
     Janitor(JanitorArgs),
-    /// Recreate a task's branch from its archive ref.
+    /// Recreate a task's branch from its newest attempt's archive ref.
     Restore(RestoreArgs),
     /// Detect the agent CLIs installed here, their version and sign-in state.
     Roster(RosterArgs),

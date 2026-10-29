@@ -2069,16 +2069,16 @@ project_dirs = []
             .clone()
             .unwrap_or_else(|| panic!("the retry must name the ref it archived"));
         assert_eq!(replaced.attempt, 1);
-        assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1");
+        assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1-a1");
         assert_eq!(
             replaced.line("janitor-reviews"),
-            "archived attempt 1 of janitor-reviews as refs/shprd/archive/t1/T1"
+            "archived attempt 1 of janitor-reviews as refs/shprd/archive/t1/T1-a1"
         );
         // The replaced attempt's commits are still reachable from its ref.
         assert_eq!(
             git_out(
                 scratch.root(),
-                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1"]
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
             ),
             tip
         );
@@ -2132,7 +2132,7 @@ project_dirs = []
             events.contains(&(
                 ResourceAction::Created,
                 ResourceKind::ArchiveRef,
-                "refs/shprd/archive/t1/T1".to_string()
+                "refs/shprd/archive/t1/T1-a1".to_string()
             )),
             "{events:?}"
         );
@@ -2152,7 +2152,7 @@ project_dirs = []
                 .map(|record| record.status)
         };
         assert_eq!(
-            live(ResourceKind::ArchiveRef, "refs/shprd/archive/t1/T1"),
+            live(ResourceKind::ArchiveRef, "refs/shprd/archive/t1/T1-a1"),
             Some(ResourceStatus::Live)
         );
         assert_eq!(
@@ -2195,7 +2195,7 @@ project_dirs = []
         assert_eq!(
             git_out(
                 scratch.root(),
-                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1"]
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
             ),
             first_tip,
             "attempt 1's archive moved"
@@ -2230,7 +2230,7 @@ project_dirs = []
         assert!(
             git_try(
                 scratch.root(),
-                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1"]
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
             )
             .is_none(),
             "a working attempt must not be archived"

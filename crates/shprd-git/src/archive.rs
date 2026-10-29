@@ -1,16 +1,21 @@
 //! Archive refs, bundles, folder copies and restore.
 //!
-//! The janitor archives before it deletes: a branch is first pointed at by its
-//! own ref, `refs/shprd/archive/<branch without the namespace>` — so
-//! `shprd/r1/t1` is held by `refs/shprd/archive/r1/t1` and a second attempt,
-//! `shprd/r1/t1-retry`, by `refs/shprd/archive/r1/t1-retry` — and only then
-//! removed. Two live branches for one task therefore never collide. The ref
-//! holds the commits alive, so every deletion is reversible with [`restore`],
-//! which rebuilds the task's conventional branch from its own ref. A retry
-//! reuses one branch name for every attempt, so each attempt's commits are kept
-//! under their own ref, named by [`archive_ref_for_attempt`]. A folder
-//! that is not a git object — a run's review packets — is archived by
-//! [`archive_dir`], which copies it aside before the janitor deletes it.
+//! The janitor archives before it deletes, and every archive of a task's branch
+//! is per attempt: `refs/shprd/archive/<run>/<task>-a<attempt>`, named by
+//! [`archive_ref_for_attempt`]. A retry reuses one branch name for every
+//! attempt, so one ref per task could not hold them all: archiving the second
+//! tip would have to move the ref, which is refused, and the janitor could then
+//! never clean up the branch it could not archive. One ref per attempt means no
+//! two archives collide and no attempt's commits are lost.
+//!
+//! A branch that is not a task's — the run's integration branch — keeps the ref
+//! derived from its own name, by [`archive_ref_for_branch`]. Every ref holds its
+//! commits alive, so every deletion is reversible with [`restore`], which
+//! rebuilds the task's conventional branch from the newest attempt ref, or from
+//! the plain task ref that archives written before the per-attempt scheme still
+//! hold. A folder that is not a git object — a run's review packets — is
+//! archived by [`archive_dir`], which copies it aside before the janitor
+//! deletes it.
 
 use std::path::{Path, PathBuf};
 
@@ -95,12 +100,14 @@ pub enum ArchiveError {
     },
 }
 
-/// The archive ref for one task of one run: `<refs/shprd/archive>/<run>/<task>`.
+/// The plain archive ref for one task of one run:
+/// `<refs/shprd/archive>/<run>/<task>`.
 ///
-/// That is the ref of the task's conventional branch
-/// `<namespace><run>/<task>`, so it is the ref [`restore`] reads. An extra
-/// attempt like `<namespace><run>/<task>-retry` archives to its own ref, named
-/// by [`archive_ref_for_branch`].
+/// Nothing shprd writes uses this name any more: every archive of a task's
+/// branch is per attempt, [`archive_ref_for_attempt`], because one ref per task
+/// cannot hold more than one attempt. Archives made before that scheme still
+/// hold their commits here, so [`restore`] falls back to this name when a task
+/// has no attempt ref, and the janitor may still hold records of it.
 ///
 /// # Panics
 ///
@@ -110,22 +117,21 @@ pub fn archive_ref_name(run: &str, task: &str) -> String {
     format!("{ARCHIVE_PREFIX}{run}/{task}")
 }
 
-/// The archive ref that holds one attempt's commits.
+/// The archive ref that holds one attempt's commits:
+/// `<refs/shprd/archive>/<run>/<task>-a<attempt>`.
 ///
-/// The first attempt keeps the task's own ref, [`archive_ref_name`], so
-/// [`restore`] still rebuilds the branch from it. Every later attempt is
-/// suffixed with its number, because each attempt's branch tip is a different
-/// commit and an archive ref is never moved: without the suffix, a retry would
-/// have to overwrite the attempt before it, and [`archive_to`] would refuse.
+/// Every attempt has its own, the first included. A retry reuses the task's one
+/// branch name, so a ref without the attempt number would be offered a different
+/// tip by each attempt, and [`archive_to`] refuses to move a ref. The number
+/// therefore belongs in the name, which is what lets the janitor archive the
+/// final attempt and then delete its branch, and what lets [`restore`] find the
+/// newest attempt by name alone.
 ///
 /// # Panics
 ///
 /// Never: it is a format, and the ids are validated by the caller.
 pub fn archive_ref_for_attempt(run: &str, task: &str, attempt: u32) -> String {
-    match attempt {
-        0 | 1 => archive_ref_name(run, task),
-        n => format!("{}-a{n}", archive_ref_name(run, task)),
-    }
+    format!("{}-a{}", archive_ref_name(run, task), attempt.max(1))
 }
 
 /// The archive ref that belongs to `branch`: `<refs/shprd/archive>/<branch
@@ -163,23 +169,14 @@ pub fn is_archive_ref(name: &str) -> bool {
     name.starts_with(ARCHIVE_PREFIX)
 }
 
-/// Points `branch`'s archive ref at its tip.
+/// Points `ref_name` at `branch`'s tip.
 ///
-/// Each branch archives to its own ref, so two live branches for one task never
-/// share one. Re-archiving the same commit is a no-op; archiving a different
-/// one is refused, because moving an archive ref would lose the recorded
-/// history it exists to keep.
-pub fn archive(repo: &Path, layout: &Layout, branch: &str) -> Result<Archived, ArchiveError> {
-    let ref_name = archive_ref_for_branch(layout, branch)?;
-    archive_to(repo, branch, &ref_name)
-}
-
-/// Points `ref_name` at `branch`'s tip, under the same rule as [`archive`].
-///
-/// [`archive`] names the ref after the branch, which is one ref per task. A
-/// retry replaces one attempt's branch and keeps each attempt's commits under
-/// [`archive_ref_for_attempt`]'s name instead, so that attempt 2's archive does
-/// not have to overwrite attempt 1's.
+/// The caller names the ref, because the name is what keeps two archives from
+/// colliding: a task's branch is archived to [`archive_ref_for_attempt`]'s name
+/// for the attempt that owns its tip, and a branch that is not a task's — the
+/// run's integration branch — to [`archive_ref_for_branch`]'s. Re-archiving the
+/// same commit is a no-op; archiving a different one is refused, because moving
+/// an archive ref would lose the recorded history it exists to keep.
 ///
 /// A ref outside [`ARCHIVE_PREFIX`] is refused: shprd writes inside its own
 /// namespace and nowhere else.
@@ -242,6 +239,11 @@ pub fn bundle(
 
 /// Recreates the task's branch at the commit its archive ref holds.
 ///
+/// The newest attempt wins: per-attempt refs are read first and the highest
+/// number is restored, so a retry's work is what comes back. Only a task with no
+/// attempt ref at all falls back to the plain [`archive_ref_name`] archive that
+/// earlier shprd versions wrote.
+///
 /// Refuses when the branch already exists: a restore never overwrites work.
 /// Returns the branch name.
 pub fn restore(
@@ -253,10 +255,15 @@ pub fn restore(
     check_id("run", run)?;
     check_id("task", task)?;
     let git = Git::new(repo);
-    let ref_name = archive_ref_name(run, task);
-    let sha = match ref_sha(&git, &ref_name)? {
+    let sha = match newest_attempt_sha(&git, run, task)? {
         Some(sha) => sha,
-        None => return Err(ArchiveError::MissingArchive { ref_name }),
+        None => {
+            let plain = archive_ref_name(run, task);
+            match ref_sha(&git, &plain)? {
+                Some(sha) => sha,
+                None => return Err(ArchiveError::MissingArchive { ref_name: plain }),
+            }
+        }
     };
     let branch = layout.branch_name(run, task);
     if git.branch_exists(&branch)? {
@@ -264,6 +271,29 @@ pub fn restore(
     }
     git.run(&["branch", &branch, &sha])?;
     Ok(branch)
+}
+
+/// The commit the newest attempt archive of `task` holds.
+///
+/// Attempt refs are found by name under the task's own prefix, so no ledger is
+/// needed and an archive written by any version of shprd is found. A ref whose
+/// suffix is not an attempt number is not one of ours and is skipped.
+fn newest_attempt_sha(git: &Git, run: &str, task: &str) -> Result<Option<String>, ArchiveError> {
+    let prefix = format!("{}-a", archive_ref_name(run, task));
+    // A glob, because `for-each-ref` matches a plain pattern only up to a slash.
+    let listed = git.run(&["for-each-ref", "--format=%(refname)", &format!("{prefix}*")])?;
+    let newest = listed
+        .lines()
+        .map(str::trim)
+        .filter_map(|name| {
+            let attempt = name.strip_prefix(&prefix)?.parse::<u32>().ok()?;
+            Some((attempt, name))
+        })
+        .max_by_key(|(attempt, _)| *attempt);
+    match newest {
+        Some((_, ref_name)) => ref_sha(git, ref_name),
+        None => Ok(None),
+    }
 }
 
 /// Copies the folder `dir` to `out`, so the original can be deleted after.

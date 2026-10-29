@@ -347,7 +347,8 @@ mod tests {
             .map(janitor::Action::describe)
             .collect();
 
-        let archive = format!("archive T1: {branch} -> refs/shprd/archive/");
+        // The task's branch is attempt 1's, so its archive ref says so.
+        let archive = format!("archive T1: {branch} -> refs/shprd/archive/r1/T1-a1");
         let remove = format!("remove worktree T1: {}", worktree.display());
         let delete = format!("delete branch T1: {branch}");
         assert_eq!(
