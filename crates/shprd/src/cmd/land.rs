@@ -476,7 +476,8 @@ pub(crate) fn repo_name(ctx: &Ctx) -> Result<String, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shprd_core::event::{Actor, ReportStatus, ReviewSource};
+    use shprd_core::event::{Actor, Finding, ReportStatus, ReviewSource, Severity};
+    use shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE;
 
     /// An event with `kind` at position `seq`.
     fn ev(seq: u64, kind: EventKind) -> Event {
@@ -734,6 +735,61 @@ mod tests {
         assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
         assert!(
             marker.contains("T1: the review gate was overridden (the reviewer was unavailable)"),
+            "{marker}"
+        );
+    }
+
+    #[test]
+    fn an_override_of_a_failed_review_degrades_the_marker() {
+        // The task passed a later gate, so an `integrate_after_failed_gate`
+        // override lets it land although the review failed. What landed is
+        // work a reviewer rejected, so the body must not claim a cross-vendor
+        // review of it.
+        let mut log = reported_log("T1");
+        log.push(reviewed(5, "T1", "c1", false));
+        log.push(ev(
+            6,
+            EventKind::GateFailed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: vec![Finding {
+                    severity: Severity::Major,
+                    title: "the retry loop loses work".to_string(),
+                    location: None,
+                    detail: "a crash drops the batch".to_string(),
+                }],
+                source: None,
+            },
+        ));
+        log.push(ev(
+            7,
+            EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: "lint".to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+        ));
+        log.push(overrode(
+            8,
+            "T1",
+            INTEGRATE_AFTER_FAILED_GATE,
+            "shipping the fixed batch handling",
+        ));
+        log.push(integrated(9, "T1"));
+        let state = folded(&log);
+        assert_eq!(
+            state.tasks.get("T1").map(|task| task.status),
+            Some(shprd_core::state::TaskStatus::Integrated),
+            "the override let it land"
+        );
+        let marker = review_marker(&state);
+        assert!(marker.starts_with(REVIEW_DEGRADED), "{marker}");
+        assert!(!marker.contains(REVIEW_PASSED), "{marker}");
+        assert!(
+            marker.contains("T1: attempt 1 has no passed review gate"),
             "{marker}"
         );
     }
