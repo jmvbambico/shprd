@@ -21,6 +21,15 @@ use crate::ctx::CliError;
 /// pane sets it, so its presence is what makes a pane not a human.
 const ACTOR_ENV: &str = "SHPRD_ACTOR";
 
+/// The actor the environment names, read where a verb starts.
+///
+/// The verbs read this once, at their boundary, and pass it down: the check
+/// itself is then a pure comparison the tests can drive with any name, instead
+/// of a hidden read of whatever the process inherited.
+pub fn named_actor() -> String {
+    std::env::var(ACTOR_ENV).unwrap_or_default()
+}
+
 /// Whether the terminal may go unasked, which only a debug build allows.
 ///
 /// `--yes` answers the question on the human's behalf, so it needs no
@@ -34,12 +43,12 @@ pub fn may_skip_tty(yes: bool) -> bool {
 
 /// Refuses unless a human is the one acting.
 ///
-/// `act` completes "only a human ..." (`approves a pull request`), and
-/// `advice` says what the reader should do instead. `SHPRD_ACTOR` names the
-/// actor, so an agent pane fails here whatever it passes; this is the check
-/// that does not depend on the terminal.
-pub fn require_human(act: &str, advice: &str) -> Result<(), CliError> {
-    let named = std::env::var(ACTOR_ENV).unwrap_or_default();
+/// `named` is what the environment said, read by the caller at the verb's
+/// boundary; an agent pane fails here whatever `--as` says, because this check
+/// is about the variable itself. `act` completes "only a human ..." (`approves
+/// a pull request`), and `advice` says what the reader should do instead. This
+/// is the check that does not depend on the terminal.
+pub fn require_human(named: &str, act: &str, advice: &str) -> Result<(), CliError> {
     let named = named.trim();
     if !named.is_empty() && named != "human" {
         return Err(CliError::Invalid(anyhow!(
@@ -87,7 +96,26 @@ pub fn answered(yes: bool, verb: &str, question: &str) -> Result<bool, CliError>
 
 #[cfg(test)]
 mod tests {
-    use super::may_skip_tty;
+    use anyhow::{Context, Result};
+
+    use super::{may_skip_tty, require_human};
+
+    /// The actor check, from the inside: the name is injected, so the test
+    /// says nothing about whatever `SHPRD_ACTOR` the process inherited.
+    #[test]
+    fn only_a_named_human_may_act() -> Result<()> {
+        assert!(require_human("", "abandons a run", "advice").is_ok());
+        assert!(require_human("human", "abandons a run", "advice").is_ok());
+        assert!(require_human(" human ", "abandons a run", "advice").is_ok());
+
+        let err = require_human("engine", "abandons a run", "advice")
+            .err()
+            .context("an engine may not abandon a run")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("SHPRD_ACTOR=engine"), "{err}");
+        assert!(err.to_string().contains("advice"), "{err}");
+        Ok(())
+    }
 
     /// The terminal check, from the inside: only a debug build may skip it.
     #[test]

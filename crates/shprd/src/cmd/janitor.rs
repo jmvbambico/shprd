@@ -4,6 +4,13 @@
 //! own ledger. `--apply` runs it and appends one `resource` event per step that
 //! succeeded, through the same check-then-append path every other verb uses.
 //! A dry run writes nothing at all.
+//!
+//! A run's review packet folder is shprd's own directory, at
+//! `<home>/.shprd/reviews/<run>`, and it is spent once the run has finished.
+//! `--apply` copies it aside, deletes it, and records the removal: the folder's
+//! path comes from the layout and the run id rather than from a ledger record,
+//! so a folder no earlier record ever held is cleaned all the same, and its
+//! removal is the audit trail the log keeps.
 
 use std::path::Path;
 
@@ -11,6 +18,7 @@ use anyhow::anyhow;
 use serde_json::json;
 use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
 use shprd_core::log::{Clock, SystemClock};
+use shprd_core::state::RunState;
 
 use crate::cli::{JanitorArgs, RestoreArgs};
 use crate::cmd::emit;
@@ -119,7 +127,7 @@ fn config_and_layout(ctx: &Ctx, home: Option<&Path>) -> Result<(Config, Layout),
 }
 
 /// The run id the plan is about.
-fn run_id(state: &shprd_core::state::RunState) -> Result<String, CliError> {
+fn run_id(state: &RunState) -> Result<String, CliError> {
     match &state.run {
         Some(info) => Ok(info.run_id.clone()),
         None => Err(CliError::other(anyhow!(
@@ -140,5 +148,317 @@ fn print_plan(ctx: &Ctx, actions: &[janitor::Action]) {
     }
     if actions.is_empty() {
         println!("nothing to clean up");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use shprd_core::event::Actor;
+
+    /// A temporary repo root and home, with a log the janitor can read.
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        ctx: Ctx,
+        home: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let temp = match tempfile::tempdir() {
+                Ok(temp) => temp,
+                Err(err) => panic!("tempdir: {err}"),
+            };
+            let root = temp.path().join("repo");
+            if let Err(err) = std::fs::create_dir_all(&root) {
+                panic!("mkdir {}: {err}", root.display());
+            }
+            let ctx = Ctx::new(root, Actor::Engine, false, true);
+            Fixture {
+                home: temp.path().to_path_buf(),
+                _temp: temp,
+                ctx,
+            }
+        }
+
+        /// Appends one event the way every writing verb does.
+        fn commit(&self, kind: EventKind) {
+            if let Err(err) = self.ctx.commit(kind) {
+                panic!("commit: {err}");
+            }
+        }
+
+        fn start(&self) {
+            self.commit(EventKind::RunStarted {
+                run_id: "r1".to_string(),
+                repo: self.ctx.root.display().to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m1".to_string(),
+            });
+        }
+
+        fn merge(&self) {
+            self.commit(EventKind::PrOpened {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "shprd/r1/int".to_string(),
+            });
+            self.commit(EventKind::PrMerged {
+                number: 7,
+                head: "abc1234".to_string(),
+            });
+        }
+
+        /// Ends the run as a human: the engine may not finish one.
+        fn finish(&self) {
+            let human = Ctx::new(self.ctx.root.clone(), Actor::Human, false, true);
+            if let Err(err) = human.commit(EventKind::RunFinished {
+                abandoned: Vec::new(),
+            }) {
+                panic!("commit: {err}");
+            }
+        }
+
+        /// The folder holding run `r1`'s packets, with one packet in it.
+        fn packets(&self) -> PathBuf {
+            let dir = self.home.join(".shprd").join("reviews").join("r1");
+            let packet = dir.join("T1-a1");
+            if let Err(err) = std::fs::create_dir_all(&packet) {
+                panic!("mkdir {}: {err}", packet.display());
+            }
+            if let Err(err) = std::fs::write(packet.join("findings.json"), "{}") {
+                panic!("write findings: {err}");
+            }
+            dir
+        }
+
+        fn archived(&self) -> PathBuf {
+            self.home
+                .join(".shprd")
+                .join("archive")
+                .join("reviews")
+                .join("r1")
+        }
+
+        fn apply(&self) {
+            let args = JanitorArgs {
+                apply: true,
+                archive_days: None,
+            };
+            if let Err(err) = plan_verb(&self.ctx, &args, Some(&self.home)) {
+                panic!("apply: {err}");
+            }
+        }
+
+        fn dry_run(&self) {
+            let args = JanitorArgs {
+                apply: false,
+                archive_days: None,
+            };
+            if let Err(err) = plan_verb(&self.ctx, &args, Some(&self.home)) {
+                panic!("dry run: {err}");
+            }
+        }
+
+        /// The resource events the log currently holds.
+        fn resource_events(&self) -> Vec<EventKind> {
+            let events = match self.ctx.load() {
+                Ok((_, events)) => events,
+                Err(err) => panic!("load: {err}"),
+            };
+            events
+                .into_iter()
+                .map(|event| event.kind)
+                .filter(|kind| matches!(kind, EventKind::Resource { .. }))
+                .collect()
+        }
+
+        /// The whole log, so a test can tell a dry run wrote nothing.
+        fn log_text(&self) -> String {
+            match std::fs::read_to_string(&self.ctx.log_path) {
+                Ok(text) => text,
+                Err(err) => panic!("read log: {err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_dry_run_lists_review_packets_and_writes_nothing() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+        // Never adopted: the run finished without an earlier apply, so nothing
+        // recorded the folder, and a finished run can record no creation. The
+        // dry run has to list the folder from the layout alone, without
+        // recording it.
+        fixture.finish();
+        let before = fixture.log_text();
+
+        fixture.dry_run();
+        assert_eq!(fixture.log_text(), before, "a dry run writes nothing");
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "the folder stays"
+        );
+        assert!(!fixture.archived().exists(), "nothing is archived");
+
+        // The same plan the dry run printed names the folder it would archive.
+        let (state, events) = match fixture.ctx.load() {
+            Ok(loaded) => loaded,
+            Err(err) => panic!("load: {err}"),
+        };
+        let layout = Layout::default_for_home(&fixture.home);
+        let actions = janitor::plan(&state, &events, &layout, 0, 30);
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                janitor::Action::ArchiveReviewPackets { dir: planned, .. } if planned == &dir
+            )),
+            "the dry run must list the folder: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .map(|action| action.describe())
+                .any(|line| line == format!("archive review packets r1: {}", dir.display())),
+            "the dry run must print the folder: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn apply_archives_then_removes_review_packets_and_records_the_removal() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+        fixture.finish();
+
+        fixture.apply();
+        assert!(!dir.exists(), "the folder must be gone");
+        assert!(
+            fixture.archived().join("T1-a1/findings.json").is_file(),
+            "the packets must survive in the archive"
+        );
+        let removed = fixture.resource_events().into_iter().any(|kind| {
+            matches!(
+                kind,
+                EventKind::Resource {
+                    action: ResourceAction::Removed,
+                    kind: ResourceKind::ReviewPackets,
+                    ref name,
+                    task: None,
+                } if name == &dir.display().to_string()
+            )
+        });
+        assert!(removed, "the removal must be in the ledger");
+    }
+
+    #[test]
+    fn apply_keeps_and_records_nothing_for_a_run_that_has_not_finished() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+        fixture.merge();
+
+        // Packets feed the pull request body and the review gate, so a run
+        // that has not finished keeps them — merged or not — and an apply
+        // records no removal for them.
+        fixture.apply();
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "an unfinished run keeps its packets"
+        );
+        assert!(!fixture.archived().exists(), "nothing may be archived yet");
+        assert!(
+            fixture.resource_events().is_empty(),
+            "nothing was removed, so nothing is recorded: {:?}",
+            fixture.resource_events()
+        );
+    }
+
+    #[test]
+    fn apply_cleans_the_review_packets_of_a_run_finished_before_any_earlier_apply() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+        // The run finished without an earlier apply, so nothing recorded the
+        // folder and, once finished, it never can. The apply must still archive
+        // the folder, remove it, and record that removal: a cleanup the log
+        // cannot show is a cleanup nobody can audit.
+        fixture.finish();
+
+        fixture.apply();
+        assert!(!dir.exists(), "the folder must be gone");
+        assert!(
+            fixture.archived().join("T1-a1/findings.json").is_file(),
+            "the packets must survive in the archive"
+        );
+        let removed = fixture.resource_events().into_iter().any(|kind| {
+            matches!(
+                kind,
+                EventKind::Resource {
+                    action: ResourceAction::Removed,
+                    kind: ResourceKind::ReviewPackets,
+                    ref name,
+                    task: None,
+                } if name == &dir.display().to_string()
+            )
+        });
+        assert!(
+            removed,
+            "the removal of a folder the ledger never held must still be recorded"
+        );
+
+        // The log still folds, which is what makes the record usable at all.
+        let state = match fixture.ctx.state() {
+            Ok(state) => state,
+            Err(err) => panic!("the recorded removal must fold: {err}"),
+        };
+        assert!(state.finished, "the run is still finished");
+    }
+
+    #[test]
+    fn a_failed_archive_leaves_the_review_packets_and_counts_as_a_failure() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+        fixture.finish();
+        // A file where the archive folder belongs, so the copy cannot start.
+        let blocker = fixture.home.join(".shprd").join("archive");
+        if let Err(err) = std::fs::write(&blocker, "not a folder") {
+            panic!("write {}: {err}", blocker.display());
+        }
+
+        let args = JanitorArgs {
+            apply: true,
+            archive_days: None,
+        };
+        assert!(
+            plan_verb(&fixture.ctx, &args, Some(&fixture.home)).is_err(),
+            "the step is reported as a failure"
+        );
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "a failed archive must not lose the folder"
+        );
+    }
+
+    #[test]
+    fn a_run_that_is_still_working_keeps_its_review_packets() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+
+        fixture.apply();
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "the folder stays"
+        );
+        assert!(!fixture.archived().exists(), "nothing may be archived yet");
+        assert!(
+            fixture.resource_events().is_empty(),
+            "an unfinished run's packets are never recorded or removed"
+        );
     }
 }

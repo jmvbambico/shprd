@@ -1,4 +1,4 @@
-//! Archive refs, bundles and restore.
+//! Archive refs, bundles, folder copies and restore.
 //!
 //! The janitor archives before it deletes: a branch is first pointed at by its
 //! own ref, `refs/shprd/archive/<branch without the namespace>` — so
@@ -6,7 +6,9 @@
 //! `shprd/r1/t1-retry`, by `refs/shprd/archive/r1/t1-retry` — and only then
 //! removed. Two live branches for one task therefore never collide. The ref
 //! holds the commits alive, so every deletion is reversible with [`restore`],
-//! which rebuilds the task's conventional branch from its own ref.
+//! which rebuilds the task's conventional branch from its own ref. A folder
+//! that is not a git object — a run's review packets — is archived by
+//! [`archive_dir`], which copies it aside before the janitor deletes it.
 
 use std::path::{Path, PathBuf};
 
@@ -71,6 +73,23 @@ pub enum ArchiveError {
         /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
+    },
+    /// There was nothing to archive at the path.
+    #[error("{path:?} is not a folder")]
+    NotAFolder {
+        /// The path that was not a folder.
+        path: PathBuf,
+    },
+    /// A folder being archived holds something that is neither a file nor a
+    /// folder.
+    ///
+    /// Such an entry is refused rather than followed or skipped: following it
+    /// could copy a file from outside the folder, and skipping it would write
+    /// an archive that does not hold what it claims to.
+    #[error("{path:?} is not a plain file or folder")]
+    UnsupportedEntry {
+        /// The entry that was neither.
+        path: PathBuf,
     },
 }
 
@@ -208,6 +227,55 @@ pub fn restore(
     Ok(branch)
 }
 
+/// Copies the folder `dir` to `out`, so the original can be deleted after.
+///
+/// The copy is built beside `out` and renamed into place only once it is
+/// complete, so a failed copy never replaces an earlier archive. The caller
+/// deletes `dir` only after this returns, which is what makes the copy the
+/// archive that licenses the deletion.
+///
+/// Nothing is followed out of `dir`: an entry that is not a plain file or
+/// folder is refused rather than copied, and an empty folder is archived as an
+/// empty folder.
+pub fn archive_dir(dir: &Path, out: &Path) -> Result<(), ArchiveError> {
+    // The root is checked without following a link, exactly as every entry
+    // inside it is, so an archive never reads through a replaced folder.
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(ArchiveError::NotAFolder {
+                path: dir.to_path_buf(),
+            });
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ArchiveError::NotAFolder {
+                path: dir.to_path_buf(),
+            });
+        }
+        Err(source) => {
+            return Err(ArchiveError::Io {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    }
+    if let Some(parent) = out.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|source| ArchiveError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let staging = staging_path(out);
+    remove_any(&staging)?;
+    copy_tree(dir, &staging)?;
+    remove_any(out)?;
+    std::fs::rename(&staging, out).map_err(|source| ArchiveError::Io {
+        path: out.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
 /// Deletes an archive ref. The commits survive as long as another ref or a
 /// bundle holds them, which is why the janitor exports one before expiring.
 pub fn expire(repo: &Path, ref_name: &str) -> Result<(), ArchiveError> {
@@ -264,4 +332,73 @@ fn out_text(path: &Path) -> Result<String, ArchiveError> {
             id: path.display().to_string(),
         }),
     }
+}
+
+/// Where a folder archive is built before it is renamed into place.
+///
+/// It sits beside `out` on the same filesystem, so the rename is atomic and a
+/// failed copy leaves nothing half-visible under the archive's own name.
+fn staging_path(out: &Path) -> PathBuf {
+    match out.file_name().and_then(|name| name.to_str()) {
+        Some(name) => out.with_file_name(format!("{name}.partial")),
+        None => out.with_extension("partial"),
+    }
+}
+
+/// Removes `path`, whatever it is, treating a missing one as already gone.
+fn remove_any(path: &Path) -> Result<(), ArchiveError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(ArchiveError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let removed = if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    removed.map_err(|source| ArchiveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Copies every plain file and folder under `from` into `to`.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), ArchiveError> {
+    std::fs::create_dir_all(to).map_err(|source| ArchiveError::Io {
+        path: to.to_path_buf(),
+        source,
+    })?;
+    let entries = std::fs::read_dir(from).map_err(|source| ArchiveError::Io {
+        path: from.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ArchiveError::Io {
+            path: from.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path).map_err(|source| ArchiveError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let target = to.join(entry.file_name());
+        if meta.is_dir() {
+            copy_tree(&path, &target)?;
+        } else if meta.is_file() {
+            std::fs::copy(&path, &target).map_err(|source| ArchiveError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        } else {
+            return Err(ArchiveError::UnsupportedEntry { path });
+        }
+    }
+    Ok(())
 }

@@ -23,7 +23,11 @@ fn repo() -> TempDir {
 fn run(root: &Path, args: &[&str]) -> Output {
     let mut all: Vec<String> = vec!["--repo".into(), root.display().to_string()];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN).args(&all).output() {
+    match Command::new(BIN)
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .output()
+    {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -328,6 +332,7 @@ fn run_with_path(root: &Path, args: &[&str], bin_dir: &Path) -> Output {
     all.extend(args.iter().map(|arg| (*arg).to_string()));
     match Command::new(BIN)
         .args(&all)
+        .env_remove("SHPRD_ACTOR")
         .env("PATH", bin_dir)
         .env_remove("SHPRD_DAGR_BIN")
         .output()
@@ -538,6 +543,7 @@ fn dagr_sync_checks_the_document_when_a_checker_is_given() {
     add_task(root, "T1", "crates/shprd");
     let output = Command::new(BIN)
         .args(["--repo", &root.display().to_string(), "dagr", "sync"])
+        .env_remove("SHPRD_ACTOR")
         .env("SHPRD_DAGR_BIN", checker)
         .output();
     let output = match output {
@@ -572,6 +578,7 @@ fn a_failing_sync_does_not_undo_a_write() {
             "--integration",
             "integration/m1",
         ])
+        .env_remove("SHPRD_ACTOR")
         .env("SHPRD_DAGR_BIN", "/bin/false")
         .output();
     let output = match output {
@@ -707,7 +714,11 @@ fn run_with_home(root: &Path, home: &Path, args: &[&str]) -> Output {
         home.display().to_string(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN).args(&all).output() {
+    match Command::new(BIN)
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .output()
+    {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -969,6 +980,7 @@ fn abandoning_is_refused_for_an_agent_actor_even_with_yes() {
             "--abandon",
             "--yes",
         ])
+        .env_remove("SHPRD_ACTOR")
         .env("SHPRD_ACTOR", "agent:codex")
         .output()
     {
@@ -1276,6 +1288,7 @@ fn an_orchestrator_may_not_re_admit_an_agent() {
             "w1",
             "--json",
         ])
+        .env_remove("SHPRD_ACTOR")
         .env("SHPRD_ACTOR", "orchestrator")
         .output()
     {

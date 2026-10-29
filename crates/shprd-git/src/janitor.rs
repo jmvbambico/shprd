@@ -9,6 +9,15 @@
 //! earns a [`Action::DeleteBranch`]. The one remote shprd touches is `origin`,
 //! and only to delete a `Live` `RemoteBranch` that the merged pull request names
 //! as its head.
+//!
+//! A finished run's review packet folder, `<home>/.shprd/reviews/<run>`, is
+//! cleaned up the same way: copied aside first and deleted only once that copy
+//! succeeded. It is shprd's own directory rather than a git object, and its
+//! path is derived from the layout and the run id alone, so the plan — not the
+//! ledger — is what proves it may go. The removal is still recorded, because a
+//! cleanup the log cannot show is a cleanup nobody can audit: nothing may be
+//! created once the run has finished, so a folder no earlier record held is
+//! closed by a removal the ledger accepts without a prior creation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +86,20 @@ pub enum Action {
         /// The branch, as it is named on the remote.
         branch: String,
     },
+    /// Archive a finished run's review packet folder, then delete it.
+    ///
+    /// The folder is `<home>/.shprd/reviews/<run>`. It is copied to
+    /// [`review_archive_dir`] first and removed only once that copy succeeded,
+    /// so a failed archive never loses a packet. The path is derived from the
+    /// layout and run id, so it is always shprd's own directory — which is why
+    /// a finished run's folder is cleaned whether or not an earlier record ever
+    /// held it. The removal is what the ledger records.
+    ArchiveReviewPackets {
+        /// The run the packets belong to.
+        run: String,
+        /// The folder holding them.
+        dir: PathBuf,
+    },
 }
 
 impl Action {
@@ -94,6 +117,9 @@ impl Action {
                 format!("expire archive {task}: {ref_name}")
             }
             Self::DeleteRemoteBranch { branch } => format!("delete remote branch {branch}"),
+            Self::ArchiveReviewPackets { run, dir, .. } => {
+                format!("archive review packets {run}: {}", dir.display())
+            }
         }
     }
 
@@ -106,6 +132,11 @@ impl Action {
     /// The ref name comes from [`archive::archive_ref_for_branch`] or not at
     /// all: a branch it refuses has no archive ref, so this returns that
     /// refusal rather than recording a ref shprd never made.
+    ///
+    /// A review packet folder's step records its removal, whether or not the
+    /// ledger ever held the folder: the folder is shprd's own by construction,
+    /// and `execute` only yields these events for a folder it actually removed,
+    /// so a second apply with nothing left records nothing.
     pub fn events(&self, layout: &Layout) -> Result<Vec<EventKind>, ArchiveError> {
         Ok(match self {
             Self::ArchiveRef { task, branch } => vec![
@@ -146,6 +177,12 @@ impl Action {
                 name: branch.clone(),
                 task: None,
             }],
+            Self::ArchiveReviewPackets { dir, .. } => vec![EventKind::Resource {
+                action: ResourceAction::Removed,
+                kind: ResourceKind::ReviewPackets,
+                name: dir.display().to_string(),
+                task: None,
+            }],
         })
     }
 
@@ -159,7 +196,7 @@ impl Action {
             | Self::RemoveWorktree { task, .. }
             | Self::DeleteBranch { task, .. }
             | Self::ExpireArchive { task, .. } => Some(task),
-            Self::DeleteRemoteBranch { .. } => None,
+            Self::DeleteRemoteBranch { .. } | Self::ArchiveReviewPackets { .. } => None,
         }
     }
 }
@@ -187,10 +224,11 @@ pub struct Outcome {
 /// A task whose resources are being cleaned up never has its archive ref
 /// expired in the same plan, so cleanup cannot delete its own safety net.
 ///
-/// Two things happen at the run's level rather than a task's. A merged pull
+/// Three things happen at the run's level rather than a task's. A merged pull
 /// request releases the integration worktree and its branch, cleaned up in the
-/// same order; and it releases the remote branches it pushed, deleted from
-/// `origin` once the forge already holds their commits.
+/// same order; it releases the remote branches it pushed, deleted from `origin`
+/// once the forge already holds their commits; and the end of the run makes its
+/// review packet folder spent, so that folder is archived and deleted.
 pub fn plan(
     state: &RunState,
     events: &[Event],
@@ -313,6 +351,18 @@ pub fn plan(
             });
         }
     }
+    // A run's review packets are spent when the run ends. They are shprd's own
+    // files, so the run id is the key, and the path is derived rather than read
+    // from the ledger: a folder no earlier record held is cleaned all the same.
+    if let Some(run) = &state.run
+        && review_packets_due(state)
+        && let Some(dir) = review_packets_dir(layout, &run.run_id)
+    {
+        actions.push(Action::ArchiveReviewPackets {
+            run: run.run_id.clone(),
+            dir,
+        });
+    }
     for action in stale {
         if actions
             .iter()
@@ -387,6 +437,18 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                 .map(|()| action.events(layout))
                 .map_err(|err| err.to_string())
                 .and_then(|events| events.map_err(|err| err.to_string())),
+            // The copy comes first and the deletion only after it: a folder
+            // this step could not archive is left exactly where it was. A
+            // folder that was already gone has nothing to record, so its step
+            // succeeds with no event; a folder this step removed records that
+            // removal, which is the audit trail the ledger keeps.
+            Action::ArchiveReviewPackets { run, dir } => {
+                match archive_review_packets(layout, run, dir) {
+                    Ok(true) => action.events(layout).map_err(|err| err.to_string()),
+                    Ok(false) => Ok(Vec::new()),
+                    Err(err) => Err(err),
+                }
+            }
         };
         outcomes.push(Outcome {
             action: action.clone(),
@@ -440,6 +502,74 @@ fn integration_worktree(state: &RunState, layout: &Layout, run_id: &str) -> Opti
         })
 }
 
+/// Archives one review packet folder and deletes it, returning whether there
+/// was a folder to remove.
+///
+/// A missing folder is not an error: a second apply finds nothing to do and
+/// records nothing. The path is `<home>/.shprd/reviews/<run>` with a validated
+/// run id, so it is always shprd's own folder — which is why a run that finished
+/// before any earlier record existed still has its folder cleaned.
+fn archive_review_packets(layout: &Layout, run: &str, dir: &Path) -> Result<bool, String> {
+    // `symlink_metadata` rather than `is_dir`: a link is never followed out of
+    // shprd's own folder, so a replacement link is reported, not archived.
+    let meta = match std::fs::symlink_metadata(dir) {
+        Ok(meta) => Some(meta),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(format!("{}: could not be read: {err}", dir.display())),
+    };
+    let Some(meta) = meta else {
+        return Ok(false);
+    };
+    if !meta.is_dir() {
+        return Err(format!("{}: not a folder", dir.display()));
+    }
+    let archived = review_archive_dir(layout, run)
+        .ok_or_else(|| format!("{run}: not a usable run id for an archive path"))?;
+    archive::archive_dir(dir, &archived).map_err(|err| err.to_string())?;
+    std::fs::remove_dir_all(dir)
+        .map_err(|err| format!("{}: could not be removed: {err}", dir.display()))?;
+    Ok(true)
+}
+
+/// True when a run's review packet folder is spent: the run has finished.
+///
+/// The packets feed the pull request body and the review gate, so a run that
+/// has not finished keeps its folders untouched — merged or not. Only the end
+/// of the run makes them somebody else's cleanup.
+pub fn review_packets_due(state: &RunState) -> bool {
+    state.finished
+}
+
+/// The folder holding a run's review packets: `<home>/.shprd/reviews/<run>`.
+///
+/// The layout's root is always `<home>/.shprd/wt`, so its parent is the shprd
+/// state directory the `reviews` folder sits beside. A run id that is not a
+/// plain identifier has no folder: it must never name a path.
+pub fn review_packets_dir(layout: &Layout, run: &str) -> Option<PathBuf> {
+    if !worktree::valid_id(run) {
+        return None;
+    }
+    Some(layout.root.parent()?.join("reviews").join(run))
+}
+
+/// Where a run's review packets are archived: `<home>/.shprd/archive/reviews/<run>`.
+///
+/// It sits beside the worktree root rather than inside it, so the archive is
+/// not mistaken for a worktree the janitor may remove.
+pub fn review_archive_dir(layout: &Layout, run: &str) -> Option<PathBuf> {
+    if !worktree::valid_id(run) {
+        return None;
+    }
+    Some(
+        layout
+            .root
+            .parent()?
+            .join("archive")
+            .join("reviews")
+            .join(run),
+    )
+}
+
 /// True for the branches a run is cut from, which shprd deletes nowhere.
 fn is_protected_branch(branch: &str) -> bool {
     matches!(branch, "main" | "master")
@@ -475,4 +605,242 @@ fn created_at(events: &[Event], seq: u64) -> Option<u64> {
 fn is_expired(created_ms: u64, now_ms: u64, archive_days: u32) -> bool {
     let window = u64::from(archive_days).saturating_mul(MILLIS_PER_DAY);
     now_ms.saturating_sub(created_ms) > window
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    use shprd_core::state::{PrInfo, RunInfo};
+
+    /// The retention window a plan needs; review packets never use it.
+    const DAYS: u32 = 30;
+
+    /// A run state with nothing but the run in it, finished or not, with an
+    /// optional merged pull request.
+    fn a_run(finished: bool, merged: bool) -> RunState {
+        RunState {
+            run: Some(RunInfo {
+                run_id: "r1".to_string(),
+                repo: "/tmp/repo".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m1".to_string(),
+            }),
+            finished,
+            pr: merged.then(|| PrInfo {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "shprd/r1/int".to_string(),
+                approved_head: None,
+                merged: true,
+            }),
+            ..RunState::default()
+        }
+    }
+
+    /// A temp home with one review packet in `<reviews>/r1/T1-a1/`.
+    fn home_with_packets() -> (tempfile::TempDir, Layout, PathBuf) {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let layout = Layout::default_for_home(temp.path());
+        let dir = match review_packets_dir(&layout, "r1") {
+            Some(dir) => dir,
+            None => panic!("a plain run id must have a reviews folder"),
+        };
+        let packet = dir.join("T1-a1");
+        if let Err(err) = fs::create_dir_all(&packet) {
+            panic!("mkdir {}: {err}", packet.display());
+        }
+        if let Err(err) = fs::write(packet.join("findings.json"), "{}") {
+            panic!("write findings: {err}");
+        }
+        (temp, layout, dir)
+    }
+
+    /// The archive folder a run's packets go to, panicking when it has none.
+    fn archive_of(layout: &Layout, run: &str) -> PathBuf {
+        match review_archive_dir(layout, run) {
+            Some(path) => path,
+            None => panic!("a plain run id must have an archive folder"),
+        }
+    }
+
+    #[test]
+    fn a_finished_run_plans_its_review_packet_folder_without_touching_it() {
+        let (_home, layout, dir) = home_with_packets();
+        let state = a_run(true, false);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        match &actions[0] {
+            Action::ArchiveReviewPackets { run, dir: planned } => {
+                assert_eq!(run, "r1");
+                assert_eq!(planned, &dir);
+            }
+            other => panic!("expected review packets, got {other:?}"),
+        }
+        assert!(dir.is_dir(), "a plan deletes nothing");
+        assert!(
+            !archive_of(&layout, "r1").exists(),
+            "a plan archives nothing"
+        );
+    }
+
+    #[test]
+    fn a_merged_run_that_has_not_finished_plans_no_review_packets() {
+        let (_home, layout, dir) = home_with_packets();
+        let state = a_run(false, true);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "an unfinished run keeps its packets, merged or not"
+        );
+    }
+
+    #[test]
+    fn a_run_that_has_not_finished_never_plans_or_touches_its_review_packets() {
+        let (_home, layout, dir) = home_with_packets();
+        let state = a_run(false, false);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        assert!(actions.is_empty(), "{actions:?}");
+        let outcomes = execute(&layout.root, &layout, &actions);
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "the folder must survive"
+        );
+    }
+
+    #[test]
+    fn applying_archives_the_review_packet_folder_before_deleting_it() {
+        let (_home, layout, dir) = home_with_packets();
+        let state = a_run(true, false);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        let outcomes = execute(&layout.root, &layout, &actions);
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        let kinds = match &outcomes[0].result {
+            Ok(kinds) => kinds,
+            Err(err) => panic!("the step must succeed: {err}"),
+        };
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        match &kinds[0] {
+            EventKind::Resource {
+                action,
+                kind,
+                name,
+                task,
+            } => {
+                assert_eq!(*action, ResourceAction::Removed);
+                assert_eq!(*kind, ResourceKind::ReviewPackets);
+                assert_eq!(name, &dir.display().to_string());
+                assert_eq!(task, &None);
+            }
+            other => panic!("expected a resource event, got {other:?}"),
+        }
+        assert!(!dir.exists(), "the source folder must be gone");
+        assert!(
+            archive_of(&layout, "r1")
+                .join("T1-a1/findings.json")
+                .is_file(),
+            "the archive holds the packet"
+        );
+    }
+
+    #[test]
+    fn a_failed_archive_leaves_the_review_packet_folder_in_place() {
+        let (_home, layout, dir) = home_with_packets();
+        let state = a_run(true, false);
+        // A file where the archive folder belongs, so the copy cannot start.
+        let shprd = match layout.root.parent() {
+            Some(path) => path,
+            None => panic!("the layout root has a parent"),
+        };
+        let blocker = shprd.join("archive");
+        if let Err(err) = fs::write(&blocker, "not a folder") {
+            panic!("write {}: {err}", blocker.display());
+        }
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        let outcomes = execute(&layout.root, &layout, &actions);
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        assert!(outcomes[0].result.is_err(), "{outcomes:?}");
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "a failed archive must not lose the folder"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_cleans_a_review_folder_no_earlier_apply_recorded() {
+        let (_home, layout, dir) = home_with_packets();
+        // Finished without a record ever being written: no earlier apply adopted
+        // the folder, and after `run finish` nothing may create one. The folder
+        // is still shprd's own, so it is archived and deleted — and the removal
+        // is recorded, because a cleanup the log cannot show cannot be audited.
+        let state = a_run(true, false);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        let outcomes = execute(&layout.root, &layout, &actions);
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        let kinds = match &outcomes[0].result {
+            Ok(kinds) => kinds,
+            Err(err) => panic!("a finished run's folder must be cleaned: {err}"),
+        };
+        assert_eq!(kinds.len(), 1, "the removal must be recorded: {kinds:?}");
+        match &kinds[0] {
+            EventKind::Resource {
+                action,
+                kind,
+                name,
+                task,
+            } => {
+                assert_eq!(*action, ResourceAction::Removed);
+                assert_eq!(*kind, ResourceKind::ReviewPackets);
+                assert_eq!(name, &dir.display().to_string());
+                assert_eq!(task, &None);
+            }
+            other => panic!("expected a resource event, got {other:?}"),
+        }
+        assert!(!dir.exists(), "the folder must be gone");
+        assert!(
+            archive_of(&layout, "r1")
+                .join("T1-a1/findings.json")
+                .is_file(),
+            "the packets must survive in the archive"
+        );
+    }
+
+    #[test]
+    fn a_second_apply_records_nothing_when_the_folder_is_already_gone() {
+        let (_home, layout, _dir) = home_with_packets();
+        let state = a_run(true, false);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        let first = execute(&layout.root, &layout, &actions);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0]
+                .result
+                .as_ref()
+                .is_ok_and(|kinds| !kinds.is_empty())
+        );
+
+        let again = execute(&layout.root, &layout, &actions);
+        assert_eq!(again.len(), 1, "{again:?}");
+        match &again[0].result {
+            Ok(kinds) => assert!(
+                kinds.is_empty(),
+                "nothing was removed, so nothing is recorded: {kinds:?}"
+            ),
+            Err(err) => panic!("a spent folder is not a failure: {err}"),
+        }
+    }
 }
