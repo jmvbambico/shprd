@@ -160,6 +160,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Approved { .. } => "approved",
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
+        EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::RunFinished {} => "run_finished",
     }
 }
