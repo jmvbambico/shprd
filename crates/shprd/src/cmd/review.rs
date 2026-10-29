@@ -2068,8 +2068,15 @@ project_dirs = []
             open_tabs(&mux, &env).contains(&reviewer),
             "the run has no reviewer tab to end"
         );
-        crate::cmd::up::down(&mux, &ctx, Some(scratch.home.path()))
-            .unwrap_or_else(|err| panic!("{err}"));
+        // The task is only reported, so the run ends the one way it can with
+        // work still in it: abandoned, which is what closes its tabs.
+        crate::cmd::up::down(
+            &mux,
+            &ctx,
+            Some(scratch.home.path()),
+            crate::cmd::up::EndRun::down(true, true),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let open = open_tabs(&mux, &env);
         assert!(

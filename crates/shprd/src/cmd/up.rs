@@ -21,7 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::Config;
-use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
+use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
+use shprd_core::rules::{abandonable_tasks, unfinished_tasks, unlanded};
 use shprd_core::state::{ResourceStatus, RunState};
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
@@ -31,6 +32,8 @@ use shprd_roster::env::{self as launch_env_mod, EnvContext, Role as LaunchRole};
 use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
 
+use crate::cli::EndRunArgs;
+use crate::cmd::confirm;
 use crate::cmd::spawn;
 use crate::ctx::{CliError, Ctx};
 
@@ -242,10 +245,14 @@ pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
 
 /// Runs `shprd down`: the run's last event.
 ///
-/// A task that is still working refuses the event, and the refusal is the whole
-/// answer: nothing else is touched, and no tab is closed. Once the event is in,
-/// the reviewer tabs the run still has open are closed with it.
-pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
+/// A run with unfinished work refuses the event, and the refusal is the whole
+/// answer: nothing else is touched, and no tab is closed. `--abandon` is the
+/// one way to say yes on purpose, and it names what it left behind. Because it
+/// throws work away, it asks a human at a terminal first, and that question is
+/// asked before anything is written: a 'no' or a refusal leaves the run exactly
+/// as it was. Once the event is in, the reviewer tabs the run still has open
+/// are closed with it.
+pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Result<(), CliError> {
     let state = ctx.state()?;
     if state.run.is_none() {
         return Err(CliError::Invalid(anyhow!(
@@ -257,10 +264,259 @@ pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Result<(), CliErro
             "the run already finished; run `shprd up` to start the next one"
         )));
     }
-    let event = ctx.commit(EventKind::RunFinished {})?;
+    let kind = end_kind(&state, end)?;
+    let event = ctx.commit(kind)?;
+    print_abandoned(&state, &event);
     spawn::close_run_tabs(mux, ctx, home);
     close_watch_pane(mux, ctx);
     crate::cmd::emit(ctx, &event)
+}
+
+/// The event that ends the run, or the refusal that says why it cannot.
+///
+/// A run is over only when every task reached a terminal state and the work
+/// that landed is merged: the pull request the run opened has to have merged,
+/// or the work sits on a branch nothing will pick up. Anything else is work a
+/// human would lose, so it is refused with the tasks named one per line.
+/// `abandon` is the explicit choice to end it anyway: the event then carries
+/// the tasks that were left, which is what `up` reports when it archives.
+pub(crate) fn finish_kind(state: &RunState, abandon: bool) -> Result<EventKind, CliError> {
+    let unfinished = unfinished_tasks(state);
+    // What an abandon names: the unfinished work, plus the integrated work
+    // while the pull request that would carry it has not merged. An abandon
+    // with nothing to abandon is a normal finish, and goes through the checks
+    // that carry no list.
+    let abandoned = abandonable_tasks(state);
+    if abandon && !abandoned.is_empty() {
+        return Ok(EventKind::RunFinished { abandoned });
+    }
+    if !unfinished.is_empty() {
+        return Err(CliError::Invalid(anyhow!(
+            "refusing to end run {}\n{}\n{}",
+            run_id(state),
+            unfinished_lines(state, &unfinished),
+            RESTART_ADVICE
+        )));
+    }
+    if unlanded(state) {
+        return Err(CliError::Invalid(anyhow!(
+            "refusing to end run {}: every task is integrated, but the run's pull \
+             request has not merged, so nothing carries the work yet\nrun `shprd \
+             land` to open it and `shprd land --merge` to merge it, or\n{}",
+            run_id(state),
+            RESTART_ADVICE
+        )));
+    }
+    Ok(EventKind::RunFinished {
+        abandoned: Vec::new(),
+    })
+}
+
+/// The event that ends the run, once a human has answered for an abandon.
+///
+/// The two verbs that end a run share every decision and every question, so
+/// both come through here: [`finish_kind`] decides what the event is, and an
+/// abandon that leaves work behind is the human's, so it is asked at a terminal
+/// before anything is recorded.
+pub(crate) fn end_kind(state: &RunState, end: EndRun) -> Result<EventKind, CliError> {
+    let kind = finish_kind(state, end.abandon)?;
+    let EventKind::RunFinished { abandoned } = &kind else {
+        return Ok(kind);
+    };
+    // A finish with nothing to abandon is a normal finish: there is no work to
+    // throw away, so there is nothing to ask.
+    if abandoned.is_empty() {
+        return Ok(kind);
+    }
+    confirm::require_human(
+        "abandons a run",
+        &format!("ask the maintainer to run `{}`", end.verb),
+    )?;
+    let question = abandon_question(state, abandoned);
+    let answer = confirm::answered(end.yes, end.verb, &question)?;
+    decided(state, abandoned, answer)?;
+    Ok(kind)
+}
+
+/// The question an abandon asks, naming the run and everything it would leave.
+///
+/// Each task carries its status and its branch: the branch is the handle on the
+/// work once the run is over, and the thing the human is agreeing to keep.
+fn abandon_question(state: &RunState, abandoned: &[TaskId]) -> String {
+    format!(
+        "abandon run {} and leave: {}? their branches are kept [y/N] ",
+        run_id(state),
+        left_list(state, abandoned)
+    )
+}
+
+/// One phrase per task being left: its status, and the branch that keeps it.
+fn left_list(state: &RunState, abandoned: &[TaskId]) -> String {
+    abandoned
+        .iter()
+        .map(|id| {
+            let status = state
+                .tasks
+                .get(id)
+                .map_or("unknown", |task| crate::summary::status_name(task.status));
+            match task_branch(state, id) {
+                Some(branch) => format!("{id} ({status}, branch {branch})"),
+                None => format!("{id} ({status}, no branch: it never started)"),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// What a 'no' to the abandon question means: the run stays exactly as it was.
+///
+/// The event is never written, so nothing is logged, no tab is closed and the
+/// branches stay put. A 'yes' hands the caller the event it already has.
+fn decided(state: &RunState, abandoned: &[TaskId], answer: bool) -> Result<(), CliError> {
+    if answer {
+        return Ok(());
+    }
+    Err(CliError::Invalid(anyhow!(
+        "not abandoned: run {} is still in flight, so nothing was logged and no tab was \
+         closed\nkept: {}\nrun `shprd up` to resume the run",
+        run_id(state),
+        left_list(state, abandoned)
+    )))
+}
+
+/// How the verb that ends a run was asked to end it.
+///
+/// Both verbs share every decision and every question and differ only in the
+/// command a refusal names, so the verb travels with the flags.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EndRun {
+    /// End the run even though tasks are unfinished, keeping their branches.
+    pub abandon: bool,
+    /// Answer the abandon's question for the record: a debug build only.
+    pub yes: bool,
+    /// The command a refusal names, e.g. `shprd down --abandon`.
+    pub verb: &'static str,
+}
+
+impl EndRun {
+    /// `shprd down` as the human typed it.
+    pub const fn down(abandon: bool, yes: bool) -> Self {
+        Self {
+            abandon,
+            yes,
+            verb: DOWN_VERB,
+        }
+    }
+
+    /// `shprd run finish` as the human typed it.
+    pub const fn finish(abandon: bool, yes: bool) -> Self {
+        Self {
+            abandon,
+            yes,
+            verb: FINISH_VERB,
+        }
+    }
+
+    /// A plain finish: it abandons nothing, so it asks nothing.
+    ///
+    /// The verbs themselves always carry the flags a human typed, so this
+    /// exists for the tests that end a run without abandoning anything.
+    #[cfg(test)]
+    pub const fn plain() -> Self {
+        Self::down(false, false)
+    }
+}
+
+/// The command that abandons through `shprd down`.
+const DOWN_VERB: &str = "shprd down --abandon";
+
+/// The command that abandons through `shprd run finish`.
+const FINISH_VERB: &str = "shprd run finish --abandon";
+
+/// What a human can do instead of ending a run with work still in it.
+///
+/// The first half is the fix the incident called for: `up` resumes the run,
+/// so a restart costs nothing and strands nothing. The second is the escape
+/// hatch, and it says what it keeps.
+const RESTART_ADVICE: &str = "to restart the orchestrator or watchdog, run `shprd up` \
+     (it resumes this run); to end the run anyway and keep the branches, run \
+     `shprd down --abandon`";
+
+/// One line per unfinished task, naming the task and where it sits.
+fn unfinished_lines(state: &RunState, unfinished: &[TaskId]) -> String {
+    let lines: Vec<String> = unfinished
+        .iter()
+        .map(|id| {
+            let status = state
+                .tasks
+                .get(id)
+                .map_or("unknown", |task| crate::summary::status_name(task.status));
+            format!("  {id}  {status}")
+        })
+        .collect();
+    format!(
+        "{} task(s) unfinished:\n{}",
+        unfinished.len(),
+        lines.join("\n")
+    )
+}
+
+/// The run's identifier, for a message about it.
+fn run_id(state: &RunState) -> &str {
+    state.run.as_ref().map_or("?", |run| run.run_id.as_str())
+}
+
+/// Tells a human which branches keep the work an abandoned run left behind.
+///
+/// Nothing is printed for a run that abandoned nothing: a run that ended with
+/// its work integrated and merged has no loose ends to name.
+pub(crate) fn print_abandoned(state: &RunState, event: &Event) {
+    let EventKind::RunFinished { abandoned } = &event.kind else {
+        return;
+    };
+    for line in abandoned_lines(state, abandoned) {
+        println!("{line}");
+    }
+}
+
+/// The lines a human reads when a run is abandoned: what was left, and where.
+///
+/// The branch is the point: the run is over and its log is about to be
+/// archived, so the branch name is the only handle on the work that survived.
+fn abandoned_lines(state: &RunState, abandoned: &[TaskId]) -> Vec<String> {
+    if abandoned.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "ended the run with unfinished tasks: {}",
+        abandoned.join(", ")
+    )];
+    for id in abandoned {
+        let status = state
+            .tasks
+            .get(id)
+            .map_or("unknown", |task| crate::summary::status_name(task.status));
+        lines.push(match task_branch(state, id) {
+            Some(branch) => format!("  {id}  {status}  branch {branch}"),
+            None => format!("  {id}  {status}  no branch: it never started"),
+        });
+    }
+    lines
+}
+
+/// The branch a task's work sits on, as the attempt that made it recorded it.
+///
+/// A spawn names it from [`shprd_git::worktree::Layout::branch_name`] and the
+/// log keeps it on the attempt, so this is the branch a human goes to and the
+/// one the janitor would archive. A task nothing ever spawned has none: the
+/// name a spawn would have made names nothing on disk.
+pub(crate) fn task_branch<'a>(state: &'a RunState, id: &TaskId) -> Option<&'a str> {
+    state
+        .tasks
+        .get(id)?
+        .attempts
+        .last()
+        .map(|attempt| attempt.branch.as_str())
 }
 
 /// Closes the watchdog's pane, as the run's last act.
@@ -277,8 +533,13 @@ pub(crate) fn close_watch_pane(mux: &dyn Mux, ctx: &Ctx) {
 }
 
 /// `shprd down` against the host the human is working in.
-pub fn down_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
-    down(&spawn::real_mux(), ctx, home)
+pub fn down_verb(ctx: &Ctx, args: &EndRunArgs, home: Option<&Path>) -> Result<(), CliError> {
+    down(
+        &spawn::real_mux(),
+        ctx,
+        home,
+        EndRun::down(args.abandon, args.yes),
+    )
 }
 
 /// Checks the three things `up` cannot work without, in the order a human
@@ -471,7 +732,21 @@ fn archive_finished_run(ctx: &Ctx, state: &RunState) -> Result<Option<PathBuf>, 
         run.run_id,
         shown.display()
     );
+    if !state.abandoned.is_empty() {
+        println!("{}", abandoned_line(&run.run_id, &state.abandoned));
+    }
     Ok(Some(target))
+}
+
+/// The line `up` prints for a run that was archived after ending with work left.
+///
+/// The new run starts empty, so this line is the only place the human is told
+/// that the previous one did not finish its jobs and where the work still is.
+fn abandoned_line(run_id: &str, abandoned: &[TaskId]) -> String {
+    format!(
+        "run {run_id} was ended with unfinished tasks: {}; their branches are kept",
+        abandoned.join(", ")
+    )
 }
 
 /// Where `run_id`'s log is archived: `<dir>/<run_id>.jsonl`, or the first free
@@ -1385,7 +1660,8 @@ mod tests {
 
     use anyhow::{Context, Result};
     use shprd_core::config::{Config, Skills};
-    use shprd_core::event::Actor;
+    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::rules::RuleError;
     use shprd_mux::Capabilities;
     use shprd_mux::fake::{Call, FakeMux};
     use shprd_roster::spec::load_dir;
@@ -2469,6 +2745,11 @@ mod tests {
             integration_branch: "shprd/rabc123/int".to_string(),
         })
         .map_err(failed)?;
+        working_attempt(ctx)
+    }
+
+    /// Adds one task and spawns an agent for it, into a run already started.
+    fn working_attempt(ctx: &Ctx) -> Result<()> {
         ctx.commit(EventKind::TaskAdded {
             task: "M4.1".to_string(),
             title: "up and down".to_string(),
@@ -2899,7 +3180,7 @@ mod tests {
             .watch
             .context("the watchdog's pane is recorded")?
             .pane;
-        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
 
         assert!(
             mux.calls()
@@ -2926,7 +3207,7 @@ mod tests {
             .pane;
         mux.close_pane(&PaneId::new(pane))
             .map_err(|err| anyhow!("{err}"))?;
-        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
         Ok(())
     }
 
@@ -2935,14 +3216,310 @@ mod tests {
         let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
         let env = fixture.env()?;
         working_task(&env.ctx)?;
-        let err = down(&mux(), &env.ctx, Some(&env.home))
+        let err = down(&mux(), &env.ctx, Some(&env.home), EndRun::plain())
             .err()
             .context("down must refuse")?;
         assert_eq!(err.exit_code(), 2, "{err}");
-        assert!(err.to_string().contains("Working"), "{err}");
+        assert!(err.to_string().contains("working"), "{err}");
+        assert!(err.to_string().contains("shprd up"), "{err}");
         assert!(
             !env.ctx.state().map_err(failed)?.finished,
             "a refused finish writes nothing"
+        );
+        Ok(())
+    }
+
+    /// The reported task's attempt, gated and integrated, with its PR merged.
+    ///
+    /// This is the one shape of run that ends without a human's say-so: every
+    /// task landed and the pull request carrying that work merged.
+    fn landed_task(ctx: &Ctx) -> Result<()> {
+        passed_task(ctx)?;
+        ctx.commit(EventKind::Integrated {
+            task: "M4.1".to_string(),
+            commits: vec!["abc1234".to_string()],
+        })
+        .map_err(failed)?;
+        ctx.commit(EventKind::PrOpened {
+            number: 7,
+            url: "https://example.invalid/pr/7".to_string(),
+            head: "shprd/rabc123/int".to_string(),
+        })
+        .map_err(failed)?;
+        ctx.commit(EventKind::PrMerged {
+            number: 7,
+            head: "abc1234".to_string(),
+        })
+        .map_err(failed)?;
+        Ok(())
+    }
+
+    /// The reported task's first gate passed, so it waits to be integrated.
+    fn passed_task(ctx: &Ctx) -> Result<()> {
+        reported_task(ctx)?;
+        ctx.commit(EventKind::GatePassed {
+            task: "M4.1".to_string(),
+            attempt: 1,
+            gate: "tests".to_string(),
+            findings: Vec::new(),
+            source: None,
+        })
+        .map_err(failed)?;
+        Ok(())
+    }
+
+    /// The working task's attempt, reported completed: it waits on its gates.
+    fn reported_task(ctx: &Ctx) -> Result<()> {
+        working_task(ctx)?;
+        reported_attempt(ctx)
+    }
+
+    /// Reports the task's attempt completed, into a run already started.
+    fn reported_attempt(ctx: &Ctx) -> Result<()> {
+        ctx.commit(EventKind::Reported {
+            task: "M4.1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: Vec::new(),
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+        })
+        .map_err(failed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn down_refuses_a_reported_task() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let before = env.ctx.state().map_err(failed)?.last_seq;
+        let err = down(&mux(), &env.ctx, Some(&env.home), EndRun::plain())
+            .err()
+            .context("down must refuse a reported task")?;
+
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let message = err.to_string();
+        assert!(message.contains("M4.1"), "{message}");
+        assert!(message.contains("reported"), "{message}");
+        assert!(message.contains("1 task(s) unfinished"), "{message}");
+        assert!(message.contains("shprd up"), "{message}");
+        assert!(message.contains("shprd down --abandon"), "{message}");
+        let state = env.ctx.state().map_err(failed)?;
+        assert!(!state.finished, "a refused finish writes nothing");
+        assert_eq!(state.last_seq, before, "a refusal appends no event");
+        Ok(())
+    }
+
+    #[test]
+    fn down_refuses_a_passed_task_that_was_never_integrated() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        passed_task(&env.ctx)?;
+        let err = down(&mux(), &env.ctx, Some(&env.home), EndRun::plain())
+            .err()
+            .context("down must refuse work that was never integrated")?;
+
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("M4.1"), "{err}");
+        // The word a human needs is the status the task is actually in.
+        assert!(err.to_string().contains("passed"), "{err}");
+        assert!(!env.ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    #[test]
+    fn down_refuses_landed_work_whose_pull_request_has_not_merged() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        passed_task(&env.ctx)?;
+        env.ctx
+            .commit(EventKind::Integrated {
+                task: "M4.1".to_string(),
+                commits: vec!["abc1234".to_string()],
+            })
+            .map_err(failed)?;
+        let err = down(&mux(), &env.ctx, Some(&env.home), EndRun::plain())
+            .err()
+            .context("down must refuse work nothing carries")?;
+
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("shprd land"), "{err}");
+        assert!(err.to_string().contains("shprd down --abandon"), "{err}");
+        assert!(!env.ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    #[test]
+    fn down_abandon_ends_a_run_whose_pull_request_never_merged() -> Result<()> {
+        // The refusal above names `--abandon` as the way out, so it has to work
+        // even though nothing is unfinished: it ends the run naming the landed
+        // task whose work the unmerged pull request would have carried.
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        passed_task(&env.ctx)?;
+        env.ctx
+            .commit(EventKind::Integrated {
+                task: "M4.1".to_string(),
+                commits: vec!["abc1234".to_string()],
+            })
+            .map_err(failed)?;
+        let before = env.ctx.state().map_err(failed)?;
+        down(&mux(), &env.ctx, Some(&env.home), EndRun::down(true, true)).map_err(failed)?;
+
+        let state = env.ctx.state().map_err(failed)?;
+        assert!(state.finished, "the abandon ends the run");
+        assert_eq!(
+            state.abandoned,
+            vec!["M4.1".to_string()],
+            "the landed task is what the unmerged pull request left behind"
+        );
+        let lines = abandoned_lines(&before, &state.abandoned);
+        assert!(
+            lines.iter().any(|line| line.contains("integrated")),
+            "each abandoned task is named with its status: {lines:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn down_finishes_a_run_whose_work_landed_and_merged() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        landed_task(&env.ctx)?;
+        down(&mux(), &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
+
+        let state = env.ctx.state().map_err(failed)?;
+        assert!(state.finished);
+        assert!(
+            state.abandoned.is_empty(),
+            "a run that landed everything abandoned nothing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn down_abandon_records_the_tasks_it_left_and_their_branches() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let before = env.ctx.state().map_err(failed)?;
+        down(&mux(), &env.ctx, Some(&env.home), EndRun::down(true, true)).map_err(failed)?;
+
+        let state = env.ctx.state().map_err(failed)?;
+        assert!(state.finished, "abandon is the explicit way to end the run");
+        assert_eq!(state.abandoned, vec!["M4.1".to_string()]);
+        let lines = abandoned_lines(&before, &state.abandoned);
+        assert!(
+            lines.iter().any(|line| line.contains("feature/m4-up")),
+            "a human is told the branch that keeps the work: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("reported")),
+            "each abandoned task is named with its status: {lines:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_finish_refuses_and_abandons_exactly_as_down_does() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let err = crate::cmd::run::finish(&mux(), &env.ctx, Some(&env.home), EndRun::plain())
+            .err()
+            .context("run finish must refuse unfinished work")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("shprd up"), "{err}");
+        assert!(!env.ctx.state().map_err(failed)?.finished);
+
+        crate::cmd::run::finish(
+            &mux(),
+            &env.ctx,
+            Some(&env.home),
+            EndRun::finish(true, true),
+        )
+        .map_err(failed)?;
+        let state = env.ctx.state().map_err(failed)?;
+        assert!(state.finished);
+        assert_eq!(state.abandoned, vec!["M4.1".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn the_abandon_question_names_the_run_the_tasks_and_their_branches() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let state = env.ctx.state().map_err(failed)?;
+        let question = abandon_question(&state, &abandonable_tasks(&state));
+
+        let run_id = state
+            .run
+            .as_ref()
+            .context("the run started")?
+            .run_id
+            .clone();
+        assert!(question.contains(&run_id), "{question}");
+        assert!(question.contains("M4.1"), "{question}");
+        assert!(question.contains("reported"), "{question}");
+        assert!(
+            question.contains("feature/m4-up"),
+            "the branch that keeps the work is named: {question}"
+        );
+        assert!(
+            question.contains("[y/N]"),
+            "the question says what an answer looks like: {question}"
+        );
+        Ok(())
+    }
+
+    /// A 'no' at the question writes nothing: no event, so no closed tab and no
+    /// abandoned list. The decision is taken from the answer alone, so the test
+    /// needs no terminal to make it.
+    #[test]
+    fn answering_no_to_the_abandon_question_leaves_the_run_as_it_was() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let before = env.ctx.state().map_err(failed)?;
+        let abandoned = abandonable_tasks(&before);
+        assert!(!abandoned.is_empty(), "there is work to leave behind");
+
+        let err = decided(&before, &abandoned, false)
+            .err()
+            .context("a no refuses")?;
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("not abandoned"), "{err}");
+
+        let after = env.ctx.state().map_err(failed)?;
+        assert!(!after.finished, "the run is still in flight");
+        assert!(after.abandoned.is_empty(), "nothing was abandoned");
+        Ok(())
+    }
+
+    #[test]
+    fn up_names_what_an_abandoned_run_kept() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let first = up(&mux, &env).map_err(failed)?;
+        working_attempt(&env.ctx)?;
+        reported_attempt(&env.ctx)?;
+        down(&mux, &env.ctx, Some(&env.home), EndRun::down(true, true)).map_err(failed)?;
+        let abandoned = env.ctx.state().map_err(failed)?.abandoned;
+        let second = up(&mux, &env).map_err(failed)?;
+
+        assert!(!second.resumed, "an abandoned run is over; up starts anew");
+        assert_ne!(second.run_id, first.run_id);
+        assert_eq!(
+            abandoned_line(&first.run_id, &abandoned),
+            format!(
+                "run {} was ended with unfinished tasks: M4.1; their branches are kept",
+                first.run_id
+            )
         );
         Ok(())
     }
@@ -2959,7 +3536,7 @@ mod tests {
                 integration_branch: "shprd/rabc123/int".to_string(),
             })
             .map_err(failed)?;
-        down(&mux(), &env.ctx, Some(&env.home)).map_err(failed)?;
+        down(&mux(), &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
         assert!(env.ctx.state().map_err(failed)?.finished);
         Ok(())
     }
@@ -2970,7 +3547,7 @@ mod tests {
         let env = fixture.env()?;
         let mux = mux();
         let first = up(&mux, &env).map_err(failed)?;
-        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
         let second = up(&mux, &env).map_err(failed)?;
 
         assert!(!second.resumed, "a finished run is never resumed");
@@ -3010,7 +3587,7 @@ mod tests {
         let env = fixture.env()?;
         let mux = mux();
         let first = up(&mux, &env).map_err(failed)?;
-        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
         let runs = fixture.repo.path().join(".shprd").join("runs");
         std::fs::create_dir_all(&runs)?;
         let taken = runs.join(format!("{}.jsonl", first.run_id));
@@ -3044,7 +3621,7 @@ mod tests {
         std::fs::write(briefs.join("T1-a1.tab"), worker.id.as_str())?;
         std::fs::write(briefs.join("T1-a1-review.tab"), reviewer.id.as_str())?;
 
-        down(&mux, &env.ctx, Some(&env.home)).map_err(failed)?;
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
 
         let open = mux
             .list_tabs(&workspace.id)
@@ -3344,6 +3921,59 @@ mod tests {
                 text.matches(title).count()
             );
         }
+        Ok(())
+    }
+
+    /// The rule is the backstop, not the verb: `down` refuses a run with work
+    /// in flight before it builds the event, so this commits the event anyway,
+    /// as the orchestrator — the one non-human actor the rule lets finish a run.
+    #[test]
+    fn the_rule_refuses_a_finish_that_never_went_through_the_verb() -> Result<()> {
+        let fixture = Fixture::new(None)?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let ctx = env.ctx.as_actor(Actor::Orchestrator);
+        let before = ctx.state().map_err(failed)?.last_seq;
+        let err = match ctx.commit(EventKind::RunFinished {
+            abandoned: Vec::new(),
+        }) {
+            Ok(event) => panic!("the finish was recorded: {event:?}"),
+            Err(err) => err,
+        };
+        match err {
+            CliError::Refused(RuleError::RunUnfinished { tasks }) => {
+                assert_eq!(tasks, vec!["M4.1".to_string()])
+            }
+            other => panic!("the finish failed for another reason: {other:?}"),
+        }
+        // Nothing was written: a refused event never reaches the log.
+        let state = ctx.state().map_err(failed)?;
+        assert!(!state.finished);
+        assert_eq!(state.last_seq, before, "a refusal appends no event");
+        Ok(())
+    }
+
+    /// An agent cannot abandon its own run: that is what closes the tabs and
+    /// walks away from the task it was given.
+    #[test]
+    fn the_rule_refuses_an_agent_abandoning_the_run() -> Result<()> {
+        let fixture = Fixture::new(None)?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let ctx = env.ctx.as_actor(Actor::Agent {
+            id: "claude".to_string(),
+        });
+        let err = match ctx.commit(EventKind::RunFinished {
+            abandoned: vec!["M4.1".to_string()],
+        }) {
+            Ok(event) => panic!("the abandon was recorded: {event:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, CliError::Refused(RuleError::AbandonNotHuman { .. })),
+            "{err:?}"
+        );
+        assert!(!ctx.state().map_err(failed)?.finished);
         Ok(())
     }
 }

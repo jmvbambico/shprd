@@ -2001,8 +2001,10 @@ project_dirs = []
             .create_tab(&workspace.id, "api", scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         record_tab(&scratch, "run-done", "api", 1, &tab.id);
-        ctx.commit(EventKind::RunFinished {})
-            .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::RunFinished {
+            abandoned: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let message = match prompt_in(&mux, scratch.home.path(), &ctx, "api", "hello") {
             Ok(()) => panic!("a prompt after the run finished was sent"),

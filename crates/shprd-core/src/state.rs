@@ -39,6 +39,12 @@ pub struct RunState {
     pub resources: BTreeMap<(ResourceKind, String), ResourceRecord>,
     /// Whether the run has finished.
     pub finished: bool,
+    /// The tasks the finished run ended with unfinished, in log order.
+    ///
+    /// Non-empty only when a human ended the run anyway (`shprd down
+    /// --abandon`): it names the work that was left behind, and the branches
+    /// that keep it alive after the run is archived.
+    pub abandoned: Vec<TaskId>,
     /// The last run-wide gate: the head it ran on, whether it passed, and the
     /// sequence number of the event that recorded it.
     ///
@@ -640,7 +646,10 @@ impl RunState {
             EventKind::OrchestratorNotified { up_to_seq } => {
                 self.notified_up_to_seq = Some(*up_to_seq);
             }
-            EventKind::RunFinished {} => self.finished = true,
+            EventKind::RunFinished { abandoned } => {
+                self.finished = true;
+                self.abandoned = abandoned.clone();
+            }
         }
     }
 }
@@ -819,7 +828,12 @@ mod tests {
 
     #[test]
     fn creating_a_resource_after_the_run_finished_is_refused() {
-        let state = match fold_extra(vec![ev(3, EventKind::RunFinished {})]) {
+        let state = match fold_extra(vec![ev(
+            3,
+            EventKind::RunFinished {
+                abandoned: Vec::new(),
+            },
+        )]) {
             Ok(state) => state,
             Err(err) => panic!("finishing must fold: {err}"),
         };
@@ -830,10 +844,27 @@ mod tests {
     }
 
     #[test]
+    fn a_run_finished_logged_before_abandonment_still_folds() {
+        // `abandoned` arrived with `--abandon`. An old log's last event carries
+        // no such field, so it must fold as a run that abandoned nothing
+        // instead of failing to parse.
+        let text = r#"{"seq":3,"at_ms":5,"actor":{"type":"engine"},"kind":"run_finished"}"#;
+        let event: Event = serde_json::from_str(text).unwrap_or_else(|err| panic!("{err}"));
+        let state = fold_extra(vec![event]).unwrap_or_else(|err| panic!("{err}"));
+        assert!(state.finished);
+        assert!(state.abandoned.is_empty());
+    }
+
+    #[test]
     fn removing_a_resource_after_the_run_finished_is_allowed() {
         let state = match fold_extra(vec![
             resource(3, ResourceAction::Created, "wt/a"),
-            ev(4, EventKind::RunFinished {}),
+            ev(
+                4,
+                EventKind::RunFinished {
+                    abandoned: Vec::new(),
+                },
+            ),
         ]) {
             Ok(state) => state,
             Err(err) => panic!("a finished run must keep its ledger: {err}"),

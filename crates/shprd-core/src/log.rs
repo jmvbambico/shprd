@@ -345,7 +345,9 @@ mod tests {
     }
 
     fn finished() -> EventKind {
-        EventKind::RunFinished {}
+        EventKind::RunFinished {
+            abandoned: Vec::new(),
+        }
     }
 
     fn open_log(dir: &Path) -> EventLog {

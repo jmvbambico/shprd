@@ -557,7 +557,7 @@ fn notices(events: &[Event], since: Option<u64>) -> Vec<Notice> {
     // integration is the news; a finished run is nobody's cue.
     let finished = events
         .iter()
-        .any(|event| matches!(event.kind, EventKind::RunFinished {}));
+        .any(|event| matches!(event.kind, EventKind::RunFinished { .. }));
     let integrated = plan.iter().all(|task| {
         newest
             .get(task)

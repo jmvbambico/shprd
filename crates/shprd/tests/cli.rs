@@ -911,7 +911,10 @@ fn restore_refuses_a_finished_run_before_creating_the_branch() {
     integrated_task(&root, branch);
     let tip = git.git(&["rev-parse", "main"]);
     git.git(&["update-ref", "refs/shprd/archive/r1/T1", &tip]);
-    ok(&root, &["run", "finish"]);
+    // T1 landed but a second task never ran, so the run only ends when a human
+    // says to end it anyway, naming the work it leaves behind.
+    add_task(&root, "T2", "crates/y");
+    ok(&root, &["run", "finish", "--abandon", "--yes"]);
 
     let output = run_with_home(&root, home.path(), &["restore", "T1"]);
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -921,6 +924,61 @@ fn restore_refuses_a_finished_run_before_creating_the_branch() {
         !git.has_ref(branch),
         "a refused restore must not leave the branch behind"
     );
+}
+
+#[test]
+fn abandoning_refuses_without_a_terminal_and_logs_nothing() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T2", "crates/y");
+    // An agent's shell tool has no TTY, so `--abandon` without the debug
+    // `--yes` has nobody to ask and must not guess: nothing is written, so the
+    // run is still in flight.
+    let before = last_event(root);
+    let output = run(root, &["run", "finish", "--abandon"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let message = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(message.contains("stdin is not a terminal"), "{message}");
+    assert!(
+        message.contains("shprd run finish --abandon"),
+        "the refusal names the command to run: {message}"
+    );
+    assert_eq!(last_event(root), before, "nothing was logged");
+    assert!(!state(root)["finished"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn abandoning_is_refused_for_an_agent_actor_even_with_yes() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T2", "crates/y");
+    let before = last_event(root);
+    let output = match Command::new(BIN)
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "run",
+            "finish",
+            "--abandon",
+            "--yes",
+        ])
+        .env("SHPRD_ACTOR", "agent:codex")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running the binary: {err}"),
+    };
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("only a human abandons a run"), "{stderr}");
+    assert_eq!(last_event(root), before, "nothing was logged");
 }
 
 #[test]
