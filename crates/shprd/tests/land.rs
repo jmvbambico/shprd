@@ -927,3 +927,146 @@ fn an_outside_merge_counts_only_at_the_integration_head() {
         "a merge at the integration head is in the log"
     );
 }
+
+#[test]
+fn a_dropped_task_stops_blocking_landing_and_is_listed_in_the_pull_request() {
+    // T2 is Working and will never integrate, which is exactly what blocks
+    // `land`; the human's drop is what unblocks the run.
+    let fixture = Fixture::new();
+    fixture.start();
+    // T2 works in its own scope, so two live tasks may hold the plan at once.
+    fixture.ok(&[
+        "agent",
+        "task",
+        "add",
+        "--id",
+        "T2",
+        "--title",
+        "a task",
+        "--scope",
+        "b.txt",
+        "--acceptance",
+        "it works",
+    ]);
+    fixture.ok(&[
+        "agent",
+        "spawn",
+        "--record-only",
+        "--task",
+        "T2",
+        "--attempt",
+        "1",
+        "--agent",
+        "w2",
+        "--worktree",
+        "/tmp/wt2",
+        "--branch",
+        "feature/t2",
+    ]);
+    fixture.land_a_task("T1");
+    fixture.script_forge("{");
+    let message = fixture.refused(&["land"]);
+    assert!(message.contains("is Working"), "{message}");
+
+    let printed = fixture.ok(&[
+        "drop",
+        "T2",
+        "--reason",
+        "the human changed their mind",
+        "--yes",
+    ]);
+    assert!(printed.contains("dropped T2"), "{printed}");
+    assert!(
+        fixture.ok(&["status"]).contains("⊘ T2 dropped"),
+        "the task reads dropped"
+    );
+
+    fixture.script_forge("{}");
+    fixture.ok(&["land"]);
+    let calls = fixture.forge_calls();
+    let opened = match calls_with(&calls, "create ").first() {
+        Some(call) => call.clone(),
+        None => panic!("no create call: {calls:?}"),
+    };
+    let body = match std::fs::read_to_string(body_of(&opened)) {
+        Ok(body) => body,
+        Err(err) => panic!("read the body: {err}"),
+    };
+    assert!(
+        body.contains("## Dropped\n\n- T2: the human changed their mind"),
+        "{body}"
+    );
+    assert!(
+        body.contains("cross-vendor-review: passed"),
+        "the dropped task is not an integrated task to review: {body}"
+    );
+}
+
+#[test]
+fn down_finishes_a_run_whose_remaining_task_was_dropped() {
+    // The work landed and merged; the other task was dropped. Nothing is
+    // stranded, so this is a normal finish: no `--abandon`, no question.
+    let fixture = landed();
+    let head = fixture.integration_head();
+    fixture.script_forge(&status_script(&head, true, Some(true)));
+    fixture.ok(&["land", "--merge"]);
+    fixture.working_task("T2");
+    fixture.ok(&["drop", "T2", "--reason", "not needed", "--yes"]);
+
+    fixture.ok(&["down"]);
+    let finished = fixture.events().into_iter().rev().find_map(|event| {
+        if let EventKind::RunFinished { abandoned } = event.kind {
+            Some(abandoned)
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        finished,
+        Some(Vec::new()),
+        "the run ended with nothing abandoned"
+    );
+}
+
+#[test]
+fn drop_is_refused_without_a_terminal_and_for_an_agent_actor() {
+    let fixture = Fixture::new();
+    fixture.start();
+    fixture.ok(&[
+        "agent",
+        "task",
+        "add",
+        "--id",
+        "T2",
+        "--title",
+        "a task",
+        "--scope",
+        "b.txt",
+        "--acceptance",
+        "it works",
+    ]);
+    let before = fixture.events().len();
+
+    // No terminal and no --yes: nobody answered the question, so nothing is
+    // dropped and nothing is written.
+    let message = fixture.refused(&["drop", "T2", "--reason", "not needed"]);
+    assert!(message.contains("stdin is not a terminal"), "{message}");
+    assert_eq!(fixture.events().len(), before, "nothing was logged");
+
+    // An agent pane may not drop its own work, even with `--yes`.
+    let output = match fixture
+        .command(&["drop", "T2", "--reason", "not needed", "--yes"])
+        .env("SHPRD_ACTOR", "orchestrator")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN}: {err}"),
+    };
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("SHPRD_ACTOR=orchestrator"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.events().len(), before, "nothing was logged");
+}
