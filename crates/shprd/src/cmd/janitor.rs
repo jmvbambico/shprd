@@ -6,11 +6,11 @@
 //! A dry run writes nothing at all.
 //!
 //! A run's review packet folder is shprd's own directory, at
-//! `<home>/.shprd/reviews/<run>`. `--apply` adopts it while the run can still
-//! record anything, so a finished run's removal is also in the ledger; a run
-//! finished before any adoption has no record to close, and its folder is still
-//! archived and removed, because the path comes from the layout and the run id
-//! rather than from the ledger.
+//! `<home>/.shprd/reviews/<run>`, and it is spent once the run has finished.
+//! `--apply` copies it aside, deletes it, and records the removal: the folder's
+//! path comes from the layout and the run id rather than from a ledger record,
+//! so a folder no earlier record ever held is cleaned all the same, and its
+//! removal is the audit trail the log keeps.
 
 use std::path::Path;
 
@@ -18,7 +18,7 @@ use anyhow::anyhow;
 use serde_json::json;
 use shprd_core::event::{EventKind, ResourceAction, ResourceKind};
 use shprd_core::log::{Clock, SystemClock};
-use shprd_core::state::{ResourceStatus, RunState};
+use shprd_core::state::RunState;
 
 use crate::cli::{JanitorArgs, RestoreArgs};
 use crate::cmd::emit;
@@ -36,17 +36,9 @@ pub fn plan_verb(
 ) -> Result<(), CliError> {
     let (loaded, layout) = config_and_layout(ctx, home)?;
     let archive_days = args.archive_days.unwrap_or(loaded.janitor.archive_days);
-    let (mut state, mut events) = ctx.load()?;
+    let (state, events) = ctx.load()?;
     // A plan without a run would be empty; say so instead of printing nothing.
     let _ = run_id(&state)?;
-    // Adopting first means the plan sees the folder as the ledger's own, which
-    // is what lets `--apply` record its removal later. A dry run never writes,
-    // so it plans from whatever ledger is already there.
-    if args.apply && adopt_review_packets(ctx, &state, &layout)? {
-        let reloaded = ctx.load()?;
-        state = reloaded.0;
-        events = reloaded.1;
-    }
     let now_ms = SystemClock.now_ms();
     let actions = janitor::plan(&state, &events, &layout, now_ms, archive_days);
 
@@ -134,54 +126,8 @@ fn config_and_layout(ctx: &Ctx, home: Option<&Path>) -> Result<(Config, Layout),
     Ok((loaded, layout))
 }
 
-/// Records the run's review packet folder while the run can still write.
-///
-/// `run finish` refuses every creation, so a run that is already finished has
-/// nothing to adopt with. While it is open — its pull request merged, say —
-/// `--apply` adopts the folder exactly as `up` adopts a worktree it finds in the
-/// layout, and the plan's later removal then also closes that record. Adopting
-/// records the folder and nothing else: no packet is read, moved or deleted
-/// here.
-///
-/// Returns whether an event was appended, so the caller can reload the state it
-/// plans from.
-fn adopt_review_packets(ctx: &Ctx, state: &RunState, layout: &Layout) -> Result<bool, CliError> {
-    if !janitor::review_packets_adoptable(state) {
-        return Ok(false);
-    }
-    let Some(run) = &state.run else {
-        return Ok(false);
-    };
-    let Some(dir) = janitor::review_packets_dir(layout, &run.run_id) else {
-        return Ok(false);
-    };
-    if !matches!(std::fs::symlink_metadata(&dir), Ok(meta) if meta.is_dir()) {
-        return Ok(false);
-    }
-    let name = dir.display().to_string();
-    let held = state
-        .resources
-        .get(&(ResourceKind::Worktree, name.clone()))
-        .is_some_and(|record| {
-            matches!(
-                record.status,
-                ResourceStatus::Live | ResourceStatus::Archived
-            )
-        });
-    if held {
-        return Ok(false);
-    }
-    ctx.commit(EventKind::Resource {
-        action: ResourceAction::Created,
-        kind: ResourceKind::Worktree,
-        name,
-        task: None,
-    })?;
-    Ok(true)
-}
-
 /// The run id the plan is about.
-fn run_id(state: &shprd_core::state::RunState) -> Result<String, CliError> {
+fn run_id(state: &RunState) -> Result<String, CliError> {
     match &state.run {
         Some(info) => Ok(info.run_id.clone()),
         None => Err(CliError::other(anyhow!(
@@ -275,16 +221,6 @@ mod tests {
             }
         }
 
-        /// Records the review packet folder live, as an earlier adoption would.
-        fn adopt(&self, dir: &std::path::Path) {
-            self.commit(EventKind::Resource {
-                action: ResourceAction::Created,
-                kind: ResourceKind::Worktree,
-                name: dir.display().to_string(),
-                task: None,
-            });
-        }
-
         /// The folder holding run `r1`'s packets, with one packet in it.
         fn packets(&self) -> PathBuf {
             let dir = self.home.join(".shprd").join("reviews").join("r1");
@@ -353,8 +289,10 @@ mod tests {
         let fixture = Fixture::new();
         fixture.start();
         let dir = fixture.packets();
-        // Never adopted, as a finished run normally is: the dry run has to
-        // list the folder from the layout alone, without recording it.
+        // Never adopted: the run finished without an earlier apply, so nothing
+        // recorded the folder, and a finished run can record no creation. The
+        // dry run has to list the folder from the layout alone, without
+        // recording it.
         fixture.finish();
         let before = fixture.log_text();
 
@@ -394,7 +332,6 @@ mod tests {
         let fixture = Fixture::new();
         fixture.start();
         let dir = fixture.packets();
-        fixture.adopt(&dir);
         fixture.finish();
 
         fixture.apply();
@@ -408,7 +345,7 @@ mod tests {
                 kind,
                 EventKind::Resource {
                     action: ResourceAction::Removed,
-                    kind: ResourceKind::Worktree,
+                    kind: ResourceKind::ReviewPackets,
                     ref name,
                     task: None,
                 } if name == &dir.display().to_string()
@@ -418,81 +355,37 @@ mod tests {
     }
 
     #[test]
-    fn apply_adopts_review_packets_once_the_pull_request_merged() {
+    fn apply_keeps_and_records_nothing_for_a_run_that_has_not_finished() {
         let fixture = Fixture::new();
         fixture.start();
         let dir = fixture.packets();
         fixture.merge();
 
-        // A merge lets an apply adopt the folder, because a run that has not
-        // finished can still record it; it does not remove packets the run may
-        // still be reading.
+        // Packets feed the pull request body and the review gate, so a run
+        // that has not finished keeps them — merged or not — and an apply
+        // records no removal for them.
         fixture.apply();
         assert!(
             dir.join("T1-a1/findings.json").is_file(),
             "an unfinished run keeps its packets"
         );
         assert!(!fixture.archived().exists(), "nothing may be archived yet");
-        let resources = fixture.resource_events();
         assert!(
-            resources.iter().any(|kind| matches!(
-                kind,
-                EventKind::Resource {
-                    action: ResourceAction::Created,
-                    kind: ResourceKind::Worktree,
-                    name,
-                    task: None,
-                } if name == &dir.display().to_string()
-            )),
-            "the adopted folder is recorded: {resources:?}"
-        );
-
-        // Once the run finishes, the adopted folder is archived and removed,
-        // and the removal is recorded after the adoption.
-        fixture.finish();
-        fixture.apply();
-        assert!(!dir.exists(), "the folder must be gone");
-        assert!(
-            fixture.archived().join("T1-a1/findings.json").is_file(),
-            "the packets must survive in the archive"
-        );
-        let resources = fixture.resource_events();
-        let created = resources.iter().position(|kind| {
-            matches!(
-                kind,
-                EventKind::Resource {
-                    action: ResourceAction::Created,
-                    kind: ResourceKind::Worktree,
-                    name,
-                    task: None,
-                } if name == &dir.display().to_string()
-            )
-        });
-        let removed = resources.iter().position(|kind| {
-            matches!(
-                kind,
-                EventKind::Resource {
-                    action: ResourceAction::Removed,
-                    kind: ResourceKind::Worktree,
-                    name,
-                    task: None,
-                } if name == &dir.display().to_string()
-            )
-        });
-        assert!(
-            created.is_some_and(|created| removed.is_some_and(|removed| created < removed)),
-            "the adoption is recorded before the removal: {resources:?}"
+            fixture.resource_events().is_empty(),
+            "nothing was removed, so nothing is recorded: {:?}",
+            fixture.resource_events()
         );
     }
 
     #[test]
-    fn apply_cleans_the_review_packets_of_a_run_finished_before_any_adoption() {
+    fn apply_cleans_the_review_packets_of_a_run_finished_before_any_earlier_apply() {
         let fixture = Fixture::new();
         fixture.start();
         let dir = fixture.packets();
-        // The run finished without an earlier apply, so the ledger never
-        // adopted the folder and, once finished, it never can. The apply must
-        // still archive it and then remove it.
+        // The run finished without an earlier apply, so nothing recorded the
+        // folder and, once finished, it never can. The apply must still archive
+        // the folder, remove it, and record that removal: a cleanup the log
+        // cannot show is a cleanup nobody can audit.
         fixture.finish();
 
         fixture.apply();
@@ -501,6 +394,28 @@ mod tests {
             fixture.archived().join("T1-a1/findings.json").is_file(),
             "the packets must survive in the archive"
         );
+        let removed = fixture.resource_events().into_iter().any(|kind| {
+            matches!(
+                kind,
+                EventKind::Resource {
+                    action: ResourceAction::Removed,
+                    kind: ResourceKind::ReviewPackets,
+                    ref name,
+                    task: None,
+                } if name == &dir.display().to_string()
+            )
+        });
+        assert!(
+            removed,
+            "the removal of a folder the ledger never held must still be recorded"
+        );
+
+        // The log still folds, which is what makes the record usable at all.
+        let state = match fixture.ctx.state() {
+            Ok(state) => state,
+            Err(err) => panic!("the recorded removal must fold: {err}"),
+        };
+        assert!(state.finished, "the run is still finished");
     }
 
     #[test]

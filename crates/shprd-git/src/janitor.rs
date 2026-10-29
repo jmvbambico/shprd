@@ -13,11 +13,11 @@
 //! A finished run's review packet folder, `<home>/.shprd/reviews/<run>`, is
 //! cleaned up the same way: copied aside first and deleted only once that copy
 //! succeeded. It is shprd's own directory rather than a git object, and its
-//! path is derived from the layout and the run id alone, so the archive is what
-//! proves it may go. The folder is adopted while the run is still open — see
-//! `shprd janitor --apply` — because nothing may be created once the run has
-//! finished; a run that finished before any apply has no record, and is cleaned
-//! anyway, with nothing left for the ledger to close.
+//! path is derived from the layout and the run id alone, so the plan — not the
+//! ledger — is what proves it may go. The removal is still recorded, because a
+//! cleanup the log cannot show is a cleanup nobody can audit: nothing may be
+//! created once the run has finished, so a folder no earlier record held is
+//! closed by a removal the ledger accepts without a prior creation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -90,18 +90,15 @@ pub enum Action {
     ///
     /// The folder is `<home>/.shprd/reviews/<run>`. It is copied to
     /// [`review_archive_dir`] first and removed only once that copy succeeded,
-    /// so a failed archive never loses a packet. `recorded` says whether the
-    /// ledger holds the folder: an adopted one is closed in the ledger when it
-    /// goes, while one adopted by no earlier apply has nothing to close. The
-    /// path is derived from the layout and run id, so it is always shprd's own
-    /// directory, finished run or not.
+    /// so a failed archive never loses a packet. The path is derived from the
+    /// layout and run id, so it is always shprd's own directory — which is why
+    /// a finished run's folder is cleaned whether or not an earlier record ever
+    /// held it. The removal is what the ledger records.
     ArchiveReviewPackets {
         /// The run the packets belong to.
         run: String,
         /// The folder holding them.
         dir: PathBuf,
-        /// Whether the ledger holds it `Live` or `Archived`.
-        recorded: bool,
     },
 }
 
@@ -136,9 +133,10 @@ impl Action {
     /// all: a branch it refuses has no archive ref, so this returns that
     /// refusal rather than recording a ref shprd never made.
     ///
-    /// A review packet folder that no earlier apply adopted yields no event:
-    /// the ledger never held it, and a finished run cannot create the record a
-    /// `Removed` event would need. The archive copy is what accounts for it.
+    /// A review packet folder's step records its removal, whether or not the
+    /// ledger ever held the folder: the folder is shprd's own by construction,
+    /// and `execute` only yields these events for a folder it actually removed,
+    /// so a second apply with nothing left records nothing.
     pub fn events(&self, layout: &Layout) -> Result<Vec<EventKind>, ArchiveError> {
         Ok(match self {
             Self::ArchiveRef { task, branch } => vec![
@@ -179,19 +177,12 @@ impl Action {
                 name: branch.clone(),
                 task: None,
             }],
-            Self::ArchiveReviewPackets { dir, recorded, .. } => {
-                if !recorded {
-                    // Never adopted, and a finished run cannot record anything.
-                    // The folder still goes, but there is no resource to close.
-                    return Ok(Vec::new());
-                }
-                vec![EventKind::Resource {
-                    action: ResourceAction::Removed,
-                    kind: ResourceKind::Worktree,
-                    name: dir.display().to_string(),
-                    task: None,
-                }]
-            }
+            Self::ArchiveReviewPackets { dir, .. } => vec![EventKind::Resource {
+                action: ResourceAction::Removed,
+                kind: ResourceKind::ReviewPackets,
+                name: dir.display().to_string(),
+                task: None,
+            }],
         })
     }
 
@@ -361,16 +352,15 @@ pub fn plan(
         }
     }
     // A run's review packets are spent when the run ends. They are shprd's own
-    // files, so the run id is the key; `recorded` says whether an earlier apply
-    // adopted the folder while the run could still record it.
+    // files, so the run id is the key, and the path is derived rather than read
+    // from the ledger: a folder no earlier record held is cleaned all the same.
     if let Some(run) = &state.run
         && review_packets_due(state)
         && let Some(dir) = review_packets_dir(layout, &run.run_id)
     {
         actions.push(Action::ArchiveReviewPackets {
             run: run.run_id.clone(),
-            dir: dir.clone(),
-            recorded: review_packets_recorded(state, &dir),
+            dir,
         });
     }
     for action in stale {
@@ -449,10 +439,11 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                 .and_then(|events| events.map_err(|err| err.to_string())),
             // The copy comes first and the deletion only after it: a folder
             // this step could not archive is left exactly where it was. A
-            // folder the ledger never recorded is reported rather than
-            // deleted, because a deletion without a record is not cleanup.
-            Action::ArchiveReviewPackets { run, dir, recorded } => {
-                match archive_review_packets(layout, run, dir, *recorded) {
+            // folder that was already gone has nothing to record, so its step
+            // succeeds with no event; a folder this step removed records that
+            // removal, which is the audit trail the ledger keeps.
+            Action::ArchiveReviewPackets { run, dir } => {
+                match archive_review_packets(layout, run, dir) {
                     Ok(true) => action.events(layout).map_err(|err| err.to_string()),
                     Ok(false) => Ok(Vec::new()),
                     Err(err) => Err(err),
@@ -512,19 +503,13 @@ fn integration_worktree(state: &RunState, layout: &Layout, run_id: &str) -> Opti
 }
 
 /// Archives one review packet folder and deletes it, returning whether there
-/// is a ledger record to close.
+/// was a folder to remove.
 ///
-/// A missing folder is not an error: a recorded one is closed so the ledger
-/// stops promising it, and an unrecorded one was simply never there. The path
-/// is `<home>/.shprd/reviews/<run>` with a validated run id, so it is always
-/// shprd's own folder — which is why a run that finished before any apply, and
-/// so can never adopt it, has its folder cleaned anyway.
-fn archive_review_packets(
-    layout: &Layout,
-    run: &str,
-    dir: &Path,
-    recorded: bool,
-) -> Result<bool, String> {
+/// A missing folder is not an error: a second apply finds nothing to do and
+/// records nothing. The path is `<home>/.shprd/reviews/<run>` with a validated
+/// run id, so it is always shprd's own folder — which is why a run that finished
+/// before any earlier record existed still has its folder cleaned.
+fn archive_review_packets(layout: &Layout, run: &str, dir: &Path) -> Result<bool, String> {
     // `symlink_metadata` rather than `is_dir`: a link is never followed out of
     // shprd's own folder, so a replacement link is reported, not archived.
     let meta = match std::fs::symlink_metadata(dir) {
@@ -533,7 +518,7 @@ fn archive_review_packets(
         Err(err) => return Err(format!("{}: could not be read: {err}", dir.display())),
     };
     let Some(meta) = meta else {
-        return Ok(recorded);
+        return Ok(false);
     };
     if !meta.is_dir() {
         return Err(format!("{}: not a folder", dir.display()));
@@ -543,7 +528,7 @@ fn archive_review_packets(
     archive::archive_dir(dir, &archived).map_err(|err| err.to_string())?;
     std::fs::remove_dir_all(dir)
         .map_err(|err| format!("{}: could not be removed: {err}", dir.display()))?;
-    Ok(recorded)
+    Ok(true)
 }
 
 /// True when a run's review packet folder is spent: the run has finished.
@@ -553,16 +538,6 @@ fn archive_review_packets(
 /// of the run makes them somebody else's cleanup.
 pub fn review_packets_due(state: &RunState) -> bool {
     state.finished
-}
-
-/// True when `--apply` may still adopt a run's review packet folder.
-///
-/// Adoption is a creation, and `run finish` refuses every creation, so it has
-/// to happen before the run is over. A merged pull request is the first moment
-/// the folder is certainly finished output rather than packets a reviewer is
-/// still reading, and it leaves the run open long enough to record it.
-pub fn review_packets_adoptable(state: &RunState) -> bool {
-    !state.finished && state.pr.as_ref().is_some_and(|pr| pr.merged)
 }
 
 /// The folder holding a run's review packets: `<home>/.shprd/reviews/<run>`.
@@ -593,23 +568,6 @@ pub fn review_archive_dir(layout: &Layout, run: &str) -> Option<PathBuf> {
             .join("reviews")
             .join(run),
     )
-}
-
-/// True when the ledger holds `dir` as a review packet folder it may remove.
-///
-/// The adoption the CLI does while the run is open records it as a `Worktree`
-/// resource, because it is a directory shprd created; a live or archived record
-/// is what the `Removed` event needs.
-fn review_packets_recorded(state: &RunState, dir: &Path) -> bool {
-    state
-        .resources
-        .get(&(ResourceKind::Worktree, dir.display().to_string()))
-        .is_some_and(|record| {
-            matches!(
-                record.status,
-                ResourceStatus::Live | ResourceStatus::Archived
-            )
-        })
 }
 
 /// True for the branches a run is cut from, which shprd deletes nowhere.
@@ -654,7 +612,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use shprd_core::state::{PrInfo, ResourceRecord, RunInfo};
+    use shprd_core::state::{PrInfo, RunInfo};
 
     /// The retention window a plan needs; review packets never use it.
     const DAYS: u32 = 30;
@@ -679,19 +637,6 @@ mod tests {
             }),
             ..RunState::default()
         }
-    }
-
-    /// Records `dir` live in the ledger, exactly as the janitor's adoption
-    /// does before it plans an apply.
-    fn adopt(state: &mut RunState, dir: &Path) {
-        state.resources.insert(
-            (ResourceKind::Worktree, dir.display().to_string()),
-            ResourceRecord {
-                task: None,
-                status: ResourceStatus::Live,
-                created_seq: 1,
-            },
-        );
     }
 
     /// A temp home with one review packet in `<reviews>/r1/T1-a1/`.
@@ -726,20 +671,14 @@ mod tests {
     #[test]
     fn a_finished_run_plans_its_review_packet_folder_without_touching_it() {
         let (_home, layout, dir) = home_with_packets();
-        let mut state = a_run(true, false);
-        adopt(&mut state, &dir);
+        let state = a_run(true, false);
 
         let actions = plan(&state, &[], &layout, 1_000, DAYS);
         assert_eq!(actions.len(), 1, "{actions:?}");
         match &actions[0] {
-            Action::ArchiveReviewPackets {
-                run,
-                dir: planned,
-                recorded,
-            } => {
+            Action::ArchiveReviewPackets { run, dir: planned } => {
                 assert_eq!(run, "r1");
                 assert_eq!(planned, &dir);
-                assert!(*recorded, "the adopted folder is recorded");
             }
             other => panic!("expected review packets, got {other:?}"),
         }
@@ -781,8 +720,7 @@ mod tests {
     #[test]
     fn applying_archives_the_review_packet_folder_before_deleting_it() {
         let (_home, layout, dir) = home_with_packets();
-        let mut state = a_run(true, false);
-        adopt(&mut state, &dir);
+        let state = a_run(true, false);
 
         let actions = plan(&state, &[], &layout, 1_000, DAYS);
         let outcomes = execute(&layout.root, &layout, &actions);
@@ -800,7 +738,7 @@ mod tests {
                 task,
             } => {
                 assert_eq!(*action, ResourceAction::Removed);
-                assert_eq!(*kind, ResourceKind::Worktree);
+                assert_eq!(*kind, ResourceKind::ReviewPackets);
                 assert_eq!(name, &dir.display().to_string());
                 assert_eq!(task, &None);
             }
@@ -818,8 +756,7 @@ mod tests {
     #[test]
     fn a_failed_archive_leaves_the_review_packet_folder_in_place() {
         let (_home, layout, dir) = home_with_packets();
-        let mut state = a_run(true, false);
-        adopt(&mut state, &dir);
+        let state = a_run(true, false);
         // A file where the archive folder belongs, so the copy cannot start.
         let shprd = match layout.root.parent() {
             Some(path) => path,
@@ -841,12 +778,12 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_run_cleans_a_review_folder_no_earlier_apply_adopted() {
+    fn a_finished_run_cleans_a_review_folder_no_earlier_apply_recorded() {
         let (_home, layout, dir) = home_with_packets();
-        // Finished without ever being adopted: the ledger has no record, and
-        // after `run finish` it can never make one. The folder is still
-        // shprd's own, so archiving it and deleting it is cleanup, not a
-        // deletion of something unrecorded and unknown.
+        // Finished without a record ever being written: no earlier apply adopted
+        // the folder, and after `run finish` nothing may create one. The folder
+        // is still shprd's own, so it is archived and deleted — and the removal
+        // is recorded, because a cleanup the log cannot show cannot be audited.
         let state = a_run(true, false);
 
         let actions = plan(&state, &[], &layout, 1_000, DAYS);
@@ -857,10 +794,21 @@ mod tests {
             Ok(kinds) => kinds,
             Err(err) => panic!("a finished run's folder must be cleaned: {err}"),
         };
-        assert!(
-            kinds.is_empty(),
-            "the ledger never held it, so there is nothing to close: {kinds:?}"
-        );
+        assert_eq!(kinds.len(), 1, "the removal must be recorded: {kinds:?}");
+        match &kinds[0] {
+            EventKind::Resource {
+                action,
+                kind,
+                name,
+                task,
+            } => {
+                assert_eq!(*action, ResourceAction::Removed);
+                assert_eq!(*kind, ResourceKind::ReviewPackets);
+                assert_eq!(name, &dir.display().to_string());
+                assert_eq!(task, &None);
+            }
+            other => panic!("expected a resource event, got {other:?}"),
+        }
         assert!(!dir.exists(), "the folder must be gone");
         assert!(
             archive_of(&layout, "r1")
@@ -868,5 +816,31 @@ mod tests {
                 .is_file(),
             "the packets must survive in the archive"
         );
+    }
+
+    #[test]
+    fn a_second_apply_records_nothing_when_the_folder_is_already_gone() {
+        let (_home, layout, _dir) = home_with_packets();
+        let state = a_run(true, false);
+
+        let actions = plan(&state, &[], &layout, 1_000, DAYS);
+        let first = execute(&layout.root, &layout, &actions);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0]
+                .result
+                .as_ref()
+                .is_ok_and(|kinds| !kinds.is_empty())
+        );
+
+        let again = execute(&layout.root, &layout, &actions);
+        assert_eq!(again.len(), 1, "{again:?}");
+        match &again[0].result {
+            Ok(kinds) => assert!(
+                kinds.is_empty(),
+                "nothing was removed, so nothing is recorded: {kinds:?}"
+            ),
+            Err(err) => panic!("a spent folder is not a failure: {err}"),
+        }
     }
 }
