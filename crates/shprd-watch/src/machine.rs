@@ -81,14 +81,6 @@ fn exit_escalation_reason(exits: usize) -> String {
     )
 }
 
-/// True when `body` is the escalation of an attempt whose exit budget is spent.
-///
-/// A restarted watchdog finds its predecessor's verdict this way instead of
-/// escalating the same attempt a second time.
-pub fn is_exit_escalation(body: &str) -> bool {
-    body.contains(EXIT_REASON) && body.ends_with(EXIT_ESCALATION_TAIL)
-}
-
 /// Where a dry verdict came from.
 ///
 /// A worker's process exiting is deliberately not one of these: the agent may
@@ -370,17 +362,6 @@ impl Watch {
             &self.health,
             Health::Escalated { reason, .. } if ParkReason::of_body(reason).is_some()
         )
-    }
-
-    /// Parks the watch: this attempt is a human's now, so nothing more is
-    /// decided for it until the log changes.
-    ///
-    /// A [`Action::HandOff`] that failed is not retried here: the same call
-    /// would fail the same way, so a tick would record an escalation a minute
-    /// until the run drowned in them.
-    pub fn park(&mut self, since_ms: u64, reason: String) {
-        self.health = Health::Escalated { since_ms, reason };
-        self.transient_since_ms = None;
     }
 
     /// The attempt was handed on: a new worker continues it.
@@ -943,19 +924,12 @@ mod tests {
         );
     }
 
-    /// A failed hand-off is a parking as well, and the same "the log moved on"
-    /// lifts it: without that, a human's retry is never watched.
+    /// Every parking is the log's, so the same "the log moved on" lifts a
+    /// failed hand-off too: without that, a human's retry is never watched.
     #[test]
-    fn a_failed_hand_off_parks_only_while_the_log_holds_it() {
+    fn a_parking_the_log_drops_is_lifted() {
         let p = Policy::default();
         let mut w = Watch::new();
-        w.park(
-            NOW,
-            format!(
-                "{}: no worker could take over",
-                ParkReason::HandoffFailed.marker()
-            ),
-        );
         w.resume(0, Some((NOW, ParkReason::HandoffFailed)));
         assert!(matches!(w.health, Health::Escalated { .. }));
 

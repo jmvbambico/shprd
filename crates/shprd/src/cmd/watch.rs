@@ -369,14 +369,11 @@ fn tick_task(
                         handed_off = Some((report.to, dry));
                     }
                     Err(err) => {
-                        escalate(env, &task.id, &err, lines);
                         // One failed hand-off is one escalation, not one a
                         // tick: the same call would fail the same way, so the
-                        // watch parks until the log says something changed.
-                        watch.park(
-                            now_ms,
-                            format!("{}: {err}", ParkReason::HandoffFailed.marker()),
-                        );
+                        // escalation this records parks the watch from the next
+                        // tick on, and nothing here decides it twice.
+                        escalate(env, &task.id, &err, lines);
                         break;
                     }
                 }
