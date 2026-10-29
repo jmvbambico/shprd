@@ -113,17 +113,22 @@ fn dropped_phrase(task: &str, status: &str, task_record: &shprd_core::state::Tas
 /// this verb wanted anyway; a tab the host keeps is a refusal, because the
 /// agent in it is still able to act on work the run has taken away. The message
 /// names the tab by id so the human can close it by hand and run the verb again.
+///
+/// A home that cannot be resolved is a refusal too. It means the briefs folder
+/// cannot be found, which is not the same as there being no records in it: the
+/// task may well have a tab open somewhere this drop cannot look, and a drop
+/// that cannot check must not go ahead and leave the agent behind.
 fn stop_task_tabs(
     mux: &dyn Mux,
     home: Option<&Path>,
     run: &str,
     task: &str,
 ) -> Result<(), CliError> {
-    let Ok(home) = crate::ctx::resolve_home(home) else {
-        // No home means no briefs folder, so no tab was ever recorded for
-        // anything: there is nothing to close.
-        return Ok(());
-    };
+    let home = crate::ctx::resolve_home(home).map_err(|err| {
+        CliError::Invalid(anyhow!(err).context(format!(
+            "the home directory could not be resolved, so the tabs recorded for task {task} cannot be checked: pass --home or set SHPRD_HOME, then run `shprd drop` again"
+        )))
+    })?;
     let briefs = home.join(".shprd").join("briefs");
     spawn::close_task_tabs(mux, &briefs, run, task).map_err(|err| {
         CliError::Invalid(
@@ -186,17 +191,22 @@ mod tests {
                 .map_err(|err| anyhow!("{err}"))
         }
 
-        /// Adds `T1` and spawns it, leaving it Working.
-        fn working(&self) -> Result<()> {
+        /// Adds `task` to the plan, scoped to `scope`.
+        fn add(&self, task: &str, scope: &str) -> Result<()> {
             self.commit(EventKind::TaskAdded {
-                task: "T1".to_string(),
+                task: task.to_string(),
                 title: "a task".to_string(),
-                scope: vec!["a.txt".to_string()],
+                scope: vec![scope.to_string()],
                 acceptance: vec!["it works".to_string()],
                 tags: Vec::new(),
                 skills: Vec::new(),
                 deps: Vec::new(),
-            })?;
+            })
+        }
+
+        /// Adds `T1` and spawns it, leaving it Working.
+        fn working(&self) -> Result<()> {
+            self.add("T1", "a.txt")?;
             self.commit(EventKind::Spawned {
                 task: "T1".to_string(),
                 attempt: 1,
@@ -234,20 +244,22 @@ mod tests {
             })
         }
 
-        /// Writes the tab record a spawn leaves beside the brief.
-        fn record_tab(&self, tab: &shprd_mux::TabId) -> Result<()> {
+        /// Writes one tab record under `name`, as a spawn or a review leaves it.
+        fn record(&self, name: &str, tab: &shprd_mux::TabId) -> Result<()> {
             let dir = self.home.path().join(".shprd").join("briefs").join(RUN);
             std::fs::create_dir_all(&dir)?;
-            std::fs::write(dir.join("T1-a1.tab"), tab.as_str())?;
+            std::fs::write(dir.join(name), tab.as_str())?;
             Ok(())
+        }
+
+        /// Writes the tab record a spawn leaves beside the brief.
+        fn record_tab(&self, tab: &shprd_mux::TabId) -> Result<()> {
+            self.record("T1-a1.tab", tab)
         }
 
         /// Writes the tab record a review leaves beside its brief.
         fn record_review_tab(&self, tab: &shprd_mux::TabId) -> Result<()> {
-            let dir = self.home.path().join(".shprd").join("briefs").join(RUN);
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(dir.join("T1-a1-review.tab"), tab.as_str())?;
-            Ok(())
+            self.record("T1-a1-review.tab", tab)
         }
 
         fn home(&self) -> Option<&Path> {
@@ -557,6 +569,54 @@ mod tests {
             fake.calls()
         );
         assert_eq!(status(&fixture)?, TaskStatus::Dropped);
+        Ok(())
+    }
+
+    #[test]
+    fn a_drop_closes_only_the_dropped_tasks_own_tabs() -> Result<()> {
+        // `T1-audit` starts with `T1`, so its records share a prefix with the
+        // dropped task's. Only the whole name says whose tab is whose: closing
+        // the neighbour's tabs would take an agent off a task the run still
+        // wants.
+        let fixture = Fixture::new()?;
+        fixture.working()?;
+        fixture.add("T1-audit", "b.txt")?;
+        let fake = FakeMux::default();
+        let worker = shprd_mux::TabId::new("tab-1");
+        let reviewer = shprd_mux::TabId::new("tab-2");
+        let neighbour = shprd_mux::TabId::new("tab-3");
+        let neighbour_reviewer = shprd_mux::TabId::new("tab-4");
+        fixture.record("T1-a1.tab", &worker)?;
+        fixture.record("T1-a1-review.tab", &reviewer)?;
+        fixture.record("T1-audit-a1.tab", &neighbour)?;
+        fixture.record("T1-audit-a1-review.tab", &neighbour_reviewer)?;
+
+        drop_task(
+            &fake,
+            &fixture.ctx,
+            &fixture.args(),
+            fixture.home(),
+            "human",
+        )
+        .map_err(failed)?;
+
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&Call::CloseTab(worker)),
+            "the dropped task's worker tab is closed: {calls:?}"
+        );
+        assert!(
+            calls.contains(&Call::CloseTab(reviewer)),
+            "the dropped task's reviewer tab is closed: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&Call::CloseTab(neighbour)),
+            "the neighbour task's worker tab stays open: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&Call::CloseTab(neighbour_reviewer)),
+            "the neighbour task's reviewer tab stays open: {calls:?}"
+        );
         Ok(())
     }
 

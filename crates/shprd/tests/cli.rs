@@ -1585,3 +1585,62 @@ fn a_human_override_with_yes_is_recorded_and_the_task_then_integrates() {
     );
     assert_eq!(status_of(&state(root), "T1"), "integrated");
 }
+
+#[test]
+fn a_drop_that_cannot_find_the_home_is_refused_and_logs_nothing() {
+    // No home means the briefs folder cannot be found, which is not the same as
+    // there being no tab records in it: the task may have an agent working in a
+    // tab this drop cannot look for, so the verb refuses instead of dropping a
+    // task and leaving the agent behind.
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    let log = log_path(root);
+    let before = match std::fs::read_to_string(&log) {
+        Ok(text) => text,
+        Err(err) => panic!("read {}: {err}", log.display()),
+    };
+
+    let args: Vec<String> = vec![
+        "--repo".to_string(),
+        root.display().to_string(),
+        "drop".to_string(),
+        "T1".to_string(),
+        "--reason".to_string(),
+        "not needed after all".to_string(),
+        "--yes".to_string(),
+    ];
+    let output = match Command::new(BIN)
+        .args(&args)
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_HOME")
+        .env_remove("HOME")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a drop with no home is refused\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("home") && stderr.contains("cannot be checked"),
+        "the refusal says why: {stderr:?}"
+    );
+    let after = match std::fs::read_to_string(&log) {
+        Ok(text) => text,
+        Err(err) => panic!("read {}: {err}", log.display()),
+    };
+    assert_eq!(after, before, "nothing was logged");
+    assert_eq!(
+        status_of(&state(root), "T1"),
+        "queued",
+        "the task is still in the run"
+    );
+}

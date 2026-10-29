@@ -455,13 +455,38 @@ pub(crate) fn close_pane(mux: &dyn Mux, pane: &shprd_mux::PaneId) -> bool {
 ///
 /// The records beside the briefs are the only list of tabs a run opened:
 /// `<task>-a<n>.tab` for a worker and `<task>-a<n>-review.tab` for a reviewer
-/// both live in `<briefs>/<run>/`, and the task id prefix keeps one task's
-/// records from matching another's (`T1-a1.tab` is not `T10-a1.tab`).
+/// both live in `<briefs>/<run>/`, and the whole name has to match, so one
+/// task's records never stand in for another's (`T1-a1.tab` is not
+/// `T10-a1.tab`, and `T1-audit-a1.tab` is not `T1`'s).
 pub fn close_worker(mux: &dyn Mux, briefs: &Path, run: &str, task: &str) -> Result<(), CliError> {
-    let prefix = format!("{task}-a");
     close_records(mux, briefs, run, "worker's", move |name| {
-        name.starts_with(&prefix) && !name.ends_with(REVIEW_TAB_SUFFIX)
+        is_task_tab_record(name, task) && !name.ends_with(REVIEW_TAB_SUFFIX)
     })
+}
+
+/// The stem suffix a reviewer's tab record carries: the `-review` that
+/// [`REVIEW_TAB_SUFFIX`] puts in front of the `.tab` extension.
+const REVIEW_STEM_SUFFIX: &str = "-review";
+
+/// Whether a tab record's file name is one of `task`'s own.
+///
+/// A record is exactly `<task>-a<digits>.tab` for a worker or
+/// `<task>-a<digits>-review.tab` for a reviewer, with one or more ASCII digits
+/// as the attempt and nothing else in the name. A prefix test is not enough: it
+/// would hand `T1-audit-a1.tab` to a drop of `T1`, and the drop would close a
+/// tab another task still needs.
+fn is_task_tab_record(file_name: &str, task: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(".tab") else {
+        return false;
+    };
+    let stem = stem.strip_suffix(REVIEW_STEM_SUFFIX).unwrap_or(stem);
+    let Some(rest) = stem.strip_prefix(task) else {
+        return false;
+    };
+    let Some(attempt) = rest.strip_prefix("-a") else {
+        return false;
+    };
+    !attempt.is_empty() && attempt.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Closes every tab the run recorded for `task`: the worker's and the
@@ -479,9 +504,8 @@ pub(crate) fn close_task_tabs(
     run: &str,
     task: &str,
 ) -> Result<(), CliError> {
-    let prefix = format!("{task}-a");
     close_records(mux, briefs, run, "task's", move |name| {
-        name.starts_with(&prefix)
+        is_task_tab_record(name, task)
     })
 }
 
@@ -2760,6 +2784,68 @@ mod tests {
     use super::*;
     use shprd_core::state::TaskStatus;
     use shprd_roster::skills::Role as SkillRole;
+
+    #[test]
+    fn a_task_tab_record_is_matched_by_its_whole_name() {
+        // The attempt number is one or more digits and nothing else follows, so
+        // a task whose id starts with another's keeps its own records.
+        assert!(is_task_tab_record("T1-a1.tab", "T1"));
+        assert!(is_task_tab_record("T1-a12-review.tab", "T1"));
+        assert!(!is_task_tab_record("T1-audit-a1.tab", "T1"));
+        assert!(!is_task_tab_record("T1-a.tab", "T1"));
+        assert!(!is_task_tab_record("T1-a1x.tab", "T1"));
+        assert!(!is_task_tab_record("T10-a1.tab", "T1"));
+    }
+
+    #[test]
+    fn a_task_tab_record_needs_the_tab_extension() {
+        assert!(!is_task_tab_record("T1-a1.md", "T1"));
+        assert!(!is_task_tab_record("T1-a1-review.md", "T1"));
+    }
+
+    #[test]
+    fn a_task_whose_name_ends_in_review_keeps_its_records() {
+        // `-review` is only stripped when it sits between the attempt and the
+        // extension, so a task called `T1-review` is not read as `T1`'s.
+        assert!(is_task_tab_record("T1-review-a1.tab", "T1-review"));
+        assert!(!is_task_tab_record("T1-review-a1.tab", "T1"));
+    }
+
+    #[test]
+    fn a_worker_close_leaves_the_reviewers_record_alone() {
+        let mux = shprd_mux::fake::FakeMux::default();
+        let dir = tempfile::TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let run = "rrun1";
+        std::fs::create_dir_all(dir.path().join(run)).unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(dir.path().join(run).join("T1-a1.tab"), "tab-w")
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(dir.path().join(run).join("T1-a1-review.tab"), "tab-r")
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(dir.path().join(run).join("T1-audit-a1.tab"), "tab-a")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        close_worker(&mux, dir.path(), run, "T1").unwrap_or_else(|err| panic!("{err}"));
+
+        let calls = mux.calls();
+        assert!(
+            calls.contains(&shprd_mux::fake::Call::CloseTab(shprd_mux::TabId::new(
+                "tab-w"
+            ))),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.contains(&shprd_mux::fake::Call::CloseTab(shprd_mux::TabId::new(
+                "tab-r"
+            ))),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.contains(&shprd_mux::fake::Call::CloseTab(shprd_mux::TabId::new(
+                "tab-a"
+            ))),
+            "{calls:?}"
+        );
+    }
 
     /// A launch spec whose only model flag carries the `{model}` placeholder.
     fn launch() -> LaunchSpec {
