@@ -1635,7 +1635,12 @@ const FLOW: &str = r#"## How a run works
    counts. Only after the human approves: `shprd land --merge`, then
    `shprd janitor --apply`, then `shprd down`.
 
-8. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
+8. **A task that should not be done.** You cannot drop one: dropping is the
+   human's decision, because it takes work out of the run. When a task turns
+   out not to be needed, ask the human to run `shprd drop <ID> --reason "…"`,
+   and carry on with the rest of the plan meanwhile.
+
+9. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
    --body "…" --default "what you will do if nobody answers"`.
 
 9. **Never override.** `shprd override` is the human's verb: it sets a rule

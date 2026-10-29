@@ -25,6 +25,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd doctor` | check CLIs, sign-ins, skill visibility, mux, relay, git and gh |
 | `shprd set orchestrator\|reviewer <agent> [--effort E]`, `shprd set workers <agent>…` | change the roster in your global config, or the repo's with `--repo <path>`; e.g. `shprd set reviewer codex/gpt-6-luna --effort high` |
 | `shprd roster` | show agents, roles, models, availability |
+| `shprd drop <task> --reason TEXT` | drop a task you decided not to do, so it stops blocking the run: it asks you at a terminal, naming the task, its status and its branch; a 'no' or a missing terminal writes nothing. Humans only. Nothing is deleted now — the worktree and branch stay, the janitor archives the branch before it removes either, and `shprd land`'s pull request lists the task and your reason under `## Dropped` |
 | `shprd restore <task>` | bring back archived work |
 
 Every command supports `--json`. Shell completion (`shprd completion zsh`) is planned, not built yet.
