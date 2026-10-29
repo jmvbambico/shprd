@@ -53,3 +53,20 @@ truth; this log holds how we got there.
   supervised, autonomous to PR, fully autonomous). The default recommendation is
   autonomous to PR. With an auto-approving orchestrator the PR gate is a brief
   rule, not enforcement, and setup says so. Reviewers never auto-approve.
+
+## 2026-10-29
+
+- **M6 gate passed (dogfood).** shprd built its own fixes end to end on real
+  herdr: runs r2fee5d (#12), rb3b71f (#13) and r7ed65f (#19). In r7ed65f every
+  review verdict was recorded by the engine with reviewer provenance, the
+  watchdog woke the orchestrator (22 notices), and no human touched the
+  ledger. Recovery gaps the runs exposed were fixed in #14–#18 and #20.
+- **Destructive or trust-bearing verbs are a human's, at a terminal.**
+  `approve`, `override`, `drop` and `down --abandon` refuse non-human actors in
+  the core rules and ask y/N on a real terminal, which an agent's shell never
+  has. `SHPRD_ACTOR` alone is a label, not a credential.
+- **Review verdicts carry provenance.** Only the engine records a review gate,
+  from the reviewer's own findings file, naming the review request it answers;
+  `cross-vendor-review: passed` requires that record.
+- **Review rounds stay at two before asking the human**, as configured; going
+  past them is the human's call, recorded in the PR body.
