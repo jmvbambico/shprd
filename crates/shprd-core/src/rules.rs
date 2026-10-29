@@ -182,6 +182,30 @@ pub enum RuleError {
         /// The task, or empty for a run-wide override.
         task: TaskId,
     },
+    /// An override was recorded by something that is not a human.
+    ///
+    /// The rule an override sets aside is the human's to set aside: an
+    /// orchestrator or an agent that recorded its own would make every rule
+    /// advisory, including a failed review. History keeps what it already
+    /// recorded, like every other actor-bound rule.
+    #[error("{actor:?} cannot override a rule: only a human can")]
+    OverrideNotHuman {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// An override named a rule the rules do not read.
+    ///
+    /// An override of a name nothing honours does nothing, so accepting it
+    /// would let a typo record a decision that silently has no effect.
+    #[error(
+        "{rule:?} is not a rule an override can set aside; the rules an override can name are {expected:?}"
+    )]
+    UnknownOverrideRule {
+        /// The rule the event named.
+        rule: String,
+        /// The rules an override may name.
+        expected: &'static [&'static str],
+    },
     /// A resource was created under a name that is already live or archived.
     #[error("{kind:?} {name:?} has already been created and not removed")]
     ResourceExists {
@@ -336,6 +360,19 @@ pub enum RuleError {
 /// Rule name a human overrides to integrate an attempt whose gate failed.
 pub const INTEGRATE_AFTER_FAILED_GATE: &str = "integrate_after_failed_gate";
 
+/// Every rule a human may override, by the name the log records.
+///
+/// An override whose name no rule reads decides nothing, so a typo would
+/// record a decision that never takes effect. `shprd override` and the rule
+/// below both read this list: adding a rule that honours an override means
+/// adding its name here.
+pub const OVERRIDE_RULES: &[&str] = &[INTEGRATE_AFTER_FAILED_GATE];
+
+/// Whether `rule` names an override the rules honour.
+pub fn is_override_rule(rule: &str) -> bool {
+    OVERRIDE_RULES.contains(&rule)
+}
+
 /// True when `agent` is on cooldown at `now_ms`.
 ///
 /// An agent is dry until its reset time; a dry agent with no reset time stays
@@ -375,6 +412,51 @@ fn check_available(
             agent: agent.to_string(),
         }),
     }
+}
+
+/// Rules for recording an override: a human, and a rule the run reads.
+///
+/// `SHPRD_ACTOR` is an environment variable, so a pane can claim to be a
+/// human. What holds regardless is the terminal `shprd override` asks its
+/// question at, which no agent's shell has; this rule is what refuses the
+/// event outright from an orchestrator or an agent, so no verb of theirs can
+/// talk a failed review past the run. The name is checked too: an override
+/// nothing honours is a decision that does nothing, and a typo must be
+/// refused rather than logged.
+///
+/// History is not re-judged, like every other actor-bound rule: a log written
+/// before either check existed still folds.
+fn check_override(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    rule: &str,
+    reason: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if !task.is_empty() {
+        task_in(state, task)?;
+    }
+    if rule.trim().is_empty() || reason.trim().is_empty() {
+        return Err(RuleError::EmptyOverride {
+            task: task.to_string(),
+        });
+    }
+    if provenance == Provenance::Historical {
+        return Ok(());
+    }
+    if !matches!(actor, Actor::Human) {
+        return Err(RuleError::OverrideNotHuman {
+            actor: actor.clone(),
+        });
+    }
+    if !is_override_rule(rule) {
+        return Err(RuleError::UnknownOverrideRule {
+            rule: rule.to_string(),
+            expected: OVERRIDE_RULES,
+        });
+    }
+    Ok(())
 }
 
 /// Checks one event kind against `state` as of `now_ms`.
@@ -492,13 +574,7 @@ fn check_with(
             None => Ok(()),
         },
         EventKind::Override { task, rule, reason } => {
-            if !task.is_empty() {
-                task_in(state, task)?;
-            }
-            if rule.trim().is_empty() || reason.trim().is_empty() {
-                return Err(RuleError::EmptyOverride { task: task.clone() });
-            }
-            Ok(())
+            check_override(state, actor, task, rule, reason, provenance)
         }
         EventKind::Resource {
             action,
@@ -1286,15 +1362,18 @@ mod tests {
         )
     }
 
+    /// Records a human overriding `rule` for `id`.
     fn overrode(seq: u64, id: &str, rule: &str) -> Event {
-        ev(
+        let mut event = ev(
             seq,
             EventKind::Override {
                 task: id.to_string(),
                 rule: rule.to_string(),
                 reason: "shipping anyway".to_string(),
             },
-        )
+        );
+        event.actor = Actor::Human;
+        event
     }
 
     fn dried(seq: u64, agent: &str, reset_at_ms: Option<u64>) -> Event {
@@ -1960,6 +2039,90 @@ mod tests {
             ]),
             RuleError::EmptyOverride { .. }
         ));
+    }
+
+    /// A folded log holding one task whose attempt passed its gate.
+    fn passed_task() -> RunState {
+        folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            gated(5, "a", 1, "clippy", true),
+        ])
+    }
+
+    /// An override of `rule` for `task`, as a verb would offer it.
+    fn override_kind(task: &str, rule: &str) -> EventKind {
+        EventKind::Override {
+            task: task.to_string(),
+            rule: rule.to_string(),
+            reason: "shipping anyway".to_string(),
+        }
+    }
+
+    #[test]
+    fn only_a_human_appends_an_override() {
+        let state = passed_task();
+        let kind = override_kind("a", INTEGRATE_AFTER_FAILED_GATE);
+        let others = [
+            Actor::Engine,
+            Actor::Orchestrator,
+            Actor::Agent {
+                id: "w1".to_string(),
+            },
+        ];
+        for actor in others {
+            match check_as(&state, &actor, &kind, 6_000) {
+                Err(RuleError::OverrideNotHuman { actor: named }) => {
+                    assert_eq!(named, actor, "the refusal names who tried");
+                }
+                other => panic!("{actor:?} must not override, got {other:?}"),
+            }
+        }
+        assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
+    }
+
+    #[test]
+    fn only_a_rule_the_run_reads_may_be_overridden() {
+        let state = passed_task();
+        assert!(matches!(
+            check_as(
+                &state,
+                &Actor::Human,
+                &override_kind("a", "integrate_after_failed_gate_typo"),
+                6_000
+            ),
+            Err(RuleError::UnknownOverrideRule { .. })
+        ));
+    }
+
+    #[test]
+    fn an_old_override_still_folds_and_still_counts() {
+        // History is not re-judged: an override an engine or an orchestrator
+        // recorded before the rule existed still folds, and still lets the
+        // task it named integrate past the gate that failed.
+        let mut old = overrode(7, "a", INTEGRATE_AFTER_FAILED_GATE);
+        old.actor = Actor::Orchestrator;
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            gated(5, "a", 1, "clippy", false),
+            gated(6, "a", 1, "clippy", true),
+            old,
+            integrated(8, "a"),
+        ];
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Integrated);
+    }
+
+    #[test]
+    fn an_old_override_of_a_name_nothing_reads_still_folds() {
+        let mut old = overrode(3, "", "no_main_push");
+        old.actor = Actor::Orchestrator;
+        let log = vec![started(1), old];
+        assert_eq!(folded(&log).run_overrides.len(), 1);
     }
 
     #[test]
