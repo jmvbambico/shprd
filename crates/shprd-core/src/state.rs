@@ -163,6 +163,12 @@ pub struct Task {
     pub attempts: Vec<Attempt>,
     /// Rules a human overrode for this task, in order.
     pub overrides: Vec<OverrideRecord>,
+    /// Why a human dropped it, once one did.
+    ///
+    /// Kept beside the status rather than looked up in the log, because every
+    /// view that draws a task reads the folded state: the pull request's
+    /// `## Dropped` section is the reason a reader is looking for.
+    pub dropped_reason: Option<String>,
 }
 
 /// Where a task sits in its lifecycle.
@@ -181,6 +187,13 @@ pub enum TaskStatus {
     Failed,
     /// Its work landed on the integration branch.
     Integrated,
+    /// A human decided the task will not be done.
+    ///
+    /// Terminal like [`TaskStatus::Integrated`]: the run is not waiting on it
+    /// any more, so ending the run strands nothing. Unlike an integrated task,
+    /// none of it is on the integration branch, so the run's pull request lists
+    /// it rather than carrying it.
+    Dropped,
 }
 
 /// One attempt at a task.
@@ -401,6 +414,7 @@ impl RunState {
                         status: TaskStatus::Queued,
                         attempts: Vec::new(),
                         overrides: Vec::new(),
+                        dropped_reason: None,
                     },
                 );
             }
@@ -515,6 +529,14 @@ impl RunState {
             EventKind::Integrated { task, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
+                }
+            }
+            EventKind::TaskDropped { task, reason } => {
+                // Terminal, and the reason is kept with it: a view that draws
+                // the task out of the folded state has to say why it is gone.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.status = TaskStatus::Dropped;
+                    entry.dropped_reason = Some(reason.clone());
                 }
             }
             EventKind::Dry {

@@ -138,6 +138,7 @@ mod tests {
             status: TaskStatus::Failed,
             attempts,
             overrides: Vec::new(),
+            dropped_reason: None,
         }
     }
 

@@ -314,6 +314,22 @@ pub enum RuleError {
         /// The failed gate.
         gate: String,
     },
+    /// A task was dropped by something that is not a human.
+    ///
+    /// Dropping is how a task leaves the run's work without landing: the human
+    /// decided nobody will do it. An orchestrator or an agent that could drop a
+    /// task could mark away the work it was given, so only a human may.
+    #[error("{actor:?} cannot drop a task: only a human can")]
+    DropNotHuman {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// A dropped task carried no reason.
+    #[error("task {task:?} was dropped without a reason, which is the only record of why")]
+    EmptyDropReason {
+        /// The task.
+        task: TaskId,
+    },
     /// A run was abandoned by something that is not a human.
     ///
     /// `--abandon` ends a run that still has work in it: it is the human's
@@ -570,6 +586,9 @@ fn check_with(
             check_review_requested(state, task, *attempt)
         }
         EventKind::Integrated { task, .. } => check_integrated(state, task),
+        EventKind::TaskDropped { task, reason } => {
+            check_task_dropped(state, actor, task, reason, provenance)
+        }
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
@@ -637,6 +656,50 @@ fn check_base_synced(actor: &Actor, provenance: Provenance) -> Result<(), RuleEr
     {
         return Err(RuleError::SyncNotAllowed {
             actor: actor.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Rules for a human's drop of a task.
+///
+/// Dropping is the human's decision alone: it takes a task out of the run's
+/// work, and an agent that could take itself out of a run would walk away from
+/// the task it was given, which is the same reason `--abandon` is the human's.
+/// History is not re-judged, like every other actor-bound rule.
+///
+/// Only a task with work left to drop may be dropped: an integrated task's
+/// commits are already on the integration branch, so calling it dropped would
+/// make the pull request's `## Dropped` list disagree with what it carries, and
+/// a dropped task is terminal already. Any other status may be dropped,
+/// `Working` included — a human who decides a running task will not be done
+/// stops it there rather than waiting for it to report.
+///
+/// The reason is required because it is the only record of why the work is
+/// missing: the pull request lists it, and a blank one would say nothing.
+fn check_task_dropped(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    reason: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Required && !matches!(actor, Actor::Human) {
+        return Err(RuleError::DropNotHuman {
+            actor: actor.clone(),
+        });
+    }
+    let found = task_in(state, task)?;
+    if matches!(found.status, TaskStatus::Integrated | TaskStatus::Dropped) {
+        return Err(RuleError::WrongStatus {
+            task: task.to_string(),
+            expected: "a task that has not landed and is not already dropped",
+            found: found.status,
+        });
+    }
+    if reason.trim().is_empty() {
+        return Err(RuleError::EmptyDropReason {
+            task: task.to_string(),
         });
     }
     Ok(())
@@ -1101,9 +1164,11 @@ fn check_handed_off(
 /// The tasks a run cannot leave behind: every one not in a terminal state.
 ///
 /// Integrated is terminal, because the work is on the integration branch and
-/// the run's pull request is what carries it. Queued, Working, Reported, in
-/// review (passed or failed) and Failed are all work in flight or work stuck,
-/// which ending the run would strand on a branch nobody watches.
+/// the run's pull request is what carries it. Dropped is terminal too, because
+/// a human decided the work is not coming: nothing is stranded, and a dropped
+/// task must not block the run for ever. Queued, Working, Reported, in review
+/// (passed or failed) and Failed are all work in flight or work stuck, which
+/// ending the run would strand on a branch nobody watches.
 ///
 /// `shprd down` names these in its refusal, and the rule refuses a finish or an
 /// abandon that disagrees with them, so both read one definition.
@@ -1111,15 +1176,23 @@ pub fn unfinished_tasks(state: &RunState) -> Vec<TaskId> {
     state
         .tasks
         .iter()
-        .filter(|(_, task)| task.status != TaskStatus::Integrated)
+        .filter(|(_, task)| !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped))
         .map(|(id, _)| id.clone())
         .collect()
 }
 
 /// Whether ending the run would leave its landed work on a branch nothing
-/// picks up: tasks exist and the pull request carrying them has not merged.
+/// picks up: a task landed and the pull request carrying it has not merged.
+///
+/// A run with nothing integrated has nothing for a pull request to carry: every
+/// task was dropped or none was planned, and refusing that run would ask for a
+/// merge that `land` refuses to open.
 pub fn unlanded(state: &RunState) -> bool {
-    !state.tasks.is_empty() && state.pr.as_ref().is_none_or(|pr| !pr.merged)
+    let integrated = state
+        .tasks
+        .values()
+        .any(|task| task.status == TaskStatus::Integrated);
+    integrated && state.pr.as_ref().is_none_or(|pr| !pr.merged)
 }
 
 /// What a human's `--abandon` may name: the work ending the run would leave.
@@ -2818,6 +2891,143 @@ mod tests {
             ),
             Err(RuleError::StaleReviewVerdict { .. })
         ));
+    }
+
+    /// A human's drop of task `a`, at `seq`.
+    fn dropped(seq: u64, reason: &str) -> Event {
+        by(
+            seq,
+            Actor::Human,
+            EventKind::TaskDropped {
+                task: "a".to_string(),
+                reason: reason.to_string(),
+            },
+        )
+    }
+
+    /// A run whose task `a` reported and waits for a gate.
+    fn reported_run() -> Vec<Event> {
+        vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+        ]
+    }
+
+    #[test]
+    fn a_human_drops_a_reported_task_and_it_leaves_the_unfinished_work() {
+        let mut log = reported_run();
+        log.push(dropped(5, "the human changed their mind"));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Dropped);
+        assert_eq!(
+            state
+                .tasks
+                .get("a")
+                .and_then(|task| task.dropped_reason.clone()),
+            Some("the human changed their mind".to_string())
+        );
+        assert!(
+            unfinished_tasks(&state).is_empty(),
+            "a dropped task is not work the run still owes"
+        );
+        assert!(
+            abandonable_tasks(&state).is_empty(),
+            "nothing is integrated, so there is nothing an abandon would carry"
+        );
+    }
+
+    #[test]
+    fn a_working_task_may_be_dropped() {
+        // A human who decides a running task will not be done stops it there,
+        // rather than waiting for the agent to report.
+        let mut log = reported_run();
+        log.truncate(3);
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Working);
+        state
+            .check_as(&Actor::Human, &dropped(4, "not needed").kind, 5_000)
+            .unwrap_or_else(|err| panic!("a Working task may be dropped: {err}"));
+    }
+
+    #[test]
+    fn an_orchestrator_cannot_drop_a_task() {
+        // Dropping takes work out of the run: only the human decides that.
+        let state = folded(&reported_run());
+        match state.check_as(&Actor::Orchestrator, &dropped(5, "x").kind, 6_000) {
+            Err(RuleError::DropNotHuman { actor }) => assert_eq!(actor, Actor::Orchestrator),
+            other => panic!("an orchestrator dropped a task: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_integrated_task_cannot_be_dropped() {
+        // Its commits are on the integration branch: calling it dropped would
+        // make the pull request's dropped list disagree with what it carries.
+        let state = folded(&landed());
+        match state.check_as(&Actor::Human, &dropped(9, "x").kind, 10_000) {
+            Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Integrated),
+            other => panic!("an integrated task was dropped: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dropped_task_cannot_be_dropped_again() {
+        let mut log = reported_run();
+        log.push(dropped(5, "first"));
+        let state = folded(&log);
+        match state.check_as(&Actor::Human, &dropped(6, "second").kind, 7_000) {
+            Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Dropped),
+            other => panic!("a dropped task was dropped twice: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_drop_without_a_reason_is_refused() {
+        let state = folded(&reported_run());
+        assert!(matches!(
+            state.check_as(&Actor::Human, &dropped(5, "  ").kind, 6_000),
+            Err(RuleError::EmptyDropReason { .. })
+        ));
+    }
+
+    #[test]
+    fn a_dropped_task_does_not_block_a_normal_finish() {
+        // Landed and merged, plus a task the human decided not to do: the run
+        // owes nothing, so ending it is a normal finish.
+        let mut log = landed();
+        log.push(added(9, "b", &["src/b"], &[]));
+        log.push(by(
+            10,
+            Actor::Human,
+            EventKind::TaskDropped {
+                task: "b".to_string(),
+                reason: "dropped".to_string(),
+            },
+        ));
+        let state = folded(&log);
+        assert!(unfinished_tasks(&state).is_empty());
+        assert!(!unlanded(&state), "the pull request merged");
+        state
+            .check_as(&Actor::Orchestrator, &finish_kind(), 11_000)
+            .unwrap_or_else(|err| panic!("a finish was refused: {err}"));
+    }
+
+    #[test]
+    fn a_drop_recorded_before_the_rule_still_folds() {
+        // History is read, not re-judged: an orchestrator's drop in an old log
+        // folds, while recording the same thing now is refused.
+        let mut log = reported_run();
+        log.push(by(
+            5,
+            Actor::Orchestrator,
+            EventKind::TaskDropped {
+                task: "a".to_string(),
+                reason: "legacy".to_string(),
+            },
+        ));
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Dropped);
     }
 
     #[test]

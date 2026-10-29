@@ -286,6 +286,20 @@ pub enum EventKind {
         /// Commits that were landed.
         commits: Vec<String>,
     },
+    /// A human decided a task will not be done.
+    ///
+    /// The other way a task leaves the run's work: `Integrated` puts its
+    /// commits on the integration branch, and this says the commits are never
+    /// coming. It is the human's decision alone, because a task nobody does is
+    /// work no agent may decide to skip, and it is terminal: the worktree and
+    /// the branch are kept, so whatever the task did is still reachable.
+    TaskDropped {
+        /// The task.
+        task: TaskId,
+        /// Why the human dropped it, in their words. It is what the run's pull
+        /// request lists, so a reader sees what was left out and why.
+        reason: String,
+    },
     /// A review was handed to a reviewer for an attempt.
     ///
     /// `degraded` is the fact a landing decision needs: it records that the
@@ -568,6 +582,10 @@ mod tests {
             EventKind::Integrated {
                 task: "M1.1".to_string(),
                 commits: vec!["abc123".to_string(), "def456".to_string()],
+            },
+            EventKind::TaskDropped {
+                task: "M1.2".to_string(),
+                reason: "not needed after all".to_string(),
             },
             EventKind::ReviewRequested {
                 task: "M1.1".to_string(),
