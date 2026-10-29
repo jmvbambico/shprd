@@ -305,9 +305,9 @@ pub enum RuleError {
         "the abandoned list is not the run's unfinished work: missing {missing:?}, extra {extra:?}"
     )]
     AbandonListMismatch {
-        /// Unfinished tasks the list does not name.
+        /// Abandonable tasks the list does not name.
         missing: Vec<TaskId>,
-        /// Tasks the list names that are not unfinished.
+        /// Tasks the list names that are not abandonable.
         extra: Vec<TaskId>,
     },
     /// A run was finished by something that may not finish one.
@@ -1010,6 +1010,30 @@ pub fn unlanded(state: &RunState) -> bool {
     !state.tasks.is_empty() && state.pr.as_ref().is_none_or(|pr| !pr.merged)
 }
 
+/// What a human's `--abandon` may name: the work ending the run would leave.
+///
+/// That is every unfinished task, plus — when the run is [`unlanded`] — the
+/// integrated tasks, whose work only the pull request that never merged would
+/// have carried. Without the second part a run whose pull request a human
+/// closed on purpose could never end: nothing is unfinished to abandon, and a
+/// normal finish is refused because nothing carries the work.
+///
+/// Nothing is abandonable once every task landed and the pull request merged,
+/// so `--abandon` there is a normal finish.
+pub fn abandonable_tasks(state: &RunState) -> Vec<TaskId> {
+    let mut tasks = unfinished_tasks(state);
+    if unlanded(state) {
+        tasks.extend(
+            state
+                .tasks
+                .iter()
+                .filter(|(_, task)| task.status == TaskStatus::Integrated)
+                .map(|(id, _)| id.clone()),
+        );
+    }
+    tasks
+}
+
 /// Rules for finishing a run.
 ///
 /// Ending a run is not an agent's decision. A finish closes the run's tabs, so
@@ -1022,9 +1046,11 @@ pub fn unlanded(state: &RunState) -> bool {
 /// work is the same loss as one that strands a working task.
 ///
 /// A human's `--abandon` is the one way past that, and the event's list is what
-/// records it. The list must be exactly the tasks unfinished at that moment: it
-/// is the log's record of what the run left, so a list missing a task, naming a
-/// finished or unknown one, would make the record lie. Every task it names and
+/// records it. The list must be exactly [`abandonable_tasks`]: the unfinished
+/// work, plus the integrated tasks while the run is unlanded, because their
+/// work is what the pull request that never merged would have carried. It is
+/// the log's record of what the run left, so a list missing a task, naming one
+/// that is safe or unknown, would make the record lie. Every task it names and
 /// every task it leaves out is still checked here, so the refusal does not rest
 /// on the verb being the only writer.
 ///
@@ -1063,9 +1089,9 @@ fn check_run_finished(
     Ok(())
 }
 
-/// The abandoned list must equal the run's unfinished tasks, as a set.
+/// The abandoned list must equal the run's abandonable tasks, as a set.
 fn check_abandoned_list(state: &RunState, abandoned: &[TaskId]) -> Result<(), RuleError> {
-    let expected: BTreeSet<TaskId> = unfinished_tasks(state).into_iter().collect();
+    let expected: BTreeSet<TaskId> = abandonable_tasks(state).into_iter().collect();
     let listed: BTreeSet<TaskId> = abandoned.iter().cloned().collect();
     if listed == expected {
         return Ok(());
@@ -1302,7 +1328,8 @@ mod tests {
     }
 
     /// A run whose work is in every state that is not integrated: `a` is
-    /// reported, `b` was never ran, and `c` landed.
+    /// reported, `b` was never ran, and `c` landed and merged, so only `a` and
+    /// `b` are an abandon's to name.
     fn in_flight() -> Vec<Event> {
         vec![
             started(1),
@@ -1313,9 +1340,50 @@ mod tests {
             reported(6, "c", 1, &["src/c/x.rs"]),
             gated(7, "c", 1, "clippy", true),
             integrated(8, "c"),
-            spawned(9, "a", 1, "agent-2"),
-            reported(10, "a", 1, &["src/a/x.rs"]),
+            ev(
+                9,
+                EventKind::PrOpened {
+                    number: 7,
+                    url: "https://example.invalid/pr/7".to_string(),
+                    head: "shprd/r1/int".to_string(),
+                },
+            ),
+            ev(
+                10,
+                EventKind::PrMerged {
+                    number: 7,
+                    head: "abc1234".to_string(),
+                },
+            ),
+            spawned(11, "a", 1, "agent-2"),
+            reported(12, "a", 1, &["src/a/x.rs"]),
         ]
+    }
+
+    /// A run whose two tasks both landed, and whose pull request never merged:
+    /// nothing is unfinished, and nothing carries the work either.
+    fn unmerged() -> Vec<Event> {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            added(3, "b", &["src/b"], &[]),
+        ];
+        for (seq, id, agent) in [(4, "a", "agent-1"), (8, "b", "agent-2")] {
+            let changed = format!("src/{id}/x.rs");
+            log.push(spawned(seq, id, 1, agent));
+            log.push(reported(seq + 1, id, 1, &[changed.as_str()]));
+            log.push(gated(seq + 2, id, 1, "clippy", true));
+            log.push(integrated(seq + 3, id));
+        }
+        log.push(ev(
+            12,
+            EventKind::PrOpened {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                head: "shprd/r1/int".to_string(),
+            },
+        ));
+        log
     }
 
     /// A run whose only task landed and whose pull request merged: nothing is
@@ -2041,7 +2109,7 @@ mod tests {
         // could do it would walk away from its own task and shut the tabs,
         // which is the incident this rule exists for.
         let state = folded(&in_flight());
-        let kind = abandoning(11, &["a", "b"]).kind;
+        let kind = abandoning(13, &["a", "b"]).kind;
         let others = [
             Actor::Orchestrator,
             Actor::Engine,
@@ -2050,13 +2118,13 @@ mod tests {
             },
         ];
         for actor in others {
-            match state.check_as(&actor, &kind, 11_000) {
+            match state.check_as(&actor, &kind, 13_000) {
                 Err(RuleError::AbandonNotHuman { actor: who }) => assert_eq!(who, actor),
                 other => panic!("{actor:?} abandoned the run: {other:?}"),
             }
         }
         state
-            .check_as(&Actor::Human, &kind, 11_000)
+            .check_as(&Actor::Human, &kind, 13_000)
             .unwrap_or_else(|err| panic!("the human was refused: {err}"));
     }
 
@@ -2068,10 +2136,10 @@ mod tests {
         // `c` landed, so it is not the abandon's to name; order is not the
         // question, the set is.
         state
-            .check_as(&Actor::Human, &abandoning(11, &["b", "a"]).kind, 11_000)
+            .check_as(&Actor::Human, &abandoning(13, &["b", "a"]).kind, 13_000)
             .unwrap_or_else(|err| panic!("the true list was refused: {err}"));
         // A task left out under-reports what was stranded.
-        match state.check_as(&Actor::Human, &abandoning(11, &["a"]).kind, 11_000) {
+        match state.check_as(&Actor::Human, &abandoning(13, &["a"]).kind, 13_000) {
             Err(RuleError::AbandonListMismatch { missing, extra }) => {
                 assert_eq!(missing, strings(&["b"]));
                 assert!(extra.is_empty(), "{extra:?}");
@@ -2082,8 +2150,8 @@ mod tests {
         for extra in ["c", "ghost"] {
             match state.check_as(
                 &Actor::Human,
-                &abandoning(11, &["a", "b", extra]).kind,
-                11_000,
+                &abandoning(13, &["a", "b", extra]).kind,
+                13_000,
             ) {
                 Err(RuleError::AbandonListMismatch {
                     missing,
@@ -2125,7 +2193,7 @@ mod tests {
         // Even the orchestrator's finish needs the work over: a reported task
         // is work in review, and ending the run would strand it.
         let state = folded(&in_flight());
-        match state.check_as(&Actor::Orchestrator, &finish_kind(), 11_000) {
+        match state.check_as(&Actor::Orchestrator, &finish_kind(), 13_000) {
             Err(RuleError::RunUnfinished { tasks }) => assert_eq!(tasks, strings(&["a", "b"])),
             other => panic!("a finish over unfinished work was accepted: {other:?}"),
         }
@@ -2143,6 +2211,59 @@ mod tests {
             state.check_as(&Actor::Orchestrator, &finish_kind(), 9_000),
             Err(RuleError::PullRequestUnmerged)
         ));
+    }
+
+    #[test]
+    fn a_human_abandons_a_run_whose_pull_request_never_merged() {
+        // Nothing is unfinished, so a normal finish is refused: no pull request
+        // carries the work. `--abandon` names what that pull request would have
+        // carried — every integrated task — and that is what the refusal tells
+        // a human to run, so it has to work.
+        let state = folded(&unmerged());
+        assert!(unfinished_tasks(&state).is_empty());
+        assert_eq!(abandonable_tasks(&state), strings(&["a", "b"]));
+        match state.check_as(&Actor::Orchestrator, &finish_kind(), 13_000) {
+            Err(RuleError::PullRequestUnmerged) => {}
+            other => panic!("a finish over unmerged work was accepted: {other:?}"),
+        }
+        state
+            .check_as(&Actor::Human, &abandoning(13, &["a", "b"]).kind, 13_000)
+            .unwrap_or_else(|err| panic!("the abandon was refused: {err}"));
+    }
+
+    #[test]
+    fn an_abandon_on_an_unmerged_run_must_name_every_landed_task() {
+        // The integrated tasks are the record of what the run left on a branch
+        // nothing carried, so leaving one out under-reports it.
+        let state = folded(&unmerged());
+        match state.check_as(&Actor::Human, &abandoning(13, &["a"]).kind, 13_000) {
+            Err(RuleError::AbandonListMismatch { missing, extra }) => {
+                assert_eq!(missing, strings(&["b"]));
+                assert!(extra.is_empty(), "{extra:?}");
+            }
+            other => panic!("a short list was accepted: {other:?}"),
+        }
+        // An unmerged run is still not an agent's to abandon.
+        for actor in [
+            Actor::Orchestrator,
+            Actor::Engine,
+            Actor::Agent {
+                id: "claude".to_string(),
+            },
+        ] {
+            match state.check_as(&actor, &abandoning(13, &["a", "b"]).kind, 13_000) {
+                Err(RuleError::AbandonNotHuman { actor: who }) => assert_eq!(who, actor),
+                other => panic!("{actor:?} abandoned the run: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_abandonable_once_the_work_landed_and_merged() {
+        // A merged run leaves nothing behind, so `--abandon` is a normal finish
+        // rather than a list. So is a run with no tasks: nothing carries work.
+        assert!(abandonable_tasks(&folded(&landed())).is_empty());
+        assert!(abandonable_tasks(&folded(&[started(1)])).is_empty());
     }
 
     #[test]

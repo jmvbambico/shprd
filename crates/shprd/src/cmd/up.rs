@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow};
 use shprd_core::config::Config;
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
-use shprd_core::rules::{unfinished_tasks, unlanded};
+use shprd_core::rules::{abandonable_tasks, unfinished_tasks, unlanded};
 use shprd_core::state::{ResourceStatus, RunState};
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
@@ -278,12 +278,13 @@ pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, abandon: bool) -> Res
 /// the tasks that were left, which is what `up` reports when it archives.
 pub(crate) fn finish_kind(state: &RunState, abandon: bool) -> Result<EventKind, CliError> {
     let unfinished = unfinished_tasks(state);
-    // An abandon with nothing left to abandon is a normal finish: the list
-    // would be empty, so it goes through the checks that carry no list.
-    if abandon && !unfinished.is_empty() {
-        return Ok(EventKind::RunFinished {
-            abandoned: unfinished,
-        });
+    // What an abandon names: the unfinished work, plus the integrated work
+    // while the pull request that would carry it has not merged. An abandon
+    // with nothing to abandon is a normal finish, and goes through the checks
+    // that carry no list.
+    let abandoned = abandonable_tasks(state);
+    if abandon && !abandoned.is_empty() {
+        return Ok(EventKind::RunFinished { abandoned });
     }
     if !unfinished.is_empty() {
         return Err(CliError::Invalid(anyhow!(
@@ -3218,6 +3219,38 @@ mod tests {
         assert!(err.to_string().contains("shprd land"), "{err}");
         assert!(err.to_string().contains("shprd down --abandon"), "{err}");
         assert!(!env.ctx.state().map_err(failed)?.finished);
+        Ok(())
+    }
+
+    #[test]
+    fn down_abandon_ends_a_run_whose_pull_request_never_merged() -> Result<()> {
+        // The refusal above names `--abandon` as the way out, so it has to work
+        // even though nothing is unfinished: it ends the run naming the landed
+        // task whose work the unmerged pull request would have carried.
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        passed_task(&env.ctx)?;
+        env.ctx
+            .commit(EventKind::Integrated {
+                task: "M4.1".to_string(),
+                commits: vec!["abc1234".to_string()],
+            })
+            .map_err(failed)?;
+        let before = env.ctx.state().map_err(failed)?;
+        down(&mux(), &env.ctx, Some(&env.home), true).map_err(failed)?;
+
+        let state = env.ctx.state().map_err(failed)?;
+        assert!(state.finished, "the abandon ends the run");
+        assert_eq!(
+            state.abandoned,
+            vec!["M4.1".to_string()],
+            "the landed task is what the unmerged pull request left behind"
+        );
+        let lines = abandoned_lines(&before, &state.abandoned);
+        assert!(
+            lines.iter().any(|line| line.contains("integrated")),
+            "each abandoned task is named with its status: {lines:?}"
+        );
         Ok(())
     }
 
