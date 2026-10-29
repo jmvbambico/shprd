@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use shprd_core::event::{EventKind, Finding, Severity};
 use shprd_core::state::Task;
 use shprd_git::git::Git;
@@ -15,6 +15,7 @@ use shprd_git::worktree::Layout;
 use shprd_mux::Mux;
 
 use crate::cli::IntegrateArgs;
+use crate::cmd::run_lock::lock_run;
 use crate::cmd::{emit, spawn};
 use crate::ctx::{CliError, Ctx, resolve_home};
 
@@ -197,41 +198,6 @@ fn failed(err: IntegrateError) -> CliError {
 /// The short form of a sha, for the human line.
 fn short(sha: &str) -> &str {
     sha.get(..SHORT_SHA).unwrap_or(sha)
-}
-
-/// One run's exclusive integration lock, released when it is dropped.
-///
-/// The lock is an advisory `flock` on a file under `<home>/.shprd/locks`, so it
-/// is held by this process and not by a stray directory or pid file: the OS
-/// drops it when the process exits, however it exits.
-struct RunLock {
-    /// The open file the lock sits on. Closing it releases the lock.
-    _file: std::fs::File,
-}
-
-/// Takes the run's integration lock, blocking until it is free.
-///
-/// Two `integrate` runs on the same run would otherwise cherry-pick onto the
-/// same branch at the same time, and both would see the head the other is
-/// about to move.
-fn lock_run(home: &Path, repo_name: &str, run: &str) -> Result<RunLock, CliError> {
-    let dir = home.join(".shprd").join("locks");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))
-        .map_err(CliError::other)?;
-    let path = dir.join(format!("{repo_name}-{run}-int.lock"));
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))
-        .map_err(CliError::other)?;
-    file.lock()
-        .with_context(|| format!("locking {}", path.display()))
-        .map_err(CliError::other)?;
-    Ok(RunLock { _file: file })
 }
 
 /// Records a conflicting pick as a failed `integrate` gate and fails with

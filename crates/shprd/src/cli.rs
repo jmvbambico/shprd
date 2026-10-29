@@ -77,7 +77,7 @@ pub enum Command {
     },
     /// Print the cleanup plan for this run, or apply it with `--apply`.
     Janitor(JanitorArgs),
-    /// Recreate a task's branch from its archive ref.
+    /// Recreate a task's branch from its newest attempt's archive ref.
     Restore(RestoreArgs),
     /// Detect the agent CLIs installed here, their version and sign-in state.
     Roster(RosterArgs),
@@ -96,6 +96,10 @@ pub enum Command {
     Watch(WatchArgs),
     /// Run the integration branch's gate commands once, in its worktree.
     Gate(FullGateArgs),
+    /// Merge the base branch into the run's integration branch, so a run that
+    /// outlived a merged pull request lands cleanly. Merges, never rebases; a
+    /// conflict is undone and escalated. Needs no terminal.
+    Sync,
     /// Push the integration branch and open its pull request; with `--merge`,
     /// merge it when `[land]` allows.
     Land(LandArgs),
@@ -106,6 +110,13 @@ pub enum Command {
     /// Re-admit a dry agent: record that the run may use it again, so a spawn
     /// or a handoff stops refusing it. A human's verb, needing no terminal.
     Readmit(ReadmitArgs),
+    /// Override a rule for a task, e.g. let it integrate although a gate
+    /// failed. It asks on the terminal, which an agent's shell tool never has.
+    Override(OverrideArgs),
+    /// Drop a task a human decided not to do: it stops blocking the run, and
+    /// its branch is kept. It asks on the terminal, which an agent's shell tool
+    /// never has.
+    Drop(DropArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -149,6 +160,23 @@ pub struct ApproveArgs {
     /// Answer the question for the record without asking, in a debug build
     /// only: a release binary ignores it and still needs a terminal.
     /// `SHPRD_ACTOR` still has to be unset or `human`.
+    #[arg(long, hide = !cfg!(debug_assertions))]
+    pub yes: bool,
+}
+
+/// Arguments for `drop`.
+#[derive(Debug, Args)]
+pub struct DropArgs {
+    /// The task to drop.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// Why it is dropped, in the human's words. The run's pull request lists it,
+    /// so a reader sees what is missing and why.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+    /// Answer the question for the record without asking, in a debug build only:
+    /// a release binary ignores it and still needs a terminal. `SHPRD_ACTOR`
+    /// still has to be unset or `human`.
     #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
 }
@@ -332,6 +360,10 @@ pub enum AgentCommand {
     /// Escalate something to a human.
     Escalate(EscalateArgs),
     /// Record a human overriding a rule.
+    ///
+    /// Kept as a hidden alias of `shprd override`, which is the verb a human
+    /// runs: the rule refuses an override from anything but a human anyway.
+    #[command(hide = true)]
     Override(OverrideArgs),
     /// Record that a task's commits landed.
     Integrate(IntegrateArgs),
@@ -533,7 +565,7 @@ pub struct EscalateArgs {
     pub default_action: String,
 }
 
-/// Arguments for `agent override`.
+/// Arguments for `override`, and its hidden `agent override` alias.
 #[derive(Debug, Args)]
 pub struct OverrideArgs {
     /// The task, or omitted for a run-wide rule.
@@ -545,6 +577,12 @@ pub struct OverrideArgs {
     /// Why it was overridden.
     #[arg(long, value_name = "TEXT")]
     pub reason: String,
+    /// Answer the terminal's question for the record.
+    ///
+    /// A test affordance, ignored by a release build: `--yes` must not be able
+    /// to turn a pane into a human.
+    #[arg(long, hide = true)]
+    pub yes: bool,
 }
 
 /// Arguments for `agent integrate`.

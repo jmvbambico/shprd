@@ -5,12 +5,13 @@
 //! guesses.
 
 use shprd_core::event::{Event, EventKind, Finding, Severity};
-use shprd_core::state::{OverrideRecord, RunState, Task};
+use shprd_core::state::{OverrideRecord, RunState, Task, TaskStatus};
 
 /// The Markdown body describing `state`, as recorded in `events`.
 ///
 /// Sections: `## Tasks` (one row per task with agent, model, integrated
-/// commits, reported tests and skills used), `## Gates` (every attempt's gates,
+/// commits, reported tests and skills used), `## Dropped` (every task a human
+/// dropped, with the reason they gave), `## Gates` (every attempt's gates,
 /// each with its pass or fail and its findings), `## Overrides` (every override
 /// event) and
 /// `## Escalations` (the count, then the bodies). A section with nothing to
@@ -28,6 +29,16 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
         for task in &tasks {
             out.push(task_row(task, events));
         }
+    }
+
+    out.push(String::new());
+    out.push("## Dropped".to_string());
+    out.push(String::new());
+    let dropped = dropped_lines(&tasks);
+    if dropped.is_empty() {
+        out.push("none".to_string());
+    } else {
+        out.extend(dropped);
     }
 
     out.push(String::new());
@@ -75,6 +86,25 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
         }
     }
     out.join("\n")
+}
+
+/// One line per dropped task: which task, and why it is not in the work.
+///
+/// The reason is the whole point of the section. A reader comparing the plan
+/// with the pull request sees what is missing, and this says who decided that
+/// and why, instead of leaving them to guess from an absent row.
+fn dropped_lines(tasks: &[&Task]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Dropped)
+        .map(|task| {
+            format!(
+                "- {}: {}",
+                task.id,
+                cell(task.dropped_reason.as_deref().unwrap_or("dropped"))
+            )
+        })
+        .collect()
 }
 
 /// One table row: the task, who ran it, what landed, what it ran, what it read.
@@ -419,6 +449,27 @@ mod tests {
         assert!(
             body.contains("- run-wide `no_main_push`: release branch"),
             "{body}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_task_is_listed_with_the_reason_a_human_gave() {
+        let mut state = fixture::many_tasks(1);
+        match state.tasks.get_mut("T00") {
+            Some(task) => {
+                task.status = TaskStatus::Dropped;
+                task.dropped_reason = Some("the human changed their mind".to_string());
+            }
+            None => panic!("the fixture has T00"),
+        }
+        let body = pr_body(&state, &[]);
+        assert!(
+            body.contains("## Dropped\n\n- T00: the human changed their mind"),
+            "{body}"
+        );
+        assert!(
+            pr_body(&fixture::many_tasks(1), &[]).contains("## Dropped\n\nnone"),
+            "a run that dropped nothing says none"
         );
     }
 

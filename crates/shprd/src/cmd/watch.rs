@@ -158,6 +158,8 @@ impl Watcher {
         self.tick_cooldowns(env, &state, now_ms, &mut lines)?;
         self.tick_reviews(mux, env, &state, &mut lines)?;
         for task in state.tasks.values() {
+            // Only work in flight is watched: a task that reported has nothing
+            // to hand over, and one a human dropped is nobody's worker to miss.
             if task.status != TaskStatus::Working {
                 continue;
             }
@@ -1575,6 +1577,49 @@ project_dirs = []
             dry_after_ms,
             Some(300_000),
             "the agent must go dry 120s after it is merely suspect"
+        );
+    }
+
+    /// A task a human dropped is nobody's to watch.
+    ///
+    /// Its attempt is over by decision, not by a lost worker, so the watchdog
+    /// must not hand it off, dry its agent or escalate a pane that is gone.
+    #[test]
+    fn a_dropped_task_is_not_watched() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let tab = tab_id(&env);
+        let pane = pane_of_tab(&mux, &scratch, &tab);
+        mux.set_state(&pane, AgentState::Working);
+        // The worker's pane is gone, which for a live task is a hand-off.
+        mux.close_tab(&shprd_mux::TabId::new(tab))
+            .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::TaskDropped {
+            task: "T1".to_string(),
+            reason: "not needed after all".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let before = events(&ctx).len();
+        let mut watcher = Watcher::new(Policy::default());
+        watcher
+            .tick(&mux, &env, 1_700_000_000_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let log = events(&ctx);
+        let fresh = &log[before..];
+        assert!(
+            !appended(fresh, |kind| matches!(
+                kind,
+                EventKind::Dry { .. } | EventKind::HandedOff { .. } | EventKind::Spawned { .. }
+            )),
+            "a dropped task is not handed off or its agent dried: {fresh:?}"
+        );
+        assert!(
+            !appended(fresh, is_escalation),
+            "a dropped task raises no escalation: {fresh:?}"
         );
     }
 

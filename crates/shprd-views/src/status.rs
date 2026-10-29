@@ -14,7 +14,8 @@ use crate::clock;
 ///
 /// Each task line starts with a symbol: `○` queued, `●` working, `◇` reported
 /// and awaiting review, `✓` for a passed task (`✓ <task> passed <title>`) or
-/// one whose work landed (`✓ <task> landed <title>`), or `✗` failed. Tasks are listed in id order. A dry agent is `◌ <agent> dry
+/// one whose work landed (`✓ <task> landed <title>`), `✗` failed, or `⊘` for a
+/// task a human dropped (`⊘ <task> dropped <title>`). Tasks are listed in id order. A dry agent is `◌ <agent> dry
 /// until HH:MM (reason) — shprd readmit <agent>` in UTC; an agent dry with no
 /// known reset time shows `unknown`.
 pub fn status(state: &RunState, now_ms: u64) -> String {
@@ -53,6 +54,7 @@ fn symbol(status: TaskStatus) -> char {
         TaskStatus::Reported => '◇',
         TaskStatus::Passed | TaskStatus::Integrated => '✓',
         TaskStatus::Failed => '✗',
+        TaskStatus::Dropped => '⊘',
     }
 }
 
@@ -65,6 +67,7 @@ fn word(status: TaskStatus) -> &'static str {
         TaskStatus::Passed => "passed",
         TaskStatus::Integrated => "landed",
         TaskStatus::Failed => "failed",
+        TaskStatus::Dropped => "dropped",
     }
 }
 
@@ -170,6 +173,22 @@ mod tests {
         assert_eq!(
             line_of(&status(&reported, fixture::NOW), "M1.2"),
             "◇ M1.2 reported views"
+        );
+    }
+
+    #[test]
+    fn a_dropped_task_has_its_own_symbol_and_word() {
+        let mut state = fixture::state();
+        match state.tasks.get_mut("M1.3") {
+            Some(task) => {
+                task.status = TaskStatus::Dropped;
+                task.dropped_reason = Some("not needed".to_string());
+            }
+            None => panic!("the fixture has M1.3"),
+        }
+        assert_eq!(
+            line_of(&status(&state, fixture::NOW), "M1.3"),
+            "⊘ M1.3 dropped roster"
         );
     }
 

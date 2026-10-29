@@ -13,16 +13,19 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd brief` | a short, paste-able summary of the run |
 | `shprd remote [--invite]` | remote access status; `--invite` shows a fresh pairing QR |
 | `shprd gate` | run the repository's full checks (`[gates] integration`) once on the integration branch |
-| `shprd land` | push the integration branch and open or update the pull request |
+| `shprd sync` | merge the base branch into the integration branch when it moved under the run (a pull request merged meanwhile): a merge commit, never a rebase, so task commits keep their ids; a conflict is undone, escalated with the files, and exits 2. Landing needs a fresh `shprd gate` afterwards. The orchestrator runs it before `shprd gate`; no terminal needed |
+| `shprd land` | push the integration branch and open or update the pull request; when the base has moved it says so and asks for `shprd sync`, then `shprd gate` |
 | `shprd land --merge` | merge it: only with green checks, the reviewed head, and your approval |
 | `shprd approve` | approve the open pull request at the integration branch's current head, for a solo maintainer who can't approve their own PR on GitHub; humans only, needs a terminal, and a new commit needs a new approval |
 | `shprd readmit <agent> [--reason TEXT]` | clear a dry agent's mark so the run may spawn and hand off to it again (`shprd status` names the agent to pass); humans only, and unlike `approve` it needs no terminal |
+| `shprd override --task <ID> --rule <RULE> --reason <TEXT>` | set a rule aside for one task. One rule honours it today: `integrate_after_failed_gate` lets the task integrate although a gate failed, a review included. Humans only, and it needs a terminal: the question names the task, the rule and the failed gate or review, and a 'no' or a missing terminal writes nothing. An orchestrator or an agent cannot record one, so the work a review stopped cannot be pushed through without you, and `shprd land` marks the pull request `degraded-review` when a failed review was overridden |
 | `shprd watch` | the watchdog loop: records review verdicts and hands off stuck or rate-limited agents. `shprd up` runs it in a pane of tab 1, so you rarely start it yourself |
 | `shprd janitor [--apply]` | show (or apply) cleanup of what the run created: worktrees, branches, the merged remote branch |
 | `shprd keys show\|install\|uninstall` | the `prefix+alt+…` key bindings in your herdr config |
 | `shprd doctor` | check CLIs, sign-ins, skill visibility, mux, relay, git and gh |
 | `shprd set orchestrator\|reviewer <agent> [--effort E]`, `shprd set workers <agent>…` | change the roster in your global config, or the repo's with `--repo <path>`; e.g. `shprd set reviewer codex/gpt-6-luna --effort high` |
 | `shprd roster` | show agents, roles, models, availability |
+| `shprd drop <task> --reason TEXT` | drop a task you decided not to do, so it stops blocking the run: it asks you at a terminal, naming the task, its status and its branch; a 'no' or a missing terminal writes nothing. Humans only. Nothing is deleted now — the worktree and branch stay, the janitor archives the branch before it removes either, and `shprd land`'s pull request lists the task and your reason under `## Dropped` |
 | `shprd restore <task>` | bring back archived work |
 
 Every command supports `--json`. Shell completion (`shprd completion zsh`) is planned, not built yet.

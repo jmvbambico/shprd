@@ -1628,13 +1628,26 @@ const FLOW: &str = r#"## How a run works
 6. **Integrate.** When a task passed review: `shprd agent integrate --task <ID>`.
    A conflict sends it back like a failed review.
 
-7. **Land.** When every task is integrated: `shprd gate` (the repository's
+7. **Land.** When every task is integrated: `shprd sync` (the base may have
+   moved under the run while it worked), then `shprd gate` (the repository's
    full checks), then `shprd land`, and tell the human the pull request URL.
-   Only after the human approves: `shprd land --merge`, then
+   A sync moves the integration head, so a gate that ran before it no longer
+   counts. Only after the human approves: `shprd land --merge`, then
    `shprd janitor --apply`, then `shprd down`.
 
-8. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
+8. **A task that should not be done.** You cannot drop one: dropping is the
+   human's decision, because it takes work out of the run. When a task turns
+   out not to be needed, ask the human to run `shprd drop <ID> --reason "…"`,
+   and carry on with the rest of the plan meanwhile.
+
+9. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]
    --body "…" --default "what you will do if nobody answers"`.
+
+10. **Never override.** `shprd override` is the human's verb: it sets a rule
+   aside, a failed review included, and only they may decide that. Never run
+   it, and never ask a worker to. When a gate or a review failed and the work
+   should land anyway, escalate it; the human runs
+   `shprd override --task <ID> --rule integrate_after_failed_gate --reason "…"`.
 "#;
 /// The first rule a brief carries when the orchestrator runs with
 /// auto-approve: with no prompt left, the pull request is the gate.

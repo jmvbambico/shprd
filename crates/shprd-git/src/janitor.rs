@@ -23,9 +23,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
-use shprd_core::state::{ResourceStatus, RunState, TaskStatus};
+use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 
-use crate::archive::{self, ArchiveError};
+use crate::archive;
 use crate::git::Git;
 use crate::worktree::{self, Layout};
 
@@ -42,15 +42,20 @@ const INTEGRATION_TASK: &str = "_int";
 /// One step the janitor would take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Point the branch's own archive ref at its tip.
+    /// Point the branch's archive ref at its tip.
     ///
-    /// The ref is named after the branch, so two live branches for one task
-    /// are archived to two refs and never collide.
+    /// The ref is named by the plan, never derived here: a task's branch is
+    /// archived under its attempt's own ref, so the branch a retry reused and
+    /// the janitor's cleanup of it can never offer one ref two commits.
     ArchiveRef {
         /// The task.
         task: TaskId,
         /// The branch to archive.
         branch: String,
+        /// The archive ref to write, from [`archive::archive_ref_for_attempt`]
+        /// for a task's branch or [`archive::archive_ref_for_branch`] for one
+        /// that is not a task's.
+        ref_name: String,
     },
     /// Remove a worktree shprd created, keeping its branch.
     ///
@@ -106,9 +111,11 @@ impl Action {
     /// A one-line, human-readable description of the step.
     pub fn describe(&self) -> String {
         match self {
-            Self::ArchiveRef { task, branch } => {
-                format!("archive {task}: {branch} -> refs/shprd/archive/")
-            }
+            Self::ArchiveRef {
+                task,
+                branch,
+                ref_name,
+            } => format!("archive {task}: {branch} -> {ref_name}"),
             Self::RemoveWorktree { task, path } => {
                 format!("remove worktree {task}: {}", path.display())
             }
@@ -126,24 +133,24 @@ impl Action {
     /// The ledger events this step appends when it succeeds, in order.
     ///
     /// Archiving records two: the branch's archive ref now exists, and the
-    /// branch is archived — kept, but out of service. `layout` names the ref,
-    /// because the ref is named after the branch.
-    ///
-    /// The ref name comes from [`archive::archive_ref_for_branch`] or not at
-    /// all: a branch it refuses has no archive ref, so this returns that
-    /// refusal rather than recording a ref shprd never made.
+    /// branch is archived — kept, but out of service. Both names come from the
+    /// step itself, so the event records exactly the ref the archive wrote.
     ///
     /// A review packet folder's step records its removal, whether or not the
     /// ledger ever held the folder: the folder is shprd's own by construction,
     /// and `execute` only yields these events for a folder it actually removed,
     /// so a second apply with nothing left records nothing.
-    pub fn events(&self, layout: &Layout) -> Result<Vec<EventKind>, ArchiveError> {
-        Ok(match self {
-            Self::ArchiveRef { task, branch } => vec![
+    pub fn events(&self) -> Vec<EventKind> {
+        match self {
+            Self::ArchiveRef {
+                task,
+                branch,
+                ref_name,
+            } => vec![
                 EventKind::Resource {
                     action: ResourceAction::Created,
                     kind: ResourceKind::ArchiveRef,
-                    name: archive::archive_ref_for_branch(layout, branch)?,
+                    name: ref_name.clone(),
                     task: recorded_task(task),
                 },
                 EventKind::Resource {
@@ -183,7 +190,7 @@ impl Action {
                 name: dir.display().to_string(),
                 task: None,
             }],
-        })
+        }
     }
 
     /// The task this step is about, when it is about one.
@@ -236,9 +243,9 @@ pub fn plan(
     now_ms: u64,
     archive_days: u32,
 ) -> Vec<Action> {
-    if state.run.is_none() {
+    let Some(run) = &state.run else {
         return Vec::new();
-    }
+    };
     let mut per_task: BTreeMap<TaskId, DueResources> = BTreeMap::new();
     let mut stale: Vec<Action> = Vec::new();
     for ((kind, name), record) in &state.resources {
@@ -286,10 +293,18 @@ pub fn plan(
     }
     let mut actions = Vec::new();
     for (task, due) in per_task {
+        let record = state.tasks.get(&task);
         for branch in &due.branches {
+            // A branch whose ref cannot be named is not archived at all, and its
+            // deletion is then skipped with it: no ref is ever invented.
+            let Some(ref_name) = task_archive_ref(layout, &run.run_id, record, &task, branch)
+            else {
+                continue;
+            };
             actions.push(Action::ArchiveRef {
                 task: task.clone(),
                 branch: branch.clone(),
+                ref_name,
             });
         }
         if let Some(path) = due.worktree {
@@ -315,10 +330,16 @@ pub fn plan(
     {
         let branch_live = is_live(state, &ResourceKind::Branch, &run.integration_branch);
         let task = || INTEGRATION_TASK.to_string();
-        if branch_live {
+        // The branch is inside the namespace, so it has a ref; the lookup is
+        // still matched rather than unwrapped, and a branch it refuses is never
+        // archived with an invented name.
+        if branch_live
+            && let Ok(ref_name) = archive::archive_ref_for_branch(layout, &run.integration_branch)
+        {
             actions.push(Action::ArchiveRef {
                 task: task(),
                 branch: run.integration_branch.clone(),
+                ref_name,
             });
         }
         if let Some(path) = integration_worktree(state, layout, &run.run_id) {
@@ -395,11 +416,13 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
     let mut failed_archive: Vec<String> = Vec::new();
     for action in actions {
         let result = match action {
-            // The events are built from the same refusal-aware lookup the
-            // archive itself used, so a branch that cannot be named is a
-            // failure here too — and its deletion is skipped with it.
-            Action::ArchiveRef { branch, .. } => archive::archive(repo, layout, branch)
-                .and_then(|_| action.events(layout))
+            // The ref the plan named is the one written, so the archive and the
+            // event it records can never disagree. A failed archive skips the
+            // deletion that follows it.
+            Action::ArchiveRef {
+                branch, ref_name, ..
+            } => archive::archive_to(repo, branch, ref_name)
+                .map(|_| action.events())
                 .map_err(|err| {
                     failed_archive.push(branch.clone());
                     err.to_string()
@@ -411,16 +434,14 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                     Err(format!("branch {branch} is outside the shprd namespace"))
                 } else {
                     worktree::delete_branch(repo, layout, branch)
-                        .map(|()| action.events(layout))
+                        .map(|()| action.events())
                         .map_err(|err| err.to_string())
-                        .and_then(|events| events.map_err(|err| err.to_string()))
                 }
             }
             Action::RemoveWorktree { path, .. } => {
                 worktree::remove_worktree_only(repo, layout, path, false)
-                    .map(|()| action.events(layout))
+                    .map(|()| action.events())
                     .map_err(|err| err.to_string())
-                    .and_then(|events| events.map_err(|err| err.to_string()))
             }
             Action::DeleteRemoteBranch { branch } => {
                 if !layout.owns_branch(branch) || is_protected_branch(branch) {
@@ -428,15 +449,13 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
                 } else {
                     Git::new(repo)
                         .run(&["push", "origin", "--delete", branch])
-                        .map(|_| action.events(layout))
+                        .map(|_| action.events())
                         .map_err(|err| err.to_string())
-                        .and_then(|events| events.map_err(|err| err.to_string()))
                 }
             }
             Action::ExpireArchive { ref_name, .. } => archive::expire(repo, ref_name)
-                .map(|()| action.events(layout))
-                .map_err(|err| err.to_string())
-                .and_then(|events| events.map_err(|err| err.to_string())),
+                .map(|()| action.events())
+                .map_err(|err| err.to_string()),
             // The copy comes first and the deletion only after it: a folder
             // this step could not archive is left exactly where it was. A
             // folder that was already gone has nothing to record, so its step
@@ -444,7 +463,7 @@ pub fn execute(repo: &Path, layout: &Layout, actions: &[Action]) -> Vec<Outcome>
             // removal, which is the audit trail the ledger keeps.
             Action::ArchiveReviewPackets { run, dir } => {
                 match archive_review_packets(layout, run, dir) {
-                    Ok(true) => action.events(layout).map_err(|err| err.to_string()),
+                    Ok(true) => Ok(action.events()),
                     Ok(false) => Ok(Vec::new()),
                     Err(err) => Err(err),
                 }
@@ -468,6 +487,42 @@ fn recorded_task(task: &TaskId) -> Option<TaskId> {
     } else {
         Some(task.clone())
     }
+}
+
+/// The archive ref a task's branch is kept under.
+///
+/// The task's own branch name is the one every attempt reuses, so it is archived
+/// under the attempt that owns its tip: the highest the ledger records on that
+/// branch, the task's latest attempt when it records none, and the first attempt
+/// for a task no record survives for. One ref per attempt is what stops a retry
+/// and the janitor from offering one ref two commits.
+///
+/// A branch the layout names differently — the extra `-retry` branch an older
+/// shprd made — is not the task's own branch, so it keeps the ref derived from
+/// its own name, which no attempt ref can collide with.
+fn task_archive_ref(
+    layout: &Layout,
+    run: &str,
+    record: Option<&Task>,
+    task: &TaskId,
+    branch: &str,
+) -> Option<String> {
+    if branch != layout.branch_name(run, task) {
+        return archive::archive_ref_for_branch(layout, branch).ok();
+    }
+    let attempt = record
+        .into_iter()
+        .flat_map(|record| record.attempts.iter())
+        .filter(|attempt| attempt.branch == branch)
+        .map(|attempt| attempt.n)
+        .max()
+        .or_else(|| {
+            record
+                .and_then(Task::latest_attempt)
+                .map(|attempt| attempt.n)
+        })
+        .unwrap_or(1);
+    Some(archive::archive_ref_for_attempt(run, task, attempt))
 }
 
 /// True when the ledger holds `name` of `kind` as a `Live` resource.
@@ -575,12 +630,25 @@ fn is_protected_branch(branch: &str) -> bool {
     matches!(branch, "main" | "master")
 }
 
-/// True when the task's resources are free to go: it landed, or the run is over
-/// and nothing is still working on it.
+/// True when the task's resources are free to go: it landed or a human dropped
+/// it, or the run is over and nothing is still working on it.
+///
+/// A dropped task is spent like an integrated one. Nobody is going to push its
+/// branch now, so the worktree and the branch are only storage — and the plan
+/// archives the branch before either is removed, so whatever the task did is
+/// still recoverable with `shprd restore`. Keeping them until the run ended
+/// would leave a dropped task's worktree in the way of nothing, but it would
+/// also leave it on disk for ever in a run a human kept working in.
+///
+/// The plan is folded state and the log, nothing else: it has no mux in reach
+/// and cannot ask whether a tab for the task is still open. It does not have to
+/// — `shprd drop` closes the task's worker and reviewer tabs and refuses the
+/// drop when the host keeps one, so a task in this state has no agent left to
+/// type into the worktree this removes.
 fn cleanup_due(state: &RunState, task: &TaskId) -> bool {
     match state.tasks.get(task) {
         Some(record) => {
-            record.status == TaskStatus::Integrated
+            matches!(record.status, TaskStatus::Integrated | TaskStatus::Dropped)
                 || (state.finished && record.status != TaskStatus::Working)
         }
         None => state.finished,

@@ -84,6 +84,10 @@ struct Times {
     end: Option<u64>,
 }
 
+/// Start and end times of every attempt, keyed by the task and attempt they
+/// belong to.
+type TimesByAttempt<'a> = BTreeMap<(&'a str, u32), Times>;
+
 /// Projects run state as a dagr v3 run document.
 ///
 /// `generated_at_ms` (milliseconds since the Unix epoch) becomes
@@ -117,12 +121,12 @@ pub fn project(
         })?;
     let run_id = run.run_id.clone();
     let title = format!("{} · {run_id}", repo_basename(&run.repo));
-    let times = times_by_attempt(events);
+    let (times, dropped) = times_by_attempt(events);
 
     let mut tasks: Vec<Value> = state
         .tasks
         .values()
-        .map(|task| task_value(task, &times))
+        .map(|task| task_value(task, &times, &dropped))
         .collect::<Result<_, _>>()?;
     tasks.sort_by(|left, right| id_of(left).cmp(id_of(right)));
 
@@ -155,8 +159,15 @@ fn id_of(value: &Value) -> &str {
 }
 
 /// Start and end times per `(task, attempt)`, read off the event log.
-fn times_by_attempt(events: &[Event]) -> BTreeMap<(&str, u32), Times> {
+///
+/// The first map is keyed by the task and attempt it belongs to. The second
+/// holds the time a task was dropped, which settles the attempt
+/// it stopped: the event names the task, not the attempt.
+fn times_by_attempt(events: &[Event]) -> (TimesByAttempt<'_>, BTreeMap<&str, u64>) {
     let mut times: BTreeMap<(&str, u32), Times> = BTreeMap::new();
+    // A drop settles the attempt it stopped, and it names no attempt: a task is
+    // dropped where it is, so the time belongs to the latest one.
+    let mut dropped: BTreeMap<&str, u64> = BTreeMap::new();
     for event in events {
         match &event.kind {
             EventKind::Spawned { task, attempt, .. } => {
@@ -167,10 +178,13 @@ fn times_by_attempt(events: &[Event]) -> BTreeMap<(&str, u32), Times> {
             | EventKind::GateFailed { task, attempt, .. } => {
                 times.entry((task.as_str(), *attempt)).or_default().end = Some(event.at_ms);
             }
+            EventKind::TaskDropped { task, .. } => {
+                dropped.insert(task.as_str(), event.at_ms);
+            }
             _ => {}
         }
     }
-    times
+    (times, dropped)
 }
 
 /// One dagr project per distinct top-level path component of the task scopes.
@@ -203,13 +217,17 @@ fn project_of(path: &str) -> Option<&str> {
 }
 
 /// Projects one task.
-fn task_value(task: &Task, times: &BTreeMap<(&str, u32), Times>) -> Result<Value, ViewError> {
+fn task_value(
+    task: &Task,
+    times: &TimesByAttempt<'_>,
+    dropped: &BTreeMap<&str, u64>,
+) -> Result<Value, ViewError> {
     let latest = task.attempts.len().checked_sub(1);
     let attempts: Vec<Value> = task
         .attempts
         .iter()
         .enumerate()
-        .map(|(index, attempt)| attempt_value(task, attempt, Some(index) == latest, times))
+        .map(|(index, attempt)| attempt_value(task, attempt, Some(index) == latest, times, dropped))
         .collect::<Result<_, _>>()?;
 
     let (state, unblock, note) = task_state(task);
@@ -261,6 +279,18 @@ fn task_state(task: &Task) -> (&'static str, Option<&'static str>, Option<String
         ),
         TaskStatus::Failed => ("blocked", Some("orchestrator"), Some(failed_note(task))),
         TaskStatus::Integrated => ("done", None, None),
+        // dagr's states have no word for work that will not happen, and `done`
+        // would say the work is on the branch. It reads `blocked` with the
+        // human as the owner, and the note is the reason they gave.
+        TaskStatus::Dropped => ("blocked", Some("human"), Some(dropped_note(task))),
+    }
+}
+
+/// Why a dropped task reads blocked: the reason the human gave.
+fn dropped_note(task: &Task) -> String {
+    match &task.dropped_reason {
+        Some(reason) => format!("dropped: {reason}"),
+        None => "dropped".to_string(),
     }
 }
 
@@ -288,7 +318,8 @@ fn attempt_value(
     task: &Task,
     attempt: &Attempt,
     latest: bool,
-    times: &BTreeMap<(&str, u32), Times>,
+    times: &TimesByAttempt<'_>,
+    dropped: &BTreeMap<&str, u64>,
 ) -> Result<Value, ViewError> {
     let state = attempt_state(task, attempt, latest);
     let terminal = matches!(state, "done" | "failed");
@@ -317,9 +348,18 @@ fn attempt_value(
         object.insert("liveness".to_string(), json!({ "queued_input": 0 }));
     }
     if terminal {
-        let end = time_ms(times, &task.id, attempt.n, |times| times.end).ok_or_else(|| {
-            missing_fact("a Reported, GatePassed or GateFailed event", task, attempt)
-        })?;
+        // A dropped task's latest attempt is settled by the drop: the attempt
+        // never reported, because a human stopped it.
+        let end = time_ms(times, &task.id, attempt.n, |times| times.end)
+            .or_else(|| {
+                latest
+                    .then(|| dropped.get(task.id.as_str()))
+                    .flatten()
+                    .copied()
+            })
+            .ok_or_else(|| {
+                missing_fact("a Reported, GatePassed or GateFailed event", task, attempt)
+            })?;
         object.insert("ended_at".to_string(), json!(rfc3339_utc(end)));
         object.insert(
             "outcome".to_string(),
@@ -379,7 +419,25 @@ fn attempt_state(task: &Task, attempt: &Attempt, latest: bool) -> &'static str {
         }
         TaskStatus::Failed => "failed",
         TaskStatus::Integrated => "done",
+        // An attempt a drop stopped never reported, so it did not finish:
+        // `failed` is the honest word for it, and `task_state` is where the
+        // reason a human gave is drawn.
+        TaskStatus::Dropped => {
+            if failed || !settled(attempt) {
+                "failed"
+            } else {
+                "done"
+            }
+        }
     }
+}
+
+/// Whether the attempt itself recorded an outcome: a report, or a gate.
+///
+/// A drop can stop an attempt that never recorded either, which is the one
+/// settling an attempt has that the attempt did not write.
+fn settled(attempt: &Attempt) -> bool {
+    attempt.report.is_some() || !attempt.gates.is_empty()
 }
 
 /// How strongly the engine can vouch for an attempt's outcome.
@@ -416,6 +474,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
+        EventKind::TaskDropped { .. } => "task_dropped",
         EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
@@ -430,6 +489,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
+        EventKind::BaseSynced { .. } => "base_synced",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }
@@ -979,6 +1039,42 @@ mod tests {
             Some(task) => task,
             None => panic!("no task {id} in {doc}"),
         }
+    }
+
+    #[test]
+    fn a_dropped_task_reads_blocked_and_names_the_reason() {
+        // dagr has no state for work that will not happen: it is drawn blocked,
+        // the human is who could unblock it, and the note is their reason.
+        let events = vec![
+            event(
+                1,
+                T0,
+                EventKind::RunStarted {
+                    run_id: "run-3".to_string(),
+                    repo: "/repo".to_string(),
+                    base_branch: "main".to_string(),
+                    integration_branch: "integration/m1".to_string(),
+                },
+            ),
+            event(
+                2,
+                T0 + MINUTE,
+                task_added("e", "dropped work", &["crates/e"], &["impl"]),
+            ),
+            event(3, T0 + 2 * MINUTE, spawned("e", 1, "w5")),
+            event(
+                4,
+                T0 + 3 * MINUTE,
+                EventKind::TaskDropped {
+                    task: "e".to_string(),
+                    reason: "not needed".to_string(),
+                },
+            ),
+        ];
+        let doc = project_doc(&state(&events), &events, T0 + 10 * MINUTE);
+        assert_eq!(task(&doc, "e")["state"], "blocked");
+        assert_eq!(task(&doc, "e")["unblock"], "human");
+        assert_eq!(task(&doc, "e")["note"], "dropped: not needed");
     }
 
     #[test]

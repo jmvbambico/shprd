@@ -110,9 +110,15 @@ fn record_only(ctx: &Ctx, args: &SpawnArgs) -> Result<(), CliError> {
 }
 
 /// Prints what a spawn did: JSON when asked, else one short human line.
+///
+/// A retry first names the ref the attempt it replaced was archived under, so
+/// the human can see the old work is still reachable — and, in JSON mode, that
+/// line goes to stderr because stdout is the document.
 fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
     if ctx.json {
         let value = serde_json::json!({
+            "archived": report.replaced.as_ref().map(|earlier| earlier.ref_name.clone()),
+            "replaced_attempt": report.replaced.as_ref().map(|earlier| earlier.attempt),
             "task": report.task,
             "attempt": report.attempt,
             "agent": report.agent,
@@ -125,6 +131,10 @@ fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
         });
         println!("{value}");
         return;
+    }
+    if let Some(replaced) = &report.replaced {
+        let line = replaced.line(&report.task);
+        println!("{line}");
     }
     println!(
         "ok spawned {} attempt {} with {} in {} (tab {:?})",
@@ -224,12 +234,10 @@ fn escalate(ctx: &Ctx, args: &EscalateArgs) -> Result<(), CliError> {
 }
 
 /// Records a human overriding a rule for one task, or run-wide.
+///
+/// The hidden `agent override` alias of `shprd override`: it is the same verb,
+/// so it asks the same question. The rule refuses it from anything but a
+/// human either way.
 fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
-    let kind = EventKind::Override {
-        task: args.task.clone().unwrap_or_default(),
-        rule: args.rule.clone(),
-        reason: args.reason.clone(),
-    };
-    let event = ctx.commit(kind)?;
-    emit(ctx, &event)
+    crate::cmd::override_rule::override_verb(ctx, args)
 }

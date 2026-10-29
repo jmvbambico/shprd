@@ -286,6 +286,20 @@ pub enum EventKind {
         /// Commits that were landed.
         commits: Vec<String>,
     },
+    /// A human decided a task will not be done.
+    ///
+    /// The other way a task leaves the run's work: `Integrated` puts its
+    /// commits on the integration branch, and this says the commits are never
+    /// coming. It is the human's decision alone, because a task nobody does is
+    /// work no agent may decide to skip, and it is terminal: the worktree and
+    /// the branch are kept, so whatever the task did is still reachable.
+    TaskDropped {
+        /// The task.
+        task: TaskId,
+        /// Why the human dropped it, in their words. It is what the run's pull
+        /// request lists, so a reader sees what was left out and why.
+        reason: String,
+    },
     /// A review was handed to a reviewer for an attempt.
     ///
     /// `degraded` is the fact a landing decision needs: it records that the
@@ -451,6 +465,23 @@ pub enum EventKind {
         /// The last log sequence the orchestrator was told about.
         up_to_seq: u64,
     },
+    /// The base branch was merged into the run's integration branch.
+    ///
+    /// Recorded by `shprd sync` when the base moved under the run — a pull
+    /// request merged meanwhile — so the integration branch is not left behind
+    /// the branch it proposes to merge into. The merge is always a merge
+    /// commit, never a rebase, so a task's commits keep the ids the pull
+    /// request body lists.
+    ///
+    /// Both ends are recorded because the run-wide gate is keyed to the
+    /// integration head: a sync moves that head, so a gate that ran before it
+    /// no longer describes the commits that would land.
+    BaseSynced {
+        /// The base commit that was merged in.
+        base_sha: String,
+        /// The integration branch's head after the merge.
+        int_sha: String,
+    },
     /// The run finished.
     RunFinished {
         /// The tasks the run ended with unfinished, when a human abandoned
@@ -552,6 +583,10 @@ mod tests {
                 task: "M1.1".to_string(),
                 commits: vec!["abc123".to_string(), "def456".to_string()],
             },
+            EventKind::TaskDropped {
+                task: "M1.2".to_string(),
+                reason: "not needed after all".to_string(),
+            },
             EventKind::ReviewRequested {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -623,6 +658,10 @@ mod tests {
                 process_group: 88158,
             },
             EventKind::OrchestratorNotified { up_to_seq: 42 },
+            EventKind::BaseSynced {
+                base_sha: "abc1234".to_string(),
+                int_sha: "def5678".to_string(),
+            },
             EventKind::RunFinished {
                 abandoned: Vec::new(),
             },
@@ -632,7 +671,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 20, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 22, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

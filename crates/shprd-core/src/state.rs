@@ -50,6 +50,13 @@ pub struct RunState {
     ///
     /// Only the newest one is kept: the full history is the log's job.
     pub last_full_gate: Option<(String, bool, u64)>,
+    /// The last base sync: the base commit that was merged in, the integration
+    /// head it produced, and the sequence number that recorded it.
+    ///
+    /// Only the newest one is kept: the full history is the log's job. It says
+    /// whether the run was ever brought up to date, which a later reader of a
+    /// merged pull request wants to know.
+    pub last_sync: Option<(String, String, u64)>,
     /// The run's pull request, once `shprd land` opened one.
     ///
     /// One run proposes one pull request, so the newest `PrOpened` wins and a
@@ -156,6 +163,12 @@ pub struct Task {
     pub attempts: Vec<Attempt>,
     /// Rules a human overrode for this task, in order.
     pub overrides: Vec<OverrideRecord>,
+    /// Why a human dropped it, once one did.
+    ///
+    /// Kept beside the status rather than looked up in the log, because every
+    /// view that draws a task reads the folded state: the pull request's
+    /// `## Dropped` section is the reason a reader is looking for.
+    pub dropped_reason: Option<String>,
 }
 
 /// Where a task sits in its lifecycle.
@@ -174,6 +187,13 @@ pub enum TaskStatus {
     Failed,
     /// Its work landed on the integration branch.
     Integrated,
+    /// A human decided the task will not be done.
+    ///
+    /// Terminal like [`TaskStatus::Integrated`]: the run is not waiting on it
+    /// any more, so ending the run strands nothing. Unlike an integrated task,
+    /// none of it is on the integration branch, so the run's pull request lists
+    /// it rather than carrying it.
+    Dropped,
 }
 
 /// One attempt at a task.
@@ -394,6 +414,7 @@ impl RunState {
                         status: TaskStatus::Queued,
                         attempts: Vec::new(),
                         overrides: Vec::new(),
+                        dropped_reason: None,
                     },
                 );
             }
@@ -508,6 +529,14 @@ impl RunState {
             EventKind::Integrated { task, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
+                }
+            }
+            EventKind::TaskDropped { task, reason } => {
+                // Terminal, and the reason is kept with it: a view that draws
+                // the task out of the folded state has to say why it is gone.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.status = TaskStatus::Dropped;
+                    entry.dropped_reason = Some(reason.clone());
                 }
             }
             EventKind::Dry {
@@ -645,6 +674,9 @@ impl RunState {
             }
             EventKind::OrchestratorNotified { up_to_seq } => {
                 self.notified_up_to_seq = Some(*up_to_seq);
+            }
+            EventKind::BaseSynced { base_sha, int_sha } => {
+                self.last_sync = Some((base_sha.clone(), int_sha.clone(), event.seq));
             }
             EventKind::RunFinished { abandoned } => {
                 self.finished = true;
@@ -906,6 +938,33 @@ mod tests {
         assert_eq!(
             state.last_full_gate,
             Some(("bbb222".to_string(), true, 4)),
+            "the later event wins"
+        );
+    }
+
+    #[test]
+    fn the_newest_base_sync_is_the_one_kept() {
+        let first = ev(
+            3,
+            EventKind::BaseSynced {
+                base_sha: "aaa111".to_string(),
+                int_sha: "bbb222".to_string(),
+            },
+        );
+        let second = ev(
+            4,
+            EventKind::BaseSynced {
+                base_sha: "ccc333".to_string(),
+                int_sha: "ddd444".to_string(),
+            },
+        );
+        let state = match fold_extra(vec![first, second]) {
+            Ok(state) => state,
+            Err(err) => panic!("two base syncs must fold: {err}"),
+        };
+        assert_eq!(
+            state.last_sync,
+            Some(("ccc333".to_string(), "ddd444".to_string(), 4)),
             "the later event wins"
         );
     }

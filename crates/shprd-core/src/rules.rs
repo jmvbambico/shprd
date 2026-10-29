@@ -85,6 +85,12 @@ pub enum RuleError {
         /// The status the task actually has.
         found: TaskStatus,
     },
+    /// A human dropped the task, so nothing may be appended for it.
+    #[error("task {task:?} was dropped by a human: no agent may record work for it again")]
+    TaskIsDropped {
+        /// The task.
+        task: TaskId,
+    },
     /// A dependency has not been integrated yet.
     #[error("task {task:?} depends on {dep:?}, which has not been integrated")]
     UnmetDependency {
@@ -119,6 +125,12 @@ pub enum RuleError {
     /// cooldown.
     #[error("{actor:?} cannot re-admit an agent: only the engine or a human can")]
     ReAdmitNotAllowed {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// A base sync was recorded by something the run does not let run one.
+    #[error("{actor:?} cannot sync the base: only a human, the orchestrator or the engine can")]
+    SyncNotAllowed {
         /// Who tried.
         actor: Actor,
     },
@@ -181,6 +193,30 @@ pub enum RuleError {
     EmptyOverride {
         /// The task, or empty for a run-wide override.
         task: TaskId,
+    },
+    /// An override was recorded by something that is not a human.
+    ///
+    /// The rule an override sets aside is the human's to set aside: an
+    /// orchestrator or an agent that recorded its own would make every rule
+    /// advisory, including a failed review. History keeps what it already
+    /// recorded, like every other actor-bound rule.
+    #[error("{actor:?} cannot override a rule: only a human can")]
+    OverrideNotHuman {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// An override named a rule the rules do not read.
+    ///
+    /// An override of a name nothing honours does nothing, so accepting it
+    /// would let a typo record a decision that silently has no effect.
+    #[error(
+        "{rule:?} is not a rule an override can set aside; the rules an override can name are {expected:?}"
+    )]
+    UnknownOverrideRule {
+        /// The rule the event named.
+        rule: String,
+        /// The rules an override may name.
+        expected: &'static [&'static str],
     },
     /// A resource was created under a name that is already live or archived.
     #[error("{kind:?} {name:?} has already been created and not removed")]
@@ -284,6 +320,22 @@ pub enum RuleError {
         /// The failed gate.
         gate: String,
     },
+    /// A task was dropped by something that is not a human.
+    ///
+    /// Dropping is how a task leaves the run's work without landing: the human
+    /// decided nobody will do it. An orchestrator or an agent that could drop a
+    /// task could mark away the work it was given, so only a human may.
+    #[error("{actor:?} cannot drop a task: only a human can")]
+    DropNotHuman {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// A dropped task carried no reason.
+    #[error("task {task:?} was dropped without a reason, which is the only record of why")]
+    EmptyDropReason {
+        /// The task.
+        task: TaskId,
+    },
     /// A run was abandoned by something that is not a human.
     ///
     /// `--abandon` ends a run that still has work in it: it is the human's
@@ -336,6 +388,19 @@ pub enum RuleError {
 /// Rule name a human overrides to integrate an attempt whose gate failed.
 pub const INTEGRATE_AFTER_FAILED_GATE: &str = "integrate_after_failed_gate";
 
+/// Every rule a human may override, by the name the log records.
+///
+/// An override whose name no rule reads decides nothing, so a typo would
+/// record a decision that never takes effect. `shprd override` and the rule
+/// below both read this list: adding a rule that honours an override means
+/// adding its name here.
+pub const OVERRIDE_RULES: &[&str] = &[INTEGRATE_AFTER_FAILED_GATE];
+
+/// Whether `rule` names an override the rules honour.
+pub fn is_override_rule(rule: &str) -> bool {
+    OVERRIDE_RULES.contains(&rule)
+}
+
 /// True when `agent` is on cooldown at `now_ms`.
 ///
 /// An agent is dry until its reset time; a dry agent with no reset time stays
@@ -375,6 +440,51 @@ fn check_available(
             agent: agent.to_string(),
         }),
     }
+}
+
+/// Rules for recording an override: a human, and a rule the run reads.
+///
+/// `SHPRD_ACTOR` is an environment variable, so a pane can claim to be a
+/// human. What holds regardless is the terminal `shprd override` asks its
+/// question at, which no agent's shell has; this rule is what refuses the
+/// event outright from an orchestrator or an agent, so no verb of theirs can
+/// talk a failed review past the run. The name is checked too: an override
+/// nothing honours is a decision that does nothing, and a typo must be
+/// refused rather than logged.
+///
+/// History is not re-judged, like every other actor-bound rule: a log written
+/// before either check existed still folds.
+fn check_override(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    rule: &str,
+    reason: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if !task.is_empty() {
+        task_in(state, task)?;
+    }
+    if rule.trim().is_empty() || reason.trim().is_empty() {
+        return Err(RuleError::EmptyOverride {
+            task: task.to_string(),
+        });
+    }
+    if provenance == Provenance::Historical {
+        return Ok(());
+    }
+    if !matches!(actor, Actor::Human) {
+        return Err(RuleError::OverrideNotHuman {
+            actor: actor.clone(),
+        });
+    }
+    if !is_override_rule(rule) {
+        return Err(RuleError::UnknownOverrideRule {
+            rule: rule.to_string(),
+            expected: OVERRIDE_RULES,
+        });
+    }
+    Ok(())
 }
 
 /// Checks one event kind against `state` as of `now_ms`.
@@ -454,13 +564,13 @@ fn check_with(
             attempt,
             agent,
             ..
-        } => check_spawned(state, task, *attempt, agent, now_ms),
+        } => check_spawned(state, task, *attempt, agent, now_ms, provenance),
         EventKind::Reported {
             task,
             attempt,
             changed_paths,
             ..
-        } => check_reported(state, task, *attempt, changed_paths),
+        } => check_reported(state, task, *attempt, changed_paths, provenance),
         EventKind::GatePassed {
             task,
             attempt,
@@ -475,30 +585,27 @@ fn check_with(
             source,
             ..
         } => {
-            check_gate(state, task, *attempt)?;
+            check_gate(state, task, *attempt, provenance)?;
             check_verdict(provenance, state, actor, task, *attempt, gate, source)
         }
         EventKind::ReviewRequested { task, attempt, .. } => {
-            check_review_requested(state, task, *attempt)
+            check_review_requested(state, task, *attempt, provenance)
         }
-        EventKind::Integrated { task, .. } => check_integrated(state, task),
+        EventKind::Integrated { task, .. } => check_integrated(state, task, provenance),
+        EventKind::TaskDropped { task, reason } => {
+            check_task_dropped(state, actor, task, reason, provenance)
+        }
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
-            check_handed_off(state, task, to_agent, now_ms)
+            check_handed_off(state, task, to_agent, now_ms, provenance)
         }
         EventKind::Escalated { task, .. } => match task {
             Some(task) => task_in(state, task).map(|_| ()),
             None => Ok(()),
         },
         EventKind::Override { task, rule, reason } => {
-            if !task.is_empty() {
-                task_in(state, task)?;
-            }
-            if rule.trim().is_empty() || reason.trim().is_empty() {
-                return Err(RuleError::EmptyOverride { task: task.clone() });
-            }
-            Ok(())
+            check_override(state, actor, task, rule, reason, provenance)
         }
         EventKind::Resource {
             action,
@@ -520,6 +627,7 @@ fn check_with(
         // A delivery record moves nothing: it is the watchdog's own bookmark,
         // and any pass may record one.
         EventKind::OrchestratorNotified { .. } => Ok(()),
+        EventKind::BaseSynced { .. } => check_base_synced(actor, provenance),
         EventKind::RunFinished { abandoned } => {
             check_run_finished(state, actor, abandoned, provenance)
         }
@@ -538,6 +646,69 @@ fn is_cleanup(kind: &EventKind) -> bool {
             ..
         }
     )
+}
+
+/// Whether `actor` may record a base sync.
+///
+/// Merging the base into the run's own integration branch is operational
+/// housekeeping: a human runs it by hand, and the orchestrator runs it before
+/// the gate, which is the case this verb exists for. An agent never does: a
+/// worker's own branch is cut from the base by the engine, and an agent that
+/// could rewrite the integration branch would move the head the gate and the
+/// pull request are pinned to.
+fn check_base_synced(actor: &Actor, provenance: Provenance) -> Result<(), RuleError> {
+    if provenance == Provenance::Required
+        && !matches!(actor, Actor::Engine | Actor::Orchestrator | Actor::Human)
+    {
+        return Err(RuleError::SyncNotAllowed {
+            actor: actor.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Rules for a human's drop of a task.
+///
+/// Dropping is the human's decision alone: it takes a task out of the run's
+/// work, and an agent that could take itself out of a run would walk away from
+/// the task it was given, which is the same reason `--abandon` is the human's.
+/// History is not re-judged, like every other actor-bound rule.
+///
+/// Only a task with work left to drop may be dropped: an integrated task's
+/// commits are already on the integration branch, so calling it dropped would
+/// make the pull request's `## Dropped` list disagree with what it carries, and
+/// a dropped task is terminal already. Any other status may be dropped,
+/// `Working` included — a human who decides a running task will not be done
+/// stops it there rather than waiting for it to report.
+///
+/// The reason is required because it is the only record of why the work is
+/// missing: the pull request lists it, and a blank one would say nothing.
+fn check_task_dropped(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    reason: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Required && !matches!(actor, Actor::Human) {
+        return Err(RuleError::DropNotHuman {
+            actor: actor.clone(),
+        });
+    }
+    let found = task_in(state, task)?;
+    if matches!(found.status, TaskStatus::Integrated | TaskStatus::Dropped) {
+        return Err(RuleError::WrongStatus {
+            task: task.to_string(),
+            expected: "a task that has not landed and is not already dropped",
+            found: found.status,
+        });
+    }
+    if reason.trim().is_empty() {
+        return Err(RuleError::EmptyDropReason {
+            task: task.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Rules for a human's approval of the run's pull request.
@@ -694,6 +865,36 @@ fn check_task_added(
     Ok(())
 }
 
+/// Refuses a late event from a task a human already dropped.
+///
+/// A drop takes the task out of the run's work, and `drop` closes the task's
+/// tabs before it records one. A worker that is somehow still running — a host
+/// that failed to close the tab, a shell the agent left behind — must not be
+/// able to append to a task nobody is waiting for: a report, a gate, a spawn, a
+/// hand-off or an integration after the drop would put work back into a run that
+/// has decided against it, and the janitor may already have archived the branch.
+///
+/// The same Provenance rule as the other actor-bound checks applies: this is a
+/// rule about what may be *appended* now. A log being folded is read, not
+/// re-judged, so the status rules alone decide what an old log already holds —
+/// and they refuse these events for a Dropped task anyway, which is why the
+/// guard stands down on replay rather than reporting a second reason.
+fn check_not_dropped(
+    state: &RunState,
+    task: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Historical {
+        return Ok(());
+    }
+    if task_in(state, task)?.status == TaskStatus::Dropped {
+        return Err(RuleError::TaskIsDropped {
+            task: task.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Rules for spawning an agent on a task attempt.
 fn check_spawned(
     state: &RunState,
@@ -701,7 +902,9 @@ fn check_spawned(
     attempt: u32,
     agent: &AgentId,
     now_ms: u64,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if !matches!(found.status, TaskStatus::Queued | TaskStatus::Failed) {
         return Err(RuleError::WrongStatus {
@@ -766,7 +969,9 @@ fn check_reported(
     task: &str,
     attempt: u32,
     changed_paths: &[String],
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if found.status != TaskStatus::Working {
         return Err(RuleError::WrongStatus {
@@ -804,7 +1009,13 @@ fn check_reported(
 }
 
 /// Rules for recording a gate outcome: it needs a completed report.
-fn check_gate(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
+fn check_gate(
+    state: &RunState,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     // A failed gate leaves the task Failed; a later gate on the same attempt is
     // still allowed, which is how a failed attempt gets re-gated after a fix.
@@ -923,7 +1134,13 @@ fn latest_review<'a>(state: &'a RunState, task: &str, attempt: u32) -> Option<&'
 /// verdict the attempt is decided, and a second request would be a review of
 /// work the run has already judged: it is refused here rather than left to the
 /// task's status alone, so the refusal names the real reason.
-fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<(), RuleError> {
+fn check_review_requested(
+    state: &RunState,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     let current = expect_current_attempt(task, found, attempt)?;
     if current.gates.iter().any(|gate| gate.gate == REVIEW_GATE) {
@@ -943,7 +1160,8 @@ fn check_review_requested(state: &RunState, task: &str, attempt: u32) -> Result<
 }
 
 /// Rules for integrating a passed task: a failed gate needs a later override.
-fn check_integrated(state: &RunState, task: &str) -> Result<(), RuleError> {
+fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if found.status != TaskStatus::Passed {
         return Err(RuleError::NotPassed {
@@ -979,7 +1197,9 @@ fn check_handed_off(
     task: &str,
     to_agent: &AgentId,
     now_ms: u64,
+    provenance: Provenance,
 ) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
     if found.status != TaskStatus::Working {
         return Err(RuleError::WrongStatus {
@@ -999,9 +1219,11 @@ fn check_handed_off(
 /// The tasks a run cannot leave behind: every one not in a terminal state.
 ///
 /// Integrated is terminal, because the work is on the integration branch and
-/// the run's pull request is what carries it. Queued, Working, Reported, in
-/// review (passed or failed) and Failed are all work in flight or work stuck,
-/// which ending the run would strand on a branch nobody watches.
+/// the run's pull request is what carries it. Dropped is terminal too, because
+/// a human decided the work is not coming: nothing is stranded, and a dropped
+/// task must not block the run for ever. Queued, Working, Reported, in review
+/// (passed or failed) and Failed are all work in flight or work stuck, which
+/// ending the run would strand on a branch nobody watches.
 ///
 /// `shprd down` names these in its refusal, and the rule refuses a finish or an
 /// abandon that disagrees with them, so both read one definition.
@@ -1009,15 +1231,23 @@ pub fn unfinished_tasks(state: &RunState) -> Vec<TaskId> {
     state
         .tasks
         .iter()
-        .filter(|(_, task)| task.status != TaskStatus::Integrated)
+        .filter(|(_, task)| !matches!(task.status, TaskStatus::Integrated | TaskStatus::Dropped))
         .map(|(id, _)| id.clone())
         .collect()
 }
 
 /// Whether ending the run would leave its landed work on a branch nothing
-/// picks up: tasks exist and the pull request carrying them has not merged.
+/// picks up: a task landed and the pull request carrying it has not merged.
+///
+/// A run with nothing integrated has nothing for a pull request to carry: every
+/// task was dropped or none was planned, and refusing that run would ask for a
+/// merge that `land` refuses to open.
 pub fn unlanded(state: &RunState) -> bool {
-    !state.tasks.is_empty() && state.pr.as_ref().is_none_or(|pr| !pr.merged)
+    let integrated = state
+        .tasks
+        .values()
+        .any(|task| task.status == TaskStatus::Integrated);
+    integrated && state.pr.as_ref().is_none_or(|pr| !pr.merged)
 }
 
 /// What a human's `--abandon` may name: the work ending the run would leave.
@@ -1286,15 +1516,18 @@ mod tests {
         )
     }
 
+    /// Records a human overriding `rule` for `id`.
     fn overrode(seq: u64, id: &str, rule: &str) -> Event {
-        ev(
+        let mut event = ev(
             seq,
             EventKind::Override {
                 task: id.to_string(),
                 rule: rule.to_string(),
                 reason: "shipping anyway".to_string(),
             },
-        )
+        );
+        event.actor = Actor::Human;
+        event
     }
 
     fn dried(seq: u64, agent: &str, reset_at_ms: Option<u64>) -> Event {
@@ -1962,6 +2195,90 @@ mod tests {
         ));
     }
 
+    /// A folded log holding one task whose attempt passed its gate.
+    fn passed_task() -> RunState {
+        folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            gated(5, "a", 1, "clippy", true),
+        ])
+    }
+
+    /// An override of `rule` for `task`, as a verb would offer it.
+    fn override_kind(task: &str, rule: &str) -> EventKind {
+        EventKind::Override {
+            task: task.to_string(),
+            rule: rule.to_string(),
+            reason: "shipping anyway".to_string(),
+        }
+    }
+
+    #[test]
+    fn only_a_human_appends_an_override() {
+        let state = passed_task();
+        let kind = override_kind("a", INTEGRATE_AFTER_FAILED_GATE);
+        let others = [
+            Actor::Engine,
+            Actor::Orchestrator,
+            Actor::Agent {
+                id: "w1".to_string(),
+            },
+        ];
+        for actor in others {
+            match check_as(&state, &actor, &kind, 6_000) {
+                Err(RuleError::OverrideNotHuman { actor: named }) => {
+                    assert_eq!(named, actor, "the refusal names who tried");
+                }
+                other => panic!("{actor:?} must not override, got {other:?}"),
+            }
+        }
+        assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
+    }
+
+    #[test]
+    fn only_a_rule_the_run_reads_may_be_overridden() {
+        let state = passed_task();
+        assert!(matches!(
+            check_as(
+                &state,
+                &Actor::Human,
+                &override_kind("a", "integrate_after_failed_gate_typo"),
+                6_000
+            ),
+            Err(RuleError::UnknownOverrideRule { .. })
+        ));
+    }
+
+    #[test]
+    fn an_old_override_still_folds_and_still_counts() {
+        // History is not re-judged: an override an engine or an orchestrator
+        // recorded before the rule existed still folds, and still lets the
+        // task it named integrate past the gate that failed.
+        let mut old = overrode(7, "a", INTEGRATE_AFTER_FAILED_GATE);
+        old.actor = Actor::Orchestrator;
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            gated(5, "a", 1, "clippy", false),
+            gated(6, "a", 1, "clippy", true),
+            old,
+            integrated(8, "a"),
+        ];
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Integrated);
+    }
+
+    #[test]
+    fn an_old_override_of_a_name_nothing_reads_still_folds() {
+        let mut old = overrode(3, "", "no_main_push");
+        old.actor = Actor::Orchestrator;
+        let log = vec![started(1), old];
+        assert_eq!(folded(&log).run_overrides.len(), 1);
+    }
+
     #[test]
     fn dry_agent_is_refused_until_reset() {
         // seq 3 dries agent-1 until seq 5 (5000 ms); spawns at seq 4 and 6.
@@ -2125,6 +2442,30 @@ mod tests {
         let state = folded(&log);
         assert!(state.finished);
         assert_eq!(state.abandoned, abandoned);
+    }
+
+    #[test]
+    fn a_base_sync_is_never_an_agent_s() {
+        // Merging the base into the run's own branch moves the head the gate
+        // and the pull request are pinned to, so a worker may not do it: the
+        // orchestrator runs it before the gate, and a human by hand.
+        let state = folded(&in_flight());
+        let kind = EventKind::BaseSynced {
+            base_sha: "abc1234".to_string(),
+            int_sha: "def5678".to_string(),
+        };
+        for actor in [Actor::Human, Actor::Orchestrator, Actor::Engine] {
+            state
+                .check_as(&actor, &kind, 13_000)
+                .unwrap_or_else(|err| panic!("{actor:?} may sync the base: {err}"));
+        }
+        let agent = Actor::Agent {
+            id: "claude".to_string(),
+        };
+        match state.check_as(&agent, &kind, 13_000) {
+            Err(err) => assert!(matches!(err, RuleError::SyncNotAllowed { .. }), "{err}"),
+            Ok(()) => panic!("an agent must not sync the base"),
+        }
     }
 
     #[test]
@@ -2605,6 +2946,216 @@ mod tests {
             ),
             Err(RuleError::StaleReviewVerdict { .. })
         ));
+    }
+
+    /// A human's drop of task `a`, at `seq`.
+    fn dropped(seq: u64, reason: &str) -> Event {
+        by(
+            seq,
+            Actor::Human,
+            EventKind::TaskDropped {
+                task: "a".to_string(),
+                reason: reason.to_string(),
+            },
+        )
+    }
+
+    /// A run whose task `a` reported and waits for a gate.
+    fn reported_run() -> Vec<Event> {
+        vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+        ]
+    }
+
+    #[test]
+    fn a_human_drops_a_reported_task_and_it_leaves_the_unfinished_work() {
+        let mut log = reported_run();
+        log.push(dropped(5, "the human changed their mind"));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Dropped);
+        assert_eq!(
+            state
+                .tasks
+                .get("a")
+                .and_then(|task| task.dropped_reason.clone()),
+            Some("the human changed their mind".to_string())
+        );
+        assert!(
+            unfinished_tasks(&state).is_empty(),
+            "a dropped task is not work the run still owes"
+        );
+        assert!(
+            abandonable_tasks(&state).is_empty(),
+            "nothing is integrated, so there is nothing an abandon would carry"
+        );
+    }
+
+    #[test]
+    fn a_working_task_may_be_dropped() {
+        // A human who decides a running task will not be done stops it there,
+        // rather than waiting for the agent to report.
+        let mut log = reported_run();
+        log.truncate(3);
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Working);
+        state
+            .check_as(&Actor::Human, &dropped(4, "not needed").kind, 5_000)
+            .unwrap_or_else(|err| panic!("a Working task may be dropped: {err}"));
+    }
+
+    #[test]
+    fn an_orchestrator_cannot_drop_a_task() {
+        // Dropping takes work out of the run: only the human decides that.
+        let state = folded(&reported_run());
+        match state.check_as(&Actor::Orchestrator, &dropped(5, "x").kind, 6_000) {
+            Err(RuleError::DropNotHuman { actor }) => assert_eq!(actor, Actor::Orchestrator),
+            other => panic!("an orchestrator dropped a task: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_integrated_task_cannot_be_dropped() {
+        // Its commits are on the integration branch: calling it dropped would
+        // make the pull request's dropped list disagree with what it carries.
+        let state = folded(&landed());
+        match state.check_as(&Actor::Human, &dropped(9, "x").kind, 10_000) {
+            Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Integrated),
+            other => panic!("an integrated task was dropped: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dropped_task_cannot_be_dropped_again() {
+        let mut log = reported_run();
+        log.push(dropped(5, "first"));
+        let state = folded(&log);
+        match state.check_as(&Actor::Human, &dropped(6, "second").kind, 7_000) {
+            Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Dropped),
+            other => panic!("a dropped task was dropped twice: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_late_report_from_a_dropped_task_s_agent_is_refused() {
+        // The drop closes the worker's tab; an agent still running anyway must
+        // not put the task back into the run's work.
+        let actor = Actor::Agent {
+            id: "agent-1".to_string(),
+        };
+        let mut log = reported_run();
+        log.push(dropped(5, "changed their mind"));
+        let state = folded(&log);
+        let late = by(
+            6,
+            Actor::Agent {
+                id: "agent-1".to_string(),
+            },
+            EventKind::Reported {
+                task: "a".to_string(),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: "still here".to_string(),
+                tests: strings(&[]),
+                changed_paths: strings(&["src/a/x.rs"]),
+                commit: Some("abc123".to_string()),
+                skills_used: Vec::new(),
+            },
+        );
+        match state.check_as(&actor, &late.kind, 7_000) {
+            Err(RuleError::TaskIsDropped { task }) => assert_eq!(task, "a"),
+            other => panic!("a dropped task's agent recorded work: {other:?}"),
+        }
+        // Every other event a leftover worker could append is refused too.
+        for kind in [
+            EventKind::GatePassed {
+                task: "a".to_string(),
+                attempt: 1,
+                gate: "tests".to_string(),
+                findings: Vec::new(),
+                source: None,
+            },
+            EventKind::ReviewRequested {
+                task: "a".to_string(),
+                attempt: 1,
+                reviewer: "agent-2".to_string(),
+                degraded: false,
+            },
+            EventKind::HandedOff {
+                task: "a".to_string(),
+                from_agent: "agent-1".to_string(),
+                to_agent: "agent-2".to_string(),
+                checkpoint: "the dropped attempt".to_string(),
+                reason: Some("a leftover worker".to_string()),
+            },
+        ] {
+            assert!(
+                matches!(
+                    state.check_as(&actor, &kind, 7_000),
+                    Err(RuleError::TaskIsDropped { .. })
+                ),
+                "{kind:?} was recorded for a dropped task"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_log_with_a_drop_still_folds() {
+        // The guard is about appending, not about history: a log a human
+        // already dropped a task in folds as it always did.
+        let mut log = reported_run();
+        log.push(dropped(5, "changed their mind"));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Dropped);
+    }
+
+    #[test]
+    fn a_drop_without_a_reason_is_refused() {
+        let state = folded(&reported_run());
+        assert!(matches!(
+            state.check_as(&Actor::Human, &dropped(5, "  ").kind, 6_000),
+            Err(RuleError::EmptyDropReason { .. })
+        ));
+    }
+
+    #[test]
+    fn a_dropped_task_does_not_block_a_normal_finish() {
+        // Landed and merged, plus a task the human decided not to do: the run
+        // owes nothing, so ending it is a normal finish.
+        let mut log = landed();
+        log.push(added(9, "b", &["src/b"], &[]));
+        log.push(by(
+            10,
+            Actor::Human,
+            EventKind::TaskDropped {
+                task: "b".to_string(),
+                reason: "dropped".to_string(),
+            },
+        ));
+        let state = folded(&log);
+        assert!(unfinished_tasks(&state).is_empty());
+        assert!(!unlanded(&state), "the pull request merged");
+        state
+            .check_as(&Actor::Orchestrator, &finish_kind(), 11_000)
+            .unwrap_or_else(|err| panic!("a finish was refused: {err}"));
+    }
+
+    #[test]
+    fn a_drop_recorded_before_the_rule_still_folds() {
+        // History is read, not re-judged: an orchestrator's drop in an old log
+        // folds, while recording the same thing now is refused.
+        let mut log = reported_run();
+        log.push(by(
+            5,
+            Actor::Orchestrator,
+            EventKind::TaskDropped {
+                task: "a".to_string(),
+                reason: "legacy".to_string(),
+            },
+        ));
+        assert_eq!(status(&folded(&log), "a"), TaskStatus::Dropped);
     }
 
     #[test]

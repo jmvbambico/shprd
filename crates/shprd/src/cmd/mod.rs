@@ -5,6 +5,7 @@ pub mod approve;
 pub mod confirm;
 pub mod dagr;
 pub mod doctor;
+pub mod drop;
 pub mod fullgate;
 pub mod handoff;
 pub mod integrate;
@@ -12,12 +13,15 @@ pub mod janitor;
 pub mod keys;
 pub mod land;
 pub mod launch;
+pub mod override_rule;
 pub mod readmit;
 pub mod review;
 pub mod roster;
 pub mod run;
+pub mod run_lock;
 pub mod set;
 pub mod spawn;
+pub mod sync;
 pub mod up;
 pub mod verdict;
 pub mod view;
@@ -82,11 +86,14 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Down(args)) => up::down_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Sync) => sync::sync_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Land(args)) => land::land_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Approve(args)) => {
             approve::approve_verb(&ctx, &args, cli.global.home.as_deref())
         }
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
+        Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
+        Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 
@@ -148,6 +155,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
+        EventKind::TaskDropped { .. } => "task_dropped",
         EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",
@@ -162,6 +170,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
+        EventKind::BaseSynced { .. } => "base_synced",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }
