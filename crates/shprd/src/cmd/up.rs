@@ -9,10 +9,12 @@
 //! binary drives it with a real host adapter.
 //!
 //! `down` finishes the run. Neither verb closes a tab a human is working in: a
-//! human's shell is not shprd's to kill. The one exception is the reviewer
-//! tabs the run opened itself, which `down` closes once the run's last event is
-//! recorded — a reviewer has no work to finish once its task is decided, and
-//! every other tab the run recorded is closed with them.
+//! human's shell is not shprd's to kill. The one exception is the tabs the run
+//! opened itself, which `down` closes as the run's last event is recorded — a
+//! reviewer has no work to finish once its task is decided, and every other tab
+//! the run recorded is closed with them. Whatever the host keeps open is listed
+//! on stderr and escalated, before the last event, so the human knows what to
+//! close.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -250,8 +252,9 @@ pub fn up(mux: &dyn Mux, env: &UpEnv) -> Result<UpReport, CliError> {
 /// one way to say yes on purpose, and it names what it left behind. Because it
 /// throws work away, it asks a human at a terminal first, and that question is
 /// asked before anything is written: a 'no' or a refusal leaves the run exactly
-/// as it was. Once the event is in, the reviewer tabs the run still has open
-/// are closed with it.
+/// as it was. The event is then checked before the first close and committed
+/// after the last: what the run left open is closed in between, and whatever
+/// the host keeps is escalated while the ledger still accepts an escalation.
 pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Result<(), CliError> {
     let state = ctx.state()?;
     if state.run.is_none() {
@@ -265,10 +268,11 @@ pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Resul
         )));
     }
     let kind = end_kind(&state, end)?;
+    ctx.check(&kind)?;
+    let watch = watch_pane(ctx);
+    spawn::close_at_run_end(mux, ctx, home, watch.as_ref());
     let event = ctx.commit(kind)?;
     print_abandoned(&state, &event);
-    spawn::close_run_tabs(mux, ctx, home);
-    close_watch_pane(mux, ctx);
     crate::cmd::emit(ctx, &event)
 }
 
@@ -519,17 +523,14 @@ pub(crate) fn task_branch<'a>(state: &'a RunState, id: &TaskId) -> Option<&'a st
         .map(|attempt| attempt.branch.as_str())
 }
 
-/// Closes the watchdog's pane, as the run's last act.
+/// The watchdog's pane, which run end closes as its last act.
 ///
-/// The watchdog watches a run that is over, so it has nothing left to do. A
-/// pane the host no longer knows counts as closed, and a refusal is warned
-/// about rather than fatal: the run's last event is already recorded.
-pub(crate) fn close_watch_pane(mux: &dyn Mux, ctx: &Ctx) {
-    let pane = match ctx.state().ok().and_then(|state| state.watch) {
-        Some(watch) => PaneId::new(watch.pane),
-        None => return,
-    };
-    spawn::close_pane(mux, &pane);
+/// The watchdog watches a run that is over, so it has nothing left to do. The
+/// pane is named here and closed by [`spawn::close_at_run_end`], so a pane the
+/// host keeps is listed with everything else the run left open.
+pub(crate) fn watch_pane(ctx: &Ctx) -> Option<PaneId> {
+    let watch = ctx.state().ok().and_then(|state| state.watch)?;
+    Some(PaneId::new(watch.pane))
 }
 
 /// `shprd down` against the host the human is working in.
@@ -1668,6 +1669,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::cmd::spawn::fault::{Fault, FlakyMux};
 
     /// Turns a verb's failure into an [`anyhow::Error`], which is what a test
     /// returns so a failing assertion prints the verb's own message.
@@ -3208,6 +3210,10 @@ mod tests {
         mux.close_pane(&PaneId::new(pane))
             .map_err(|err| anyhow!("{err}"))?;
         down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
+        assert!(
+            escalations(&env.ctx)?.is_empty(),
+            "a pane the host forgot is closed, not left over"
+        );
         Ok(())
     }
 
@@ -3644,6 +3650,170 @@ mod tests {
             ids.contains(&report.orchestrator_tab.to_string()),
             "run end closed the orchestrator tab: {ids:?}"
         );
+        Ok(())
+    }
+
+    /// A worker and a reviewer tab, with the records a spawn and a review
+    /// leave beside the briefs.
+    fn recorded_tabs(mux: &FakeMux, env: &UpEnv, run: &str) -> Result<(TabId, TabId)> {
+        let workspace = mux
+            .find_workspace(&naming::workspace_name(&env.repo_name))
+            .map_err(|err| anyhow!("{err}"))?
+            .context("up must leave a workspace")?;
+        let worker = mux
+            .create_tab(&workspace.id, "worker", &env.ctx.root)
+            .map_err(|err| anyhow!("{err}"))?;
+        let reviewer = mux
+            .create_tab(&workspace.id, "reviewer", &env.ctx.root)
+            .map_err(|err| anyhow!("{err}"))?;
+        let briefs = env.home.join(".shprd").join("briefs").join(run);
+        std::fs::create_dir_all(&briefs)?;
+        std::fs::write(briefs.join("T1-a1.tab"), worker.id.as_str())?;
+        std::fs::write(briefs.join("T1-a1-review.tab"), reviewer.id.as_str())?;
+        Ok((worker.id, reviewer.id))
+    }
+
+    /// Every escalation in the log, as its task and body.
+    fn escalations(ctx: &Ctx) -> Result<Vec<(Option<String>, String)>> {
+        let (_, events) = ctx.load().map_err(failed)?;
+        Ok(events
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Escalated { task, body, .. } => Some((task, body)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    #[test]
+    fn down_escalates_the_watchdog_pane_the_host_will_not_close() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux()
+            .with_process_group(4242)
+            .failing_close_pane("the pane is busy");
+        up(&mux, &env).map_err(failed)?;
+        let pane = env
+            .ctx
+            .state()
+            .map_err(failed)?
+            .watch
+            .context("the watchdog's pane is recorded")?
+            .pane;
+
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
+
+        let recorded = escalations(&env.ctx)?;
+        assert_eq!(
+            recorded.len(),
+            1,
+            "one escalation, not one per verb: {recorded:?}"
+        );
+        let body = &recorded[0].1;
+        assert!(body.contains("watchdog pane"), "names what it is: {body}");
+        assert!(body.contains(&pane), "names the id that closes it: {body}");
+        // The run's last event refuses an escalation after it, so the escalation
+        // has to be in the log before it and both have to be there.
+        let (state, events) = env.ctx.load().map_err(failed)?;
+        assert!(state.finished, "the run still ended");
+        let escalated = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::Escalated { .. }));
+        let finished = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::RunFinished { .. }));
+        assert!(
+            escalated < finished,
+            "the escalation precedes the finish: {events:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn down_escalates_every_tab_the_host_will_not_close() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        // No watchdog pane: this test is about the tabs, and a host whose
+        // close_tab refuses must be the only thing leaving anything behind.
+        let fake = mux().without_split();
+        let report = up(&fake, &env).map_err(failed)?;
+        let (worker, reviewer) = recorded_tabs(&fake, &env, &report.run_id)?;
+        let mux = FlakyMux::new(fake, Fault::CloseTab);
+
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
+
+        let recorded = escalations(&env.ctx)?;
+        assert_eq!(
+            recorded.len(),
+            1,
+            "one escalation, not one per tab: {recorded:?}"
+        );
+        let body = &recorded[0].1;
+        assert!(
+            body.contains("worker tab for T1"),
+            "names what it is: {body}"
+        );
+        assert!(body.contains(worker.as_str()), "names its id: {body}");
+        assert!(
+            body.contains("reviewer tab for T1"),
+            "names the other: {body}"
+        );
+        assert!(body.contains(reviewer.as_str()), "and its id: {body}");
+        assert!(env.ctx.state().map_err(failed)?.finished, "the run ended");
+        Ok(())
+    }
+
+    #[test]
+    fn down_records_no_escalation_when_every_tab_and_pane_closes() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        let mux = mux();
+        let report = up(&mux, &env).map_err(failed)?;
+        let (worker, reviewer) = recorded_tabs(&mux, &env, &report.run_id)?;
+
+        down(&mux, &env.ctx, Some(&env.home), EndRun::plain()).map_err(failed)?;
+
+        assert!(
+            escalations(&env.ctx)?.is_empty(),
+            "nothing was left over, so there is nothing to escalate"
+        );
+        let open = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CloseTab(tab) => Some(tab),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(open.contains(&worker), "the worker tab is closed: {open:?}");
+        assert!(
+            open.contains(&reviewer),
+            "the reviewer tab is closed: {open:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_down_closes_no_tab() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        working_task(&env.ctx)?;
+        let briefs = env.home.join(".shprd").join("briefs").join("rabc123");
+        std::fs::create_dir_all(&briefs)?;
+        std::fs::write(briefs.join("T1-a1.tab"), "tab-404")?;
+        let mux = mux();
+
+        let err = down(&mux, &env.ctx, Some(&env.home), EndRun::plain())
+            .err()
+            .context("down must refuse")?;
+
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(
+            mux.calls().is_empty(),
+            "a refused down touches no tab: {:?}",
+            mux.calls()
+        );
+        assert!(!env.ctx.state().map_err(failed)?.finished);
         Ok(())
     }
 
