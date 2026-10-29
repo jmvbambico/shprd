@@ -18,7 +18,9 @@ use std::time::Duration;
 use anyhow::anyhow;
 use shprd_core::config::Skills;
 use shprd_core::event::{Actor, EventKind, Finding, ResourceAction, ResourceKind, Severity};
-use shprd_core::state::{GateResult, RunState, Task};
+use shprd_core::state::{GateResult, ResourceStatus, RunState, Task, TaskStatus};
+use shprd_git::archive;
+use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{Mux, naming};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
@@ -104,6 +106,31 @@ pub struct SpawnReport {
     pub brief: PathBuf,
     /// The skills the attempt must load, in the order they were selected.
     pub skills: Vec<String>,
+    /// The attempt this spawn archived and replaced, when it was a retry.
+    pub replaced: Option<Replaced>,
+}
+
+/// An attempt a retry archived and replaced.
+///
+/// A task's attempts all share one worktree path and one branch name, so a new
+/// attempt can only start once the one before it is out of the way. Its branch
+/// is archived first, which is what keeps its commits reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    /// The attempt number that was archived.
+    pub attempt: u32,
+    /// The archive ref holding its commits.
+    pub ref_name: String,
+}
+
+impl Replaced {
+    /// The one line a human reads.
+    pub fn line(&self, task: &str) -> String {
+        format!(
+            "archived attempt {} of {task} as {}",
+            self.attempt, self.ref_name
+        )
+    }
 }
 
 /// The agent a spawn picked, with everything needed to start it.
@@ -137,6 +164,10 @@ pub fn spawn(
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
+    // A retry replaces what the failed attempt left behind, so the fresh
+    // worktree below can take the same path and branch name. A task still in
+    // flight is refused here, before anything is removed.
+    let replaced = replace_previous(mux, env, &state, task, attempt)?;
     let kind = spawned_event(&task.id, attempt, &pick, &worktree, &branch);
     // Refuse before any effect: a refused spawn must leave nothing behind.
     env.ctx.check(&kind)?;
@@ -152,6 +183,7 @@ pub fn spawn(
         branch: &branch,
         worktree: &worktree.display().to_string(),
         skills: &skills,
+        archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
     });
     write_brief(&brief_path, &brief)?;
     // The workspace must exist before a worktree does, so a repo the human has
@@ -201,6 +233,7 @@ pub fn spawn(
         tab,
         brief: brief_path,
         skills,
+        replaced,
     })
 }
 
@@ -681,6 +714,203 @@ fn discard_worktree(env: &SpawnEnv<'_>, created: &Worktree) {
     }
 }
 
+/// Archives the previous attempt's branch and removes its worktree and branch.
+///
+/// Every attempt at a task works at the same path on the same branch, so a new
+/// attempt can only start once the one it replaces is out of the way. The
+/// branch is archived first, with [`archive::archive_to`], and only then
+/// deleted, so no commit is ever lost: each attempt's archive ref holds its tip,
+/// and the new worker's brief names the ref so it can cherry-pick what is still
+/// useful. Every removal is recorded, because the ledger is what licenses the
+/// next cleanup.
+///
+/// Only a failed attempt may be replaced. One that is still working, or has
+/// reported and is waiting on its gates or on integration, is work in flight:
+/// removing its worktree under the agent's feet would throw that work away, so
+/// it is refused with the reason.
+fn replace_previous(
+    mux: &dyn Mux,
+    env: &SpawnEnv<'_>,
+    state: &RunState,
+    task: &Task,
+    attempt: u32,
+) -> Result<Option<Replaced>, CliError> {
+    let Some(previous) = task.attempts.last().map(|earlier| earlier.n) else {
+        return Ok(None);
+    };
+    if attempt <= previous {
+        return Ok(None);
+    }
+    let path = env.layout.path(&env.repo_name, &env.run, &task.id);
+    let branch = env.layout.branch_name(&env.run, &task.id);
+    let branch_exists = branch_exists(env, &branch)?;
+    if !branch_exists && !path.exists() {
+        return Ok(None);
+    }
+    if !replaceable(task.status) {
+        return Err(CliError::Invalid(anyhow!(
+            "task {:?} is {:?}: attempt {previous} cannot be archived and replaced \
+             until it fails or is integrated",
+            task.id,
+            task.status
+        )));
+    }
+    let ref_name = archive::archive_ref_for_attempt(&env.run, &task.id, previous);
+    let task_id = Some(task.id.clone());
+    let mut archive_events: Vec<EventKind> = Vec::new();
+    if branch_exists {
+        if allows(
+            state,
+            ResourceKind::ArchiveRef,
+            &ref_name,
+            ResourceAction::Created,
+        ) {
+            archive_events.push(EventKind::Resource {
+                action: ResourceAction::Created,
+                kind: ResourceKind::ArchiveRef,
+                name: ref_name.clone(),
+                task: task_id.clone(),
+            });
+        }
+        if allows(
+            state,
+            ResourceKind::Branch,
+            &branch,
+            ResourceAction::Archived,
+        ) {
+            archive_events.push(EventKind::Resource {
+                action: ResourceAction::Archived,
+                kind: ResourceKind::Branch,
+                name: branch.clone(),
+                task: task_id.clone(),
+            });
+        }
+    }
+    let path_text = path.display().to_string();
+    let worktree_event = allows(
+        state,
+        ResourceKind::Worktree,
+        &path_text,
+        ResourceAction::Removed,
+    )
+    .then(|| EventKind::Resource {
+        action: ResourceAction::Removed,
+        kind: ResourceKind::Worktree,
+        name: path_text.clone(),
+        task: task_id.clone(),
+    });
+    let branch_event = allows(
+        state,
+        ResourceKind::Branch,
+        &branch,
+        ResourceAction::Removed,
+    )
+    .then(|| EventKind::Resource {
+        action: ResourceAction::Removed,
+        kind: ResourceKind::Branch,
+        name: branch.clone(),
+        task: task_id.clone(),
+    });
+    // Everything the ledger will be asked to accept is checked before the first
+    // removal: a replacement the ledger refuses must cost nothing.
+    for event in archive_events
+        .iter()
+        .chain(worktree_event.iter())
+        .chain(branch_event.iter())
+    {
+        env.ctx.check(event)?;
+    }
+    if branch_exists {
+        archive::archive_to(&env.ctx.root, &branch, &ref_name).map_err(|err| {
+            CliError::other(
+                anyhow!(err).context(format!("archiving attempt {previous} of {:?}", task.id)),
+            )
+        })?;
+        for event in archive_events {
+            env.ctx.commit(event)?;
+        }
+    }
+    // The previous attempt's tab points at a worktree that is about to go, and
+    // its worker has already been sent back: leaving the tab open would leave a
+    // pane typing into a directory that no longer exists.
+    if let Err(err) = close_worker(mux, &env.briefs_dir, &env.run, &task.id) {
+        eprintln!("warning: {err}");
+    }
+    if worktree_event.is_some() {
+        worktree::remove_worktree_only(&env.ctx.root, &env.layout, &path, true).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!(
+                "removing the failed attempt's worktree {}",
+                path.display()
+            )))
+        })?;
+        if let Some(event) = worktree_event {
+            env.ctx.commit(event)?;
+        }
+    }
+    if branch_exists {
+        worktree::delete_branch(&env.ctx.root, &env.layout, &branch).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!("deleting the branch {branch:?}")))
+        })?;
+        if let Some(event) = branch_event {
+            env.ctx.commit(event)?;
+        }
+    }
+    Ok(Some(Replaced {
+        attempt: previous,
+        ref_name,
+    }))
+}
+
+/// True when an attempt at a task in `status` may be archived and replaced.
+///
+/// A failed attempt is finished and retryable; an integrated one is done. A
+/// task that is queued has no attempt to replace.
+fn replaceable(status: TaskStatus) -> bool {
+    !matches!(
+        status,
+        TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+    )
+}
+
+/// True when the ledger holds `name` as a `kind` that `action` may be recorded
+/// against, which is what [`EventKind::Resource`] checks in `shprd_core::rules`.
+///
+/// A resource the ledger has no record of earns no event: the removal still
+/// happens — the path has to go for the retry to work — but shprd cannot claim
+/// to have closed something it never opened. The warnings below say so.
+fn allows(state: &RunState, kind: ResourceKind, name: &str, action: ResourceAction) -> bool {
+    let found = state
+        .resources
+        .get(&(kind, name.to_string()))
+        .map(|record| record.status);
+    let allowed = match action {
+        ResourceAction::Created => matches!(found, None | Some(ResourceStatus::Removed)),
+        ResourceAction::Archived => found == Some(ResourceStatus::Live),
+        ResourceAction::Removed => {
+            matches!(found, Some(ResourceStatus::Live | ResourceStatus::Archived))
+        }
+    };
+    if !allowed {
+        eprintln!(
+            "warning: the ledger has no {} {kind:?} {name:?}, so replacing it is not recorded",
+            match action {
+                ResourceAction::Created => "new",
+                ResourceAction::Archived | ResourceAction::Removed => "live",
+            }
+        );
+    }
+    allowed
+}
+
+/// True when `branch` exists in the repository this spawn runs in.
+fn branch_exists(env: &SpawnEnv<'_>, branch: &str) -> Result<bool, CliError> {
+    Git::new(&env.ctx.root)
+        .branch_exists(branch)
+        .map_err(|err| {
+            CliError::other(anyhow!(err).context(format!("looking for the branch {branch:?}")))
+        })
+}
+
 /// The ledger entries a spawn writes, in order: its two resources, then the
 /// attempt itself.
 fn attempt_events(task: &str, attempt: u32, pick: &Pick, created: &Worktree) -> Vec<EventKind> {
@@ -938,6 +1168,9 @@ pub struct BriefInput<'a> {
     pub worktree: &'a str,
     /// The skills the attempt must load first.
     pub skills: &'a [String],
+    /// The archive ref the previous attempt's commits are held under, when
+    /// this attempt replaced one.
+    pub archive: Option<&'a str>,
 }
 
 /// The gate that sent the previous attempt back, when its latest gate failed.
@@ -1015,6 +1248,12 @@ pub fn render_brief(input: &BriefInput<'_>) -> String {
         "branch `{}` in worktree `{}`\n\n",
         input.branch, input.worktree
     ));
+    if let Some(ref_name) = input.archive {
+        out.push_str(&format!(
+            "the attempt before this one was archived at `{ref_name}`: \
+             `git cherry-pick {ref_name}` brings over whatever of its work you still need\n\n"
+        ));
+    }
     if let Some(gate) = previous_failure(input.task, input.attempt) {
         out.push_str("## Why the previous attempt was sent back\n\n");
         out.push_str(&format!("gate `{}` failed:\n\n", gate.gate));
@@ -1331,7 +1570,7 @@ mod flow_tests {
     use super::*;
     use std::process::Command;
 
-    use shprd_core::event::Actor;
+    use shprd_core::event::{Actor, ReportStatus, ReviewSource};
     use shprd_core::state::{ResourceRecord, ResourceStatus, TaskStatus};
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
@@ -1679,6 +1918,315 @@ project_dirs = []
             })
             .unwrap_or_else(|| panic!("the brief was never typed in: {calls:?}"));
         assert!(prompt.contains("Make spawn real"), "{prompt}");
+    }
+
+    /// Runs one git command in `dir`, returning its trimmed stdout when it
+    /// succeeds and `None` when git refuses.
+    fn git_try(dir: &Path, args: &[&str]) -> Option<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Runs one git command in `dir` and returns its trimmed stdout, failing
+    /// the test when git refuses.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        git_try(dir, args).unwrap_or_else(|| panic!("git {args:?} refused in {}", dir.display()))
+    }
+
+    /// Commits `name` in `dir` and answers the commit's sha.
+    fn commit_in(dir: &Path, name: &str, body: &str) -> String {
+        std::fs::write(dir.join(name), body).unwrap_or_else(|err| panic!("{err}"));
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", name]);
+        git_out(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// A host with the repository's workspace open, as `shprd up` leaves it.
+    fn host(scratch: &Scratch) -> FakeMux {
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(
+            &naming::workspace_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        mux
+    }
+
+    /// Records a completed report for `attempt`, which leaves the task Reported.
+    fn report_completed(ctx: &Ctx, attempt: u32) {
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt,
+            status: ReportStatus::Completed,
+            summary: "done".to_string(),
+            tests: vec!["cargo test".to_string()],
+            changed_paths: vec!["crates/shprd/src/cmd/spawn.rs".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Fails `attempt`'s review, which is what sends a task back for a retry.
+    fn fail_review(ctx: &Ctx, attempt: u32) {
+        report_completed(ctx, attempt);
+        let engine = Ctx::new(ctx.root.clone(), Actor::Engine, false, true);
+        let reviewer = "codex".to_string();
+        let request = engine
+            .commit(EventKind::ReviewRequested {
+                task: "T1".to_string(),
+                attempt,
+                reviewer: reviewer.clone(),
+                degraded: false,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        engine
+            .commit(EventKind::GateFailed {
+                task: "T1".to_string(),
+                attempt,
+                gate: "review".to_string(),
+                findings: vec![Finding {
+                    severity: Severity::Major,
+                    title: "the retry cannot start".to_string(),
+                    location: Some("crates/shprd/src/cmd/spawn.rs:142".to_string()),
+                    detail: "archive the failed attempt before making a new one".to_string(),
+                }],
+                source: Some(ReviewSource {
+                    reviewer,
+                    findings_sha256: "ab".repeat(32),
+                    request_seq: request.seq,
+                }),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Every resource event the log holds, in order.
+    fn resource_events(ctx: &Ctx) -> Vec<(ResourceAction, ResourceKind, String)> {
+        let (_, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Resource {
+                    action, kind, name, ..
+                } => Some((*action, *kind, name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A failed review sends the attempt back, and the retry has to take over
+    /// the same worktree path and branch name that attempt used. So the retry
+    /// archives that attempt's branch first, then removes its worktree and
+    /// branch, records all three, and only then creates the fresh pair.
+    #[test]
+    fn a_retry_after_a_failed_review_archives_and_replaces_the_attempt() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(first.replaced.is_none(), "a first attempt replaces nothing");
+        let tip = commit_in(&first.worktree, "retry.txt", "attempt one\n");
+        fail_review(&ctx, 1);
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2);
+        let replaced = second
+            .replaced
+            .clone()
+            .unwrap_or_else(|| panic!("the retry must name the ref it archived"));
+        assert_eq!(replaced.attempt, 1);
+        assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1");
+        assert_eq!(
+            replaced.line("janitor-reviews"),
+            "archived attempt 1 of janitor-reviews as refs/shprd/archive/t1/T1"
+        );
+        // The replaced attempt's commits are still reachable from its ref.
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1"]
+            ),
+            tip
+        );
+        // Every attempt works at the same path, so what proves the old worktree
+        // was replaced rather than reused is what is not in it: the fresh one is
+        // cut from the integration branch's current head, and the replaced
+        // attempt's commit is only reachable through the archive ref.
+        assert!(second.worktree.is_dir(), "the new worktree is missing");
+        assert!(
+            !second.worktree.join("retry.txt").exists(),
+            "the fresh worktree still carries the replaced attempt's work"
+        );
+        assert_eq!(
+            git_out(scratch.root(), &["rev-parse", &second.branch]),
+            git_out(scratch.root(), &["rev-parse", "integration/m4"])
+        );
+        // The brief names the ref, so the worker can cherry-pick what is useful.
+        let brief = std::fs::read_to_string(&second.brief).unwrap_or_default();
+        assert!(brief.contains("refs/shprd/archive/t1/T1"), "{brief}");
+        assert!(brief.contains("git cherry-pick"), "{brief}");
+        // The ledger records the archive, then the two removals, then the fresh
+        // pair — and the archive precedes the deletion it licenses.
+        let events = resource_events(&ctx);
+        let archive = events
+            .iter()
+            .position(|event| {
+                *event
+                    == (
+                        ResourceAction::Archived,
+                        ResourceKind::Branch,
+                        "shprd/t1/T1".to_string(),
+                    )
+            })
+            .unwrap_or_else(|| panic!("no archive of the failed branch: {events:?}"));
+        let removed = events
+            .iter()
+            .position(|event| {
+                *event
+                    == (
+                        ResourceAction::Removed,
+                        ResourceKind::Branch,
+                        "shprd/t1/T1".to_string(),
+                    )
+            })
+            .unwrap_or_else(|| panic!("no removal of the failed branch: {events:?}"));
+        assert!(
+            archive < removed,
+            "the branch was deleted unarchived: {events:?}"
+        );
+        assert!(
+            events.contains(&(
+                ResourceAction::Created,
+                ResourceKind::ArchiveRef,
+                "refs/shprd/archive/t1/T1".to_string()
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&(
+                ResourceAction::Removed,
+                ResourceKind::Worktree,
+                first.worktree.display().to_string()
+            )),
+            "{events:?}"
+        );
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let live = |kind: ResourceKind, name: &str| {
+            state
+                .resources
+                .get(&(kind, name.to_string()))
+                .map(|record| record.status)
+        };
+        assert_eq!(
+            live(ResourceKind::ArchiveRef, "refs/shprd/archive/t1/T1"),
+            Some(ResourceStatus::Live)
+        );
+        assert_eq!(
+            live(ResourceKind::Branch, "shprd/t1/T1"),
+            Some(ResourceStatus::Live)
+        );
+        assert_eq!(
+            live(
+                ResourceKind::Worktree,
+                &second.worktree.display().to_string()
+            ),
+            Some(ResourceStatus::Live)
+        );
+    }
+
+    /// Every attempt reuses one branch name, so a third attempt must not
+    /// overwrite the ref that keeps attempt 1's commits.
+    #[test]
+    fn a_third_attempt_keeps_each_earlier_attempts_archive_apart() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let first_tip = commit_in(&first.worktree, "one.txt", "one\n");
+        fail_review(&ctx, 1);
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let second_tip = commit_in(&second.worktree, "two.txt", "two\n");
+        fail_review(&ctx, 2);
+
+        let third = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(third.attempt, 3);
+        let replaced = third
+            .replaced
+            .clone()
+            .unwrap_or_else(|| panic!("the retry must name the ref it archived"));
+        assert_eq!(replaced.attempt, 2);
+        assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1-a2");
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1"]
+            ),
+            first_tip,
+            "attempt 1's archive moved"
+        );
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a2"]
+            ),
+            second_tip,
+            "attempt 2's commits are not archived"
+        );
+    }
+
+    /// An attempt that is still working, or reported and waiting on its gates,
+    /// is work in flight: it is refused with the reason, not replaced.
+    #[test]
+    fn a_retry_refuses_an_attempt_that_is_still_in_flight() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let err = match spawn(&mux, &env, &request()) {
+            Ok(report) => panic!("a working attempt must not be replaced: {report:?}"),
+            Err(err) => format!("{err}"),
+        };
+        assert!(err.contains("Working"), "{err}");
+        assert!(err.contains("cannot be archived and replaced"), "{err}");
+        assert!(first.worktree.is_dir(), "the working worktree was removed");
+        assert!(
+            git_try(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1"]
+            )
+            .is_none(),
+            "a working attempt must not be archived"
+        );
+
+        report_completed(&ctx, 1);
+        let err = match spawn(&mux, &env, &request()) {
+            Ok(report) => panic!("a reported attempt must not be replaced: {report:?}"),
+            Err(err) => format!("{err}"),
+        };
+        assert!(err.contains("Reported"), "{err}");
+        assert!(first.worktree.is_dir(), "the reported worktree was removed");
+        assert_eq!(
+            git_out(scratch.root(), &["rev-parse", "shprd/t1/T1"]),
+            git_out(scratch.root(), &["rev-parse", "integration/m4"]),
+            "the reported attempt's branch was replaced"
+        );
     }
 
     /// The calls spawn made for one worker spec, whose `system_prompt_args` are
@@ -2321,6 +2869,7 @@ mod tests {
             branch: "shprd/m4/M4.4",
             worktree: "/wt/m4/M4.4",
             skills: &skills,
+            archive: None,
         });
         for needle in [
             "# M4.4 Make spawn real",
@@ -2363,6 +2912,7 @@ mod tests {
             branch: "shprd/m4/M4.4",
             worktree: "/wt/m4/M4.4",
             skills: &skills,
+            archive: None,
         });
         for needle in [
             "## Why the previous attempt was sent back",
@@ -2393,6 +2943,7 @@ mod tests {
                 branch: "shprd/m4/M4.4",
                 worktree: "/wt/m4/M4.4",
                 skills: &skills,
+                archive: None,
             })
         };
         assert!(!brief_for(1).contains("sent back"));

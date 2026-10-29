@@ -397,6 +397,8 @@ pub fn handoff(
         branch: &attempt.branch,
         worktree: &attempt.worktree,
         skills: &skills,
+        // A handoff is the same attempt, so nothing was archived for it.
+        archive: None,
     };
     let brief = handoff_brief(
         &base_brief(env, &task.id, attempt.n, &start),

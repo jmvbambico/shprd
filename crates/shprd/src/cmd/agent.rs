@@ -110,9 +110,15 @@ fn record_only(ctx: &Ctx, args: &SpawnArgs) -> Result<(), CliError> {
 }
 
 /// Prints what a spawn did: JSON when asked, else one short human line.
+///
+/// A retry first names the ref the attempt it replaced was archived under, so
+/// the human can see the old work is still reachable — and, in JSON mode, that
+/// line goes to stderr because stdout is the document.
 fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
     if ctx.json {
         let value = serde_json::json!({
+            "archived": report.replaced.as_ref().map(|earlier| earlier.ref_name.clone()),
+            "replaced_attempt": report.replaced.as_ref().map(|earlier| earlier.attempt),
             "task": report.task,
             "attempt": report.attempt,
             "agent": report.agent,
@@ -125,6 +131,10 @@ fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
         });
         println!("{value}");
         return;
+    }
+    if let Some(replaced) = &report.replaced {
+        let line = replaced.line(&report.task);
+        println!("{line}");
     }
     println!(
         "ok spawned {} attempt {} with {} in {} (tab {:?})",
