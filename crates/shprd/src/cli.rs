@@ -124,9 +124,15 @@ pub struct EndRunArgs {
     ///
     /// A run whose every task landed and whose pull request merged needs no
     /// flag. This is the explicit choice for the rest: the event records which
-    /// tasks were left behind, and their branches are kept.
+    /// tasks were left behind, and their branches are kept. It asks a human at
+    /// a terminal first, naming the run and the tasks it leaves.
     #[arg(long)]
     pub abandon: bool,
+    /// Answer the abandon's question for the record without asking, in a debug
+    /// build only: a release binary ignores it and still needs a terminal.
+    /// `SHPRD_ACTOR` still has to be unset or `human`.
+    #[arg(long, hide = !cfg!(debug_assertions))]
+    pub yes: bool,
 }
 
 /// Arguments for `land`.

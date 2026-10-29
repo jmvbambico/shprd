@@ -2070,8 +2070,13 @@ project_dirs = []
         );
         // The task is only reported, so the run ends the one way it can with
         // work still in it: abandoned, which is what closes its tabs.
-        crate::cmd::up::down(&mux, &ctx, Some(scratch.home.path()), true)
-            .unwrap_or_else(|err| panic!("{err}"));
+        crate::cmd::up::down(
+            &mux,
+            &ctx,
+            Some(scratch.home.path()),
+            crate::cmd::up::EndRun::down(true, true),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let open = open_tabs(&mux, &env);
         assert!(

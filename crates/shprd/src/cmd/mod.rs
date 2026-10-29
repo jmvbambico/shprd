@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod approve;
+pub mod confirm;
 pub mod dagr;
 pub mod doctor;
 pub mod fullgate;
