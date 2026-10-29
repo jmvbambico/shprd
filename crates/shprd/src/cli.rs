@@ -106,6 +106,9 @@ pub enum Command {
     /// Re-admit a dry agent: record that the run may use it again, so a spawn
     /// or a handoff stops refusing it. A human's verb, needing no terminal.
     Readmit(ReadmitArgs),
+    /// Override a rule for a task, e.g. let it integrate although a gate
+    /// failed. It asks on the terminal, which an agent's shell tool never has.
+    Override(OverrideArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -332,6 +335,10 @@ pub enum AgentCommand {
     /// Escalate something to a human.
     Escalate(EscalateArgs),
     /// Record a human overriding a rule.
+    ///
+    /// Kept as a hidden alias of `shprd override`, which is the verb a human
+    /// runs: the rule refuses an override from anything but a human anyway.
+    #[command(hide = true)]
     Override(OverrideArgs),
     /// Record that a task's commits landed.
     Integrate(IntegrateArgs),
@@ -533,7 +540,7 @@ pub struct EscalateArgs {
     pub default_action: String,
 }
 
-/// Arguments for `agent override`.
+/// Arguments for `override`, and its hidden `agent override` alias.
 #[derive(Debug, Args)]
 pub struct OverrideArgs {
     /// The task, or omitted for a run-wide rule.
@@ -545,6 +552,12 @@ pub struct OverrideArgs {
     /// Why it was overridden.
     #[arg(long, value_name = "TEXT")]
     pub reason: String,
+    /// Answer the terminal's question for the record.
+    ///
+    /// A test affordance, ignored by a release build: `--yes` must not be able
+    /// to turn a pane into a human.
+    #[arg(long, hide = true)]
+    pub yes: bool,
 }
 
 /// Arguments for `agent integrate`.

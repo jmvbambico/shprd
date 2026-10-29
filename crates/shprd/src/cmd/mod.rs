@@ -12,6 +12,7 @@ pub mod janitor;
 pub mod keys;
 pub mod land;
 pub mod launch;
+pub mod override_rule;
 pub mod readmit;
 pub mod review;
 pub mod roster;
@@ -87,6 +88,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             approve::approve_verb(&ctx, &args, cli.global.home.as_deref())
         }
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
+        Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
     }
 }
 

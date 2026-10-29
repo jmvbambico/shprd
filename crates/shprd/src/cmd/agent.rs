@@ -234,12 +234,10 @@ fn escalate(ctx: &Ctx, args: &EscalateArgs) -> Result<(), CliError> {
 }
 
 /// Records a human overriding a rule for one task, or run-wide.
+///
+/// The hidden `agent override` alias of `shprd override`: it is the same verb,
+/// so it asks the same question. The rule refuses it from anything but a
+/// human either way.
 fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
-    let kind = EventKind::Override {
-        task: args.task.clone().unwrap_or_default(),
-        rule: args.rule.clone(),
-        reason: args.reason.clone(),
-    };
-    let event = ctx.commit(kind)?;
-    emit(ctx, &event)
+    crate::cmd::override_rule::override_verb(ctx, args)
 }

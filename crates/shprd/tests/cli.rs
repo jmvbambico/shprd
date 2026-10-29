@@ -451,12 +451,14 @@ fn a_scripted_run_writes_the_document_and_the_views() {
     ok_with_path(
         root,
         &[
-            "agent",
             "override",
+            "--task",
+            "T1",
             "--rule",
-            "no_main_push",
+            "integrate_after_failed_gate",
             "--reason",
             "release branch",
+            "--yes",
         ],
         bin_dir,
     );
@@ -482,7 +484,7 @@ fn a_scripted_run_writes_the_document_and_the_views() {
     let body = ok_with_path(root, &["pr-body"], bin_dir);
     assert!(body.contains("## Tasks"), "pr-body was {body:?}");
     assert!(
-        body.contains("- run-wide `no_main_push`: release branch"),
+        body.contains("- T1 `integrate_after_failed_gate`: release branch"),
         "a run-wide override must reach the PR body: {body:?}"
     );
 }
@@ -1299,4 +1301,262 @@ fn an_orchestrator_may_not_re_admit_an_agent() {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert!(stderr.contains("only a human"), "{stderr}");
     assert_eq!(last_event(root), before, "nothing was logged");
+}
+
+/// The rule name the run honours, as the override verbs spell it.
+const OVERRIDE_RULE: &str = "integrate_after_failed_gate";
+
+/// A run with one task that failed `clippy` and then passed it: the task is
+/// `Passed` with a failed gate behind it, so only an override lets it land.
+fn run_that_needs_an_override(root: &Path) {
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+    ok(
+        root,
+        &[
+            "agent",
+            "report",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "did it",
+        ],
+    );
+    ok(
+        root,
+        &[
+            "agent",
+            "gate",
+            "fail",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--gate",
+            "clippy",
+        ],
+    );
+    ok(
+        root,
+        &[
+            "agent",
+            "gate",
+            "pass",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--gate",
+            "clippy",
+        ],
+    );
+    let message = refused(
+        root,
+        &["agent", "integrate", "--task", "T1", "--record-only"],
+    );
+    assert!(
+        message.contains("clippy"),
+        "the refusal names the gate: {message}"
+    );
+}
+
+/// Runs the binary with `SHPRD_ACTOR` naming who acts.
+fn run_as(root: &Path, actor: &str, args: &[&str]) -> Output {
+    let mut all = vec![
+        "--repo".to_string(),
+        root.display().to_string(),
+        "--json".to_string(),
+    ];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    match Command::new(BIN)
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .env("SHPRD_ACTOR", actor)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running the binary: {err}"),
+    }
+}
+
+/// Runs the binary, asserts it exited 2, and returns stderr.
+///
+/// A human verb refuses with [`shprd_core::rules::RuleError`] nowhere in the
+/// message, so unlike [`refused`] this asks only for the exit code.
+fn refused_verb(root: &Path, args: &[&str]) -> String {
+    let output = run(root, args);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
+    stderr
+}
+
+/// Every override the log holds.
+fn override_events(root: &Path) -> Vec<Value> {
+    let body = match std::fs::read_to_string(log_path(root)) {
+        Ok(body) => body,
+        Err(err) => panic!("reading the log: {err}"),
+    };
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("kind").and_then(Value::as_str) == Some("override"))
+        .collect()
+}
+
+#[test]
+fn override_without_a_terminal_and_without_yes_is_refused_and_logs_nothing() {
+    let dir = repo();
+    let root = dir.path();
+    run_that_needs_an_override(root);
+    let before = last_event(root);
+    // An agent's shell tool has no TTY, so the question has nobody to ask,
+    // and a guess that went through would be exactly the hole this closes.
+    let message = refused_verb(
+        root,
+        &[
+            "override",
+            "--task",
+            "T1",
+            "--rule",
+            OVERRIDE_RULE,
+            "--reason",
+            "the finding is cosmetic",
+        ],
+    );
+    assert!(message.contains("stdin is not a terminal"), "{message}");
+    assert!(message.contains("shprd override"), "{message}");
+    assert_eq!(last_event(root), before, "nothing was logged");
+    assert!(override_events(root).is_empty());
+    // And the work still cannot land, so nothing was set aside either.
+    refused(
+        root,
+        &["agent", "integrate", "--task", "T1", "--record-only"],
+    );
+}
+
+#[test]
+fn an_orchestrator_override_is_refused_even_with_yes() {
+    let dir = repo();
+    let root = dir.path();
+    run_that_needs_an_override(root);
+    let before = last_event(root);
+    let output = run_as(
+        root,
+        "orchestrator",
+        &[
+            "override",
+            "--task",
+            "T1",
+            "--rule",
+            OVERRIDE_RULE,
+            "--reason",
+            "shipping it",
+            "--yes",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("only a human overrides a rule"),
+        "the refusal says who may: {stderr}"
+    );
+    assert_eq!(last_event(root), before, "nothing was logged");
+    assert!(override_events(root).is_empty());
+}
+
+#[test]
+fn an_agent_override_is_refused_even_with_yes() {
+    let dir = repo();
+    let root = dir.path();
+    run_that_needs_an_override(root);
+    let before = last_event(root);
+    let output = run_as(
+        root,
+        "agent:codex",
+        &[
+            "override",
+            "--task",
+            "T1",
+            "--rule",
+            OVERRIDE_RULE,
+            "--reason",
+            "shipping it",
+            "--yes",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("only a human overrides a rule"), "{stderr}");
+    assert_eq!(last_event(root), before, "nothing was logged");
+}
+
+#[test]
+fn an_override_of_a_rule_nothing_reads_is_refused() {
+    let dir = repo();
+    let root = dir.path();
+    run_that_needs_an_override(root);
+    let before = last_event(root);
+    let message = refused_verb(
+        root,
+        &[
+            "override",
+            "--task",
+            "T1",
+            "--rule",
+            "integrate_after_failed_gates",
+            "--reason",
+            "a typo",
+            "--yes",
+        ],
+    );
+    assert!(
+        message.contains("is not one") && message.contains("integrate_after_failed_gate"),
+        "the refusal names the rule and the rules there are: {message}"
+    );
+    assert_eq!(last_event(root), before, "nothing was logged");
+}
+
+#[test]
+fn a_human_override_with_yes_is_recorded_and_the_task_then_integrates() {
+    let dir = repo();
+    let root = dir.path();
+    run_that_needs_an_override(root);
+    let printed = ok(
+        root,
+        &[
+            "override",
+            "--task",
+            "T1",
+            "--rule",
+            OVERRIDE_RULE,
+            "--reason",
+            "the finding is cosmetic",
+            "--yes",
+        ],
+    );
+    assert!(
+        printed.contains("overrode integrate_after_failed_gate for task T1"),
+        "{printed}"
+    );
+    let recorded = override_events(root);
+    assert_eq!(recorded.len(), 1, "the override is in the log");
+    assert_eq!(
+        recorded[0].get("rule").and_then(Value::as_str),
+        Some(OVERRIDE_RULE)
+    );
+    assert_eq!(
+        recorded[0].get("actor").and_then(|actor| actor.get("type")),
+        Some(&Value::String("human".to_string())),
+        "the log says a human took the decision"
+    );
+
+    ok(
+        root,
+        &["agent", "integrate", "--task", "T1", "--record-only"],
+    );
+    assert_eq!(status_of(&state(root), "T1"), "integrated");
 }
