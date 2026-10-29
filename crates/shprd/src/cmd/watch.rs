@@ -302,7 +302,7 @@ fn tick_task(
     // What the log already knows outlives any one watchdog: a restart must not
     // hand off a worker that already died its budget's worth of times, nor
     // escalate an attempt a human has already been asked about.
-    let streak = exit_streak(events, &task.id, attempt.n);
+    let streak = exit_streak(events, &task.id);
     let parked = parked(events, &task.id);
     let (watch, sampler) = watcher
         .watches
@@ -610,41 +610,33 @@ fn parked(events: &[Event], task: &str) -> Option<(u64, ParkReason)> {
     latest.and_then(|(_, parking)| parking)
 }
 
-/// The `seq` of the attempt's `Spawned` event, or zero when the log lost it,
-/// which errs towards counting everything the task's history holds.
-fn attempt_start_seq(events: &[Event], task: &str, attempt: u32) -> u64 {
-    events
-        .iter()
-        .filter(|event| {
-            matches!(
-                &event.kind,
-                EventKind::Spawned { task: id, attempt: n, .. } if id == task && *n == attempt
-            )
-        })
-        .map(|event| event.seq)
-        .max()
-        .unwrap_or(0)
-}
-
-/// How many of this attempt's workers the log says have already exited.
+/// How many of this task's workers the log says have already exited in a row.
 ///
 /// The log is the one source of truth for the exit streak: a watchdog that
 /// restarts reads the count back instead of starting at zero, so a crash loop
-/// still meets the budget it earned. Only a `HandedOff` carrying
-/// [`EXIT_REASON`] is an exit; a hand-off for any other reason kept its worker.
-fn exit_streak(events: &[Event], task: &str, attempt: u32) -> usize {
-    let start = attempt_start_seq(events, task, attempt);
-    events
-        .iter()
-        .filter(|event| event.seq > start)
-        .filter(|event| {
-            matches!(
-                &event.kind,
-                EventKind::HandedOff { task: id, reason, .. }
-                    if id == task && reason.as_deref() == Some(EXIT_REASON)
-            )
-        })
-        .count()
+/// still meets the budget it earned. Only a `HandedOff` carrying [`EXIT_REASON`]
+/// is an exit, and it adds one. A spawn starts the count over, and so does a
+/// hand-off for any other reason - a human handing the task to another worker -
+/// because both are a new worker, which has proved nothing yet and must not
+/// inherit the budget the last one spent.
+fn exit_streak(events: &[Event], task: &str) -> usize {
+    let mut streak: usize = 0;
+    for event in events {
+        match &event.kind {
+            EventKind::Spawned { task: id, .. } if id == task => streak = 0,
+            EventKind::HandedOff {
+                task: id, reason, ..
+            } if id == task => {
+                streak = if reason.as_deref() == Some(EXIT_REASON) {
+                    streak.saturating_add(1)
+                } else {
+                    0
+                };
+            }
+            _ => {}
+        }
+    }
+    streak
 }
 
 /// When the attempt's `spawned` event was written, or zero if the log lost it.
@@ -1892,7 +1884,7 @@ project_dirs = []
                 },
             ),
         ];
-        assert_eq!(exit_streak(&events, "T1", 1), 3);
+        assert_eq!(exit_streak(&events, "T1"), 3);
         assert_eq!(
             parked(&events, "T1"),
             Some((events[4].at_ms, ParkReason::ExitBudget))
@@ -1900,13 +1892,82 @@ project_dirs = []
 
         events.push(spawned(6, 2));
         assert_eq!(
-            exit_streak(&events, "T1", 2),
+            exit_streak(&events, "T1"),
             0,
             "a new attempt starts with a fresh budget"
         );
         assert!(
             parked(&events, "T1").is_none(),
             "a new attempt is a human's no longer"
+        );
+    }
+
+    /// A hand-off that is not an exit hands the task to a new worker, and a new
+    /// worker starts with a fresh budget: a human's hand-off must not leave the
+    /// newcomer one exit away from an escalation it never earned. The count is
+    /// the log's, so this reads the same before and after a restart.
+    #[test]
+    fn a_human_hand_off_starts_a_fresh_exit_streak() {
+        let dealt = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Human,
+            kind,
+        };
+        let spawned = |seq: u64, attempt: u32| {
+            dealt(
+                seq,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt,
+                    agent: "sh".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            )
+        };
+        let handed_off = |seq: u64, reason: &str| {
+            dealt(
+                seq,
+                EventKind::HandedOff {
+                    task: "T1".to_string(),
+                    from_agent: "sh".to_string(),
+                    to_agent: "sh".to_string(),
+                    checkpoint: "c0".to_string(),
+                    reason: Some(reason.to_string()),
+                },
+            )
+        };
+        let budget = 3;
+
+        let mut events = vec![spawned(1, 1)];
+        assert_eq!(exit_streak(&events, "T1"), 0, "a fresh spawn has no exits");
+        for (n, seq) in (1..=budget as u64).zip(2..) {
+            events.push(handed_off(seq, EXIT_REASON));
+            assert_eq!(
+                exit_streak(&events, "T1"),
+                n as usize,
+                "each exit is the next one of the streak"
+            );
+        }
+
+        // A human hands the same attempt to another worker: a full budget again.
+        events.push(handed_off(2 + budget as u64, "a human handed it on"));
+        assert_eq!(
+            exit_streak(&events, "T1"),
+            0,
+            "a human's hand-off starts a fresh budget"
+        );
+        events.push(handed_off(3 + budget as u64, EXIT_REASON));
+        assert_eq!(
+            exit_streak(&events, "T1"),
+            1,
+            "the new worker's exit is the first of its streak"
+        );
+        assert!(
+            exit_streak(&events, "T1") <= budget,
+            "the new worker still has its budget"
         );
     }
 
