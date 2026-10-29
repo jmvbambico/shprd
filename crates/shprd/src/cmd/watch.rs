@@ -400,13 +400,18 @@ impl Watcher {
 /// matches before typing a brief at a fresh agent are asked here too. The
 /// watcher does not record which harness the orchestrator runs, so every
 /// installed spec's prompts are asked.
+///
+/// Only a matched pattern blocks. A readable screen showing no prompt is a
+/// working orchestrator, and a screen the host will not hand over is no signal
+/// at all: both deliver, the way an unknown state does. Counting either as
+/// blocked would leave a healthy orchestrator unnoticed until the escalation.
 fn blocked_on_a_prompt(mux: &dyn Mux, env: &SpawnEnv<'_>, pane: &PaneId) -> bool {
     if matches!(mux.agent_state(pane), Ok(AgentState::Blocked)) {
         return true;
     }
     env.programs
         .iter()
-        .any(|program| launch::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_ok())
+        .any(|program| launch::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_some())
 }
 
 /// One thing the orchestrator has to act on, and the event that says so.
@@ -3051,6 +3056,9 @@ project_dirs = []
         let mux = mux_with_workspace(&scratch);
         let pane = record_orchestrator(&mux, &ctx, &scratch);
         reported(&ctx);
+        // A screen the host hands over with no prompt on it, and a state of its
+        // own: the state is the signal here, not the readable screen.
+        mux.set_screen(&pane, "thinking…\n> ");
         mux.set_state(&pane, AgentState::Blocked);
 
         let mut watcher = Watcher::new(Policy::default());
@@ -3123,6 +3131,73 @@ project_dirs = []
         );
     }
 
+    /// A readable screen with no prompt on it is a working orchestrator, so the
+    /// notice is typed and recorded: only a matched pattern may hold it back.
+    #[test]
+    fn a_plain_screen_does_not_hold_the_notice_back() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.env(&ctx, &["sh"]);
+        env.programs.push(Program {
+            spec: trust_spec("claude"),
+            installed: true,
+        });
+        let mux = mux_with_workspace(&scratch);
+        let pane = record_orchestrator(&mux, &ctx, &scratch);
+        reported(&ctx);
+        mux.set_screen(&pane, "working on it\n> 3 tasks queued\n");
+
+        let mut watcher = Watcher::new(Policy::default());
+        let lines = watcher
+            .tick(&mux, &env, 1_700_000_000_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(prompts(&mux).len(), 1, "nothing was typed: {lines:?}");
+        assert!(
+            prompts(&mux)[0].1.contains("shprd agent review --task T1"),
+            "the wrong line was typed: {:?}",
+            prompts(&mux)
+        );
+        assert!(
+            ctx.state()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .notified_up_to_seq
+                .is_some(),
+            "a notice that landed must be recorded, or it is sent again"
+        );
+    }
+
+    /// A screen the host will not hand over says nothing about a prompt, so it
+    /// is no more a reason to hold a notice back than an unknown state is.
+    #[test]
+    fn an_unreadable_screen_does_not_hold_the_notice_back() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.env(&ctx, &["sh"]);
+        env.programs.push(Program {
+            spec: trust_spec("claude"),
+            installed: true,
+        });
+        let mux = mux_with_workspace(&scratch);
+        let pane = record_orchestrator(&mux, &ctx, &scratch);
+        reported(&ctx);
+        mux.failing_read_of(&pane, "the screen could not be read");
+
+        let mut watcher = Watcher::new(Policy::default());
+        let lines = watcher
+            .tick(&mux, &env, 1_700_000_000_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(prompts(&mux).len(), 1, "nothing was typed: {lines:?}");
+        assert!(
+            ctx.state()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .notified_up_to_seq
+                .is_some(),
+            "a notice that landed must be recorded, or it is sent again"
+        );
+    }
+
     /// A wait past the threshold is one line and one escalation, not one a tick.
     #[test]
     fn a_long_blocked_orchestrator_is_escalated_once() {
@@ -3132,6 +3207,7 @@ project_dirs = []
         let mux = mux_with_workspace(&scratch);
         let pane = record_orchestrator(&mux, &ctx, &scratch);
         reported(&ctx);
+        mux.set_screen(&pane, "thinking…\n> ");
         mux.set_state(&pane, AgentState::Blocked);
 
         let mut watcher = Watcher::new(Policy::default());

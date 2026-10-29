@@ -78,6 +78,9 @@ struct Inner {
     process_groups: HashMap<PaneId, Option<u32>>,
     /// Panes a test scripted [`Mux::close_pane`] to refuse, with the reason.
     close_failures: HashMap<PaneId, String>,
+    /// Panes a test scripted [`Mux::read`] to fail on, with the reason: a pane
+    /// the host still knows, whose screen it will not hand over.
+    read_failures: HashMap<PaneId, String>,
     events: VecDeque<MuxEvent>,
     next_workspace: usize,
     next_tab: usize,
@@ -96,6 +99,7 @@ impl Inner {
             pending: HashMap::new(),
             process_groups: HashMap::new(),
             close_failures: HashMap::new(),
+            read_failures: HashMap::new(),
             events: VecDeque::new(),
             next_workspace: 0,
             next_tab: 0,
@@ -237,6 +241,16 @@ impl FakeMux {
     pub fn failing_close_of(&self, pane: &PaneId, reason: impl Into<String>) {
         if let Ok(mut inner) = self.lock() {
             inner.close_failures.insert(pane.clone(), reason.into());
+        }
+    }
+
+    /// Make [`Mux::read`] fail for `pane` alone with `reason`, registering the
+    /// pane as existing if it was not already: a pane the host knows and will
+    /// still type into, whose screen it refuses to show.
+    pub fn failing_read_of(&self, pane: &PaneId, reason: impl Into<String>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.panes.insert(pane.clone());
+            inner.read_failures.insert(pane.clone(), reason.into());
         }
     }
 
@@ -455,6 +469,7 @@ impl Mux for FakeMux {
         inner.panes.remove(pane);
         inner.screens.remove(pane);
         inner.states.remove(pane);
+        inner.read_failures.remove(pane);
         Ok(())
     }
 
@@ -501,6 +516,9 @@ impl Mux for FakeMux {
         let mut inner = self.lock()?;
         inner.calls.push(Call::Read(pane.clone(), lines));
         inner.require_pane(pane)?;
+        if let Some(reason) = inner.read_failures.get(pane) {
+            return Err(MuxError::command("read", reason.clone()));
+        }
         Ok(inner.screens.get(pane).cloned().unwrap_or_default())
     }
 
