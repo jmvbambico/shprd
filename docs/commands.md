@@ -16,6 +16,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd land` | push the integration branch and open or update the pull request |
 | `shprd land --merge` | merge it: only with green checks, the reviewed head, and your approval |
 | `shprd approve` | approve the open pull request at the integration branch's current head, for a solo maintainer who can't approve their own PR on GitHub; humans only, needs a terminal, and a new commit needs a new approval |
+| `shprd readmit <agent> [--reason TEXT]` | clear a dry agent's mark so the run may spawn and hand off to it again (`shprd status` names the agent to pass); humans only, and unlike `approve` it needs no terminal |
 | `shprd watch` | the watchdog loop: records review verdicts and hands off stuck or rate-limited agents. `shprd up` runs it in a pane of tab 1, so you rarely start it yourself |
 | `shprd janitor [--apply]` | show (or apply) cleanup of what the run created: worktrees, branches, the merged remote branch |
 | `shprd keys show\|install\|uninstall` | the `prefix+alt+…` key bindings in your herdr config |
@@ -24,7 +25,7 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd roster` | show agents, roles, models, availability |
 | `shprd restore <task>` | bring back archived work |
 
-Every command supports `--json`. `shprd completion zsh` prints shell completion.
+Every command supports `--json`. Shell completion (`shprd completion zsh`) is planned, not built yet.
 
 Agent and model strings use the CLI's own model names: `program/model`, e.g.
 `opencode/deepseek-v4.1-flash-free` or `claude/claude-opus-5-5`, with effort set

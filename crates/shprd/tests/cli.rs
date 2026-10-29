@@ -1095,3 +1095,137 @@ fn handoff_needs_a_task_and_a_reason() {
         String::from_utf8_lossy(&missing.stderr)
     );
 }
+
+/// The last event the log holds, as JSON.
+fn last_event(root: &Path) -> Value {
+    let path = log_path(root);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(err) => panic!("read {}: {err}", path.display()),
+    };
+    let line = match body.lines().last() {
+        Some(line) => line,
+        None => panic!("the log is empty"),
+    };
+    match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(err) => panic!("bad event line {line:?}: {err}"),
+    }
+}
+
+/// Records a dry mark for `agent`, the way the watchdog does when its process
+/// exits and no reset time is known.
+fn mark_dry(root: &Path, agent: &str) {
+    append_events(
+        root,
+        vec![EventKind::Dry {
+            agent: agent.to_string(),
+            reason: "agent process exited".to_string(),
+            reset_at_ms: None,
+        }],
+    );
+}
+
+#[test]
+fn a_human_re_admits_a_dry_agent_and_the_run_may_use_it_again() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    mark_dry(root, "w1");
+
+    // The dry mark holds the run back, and the status says how to lift it.
+    let spawn = [
+        "agent",
+        "spawn",
+        "--record-only",
+        "--task",
+        "T1",
+        "--attempt",
+        "1",
+        "--agent",
+        "w1",
+        "--worktree",
+        "/tmp/wt",
+        "--branch",
+        "feature/x",
+    ];
+    let message = refused(root, &spawn);
+    assert!(message.contains("is dry"), "{message}");
+    let status = ok(root, &["status"]);
+    assert!(
+        status.contains("w1 dry until unknown (agent process exited) — shprd readmit w1"),
+        "the status must say how to re-admit: {status}"
+    );
+
+    // A roster spelling names the same agent the dry mark stores.
+    let printed = ok(root, &["readmit", "w1/some-model"]);
+    assert!(printed.contains("re-admitted w1"), "{printed}");
+    let event = last_event(root);
+    assert_eq!(event.get("kind").and_then(Value::as_str), Some("available"));
+    assert_eq!(event.get("agent").and_then(Value::as_str), Some("w1"));
+    assert_eq!(
+        event.get("reason").and_then(Value::as_str),
+        Some("re-admitted by a human"),
+        "the default reason says a human did it: {event}"
+    );
+    assert_eq!(
+        event.get("actor").and_then(|actor| actor.get("type")),
+        Some(&Value::String("human".to_string())),
+        "the log says a human re-admitted it: {event}"
+    );
+
+    // And with the mark cleared, the attempt spawns.
+    ok(root, &spawn);
+}
+
+#[test]
+fn readmit_takes_a_reason_and_refuses_what_is_not_dry() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    mark_dry(root, "w1");
+    ok(root, &["readmit", "w1", "--reason", "quota topped up"]);
+    assert_eq!(
+        last_event(root).get("reason").and_then(Value::as_str),
+        Some("quota topped up")
+    );
+
+    let message = refused(root, &["readmit", "w1"]);
+    assert!(message.contains("is not dry"), "{message}");
+
+    // An agent the log never mentions is not one this run holds.
+    let output = run(root, &["readmit", "pi"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("is not known to this run"), "{stderr}");
+}
+
+#[test]
+fn an_orchestrator_may_not_re_admit_an_agent() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    mark_dry(root, "w1");
+    let before = last_event(root);
+    let output = match Command::new(BIN)
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "readmit",
+            "w1",
+            "--json",
+        ])
+        .env("SHPRD_ACTOR", "orchestrator")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => panic!("running the binary: {err}"),
+    };
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("only a human"), "{stderr}");
+    assert_eq!(last_event(root), before, "nothing was logged");
+}

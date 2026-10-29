@@ -318,6 +318,13 @@ pub enum EventKind {
         to_agent: AgentId,
         /// The checkpoint the new agent should resume from.
         checkpoint: String,
+        /// Why it was handed over, in the words of the verdict that caused it.
+        ///
+        /// A worker process exiting hands the attempt on without drying the
+        /// agent, so the reason is the only record that the attempt's worker
+        /// was lost. Defaulted so a log written before it existed still folds.
+        #[serde(default)]
+        reason: Option<String>,
     },
     /// Something needs a human decision.
     Escalated {
@@ -529,6 +536,7 @@ mod tests {
                 from_agent: "claude".to_string(),
                 to_agent: "codex".to_string(),
                 checkpoint: "after log.rs".to_string(),
+                reason: Some("agent process exited".to_string()),
             },
             EventKind::Escalated {
                 task: None,

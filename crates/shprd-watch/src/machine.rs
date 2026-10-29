@@ -12,7 +12,80 @@ use shprd_mux::AgentState;
 /// Backoff used when a [`Policy`] supplies an empty backoff list.
 const FALLBACK_BACKOFF_MS: u64 = 900_000;
 
+/// Why a worker's process ending hands its attempt on.
+///
+/// The one spelling of the reason a `HandedOff` event carries, so the exit
+/// streak can be counted back out of the log by a watchdog that restarted.
+pub const EXIT_REASON: &str = "agent process exited";
+
+/// The tail every exit-budget escalation ends with.
+const EXIT_ESCALATION_TAIL: &str = "times in a row on this attempt: pick up by hand";
+
+/// The opening marker an exit-budget escalation carries.
+///
+/// A parking escalation is the only kind a later event lifts, so the watcher
+/// that reads the log and the watchdog that writes it have to agree on which
+/// escalations park: they share this marker instead of re-deriving it from
+/// prose.
+pub const PARK_EXIT_BUDGET: &str = "watch parked, exit budget spent";
+
+/// The opening marker a failed hand-off's escalation carries.
+pub const PARK_HANDOFF_FAILED: &str = "watch parked, hand-off failed";
+
+/// Which escalation parked a task's watch.
+///
+/// Nothing else parks: an escalation about a dry agent asks a human to act and
+/// keeps standing until they do, while these two are lifted as soon as the log
+/// holds a newer spawn or hand-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkReason {
+    /// The attempt spent its exit budget.
+    ExitBudget,
+    /// A hand-off could not be made, so the attempt cannot go on by itself.
+    HandoffFailed,
+}
+
+impl ParkReason {
+    /// The marker this parking opens its escalation body with.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::ExitBudget => PARK_EXIT_BUDGET,
+            Self::HandoffFailed => PARK_HANDOFF_FAILED,
+        }
+    }
+
+    /// What the watch shows as this parking's reason.
+    ///
+    /// It opens with the marker, so a watcher rebuilding its memory from the log
+    /// still reads it as a parking and can lift it.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::ExitBudget => "watch parked, exit budget spent: pick the task up by hand",
+            Self::HandoffFailed => "watch parked, hand-off failed: a human's now",
+        }
+    }
+
+    /// The parking `body` records, if it records one.
+    pub fn of_body(body: &str) -> Option<Self> {
+        [Self::ExitBudget, Self::HandoffFailed]
+            .into_iter()
+            .find(|parking| body.contains(parking.marker()))
+    }
+}
+
+/// The reason an attempt whose exit budget is spent is escalated with.
+fn exit_escalation_reason(exits: usize) -> String {
+    format!(
+        "{}: {EXIT_REASON} {exits} {EXIT_ESCALATION_TAIL}",
+        ParkReason::ExitBudget.marker()
+    )
+}
+
 /// Where a dry verdict came from.
+///
+/// A worker's process exiting is deliberately not one of these: the agent may
+/// be perfectly usable, so an exit hands the attempt on instead of drying
+/// anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// A provider error record in the session's transcript.
@@ -23,8 +96,6 @@ pub enum Source {
     Screen,
     /// The agent stopped producing output for too long.
     Silence,
-    /// The agent's process is gone.
-    Exit,
 }
 
 /// What the watchdog currently believes about one agent.
@@ -52,6 +123,13 @@ pub enum Health {
     },
     /// A canary succeeded: the agent is believed usable again.
     Available,
+    /// The worker keeps dying: only a human can decide what to do next.
+    Escalated {
+        /// When the escalation was reached, in epoch milliseconds.
+        since_ms: u64,
+        /// Human-readable explanation, shown to the operator.
+        reason: String,
+    },
 }
 
 /// Something the caller must do as a result of [`Watch::step`].
@@ -61,11 +139,25 @@ pub enum Action {
     MarkDry {
         /// Why the session went dry, for the operator.
         reason: String,
-        /// Provider-stated reset time, in epoch milliseconds, if it gave one.
+        /// When the agent is expected back, in epoch milliseconds: the
+        /// provider's reset time when it gave one, and otherwise the policy's
+        /// backoff end, so no dry mark ever lasts forever.
         reset_at_ms: Option<u64>,
     },
-    /// Hand the work to another agent.
-    HandOff,
+    /// Hand the attempt to a worker.
+    HandOff {
+        /// Why the attempt is being handed over, for the record.
+        reason: String,
+        /// True when the hand-off follows a dry verdict, so the outgoing agent
+        /// stays on cooldown. False when only the attempt's worker is gone and
+        /// the agent itself is still usable.
+        dry: bool,
+    },
+    /// Stop handing off and ask a human: the worker keeps dying.
+    Escalate {
+        /// What the human is being asked about.
+        reason: String,
+    },
     /// Probe the dry agent with a cheap request to see whether it recovered.
     Canary,
     /// Clear the dry mark: the agent is usable again.
@@ -98,6 +190,13 @@ pub struct Policy {
     pub transient_backoff_ms: Vec<u64>,
     /// Backoff for successive dry attempts, indexed by dry count.
     pub dry_backoff_ms: Vec<u64>,
+    /// How many of one attempt's workers may exit in a row before the watchdog
+    /// stops handing off and asks a human instead.
+    ///
+    /// A crashed worker is replaced silently, because a fresh process usually
+    /// runs: a worker that dies this many times running the same brief is not
+    /// going to be fixed by a fourth one.
+    pub exit_budget: usize,
 }
 
 impl Default for Policy {
@@ -107,6 +206,7 @@ impl Default for Policy {
             dry_after_suspect_ms: 120_000,
             transient_backoff_ms: vec![60_000, 120_000, 240_000, 480_000],
             dry_backoff_ms: vec![900_000, 1_800_000, 3_600_000],
+            exit_budget: 3,
         }
     }
 }
@@ -134,6 +234,12 @@ pub struct Watch {
     transient_since_ms: Option<u64>,
     /// How many times the agent has gone dry in this run of trouble.
     dry_count: usize,
+    /// How many of this attempt's workers have exited in a row.
+    ///
+    /// A hand-off keeps the attempt, so the count survives it: that is what
+    /// makes a worker that dies every time escalate instead of being replaced
+    /// for ever.
+    exit_count: usize,
 }
 
 impl Default for Watch {
@@ -149,6 +255,7 @@ impl Watch {
             health: Health::Working,
             transient_since_ms: None,
             dry_count: 0,
+            exit_count: 0,
         }
     }
 
@@ -174,7 +281,11 @@ impl Watch {
         p: &Policy,
     ) -> Vec<Action> {
         let backoff = self.next_dry_backoff(p);
-        let retry_at_ms = reset_at_ms.unwrap_or_else(|| now_ms.saturating_add(backoff));
+        // A dry mark with no end is dry for ever, and a roster of one has no
+        // other worker to fall back on: the policy's cooldown stands in for a
+        // reset the provider never gave, so the canary can re-admit the agent.
+        let backoff_end = now_ms.saturating_add(backoff);
+        let retry_at_ms = reset_at_ms.unwrap_or(backoff_end);
         self.transient_since_ms = None;
         self.health = Health::Dry {
             since_ms: now_ms,
@@ -185,18 +296,91 @@ impl Watch {
         };
         vec![
             Action::MarkDry {
-                reason,
-                reset_at_ms,
+                reason: reason.clone(),
+                reset_at_ms: Some(retry_at_ms),
             },
-            Action::HandOff,
+            Action::HandOff { reason, dry: true },
         ]
+    }
+
+    /// A worker process is gone: hand the attempt on, dry nothing.
+    ///
+    /// The program was never at fault, so nothing about it is recorded as
+    /// unusable, and the hand-off may well pick the same agent again: a fresh
+    /// process is a perfectly good replacement. Only a worker that keeps dying
+    /// on the same attempt is a decision for a human.
+    fn on_exit(&mut self, now_ms: u64, p: &Policy) -> Vec<Action> {
+        self.exit_count = self.exit_count.saturating_add(1);
+        self.transient_since_ms = None;
+        let reason = String::from(EXIT_REASON);
+        if self.exit_count > p.exit_budget.max(1) {
+            self.health = Health::Escalated {
+                since_ms: now_ms,
+                reason: reason.clone(),
+            };
+            return vec![Action::Escalate {
+                reason: exit_escalation_reason(self.exit_count),
+            }];
+        }
+        self.health = Health::Working;
+        vec![Action::HandOff { reason, dry: false }]
+    }
+
+    /// Rebuilds what this watch remembers from what the log already says.
+    ///
+    /// A restarted watchdog starts with no memory, so the exit streak is handed
+    /// in from the log rather than counted from zero: a crash loop must not
+    /// survive the watchdog's own restart.
+    ///
+    /// The log is the one authority on parking too. The watcher decides it with
+    /// one rule and hands the verdict in on every tick, so a parking the log
+    /// still holds is applied - nothing is handed off or escalated twice for
+    /// it - and a parking the log has moved past is lifted, whether the log
+    /// moved on by a new attempt, a fresh worker or a retried hand-off.
+    pub fn resume(&mut self, exits: usize, parked: Option<(u64, ParkReason)>) {
+        self.exit_count = exits;
+        if let Some((since_ms, why)) = parked {
+            self.health = Health::Escalated {
+                since_ms,
+                reason: String::from(why.reason()),
+            };
+            self.transient_since_ms = None;
+        } else if self.is_parked() {
+            // The log moved past the parking, so the attempt is watched again on
+            // whichever worker the log now names.
+            self.health = Health::Working;
+            self.transient_since_ms = None;
+        }
+    }
+
+    /// Whether this watch is showing a parking escalation.
+    ///
+    /// Only a parking is lifted by the log moving on; any other escalation is a
+    /// human's to answer and keeps standing.
+    fn is_parked(&self) -> bool {
+        matches!(
+            &self.health,
+            Health::Escalated { reason, .. } if ParkReason::of_body(reason).is_some()
+        )
+    }
+
+    /// The attempt was handed on: a new worker continues it.
+    ///
+    /// The fresh process has proved nothing yet, so health starts over, but the
+    /// count of exits stays: a worker that dies again on the same attempt is
+    /// the next entry in the same streak.
+    pub fn after_handoff(&mut self) {
+        self.health = Health::Working;
+        self.transient_since_ms = None;
     }
 
     /// Fold one polling instant into the health verdict.
     ///
-    /// Rules run in priority order: exit, unretryable provider error, serve
-    /// retries, a dry screen pattern, then silence. While already dry only the
-    /// canary is considered.
+    /// Rules run in priority order: an exited worker, an unretryable provider
+    /// error, serve retries, a dry screen pattern, then silence. An exit hands
+    /// the attempt on without drying anything; every other verdict dries the
+    /// agent. While already dry only the canary is considered, and while
+    /// escalated nothing is.
     pub fn step(&mut self, i: &Inputs, p: &Policy) -> Vec<Action> {
         if let Health::Dry {
             retry_at_ms,
@@ -211,9 +395,13 @@ impl Watch {
             return vec![Action::Canary];
         }
 
+        if matches!(self.health, Health::Escalated { .. }) {
+            // Nothing more is decided here: the task is a human's now.
+            return Vec::new();
+        }
+
         if i.process_exited {
-            let reason = String::from("agent process exited");
-            return self.go_dry(i.now_ms, Source::Exit, reason, None, p);
+            return self.on_exit(i.now_ms, p);
         }
 
         if let Some(err) = &i.record_error
@@ -377,9 +565,12 @@ mod tests {
             vec![
                 Action::MarkDry {
                     reason: String::from("no output for too long"),
-                    reset_at_ms: None,
+                    reset_at_ms: Some(NOW + 300_000 + 900_000),
                 },
-                Action::HandOff,
+                Action::HandOff {
+                    reason: String::from("no output for too long"),
+                    dry: true,
+                },
             ]
         );
         assert_eq!(
@@ -416,7 +607,10 @@ mod tests {
                     reason: String::from("credit balance is too low"),
                     reset_at_ms: Some(resets),
                 },
-                Action::HandOff,
+                Action::HandOff {
+                    reason: String::from("credit balance is too low"),
+                    dry: true,
+                },
             ]
         );
         assert_eq!(
@@ -469,15 +663,21 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            dry_acts,
-            Some(vec![
-                Action::MarkDry {
-                    reason: String::from("overloaded"),
-                    reset_at_ms: None,
-                },
-                Action::HandOff,
-            ])
+        let Some(acts) = dry_acts else {
+            panic!("the retry budget expiring must be a dry verdict");
+        };
+        assert!(
+            matches!(
+                acts.as_slice(),
+                [
+                    Action::MarkDry {
+                        reason,
+                        reset_at_ms: Some(_),
+                    },
+                    Action::HandOff { dry: true, .. },
+                ] if reason == "overloaded"
+            ),
+            "serve retries past the budget still dry the agent: {acts:?}"
         );
         assert!(matches!(
             w.health,
@@ -513,9 +713,12 @@ mod tests {
             vec![
                 Action::MarkDry {
                     reason: String::from("overloaded"),
-                    reset_at_ms: None,
+                    reset_at_ms: Some(dry_at + 900_000),
                 },
-                Action::HandOff,
+                Action::HandOff {
+                    reason: String::from("overloaded"),
+                    dry: true,
+                },
             ]
         );
         assert_eq!(
@@ -589,41 +792,155 @@ mod tests {
         assert_eq!(w.health, Health::Working);
     }
 
+    /// One polling instant in which the attempt's worker is gone.
+    fn exited(now_ms: u64) -> Inputs {
+        Inputs {
+            process_exited: true,
+            ..inputs(now_ms)
+        }
+    }
+
+    /// A screen whose dry pattern matches: a real "this agent is unusable"
+    /// signal, and one the provider gives no reset time for.
+    fn dry_screen(now_ms: u64) -> Inputs {
+        Inputs {
+            screen: Some(ScreenSignal {
+                dry_pattern: Some(String::from("usage limit reached")),
+                ..still(AgentState::Working, 0)
+            }),
+            ..inputs(now_ms)
+        }
+    }
+
+    /// An exited process is a lost worker, not an unusable program: the task is
+    /// handed on and nothing is marked dry, so the roster stays usable.
     #[test]
-    fn an_exited_process_goes_dry() {
+    fn an_exited_process_hands_off_without_drying_the_agent() {
         let p = Policy::default();
         let mut w = Watch::new();
-        let i = Inputs {
-            process_exited: true,
-            ..inputs(NOW)
-        };
 
         assert_eq!(
-            w.step(&i, &p),
-            vec![
-                Action::MarkDry {
+            w.step(&exited(NOW), &p),
+            vec![Action::HandOff {
+                reason: String::from("agent process exited"),
+                dry: false,
+            }]
+        );
+        assert_eq!(w.health, Health::Working);
+    }
+
+    /// A worker that keeps dying on one attempt is not a hand-off problem: the
+    /// policy's budget runs out and a human is asked, instead of a fourth
+    /// replacement that would only die the same way.
+    #[test]
+    fn exits_past_the_budget_escalate_instead_of_handing_off_again() {
+        let p = Policy::default();
+        assert_eq!(p.exit_budget, 3);
+        let mut w = Watch::new();
+
+        for round in 0..p.exit_budget {
+            assert_eq!(
+                w.step(&exited(NOW + round as u64 * 1_000), &p),
+                vec![Action::HandOff {
                     reason: String::from("agent process exited"),
-                    reset_at_ms: None,
-                },
-                Action::HandOff,
-            ]
+                    dry: false,
+                }],
+                "exit {} is still replaced silently",
+                round + 1
+            );
+            // The hand-off starts a fresh worker, which proves nothing yet.
+            w.after_handoff();
+        }
+
+        let escalated_at = NOW + 3_000;
+        let acts = w.step(&exited(escalated_at), &p);
+        assert_eq!(acts.len(), 1);
+        assert!(
+            matches!(
+                acts.as_slice(),
+                [Action::Escalate { reason }]
+                    if reason.contains("4 times in a row") && !reason.is_empty()
+            ),
+            "the fourth exit escalates: {acts:?}"
         );
         assert!(matches!(
             w.health,
-            Health::Dry {
-                source: Source::Exit,
+            Health::Escalated {
+                since_ms,
                 ..
-            }
+            } if since_ms == escalated_at
+        ));
+
+        // One escalation, not one per tick.
+        assert_eq!(w.step(&exited(escalated_at + 1_000), &p), Vec::new());
+    }
+
+    /// A hand-off to another agent keeps the streak: the same attempt losing
+    /// worker after worker escalates no matter which agent ran it.
+    #[test]
+    fn a_hand_off_to_another_agent_keeps_the_exit_streak() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        for round in 0..p.exit_budget {
+            w.step(&exited(NOW + round as u64 * 1_000), &p);
+            w.after_handoff();
+        }
+        assert!(matches!(
+            w.step(&exited(NOW + 3_000), &p).as_slice(),
+            [Action::Escalate { .. }]
         ));
     }
 
-    /// Drive `w` into a dry verdict through an exited process.
+    /// A parking belongs to the log, not to this process: once the log records
+    /// a later worker, a watchdog that kept running stops waiting for a human.
+    #[test]
+    fn a_parked_watch_unparks_when_the_log_moves_past_the_escalation() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        for round in 0..=p.exit_budget {
+            let acts = w.step(&exited(NOW + round as u64 * 1_000), &p);
+            if matches!(acts.as_slice(), [Action::HandOff { .. }]) {
+                w.after_handoff();
+            }
+        }
+        assert!(matches!(w.health, Health::Escalated { .. }));
+
+        // The log still holds the escalation: a human was asked, so nothing is
+        // decided here twice.
+        w.resume(w.exit_count, Some((NOW, ParkReason::ExitBudget)));
+        assert!(matches!(w.health, Health::Escalated { .. }));
+        assert_eq!(w.step(&exited(NOW + 4_000), &p), Vec::new());
+
+        // A worker started since then, so the attempt is monitored again and
+        // the streak is whatever the log now counts for it.
+        w.resume(0, None);
+        assert_eq!(w.health, Health::Working);
+        assert_eq!(
+            w.step(&exited(NOW + 5_000), &p),
+            vec![Action::HandOff {
+                reason: String::from(EXIT_REASON),
+                dry: false,
+            }]
+        );
+    }
+
+    /// Every parking is the log's, so the same "the log moved on" lifts a
+    /// failed hand-off too: without that, a human's retry is never watched.
+    #[test]
+    fn a_parking_the_log_drops_is_lifted() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+        w.resume(0, Some((NOW, ParkReason::HandoffFailed)));
+        assert!(matches!(w.health, Health::Escalated { .. }));
+
+        w.resume(0, None);
+        assert_eq!(w.health, Health::Working);
+        assert_eq!(w.step(&exited(NOW + 1_000), &p).len(), 1);
+    }
+
+    /// Drive `w` into a dry verdict through a screen pattern.
     fn go_dry(w: &mut Watch, p: &Policy) {
-        let i = Inputs {
-            process_exited: true,
-            ..inputs(NOW)
-        };
-        w.step(&i, p);
+        w.step(&dry_screen(NOW), p);
     }
 
     #[test]
@@ -666,15 +983,47 @@ mod tests {
             w.health,
             Health::Dry {
                 since_ms: NOW,
-                reason: String::from("agent process exited"),
+                reason: String::from("usage limit reached"),
                 retry_at_ms: retry_at,
-                source: Source::Exit,
+                source: Source::Screen,
                 canary_sent: false,
             }
         );
 
         assert_eq!(w.step(&inputs(retry_at - 1), &p), Vec::new());
         assert_eq!(w.step(&inputs(retry_at), &p), vec![Action::Canary]);
+    }
+
+    /// A dry verdict the provider gave no reset for still ends: the policy's
+    /// cooldown stands in for it, so the canary can re-admit the agent and a
+    /// roster of one is never stuck for ever.
+    #[test]
+    fn a_dry_verdict_without_a_provider_reset_ends_at_the_default_cooldown() {
+        let p = Policy::default();
+        let mut w = Watch::new();
+
+        assert_eq!(
+            w.step(&dry_screen(NOW), &p),
+            vec![
+                Action::MarkDry {
+                    reason: String::from("usage limit reached"),
+                    reset_at_ms: Some(NOW + 900_000),
+                },
+                Action::HandOff {
+                    reason: String::from("usage limit reached"),
+                    dry: true,
+                },
+            ]
+        );
+
+        // The canary is due when the cooldown ends, and re-admits the agent.
+        assert_eq!(w.step(&inputs(NOW + 899_999), &p), Vec::new());
+        assert_eq!(w.step(&inputs(NOW + 900_000), &p), vec![Action::Canary]);
+        assert_eq!(
+            w.canary_result(true, NOW + 900_001, &p),
+            vec![Action::MarkAvailable]
+        );
+        assert_eq!(w.health, Health::Available);
     }
 
     #[test]
@@ -693,9 +1042,12 @@ mod tests {
             vec![
                 Action::MarkDry {
                     reason: String::from("usage limit reached"),
-                    reset_at_ms: None,
+                    reset_at_ms: Some(NOW + 900_000),
                 },
-                Action::HandOff,
+                Action::HandOff {
+                    reason: String::from("usage limit reached"),
+                    dry: true,
+                },
             ]
         );
     }

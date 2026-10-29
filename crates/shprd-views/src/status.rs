@@ -15,7 +15,8 @@ use crate::clock;
 /// Each task line starts with a symbol: `○` queued, `●` working, `◇` reported
 /// and awaiting review, `✓` for a passed task (`✓ <task> passed <title>`) or
 /// one whose work landed (`✓ <task> landed <title>`), or `✗` failed. Tasks are listed in id order. A dry agent is `◌ <agent> dry
-/// until HH:MM` in UTC; an agent dry with no known reset time shows `unknown`.
+/// until HH:MM (reason) — shprd readmit <agent>` in UTC; an agent dry with no
+/// known reset time shows `unknown`.
 pub fn status(state: &RunState, now_ms: u64) -> String {
     let mut lines: Vec<String> = Vec::new();
     match &state.run {
@@ -38,10 +39,7 @@ pub fn status(state: &RunState, now_ms: u64) -> String {
     }
     for (agent, info) in &state.agents {
         if is_dry_now(info, now_ms) {
-            lines.push(format!(
-                "◌ {agent} dry until {}",
-                clock::until(info.dry_until_ms)
-            ));
+            lines.push(dry_line(agent, info));
         }
     }
     lines.join("\n")
@@ -68,6 +66,21 @@ fn word(status: TaskStatus) -> &'static str {
         TaskStatus::Integrated => "landed",
         TaskStatus::Failed => "failed",
     }
+}
+
+/// One dry agent's line: how long it is out, why, and how to bring it back.
+///
+/// The hint is the point: a dry mark whose reset time is `unknown` never
+/// clears itself, so a human has to be told the verb that clears it.
+fn dry_line(agent: &str, info: &AgentInfo) -> String {
+    let reason = match &info.dry_reason {
+        Some(reason) => format!(" ({reason})"),
+        None => String::new(),
+    };
+    format!(
+        "◌ {agent} dry until {}{reason} — shprd readmit {agent}",
+        clock::until(info.dry_until_ms)
+    )
 }
 
 /// Whether `info` is dry at `now_ms`; a dry agent with no reset stays dry.
@@ -157,6 +170,28 @@ mod tests {
         assert_eq!(
             line_of(&status(&reported, fixture::NOW), "M1.2"),
             "◇ M1.2 reported views"
+        );
+    }
+
+    #[test]
+    fn a_dry_agent_says_how_to_re_admit_it() {
+        let state = fixture::state();
+        assert_eq!(
+            line_of(&status(&state, fixture::NOW), "codex"),
+            "◌ codex dry until 22:23 (rate limited) — shprd readmit codex"
+        );
+    }
+
+    #[test]
+    fn a_dry_agent_with_no_reset_time_is_told_apart() {
+        let mut state = fixture::state();
+        let info = state.agents.entry("pi".to_string()).or_default();
+        info.dry = true;
+        info.dry_until_ms = None;
+        info.dry_reason = Some("agent process exited".to_string());
+        assert_eq!(
+            line_of(&status(&state, fixture::NOW), "pi"),
+            "◌ pi dry until unknown (agent process exited) — shprd readmit pi"
         );
     }
 

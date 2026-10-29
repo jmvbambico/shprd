@@ -11,6 +11,7 @@ pub mod janitor;
 pub mod keys;
 pub mod land;
 pub mod launch;
+pub mod readmit;
 pub mod review;
 pub mod roster;
 pub mod run;
@@ -84,6 +85,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Approve(args)) => {
             approve::approve_verb(&ctx, &args, cli.global.home.as_deref())
         }
+        Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
     }
 }
 

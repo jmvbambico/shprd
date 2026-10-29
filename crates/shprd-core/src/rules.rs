@@ -113,6 +113,13 @@ pub enum RuleError {
         /// The agent.
         agent: AgentId,
     },
+    /// A re-admission was recorded by something the run does not let clear a
+    /// cooldown.
+    #[error("{actor:?} cannot re-admit an agent: only the engine or a human can")]
+    ReAdmitNotAllowed {
+        /// Who tried.
+        actor: Actor,
+    },
     /// The task's scope clashes with another task's.
     #[error("task {task:?} path {path:?} overlaps task {other:?}")]
     ScopeConflict {
@@ -294,8 +301,25 @@ pub(crate) fn is_dry(info: Option<&AgentInfo>, now_ms: u64) -> bool {
     }
 }
 
-/// Whether `agent` may be re-admitted: only an agent the log has on cooldown.
-fn check_available(state: &RunState, agent: &str) -> Result<(), RuleError> {
+/// Whether `agent` may be re-admitted: only an agent the log has on cooldown,
+/// and only by the engine or a human.
+///
+/// The engine is the watchdog, which re-admits an agent once its reset time
+/// passes. A human is the maintainer who decides the run may use the agent
+/// again, with `shprd readmit`. An orchestrator or an agent that could clear a
+/// cooldown would make a dry mark advisory, so neither may record one; history
+/// keeps whatever it already recorded, like every other actor-bound rule.
+fn check_available(
+    state: &RunState,
+    actor: &Actor,
+    agent: &str,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    if provenance == Provenance::Required && !matches!(actor, Actor::Engine | Actor::Human) {
+        return Err(RuleError::ReAdmitNotAllowed {
+            actor: actor.clone(),
+        });
+    }
     match state.agents.get(agent) {
         Some(info) if info.dry => Ok(()),
         _ => Err(RuleError::AgentNotDry {
@@ -410,7 +434,7 @@ fn check_with(
         }
         EventKind::Integrated { task, .. } => check_integrated(state, task),
         EventKind::Dry { .. } => Ok(()),
-        EventKind::Available { agent, .. } => check_available(state, agent),
+        EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
             check_handed_off(state, task, to_agent, now_ms)
         }
@@ -1679,6 +1703,37 @@ mod tests {
     }
 
     #[test]
+    fn only_the_engine_or_a_human_may_re_admit_an_agent() {
+        let state = folded(&[started(1), dried(2, "agent-1", None)]);
+        let kind = available(3, "agent-1").kind;
+        for actor in [Actor::Engine, Actor::Human] {
+            assert!(
+                state.check_as(&actor, &kind, 3_000).is_ok(),
+                "{actor:?} may re-admit: the watchdog and a human both do"
+            );
+        }
+        let agent = Actor::Agent {
+            id: "agent-1".to_string(),
+        };
+        for actor in [Actor::Orchestrator, agent] {
+            match state.check_as(&actor, &kind, 3_000) {
+                Err(err) => assert!(matches!(err, RuleError::ReAdmitNotAllowed { .. }), "{err}"),
+                Ok(()) => panic!("{actor:?} must not clear a cooldown"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_re_admission_still_needs_a_dry_agent() {
+        let state = folded(&[started(1), added(2, "a", &["src/a"], &[])]);
+        let kind = available(3, "agent-1").kind;
+        assert!(matches!(
+            state.check_as(&Actor::Human, &kind, 3_000),
+            Err(RuleError::AgentNotDry { .. })
+        ));
+    }
+
+    #[test]
     fn available_is_refused_for_an_agent_that_is_not_dry() {
         let log = vec![
             started(1),
@@ -1701,6 +1756,7 @@ mod tests {
                     from_agent: "agent-1".to_string(),
                     to_agent: "agent-2".to_string(),
                     checkpoint: "carry on".to_string(),
+                    reason: Some("rate limited".to_string()),
                 },
             ),
         ]);

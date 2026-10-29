@@ -10,7 +10,7 @@ use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_mux::{Mux, MuxError, PaneId, naming};
-use shprd_watch::machine::{Action, Health, Inputs, Policy, Watch};
+use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
 use shprd_watch::records::pi::scan_pi;
@@ -247,10 +247,15 @@ impl Watcher {
             {
                 continue;
             }
-            env.ctx.commit(EventKind::Available {
-                agent: agent.clone(),
-                reason: String::from("reset time passed"),
-            })?;
+            // The watchdog is the engine, whatever actor started it: a
+            // re-admission is the engine's, and only the engine or a human
+            // may record one.
+            env.ctx
+                .as_actor(Actor::Engine)
+                .commit(EventKind::Available {
+                    agent: agent.clone(),
+                    reason: String::from("reset time passed"),
+                })?;
             lines.push(format!("available again: {agent}"));
             finished.push(agent.clone());
         }
@@ -294,10 +299,16 @@ fn tick_task(
         }
     };
     let key = (task.id.clone(), attempt.n, agent.clone());
+    // What the log already knows outlives any one watchdog: a restart must not
+    // hand off a worker that already died its budget's worth of times, nor
+    // escalate an attempt a human has already been asked about.
+    let streak = exit_streak(events, &task.id);
+    let parked = parked(events, &task.id);
     let (watch, sampler) = watcher
         .watches
         .entry(key.clone())
         .or_insert_with(|| (Watch::new(), Sampler::new()));
+    watch.resume(streak, parked);
     let (screen, process_exited) = observe(
         mux,
         pane.as_ref(),
@@ -306,6 +317,14 @@ fn tick_task(
         now_ms,
     );
     let since_ms = spawned_at_ms(events, &task.id, attempt.n);
+    // A pane that is not there yet is not a worker that died: a hand-off starts
+    // a new process, and reading the gap as an exit would spend the whole exit
+    // budget before the newcomer had a chance to run. A start the log places
+    // after `now_ms` means the two clocks disagree, which proves nothing
+    // either, so only a start this tick can measure counts.
+    let started_at = worker_started_at_ms(events, &task.id, attempt.n);
+    let starting_up = started_at <= now_ms && now_ms.saturating_sub(started_at) < EXIT_GRACE_MS;
+    let process_exited = process_exited && !starting_up;
     let record_error = home_of(env)
         .and_then(|home| record_error(program, home, Path::new(&attempt.worktree), since_ms));
     let inputs = Inputs {
@@ -316,7 +335,7 @@ fn tick_task(
         process_exited,
     };
     let mut queue = watch.step(&inputs, &watcher.policy);
-    let mut handed_off = false;
+    let mut handed_off: Option<(String, bool)> = None;
     queue.reverse();
     while let Some(action) = queue.pop() {
         match action {
@@ -334,17 +353,38 @@ fn tick_task(
                 })?;
                 lines.push(format!("dry {} ({agent}): {reason}", task.id));
             }
-            Action::HandOff => {
+            Action::HandOff { reason, dry } => {
                 let request = HandoffRequest {
                     task: task.id.clone(),
-                    reason: dry_reason(watch),
+                    reason,
                     to: None,
+                    // A dry agent needs a different worker; an agent whose
+                    // process died is still perfectly able to take its own
+                    // task back in a fresh process.
+                    same_worker: !dry,
                 };
-                handed_off = true;
                 match handoff(mux, env, &request) {
-                    Ok(report) => lines.push(format!("handed off {} to {}", task.id, report.to)),
-                    Err(err) => escalate(env, &task.id, &err, lines),
+                    Ok(report) => {
+                        lines.push(format!("handed off {} to {}", task.id, report.to));
+                        handed_off = Some((report.to, dry));
+                    }
+                    Err(err) => {
+                        // One failed hand-off is one escalation, not one a
+                        // tick: the same call would fail the same way, so the
+                        // escalation this records parks the watch from the next
+                        // tick on, and nothing here decides it twice.
+                        escalate(env, &task.id, &err, lines);
+                        break;
+                    }
                 }
+            }
+            Action::Escalate { reason } => {
+                env.ctx.commit(EventKind::Escalated {
+                    task: Some(task.id.clone()),
+                    body: format!("{agent} {reason}"),
+                    default_action: String::from("pick the task up by hand"),
+                })?;
+                lines.push(format!("escalated {}: {reason}", task.id));
             }
             // No quota call is wired yet, so a probe that is due always reads
             // as recovered: the dry mark existed to make the agent wait, and
@@ -369,10 +409,23 @@ fn tick_task(
             }
         }
     }
-    // The attempt is over, but the outgoing agent's cooldown is not: its watch
-    // moves to the map that outlives the attempt.
-    if handed_off && let Some((cooldown, _)) = watcher.watches.remove(&key) {
-        watcher.cooldowns.insert(agent.clone(), cooldown);
+    // The attempt is over, but what the watch knows is not always done with.
+    if let Some((to, dry)) = handed_off
+        && let Some((mut watch, _)) = watcher.watches.remove(&key)
+    {
+        if dry {
+            // The outgoing agent's cooldown outlives the attempt: its watch
+            // moves to the map that clears the dry mark when the probe is due.
+            watcher.cooldowns.insert(agent.clone(), watch);
+        } else {
+            // A lost worker dry nothing, so the attempt simply continues under
+            // its new process. The watch follows it, because the count of exits
+            // is what turns a crash loop into an escalation.
+            watch.after_handoff();
+            watcher
+                .watches
+                .insert((task.id.clone(), attempt.n, to), (watch, Sampler::new()));
+        }
     }
     Ok(())
 }
@@ -381,7 +434,11 @@ fn tick_task(
 fn escalate(env: &SpawnEnv<'_>, task: &str, err: &CliError, lines: &mut Vec<String>) {
     let kind = EventKind::Escalated {
         task: Some(task.to_string()),
-        body: format!("hand-off of {task} failed: {err}"),
+        body: format!(
+            "{}: {}",
+            ParkReason::HandoffFailed.marker(),
+            handoff_failure_detail(task, err)
+        ),
         default_action: String::from("stop the run"),
     };
     match env.ctx.commit(kind) {
@@ -390,13 +447,12 @@ fn escalate(env: &SpawnEnv<'_>, task: &str, err: &CliError, lines: &mut Vec<Stri
     }
 }
 
-/// Why the watchdog calls this attempt dry, for the hand-off brief.
-fn dry_reason(watch: &Watch) -> String {
-    match &watch.health {
-        Health::Dry { reason, .. } => reason.clone(),
-        _ => String::from("the agent stopped working"),
-    }
-}
+/// How long a worker may still show no pane after it started before the
+/// watchdog reads that as its process having exited.
+///
+/// A hand-off writes its event before the newcomer's tab answers, so without
+/// this every hand-off would look like two exits in a row.
+const EXIT_GRACE_MS: u64 = 60_000;
 
 /// The tab id an attempt recorded when it spawned, if the record is there.
 fn recorded_tab(env: &SpawnEnv<'_>, task: &str, attempt: u32) -> Option<String> {
@@ -482,6 +538,102 @@ fn observe(
         Err(MuxError::NotFound { .. }) => (None, true),
         Err(_) => (None, false),
     }
+}
+
+/// When the attempt's current worker started: its spawn, or the hand-off that
+/// replaced it, whichever is newer. Zero when the log says neither, which only
+/// errs towards believing the first observation.
+fn worker_started_at_ms(events: &[Event], task: &str, attempt: u32) -> u64 {
+    events
+        .iter()
+        .rev()
+        .find(|event| match &event.kind {
+            EventKind::Spawned {
+                task: id,
+                attempt: n,
+                ..
+            } => id == task && *n == attempt,
+            // A hand-off does not carry the attempt, but it cannot cross one
+            // either: a new attempt starts with a spawn.
+            EventKind::HandedOff { task: id, .. } => id == task,
+            _ => false,
+        })
+        .map(|event| event.at_ms)
+        .unwrap_or(0)
+}
+
+/// The words a failed hand-off is escalated in.
+fn handoff_failure_detail(task: &str, err: &CliError) -> String {
+    format!("the hand-off of {task} failed: {err}")
+}
+
+/// Whether this task's watch is parked, and since when.
+///
+/// The one rule for the whole question: among the task's events of kind
+/// `Spawned`, `HandedOff` and a parking `Escalated`, the latest by `seq` decides
+/// it, and the watch is parked iff that latest event is a parking escalation.
+/// So every way of lifting a parking is the same event shape - a spawn or a
+/// hand-off after the escalation, whether a new attempt, a human handing the
+/// task to a fresh worker or a human retrying a failed hand-off - and every
+/// other kind of escalation, which is a human's to answer, leaves the parking
+/// exactly as it was.
+fn parked(events: &[Event], task: &str) -> Option<(u64, ParkReason)> {
+    let mut latest: Option<(u64, Option<(u64, ParkReason)>)> = None;
+    for event in events {
+        let parking = match &event.kind {
+            EventKind::Spawned { task: id, .. } | EventKind::HandedOff { task: id, .. }
+                if id == task =>
+            {
+                None
+            }
+            EventKind::Escalated {
+                task: Some(id),
+                body,
+                ..
+            } if id == task => {
+                // An escalation about anything but a parking leaves the rule's
+                // question unanswered, so it must not count as "the latest".
+                let Some(why) = ParkReason::of_body(body) else {
+                    continue;
+                };
+                Some((event.at_ms, why))
+            }
+            _ => continue,
+        };
+        if latest.is_none_or(|(seq, _)| event.seq >= seq) {
+            latest = Some((event.seq, parking));
+        }
+    }
+    latest.and_then(|(_, parking)| parking)
+}
+
+/// How many of this task's workers the log says have already exited in a row.
+///
+/// The log is the one source of truth for the exit streak: a watchdog that
+/// restarts reads the count back instead of starting at zero, so a crash loop
+/// still meets the budget it earned. Only a `HandedOff` carrying [`EXIT_REASON`]
+/// is an exit, and it adds one. A spawn starts the count over, and so does a
+/// hand-off for any other reason - a human handing the task to another worker -
+/// because both are a new worker, which has proved nothing yet and must not
+/// inherit the budget the last one spent.
+fn exit_streak(events: &[Event], task: &str) -> usize {
+    let mut streak: usize = 0;
+    for event in events {
+        match &event.kind {
+            EventKind::Spawned { task: id, .. } if id == task => streak = 0,
+            EventKind::HandedOff {
+                task: id, reason, ..
+            } if id == task => {
+                streak = if reason.as_deref() == Some(EXIT_REASON) {
+                    streak.saturating_add(1)
+                } else {
+                    0
+                };
+            }
+            _ => {}
+        }
+    }
+    streak
 }
 
 /// When the attempt's `spawned` event was written, or zero if the log lost it.
@@ -581,7 +733,7 @@ mod tests {
     use std::process::Command;
 
     use shprd_core::config::Skills;
-    use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::event::{Actor, ReportStatus, ResourceAction, ResourceKind};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::FakeMux;
     use shprd_mux::{AgentState, PaneId};
@@ -636,10 +788,28 @@ mod tests {
             "the second watchdog steps aside"
         );
         drop(first);
+        // Another test in this process may be between `fork` and `exec` right
+        // now: the forked child holds a duplicate of the lock file's open file
+        // description, and `flock` locks belong to that description, so the
+        // lock can outlive `drop(first)` for as long as the child takes to
+        // exec. Production never forks mid-claim; only this immediate re-claim
+        // is racy, so poll for a bounded time rather than assume the lock dies
+        // the instant the file is closed.
+        let mut waited_ms = 0;
         assert!(
-            claim_run(&log)
-                .expect("a claim after the first is gone")
-                .is_some(),
+            loop {
+                if claim_run(&log)
+                    .expect("a claim after the first is gone")
+                    .is_some()
+                {
+                    break true;
+                }
+                if waited_ms >= 2_000 {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                waited_ms += 10;
+            },
             "the lock dies with the process that held it"
         );
     }
@@ -874,7 +1044,12 @@ project_dirs = []
 
     /// The tab id `T1`'s first attempt recorded.
     fn tab_id(env: &SpawnEnv<'_>) -> String {
-        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", 1);
+        tab_id_of(env, 1)
+    }
+
+    /// The tab id `T1`'s attempt `attempt` recorded.
+    fn tab_id_of(env: &SpawnEnv<'_>, attempt: u32) -> String {
+        let record = spawn::tab_path(&env.briefs_dir, &env.run, "T1", attempt);
         std::fs::read_to_string(record)
             .unwrap_or_default()
             .trim()
@@ -894,6 +1069,51 @@ project_dirs = []
             .find(|listed| listed.id.as_str() == tab)
             .unwrap_or_else(|| panic!("no tab {tab}"))
             .root_pane
+    }
+
+    /// True when `kind` is a hand-off.
+    fn is_handoff(kind: &EventKind) -> bool {
+        matches!(kind, EventKind::HandedOff { .. })
+    }
+
+    /// True when `kind` is an escalation.
+    fn is_escalation(kind: &EventKind) -> bool {
+        matches!(kind, EventKind::Escalated { .. })
+    }
+
+    /// True when `kind` is an escalation that parks a watch.
+    fn is_parking(kind: &EventKind) -> bool {
+        matches!(
+            kind,
+            EventKind::Escalated { body, .. } if ParkReason::of_body(body).is_some()
+        )
+    }
+
+    /// How many events in `fresh` match `wanted`.
+    fn count(fresh: &[Event], wanted: fn(&EventKind) -> bool) -> usize {
+        fresh.iter().filter(|event| wanted(&event.kind)).count()
+    }
+
+    /// Closes the attempt's tab - the host's way of saying the worker's process
+    /// is gone - and returns the events the next tick appended.
+    fn one_exit(
+        watcher: &mut Watcher,
+        ctx: &Ctx,
+        env: &SpawnEnv<'_>,
+        mux: &FakeMux,
+        attempt: u32,
+        now: u64,
+    ) -> Vec<Event> {
+        let before = events(ctx).len();
+        let tab = shprd_mux::TabId::new(tab_id_of(env, attempt));
+        match mux.close_tab(&tab) {
+            Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+            Err(err) => panic!("{err}"),
+        }
+        watcher
+            .tick(mux, env, now)
+            .unwrap_or_else(|err| panic!("{err}"));
+        events(ctx)[before..].to_vec()
     }
 
     /// The events the run log holds now.
@@ -993,7 +1213,15 @@ project_dirs = []
                 .unwrap_or_else(|err| panic!("{err}"));
             let log = events(&ctx);
             let fresh = &log[before..];
-            if appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })) {
+            if let Some(EventKind::Dry { reset_at_ms, .. }) = fresh
+                .iter()
+                .map(|event| &event.kind)
+                .find(|kind| matches!(kind, EventKind::Dry { .. }))
+            {
+                assert!(
+                    reset_at_ms.is_some_and(|reset| reset > t0),
+                    "a dry mark with no reset would be dry for ever"
+                );
                 dry_after_ms = Some(10_000 * step);
                 eprintln!("DRY_AT {dry_after_ms:?}");
                 assert!(
@@ -1010,9 +1238,11 @@ project_dirs = []
         );
     }
 
-    /// A pane the host closed is a dead agent: the next tick acts on it.
+    /// A pane the host closed is a lost worker, not an unusable agent: the next
+    /// tick hands the task to a fresh process of the same agent, and nothing is
+    /// marked dry, so a one-agent roster is not dead-ended.
     #[test]
-    fn a_closed_pane_goes_dry_and_is_handed_off_on_the_next_tick() {
+    fn a_closed_pane_is_handed_off_to_the_same_agent_and_dries_nothing() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.env(&ctx, &["sh", "pi"]);
@@ -1037,12 +1267,896 @@ project_dirs = []
         let log = events(&ctx);
         let fresh = &log[before..];
         assert!(
-            appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
-            "a closed pane must mark the agent dry"
+            !appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
+            "a closed pane is a lost worker, not a dry program"
+        );
+        let handoffs: Vec<&EventKind> = fresh
+            .iter()
+            .map(|event| &event.kind)
+            .filter(|kind| matches!(kind, EventKind::HandedOff { .. }))
+            .collect();
+        assert_eq!(handoffs.len(), 1, "a closed pane hands the task off once");
+        match handoffs[0] {
+            EventKind::HandedOff {
+                from_agent,
+                to_agent,
+                reason,
+                ..
+            } => {
+                assert_eq!(from_agent, to_agent, "a fresh process of the same agent");
+                assert_eq!(reason.as_deref(), Some("agent process exited"));
+            }
+            other => panic!("not a hand-off: {other:?}"),
+        }
+    }
+
+    /// A worker that dies every time is not replaced for ever: once the
+    /// policy's exit budget is spent the watchdog asks a human, because a
+    /// fourth identical attempt would only die the same way. The roster here
+    /// holds one agent, which is the case a dry program used to dead-end.
+    #[test]
+    fn a_worker_that_keeps_dying_escalates_instead_of_looping() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let mut handoffs = 0;
+        let mut escalations = 0;
+        for round in 0..=policy.exit_budget {
+            // Each round's worker dies before it does anything.
+            let tab = tab_id(&env);
+            mux.close_tab(&shprd_mux::TabId::new(tab))
+                .unwrap_or_else(|err| panic!("{err}"));
+            let before = events(&ctx).len();
+            watcher
+                .tick(&mux, &env, t0 + 10_000 * round as u64)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let log = events(&ctx);
+            let fresh = &log[before..];
+            handoffs += fresh
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::HandedOff { .. }))
+                .count();
+            escalations += fresh
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::Escalated { .. }))
+                .count();
+            assert!(
+                !appended(fresh, |kind| matches!(kind, EventKind::Dry { .. })),
+                "a lost worker never dries the agent"
+            );
+        }
+        assert_eq!(
+            handoffs, policy.exit_budget,
+            "the budget's worth of exits is still replaced silently"
+        );
+        assert_eq!(escalations, 1, "the exit past the budget escalates");
+    }
+
+    /// The exit streak is the log's, not a counter in memory: a watchdog that
+    /// restarts must not hand off an attempt whose budget is already spent.
+    #[test]
+    fn a_restarted_watcher_escalates_an_attempt_the_log_already_spent() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+
+        for round in 0..policy.exit_budget {
+            // Every round is a fresh watchdog: no memory but the log's.
+            let mut watcher = Watcher::new(policy.clone());
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            assert_eq!(
+                count(&fresh, is_handoff),
+                1,
+                "exit {} is still replaced silently",
+                round + 1
+            );
+            assert_eq!(count(&fresh, is_escalation), 0);
+        }
+
+        let mut watcher = Watcher::new(policy.clone());
+        let fresh = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert_eq!(
+            count(&fresh, is_handoff),
+            0,
+            "the budget the log already spent is not handed off again"
+        );
+        assert_eq!(
+            count(&fresh, is_escalation),
+            1,
+            "the exit past the budget escalates, restart or not"
+        );
+    }
+
+    /// A restarted watchdog reads the escalation its predecessor recorded and
+    /// leaves the attempt alone: one escalation per attempt, not one per run.
+    #[test]
+    fn a_restarted_watcher_does_nothing_for_an_attempt_the_log_escalated() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+
+        let mut spent = 0;
+        for round in 0..=policy.exit_budget {
+            let mut watcher = Watcher::new(policy.clone());
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            spent += count(&fresh, is_escalation);
+        }
+        assert_eq!(spent, 1, "the attempt escalates once");
+
+        for step in 0..2 {
+            let mut watcher = Watcher::new(policy.clone());
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 100_000 + 10_000 * step,
+            );
+            assert!(
+                fresh.is_empty(),
+                "a restarted watchdog retried an escalated attempt: {fresh:?}"
+            );
+        }
+    }
+
+    /// A hand-off that fails is one escalation, not one a tick: the watch parks
+    /// and only a change in the log sets it going again.
+    #[test]
+    fn a_failed_hand_off_escalates_once_and_parks() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        // The one worker in the roster is dry, so no hand-off can be made.
+        ctx.commit(EventKind::Dry {
+            agent: "sh".to_string(),
+            reason: "quota".to_string(),
+            reset_at_ms: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+
+        let mut watcher = Watcher::new(policy.clone());
+        let first = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0);
+        assert_eq!(count(&first, is_handoff), 0, "no worker could take over");
+        let ours = first
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind, EventKind::Escalated { body, .. }
+                    if ParkReason::of_body(body) == Some(ParkReason::HandoffFailed))
+            })
+            .count();
+        assert_eq!(ours, 1, "the failed hand-off records one escalation");
+
+        for step in 1..4u64 {
+            let mut restarted = Watcher::new(policy.clone());
+            let fresh = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 10_000 * step);
+            assert!(
+                fresh.is_empty(),
+                "a parked watch retried the hand-off: {fresh:?}"
+            );
+        }
+
+        // A human re-admits the agent and retries the hand-off by hand: that is
+        // the change the parking waits for.
+        ctx.commit(EventKind::Available {
+            agent: "sh".to_string(),
+            reason: "quota reset".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::HandedOff {
+            task: "T1".to_string(),
+            from_agent: "sh".to_string(),
+            to_agent: "sh".to_string(),
+            checkpoint: "c0".to_string(),
+            reason: Some("a human retried the hand-off".to_string()),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let mut restarted = Watcher::new(policy.clone());
+        let fresh = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert_eq!(
+            count(&fresh, is_handoff),
+            1,
+            "a hand-off since the escalation un-parks the watch"
+        );
+        assert_eq!(count(&fresh, is_escalation), 0);
+    }
+
+    /// A hand-off that moves the task to another worker moves the watch with
+    /// it: the next tick reads the new pane, and the new worker's exit is what
+    /// is handed off, not the old worker's again.
+    #[test]
+    fn a_dry_hand_off_moves_the_watch_to_the_new_agent() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_screen(&pane, "step 1\nstep 2\n");
+        mux.set_state(&pane, AgentState::Working);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        // Silence takes the idle `sh` out of play and hands the task to `pi`.
+        let mut handed_to = None;
+        for step in 0..=30u64 {
+            let before = events(&ctx).len();
+            watcher
+                .tick(&mux, &env, t0 + 10_000 * step)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let log = events(&ctx);
+            if let Some(EventKind::HandedOff { to_agent, .. }) = log[before..]
+                .iter()
+                .map(|event| &event.kind)
+                .find(|kind| matches!(kind, EventKind::HandedOff { .. }))
+            {
+                handed_to = Some(to_agent.clone());
+                break;
+            }
+        }
+        assert_eq!(
+            handed_to.as_deref(),
+            Some("pi"),
+            "the dry worker is replaced"
+        );
+
+        // The new worker's pane goes away: the watch acts on it, in the new
+        // agent's name, and the streak is what the log counts for the attempt.
+        let fresh = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 400_000);
+        assert_eq!(count(&fresh, is_handoff), 1, "{fresh:?}");
+        assert_eq!(count(&fresh, is_escalation), 0);
+        match fresh
+            .iter()
+            .map(|event| &event.kind)
+            .find(|kind| matches!(kind, EventKind::HandedOff { .. }))
+        {
+            Some(EventKind::HandedOff {
+                from_agent,
+                to_agent,
+                reason,
+                ..
+            }) => {
+                assert_eq!(from_agent, "pi", "the pane that went away is pi's");
+                assert_eq!(to_agent, "pi", "a fresh process of the same agent");
+                assert_eq!(reason.as_deref(), Some(EXIT_REASON));
+            }
+            other => panic!("not a hand-off: {other:?}"),
+        }
+        assert!(
+            watcher
+                .watches
+                .contains_key(&(String::from("T1"), 1, String::from("pi"))),
+            "the watch stays on the attempt's current worker"
+        );
+    }
+
+    /// The parking is the log's, so one watchdog that keeps running has to be
+    /// un-parked by a human's retry: a restart used to be the only thing that
+    /// cleared the escalation, and a running watch stayed parked for good.
+    #[test]
+    fn a_human_hand_off_unparks_a_running_watch() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        // The roster's one worker is dry, so the first hand-off cannot be made.
+        ctx.commit(EventKind::Dry {
+            agent: "sh".to_string(),
+            reason: "quota".to_string(),
+            reset_at_ms: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+
+        // One watcher for the whole test: no restart may be what sets it going.
+        let mut watcher = Watcher::new(policy.clone());
+        let first = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0);
+        assert_eq!(count(&first, is_handoff), 0, "no worker could take over");
+        let parked_escalations = |fresh: &[Event]| {
+            fresh
+                .iter()
+                .filter(|event| {
+                    matches!(&event.kind, EventKind::Escalated { body, .. }
+                        if ParkReason::of_body(body) == Some(ParkReason::HandoffFailed))
+                })
+                .count()
+        };
+        assert_eq!(parked_escalations(&first), 1, "the failure escalates once");
+
+        for step in 1..3u64 {
+            let fresh = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 10_000 * step);
+            assert!(
+                fresh.is_empty(),
+                "a parked watch retried the hand-off: {fresh:?}"
+            );
+        }
+
+        // A human re-admits the agent and carries the hand-off out by hand.
+        ctx.commit(EventKind::Available {
+            agent: "sh".to_string(),
+            reason: "quota reset".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::HandedOff {
+            task: "T1".to_string(),
+            from_agent: "sh".to_string(),
+            to_agent: "sh".to_string(),
+            checkpoint: "c0".to_string(),
+            reason: Some("a human retried the hand-off".to_string()),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        // The new worker's grace is the log's, not the parking's: a pane that
+        // has not answered yet is not the newcomer's exit.
+        let handoff_at = events(&ctx)
+            .last()
+            .map(|event| event.at_ms)
+            .unwrap_or_else(|| panic!("the log lost the human's hand-off"));
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, handoff_at + 1_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let early = events(&ctx)[before..].to_vec();
+        assert!(
+            early.is_empty(),
+            "a hand-off's grace is measured from the log: {early:?}"
+        );
+
+        let fresh = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert_eq!(
+            count(&fresh, is_handoff),
+            1,
+            "the running watch monitors the new worker again"
+        );
+        assert_eq!(parked_escalations(&fresh), 0, "the parking was lifted");
+    }
+
+    /// A spent exit budget parks the watch, and a human re-spawning the
+    /// attempt is what sets it going again while that watchdog keeps running.
+    #[test]
+    fn a_new_spawn_unparks_a_running_watch() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let mut escalations = 0;
+        for round in 0..=policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            escalations += count(&fresh, is_escalation);
+        }
+        assert_eq!(escalations, 1, "the exit past the budget escalates");
+
+        let parked = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert!(
+            parked.is_empty(),
+            "a parked watch kept deciding: {parked:?}"
+        );
+
+        // A human gives up on the attempt and spawns the next one: the log now
+        // holds a worker newer than the escalation, so the watchdog watches
+        // again instead of staying parked.
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Failed,
+            summary: "died four times".to_string(),
+            tests: Vec::new(),
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        // The human also clears the dead attempt's worktree and branch.
+        let (state, _) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        let dead = &state.tasks["T1"].attempts[0];
+        std::fs::remove_dir_all(&dead.worktree).unwrap_or_else(|err| panic!("{err}"));
+        git_out(scratch.root(), &["worktree", "prune"]);
+        git_out(scratch.root(), &["branch", "-D", &dead.branch]);
+        for (kind, name) in [
+            (ResourceKind::Worktree, dead.worktree.clone()),
+            (ResourceKind::Branch, dead.branch.clone()),
+        ] {
+            ctx.commit(EventKind::Resource {
+                action: ResourceAction::Removed,
+                kind,
+                name,
+                task: Some("T1".to_string()),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        }
+        let request = SpawnRequest {
+            task: "T1".to_string(),
+            agent: Some("sh".to_string()),
+            effort: None,
+        };
+        spawn::spawn(&mux, &env, &request).unwrap_or_else(|err| panic!("{err}"));
+
+        let fresh = one_exit(&mut watcher, &ctx, &env, &mux, 2, t0 + 110_000);
+        assert_eq!(
+            count(&fresh, is_handoff),
+            1,
+            "the new worker's exit is handed off, not parked: {fresh:?}"
+        );
+
+        // The fresh attempt's streak started at its spawn, so the rest of its
+        // budget is still there to spend before a human is asked again.
+        let mut quiet = 0;
+        for round in 1..policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                2,
+                t0 + 120_000 + 10_000 * round as u64,
+            );
+            quiet += count(&fresh, is_handoff);
+            assert_eq!(
+                count(&fresh, is_escalation),
+                0,
+                "the new attempt's budget is whole: {fresh:?}"
+            );
+        }
+        assert_eq!(
+            quiet,
+            policy.exit_budget - 1,
+            "its budget is spent, not cut"
+        );
+        let spent = one_exit(&mut watcher, &ctx, &env, &mux, 2, t0 + 200_000);
+        assert_eq!(
+            count(&spent, is_escalation),
+            1,
+            "the new attempt's own budget ends it: {spent:?}"
+        );
+    }
+
+    /// A spent exit budget parks the watch. A human handing the same attempt to
+    /// another worker lifts the parking and gives that worker a whole budget:
+    /// the streak starts over at the human's hand-off, not three exits in. One
+    /// watcher runs throughout, and the log gives a restarted one the same
+    /// answer.
+    #[test]
+    fn a_human_hand_off_after_a_spent_budget_starts_a_fresh_streak() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let mut escalations = 0;
+        for round in 0..=policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 10_000 * round as u64,
+            );
+            escalations += count(&fresh, is_parking);
+        }
+        assert_eq!(escalations, 1, "the exit past the budget escalates");
+        let parked = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 100_000);
+        assert!(
+            parked.is_empty(),
+            "a parked watch kept deciding: {parked:?}"
+        );
+
+        // A human carries the hand-off out by hand: same attempt, new worker.
+        ctx.commit(EventKind::HandedOff {
+            task: "T1".to_string(),
+            from_agent: "sh".to_string(),
+            to_agent: "sh".to_string(),
+            checkpoint: "c0".to_string(),
+            reason: Some("a human handed it to a new worker".to_string()),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let mut handed = 0;
+        for round in 0..policy.exit_budget {
+            let fresh = one_exit(
+                &mut watcher,
+                &ctx,
+                &env,
+                &mux,
+                1,
+                t0 + 110_000 + 10_000 * round as u64,
+            );
+            handed += count(&fresh, is_handoff);
+            assert_eq!(
+                count(&fresh, is_parking),
+                0,
+                "the newcomer's budget is fresh: {fresh:?}"
+            );
+        }
+        assert_eq!(
+            handed, policy.exit_budget,
+            "each of that budget's exits is handed off"
+        );
+        let spent = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 200_000);
+        assert_eq!(
+            count(&spent, is_parking),
+            1,
+            "its own budget is what ends the attempt: {spent:?}"
+        );
+
+        // The parking and the streak are the log's, so a restarted watchdog
+        // neither escalates again nor spends a budget the newcomer did not.
+        let mut restarted = Watcher::new(policy.clone());
+        let after = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 300_000);
+        assert!(
+            after.is_empty(),
+            "a restarted watchdog kept deciding: {after:?}"
+        );
+    }
+
+    /// Only a spawn or a hand-off lifts a parking. An escalation about anything
+    /// else is a human's to answer, so it leaves the watch parked, whether the
+    /// watchdog kept running or was restarted.
+    #[test]
+    fn a_non_parking_escalation_leaves_the_watch_parked() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        // The roster's one worker is dry, so the first hand-off cannot be made.
+        ctx.commit(EventKind::Dry {
+            agent: "sh".to_string(),
+            reason: "quota".to_string(),
+            reset_at_ms: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let policy = Policy::default();
+        let t0 = 1_700_000_000_000u64;
+        let mut watcher = Watcher::new(policy.clone());
+
+        let first = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0);
+        assert_eq!(count(&first, is_handoff), 0, "no worker could take over");
+        assert_eq!(count(&first, is_parking), 1, "the failure parks the watch");
+
+        // An escalation about the dry agent lands in the log afterwards: it
+        // asks a human for something else and is not a parking.
+        ctx.commit(EventKind::Escalated {
+            task: Some("T1".to_string()),
+            body: "sh agent is dry: the quota is gone".to_string(),
+            default_action: String::from("pick the task up by hand"),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let running = one_exit(&mut watcher, &ctx, &env, &mux, 1, t0 + 10_000);
+        assert!(
+            running.is_empty(),
+            "a non-parking escalation un-parked a running watch: {running:?}"
+        );
+        let mut restarted = Watcher::new(policy.clone());
+        let fresh = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 20_000);
+        assert!(
+            fresh.is_empty(),
+            "a non-parking escalation un-parked a restarted watch: {fresh:?}"
+        );
+
+        // A human's hand-off still lifts it: the rule is the newest event, not
+        // the number of escalations the log holds.
+        ctx.commit(EventKind::Available {
+            agent: "sh".to_string(),
+            reason: "quota reset".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::HandedOff {
+            task: "T1".to_string(),
+            from_agent: "sh".to_string(),
+            to_agent: "sh".to_string(),
+            checkpoint: "c0".to_string(),
+            reason: Some("a human handed it on".to_string()),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let lifted = one_exit(&mut restarted, &ctx, &env, &mux, 1, t0 + 200_000);
+        assert_eq!(
+            count(&lifted, is_handoff),
+            1,
+            "a hand-off after the parking is watched: {lifted:?}"
+        );
+        assert_eq!(count(&lifted, is_escalation), 0);
+    }
+
+    /// One rule decides whether a watch is parked: the newest event among a
+    /// task's spawns, hand-offs and parking escalations says so, and the kinds
+    /// of event that say nothing about a parking are not consulted at all.
+    #[test]
+    fn the_rule_reads_the_newest_parking_event_of_the_task() {
+        let dealt = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Engine,
+            kind,
+        };
+        let spawned = |seq: u64| {
+            dealt(
+                seq,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    agent: "sh".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            )
+        };
+        let handed_off = |seq: u64, reason: &str| {
+            dealt(
+                seq,
+                EventKind::HandedOff {
+                    task: "T1".to_string(),
+                    from_agent: "sh".to_string(),
+                    to_agent: "pi".to_string(),
+                    checkpoint: "c0".to_string(),
+                    reason: Some(reason.to_string()),
+                },
+            )
+        };
+        let parked_by = |seq: u64, why: ParkReason| {
+            dealt(
+                seq,
+                EventKind::Escalated {
+                    task: Some("T1".to_string()),
+                    body: format!("sh {}: something went wrong", why.marker()),
+                    default_action: "pick the task up by hand".to_string(),
+                },
+            )
+        };
+        let other_escalation = |seq: u64| {
+            dealt(
+                seq,
+                EventKind::Escalated {
+                    task: Some("T1".to_string()),
+                    body: "sh agent is dry: quota".to_string(),
+                    default_action: "pick the task up by hand".to_string(),
+                },
+            )
+        };
+        let other_task = dealt(
+            90,
+            EventKind::Escalated {
+                task: Some("T2".to_string()),
+                body: format!("sh {}: not T1's business", ParkReason::ExitBudget.marker()),
+                default_action: "pick the task up by hand".to_string(),
+            },
+        );
+
+        // Nothing has happened: nothing parks.
+        assert_eq!(parked(&[], "T1"), None);
+
+        // A spawn, an exit hand-off, then the exit budget's escalation.
+        let events = vec![
+            spawned(1),
+            handed_off(2, EXIT_REASON),
+            parked_by(3, ParkReason::ExitBudget),
+        ];
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((1_700_000_000_003, ParkReason::ExitBudget)),
+            "the exit budget's escalation parks the watch"
+        );
+
+        // An escalation about a dry agent is not a parking and does not touch
+        // the rule: parked stays parked, whatever else the log records.
+        let mut events = events;
+        events.push(other_escalation(4));
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((1_700_000_000_003, ParkReason::ExitBudget)),
+            "only a later spawn or hand-off lifts a parking"
+        );
+
+        // A human handing the task to a fresh worker lifts it: the hand-off is
+        // newer than the escalation, whatever the attempt was doing before.
+        events.push(handed_off(5, "a human did it by hand"));
+        assert_eq!(parked(&events, "T1"), None, "a hand-off lifts the parking");
+
+        // A failed hand-off parks in its own right, and a new attempt's spawn
+        // is what lifts it.
+        events.push(parked_by(6, ParkReason::HandoffFailed));
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((1_700_000_000_006, ParkReason::HandoffFailed))
+        );
+        events.push(spawned(7));
+        assert_eq!(parked(&events, "T1"), None, "a new attempt is watched");
+
+        // Another task's parking is not this task's.
+        events.push(other_task);
+        assert_eq!(parked(&events, "T1"), None);
+    }
+
+    /// The streak and the escalation belong to their attempt, not their task:
+    /// the next attempt starts from zero and is watched again, which is what
+    /// un-parks a watch.
+    #[test]
+    fn a_new_attempt_starts_with_no_streak_and_no_escalation() {
+        let dealt = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Human,
+            kind,
+        };
+        let spawned = |seq: u64, attempt: u32| {
+            dealt(
+                seq,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt,
+                    agent: "sh".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            )
+        };
+        let exited = |seq: u64| {
+            dealt(
+                seq,
+                EventKind::HandedOff {
+                    task: "T1".to_string(),
+                    from_agent: "sh".to_string(),
+                    to_agent: "sh".to_string(),
+                    checkpoint: "c0".to_string(),
+                    reason: Some(EXIT_REASON.to_string()),
+                },
+            )
+        };
+        let mut events = vec![
+            spawned(1, 1),
+            exited(2),
+            exited(3),
+            exited(4),
+            dealt(
+                5,
+                EventKind::Escalated {
+                    task: Some("T1".to_string()),
+                    body: format!(
+                        "sh {}: {EXIT_REASON} 4 times in a row on this attempt: pick up by hand",
+                        ParkReason::ExitBudget.marker()
+                    ),
+                    default_action: "pick the task up by hand".to_string(),
+                },
+            ),
+        ];
+        assert_eq!(exit_streak(&events, "T1"), 3);
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((events[4].at_ms, ParkReason::ExitBudget))
+        );
+
+        events.push(spawned(6, 2));
+        assert_eq!(
+            exit_streak(&events, "T1"),
+            0,
+            "a new attempt starts with a fresh budget"
         );
         assert!(
-            appended(fresh, |kind| matches!(kind, EventKind::HandedOff { .. })),
-            "a closed pane must hand the task off"
+            parked(&events, "T1").is_none(),
+            "a new attempt is a human's no longer"
+        );
+    }
+
+    /// A hand-off that is not an exit hands the task to a new worker, and a new
+    /// worker starts with a fresh budget: a human's hand-off must not leave the
+    /// newcomer one exit away from an escalation it never earned. The count is
+    /// the log's, so this reads the same before and after a restart.
+    #[test]
+    fn a_human_hand_off_starts_a_fresh_exit_streak() {
+        let dealt = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Human,
+            kind,
+        };
+        let spawned = |seq: u64, attempt: u32| {
+            dealt(
+                seq,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt,
+                    agent: "sh".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            )
+        };
+        let handed_off = |seq: u64, reason: &str| {
+            dealt(
+                seq,
+                EventKind::HandedOff {
+                    task: "T1".to_string(),
+                    from_agent: "sh".to_string(),
+                    to_agent: "sh".to_string(),
+                    checkpoint: "c0".to_string(),
+                    reason: Some(reason.to_string()),
+                },
+            )
+        };
+        let budget = 3;
+
+        let mut events = vec![spawned(1, 1)];
+        assert_eq!(exit_streak(&events, "T1"), 0, "a fresh spawn has no exits");
+        for (n, seq) in (1..=budget as u64).zip(2..) {
+            events.push(handed_off(seq, EXIT_REASON));
+            assert_eq!(
+                exit_streak(&events, "T1"),
+                n as usize,
+                "each exit is the next one of the streak"
+            );
+        }
+
+        // A human hands the same attempt to another worker: a full budget again.
+        events.push(handed_off(2 + budget as u64, "a human handed it on"));
+        assert_eq!(
+            exit_streak(&events, "T1"),
+            0,
+            "a human's hand-off starts a fresh budget"
+        );
+        events.push(handed_off(3 + budget as u64, EXIT_REASON));
+        assert_eq!(
+            exit_streak(&events, "T1"),
+            1,
+            "the new worker's exit is the first of its streak"
+        );
+        assert!(
+            exit_streak(&events, "T1") <= budget,
+            "the new worker still has its budget"
         );
     }
 
