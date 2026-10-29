@@ -333,6 +333,7 @@ pub(crate) fn end_kind(state: &RunState, end: EndRun) -> Result<EventKind, CliEr
         return Ok(kind);
     }
     confirm::require_human(
+        &end.actor,
         "abandons a run",
         &format!("ask the maintainer to run `{}`", end.verb),
     )?;
@@ -392,7 +393,7 @@ fn decided(state: &RunState, abandoned: &[TaskId], answer: bool) -> Result<(), C
 ///
 /// Both verbs share every decision and every question and differ only in the
 /// command a refusal names, so the verb travels with the flags.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct EndRun {
     /// End the run even though tasks are unfinished, keeping their branches.
     pub abandon: bool,
@@ -400,6 +401,13 @@ pub(crate) struct EndRun {
     pub yes: bool,
     /// The command a refusal names, e.g. `shprd down --abandon`.
     pub verb: &'static str,
+    /// The actor the environment named, read at the verb's boundary.
+    ///
+    /// Empty is "nothing was named", which is a human. The constructors leave
+    /// it empty, so the tests that end a run are not at the mercy of the
+    /// `SHPRD_ACTOR` the test process inherited; a test that needs a named
+    /// actor injects one with [`EndRun::acting_as`].
+    actor: String,
 }
 
 impl EndRun {
@@ -409,6 +417,7 @@ impl EndRun {
             abandon,
             yes,
             verb: DOWN_VERB,
+            actor: String::new(),
         }
     }
 
@@ -418,7 +427,15 @@ impl EndRun {
             abandon,
             yes,
             verb: FINISH_VERB,
+            actor: String::new(),
         }
+    }
+
+    /// The actor the environment named, for the abandon's human check.
+    #[must_use]
+    pub fn acting_as(mut self, named: impl Into<String>) -> Self {
+        self.actor = named.into();
+        self
     }
 
     /// A plain finish: it abandons nothing, so it asks nothing.
@@ -539,7 +556,7 @@ pub fn down_verb(ctx: &Ctx, args: &EndRunArgs, home: Option<&Path>) -> Result<()
         &spawn::real_mux(),
         ctx,
         home,
-        EndRun::down(args.abandon, args.yes),
+        EndRun::down(args.abandon, args.yes).acting_as(confirm::named_actor()),
     )
 }
 
@@ -3451,6 +3468,35 @@ mod tests {
         let state = env.ctx.state().map_err(failed)?;
         assert!(state.finished);
         assert_eq!(state.abandoned, vec!["M4.1".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_abandon_refuses_an_actor_that_is_not_a_human() -> Result<()> {
+        let fixture = Fixture::new(Some("claude/claude-opus-5-5"))?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let before = env.ctx.state().map_err(failed)?;
+
+        // The actor is injected, not inherited: the process may run with any
+        // `SHPRD_ACTOR` and this still tests the refusal itself.
+        let err = down(
+            &mux(),
+            &env.ctx,
+            Some(&env.home),
+            EndRun::down(true, true).acting_as("engine"),
+        )
+        .err()
+        .context("an abandon must refuse a named non-human actor")?;
+
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("SHPRD_ACTOR=engine"), "{err}");
+        let after = env.ctx.state().map_err(failed)?;
+        assert!(!after.finished, "the refused abandon wrote nothing");
+        assert_eq!(
+            after.last_seq, before.last_seq,
+            "a refusal appends no event"
+        );
         Ok(())
     }
 

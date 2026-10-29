@@ -7,7 +7,7 @@ use shprd_mux::Mux;
 
 use crate::cli::{EndRunArgs, RunStartArgs};
 use crate::cmd::up::EndRun;
-use crate::cmd::{emit, spawn};
+use crate::cmd::{confirm, emit, spawn};
 use crate::ctx::{CliError, Ctx};
 
 /// Records the run's first event.
@@ -48,7 +48,7 @@ pub fn finish_verb(ctx: &Ctx, args: &EndRunArgs, home: Option<&Path>) -> Result<
         &spawn::real_mux(),
         ctx,
         home,
-        EndRun::finish(args.abandon, args.yes),
+        EndRun::finish(args.abandon, args.yes).acting_as(confirm::named_actor()),
     )
 }
 

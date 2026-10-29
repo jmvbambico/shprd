@@ -26,6 +26,7 @@ use crate::ctx::{CliError, Ctx, resolve_layout};
 /// Approves the run's pull request at the integration head a human is shown.
 pub fn approve_verb(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Result<(), CliError> {
     confirm::require_human(
+        &confirm::named_actor(),
         "approves a pull request",
         "ask the maintainer to run `shprd approve`",
     )?;
