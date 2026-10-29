@@ -464,6 +464,27 @@ pub fn close_worker(mux: &dyn Mux, briefs: &Path, run: &str, task: &str) -> Resu
     })
 }
 
+/// Closes every tab the run recorded for `task`: the worker's and the
+/// reviewer's alike.
+///
+/// [`close_worker`] leaves the reviewer's records alone because a task that is
+/// still in the run gets its reviewer tab closed by the verdict that decides the
+/// review ([`review::close_reviewer`](super::review::close_reviewer)). A drop
+/// has no verdict to wait for: the task is leaving the run, so both kinds of
+/// record are closed here, and the caller counts every refusal — a tab the host
+/// keeps still has an agent in it.
+pub(crate) fn close_task_tabs(
+    mux: &dyn Mux,
+    briefs: &Path,
+    run: &str,
+    task: &str,
+) -> Result<(), CliError> {
+    let prefix = format!("{task}-a");
+    close_records(mux, briefs, run, "task's", move |name| {
+        name.starts_with(&prefix)
+    })
+}
+
 /// Closes every tab the run recorded, as the run's last act.
 ///
 /// Run end has no task in hand, so it sweeps the lot: every `.tab` record under

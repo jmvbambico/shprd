@@ -10,8 +10,9 @@
 //! Nothing is thrown away here. The worktree and the branch stay where they
 //! are, and the janitor archives the branch before it removes either, so
 //! whatever the task did is still reachable with `shprd restore`. The one thing
-//! the verb closes is the worker's tab: an agent cannot be left typing into a
-//! task nobody is waiting for.
+//! the verb closes is the task's tabs, the worker's and any open reviewer's: an
+//! agent cannot be left typing into a task nobody is waiting for, so a tab the
+//! host refuses to close refuses the whole drop rather than warning about it.
 
 use std::path::Path;
 
@@ -28,11 +29,11 @@ pub fn drop_verb(ctx: &Ctx, args: &DropArgs, home: Option<&Path>) -> Result<(), 
     drop_task(&spawn::real_mux(), ctx, args, home, &confirm::named_actor())
 }
 
-/// Drops a task, closing the worker tab the run recorded for it.
+/// Drops a task, closing every tab the run recorded for it first.
 ///
-/// Every refusal happens before the question, and the question before anything
-/// is written: the event, the tab and the log are one decision, and a human who
-/// says no gets the run they had.
+/// Every rule refusal happens before the question, and the question before
+/// anything is written: the event, the tabs and the log are one decision, and a
+/// human who says no gets the run they had — with its agent still running.
 pub fn drop_task(
     mux: &dyn Mux,
     ctx: &Ctx,
@@ -77,9 +78,13 @@ pub fn drop_task(
         )));
     }
 
+    // The agents go first. A tab left open is a worker that can keep typing
+    // into a task the run has decided against — its branch may be archived and
+    // its worktree gone by the time it commits — so a close that genuinely
+    // fails refuses the drop, and nothing is written.
+    stop_task_tabs(mux, home, &run.run_id, &args.task)?;
     let event = ctx.commit(kind)?;
     crate::cmd::emit(ctx, &event)?;
-    close_worker_tab(mux, home, &run.run_id, &args.task);
     if !ctx.json {
         println!(
             "dropped {} ({}); its worktree and branch are kept",
@@ -100,19 +105,33 @@ fn dropped_phrase(task: &str, status: &str, task_record: &shprd_core::state::Tas
     }
 }
 
-/// Closes the tab the run recorded for `task`'s attempts.
+/// Closes every tab the run recorded for `task`, worker and reviewer alike.
 ///
-/// A host that keeps the tab is warned about, not fatal: the event is written
-/// and the task is out of the run, so a tab left open is a thing to tidy, not a
-/// reason to pretend the drop did not happen.
-fn close_worker_tab(mux: &dyn Mux, home: Option<&Path>, run: &str, task: &str) {
+/// The records a spawn and a review wrote beside the briefs are the only list of
+/// tabs the task has, so this is where a drop finds them. A tab the host no
+/// longer knows is closed already — a human shut it, say — which is the state
+/// this verb wanted anyway; a tab the host keeps is a refusal, because the
+/// agent in it is still able to act on work the run has taken away. The message
+/// names the tab by id so the human can close it by hand and run the verb again.
+fn stop_task_tabs(
+    mux: &dyn Mux,
+    home: Option<&Path>,
+    run: &str,
+    task: &str,
+) -> Result<(), CliError> {
     let Ok(home) = crate::ctx::resolve_home(home) else {
-        return;
+        // No home means no briefs folder, so no tab was ever recorded for
+        // anything: there is nothing to close.
+        return Ok(());
     };
     let briefs = home.join(".shprd").join("briefs");
-    if let Err(err) = spawn::close_worker(mux, &briefs, run, task) {
-        eprintln!("warning: {err}");
-    }
+    spawn::close_task_tabs(mux, &briefs, run, task).map_err(|err| {
+        CliError::Invalid(
+            anyhow!(err).context(format!(
+                "task {task} may still have an agent working in it: close the tab it names by hand, then run `shprd drop` again"
+            )),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -121,6 +140,7 @@ mod tests {
     use shprd_core::event::{Actor, ReportStatus};
     use shprd_core::state::TaskStatus;
     use shprd_mux::fake::{Call, FakeMux};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     use super::*;
@@ -219,6 +239,14 @@ mod tests {
             let dir = self.home.path().join(".shprd").join("briefs").join(RUN);
             std::fs::create_dir_all(&dir)?;
             std::fs::write(dir.join("T1-a1.tab"), tab.as_str())?;
+            Ok(())
+        }
+
+        /// Writes the tab record a review leaves beside its brief.
+        fn record_review_tab(&self, tab: &shprd_mux::TabId) -> Result<()> {
+            let dir = self.home.path().join(".shprd").join("briefs").join(RUN);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join("T1-a1-review.tab"), tab.as_str())?;
             Ok(())
         }
 
@@ -349,6 +377,186 @@ mod tests {
         assert!(err.to_string().contains("shprd drop"), "{err}");
         assert_eq!(fixture.log_text()?, before, "nothing was logged");
         assert_eq!(status(&fixture)?, TaskStatus::Reported, "nothing changed");
+        Ok(())
+    }
+
+    /// A host that keeps every tab it is asked to close.
+    ///
+    /// The real mux does this — a pane whose process will not die holds the tab
+    /// open — and it is the case a drop must refuse rather than warn about: the
+    /// agent in the tab is still able to act on the task.
+    struct StuckTabMux {
+        /// Where the calls are recorded, so a test can see the attempt.
+        inner: FakeMux,
+    }
+
+    impl StuckTabMux {
+        fn new() -> Self {
+            Self {
+                inner: FakeMux::default(),
+            }
+        }
+    }
+
+    impl Mux for StuckTabMux {
+        fn capabilities(&self) -> shprd_mux::Capabilities {
+            self.inner.capabilities()
+        }
+        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<shprd_mux::Workspace>> {
+            self.inner.find_workspace(name)
+        }
+        fn create_workspace(
+            &self,
+            name: &str,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::Workspace> {
+            self.inner.create_workspace(name, cwd)
+        }
+        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
+            self.inner.focus_workspace(workspace)
+        }
+        fn list_tabs(
+            &self,
+            workspace: &shprd_mux::WorkspaceId,
+        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
+            self.inner.list_tabs(workspace)
+        }
+        fn create_tab(
+            &self,
+            workspace: &shprd_mux::WorkspaceId,
+            title: &str,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::Tab> {
+            self.inner.create_tab(workspace, title, cwd)
+        }
+        fn rename_tab(&self, tab: &shprd_mux::TabId, title: &str) -> shprd_mux::Result<()> {
+            self.inner.rename_tab(tab, title)
+        }
+        fn focus_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()> {
+            self.inner.focus_tab(tab)
+        }
+        fn close_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()> {
+            // The call is recorded either way, so a test can see shprd tried.
+            let _ = self.inner.close_tab(tab);
+            Err(shprd_mux::MuxError::command(
+                "the stuck host",
+                format!("tab {} is held open by a running process", tab.as_str()),
+            ))
+        }
+        fn split(
+            &self,
+            pane: &shprd_mux::PaneId,
+            direction: shprd_mux::Direction,
+            ratio: f32,
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::PaneId> {
+            self.inner.split(pane, direction, ratio, cwd)
+        }
+        fn run(
+            &self,
+            pane: &shprd_mux::PaneId,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+        ) -> shprd_mux::Result<()> {
+            self.inner.run(pane, argv, env)
+        }
+        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.send_text(pane, text)
+        }
+        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
+            self.inner.prompt(pane, text)
+        }
+        fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
+            self.inner.read(pane, lines)
+        }
+        fn agent_state(
+            &self,
+            pane: &shprd_mux::PaneId,
+        ) -> shprd_mux::Result<shprd_mux::AgentState> {
+            self.inner.agent_state(pane)
+        }
+        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
+            self.inner.next_events(timeout)
+        }
+    }
+
+    #[test]
+    fn a_worker_tab_the_host_keeps_refuses_the_drop_and_logs_nothing() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.reported()?;
+        let fake = StuckTabMux::new();
+        let tab = shprd_mux::TabId::new("tab-7");
+        fixture.record_tab(&tab)?;
+        let before = fixture.log_text()?;
+
+        let err = drop_task(
+            &fake,
+            &fixture.ctx,
+            &fixture.args(),
+            fixture.home(),
+            "human",
+        )
+        .err()
+        .context("a tab the host keeps must refuse the drop")?;
+
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let message = err.to_string();
+        assert!(message.contains("tab-7"), "{message}");
+        assert!(message.contains("shprd drop"), "{message}");
+        assert_eq!(fixture.log_text()?, before, "nothing was logged");
+        assert_eq!(status(&fixture)?, TaskStatus::Reported, "nothing changed");
+        Ok(())
+    }
+
+    #[test]
+    fn a_worker_tab_already_gone_counts_as_closed() -> Result<()> {
+        // A human closed the tab before the drop: that is the state the verb
+        // wants, not a refusal, so the drop goes ahead.
+        let fixture = Fixture::new()?;
+        fixture.reported()?;
+        let fake = FakeMux::default();
+        fixture.record_tab(&shprd_mux::TabId::new("tab-7"))?;
+
+        drop_task(
+            &fake,
+            &fixture.ctx,
+            &fixture.args(),
+            fixture.home(),
+            "human",
+        )
+        .map_err(failed)?;
+
+        assert_eq!(status(&fixture)?, TaskStatus::Dropped);
+        Ok(())
+    }
+
+    #[test]
+    fn a_drop_closes_an_open_reviewer_tab_too() -> Result<()> {
+        // A reviewer can be as talkative as a worker: its tab goes with the
+        // worker's, or the review could still be written for a dropped task.
+        let fixture = Fixture::new()?;
+        fixture.reported()?;
+        let fake = FakeMux::default();
+        let worker = shprd_mux::TabId::new("tab-7");
+        let reviewer = shprd_mux::TabId::new("tab-8");
+        fixture.record_tab(&worker)?;
+        fixture.record_review_tab(&reviewer)?;
+
+        drop_task(
+            &fake,
+            &fixture.ctx,
+            &fixture.args(),
+            fixture.home(),
+            "human",
+        )
+        .map_err(failed)?;
+
+        assert!(
+            fake.calls().contains(&Call::CloseTab(reviewer)),
+            "the reviewer tab is closed: {:?}",
+            fake.calls()
+        );
+        assert_eq!(status(&fixture)?, TaskStatus::Dropped);
         Ok(())
     }
 
