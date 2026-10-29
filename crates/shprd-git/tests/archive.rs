@@ -2,7 +2,7 @@
 
 mod support;
 
-use shprd_git::archive::{self, ArchiveError, archive_ref_name};
+use shprd_git::archive::{self, ArchiveError, archive_ref_for_attempt, archive_ref_name};
 
 use support::Repo;
 
@@ -152,4 +152,45 @@ fn an_archive_ref_must_be_an_archive_ref() {
         Some("refs/shprd/archive/r1/T1-retry".to_string()),
         "an extra attempt names its own ref"
     );
+}
+
+#[test]
+fn each_attempt_archives_to_its_own_ref() {
+    let repo = Repo::new();
+    let first_ref = archive_ref_for_attempt("r1", "T1", 1);
+    let second_ref = archive_ref_for_attempt("r1", "T1", 2);
+    let third_ref = archive_ref_for_attempt("r1", "T1", 3);
+    assert_eq!(first_ref, archive_ref_name("r1", "T1"));
+    assert_ne!(first_ref, second_ref);
+    assert_ne!(second_ref, third_ref);
+
+    repo.git(&["branch", "shprd/r1/T1", "main"]);
+    let first = repo.commit_empty("attempt one");
+    repo.git(&["branch", "-f", "shprd/r1/T1", &first]);
+    let kept = match archive::archive_to(&repo.path, "shprd/r1/T1", &first_ref) {
+        Ok(archived) => archived,
+        Err(err) => panic!("archiving attempt 1 must succeed: {err}"),
+    };
+    assert_eq!(kept.sha, first);
+
+    let second = repo.commit_empty("attempt two");
+    repo.git(&["branch", "-f", "shprd/r1/T1", &second]);
+    match archive::archive_to(&repo.path, "shprd/r1/T1", &second_ref) {
+        Ok(archived) => assert_eq!(archived.sha, second),
+        Err(err) => panic!("archiving attempt 2 must succeed: {err}"),
+    }
+    // Neither attempt's commits are lost: each ref still holds its own.
+    assert_eq!(repo.git(&["rev-parse", &first_ref]), first);
+    assert_eq!(repo.git(&["rev-parse", &second_ref]), second);
+}
+
+#[test]
+fn archive_to_refuses_a_ref_outside_the_archive_namespace() {
+    let repo = Repo::new();
+    repo.git(&["branch", "shprd/r1/T1", "main"]);
+    let err = match archive::archive_to(&repo.path, "shprd/r1/T1", "refs/heads/shprd/kept") {
+        Ok(archived) => panic!("a ref outside the archive namespace must be refused: {archived:?}"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, ArchiveError::InvalidId { .. }), "{err:?}");
 }

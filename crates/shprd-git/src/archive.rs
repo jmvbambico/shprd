@@ -6,7 +6,9 @@
 //! `shprd/r1/t1-retry`, by `refs/shprd/archive/r1/t1-retry` — and only then
 //! removed. Two live branches for one task therefore never collide. The ref
 //! holds the commits alive, so every deletion is reversible with [`restore`],
-//! which rebuilds the task's conventional branch from its own ref. A folder
+//! which rebuilds the task's conventional branch from its own ref. A retry
+//! reuses one branch name for every attempt, so each attempt's commits are kept
+//! under their own ref, named by [`archive_ref_for_attempt`]. A folder
 //! that is not a git object — a run's review packets — is archived by
 //! [`archive_dir`], which copies it aside before the janitor deletes it.
 
@@ -108,6 +110,24 @@ pub fn archive_ref_name(run: &str, task: &str) -> String {
     format!("{ARCHIVE_PREFIX}{run}/{task}")
 }
 
+/// The archive ref that holds one attempt's commits.
+///
+/// The first attempt keeps the task's own ref, [`archive_ref_name`], so
+/// [`restore`] still rebuilds the branch from it. Every later attempt is
+/// suffixed with its number, because each attempt's branch tip is a different
+/// commit and an archive ref is never moved: without the suffix, a retry would
+/// have to overwrite the attempt before it, and [`archive_to`] would refuse.
+///
+/// # Panics
+///
+/// Never: it is a format, and the ids are validated by the caller.
+pub fn archive_ref_for_attempt(run: &str, task: &str, attempt: u32) -> String {
+    match attempt {
+        0 | 1 => archive_ref_name(run, task),
+        n => format!("{}-a{n}", archive_ref_name(run, task)),
+    }
+}
+
 /// The archive ref that belongs to `branch`: `<refs/shprd/archive>/<branch
 /// without the namespace>`, so `shprd/r1/t1` maps to
 /// `refs/shprd/archive/r1/t1`.
@@ -150,25 +170,44 @@ pub fn is_archive_ref(name: &str) -> bool {
 /// one is refused, because moving an archive ref would lose the recorded
 /// history it exists to keep.
 pub fn archive(repo: &Path, layout: &Layout, branch: &str) -> Result<Archived, ArchiveError> {
+    let ref_name = archive_ref_for_branch(layout, branch)?;
+    archive_to(repo, branch, &ref_name)
+}
+
+/// Points `ref_name` at `branch`'s tip, under the same rule as [`archive`].
+///
+/// [`archive`] names the ref after the branch, which is one ref per task. A
+/// retry replaces one attempt's branch and keeps each attempt's commits under
+/// [`archive_ref_for_attempt`]'s name instead, so that attempt 2's archive does
+/// not have to overwrite attempt 1's.
+///
+/// A ref outside [`ARCHIVE_PREFIX`] is refused: shprd writes inside its own
+/// namespace and nowhere else.
+pub fn archive_to(repo: &Path, branch: &str, ref_name: &str) -> Result<Archived, ArchiveError> {
+    if !is_archive_ref(ref_name) {
+        return Err(ArchiveError::InvalidId {
+            what: "archive ref",
+            id: ref_name.to_string(),
+        });
+    }
     let git = Git::new(repo);
     let wanted = git.rev_parse(branch)?;
-    let ref_name = archive_ref_for_branch(layout, branch)?;
-    if let Some(found) = ref_sha(&git, &ref_name)? {
+    if let Some(found) = ref_sha(&git, ref_name)? {
         if found == wanted {
             return Ok(Archived {
-                ref_name,
+                ref_name: ref_name.to_string(),
                 sha: found,
             });
         }
         return Err(ArchiveError::ArchiveExists {
-            ref_name,
+            ref_name: ref_name.to_string(),
             found,
             wanted,
         });
     }
-    git.run(&["update-ref", &ref_name, &wanted])?;
+    git.run(&["update-ref", ref_name, &wanted])?;
     Ok(Archived {
-        ref_name,
+        ref_name: ref_name.to_string(),
         sha: wanted,
     })
 }
