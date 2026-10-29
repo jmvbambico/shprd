@@ -584,6 +584,12 @@ fn is_protected_branch(branch: &str) -> bool {
 /// still recoverable with `shprd restore`. Keeping them until the run ended
 /// would leave a dropped task's worktree in the way of nothing, but it would
 /// also leave it on disk for ever in a run a human kept working in.
+///
+/// The plan is folded state and the log, nothing else: it has no mux in reach
+/// and cannot ask whether a tab for the task is still open. It does not have to
+/// — `shprd drop` closes the task's worker and reviewer tabs and refuses the
+/// drop when the host keeps one, so a task in this state has no agent left to
+/// type into the worktree this removes.
 fn cleanup_due(state: &RunState, task: &TaskId) -> bool {
     match state.tasks.get(task) {
         Some(record) => {
