@@ -296,7 +296,7 @@ impl Watcher {
                 let pane = PaneId::new(info.pane.clone());
                 match mux.prompt(&pane, &text) {
                     Ok(()) => Ok(()),
-                    Err(err) => Err(format!("{}", err)),
+                    Err(err) => Err(err.to_string()),
                 }
             }
             None => Err(String::from("no orchestrator pane is recorded")),
@@ -489,8 +489,11 @@ fn notices(events: &[Event], since: Option<u64>) -> Vec<Notice> {
 
 /// The one prompt that carries `wanted`.
 fn prompt_text(wanted: &[Notice]) -> String {
-    let plural = if wanted.len() == 1 { "" } else { "s" };
-    let mut text = format!("shprd: {} thing{plural} needs you\n", wanted.len());
+    let count = match wanted.len() {
+        1 => String::from("1 thing needs you"),
+        n => format!("{n} things need you"),
+    };
+    let mut text = format!("shprd: {count}\n");
     text.push_str(
         &wanted
             .iter()
