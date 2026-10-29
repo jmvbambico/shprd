@@ -22,7 +22,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow};
 use shprd_core::config::Config;
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
-use shprd_core::state::{ResourceStatus, RunState, TaskStatus};
+use shprd_core::rules::{unfinished_tasks, unlanded};
+use shprd_core::state::{ResourceStatus, RunState};
 use shprd_git::integrate::{self, IntegrationWorktree};
 use shprd_git::worktree::Layout;
 use shprd_mux::naming::{self, Role as TabRole};
@@ -277,7 +278,9 @@ pub fn down(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, abandon: bool) -> Res
 /// the tasks that were left, which is what `up` reports when it archives.
 pub(crate) fn finish_kind(state: &RunState, abandon: bool) -> Result<EventKind, CliError> {
     let unfinished = unfinished_tasks(state);
-    if abandon {
+    // An abandon with nothing left to abandon is a normal finish: the list
+    // would be empty, so it goes through the checks that carry no list.
+    if abandon && !unfinished.is_empty() {
         return Ok(EventKind::RunFinished {
             abandoned: unfinished,
         });
@@ -313,21 +316,6 @@ const RESTART_ADVICE: &str = "to restart the orchestrator or watchdog, run `shpr
      (it resumes this run); to end the run anyway and keep the branches, run \
      `shprd down --abandon`";
 
-/// The tasks a run cannot leave behind: every one not in a terminal state.
-///
-/// Integrated is terminal, because the work is on the integration branch and
-/// the run's pull request is what carries it. Reported, on its way through
-/// review (passed or failed), planned and working are all work in flight or
-/// work stuck, which ending the run would strand on a branch nobody watches.
-fn unfinished_tasks(state: &RunState) -> Vec<TaskId> {
-    state
-        .tasks
-        .iter()
-        .filter(|(_, task)| task.status != TaskStatus::Integrated)
-        .map(|(id, _)| id.clone())
-        .collect()
-}
-
 /// One line per unfinished task, naming the task and where it sits.
 fn unfinished_lines(state: &RunState, unfinished: &[TaskId]) -> String {
     let lines: Vec<String> = unfinished
@@ -345,13 +333,6 @@ fn unfinished_lines(state: &RunState, unfinished: &[TaskId]) -> String {
         unfinished.len(),
         lines.join("\n")
     )
-}
-
-/// True when the run landed work on a branch nothing will carry yet.
-///
-/// A run with no tasks ends as it always did: there is no work to carry.
-fn unlanded(state: &RunState) -> bool {
-    !state.tasks.is_empty() && state.pr.as_ref().is_none_or(|pr| !pr.merged)
 }
 
 /// The run's identifier, for a message about it.
@@ -1549,6 +1530,7 @@ mod tests {
     use anyhow::{Context, Result};
     use shprd_core::config::{Config, Skills};
     use shprd_core::event::{Actor, ReportStatus};
+    use shprd_core::rules::RuleError;
     use shprd_mux::Capabilities;
     use shprd_mux::fake::{Call, FakeMux};
     use shprd_roster::spec::load_dir;
@@ -3718,6 +3700,59 @@ mod tests {
                 text.matches(title).count()
             );
         }
+        Ok(())
+    }
+
+    /// The rule is the backstop, not the verb: `down` refuses a run with work
+    /// in flight before it builds the event, so this commits the event anyway,
+    /// as the orchestrator — the one non-human actor the rule lets finish a run.
+    #[test]
+    fn the_rule_refuses_a_finish_that_never_went_through_the_verb() -> Result<()> {
+        let fixture = Fixture::new(None)?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let ctx = env.ctx.as_actor(Actor::Orchestrator);
+        let before = ctx.state().map_err(failed)?.last_seq;
+        let err = match ctx.commit(EventKind::RunFinished {
+            abandoned: Vec::new(),
+        }) {
+            Ok(event) => panic!("the finish was recorded: {event:?}"),
+            Err(err) => err,
+        };
+        match err {
+            CliError::Refused(RuleError::RunUnfinished { tasks }) => {
+                assert_eq!(tasks, vec!["M4.1".to_string()])
+            }
+            other => panic!("the finish failed for another reason: {other:?}"),
+        }
+        // Nothing was written: a refused event never reaches the log.
+        let state = ctx.state().map_err(failed)?;
+        assert!(!state.finished);
+        assert_eq!(state.last_seq, before, "a refusal appends no event");
+        Ok(())
+    }
+
+    /// An agent cannot abandon its own run: that is what closes the tabs and
+    /// walks away from the task it was given.
+    #[test]
+    fn the_rule_refuses_an_agent_abandoning_the_run() -> Result<()> {
+        let fixture = Fixture::new(None)?;
+        let env = fixture.env()?;
+        reported_task(&env.ctx)?;
+        let ctx = env.ctx.as_actor(Actor::Agent {
+            id: "claude".to_string(),
+        });
+        let err = match ctx.commit(EventKind::RunFinished {
+            abandoned: vec!["M4.1".to_string()],
+        }) {
+            Ok(event) => panic!("the abandon was recorded: {event:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, CliError::Refused(RuleError::AbandonNotHuman { .. })),
+            "{err:?}"
+        );
+        assert!(!ctx.state().map_err(failed)?.finished);
         Ok(())
     }
 }
