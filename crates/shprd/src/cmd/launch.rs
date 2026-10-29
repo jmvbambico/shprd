@@ -150,10 +150,14 @@ fn await_agent(
 
 /// The name of the first blocking prompt the pane's screen is showing, if any.
 ///
+/// The watchdog asks the same question of the orchestrator's pane before it
+/// types a notice: a CLI waiting on its own prompt reads the next line as the
+/// answer to that prompt.
+///
 /// The match is case-insensitive, like [`shprd_roster::spec::HarnessSpec::dry_patterns`],
 /// and reads only the last [`BLOCKING_PROMPT_LINES`] lines: a prompt still
 /// waiting is on screen, and the scrollback above it may mention one long gone.
-fn blocking_prompt(
+pub(crate) fn blocking_prompt(
     mux: &dyn Mux,
     pane: &PaneId,
     patterns: &[BlockingPrompt],

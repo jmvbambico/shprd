@@ -9,7 +9,7 @@ use shprd_core::event::{Actor, Event, EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
-use shprd_mux::{Mux, MuxError, PaneId, naming};
+use shprd_mux::{AgentState, Mux, MuxError, PaneId, naming};
 use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
@@ -20,7 +20,7 @@ use shprd_watch::screen::{Sampler, ScreenSignal, sample};
 use crate::cli::WatchArgs;
 use crate::cmd::handoff::{HandoffRequest, handoff};
 use crate::cmd::spawn::{self, Program, SpawnEnv};
-use crate::cmd::{review, verdict};
+use crate::cmd::{launch, review, verdict};
 use crate::ctx::{CliError, Ctx};
 
 /// The newest `*.jsonl` file in `dir`, if the directory holds one.
@@ -91,6 +91,16 @@ fn record_error(
     scan.ok()?.last_error
 }
 
+/// How long the orchestrator may sit on a prompt of its own before the
+/// watchdog says so.
+///
+/// Answering it is the human's job, not the watchdog's, so the wait is short:
+/// a notice nobody can deliver is news the human needs while the tab waits.
+const ORCHESTRATOR_BLOCKED_AFTER_MS: u64 = 120_000;
+
+/// What the watchdog says when the orchestrator will not take a notice.
+const ORCHESTRATOR_WAITING: &str = "the orchestrator is waiting on its own prompt";
+
 /// Every working attempt's watchdog, one pane each.
 pub struct Watcher {
     /// Per attempt: the state machine's memory and the screen sampler.
@@ -108,6 +118,16 @@ pub struct Watcher {
     /// A reviewer's bad file is one escalation, not one per tick: the mark is
     /// cleared by a rewrite, which is the reviewer's second chance.
     rejected: BTreeMap<PathBuf, SystemTime>,
+    /// When the orchestrator was first seen waiting on a prompt of its own.
+    ///
+    /// `None` while it is not, so the clock starts the first tick that finds
+    /// it blocked and stops when the human has answered.
+    orchestrator_blocked_since: Option<u64>,
+    /// Whether the current wait has already been escalated.
+    ///
+    /// A human who leaves the prompt for an hour has one thing to read, not
+    /// one line per tick.
+    orchestrator_escalated: bool,
 }
 
 impl Watcher {
@@ -118,6 +138,8 @@ impl Watcher {
             cooldowns: BTreeMap::new(),
             policy,
             rejected: BTreeMap::new(),
+            orchestrator_blocked_since: None,
+            orchestrator_escalated: false,
         }
     }
 
@@ -152,7 +174,7 @@ impl Watcher {
             .retain(|key, _| working(&key.0, &key.1, &key.2));
         // Last, and from the state this pass left behind: a verdict it just
         // recorded is the freshest thing the orchestrator needs to hear.
-        self.notify(mux, env, &mut lines)?;
+        self.notify(mux, env, now_ms, &mut lines)?;
         Ok(lines)
     }
 
@@ -278,22 +300,30 @@ impl Watcher {
     /// Nothing here fails the tick. A run with no orchestrator pane recorded,
     /// or a prompt the host refuses, prints the notices in the watchdog's own
     /// output instead, and leaves the watermark where it was so no news is
-    /// lost: the next pass says it again.
+    /// lost: the next pass says it again. A pane showing a prompt of its own
+    /// is not typed at at all: its next line would be read as the answer to
+    /// that prompt, not as a notice.
     fn notify(
         &mut self,
         mux: &dyn Mux,
         env: &SpawnEnv<'_>,
+        now_ms: u64,
         lines: &mut Vec<String>,
     ) -> Result<(), CliError> {
         let (state, events) = env.ctx.load()?;
         let wanted = notices(&events, state.notified_up_to_seq);
         if wanted.is_empty() {
+            self.orchestrator_blocked_since = None;
+            self.orchestrator_escalated = false;
             return Ok(());
         }
         let text = prompt_text(&wanted);
         let delivered = match state.orchestrator.as_ref() {
             Some(info) => {
                 let pane = PaneId::new(info.pane.clone());
+                if self.awaiting_human(mux, env, &pane, now_ms, lines)? {
+                    return Ok(());
+                }
                 match mux.prompt(&pane, &text) {
                     Ok(()) => Ok(()),
                     Err(err) => Err(err.to_string()),
@@ -321,6 +351,62 @@ impl Watcher {
         }
         Ok(())
     }
+
+    /// True when the orchestrator's pane is waiting on a prompt of its own.
+    ///
+    /// Typing into that pane answers its prompt instead of waking it, which
+    /// can approve or deny something nobody meant to answer, so nothing is
+    /// typed and the watermark stays where it was: the notice is retried once
+    /// the human has answered. A human who leaves it waiting gets one line and
+    /// one escalation, not one of each per tick.
+    fn awaiting_human(
+        &mut self,
+        mux: &dyn Mux,
+        env: &SpawnEnv<'_>,
+        pane: &PaneId,
+        now_ms: u64,
+        lines: &mut Vec<String>,
+    ) -> Result<bool, CliError> {
+        if !blocked_on_a_prompt(mux, env, pane) {
+            self.orchestrator_blocked_since = None;
+            self.orchestrator_escalated = false;
+            return Ok(false);
+        }
+        let since = *self.orchestrator_blocked_since.get_or_insert(now_ms);
+        let waited = now_ms.saturating_sub(since);
+        if self.orchestrator_escalated || waited < ORCHESTRATOR_BLOCKED_AFTER_MS {
+            return Ok(true);
+        }
+        self.orchestrator_escalated = true;
+        let body = format!("{ORCHESTRATOR_WAITING}: answer it in its tab");
+        // The watchdog is the engine, whatever actor started it: a run-wide
+        // escalation is the engine's to record.
+        env.ctx
+            .as_actor(Actor::Engine)
+            .commit(EventKind::Escalated {
+                task: None,
+                body: body.clone(),
+                default_action: String::from("answer the prompt in the orchestrator's tab"),
+            })?;
+        lines.push(body);
+        Ok(true)
+    }
+}
+
+/// Whether the orchestrator's pane is waiting on a prompt only a human answers.
+///
+/// The host's own state is the first signal. A host that cannot report one
+/// still shows the CLI's prompt on screen, so the same spec patterns `launch`
+/// matches before typing a brief at a fresh agent are asked here too. The
+/// watcher does not record which harness the orchestrator runs, so every
+/// installed spec's prompts are asked.
+fn blocked_on_a_prompt(mux: &dyn Mux, env: &SpawnEnv<'_>, pane: &PaneId) -> bool {
+    if matches!(mux.agent_state(pane), Ok(AgentState::Blocked)) {
+        return true;
+    }
+    env.programs
+        .iter()
+        .any(|program| launch::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_ok())
 }
 
 /// One thing the orchestrator has to act on, and the event that says so.
@@ -1157,6 +1243,17 @@ project_dirs = []
 "#
         );
         toml::from_str::<HarnessSpec>(&text).unwrap_or_else(|err| panic!("the test spec: {err}"))
+    }
+
+    /// A fake spec whose CLI stops at a folder-trust prompt, as claude's does.
+    fn trust_spec(id: &str) -> HarnessSpec {
+        let mut spec = fake_spec(id);
+        spec.blocking_prompts
+            .push(shprd_roster::spec::BlockingPrompt {
+                name: "folder trust".to_string(),
+                pattern: "Is this a project you created or one you trust".to_string(),
+            });
+        spec
     }
 
     /// A repository with one commit, the integration branch, and a home for
@@ -2942,6 +3039,131 @@ project_dirs = []
             state.notified_up_to_seq, None,
             "a notice that never landed must not be marked as delivered"
         );
+    }
+
+    /// A notice is never typed into an orchestrator waiting on its own prompt:
+    /// the next line in that pane is that prompt's answer, not a notice.
+    #[test]
+    fn a_blocked_orchestrator_is_not_typed_at() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        let pane = record_orchestrator(&mux, &ctx, &scratch);
+        reported(&ctx);
+        mux.set_state(&pane, AgentState::Blocked);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let at = 1_700_000_000_000;
+        let lines = watcher
+            .tick(&mux, &env, at)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            prompts(&mux).is_empty(),
+            "the notice was typed into a prompt: {:?}",
+            prompts(&mux)
+        );
+        assert_eq!(
+            ctx.state()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .notified_up_to_seq,
+            None,
+            "a notice that was not delivered must not be marked as delivered"
+        );
+        assert!(lines.is_empty(), "nothing to say yet: {lines:?}");
+
+        // The human answered, so the next tick delivers what waited.
+        mux.set_state(&pane, AgentState::Idle);
+        watcher
+            .tick(&mux, &env, at + 5_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(prompts(&mux).len(), 1, "{:?}", prompts(&mux));
+        assert!(
+            ctx.state()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .notified_up_to_seq
+                .is_some(),
+            "the delivered notice is recorded"
+        );
+    }
+
+    /// A host that reports no state still shows the prompt on its screen.
+    #[test]
+    fn a_trust_prompt_on_screen_is_not_typed_at() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.env(&ctx, &["sh"]);
+        env.programs.push(Program {
+            spec: trust_spec("claude"),
+            installed: true,
+        });
+        let mux = mux_with_workspace(&scratch);
+        let pane = record_orchestrator(&mux, &ctx, &scratch);
+        reported(&ctx);
+        mux.set_screen(
+            &pane,
+            "Do you trust the files in this folder?\nIs this a project you created or one you trust?",
+        );
+
+        let mut watcher = Watcher::new(Policy::default());
+        watcher
+            .tick(&mux, &env, 1_700_000_000_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(
+            prompts(&mux).is_empty(),
+            "the notice answered the trust prompt: {:?}",
+            prompts(&mux)
+        );
+        assert_eq!(
+            ctx.state()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .notified_up_to_seq,
+            None
+        );
+    }
+
+    /// A wait past the threshold is one line and one escalation, not one a tick.
+    #[test]
+    fn a_long_blocked_orchestrator_is_escalated_once() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        let pane = record_orchestrator(&mux, &ctx, &scratch);
+        reported(&ctx);
+        mux.set_state(&pane, AgentState::Blocked);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let at = 1_700_000_000_000;
+        let early = watcher
+            .tick(&mux, &env, at)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(early.is_empty(), "nothing to say yet: {early:?}");
+
+        let told = watcher
+            .tick(&mux, &env, at + ORCHESTRATOR_BLOCKED_AFTER_MS + 1)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(told.len(), 1, "one line, once: {told:?}");
+        assert!(told[0].contains("waiting on its own prompt"), "{}", told[0]);
+
+        for step in 2..6 {
+            let again = watcher
+                .tick(&mux, &env, at + ORCHESTRATOR_BLOCKED_AFTER_MS * step)
+                .unwrap_or_else(|err| panic!("{err}"));
+            assert!(again.is_empty(), "said it again: {again:?}");
+        }
+
+        let (_, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
+        let escalations = events
+            .iter()
+            .filter(|event| match &event.kind {
+                EventKind::Escalated { body, .. } => body.contains("waiting on its own prompt"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(escalations, 1, "one escalation for one wait");
+        assert!(prompts(&mux).is_empty(), "{:?}", prompts(&mux));
     }
 
     /// The same escalation body for a task is one notice, not one per tick.
