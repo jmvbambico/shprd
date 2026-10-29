@@ -575,12 +575,19 @@ fn is_protected_branch(branch: &str) -> bool {
     matches!(branch, "main" | "master")
 }
 
-/// True when the task's resources are free to go: it landed, or the run is over
-/// and nothing is still working on it.
+/// True when the task's resources are free to go: it landed or a human dropped
+/// it, or the run is over and nothing is still working on it.
+///
+/// A dropped task is spent like an integrated one. Nobody is going to push its
+/// branch now, so the worktree and the branch are only storage — and the plan
+/// archives the branch before either is removed, so whatever the task did is
+/// still recoverable with `shprd restore`. Keeping them until the run ended
+/// would leave a dropped task's worktree in the way of nothing, but it would
+/// also leave it on disk for ever in a run a human kept working in.
 fn cleanup_due(state: &RunState, task: &TaskId) -> bool {
     match state.tasks.get(task) {
         Some(record) => {
-            record.status == TaskStatus::Integrated
+            matches!(record.status, TaskStatus::Integrated | TaskStatus::Dropped)
                 || (state.finished && record.status != TaskStatus::Working)
         }
         None => state.finished,

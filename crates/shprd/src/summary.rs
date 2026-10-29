@@ -15,6 +15,7 @@ pub fn status_name(status: TaskStatus) -> &'static str {
         TaskStatus::Passed => "passed",
         TaskStatus::Failed => "failed",
         TaskStatus::Integrated => "integrated",
+        TaskStatus::Dropped => "dropped",
     }
 }
 
@@ -78,7 +79,7 @@ pub fn describe(state: &RunState) -> String {
         Some(info) => info.run_id.as_str(),
         None => "(no run)",
     };
-    let mut counts = [0usize; 6];
+    let mut counts = [0usize; 7];
     for task in state.tasks.values() {
         let slot = match task.status {
             TaskStatus::Queued => 0,
@@ -87,14 +88,16 @@ pub fn describe(state: &RunState) -> String {
             TaskStatus::Passed => 3,
             TaskStatus::Failed => 4,
             TaskStatus::Integrated => 5,
+            TaskStatus::Dropped => 6,
         };
         counts[slot] += 1;
     }
     format!(
-        "run {run}: {} tasks ({}/{} done), {} working, {} failed, {} escalations",
+        "run {run}: {} tasks ({}/{} done, {} dropped), {} working, {} failed, {} escalations",
         state.tasks.len(),
         counts[5],
         state.tasks.len(),
+        counts[6],
         counts[1],
         counts[4],
         state.escalations.len()

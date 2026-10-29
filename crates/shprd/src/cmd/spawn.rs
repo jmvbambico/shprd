@@ -2791,6 +2791,7 @@ mod tests {
             status: TaskStatus::Queued,
             attempts: Vec::new(),
             overrides: Vec::new(),
+            dropped_reason: None,
         }
     }
 

@@ -275,6 +275,51 @@ mod tests {
                 .collect()
         }
 
+        /// Adds `T1`, spawns it, records the worktree and branch it holds, then
+        /// drops it — the state a dropped task leaves behind.
+        fn dropped_task(&self) -> (PathBuf, String) {
+            let layout = Layout::default_for_home(&self.home);
+            let worktree = layout.path("repo", "r1", "T1");
+            let branch = "shprd/r1/T1".to_string();
+            self.commit(EventKind::TaskAdded {
+                task: "T1".to_string(),
+                title: "a task".to_string(),
+                scope: vec!["a.txt".to_string()],
+                acceptance: vec!["it works".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            });
+            self.commit(EventKind::Spawned {
+                task: "T1".to_string(),
+                attempt: 1,
+                agent: "w1".to_string(),
+                model: None,
+                worktree: worktree.display().to_string(),
+                branch: branch.clone(),
+            });
+            self.commit(EventKind::Resource {
+                action: ResourceAction::Created,
+                kind: ResourceKind::Worktree,
+                name: worktree.display().to_string(),
+                task: Some("T1".to_string()),
+            });
+            self.commit(EventKind::Resource {
+                action: ResourceAction::Created,
+                kind: ResourceKind::Branch,
+                name: branch.clone(),
+                task: Some("T1".to_string()),
+            });
+            let human = Ctx::new(self.ctx.root.clone(), Actor::Human, false, true);
+            if let Err(err) = human.commit(EventKind::TaskDropped {
+                task: "T1".to_string(),
+                reason: "the human changed their mind".to_string(),
+            }) {
+                panic!("commit: {err}");
+            }
+            (worktree, branch)
+        }
+
         /// The whole log, so a test can tell a dry run wrote nothing.
         fn log_text(&self) -> String {
             match std::fs::read_to_string(&self.ctx.log_path) {
@@ -282,6 +327,34 @@ mod tests {
                 Err(err) => panic!("read log: {err}"),
             }
         }
+    }
+
+    #[test]
+    fn a_dropped_task_is_archived_before_its_worktree_and_branch_go() {
+        // A human dropped T1: nobody will push its branch, so it is spent like
+        // an integrated one. The archive comes first, so whatever the task did
+        // is still recoverable with `shprd restore`.
+        let fixture = Fixture::new();
+        fixture.start();
+        let (worktree, branch) = fixture.dropped_task();
+        let (state, events) = match fixture.ctx.load() {
+            Ok(loaded) => loaded,
+            Err(err) => panic!("load: {err}"),
+        };
+        let layout = Layout::default_for_home(&fixture.home);
+        let described: Vec<String> = janitor::plan(&state, &events, &layout, 0, 30)
+            .iter()
+            .map(janitor::Action::describe)
+            .collect();
+
+        let archive = format!("archive T1: {branch} -> refs/shprd/archive/");
+        let remove = format!("remove worktree T1: {}", worktree.display());
+        let delete = format!("delete branch T1: {branch}");
+        assert_eq!(
+            described,
+            vec![archive.clone(), remove.clone(), delete.clone()],
+            "one dropped task: archive, then its worktree, then its branch"
+        );
     }
 
     #[test]

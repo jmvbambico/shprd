@@ -221,6 +221,7 @@ fn label(status: TaskStatus) -> &'static str {
         TaskStatus::Passed => "passed",
         TaskStatus::Failed => "failed",
         TaskStatus::Integrated => "integrated",
+        TaskStatus::Dropped => "dropped",
     }
 }
 
