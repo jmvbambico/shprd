@@ -21,9 +21,64 @@ pub const EXIT_REASON: &str = "agent process exited";
 /// The tail every exit-budget escalation ends with.
 const EXIT_ESCALATION_TAIL: &str = "times in a row on this attempt: pick up by hand";
 
+/// The opening marker an exit-budget escalation carries.
+///
+/// A parking escalation is the only kind a later event lifts, so the watcher
+/// that reads the log and the watchdog that writes it have to agree on which
+/// escalations park: they share this marker instead of re-deriving it from
+/// prose.
+pub const PARK_EXIT_BUDGET: &str = "watch parked, exit budget spent";
+
+/// The opening marker a failed hand-off's escalation carries.
+pub const PARK_HANDOFF_FAILED: &str = "watch parked, hand-off failed";
+
+/// Which escalation parked a task's watch.
+///
+/// Nothing else parks: an escalation about a dry agent asks a human to act and
+/// keeps standing until they do, while these two are lifted as soon as the log
+/// holds a newer spawn or hand-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkReason {
+    /// The attempt spent its exit budget.
+    ExitBudget,
+    /// A hand-off could not be made, so the attempt cannot go on by itself.
+    HandoffFailed,
+}
+
+impl ParkReason {
+    /// The marker this parking opens its escalation body with.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::ExitBudget => PARK_EXIT_BUDGET,
+            Self::HandoffFailed => PARK_HANDOFF_FAILED,
+        }
+    }
+
+    /// What the watch shows as this parking's reason.
+    ///
+    /// It opens with the marker, so a watcher rebuilding its memory from the log
+    /// still reads it as a parking and can lift it.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::ExitBudget => "watch parked, exit budget spent: pick the task up by hand",
+            Self::HandoffFailed => "watch parked, hand-off failed: a human's now",
+        }
+    }
+
+    /// The parking `body` records, if it records one.
+    pub fn of_body(body: &str) -> Option<Self> {
+        [Self::ExitBudget, Self::HandoffFailed]
+            .into_iter()
+            .find(|parking| body.contains(parking.marker()))
+    }
+}
+
 /// The reason an attempt whose exit budget is spent is escalated with.
 fn exit_escalation_reason(exits: usize) -> String {
-    format!("{EXIT_REASON} {exits} {EXIT_ESCALATION_TAIL}")
+    format!(
+        "{}: {EXIT_REASON} {exits} {EXIT_ESCALATION_TAIL}",
+        ParkReason::ExitBudget.marker()
+    )
 }
 
 /// True when `body` is the escalation of an attempt whose exit budget is spent.
@@ -193,13 +248,6 @@ pub struct Watch {
     /// makes a worker that dies every time escalate instead of being replaced
     /// for ever.
     exit_count: usize,
-    /// True while the health is an escalation this watch wrote for a parked
-    /// attempt: a spent exit budget or a hand-off that failed.
-    ///
-    /// Only a parking is lifted when the log moves past it, because that is a
-    /// human retrying the hand-off or a fresh worker taking the attempt. An
-    /// escalation from any other cause stays until a human acts on it.
-    parked: bool,
 }
 
 impl Default for Watch {
@@ -216,7 +264,6 @@ impl Watch {
             transient_since_ms: None,
             dry_count: 0,
             exit_count: 0,
-            parked: false,
         }
     }
 
@@ -279,7 +326,6 @@ impl Watch {
                 since_ms: now_ms,
                 reason: reason.clone(),
             };
-            self.parked = true;
             return vec![Action::Escalate {
                 reason: exit_escalation_reason(self.exit_count),
             }];
@@ -292,28 +338,38 @@ impl Watch {
     ///
     /// A restarted watchdog starts with no memory, so the exit streak is handed
     /// in from the log rather than counted from zero: a crash loop must not
-    /// survive the watchdog's own restart. An escalation the log already holds
-    /// for the attempt parks the watch, so nothing is handed off or escalated
-    /// twice for it, and one the log has moved past - a later `Spawned` or
-    /// `HandedOff` - un-parks it again, so a run that was retried by hand is
-    /// watched without the watchdog being restarted.
-    pub fn resume(&mut self, exits: usize, parked: Option<(u64, String)>) {
+    /// survive the watchdog's own restart.
+    ///
+    /// The log is the one authority on parking too. The watcher decides it with
+    /// one rule and hands the verdict in on every tick, so a parking the log
+    /// still holds is applied - nothing is handed off or escalated twice for
+    /// it - and a parking the log has moved past is lifted, whether the log
+    /// moved on by a new attempt, a fresh worker or a retried hand-off.
+    pub fn resume(&mut self, exits: usize, parked: Option<(u64, ParkReason)>) {
         self.exit_count = exits;
-        if let Some((since_ms, reason)) = parked {
-            self.health = Health::Escalated { since_ms, reason };
-            self.parked = true;
+        if let Some((since_ms, why)) = parked {
+            self.health = Health::Escalated {
+                since_ms,
+                reason: String::from(why.reason()),
+            };
             self.transient_since_ms = None;
-        } else if self.parked {
-            // The log moved past the parking - a human retried the hand-off, or
-            // a new spawn took the attempt - so this is no longer a human's to
-            // pick up. Monitoring resumes on the current worker, whose start
-            // and grace come from the log's newest `Spawned`/`HandedOff`. The
-            // streak stays as the log counts it: a human's hand-off reason is
-            // not an exit, so it adds nothing to it.
+        } else if self.is_parked() {
+            // The log moved past the parking, so the attempt is watched again on
+            // whichever worker the log now names.
             self.health = Health::Working;
-            self.parked = false;
             self.transient_since_ms = None;
         }
+    }
+
+    /// Whether this watch is showing a parking escalation.
+    ///
+    /// Only a parking is lifted by the log moving on; any other escalation is a
+    /// human's to answer and keeps standing.
+    fn is_parked(&self) -> bool {
+        matches!(
+            &self.health,
+            Health::Escalated { reason, .. } if ParkReason::of_body(reason).is_some()
+        )
     }
 
     /// Parks the watch: this attempt is a human's now, so nothing more is
@@ -324,7 +380,6 @@ impl Watch {
     /// until the run drowned in them.
     pub fn park(&mut self, since_ms: u64, reason: String) {
         self.health = Health::Escalated { since_ms, reason };
-        self.parked = true;
         self.transient_since_ms = None;
     }
 
@@ -335,7 +390,6 @@ impl Watch {
     /// the next entry in the same streak.
     pub fn after_handoff(&mut self) {
         self.health = Health::Working;
-        self.parked = false;
         self.transient_since_ms = None;
     }
 
@@ -872,7 +926,7 @@ mod tests {
 
         // The log still holds the escalation: a human was asked, so nothing is
         // decided here twice.
-        w.resume(w.exit_count, Some((NOW, String::from(EXIT_REASON))));
+        w.resume(w.exit_count, Some((NOW, ParkReason::ExitBudget)));
         assert!(matches!(w.health, Health::Escalated { .. }));
         assert_eq!(w.step(&exited(NOW + 4_000), &p), Vec::new());
 
@@ -895,8 +949,14 @@ mod tests {
     fn a_failed_hand_off_parks_only_while_the_log_holds_it() {
         let p = Policy::default();
         let mut w = Watch::new();
-        w.park(NOW, String::from("hand-off failed"));
-        w.resume(0, Some((NOW, String::from("hand-off failed"))));
+        w.park(
+            NOW,
+            format!(
+                "{}: no worker could take over",
+                ParkReason::HandoffFailed.marker()
+            ),
+        );
+        w.resume(0, Some((NOW, ParkReason::HandoffFailed)));
         assert!(matches!(w.health, Health::Escalated { .. }));
 
         w.resume(0, None);

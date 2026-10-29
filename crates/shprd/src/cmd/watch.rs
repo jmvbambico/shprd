@@ -10,9 +10,7 @@ use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_mux::{Mux, MuxError, PaneId, naming};
-use shprd_watch::machine::{
-    Action, EXIT_REASON, Health, Inputs, Policy, Watch, is_exit_escalation,
-};
+use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
 use shprd_watch::records::pi::scan_pi;
@@ -305,7 +303,7 @@ fn tick_task(
     // hand off a worker that already died its budget's worth of times, nor
     // escalate an attempt a human has already been asked about.
     let streak = exit_streak(events, &task.id, attempt.n);
-    let parked = parked_since_ms(events, &task.id, attempt.n);
+    let parked = parked(events, &task.id);
     let (watch, sampler) = watcher
         .watches
         .entry(key.clone())
@@ -375,7 +373,10 @@ fn tick_task(
                         // One failed hand-off is one escalation, not one a
                         // tick: the same call would fail the same way, so the
                         // watch parks until the log says something changed.
-                        watch.park(now_ms, handoff_failure_reason(&err));
+                        watch.park(
+                            now_ms,
+                            format!("{}: {err}", ParkReason::HandoffFailed.marker()),
+                        );
                         break;
                     }
                 }
@@ -436,7 +437,11 @@ fn tick_task(
 fn escalate(env: &SpawnEnv<'_>, task: &str, err: &CliError, lines: &mut Vec<String>) {
     let kind = EventKind::Escalated {
         task: Some(task.to_string()),
-        body: format!("{HANDOFF_FAILED}{task} failed: {err}"),
+        body: format!(
+            "{}: {}",
+            ParkReason::HandoffFailed.marker(),
+            handoff_failure_detail(task, err)
+        ),
         default_action: String::from("stop the run"),
     };
     match env.ctx.commit(kind) {
@@ -560,17 +565,49 @@ fn worker_started_at_ms(events: &[Event], task: &str, attempt: u32) -> u64 {
         .unwrap_or(0)
 }
 
-/// The prefix a failed hand-off's escalation body opens with.
-const HANDOFF_FAILED: &str = "hand-off of ";
-
-/// Why a failed hand-off parks its watch, in the words the operator reads.
-fn handoff_failure_reason(err: &CliError) -> String {
-    format!("{HANDOFF_FAILED}this attempt failed: {err}")
+/// The words a failed hand-off is escalated in.
+fn handoff_failure_detail(task: &str, err: &CliError) -> String {
+    format!("the hand-off of {task} failed: {err}")
 }
 
-/// True when `body` is the escalation a failed hand-off recorded.
-fn is_handoff_failure(body: &str) -> bool {
-    body.starts_with(HANDOFF_FAILED) && body.contains(" failed: ")
+/// Whether this task's watch is parked, and since when.
+///
+/// The one rule for the whole question: among the task's events of kind
+/// `Spawned`, `HandedOff` and a parking `Escalated`, the latest by `seq` decides
+/// it, and the watch is parked iff that latest event is a parking escalation.
+/// So every way of lifting a parking is the same event shape - a spawn or a
+/// hand-off after the escalation, whether a new attempt, a human handing the
+/// task to a fresh worker or a human retrying a failed hand-off - and every
+/// other kind of escalation, which is a human's to answer, leaves the parking
+/// exactly as it was.
+fn parked(events: &[Event], task: &str) -> Option<(u64, ParkReason)> {
+    let mut latest: Option<(u64, Option<(u64, ParkReason)>)> = None;
+    for event in events {
+        let parking = match &event.kind {
+            EventKind::Spawned { task: id, .. } | EventKind::HandedOff { task: id, .. }
+                if id == task =>
+            {
+                None
+            }
+            EventKind::Escalated {
+                task: Some(id),
+                body,
+                ..
+            } if id == task => {
+                // An escalation about anything but a parking leaves the rule's
+                // question unanswered, so it must not count as "the latest".
+                let Some(why) = ParkReason::of_body(body) else {
+                    continue;
+                };
+                Some((event.at_ms, why))
+            }
+            _ => continue,
+        };
+        if latest.is_none_or(|(seq, _)| event.seq >= seq) {
+            latest = Some((event.seq, parking));
+        }
+    }
+    latest.and_then(|(_, parking)| parking)
 }
 
 /// The `seq` of the attempt's `Spawned` event, or zero when the log lost it,
@@ -583,27 +620,6 @@ fn attempt_start_seq(events: &[Event], task: &str, attempt: u32) -> u64 {
                 &event.kind,
                 EventKind::Spawned { task: id, attempt: n, .. } if id == task && *n == attempt
             )
-        })
-        .map(|event| event.seq)
-        .max()
-        .unwrap_or(0)
-}
-
-/// The `seq` of the event the attempt's current worker started at: its spawn,
-/// or the hand-off that replaced it, whichever is newer.
-fn worker_start_seq(events: &[Event], task: &str, attempt: u32) -> u64 {
-    events
-        .iter()
-        .filter(|event| match &event.kind {
-            EventKind::Spawned {
-                task: id,
-                attempt: n,
-                ..
-            } => id == task && *n == attempt,
-            // A hand-off does not carry the attempt, but it cannot cross one
-            // either: a new attempt starts with a spawn.
-            EventKind::HandedOff { task: id, .. } => id == task,
-            _ => false,
         })
         .map(|event| event.seq)
         .max()
@@ -629,39 +645,6 @@ fn exit_streak(events: &[Event], task: &str, attempt: u32) -> usize {
             )
         })
         .count()
-}
-
-/// The moment the log already parked this attempt, if a watchdog wrote one.
-///
-/// A spent exit budget stands for the whole attempt, because the streak does. A
-/// failed hand-off is one worker's trouble, so a later spawn or hand-off clears
-/// it: that is what a new attempt, or a human retrying by hand, changes.
-fn parked_since_ms(events: &[Event], task: &str, attempt: u32) -> Option<(u64, String)> {
-    let attempt_start = attempt_start_seq(events, task, attempt);
-    let worker_start = worker_start_seq(events, task, attempt);
-    events.iter().rev().find_map(|event| {
-        let EventKind::Escalated {
-            task: Some(id),
-            body,
-            ..
-        } = &event.kind
-        else {
-            return None;
-        };
-        if id != task {
-            return None;
-        }
-        if is_exit_escalation(body) && event.seq > attempt_start {
-            return Some((event.at_ms, String::from(EXIT_REASON)));
-        }
-        if is_handoff_failure(body) && event.seq > worker_start {
-            return Some((
-                event.at_ms,
-                format!("{HANDOFF_FAILED}this attempt failed: a human's now"),
-            ));
-        }
-        None
-    })
 }
 
 /// When the attempt's `spawned` event was written, or zero if the log lost it.
@@ -1474,7 +1457,7 @@ project_dirs = []
             .iter()
             .filter(|event| {
                 matches!(&event.kind, EventKind::Escalated { body, .. }
-                    if body.starts_with("hand-off of T1 failed"))
+                    if ParkReason::of_body(body) == Some(ParkReason::HandoffFailed))
             })
             .count();
         assert_eq!(ours, 1, "the failed hand-off records one escalation");
@@ -1612,7 +1595,7 @@ project_dirs = []
                 .iter()
                 .filter(|event| {
                     matches!(&event.kind, EventKind::Escalated { body, .. }
-                        if body.starts_with("hand-off of T1 failed"))
+                        if ParkReason::of_body(body) == Some(ParkReason::HandoffFailed))
                 })
                 .count()
         };
@@ -1746,6 +1729,116 @@ project_dirs = []
         );
     }
 
+    /// One rule decides whether a watch is parked: the newest event among a
+    /// task's spawns, hand-offs and parking escalations says so, and the kinds
+    /// of event that say nothing about a parking are not consulted at all.
+    #[test]
+    fn the_rule_reads_the_newest_parking_event_of_the_task() {
+        let dealt = |seq: u64, kind: EventKind| Event {
+            seq,
+            at_ms: 1_700_000_000_000 + seq,
+            actor: Actor::Engine,
+            kind,
+        };
+        let spawned = |seq: u64| {
+            dealt(
+                seq,
+                EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    agent: "sh".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "feature/t1".to_string(),
+                },
+            )
+        };
+        let handed_off = |seq: u64, reason: &str| {
+            dealt(
+                seq,
+                EventKind::HandedOff {
+                    task: "T1".to_string(),
+                    from_agent: "sh".to_string(),
+                    to_agent: "pi".to_string(),
+                    checkpoint: "c0".to_string(),
+                    reason: Some(reason.to_string()),
+                },
+            )
+        };
+        let parked_by = |seq: u64, why: ParkReason| {
+            dealt(
+                seq,
+                EventKind::Escalated {
+                    task: Some("T1".to_string()),
+                    body: format!("sh {}: something went wrong", why.marker()),
+                    default_action: "pick the task up by hand".to_string(),
+                },
+            )
+        };
+        let other_escalation = |seq: u64| {
+            dealt(
+                seq,
+                EventKind::Escalated {
+                    task: Some("T1".to_string()),
+                    body: "sh agent is dry: quota".to_string(),
+                    default_action: "pick the task up by hand".to_string(),
+                },
+            )
+        };
+        let other_task = dealt(
+            90,
+            EventKind::Escalated {
+                task: Some("T2".to_string()),
+                body: format!("sh {}: not T1's business", ParkReason::ExitBudget.marker()),
+                default_action: "pick the task up by hand".to_string(),
+            },
+        );
+
+        // Nothing has happened: nothing parks.
+        assert_eq!(parked(&[], "T1"), None);
+
+        // A spawn, an exit hand-off, then the exit budget's escalation.
+        let events = vec![
+            spawned(1),
+            handed_off(2, EXIT_REASON),
+            parked_by(3, ParkReason::ExitBudget),
+        ];
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((1_700_000_000_003, ParkReason::ExitBudget)),
+            "the exit budget's escalation parks the watch"
+        );
+
+        // An escalation about a dry agent is not a parking and does not touch
+        // the rule: parked stays parked, whatever else the log records.
+        let mut events = events;
+        events.push(other_escalation(4));
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((1_700_000_000_003, ParkReason::ExitBudget)),
+            "only a later spawn or hand-off lifts a parking"
+        );
+
+        // A human handing the task to a fresh worker lifts it: the hand-off is
+        // newer than the escalation, whatever the attempt was doing before.
+        events.push(handed_off(5, "a human did it by hand"));
+        assert_eq!(parked(&events, "T1"), None, "a hand-off lifts the parking");
+
+        // A failed hand-off parks in its own right, and a new attempt's spawn
+        // is what lifts it.
+        events.push(parked_by(6, ParkReason::HandoffFailed));
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((1_700_000_000_006, ParkReason::HandoffFailed))
+        );
+        events.push(spawned(7));
+        assert_eq!(parked(&events, "T1"), None, "a new attempt is watched");
+
+        // Another task's parking is not this task's.
+        events.push(other_task);
+        assert_eq!(parked(&events, "T1"), None);
+    }
+
     /// The streak and the escalation belong to their attempt, not their task:
     /// the next attempt starts from zero and is watched again, which is what
     /// un-parks a watch.
@@ -1792,14 +1885,18 @@ project_dirs = []
                 EventKind::Escalated {
                     task: Some("T1".to_string()),
                     body: format!(
-                        "sh {EXIT_REASON} 4 times in a row on this attempt: pick up by hand"
+                        "sh {}: {EXIT_REASON} 4 times in a row on this attempt: pick up by hand",
+                        ParkReason::ExitBudget.marker()
                     ),
                     default_action: "pick the task up by hand".to_string(),
                 },
             ),
         ];
         assert_eq!(exit_streak(&events, "T1", 1), 3);
-        assert!(parked_since_ms(&events, "T1", 1).is_some());
+        assert_eq!(
+            parked(&events, "T1"),
+            Some((events[4].at_ms, ParkReason::ExitBudget))
+        );
 
         events.push(spawned(6, 2));
         assert_eq!(
@@ -1808,7 +1905,7 @@ project_dirs = []
             "a new attempt starts with a fresh budget"
         );
         assert!(
-            parked_since_ms(&events, "T1", 2).is_none(),
+            parked(&events, "T1").is_none(),
             "a new attempt is a human's no longer"
         );
     }
