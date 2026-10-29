@@ -19,6 +19,7 @@ pub mod roster;
 pub mod run;
 pub mod set;
 pub mod spawn;
+pub mod sync;
 pub mod up;
 pub mod verdict;
 pub mod view;
@@ -83,6 +84,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Down(args)) => up::down_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Sync) => sync::sync_verb(&ctx, cli.global.home.as_deref()),
         Some(Command::Land(args)) => land::land_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Approve(args)) => {
             approve::approve_verb(&ctx, &args, cli.global.home.as_deref())

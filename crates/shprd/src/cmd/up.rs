@@ -1628,9 +1628,11 @@ const FLOW: &str = r#"## How a run works
 6. **Integrate.** When a task passed review: `shprd agent integrate --task <ID>`.
    A conflict sends it back like a failed review.
 
-7. **Land.** When every task is integrated: `shprd gate` (the repository's
+7. **Land.** When every task is integrated: `shprd sync` (the base may have
+   moved under the run while it worked), then `shprd gate` (the repository's
    full checks), then `shprd land`, and tell the human the pull request URL.
-   Only after the human approves: `shprd land --merge`, then
+   A sync moves the integration head, so a gate that ran before it no longer
+   counts. Only after the human approves: `shprd land --merge`, then
    `shprd janitor --apply`, then `shprd down`.
 
 8. **Escalate.** When a human must decide: `shprd agent escalate [--task <ID>]

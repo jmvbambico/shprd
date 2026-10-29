@@ -96,6 +96,10 @@ pub enum Command {
     Watch(WatchArgs),
     /// Run the integration branch's gate commands once, in its worktree.
     Gate(FullGateArgs),
+    /// Merge the base branch into the run's integration branch, so a run that
+    /// outlived a merged pull request lands cleanly. Merges, never rebases; a
+    /// conflict is undone and escalated. Needs no terminal.
+    Sync,
     /// Push the integration branch and open its pull request; with `--merge`,
     /// merge it when `[land]` allows.
     Land(LandArgs),

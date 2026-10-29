@@ -13,7 +13,8 @@ Status: built through M6 (`setup` and `remote` are M7).
 | `shprd brief` | a short, paste-able summary of the run |
 | `shprd remote [--invite]` | remote access status; `--invite` shows a fresh pairing QR |
 | `shprd gate` | run the repository's full checks (`[gates] integration`) once on the integration branch |
-| `shprd land` | push the integration branch and open or update the pull request |
+| `shprd sync` | merge the base branch into the integration branch when it moved under the run (a pull request merged meanwhile): a merge commit, never a rebase, so task commits keep their ids; a conflict is undone, escalated with the files, and exits 2. Landing needs a fresh `shprd gate` afterwards. The orchestrator runs it before `shprd gate`; no terminal needed |
+| `shprd land` | push the integration branch and open or update the pull request; when the base has moved it says so and asks for `shprd sync`, then `shprd gate` |
 | `shprd land --merge` | merge it: only with green checks, the reviewed head, and your approval |
 | `shprd approve` | approve the open pull request at the integration branch's current head, for a solo maintainer who can't approve their own PR on GitHub; humans only, needs a terminal, and a new commit needs a new approval |
 | `shprd readmit <agent> [--reason TEXT]` | clear a dry agent's mark so the run may spawn and hand off to it again (`shprd status` names the agent to pass); humans only, and unlike `approve` it needs no terminal |

@@ -20,6 +20,7 @@ use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_git::forge::{FakeForge, Forge, GhForge};
 use shprd_git::git::Git;
 use shprd_git::integrate;
+use shprd_git::sync;
 
 use crate::cli::LandArgs;
 use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
@@ -76,6 +77,7 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
     let head = git
         .head_sha()
         .map_err(|err| CliError::other(anyhow!(err).context("reading the integration head")))?;
+    hint_moved_base(&git, &base_branch);
     check_full_gate(&state, &head)?;
 
     if args.merge {
@@ -107,6 +109,25 @@ fn integrated_tasks(state: &RunState) -> Vec<&Task> {
         .values()
         .filter(|task| task.status == TaskStatus::Integrated)
         .collect()
+}
+
+/// Says the base moved under the run, without changing anything.
+///
+/// Landing a branch cut from an old base either conflicts at the forge or
+/// proposes a merge the base already has, so a human is told to sync and gate
+/// again. Never automatic: a sync moves the integration head, which is exactly
+/// what a gate is pinned to, so the decision to take that step is theirs.
+///
+/// A missing remote-tracking ref reads as "did not move": a hint must not fail
+/// a landing, and a run with no `origin` has no base to compare with.
+fn hint_moved_base(git: &Git, base: &str) {
+    match sync::base_moved(git, base) {
+        Ok(true) => {
+            eprintln!("{base} moved since this run started: run `shprd sync`, then `shprd gate`")
+        }
+        Ok(false) => {}
+        Err(err) => eprintln!("warning: could not tell whether {base} moved: {err}"),
+    }
 }
 
 /// Refuses unless the run-wide gate passed on exactly this head.
