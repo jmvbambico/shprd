@@ -501,7 +501,7 @@ fn escalate_leftovers(ctx: &Ctx, leftovers: &[Leftover]) {
             leftovers.len(),
             listed.join("; ")
         ),
-        default_action: "close them yourself: each entry names what it is and the mux id that                           closes it"
+        default_action: "close them yourself: each entry names what it is and its mux id"
             .to_string(),
     };
     if let Err(err) = ctx.commit(kind) {
