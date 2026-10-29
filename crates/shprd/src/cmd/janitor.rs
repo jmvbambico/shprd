@@ -5,9 +5,12 @@
 //! succeeded, through the same check-then-append path every other verb uses.
 //! A dry run writes nothing at all.
 //!
-//! A run's review packet folder is shprd's own directory, so the ledger has to
-//! hold it before a finished run may delete it: `--apply` adopts it while the
-//! run can still record anything, and only then does the plan remove it.
+//! A run's review packet folder is shprd's own directory, at
+//! `<home>/.shprd/reviews/<run>`. `--apply` adopts it while the run can still
+//! record anything, so a finished run's removal is also in the ledger; a run
+//! finished before any adoption has no record to close, and its folder is still
+//! archived and removed, because the path comes from the layout and the run id
+//! rather than from the ledger.
 
 use std::path::Path;
 
@@ -133,16 +136,17 @@ fn config_and_layout(ctx: &Ctx, home: Option<&Path>) -> Result<(Config, Layout),
 
 /// Records the run's review packet folder while the run can still write.
 ///
-/// A deletion is only cleanup when the ledger holds what it deletes, and after
-/// `run finish` the rules refuse every creation. So `--apply` adopts the folder
-/// at the first run whose work has left — its pull request merged — exactly as
-/// `up` adopts a worktree it finds in the layout. Adopting records the folder
-/// and nothing else: no packet is read, moved or deleted here.
+/// `run finish` refuses every creation, so a run that is already finished has
+/// nothing to adopt with. While it is open — its pull request merged, say —
+/// `--apply` adopts the folder exactly as `up` adopts a worktree it finds in the
+/// layout, and the plan's later removal then also closes that record. Adopting
+/// records the folder and nothing else: no packet is read, moved or deleted
+/// here.
 ///
 /// Returns whether an event was appended, so the caller can reload the state it
 /// plans from.
 fn adopt_review_packets(ctx: &Ctx, state: &RunState, layout: &Layout) -> Result<bool, CliError> {
-    if state.finished || !janitor::review_packets_due(state) {
+    if !janitor::review_packets_adoptable(state) {
         return Ok(false);
     }
     let Some(run) = &state.run else {
@@ -207,7 +211,6 @@ mod tests {
     use std::path::PathBuf;
 
     use shprd_core::event::Actor;
-    use shprd_core::state::RunState;
 
     /// A temporary repo root and home, with a log the janitor can read.
     struct Fixture {
@@ -343,13 +346,6 @@ mod tests {
                 Err(err) => panic!("read log: {err}"),
             }
         }
-
-        fn state(&self) -> RunState {
-            match self.ctx.state() {
-                Ok(state) => state,
-                Err(err) => panic!("state: {err}"),
-            }
-        }
     }
 
     #[test]
@@ -357,7 +353,8 @@ mod tests {
         let fixture = Fixture::new();
         fixture.start();
         let dir = fixture.packets();
-        fixture.adopt(&dir);
+        // Never adopted, as a finished run normally is: the dry run has to
+        // list the folder from the layout alone, without recording it.
         fixture.finish();
         let before = fixture.log_text();
 
@@ -382,6 +379,13 @@ mod tests {
                 janitor::Action::ArchiveReviewPackets { dir: planned, .. } if planned == &dir
             )),
             "the dry run must list the folder: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .map(|action| action.describe())
+                .any(|line| line == format!("archive review packets r1: {}", dir.display())),
+            "the dry run must print the folder: {actions:?}"
         );
     }
 
@@ -420,6 +424,32 @@ mod tests {
         let dir = fixture.packets();
         fixture.merge();
 
+        // A merge lets an apply adopt the folder, because a run that has not
+        // finished can still record it; it does not remove packets the run may
+        // still be reading.
+        fixture.apply();
+        assert!(
+            dir.join("T1-a1/findings.json").is_file(),
+            "an unfinished run keeps its packets"
+        );
+        assert!(!fixture.archived().exists(), "nothing may be archived yet");
+        let resources = fixture.resource_events();
+        assert!(
+            resources.iter().any(|kind| matches!(
+                kind,
+                EventKind::Resource {
+                    action: ResourceAction::Created,
+                    kind: ResourceKind::Worktree,
+                    name,
+                    task: None,
+                } if name == &dir.display().to_string()
+            )),
+            "the adopted folder is recorded: {resources:?}"
+        );
+
+        // Once the run finishes, the adopted folder is archived and removed,
+        // and the removal is recorded after the adoption.
+        fixture.finish();
         fixture.apply();
         assert!(!dir.exists(), "the folder must be gone");
         assert!(
@@ -453,18 +483,37 @@ mod tests {
             created.is_some_and(|created| removed.is_some_and(|removed| created < removed)),
             "the adoption is recorded before the removal: {resources:?}"
         );
+    }
+
+    #[test]
+    fn apply_cleans_the_review_packets_of_a_run_finished_before_any_adoption() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let dir = fixture.packets();
+        // The run finished without an earlier apply, so the ledger never
+        // adopted the folder and, once finished, it never can. The apply must
+        // still archive it and then remove it.
+        fixture.finish();
+
+        fixture.apply();
+        assert!(!dir.exists(), "the folder must be gone");
         assert!(
-            !fixture.state().finished,
-            "the run was not finished; the merge was enough"
+            fixture.archived().join("T1-a1/findings.json").is_file(),
+            "the packets must survive in the archive"
         );
     }
 
     #[test]
-    fn apply_refuses_to_delete_review_packets_the_ledger_never_saw() {
+    fn a_failed_archive_leaves_the_review_packets_and_counts_as_a_failure() {
         let fixture = Fixture::new();
         fixture.start();
         let dir = fixture.packets();
         fixture.finish();
+        // A file where the archive folder belongs, so the copy cannot start.
+        let blocker = fixture.home.join(".shprd").join("archive");
+        if let Err(err) = std::fs::write(&blocker, "not a folder") {
+            panic!("write {}: {err}", blocker.display());
+        }
 
         let args = JanitorArgs {
             apply: true,
@@ -472,15 +521,11 @@ mod tests {
         };
         assert!(
             plan_verb(&fixture.ctx, &args, Some(&fixture.home)).is_err(),
-            "a step the ledger cannot record is reported as a failure"
+            "the step is reported as a failure"
         );
         assert!(
             dir.join("T1-a1/findings.json").is_file(),
-            "the folder must survive"
-        );
-        assert!(
-            !fixture.archived().exists(),
-            "nothing may be archived for an unrecorded folder"
+            "a failed archive must not lose the folder"
         );
     }
 
