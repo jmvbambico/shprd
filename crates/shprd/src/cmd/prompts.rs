@@ -1,0 +1,107 @@
+//! `shprd prompts`: the standing instructions a role starts with.
+//!
+//! The verb is the readable half of [`shprd_core::prompts`]: it lists the
+//! prompts this machine has, prints one's words or its file, and puts the
+//! shipped words back over an edit. Reading one writes it on first use, so the
+//! file always exists for a person to find after the first command.
+//!
+//! The prompts directory is `$XDG_CONFIG_HOME/shprd/prompts`, else
+//! `~/.config/shprd/prompts`, so a person who moves their XDG directories keeps
+//! their words. Nothing here reads a run log, so the verb works outside a
+//! repository.
+
+use std::path::Path;
+
+use anyhow::anyhow;
+use shprd_core::prompts::{self, Installed, PromptError};
+
+use crate::cli::{PromptIdArgs, PromptsCommand};
+use crate::ctx::{CliError, resolve_home};
+
+/// Runs `shprd prompts`, whichever verb the command line asked for.
+pub fn run(command: &PromptsCommand, json: bool, home: Option<&Path>) -> Result<(), CliError> {
+    let home = resolve_home(home)?;
+    let dir = prompts::prompts_dir(&home);
+    match command {
+        PromptsCommand::List => list(&dir, json),
+        PromptsCommand::Show(args) => show(&dir, args, json),
+        PromptsCommand::Path(args) => path(&dir, args, json),
+        PromptsCommand::Reset(args) => reset(&dir, args, json),
+    }
+}
+
+/// Prints every prompt: its id, whether it is the shipped default or an edit,
+/// and the file it lives in.
+fn list(dir: &Path, json: bool) -> Result<(), CliError> {
+    let prompts = prompts::list(dir).map_err(invalid)?;
+    if json {
+        let prompt: Vec<serde_json::Value> = prompts.iter().map(document).collect();
+        let value = serde_json::json!({
+            "dir": dir.display().to_string(),
+            "prompts": prompt,
+        });
+        println!("{value}");
+    } else {
+        for prompt in &prompts {
+            println!("{}", prompt.line());
+        }
+    }
+    Ok(())
+}
+
+/// Prints one prompt's words, exactly as the agent reads them.
+fn show(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
+    let installed = prompts::ensure(dir, &args.id).map_err(invalid)?;
+    if json {
+        println!("{}", document(&installed));
+    } else {
+        print!("{}", installed.text);
+    }
+    Ok(())
+}
+
+/// Prints the file one prompt is stored in, writing it on first use.
+fn path(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
+    let installed = prompts::ensure(dir, &args.id).map_err(invalid)?;
+    if json {
+        println!("{}", document(&installed));
+    } else {
+        println!("{}", installed.path.display());
+    }
+    Ok(())
+}
+
+/// Puts the shipped words back over whatever the file holds.
+fn reset(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
+    let installed = prompts::reset(dir, &args.id).map_err(invalid)?;
+    if json {
+        println!("{}", document(&installed));
+    } else {
+        println!(
+            "ok {} {}: {}",
+            installed.change.name(),
+            installed.id,
+            installed.path.display()
+        );
+    }
+    Ok(())
+}
+
+/// One prompt as JSON: the file, its words and what the command did.
+fn document(installed: &Installed) -> serde_json::Value {
+    serde_json::json!({
+        "id": installed.id,
+        "path": installed.path.display().to_string(),
+        "state": installed.state.name(),
+        "change": installed.change.name(),
+        "shipped": installed.shipped,
+        "about": installed.about,
+        "text": installed.text,
+    })
+}
+
+/// A prompt failure is the person's to fix, so it is a refusal (exit 2), not a
+/// crash.
+fn invalid(error: PromptError) -> CliError {
+    CliError::Invalid(anyhow!(error))
+}
