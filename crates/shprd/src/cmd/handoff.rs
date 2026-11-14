@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::anyhow;
+use shprd_agents::models::AgentRef;
 use shprd_core::event::{Event, EventKind};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_git::worktree::Worktree;
 use shprd_mux::{Mux, MuxError, TabId, Workspace};
-use shprd_roster::models::AgentRef;
 
 use crate::cli::HandoffArgs;
 use crate::cmd::spawn::{self, BriefInput, Launching, Pick, Program, SpawnEnv};
@@ -606,12 +606,12 @@ mod tests {
     use std::process::Command;
     use std::time::Duration;
 
+    use shprd_agents::spec::HarnessSpec;
     use shprd_core::config::Skills;
     use shprd_core::event::Actor;
     use shprd_core::state::TaskStatus;
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
-    use shprd_roster::spec::HarnessSpec;
     use tempfile::TempDir;
 
     use crate::cmd::spawn::fault::{Fault, FlakyMux};

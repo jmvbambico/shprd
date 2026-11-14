@@ -1,5 +1,5 @@
 [package]
-name = "shprd-roster"
+name = "shprd-agents"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

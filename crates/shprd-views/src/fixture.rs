@@ -52,7 +52,7 @@ pub fn events() -> Vec<Event> {
         ),
         task(2, "M1.1", "event log", "crates/shprd-core"),
         task(3, "M1.2", "views", "crates/shprd-views"),
-        task(4, "M1.3", "roster", "crates/shprd-roster"),
+        task(4, "M1.3", "roster", "crates/shprd-agents"),
         ev(
             5,
             EventKind::Spawned {

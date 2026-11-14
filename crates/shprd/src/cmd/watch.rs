@@ -1108,12 +1108,12 @@ mod tests {
 
     use std::process::Command;
 
+    use shprd_agents::spec::HarnessSpec;
     use shprd_core::config::Skills;
     use shprd_core::event::{Actor, ReportStatus, ResourceAction, ResourceKind};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::FakeMux;
     use shprd_mux::{AgentState, PaneId};
-    use shprd_roster::spec::HarnessSpec;
     use tempfile::TempDir;
 
     use crate::cmd::spawn::SpawnRequest;
@@ -1302,7 +1302,7 @@ project_dirs = []
     fn trust_spec(id: &str) -> HarnessSpec {
         let mut spec = fake_spec(id);
         spec.blocking_prompts
-            .push(shprd_roster::spec::BlockingPrompt {
+            .push(shprd_agents::spec::BlockingPrompt {
                 name: "folder trust".to_string(),
                 pattern: "Is this a project you created or one you trust".to_string(),
             });

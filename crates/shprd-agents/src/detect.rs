@@ -153,7 +153,7 @@ fn is_executable(path: &Path) -> bool {
 /// the retries are spent.
 ///
 /// This mirrors the retry in `shprd_core::spawn`, which this crate cannot
-/// share: `shprd-roster` deliberately does not depend on the event model.
+/// share: `shprd-agents` deliberately does not depend on the event model.
 fn spawn_retrying_busy(command: &mut Command) -> io::Result<Child> {
     retry_busy(|| command.spawn())
 }

@@ -12,15 +12,15 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use serde_json::{Value, json};
+use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
+use shprd_agents::families::{Families, agent_vendor};
+use shprd_agents::models::AgentRef;
+use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 use shprd_core::event::{EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_mux::Mux;
-use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
-use shprd_roster::families::{Families, agent_vendor};
-use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
 use crate::cmd::deliver;
