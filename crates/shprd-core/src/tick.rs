@@ -15,6 +15,9 @@
 //! - [`Step::Review`] a task that handed in work which passed its own checks,
 //!   when it has no review request for that attempt: the engine starts the
 //!   reviewer, not the worker (see `docs/decisions.md`, 2026-11-14);
+//! - [`Step::Verdict`] a task whose reviewer has written its findings and not
+//!   decided them: the file is the reviewer's whole output, so the engine is
+//!   what turns it into a gate result;
 //! - [`Step::Land`] a task `shprd_core::rules::ready_to_land` accepts, when its
 //!   merge policy allows it;
 //! - [`Step::MarkLanded`] a task whose pull request merged outside shprd;
@@ -117,6 +120,14 @@ pub struct Facts {
     /// repository with no forge has no CI to ask.
     #[serde(default)]
     pub local: bool,
+    /// The tasks whose reviewer's findings file has settled.
+    ///
+    /// A reviewer writes `findings.json` and stops; a file that is younger than
+    /// [`crate::review::FINDINGS_SETTLE`] may still be being written, so it is not
+    /// in this set and the pass decides nothing from it. The planner reads only
+    /// this fact: reading and judging the file is the executor's work.
+    #[serde(default)]
+    pub settled_findings: BTreeSet<String>,
 }
 
 impl Facts {
@@ -143,6 +154,11 @@ pub enum Step {
     /// Start the engine's reviewer on a task that just handed in.
     Review {
         /// The task to review.
+        task: String,
+    },
+    /// Decide the review of a task whose reviewer has written its findings.
+    Verdict {
+        /// The task whose review is decided.
         task: String,
     },
     /// Land a task through its own pull request.
@@ -178,6 +194,7 @@ impl Step {
         match self {
             Self::Start { task }
             | Self::Review { task }
+            | Self::Verdict { task }
             | Self::Land { task, .. }
             | Self::MarkLanded { task, .. }
             | Self::NeedsYou { task, .. } => task,
@@ -189,6 +206,7 @@ impl Step {
         match self {
             Self::Start { .. } => "start",
             Self::Review { .. } => "review",
+            Self::Verdict { .. } => "verdict",
             Self::Land { .. } => "land",
             Self::MarkLanded { .. } => "mark_landed",
             Self::NeedsYou { .. } => "needs_you",
@@ -229,7 +247,16 @@ pub fn plan(input: &Input<'_>) -> Vec<Step> {
     let Some(run) = state.run.as_ref() else {
         return Vec::new();
     };
-    let base = run.base_branch.clone();
+    // The branch a landing actually writes: a repository with no forge lands
+    // inside the run's integration worktree, so that is the branch the policy
+    // and the protected list are asked about. Asking about the base branch
+    // instead would judge every local landing by `main` and turn `auto` into
+    // `ask` for a branch nobody protects.
+    let target = if input.facts.local {
+        run.integration_branch.clone()
+    } else {
+        run.base_branch.clone()
+    };
     let max_running = input.config.tick.max_running.max(1);
     let mut running = running_count(state, input.facts, input.phases);
     let mut steps = Vec::new();
@@ -239,7 +266,7 @@ pub fn plan(input: &Input<'_>) -> Vec<Step> {
             .get(id)
             .copied()
             .unwrap_or_else(|| Phase::of(task.status));
-        if let Some(step) = step_for(input, task, phase, &base, &mut running, max_running) {
+        if let Some(step) = step_for(input, task, phase, &target, &mut running, max_running) {
             steps.push(step);
         }
     }
@@ -255,7 +282,7 @@ fn step_for(
     input: &Input<'_>,
     task: &Task,
     phase: Phase,
-    base: &str,
+    landing_target: &str,
     running: &mut u32,
     max_running: u32,
 ) -> Option<Step> {
@@ -286,6 +313,18 @@ fn step_for(
             task: task.id.clone(),
         });
     }
+    // A reviewer only describes what it found: the file it writes is turned into
+    // a gate result by the engine, and a settled file nobody decided yet is that
+    // work. The recorded gate is what stops the next pass deciding it again, and
+    // a file already escalated as unreadable is a person's to look at.
+    if awaiting_verdict(task).is_some()
+        && facts.settled_findings.contains(&task.id)
+        && !invalid_findings_escalated(state, task)
+    {
+        return Some(Step::Verdict {
+            task: task.id.clone(),
+        });
+    }
     // A landing already looked at this attempt and found nothing of its own to
     // merge, so there is nothing left to do: the branch has no work beyond its
     // base, and landing it again would record the same fact every pass without
@@ -296,7 +335,7 @@ fn step_for(
     // commit the branch is at, and an agent that is writing produces another.
     let busy = facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging);
     if !busy && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
-        let policy = input.config.land.policy_for(base);
+        let policy = input.config.land.policy_for(landing_target);
         let land = Step::Land {
             task: task.id.clone(),
             policy,
@@ -368,7 +407,7 @@ fn is_running(id: &str, task: &Task, facts: &Facts, phases: &BTreeMap<String, Ph
         || task.status == TaskStatus::Working
 }
 
-/// Whether a task handed in work that passed its own checks and has no review
+/// Whether a task hands in work that passed its own checks and has no review
 /// request for that attempt.
 ///
 /// The check report is the worker's own word that it ran the project's gates and
@@ -391,6 +430,37 @@ fn awaiting_review(task: &Task) -> bool {
     report.status == ReportStatus::Completed
         && !report.checks.is_empty()
         && report.checks.iter().all(|check| check.exit_code == Some(0))
+}
+
+/// The attempt of `task` a review is still owed for, if there is one.
+///
+/// A review was asked for and no review gate result is recorded, so the task
+/// sits in `Reported` until the reviewer's file is decided, however long the
+/// reviewer takes. Every actor that decides a review asks this before it does —
+/// the planner, the service's verdict step and the watchdog — so one review is
+/// never decided twice, whichever of them notices the file first.
+pub fn awaiting_verdict(task: &Task) -> Option<u32> {
+    if task.status != TaskStatus::Reported {
+        return None;
+    }
+    let attempt = task.latest_attempt()?;
+    let decided = attempt
+        .gates
+        .iter()
+        .any(|gate| gate.gate == crate::gate::REVIEW_GATE);
+    (!attempt.reviews.is_empty() && !decided).then_some(attempt.n)
+}
+
+/// Whether an unreadable findings file for this task was already escalated.
+///
+/// The escalation is the record that a person has been told; the recovery is
+/// theirs — they read the packet, or run `shprd agent review-verdict` once the
+/// reviewer has rewritten a valid file.
+fn invalid_findings_escalated(state: &RunState, task: &Task) -> bool {
+    let marker = crate::review::invalid_findings_prefix(&task.id);
+    state.escalations.iter().any(|escalation| {
+        escalation.task.as_deref() == Some(task.id.as_str()) && escalation.body.starts_with(&marker)
+    })
 }
 
 /// Whether every task `task` waits for has landed.
@@ -869,6 +939,115 @@ mod tests {
             matches!(steps.as_slice(), [Step::NeedsYou { .. }]),
             "{steps:?}"
         );
+    }
+
+    #[test]
+    fn a_local_landing_is_judged_by_the_branch_it_writes() {
+        // A local landing writes the run's integration branch, so that is the
+        // branch the protected list is asked about. Asking about `main` would
+        // turn `auto` into `ask` for every task of every local run.
+        let state = folded(&ready_log("A"));
+        let facts = Facts {
+            local: true,
+            ..Facts::default()
+        };
+        let mut config = config(MergePolicy::Auto, 4);
+        config.land.protected = vec!["main".to_string(), "master".to_string()];
+        let steps = plan_for(&state, &facts, &config);
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Auto,
+            }],
+            "integration/m8 is not protected: {steps:?}"
+        );
+        // The branch it writes is what is judged, so protecting that one asks.
+        config.land.protected = vec!["integration/m8".to_string()];
+        let steps = plan_for(&state, &facts, &config);
+        assert!(
+            matches!(steps.as_slice(), [Step::NeedsYou { .. }]),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_forge_landing_is_judged_by_the_pull_requests_base() {
+        let state = folded(&ready_log("A"));
+        let mut config = config(MergePolicy::Auto, 4);
+        config.land.protected = vec!["main".to_string()];
+        // The pull request is opened into the base branch, so a forge landing
+        // into `main` is a landing into a protected branch.
+        let steps = plan_for(&state, &Facts::default(), &config);
+        assert!(
+            matches!(steps.as_slice(), [Step::NeedsYou { .. }]),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_settled_findings_file_is_decided_once() {
+        // A reviewer was asked and has written its file; the pass decides it.
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+            review_requested(5, "A", 1),
+        ];
+        let state = folded(&log);
+        let mut facts = Facts::default();
+        facts.settled_findings.insert("A".to_string());
+        let steps = plan_with(&state, &facts, &config(MergePolicy::Auto, 4), true);
+        assert_eq!(
+            steps,
+            vec![Step::Verdict {
+                task: "A".to_string()
+            }]
+        );
+
+        // The recorded gate is the record that stops a second decision.
+        let mut decided = log;
+        decided.push(gated(6, "A", 1, "review"));
+        let state = folded(&decided);
+        let steps = plan_with(&state, &facts, &config(MergePolicy::Auto, 4), true);
+        assert!(steps.is_empty(), "already decided: {steps:?}");
+    }
+
+    #[test]
+    fn a_findings_file_still_being_written_is_not_decided() {
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+            review_requested(5, "A", 1),
+        ];
+        let state = folded(&log);
+        let steps = plan_with(
+            &state,
+            &Facts::default(),
+            &config(MergePolicy::Auto, 4),
+            true,
+        );
+        assert!(steps.is_empty(), "the file has not settled: {steps:?}");
+    }
+
+    #[test]
+    fn a_verdict_is_not_planned_for_a_review_nobody_requested() {
+        // Findings left over from an earlier review must not decide an attempt
+        // whose review was never dispatched.
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        let state = folded(&log);
+        let mut facts = Facts::default();
+        facts.settled_findings.insert("A".to_string());
+        let steps = plan_with(&state, &facts, &config(MergePolicy::Auto, 4), false);
+        assert!(steps.is_empty(), "{steps:?}");
     }
 
     #[test]

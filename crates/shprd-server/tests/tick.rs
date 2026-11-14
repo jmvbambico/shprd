@@ -95,6 +95,7 @@ impl Fixture {
             local: false,
             start,
             review: None,
+            close_reviewer: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),
@@ -426,6 +427,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         local: false,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: None,
+        close_reviewer: None,
         actor: Actor::Engine,
         after_write: None,
         hub: hub.clone(),
@@ -549,6 +551,7 @@ fn a_hand_in_starts_the_engine_reviewer() {
         local: false,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
+        close_reviewer: None,
         actor: Actor::Engine,
         after_write: None,
         hub: Hub::new(),
@@ -583,6 +586,7 @@ fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
         local: false,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
+        close_reviewer: None,
         actor: Actor::Engine,
         after_write: None,
         hub: Hub::new(),
@@ -606,6 +610,7 @@ fn reviewing(fixture: &Fixture, review: shprd_server::Reviewer) -> Worker {
         local: false,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
+        close_reviewer: None,
         actor: Actor::Engine,
         after_write: None,
         hub: Hub::new(),
@@ -1182,6 +1187,348 @@ fn a_cut_with_no_backup_asks_the_person_once() {
         report.steps.iter().all(|step| step.action != "give_up"),
         "a give-up is recorded once: {report:?}"
     );
+}
+
+/// Writes the findings file a reviewer for `task` attempt 1 wrote, backdated so
+/// a pass trusts it without waiting out the settle window.
+fn write_findings(fixture: &Fixture, task: &str, body: &str) {
+    let reviews = fixture.home.join(".shprd").join("reviews");
+    let path = shprd_core::review::findings_path(&reviews, "r1", task, 1);
+    std::fs::create_dir_all(path.parent().expect("a packet folder")).expect("mkdir the packet");
+    std::fs::write(&path, body).expect("write the findings");
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("open the findings");
+    file.set_modified(std::time::SystemTime::now() - Duration::from_secs(5))
+        .expect("backdate the findings");
+}
+
+/// A fixture whose one task handed in and whose review was requested.
+fn handed_in_and_reviewed() -> Fixture {
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    log.push(ev(
+        5,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 1,
+            reviewer: String::from("codex"),
+            degraded: false,
+        },
+    ));
+    Fixture::new(log)
+}
+
+#[test]
+fn a_reviewers_findings_file_is_decided_once_by_the_pass() {
+    // Bug 1 of the M9 gate: the service only ever started reviewers, so a
+    // service-only run sat at "In review" for ever. The pass decides the file
+    // the reviewer wrote, through the same decision the verdict verb makes.
+    let fixture = handed_in_and_reviewed();
+    write_findings(&fixture, "A", "[]");
+    let worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+
+    let first = worker.tick().expect("the pass ran");
+    assert_eq!(first.steps.len(), 1, "{:?}", first.steps);
+    assert_eq!(first.steps[0].action, "verdict", "{:?}", first.steps);
+    assert!(first.steps[0].ok, "{:?}", first.steps);
+    assert!(first.steps[0].seq.is_some(), "the write is named");
+    let state = fixture.state();
+    let task = state.tasks.get("A").expect("the task");
+    assert_eq!(
+        task.status,
+        shprd_core::state::TaskStatus::Passed,
+        "a clean review passes"
+    );
+    let gate = task
+        .attempts
+        .last()
+        .expect("an attempt")
+        .gates
+        .iter()
+        .find(|gate| gate.gate == "review")
+        .expect("a review gate");
+    assert!(gate.passed);
+    let source = gate.source.as_ref().expect("the verdict is proven");
+    assert_eq!(source.reviewer, "codex");
+    assert!(source.request_seq > 0, "it answers the request");
+
+    // The recorded gate is what stops the next pass deciding it again; what it
+    // plans instead is the landing, which is the next step of the loop.
+    let second = worker.tick().expect("the second pass ran");
+    assert!(
+        second.steps.iter().all(|step| step.action != "verdict"),
+        "{:?}",
+        second.steps
+    );
+    let gates = fixture
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::GatePassed { task, gate, .. } | EventKind::GateFailed { task, gate, .. }
+                    if task == "A" && gate == "review"
+            )
+        })
+        .count();
+    assert_eq!(gates, 1, "one verdict, not one per pass");
+}
+
+#[test]
+fn a_blocking_finding_fails_the_review_and_sends_the_task_back() {
+    let fixture = handed_in_and_reviewed();
+    write_findings(
+        &fixture,
+        "A",
+        r#"[{"severity":"critical","title":"it deletes the file","detail":"do not"}]"#,
+    );
+    let worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+
+    let report = worker.tick().expect("the pass ran");
+    assert_eq!(report.steps.len(), 1, "{report:?}");
+    assert_eq!(report.steps[0].action, "verdict");
+    assert!(report.steps[0].ok, "{report:?}");
+    let state = fixture.state();
+    assert_eq!(
+        state.tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Failed),
+        "a blocking finding fails the attempt"
+    );
+    assert!(
+        state.tasks["A"]
+            .attempts
+            .last()
+            .expect("an attempt")
+            .gates
+            .iter()
+            .any(|gate| gate.gate == "review" && !gate.passed),
+        "a failed review gate was recorded"
+    );
+    // Two rounds are allowed, so the first failure sends the task back without
+    // asking a person.
+    assert!(
+        !state
+            .escalations
+            .iter()
+            .any(|escalation| escalation.task.as_deref() == Some("A")),
+        "one failed round is not an escalation"
+    );
+}
+
+#[test]
+fn an_unreadable_findings_file_is_escalated_once_and_left_to_a_person() {
+    let fixture = handed_in_and_reviewed();
+    write_findings(
+        &fixture,
+        "A",
+        "this is not the JSON array the packet asks for",
+    );
+    let worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+
+    let first = worker.tick().expect("the pass ran");
+    assert_eq!(first.steps.len(), 1, "{first:?}");
+    assert_eq!(first.steps[0].action, "verdict");
+    assert!(first.steps[0].ok, "the escalation is the step's work");
+    let recorded = escalations(&fixture);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(
+        recorded[0]
+            .1
+            .starts_with("A: the reviewer's findings could not be read: "),
+        "{recorded:?}"
+    );
+    assert_eq!(
+        recorded[0].2,
+        shprd_core::review::INVALID_FINDINGS_ACTION,
+        "the person is told what to do"
+    );
+
+    // The escalation is the record: a person has been told, so the pass stops
+    // deciding a file it cannot read.
+    let second = worker.tick().expect("the second pass ran");
+    assert!(second.steps.is_empty(), "{:?}", second.steps);
+    assert_eq!(escalations(&fixture).len(), 1, "said once");
+}
+
+#[test]
+fn the_merge_policy_is_read_from_the_settings_on_every_pass() {
+    // Bug 2 and bug 6 of the M9 gate: `settings set tasks.merge auto` is what
+    // the brief prints, and a change to it must apply on the next pass of the
+    // running service, not on its next restart.
+    let mut log = vec![started()];
+    log.extend(ready(2, "abc123"));
+    let fixture = Fixture::new(log);
+    let forge = Arc::new(SharedFake::new(vec![(
+        Pr {
+            number: 1,
+            url: String::from("https://example.invalid/pull/1"),
+            head: String::from("shprd/r1/A"),
+        },
+        PrStatus {
+            approved: false,
+            checks_passed: Some(true),
+            merged: false,
+            head_sha: String::from("abc123"),
+        },
+    )]));
+    // The file layers say `ask`; the settings are the person's newer answer.
+    let worker = Fixture::worker(
+        &fixture,
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Ask),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    fixture.settings("version = 1\n\n[tasks]\nmerge = \"auto\"\n");
+
+    let auto = worker.tick().expect("the pass ran");
+    assert_eq!(auto.steps.len(), 1, "{auto:?}");
+    assert_eq!(
+        auto.steps[0].action, "land",
+        "the setting, not the file layer, decides: {auto:?}"
+    );
+
+    // The very next pass of the same worker under `ask` asks instead.
+    fixture.settings("version = 1\n\n[tasks]\nmerge = \"ask\"\n");
+    let ask = worker.tick().expect("the second pass ran");
+    assert_eq!(ask.steps.len(), 1, "{ask:?}");
+    assert_eq!(
+        ask.steps[0].action, "needs_you",
+        "a settings change applies without a restart: {ask:?}"
+    );
+}
+
+#[test]
+fn the_concurrency_cap_is_read_from_the_settings_on_every_pass() {
+    let fixture = Fixture::new(vec![started(), added(2, "A"), added(3, "B")]);
+    let forge: SharedForge = Arc::new(NoForge);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker = Fixture::worker(
+        &fixture,
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::clone(&calls)),
+    );
+    // One slot: only the first task by id starts. The closure records the call
+    // but not the attempt, so both tasks are still queued on the next pass.
+    fixture.settings("version = 1\n\n[tasks]\nmax_running = 1\n");
+    let first = worker.tick().expect("the pass ran");
+    assert_eq!(first.steps.len(), 1, "{first:?}");
+    assert_eq!(first.steps[0].task, "A");
+
+    // Two slots apply on the next pass with no restart.
+    fixture.settings("version = 1\n\n[tasks]\nmax_running = 2\n");
+    let second = worker.tick().expect("the second pass ran");
+    assert_eq!(second.steps.len(), 2, "{second:?}");
+}
+
+/// A facts source that lets another decider win the race for the verdict.
+///
+/// `live` is asked once per pass, after the log was folded and before the plan
+/// is made — exactly the window a `shprd watch` runs in. This one records the
+/// review's verdict itself, so the pass plans a verdict step from a state that
+/// is already stale.
+struct Racing {
+    /// The repository whose log the competing verdict is appended to.
+    repo: PathBuf,
+    /// Every call `live` made, so a test can assert the race really happened.
+    raced: Arc<Mutex<usize>>,
+}
+
+impl FactsSource for Racing {
+    fn pr(&self, _task: &shprd_core::state::Task, _state: &RunState) -> Option<PrFacts> {
+        None
+    }
+
+    fn live(&self, state: &RunState) -> BTreeSet<String> {
+        let task = state.tasks.get("A").expect("the fixture's task");
+        let request = task
+            .attempts
+            .last()
+            .and_then(|attempt| attempt.reviews.last())
+            .expect("the fixture requested a review");
+        let path = self.repo.join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).expect("open the log");
+        log.append(
+            Actor::Engine,
+            EventKind::GatePassed {
+                task: String::from("A"),
+                attempt: 1,
+                gate: String::from("review"),
+                findings: Vec::new(),
+                source: Some(ReviewSource {
+                    reviewer: request.reviewer.clone(),
+                    findings_sha256: shprd_core::hash::sha256_hex(b"[]"),
+                    request_seq: request.seq,
+                }),
+            },
+            &SystemClock,
+        )
+        .expect("the competing verdict is recorded");
+        *self.raced.lock().expect("the race counter") += 1;
+        BTreeSet::new()
+    }
+}
+
+#[test]
+fn a_verdict_another_decider_already_recorded_is_not_recorded_twice() {
+    // Bug found by the M9 gate's reviewer: a `shprd watch` racing the service
+    // could fold one reviewer's packet into two gate results, because both plan
+    // from a state that says the review is owed and a second `gate_passed`
+    // answering the same request used to be accepted. The log refuses it now,
+    // and the pass that loses says the review is already decided.
+    let fixture = handed_in_and_reviewed();
+    write_findings(&fixture, "A", "[]");
+    let raced = Arc::new(Mutex::new(0));
+    let facts: Arc<dyn FactsSource> = Arc::new(Racing {
+        repo: fixture.repo.clone(),
+        raced: Arc::clone(&raced),
+    });
+    let mut worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+    worker.facts = facts;
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert_eq!(*raced.lock().expect("the race counter"), 1, "the race ran");
+    assert_eq!(report.steps.len(), 1, "{:?}", report.steps);
+    assert_eq!(report.steps[0].action, "verdict");
+    assert!(
+        report.steps[0].ok,
+        "losing the race is not a failure: {:?}",
+        report.steps
+    );
+    assert!(
+        report.steps[0].detail.contains("already decided"),
+        "{:?}",
+        report.steps
+    );
+    let verdicts = fixture
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::GatePassed { task, gate, .. } | EventKind::GateFailed { task, gate, .. }
+                    if task == "A" && gate == "review"
+            )
+        })
+        .count();
+    assert_eq!(verdicts, 1, "one review, one verdict");
 }
 
 /// A task worktree an older build made has no `info/exclude` entries, so the

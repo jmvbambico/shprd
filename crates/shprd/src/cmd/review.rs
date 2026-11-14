@@ -132,7 +132,7 @@ pub struct ReviewReport {
 
 /// Where a review packet lives: `<reviews>/<run>/<task>-a<attempt>/`.
 pub fn packet_dir(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
-    reviews.join(run).join(format!("{task}-a{attempt}"))
+    shprd_core::review::packet_dir(reviews, run, task, attempt)
 }
 
 /// The file a reviewer writes its findings to, inside its packet folder.
@@ -140,7 +140,7 @@ pub fn packet_dir(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBu
 /// It is the one file read back out of a packet: the watchdog watches it, so a
 /// finished review is picked up without the reviewer running any command.
 pub fn findings_path(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
-    packet_dir(reviews, run, task, attempt).join("findings.json")
+    shprd_core::review::findings_path(reviews, run, task, attempt)
 }
 
 /// Where a reviewer's brief lives: `<briefs>/<run>/<task>-a<attempt>-review.md`.

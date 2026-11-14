@@ -11,8 +11,9 @@
 //! {
 //!   "steps": [
 //!     {
-//!       "action": "start",            // start | review | land | mark_landed
-//!                                     // | needs_you | nudge | backup | give_up
+//!       "action": "start",            // start | review | verdict | land
+//!                                     // | mark_landed | needs_you | nudge
+//!                                     // | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
 //!       "detail": "started T1 attempt 1 with claude in ...",
@@ -43,6 +44,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use shprd_core::config;
+use shprd_core::event::Actor;
 use shprd_git::forge::{Forge, GhForge};
 use shprd_server::{NewsDesk, Starter, TickReport, Worker};
 
@@ -130,6 +132,29 @@ pub(crate) fn worker_with_hub(
             crate::cmd::review::review_for_tick(&review_ctx, &review_home, task)
         }) as shprd_server::Reviewer
     });
+    // A verdict closes the reviewer's tab, and the tab belongs to the host, so a
+    // pass that decides a review calls the same `review::close_reviewer` the
+    // verb does. A record-only pass has no tabs at all.
+    let close_home = home.to_path_buf();
+    let close_reviewer: Option<shprd_server::ReviewCloser> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str, attempt: u32| {
+            let ctx = Ctx::new(repo.to_path_buf(), Actor::Engine, false, true);
+            let run = ctx
+                .state()
+                .ok()
+                .and_then(|state| state.run.map(|run| run.run_id))
+                .ok_or_else(|| String::from("the run has not started"))?;
+            let briefs = close_home.join(".shprd").join("briefs");
+            crate::cmd::review::close_reviewer(
+                &crate::cmd::spawn::real_mux(),
+                &briefs,
+                &run,
+                task,
+                attempt,
+            )
+            .map_err(|err| err.to_string())
+        }) as shprd_server::ReviewCloser
+    });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two
     // effects it may have. A record-only pass has no tabs and no CLIs to probe,
     // so it is not wired there.
@@ -173,6 +198,7 @@ pub(crate) fn worker_with_hub(
         local,
         start,
         review,
+        close_reviewer,
         actor,
         after_write: None,
         hub,

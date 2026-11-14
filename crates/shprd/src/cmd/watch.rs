@@ -10,9 +10,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use shprd_core::config::MergePolicy;
 use shprd_core::event::{Actor, Event, EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
+use shprd_core::settings::merge_name;
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_mux::{AgentState, Mux, MuxError, PaneId};
 use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
@@ -220,15 +222,25 @@ impl Watcher {
             let Some(modified) = settled_mtime(&path) else {
                 continue;
             };
-            if verdict::read_findings(&path).is_err() {
+            if let Err(err) = verdict::read_findings(&path) {
+                // One bad file is one escalation, whichever pass noticed it: the
+                // body begins with the marker the service's own pass compares, so
+                // `watch` and `serve` cannot each escalate the same file.
+                let marker = shprd_core::review::invalid_findings_prefix(&task.id);
+                if state.escalations.iter().any(|escalation| {
+                    escalation.task.as_deref() == Some(task.id.as_str())
+                        && escalation.body.starts_with(&marker)
+                }) {
+                    continue;
+                }
                 if self.rejected.get(&path) == Some(&modified) {
                     continue;
                 }
                 self.rejected.insert(path, modified);
                 env.ctx.commit(EventKind::Escalated {
                     task: Some(task.id.clone()),
-                    body: format!("reviewer wrote an invalid findings.json for {}", task.id),
-                    default_action: INVALID_FINDINGS_ACTION.to_string(),
+                    body: format!("{marker}{err}"),
+                    default_action: String::from(shprd_core::review::INVALID_FINDINGS_ACTION),
                 })?;
                 lines.push(format!("escalated {}: invalid findings.json", task.id));
                 continue;
@@ -237,6 +249,9 @@ impl Watcher {
             let word = match outcome {
                 verdict::Outcome::Passed => "passed",
                 verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",
+                // The service's own pass decided it while this one was reading
+                // the packet: one review, one verdict, and nothing to say.
+                verdict::Outcome::AlreadyDecided => continue,
             };
             lines.push(format!("\u{25c7} {} review {word}", task.id));
         }
@@ -317,7 +332,11 @@ impl Watcher {
     /// Nothing here fails the tick. A run with no orchestrator pane recorded,
     /// or a prompt the host refuses, prints the notices in the watchdog's own
     /// output instead, and leaves the watermark where it was so no news is
-    /// lost: the next pass says it again. A pane showing a prompt of its own
+    /// lost: the next pass says it again. A run with no coordinator at all is
+    /// the service-driven default rather than a fault, so nothing is printed at
+    /// a person who is not there to read it; the watermark stays where it was,
+    /// so a coordinator added later hears the news. A pane showing a prompt of
+    /// its own
     /// is not typed at at all: its next line would be read as the answer to
     /// that prompt, not as a notice.
     fn notify(
@@ -328,7 +347,8 @@ impl Watcher {
         lines: &mut Vec<String>,
     ) -> Result<(), CliError> {
         let (state, events) = env.ctx.load()?;
-        let wanted = notices(&events, state.notified_up_to_seq);
+        let merge = env.settings.resolve(None).tasks().merge;
+        let wanted = notices(&events, state.notified_up_to_seq, merge);
         if wanted.is_empty() {
             self.orchestrator_blocked_since = None;
             self.orchestrator_escalated = false;
@@ -362,6 +382,14 @@ impl Watcher {
                 lines.extend(wanted[1..].iter().map(|notice| notice.line.clone()));
             }
             Err(reason) => {
+                if state.orchestrator.is_none() {
+                    // The default run setup records no coordinator, so there is
+                    // nobody to tell and nothing wrong: the tick is what advances
+                    // the work, and the watermark stays put so a coordinator
+                    // added later still hears the news. Printing it at a person
+                    // who did not ask for one is the noise this avoids.
+                    return Ok(());
+                }
                 lines.push(format!("could not tell the orchestrator ({reason}):"));
                 lines.extend(wanted.iter().map(|notice| notice.line.clone()));
             }
@@ -469,7 +497,11 @@ fn shorten(body: &str) -> String {
 }
 
 /// The line that turns `kind` into an action for `task`, if it needs one.
-fn action_line(task: &str, kind: &EventKind) -> Option<String> {
+///
+/// A passed review is the one notice that has to know the run's merge policy: the
+/// tick lands a ready task by itself, so the line says so and names the manual
+/// verb only when the policy is `ask` and the person is what it waits for.
+fn action_line(task: &str, kind: &EventKind, merge: MergePolicy) -> Option<String> {
     match kind {
         // A worker reported: nothing has looked at it yet.
         EventKind::Reported {
@@ -478,11 +510,19 @@ fn action_line(task: &str, kind: &EventKind) -> Option<String> {
         } => Some(format!(
             "[{task}] review it: shprd agent review --task {task}"
         )),
-        // The review decided. Passed means it is ready to land on the
-        // integration branch; failed means it needs another attempt.
-        EventKind::GatePassed { gate, .. } if gate == REVIEW_GATE => Some(format!(
-            "[{task}] integrate it: shprd agent integrate --task {task}"
-        )),
+        // The review decided. Passed means it is ready to land, which the tick
+        // does on its own unless the policy waits for a person.
+        EventKind::GatePassed { gate, .. } if gate == REVIEW_GATE => Some(match merge {
+            MergePolicy::Ask => format!(
+                "[{task}] review passed: it is ready to land, and its merge policy is ask: \
+                 land it with `shprd approve {task}`"
+            ),
+            other => format!(
+                "[{task}] review passed: it is ready to land, and the tick will land it under \
+                 its {} merge policy",
+                merge_name(other)
+            ),
+        }),
         EventKind::GateFailed { gate, .. } if gate == REVIEW_GATE => Some(format!(
             "[{task}] start the next attempt: shprd agent spawn --task {task}"
         )),
@@ -504,7 +544,9 @@ fn action_line(task: &str, kind: &EventKind) -> Option<String> {
 /// about it, never the log's history: a log that holds thousands of old
 /// escalations still yields one line per task at most. `since` is the last
 /// sequence the orchestrator was told about, so a restart replays nothing.
-fn notices(events: &[Event], since: Option<u64>) -> Vec<Notice> {
+/// `merge` is the run's merge policy, which the passed-review line states so the
+/// notice and the tick agree about who lands the task.
+fn notices(events: &[Event], since: Option<u64>, merge: MergePolicy) -> Vec<Notice> {
     let older = |seq: u64| since.is_some_and(|since| seq <= since);
     let mut plan: Vec<String> = Vec::new();
     let mut newest: BTreeMap<String, &Event> = BTreeMap::new();
@@ -549,7 +591,7 @@ fn notices(events: &[Event], since: Option<u64>) -> Vec<Notice> {
         if repeats {
             continue;
         }
-        if let Some(line) = action_line(task, &event.kind) {
+        if let Some(line) = action_line(task, &event.kind, merge) {
             wanted.push(Notice { line });
         }
     }
@@ -819,38 +861,22 @@ fn reviews_dir(env: &SpawnEnv<'_>) -> Option<PathBuf> {
     Some(home_of(env)?.join(".shprd").join("reviews"))
 }
 
-/// How long a findings file must sit untouched before a tick trusts it.
-///
-/// A reviewer writes its file in one go, but a tick can fall between the open
-/// and the last byte: reading a file younger than this would decide a review
-/// from half of it.
-const FINDINGS_SETTLE: Duration = Duration::from_secs(2);
-
-/// What a human is asked to do about a reviewer's invalid findings file.
-const INVALID_FINDINGS_ACTION: &str = "read the packet and decide the review by hand";
-
 /// The mtime of `path`, when the file is old enough for the watchdog to read.
 ///
 /// A restart asks the same question: findings that are not settled yet may
-/// still be being written, so `review --again` must not delete them.
+/// still be being written, so `review --again` must not delete them. The settle
+/// window is [`shprd_core::review`]'s, because the service's own pass reads the
+/// same file and must trust it at the same age.
 pub(crate) fn settled_mtime(path: &Path) -> Option<SystemTime> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let age = SystemTime::now().duration_since(modified).ok()?;
-    (age >= FINDINGS_SETTLE).then_some(modified)
+    shprd_core::review::settled_mtime(path)
 }
 
 /// The attempt of `task` a review is still owed for, if there is one.
 ///
-/// A review was asked for, and no review gate result is recorded yet: the task
-/// sits in `Reported` until that result arrives, however long the reviewer
-/// takes.
+/// It is [`shprd_core::tick::awaiting_verdict`], because the service's own pass
+/// decides a review too: the two must ask the same question of the same state.
 fn awaiting_review(task: &Task) -> Option<u32> {
-    if task.status != TaskStatus::Reported {
-        return None;
-    }
-    let attempt = task.attempts.last()?;
-    let decided = attempt.gates.iter().any(|gate| gate.gate == REVIEW_GATE);
-    (!attempt.reviews.is_empty() && !decided).then_some(attempt.n)
+    shprd_core::tick::awaiting_verdict(task)
 }
 
 /// The pane `tab` holds, or `None` when the host no longer has it.
@@ -1645,6 +1671,9 @@ project_dirs = []
         let env = scratch.env(&ctx, &["sh", "pi"]);
         let mux = mux_with_workspace(&scratch);
         seed(&mux, &env);
+        // A coordinator to tell, so the notice has somewhere to go: the point of
+        // the assertion below is that it is told, not that it is printed.
+        record_orchestrator(&mux, &ctx, &scratch);
         let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
         mux.set_screen(&pane, "> ");
         mux.set_state(&pane, AgentState::Idle);
@@ -2880,6 +2909,66 @@ project_dirs = []
         );
     }
 
+    /// A review another decider already recorded is not recorded again.
+    ///
+    /// The race the M9 gate's reviewer found: the service's own pass and a
+    /// `shprd watch` both fold the log while a review is owed, and only the log
+    /// under its lock can tell the second of them that the first recorded the
+    /// verdict. The state handed in here is the one a watchdog already read, so
+    /// the competing verdict lands in exactly that window.
+    #[test]
+    fn a_review_the_service_already_decided_is_left_alone() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        write_findings(&env, &scratch, "[]", Duration::from_secs(10));
+        // What this pass planned from: the review is still owed.
+        let planned = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let request = planned
+            .tasks
+            .get("T1")
+            .and_then(|task| task.attempts.last())
+            .and_then(|attempt| attempt.reviews.last())
+            .map(|request| (request.reviewer.clone(), request.seq))
+            .unwrap_or_else(|| panic!("the fixture requested no review"));
+        // What the service's pass recorded in the meantime, reading the same
+        // settled packet from its own state.
+        ctx.as_actor(Actor::Engine)
+            .commit(EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: request.0,
+                    findings_sha256: shprd_core::hash::sha256_hex(b"[]"),
+                    request_seq: request.1,
+                }),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        let before = events(&ctx).len();
+
+        let mut watcher = Watcher::new(Policy::default());
+        let mut lines = Vec::new();
+        watcher
+            .tick_reviews(&FakeMux::default(), &env, &planned, &mut lines)
+            .unwrap_or_else(|err| panic!("losing the race is not a failure: {err}"));
+
+        let fresh = &events(&ctx)[before..];
+        assert!(
+            !appended(fresh, |kind| matches!(
+                kind,
+                EventKind::GatePassed { .. } | EventKind::GateFailed { .. }
+            )),
+            "the decision was recorded twice: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("review p")),
+            "a review this pass did not decide is not reported as its own: {lines:?}"
+        );
+    }
+
     /// A blocking finding fails the gate, and the line says so.
     #[test]
     fn a_failing_review_is_recorded_as_a_failed_gate() {
@@ -2907,6 +2996,10 @@ project_dirs = []
     }
 
     /// An unreadable file is one escalation, not one per tick.
+    ///
+    /// The body begins with [`shprd_core::review::invalid_findings_prefix`], which
+    /// is also what the service's own pass compares, so `watch` and `serve`
+    /// cannot each escalate the same file.
     #[test]
     fn an_invalid_findings_file_is_escalated_once() {
         let scratch = Scratch::new();
@@ -2922,7 +3015,7 @@ project_dirs = []
                 kind,
                 EventKind::Escalated { task, body, .. }
                     if task.as_deref() == Some("T1")
-                        && body.contains("invalid findings.json for T1")
+                        && body.contains(shprd_core::review::invalid_findings_prefix("T1").as_str())
             )),
             "an invalid file was not escalated: {first:?}"
         );
@@ -3218,6 +3311,36 @@ project_dirs = []
             text.lines().count() <= 3,
             "the history was replayed: {} lines",
             text.lines().count()
+        );
+    }
+
+    /// A run with no coordinator at all is the default service setup, not a
+    /// fault: its notices are kept for a later pass and nothing is printed at a
+    /// person who is not there to read it.
+    #[test]
+    fn a_run_with_no_coordinator_says_nothing_about_it() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh"]);
+        let mux = mux_with_workspace(&scratch);
+        reported(&ctx);
+
+        let mut watcher = Watcher::new(Policy::default());
+        let lines = watcher
+            .tick(&mux, &env, 1_700_000_000_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("no orchestrator pane is recorded")),
+            "the default run prints no complaint about having no coordinator: {lines:?}"
+        );
+        assert!(prompts(&mux).is_empty(), "there is nobody to type at");
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            state.notified_up_to_seq, None,
+            "the notice is kept for a coordinator added later"
         );
     }
 
@@ -3530,16 +3653,40 @@ project_dirs = []
                 deps: Vec::new(),
             },
         );
-        let passed = notices(&[plan.clone(), review(true, 2)], None);
+        let passed = notices(&[plan.clone(), review(true, 2)], None, MergePolicy::Auto);
         assert_eq!(passed.len(), 1, "{passed:?}");
         assert!(
-            passed[0]
-                .line
-                .contains("integrate it: shprd agent integrate --task T1"),
+            passed[0].line.contains("it is ready to land"),
             "{}",
             passed[0].line
         );
-        let failed = notices(&[plan.clone(), review(false, 2)], None);
+        assert!(
+            passed[0]
+                .line
+                .contains("the tick will land it under its auto"),
+            "{}",
+            passed[0].line
+        );
+        assert!(
+            !passed[0].line.contains("shprd approve"),
+            "a landing nobody has to approve names no verb: {}",
+            passed[0].line
+        );
+        // Under `ask` the person is the one who lands it, so the line names
+        // the verb that does it.
+        let asked = notices(&[plan.clone(), review(true, 2)], None, MergePolicy::Ask);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].line.contains("shprd approve T1"),
+            "{}",
+            asked[0].line
+        );
+        assert!(
+            !asked[0].line.contains("shprd agent integrate"),
+            "the pre-M9 flow is gone: {}",
+            asked[0].line
+        );
+        let failed = notices(&[plan.clone(), review(false, 2)], None, MergePolicy::Auto);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(
             failed[0]
@@ -3560,6 +3707,7 @@ project_dirs = []
                 ),
             ],
             None,
+            MergePolicy::Auto,
         );
         assert_eq!(integrated.len(), 1, "{integrated:?}");
         assert_eq!(

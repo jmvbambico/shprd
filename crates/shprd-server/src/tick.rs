@@ -5,11 +5,13 @@
 //!
 //! 1. reads the run log and the derived status of every task;
 //! 2. asks a [`FactsSource`] for what the log cannot hold — the forge's word on
-//!    each pull request, and which tasks have an agent running now;
+//!    each pull request, which tasks have an agent running now, and which
+//!    reviewers have written their findings;
 //! 3. plans ([`shprd_core::tick::plan`]);
 //! 4. runs each [`Step`] through the verbs the CLI already has — a start goes
 //!    through the binary's spawn path, a review through its `agent review`, a
-//!    landing through `shprd_git::land`;
+//!    verdict through the same [`shprd_core::gate::decide`] the review verdict
+//!    verb uses, a landing through `shprd_git::land`;
 //! 5. appends one ledger event per step that changed something and publishes it
 //!    on the service's [`Hub`], so the web app and a Herdr mod see it;
 //! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
@@ -32,11 +34,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use shprd_core::config::Config;
+use shprd_core::config::{Config, MergePolicy};
 use shprd_core::event::{
     Actor, EventKind, FallbackAction, Finding, LandOutcome, ProviderClass, ResourceKind, Severity,
 };
+use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
+use shprd_core::rules::RuleError;
 use shprd_core::state::{ResourceStatus, RunState, Task};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::{Forge, ForgeError};
@@ -183,7 +187,8 @@ pub trait FallbackSource: Send + Sync {
 /// What running one plan step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepReport {
-    /// The action's name: `start`, `land`, `mark_landed` or `needs_you`.
+    /// The action's name: `start`, `review`, `verdict`, `land`, `mark_landed`,
+    /// `needs_you`, `nudge`, `backup` or `give_up`.
     pub action: String,
     /// The task it was about.
     pub task: String,
@@ -267,6 +272,14 @@ pub type Starter = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sy
 /// closure returns one line about the reviewer it opened.
 pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
+/// What the tick needs to close a reviewer's tab once its verdict is recorded.
+///
+/// The verdict itself is the service's to decide and record; the tab belongs to
+/// the host, so the binary passes the same `review::close_reviewer` the verb
+/// calls. A failure closes nothing and is logged: the verdict is already in the
+/// log, and failing the step would tell the caller the review decided nothing.
+pub type ReviewCloser = Arc<dyn Fn(&Path, &str, u32) -> Result<(), String> + Send + Sync>;
+
 /// Everything one pass runs against.
 pub struct Worker {
     /// The repository whose run log is advanced.
@@ -297,6 +310,11 @@ pub struct Worker {
     /// planner then plans no `review` step. Whether a reviewer is configured is
     /// asked of the settings on every pass, not fixed here.
     pub review: Option<Reviewer>,
+    /// Closes the reviewer's tab once its verdict is recorded.
+    ///
+    /// `None` when the caller has no host (a test, a record-only pass): a
+    /// verdict is still recorded, and nothing is left open to close.
+    pub close_reviewer: Option<ReviewCloser>,
     /// Who the pass's writes act as. The engine, always: the tick is shprd's
     /// own automation rather than a human's or an agent's action.
     pub actor: Actor,
@@ -325,10 +343,16 @@ impl Worker {
         // is one file read per live worktree and writes nothing when the entries
         // are already there, so every pass makes it.
         self.repair_worktree_excludes(&state);
+        // The settings are read on every pass, never kept from startup: a person
+        // who changes the merge policy or the concurrency cap while the service
+        // runs gets it on the next pass, exactly as the roles and the fallbacks
+        // already do.
+        let config = self.pass_config();
         let facts = Facts {
             prs: self.state_prs(&state),
             live: self.facts.live(&state),
             local: self.local,
+            settled_findings: self.settled_findings(&state),
         };
         // The ladder's facts are read before the phases because a provider cut
         // is what makes a task read "Needs you" rather than "Working".
@@ -338,12 +362,12 @@ impl Worker {
             state: &state,
             phases: &phases,
             facts: &facts,
-            config: &self.config,
+            config: &config,
             review: self.review.is_some() && self.reviews_hand_ins(),
         });
         let mut report = TickReport::default();
         for step in steps {
-            let result = self.run_step(&state, &step);
+            let result = self.run_step(&config, &state, &step);
             report.steps.push(result);
         }
         // The ladder runs after the advance steps so a task this pass just
@@ -398,6 +422,70 @@ impl Worker {
             }),
             Err(_) => self.config.roster.reviewer.is_some(),
         }
+    }
+
+    /// The config this pass runs under: the file layers, with the settings
+    /// resolution applied on top.
+    ///
+    /// `tasks.merge` and `tasks.max_running` are what the person sees in the
+    /// brief's Settings block and in `shprd settings show`, so they are what the
+    /// pass must act on. Only a key a layer actually names wins: a settings file
+    /// that says nothing about the merge policy leaves the resolved config's own
+    /// answer standing, which is what a test that hands a pass its config
+    /// directly expects. The settings resolution already reads the old
+    /// `config.toml` keys as its lowest named layer, so a run whose person has
+    /// not migrated keeps the values its config file asks for. A settings file
+    /// that cannot be read is not a reason to stop the pass: the resolved
+    /// config's own values stand, and the next pass reads the file again.
+    fn pass_config(&self) -> Config {
+        use shprd_core::settings::{Key, Source, TaskKey};
+
+        let Ok(loaded) = shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) else {
+            return self.config.clone();
+        };
+        let resolved = loaded.resolve(None);
+        let tasks = resolved.tasks();
+        // Every key resolves, because the built-in layer sets them all: a key is
+        // "set" only when a layer other than the defaults named it.
+        let named = |key: TaskKey| {
+            resolved
+                .get(&Key::Task(key))
+                .is_some_and(|sourced| sourced.source != Source::BuiltIn)
+        };
+        let mut config = self.config.clone();
+        if named(TaskKey::Merge) {
+            config.land.merge = tasks.merge;
+        }
+        if named(TaskKey::MaxRunning) {
+            config.tick.max_running = tasks.max_running;
+        }
+        config
+    }
+
+    /// The tasks whose reviewer's findings file has settled and may be decided.
+    ///
+    /// The reviewer runs outside the repository and cannot record anything: it
+    /// writes `findings.json` and stops. The file is the service's to read, and a
+    /// file younger than [`shprd_core::review::FINDINGS_SETTLE`] may still be
+    /// being written, so only a settled one is offered to the planner.
+    fn settled_findings(&self, state: &RunState) -> BTreeSet<String> {
+        let Some(run) = state.run.as_ref() else {
+            return BTreeSet::new();
+        };
+        let reviews = self.home.join(".shprd").join("reviews");
+        state
+            .tasks
+            .values()
+            .filter(|task| {
+                let Some(attempt) = tick::awaiting_verdict(task) else {
+                    return false;
+                };
+                let path =
+                    shprd_core::review::findings_path(&reviews, &run.run_id, &task.id, attempt);
+                shprd_core::review::settled_mtime(&path).is_some()
+            })
+            .map(|task| task.id.clone())
+            .collect()
     }
 
     /// The programs a cut worker is handed to, in order: the worker role's own
@@ -751,11 +839,12 @@ impl Worker {
     }
 
     /// Runs one step, mapping a failure to a reported one.
-    fn run_step(&self, state: &RunState, step: &Step) -> StepReport {
+    fn run_step(&self, config: &Config, state: &RunState, step: &Step) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
             Step::Review { task } => self.review_task(state, task),
-            Step::Land { task, policy: _ } => self.land_task(state, task),
+            Step::Verdict { task } => self.verdict_task(config, state, task),
+            Step::Land { task, policy } => self.land_task(state, task, *policy),
             Step::MarkLanded {
                 task,
                 outcome,
@@ -826,6 +915,148 @@ impl Worker {
         Ok(StepReport::done(&step, detail, seq))
     }
 
+    /// Decides the review of a task whose reviewer has written its findings.
+    ///
+    /// The reviewer cannot record anything itself: it writes `findings.json` and
+    /// stops. This is what turns that file into the gate result the run waits
+    /// for, through the same [`shprd_core::gate::decide`] the `review-verdict`
+    /// verb and the watchdog use, so the policy, the provenance and the events
+    /// cannot drift between the three. The plan only offers a settled file, and
+    /// the recorded gate result is what stops the next pass deciding it again.
+    ///
+    /// A file that is not a findings list is a reviewer's mistake, not a
+    /// decision: it is escalated once, in the task's name, and left for a person.
+    fn verdict_task(
+        &self,
+        config: &Config,
+        state: &RunState,
+        task: &str,
+    ) -> Result<StepReport, String> {
+        let step = Step::Verdict {
+            task: task.to_string(),
+        };
+        let found = state
+            .tasks
+            .get(task)
+            .ok_or_else(|| format!("no task {task:?} in this run"))?;
+        let attempt = tick::awaiting_verdict(found)
+            .ok_or_else(|| format!("task {task:?} has no review waiting on a verdict"))?;
+        let run = state
+            .run
+            .as_ref()
+            .ok_or_else(|| String::from("the run has not started"))?;
+        let reviews = self.home.join(".shprd").join("reviews");
+        let path = shprd_core::review::findings_path(&reviews, &run.run_id, task, attempt);
+        let bytes =
+            std::fs::read(&path).map_err(|err| format!("reading {}: {err}", path.display()))?;
+        let findings = match shprd_core::review::parse_findings(&bytes, &path) {
+            Ok(findings) => findings,
+            Err(err) => {
+                let seq = self.escalate_invalid_findings(state, task, &err.to_string())?;
+                return Ok(StepReport::done(
+                    &step,
+                    format!("{task}: the reviewer's findings could not be read: {err}"),
+                    seq,
+                ));
+            }
+        };
+        let source = gate::provenance(found, attempt, &bytes).ok_or_else(|| {
+            format!(
+                "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
+            )
+        })?;
+        let decided = gate::decide(found, attempt, findings, source, config.review);
+        let mut last = None;
+        for kind in decided.events {
+            match self.commit_verdict(kind) {
+                Ok(Some(seq)) => {
+                    last = Some(seq);
+                    self.notify(Some(seq));
+                }
+                // A `shprd watch`, or another process, decided this attempt's
+                // review between this pass reading the log and appending the
+                // verdict. The rules refuse a second verdict for one attempt, so
+                // the loop stops here; closing the tab is still right, and the
+                // run is in the state this step wanted.
+                Ok(None) => {
+                    self.close_reviewer_task(task, attempt);
+                    return Ok(StepReport::done(
+                        &step,
+                        format!("{task}'s review was already decided"),
+                        self.last_seq(),
+                    ));
+                }
+                Err(reason) => return Err(reason),
+            }
+        }
+        self.close_reviewer_task(task, attempt);
+        let detail = if decided.passed {
+            format!("{task}'s review passed")
+        } else {
+            format!(
+                "{task}'s review failed: {} blocking finding(s)",
+                decided.blocking
+            )
+        };
+        Ok(StepReport::done(&step, detail, last))
+    }
+
+    /// Appends one verdict event, folding "already decided" into `Ok(None)`.
+    ///
+    /// The log refuses a second review verdict for one attempt, and that refusal
+    /// is news about the run rather than a failure of this pass: another decider
+    /// got there first.
+    fn commit_verdict(&self, kind: EventKind) -> Result<Option<u64>, String> {
+        match ledger::commit(&self.repo, &self.actor, kind) {
+            Ok(event) => {
+                after_write(&self.after_write, &self.repo);
+                Ok(Some(event.seq))
+            }
+            Err(ledger::CommitError::Refused(RuleError::ReviewAlreadyDecided { .. })) => Ok(None),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Closes the reviewer's tab after a verdict, logging a host that refuses.
+    ///
+    /// A close that fails is never fatal: the gate result is already recorded,
+    /// and failing the step would report the review as undecided.
+    fn close_reviewer_task(&self, task: &str, attempt: u32) {
+        if let Some(close) = &self.close_reviewer
+            && let Err(err) = close(&self.repo, task, attempt)
+        {
+            tracing::warn!(task, %err, "the reviewer's tab did not close after its verdict");
+        }
+    }
+
+    /// Records once that a reviewer's findings file could not be read.
+    ///
+    /// The body begins with [`shprd_core::review::invalid_findings_prefix`], so a
+    /// pass after the first finds the escalation and says nothing again. The
+    /// planner reads the same marker, so the file is left for a person rather
+    /// than decided over and over.
+    fn escalate_invalid_findings(
+        &self,
+        state: &RunState,
+        task: &str,
+        reason: &str,
+    ) -> Result<Option<u64>, String> {
+        let marker = shprd_core::review::invalid_findings_prefix(task);
+        let already = state.escalations.iter().any(|escalation| {
+            escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)
+        });
+        if already {
+            return Ok(None);
+        }
+        let seq = self.commit(EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: format!("{marker}{reason}"),
+            default_action: String::from(shprd_core::review::INVALID_FINDINGS_ACTION),
+        })?;
+        self.notify(Some(seq));
+        Ok(Some(seq))
+    }
+
     /// Records once that the engine's review of `task` did not start.
     ///
     /// The body begins with [`review_failure_prefix`], so a second failed pass
@@ -892,11 +1123,19 @@ impl Worker {
     /// The composition is the same one the verb uses: the rule is re-asked here
     /// (a pass may have been planned from a log that has since moved), the
     /// branch's head is read, an approval counts only for that exact commit, and
-    /// every outcome is recorded once per head.
-    fn land_task(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+    /// every outcome is recorded once per head. The policy is the one the plan
+    /// decided the landing under — the pass's own settings resolution asked about
+    /// the branch the landing writes — so the report and the planner never
+    /// disagree about who merged what.
+    fn land_task(
+        &self,
+        state: &RunState,
+        task: &str,
+        policy: MergePolicy,
+    ) -> Result<StepReport, String> {
         let step = Step::Land {
             task: task.to_string(),
-            policy: self.config.land.merge,
+            policy,
         };
         let found = state
             .tasks
@@ -921,7 +1160,15 @@ impl Worker {
             .is_some()
             || found.pr.is_some();
         if self.local {
-            return self.land_locally(&step, found, &attempt.branch, run, approved, has_work);
+            return self.land_locally(
+                &step,
+                found,
+                &attempt.branch,
+                run,
+                policy,
+                approved,
+                has_work,
+            );
         }
         let base = run.base_branch.clone();
         let title = format!("{task}: {}", found.title);
@@ -932,7 +1179,6 @@ impl Worker {
             &pr::task_pr_body_marked(found),
         )?;
         let forge = self.forge();
-        let policy = self.config.land.policy_for(&base);
         let landing = Landing {
             task,
             branch: &attempt.branch,
@@ -957,12 +1203,17 @@ impl Worker {
     /// `run.integration_branch`, so the user's checkout is never touched. The
     /// policy is the same one the forge path applies; `checks` reads the
     /// hand-in's own checks report because there is no CI to ask.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one local landing's whole input: the step, the task, its branch, the run, the policy and what the git read found"
+    )]
     fn land_locally(
         &self,
         step: &Step,
         task: &Task,
         branch: &str,
         run: &shprd_core::state::RunInfo,
+        policy: MergePolicy,
         approved: bool,
         has_work: bool,
     ) -> Result<StepReport, String> {
@@ -986,7 +1237,6 @@ impl Worker {
             &run.base_branch,
         )
         .map_err(|err| err.to_string())?;
-        let policy = self.config.land.policy_for(&run.integration_branch);
         let landing = LocalLanding {
             task: &task.id,
             branch,

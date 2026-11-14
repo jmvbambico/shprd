@@ -187,6 +187,22 @@ pub enum RuleError {
         /// The attempt.
         attempt: u32,
     },
+    /// The attempt's review already has a verdict, so a second one is refused.
+    ///
+    /// It is [`RuleError::ReviewDecided`] for a verdict rather than a request:
+    /// two readers of one packet (a watchdog and the service's pass, a person
+    /// and the engine) both plan from a state that says the review is owed, and
+    /// only the log under its lock can tell the second of them that the first
+    /// has already decided it.
+    #[error(
+        "task {task:?} attempt {attempt} already has a review verdict: a review is decided once"
+    )]
+    ReviewAlreadyDecided {
+        /// The task.
+        task: TaskId,
+        /// The attempt.
+        attempt: u32,
+    },
     /// Integration was requested for a task that has not passed its gates.
     #[error("task {task:?} is {found:?} and cannot be integrated")]
     NotPassed {
@@ -1444,6 +1460,15 @@ fn check_gate(
 /// with. A log written before requests carried a seq cannot answer the
 /// question, and one written before this rule holds verdicts this rule would
 /// refuse, so replay keeps them all.
+///
+/// A review is decided once per attempt. Two deciders can both plan from a state
+/// that says the review is owed — a `shprd watch` and the service's own pass, a
+/// person and the engine — and the log under its lock is the only place that can
+/// tell the second of them that the first already recorded the verdict. Without
+/// this the same packet is folded twice into two gate results, which is what the
+/// M9 gate's second run found: one `findings.json`, two `gate_passed` events.
+/// A second review of the same attempt needs a new attempt, and a fresh request
+/// on a decided attempt is refused by [`check_review_requested`] anyway.
 fn check_verdict(
     provenance: Provenance,
     state: &RunState,
@@ -1473,6 +1498,16 @@ fn check_verdict(
             });
         }
     };
+    let current = state
+        .tasks
+        .get(task)
+        .and_then(|found| found.attempts.iter().find(|current| current.n == attempt));
+    if current.is_some_and(|current| current.gates.iter().any(|gate| gate.gate == REVIEW_GATE)) {
+        return Err(RuleError::ReviewAlreadyDecided {
+            task: task.to_string(),
+            attempt,
+        });
+    }
     match latest_review(state, task, attempt) {
         Some(request)
             if request.reviewer == source.reviewer && request.seq == source.request_seq =>
@@ -3692,7 +3727,9 @@ mod tests {
     ///
     /// The field defaults to `0`, which no request has, so such a verdict can
     /// never be recorded now; replay keeps it because a run's history is read,
-    /// not re-judged, exactly as a verdict without provenance is kept.
+    /// not re-judged, exactly as a verdict without provenance is kept. A second
+    /// verdict on the same attempt is refused for the reason that matters most:
+    /// the review already has one.
     #[test]
     fn a_legacy_verdict_without_a_request_seq_still_folds() {
         let mut log = reviewable();
@@ -3702,16 +3739,71 @@ mod tests {
         ));
         let state = folded(&log);
         assert_eq!(status(&state, "a"), TaskStatus::Passed);
-        // Recording the same thing now is refused: absence is a legacy reading,
-        // never a way past the rule.
+        // Recording the same thing now is refused, never accepted as a second
+        // verdict: absence is a legacy reading, never a way past the rule.
         assert!(matches!(
             state.check_as(
                 &Actor::Engine,
                 &review_gate(true, Some(provenance_for("codex/m1", 0))),
                 7_000
             ),
-            Err(RuleError::StaleReviewVerdict { .. })
+            Err(RuleError::ReviewAlreadyDecided { .. })
         ));
+    }
+
+    /// One review is decided once, whatever answers it.
+    ///
+    /// The M9 gate's second run found a `shprd watch` and the service's pass both
+    /// deciding one reviewer's packet: both plan from a state that says the
+    /// review is owed, and a second `gate_passed` answering the same request used
+    /// to be accepted. The log under its lock is the only place that can tell the
+    /// second decider the first has already recorded the verdict, so the rules
+    /// are what refuse it.
+    #[test]
+    fn a_second_verdict_for_one_attempt_is_refused() {
+        for first in [true, false] {
+            for second in [true, false] {
+                let mut log = reviewable();
+                log.push(ev(
+                    6,
+                    review_gate(first, Some(provenance_for("codex/m1", 5))),
+                ));
+                let state = folded(&log);
+                assert!(
+                    matches!(
+                        state.check_as(
+                            &Actor::Engine,
+                            &review_gate(second, Some(provenance_for("codex/m1", 5))),
+                            7_000
+                        ),
+                        Err(RuleError::ReviewAlreadyDecided { .. })
+                    ),
+                    "a {second} verdict after a {first} one must be refused"
+                );
+            }
+        }
+        // A second attempt is a new review, so it is not refused: the refusal is
+        // per attempt, not per task. A failed verdict is what sends the task back
+        // to a worker, which is what a new attempt needs.
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        log.push(spawned(7, "a", 2, "agent-1"));
+        log.push(reported(8, "a", 2, &["src/a/x.rs"]));
+        log.push(review_requested(9, "a", 2, "codex/m1", false));
+        let state = folded(&log);
+        let second = EventKind::GatePassed {
+            task: "a".to_string(),
+            attempt: 2,
+            gate: "review".to_string(),
+            findings: Vec::new(),
+            source: Some(provenance_for("codex/m1", 9)),
+        };
+        state
+            .check_as(&Actor::Engine, &second, 10_000)
+            .unwrap_or_else(|err| panic!("a new attempt's verdict was refused: {err}"));
     }
 
     /// A human's drop of task `a`, at `seq`.
