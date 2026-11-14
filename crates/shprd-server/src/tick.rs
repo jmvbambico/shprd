@@ -886,8 +886,7 @@ impl Worker {
         let worktree = PathBuf::from(&attempt.worktree);
         let git = Git::new(&worktree);
         let head = git.head_sha().map_err(|err| err.to_string())?;
-        let approved =
-            found.pr.as_ref().and_then(|pr| pr.approved_head.as_deref()) == Some(head.as_str());
+        let approved = found.approved_head.as_deref() == Some(head.as_str());
         let has_work = attempt
             .report
             .as_ref()
@@ -1329,7 +1328,7 @@ fn local_landed_line(task: &str, base: &str, landed: &land::LocalLanded) -> Stri
         land::LocalLanded::NothingToMerge { .. } => {
             format!("nothing to merge: {task}'s branch has no work beyond {base}")
         }
-        land::LocalLanded::Waiting { reason, .. } => reason.advice(task),
+        land::LocalLanded::Waiting { reason, .. } => reason.local_advice(task),
     }
 }
 

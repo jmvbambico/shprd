@@ -316,9 +316,14 @@ fn step_for(
                     // Said once already: a pass must not repeat itself.
                     None
                 } else {
+                    let body = if facts.local {
+                        needs_you_body_local(&task.id)
+                    } else {
+                        needs_you_body(&task.id, pr.and_then(|pr| pr.number))
+                    };
                     Some(Step::NeedsYou {
                         task: task.id.clone(),
-                        body: needs_you_body(&task.id, pr.and_then(|pr| pr.number)),
+                        body,
                     })
                 }
             }
@@ -404,11 +409,7 @@ fn deps_landed(state: &RunState, task: &Task) -> bool {
 /// about the commits now on top of it. The head is the forge's word when it
 /// could be asked, else the commit the hand-in named.
 fn approval_matches(task: &Task, pr: Option<&PrFacts>) -> bool {
-    let Some(approved) = task
-        .pr
-        .as_ref()
-        .and_then(|known| known.approved_head.as_deref())
-    else {
+    let Some(approved) = task.approved_head.as_deref() else {
         return false;
     };
     let head = pr.and_then(|pr| pr.head.as_deref()).or_else(|| {
@@ -435,6 +436,14 @@ fn already_asked(state: &RunState, task: &Task) -> bool {
 /// What every `needs you` message for `task` begins with.
 pub fn needs_you_prefix(task: &str) -> String {
     format!("{task} is ready to land")
+}
+
+/// What a human is told when a ready task's `ask` has no forge to approve on.
+///
+/// A local landing has no pull request, so the only approval path is shprd's
+/// own `shprd approve <task>`: the message must not send the reader to a forge.
+pub fn needs_you_body_local(task: &str) -> String {
+    format!("{}: run `shprd approve {task}`", needs_you_prefix(task))
 }
 
 /// What a human is told when a ready task's policy is `ask`.

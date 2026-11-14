@@ -655,7 +655,8 @@ pub enum EventKind {
     TaskApproved {
         /// The task.
         task: TaskId,
-        /// The forge's number for the pull request.
+        /// The forge's number for the pull request, or `0` when the task lands
+        /// locally and has no pull request.
         number: u64,
         /// The commit the human approved.
         head_sha: String,

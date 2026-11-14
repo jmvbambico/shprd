@@ -471,3 +471,45 @@ fn a_local_ask_waits_for_a_person_and_local_checks_land_on_the_report() {
         "the task's work"
     );
 }
+
+#[test]
+fn a_local_ask_can_be_approved_on_the_task_itself() {
+    let fixture = Fixture::new();
+    fixture.write_config("ask");
+    fixture.start();
+    let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
+    let seed = fixture.seed.clone();
+
+    // The ask names the verb a person can actually run: there is no pull
+    // request, so nothing points at a forge.
+    let steps = fixture.tick();
+    assert_eq!(
+        actions(&steps),
+        vec!["needs_you:T1".to_string()],
+        "{steps:?}"
+    );
+    let detail = steps[0]
+        .get("detail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(detail.contains("shprd approve T1"), "{detail}");
+    assert!(!detail.contains("pull request"), "{detail}");
+    assert_eq!(fixture.integration_head(), seed);
+
+    // The task's own approval verb works without a pull request.
+    let approved = fixture.ok(&["approve", "T1", "--yes"]);
+    assert!(
+        approved.contains("approved T1's local landing"),
+        "{approved}"
+    );
+
+    // And the next pass lands the head the person approved.
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:T1".to_string()], "{steps:?}");
+    assert_eq!(steps[0].get("ok"), Some(&Value::Bool(true)), "{steps:?}");
+    assert_eq!(fixture.integration_head(), head);
+    assert_eq!(
+        fixture.git(&["show", "integration/m9:a.txt"]),
+        "the task's work"
+    );
+}

@@ -194,9 +194,9 @@ fn land_task(
         )))
     })?;
     // An approval counts only for the commit it named: a human who approved an
-    // older head said nothing about the commits pushed since.
-    let approved =
-        task.pr.as_ref().and_then(|pr| pr.approved_head.as_deref()) == Some(head.as_str());
+    // older head said nothing about the commits pushed since. A local landing
+    // has no pull request, so the approval is read from the task itself.
+    let approved = task.approved_head.as_deref() == Some(head.as_str());
     // Whether the branch had work of its own, for the one case git cannot tell
     // a merged branch from one that never moved.
     let has_work = attempt
@@ -336,7 +336,7 @@ fn local_landing_line(task_id: &str, base: &str, landed: &land::LocalLanded) -> 
         land::LocalLanded::NothingToMerge { .. } => {
             format!("nothing to merge: {task_id}'s branch has no work beyond {base}")
         }
-        land::LocalLanded::Waiting { reason, .. } => reason.advice(task_id),
+        land::LocalLanded::Waiting { reason, .. } => reason.local_advice(task_id),
     }
 }
 

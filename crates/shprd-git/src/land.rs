@@ -110,6 +110,19 @@ impl WaitReason {
             }
         }
     }
+
+    /// The same advice for a local landing, which has no pull request to
+    /// approve on a forge.
+    pub fn local_advice(self, task: &str) -> String {
+        match self {
+            WaitReason::Approval => {
+                format!("waiting for your approval: run `shprd approve {task}`")
+            }
+            WaitReason::Checks => {
+                String::from("waiting for its checks: run `shprd land` again once they pass")
+            }
+        }
+    }
 }
 
 /// What a landing did.

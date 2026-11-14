@@ -228,6 +228,12 @@ pub struct Task {
     /// head a human approved and whether it merged. `None` until a landing
     /// asks the forge for one.
     pub pr: Option<PrInfo>,
+    /// The commit a human approved for this task's landing, if one has.
+    ///
+    /// The approval lives on the task rather than only on its pull request
+    /// because a repository with no forge lands locally and has no pull request
+    /// to hang it on. A forge landing keeps the same value on [`Task::pr`].
+    pub approved_head: Option<String>,
     /// The head a landing found nothing of its own to merge at, if one did.
     ///
     /// It is the one landing outcome that moves nothing: the branch had no work
@@ -533,6 +539,7 @@ impl RunState {
                         dropped_reason: None,
                         last_status: None,
                         pr: None,
+                        approved_head: None,
                         nothing_to_merge: None,
                         fallbacks: Vec::new(),
                     },
@@ -908,7 +915,12 @@ impl RunState {
                 // run's pull request: the approval names one head, and landing
                 // honours it only while that head is still the tip.
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    let approved_head = entry.pr.as_ref().and_then(|pr| pr.approved_head.clone());
+                    let approved_head = entry
+                        .pr
+                        .as_ref()
+                        .and_then(|pr| pr.approved_head.clone())
+                        .or_else(|| entry.approved_head.clone());
+                    entry.approved_head = approved_head.clone();
                     entry.pr = Some(PrInfo {
                         number: *number,
                         url: url.clone(),
@@ -923,10 +935,16 @@ impl RunState {
                 number,
                 head_sha,
             } => {
-                if let Some(pr) = self.tasks.get_mut(task).and_then(|entry| entry.pr.as_mut())
-                    && pr.number == *number
-                {
-                    pr.approved_head = Some(head_sha.clone());
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    // A local landing has no pull request: the task itself
+                    // carries the approval, and a forge landing reads the same
+                    // value from its pull request.
+                    entry.approved_head = Some(head_sha.clone());
+                    if let Some(pr) = entry.pr.as_mut()
+                        && pr.number == *number
+                    {
+                        pr.approved_head = Some(head_sha.clone());
+                    }
                 }
             }
             EventKind::TaskLanded {
