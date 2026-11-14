@@ -912,6 +912,8 @@ fn start_in_tab(
             task: Some(task.to_string()),
             run: Some(env.spawn.run.clone()),
             repo: dir.to_path_buf(),
+            home: Some(env.spawn.home.clone()),
+            data: Some(env.spawn.data_dir.clone()),
         },
     ));
     mux.run(&tab.root_pane, &argv, &pairs)

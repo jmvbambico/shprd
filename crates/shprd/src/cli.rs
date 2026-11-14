@@ -24,7 +24,13 @@ pub struct Cli {
 /// Options every subcommand accepts.
 #[derive(Debug, Args)]
 pub struct Global {
-    /// Repository root; defaults to the git top level of the current directory.
+    /// Repository root; defaults to `$SHPRD_REPO`, then the git top level of the
+    /// current directory.
+    ///
+    /// A linked git worktree resolves to the repository it was cut from, so a
+    /// worker's own verbs find the run from its worktree; `$SHPRD_REPO` keeps
+    /// that meaning, and a verb that writes into the checkout itself (ask
+    /// install) still uses the worktree it names.
     #[arg(long, global = true, value_name = "PATH")]
     pub repo: Option<PathBuf>,
     /// Who is acting: `engine`, `orchestrator`, `human` or `agent:<ID>`.

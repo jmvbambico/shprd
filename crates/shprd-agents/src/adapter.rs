@@ -422,6 +422,8 @@ mod tests {
             task: Some("M9.2".to_owned()),
             run: Some("run-1".to_owned()),
             repo: PathBuf::from("/repo"),
+            home: None,
+            data: None,
         }
     }
 
