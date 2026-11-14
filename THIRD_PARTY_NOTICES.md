@@ -52,7 +52,8 @@ SOFTWARE.
   `provider_cut`, `provider_error`),
   `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
   `takes_over`, `head`), `mods/tasks/bin/herdr_task/tick.py` (`retry_one`,
-  `retry_pass`), `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
+  `retry_pass`), `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`,
+  `service/asks.ts`, `core/asks.js`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -64,13 +65,16 @@ SOFTWARE.
   long it waits, the launch argument order and the two fast-mode values, and
   the environment strip that keeps an agent from inheriting a parent Claude
   Code session — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`; also the settings model
-  — the layered resolution and the layer each value comes from, the reserved
-  built-in roles and the keyed role table, the per-repository entry and the
-  "a value equal to the inherited one is stored nowhere" write rule — in
-  `crates/shprd-core/src/settings/`; and the provider fallback ladder — the
-  error classes, the carry-on message and its waits, the record-tail reading of
-  a cut, the one backup handover and its chat-tail brief — in
+  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`; the ask file queue and
+  waiting hook — one request file, one answer, never a decision by the hook
+  itself — in `crates/shprd-core/src/ask.rs` and `crates/shprd/src/cmd/ask.rs`;
+  also the settings model — the layered resolution and the layer each value
+  comes from, the reserved built-in roles and the keyed role table, the
+  per-repository entry and the "a value equal to the inherited one is stored
+  nowhere" write rule — in `crates/shprd-core/src/settings/`; and the provider
+  fallback ladder — the error classes, the carry-on message and its waits, the
+  record-tail reading of a cut, the one backup handover and its chat-tail brief
+  — in
   `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
   `crates/shprd-watch/src/fallback.rs` and the events that record it in
   `crates/shprd-core/src/{event,state,rules}.rs`

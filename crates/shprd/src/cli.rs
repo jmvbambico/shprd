@@ -67,6 +67,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: TaskVerb,
     },
+    /// Asks: the hook a program runs when its agent waits for an answer.
+    Ask {
+        /// Which ask verb.
+        #[command(subcommand)]
+        cmd: AskCommand,
+    },
     /// Print the folded run state.
     State,
     /// Print the rehydration brief: what an agent needs to resume.
@@ -517,6 +523,80 @@ pub enum TaskCommand {
     /// The same verb as `shprd agent report`; this is the spelling a worker's
     /// brief uses.
     Report(ReportArgs),
+}
+
+/// The ask verbs.
+#[derive(Debug, Subcommand)]
+pub enum AskCommand {
+    /// Write one ask from a program's hook payload and wait for its answer.
+    ///
+    /// The payload is JSON on stdin, in the shape Claude Code and Codex send to
+    /// a `PermissionRequest` hook. Nothing is printed on timeout or on any
+    /// error: the hook never decides by itself.
+    Hook(AskHookArgs),
+    /// Write a program's ask hook into a task's worktree-local config file.
+    ///
+    /// The target is the program's own project file — Claude Code's
+    /// `.claude/settings.local.json`, Codex's `.codex/hooks.json` plus
+    /// `.codex/config.toml` — never the person's global config. A program with
+    /// no hook of its own (pi, opencode) is left untouched, and the board falls
+    /// back to reading its screen.
+    Install(AskInstallArgs),
+}
+
+/// Arguments for `ask install`.
+#[derive(Debug, Args)]
+pub struct AskInstallArgs {
+    /// The program whose hook is installed: `claude`, `codex`, and so on.
+    #[arg(long, value_name = "PROGRAM", default_value = "claude")]
+    pub program: String,
+    /// The task's worktree, whose config file gets the hook. Defaults to the
+    /// working directory.
+    #[arg(long, value_name = "DIR")]
+    pub worktree: Option<PathBuf>,
+    /// Where the hook script goes. Defaults to `<worktree>/.shprd/ask-hook.sh`.
+    #[arg(long, value_name = "PATH")]
+    pub hook: Option<PathBuf>,
+}
+
+/// What kind of ask a flag names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AskKindArg {
+    /// A question the agent asks and waits on.
+    Question,
+    /// Permission to run a tool.
+    Permission,
+    /// A plan to approve.
+    Plan,
+}
+
+/// Arguments for `ask hook`.
+#[derive(Debug, Args)]
+pub struct AskHookArgs {
+    /// The program whose hook is calling: `claude`, `codex`, and so on.
+    #[arg(long, value_name = "PROGRAM", default_value = "claude")]
+    pub program: String,
+    /// How long to wait for an answer, in seconds.
+    ///
+    /// Defaults to the harness's ask timeout, or 1800 seconds. A test uses a
+    /// short one; a timeout prints nothing, as the program's own prompt stays.
+    #[arg(long = "timeout-secs", value_name = "SECS")]
+    pub timeout_secs: Option<u64>,
+    /// The task the ask belongs to; normally `$SHPRD_TASK` inside the worktree.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+    /// The ask's kind, when the payload is not a program's hook shape.
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub kind: Option<AskKindArg>,
+    /// What the person is asked, when the payload is not a program's hook shape.
+    #[arg(long, value_name = "TEXT")]
+    pub text: Option<String>,
+    /// A choice a card offers. Repeat for more than one.
+    #[arg(long = "option", value_name = "LABEL")]
+    pub options: Vec<String>,
+    /// The ask's id; one is made when it is omitted.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
 }
 
 /// Agent-callable task verbs.

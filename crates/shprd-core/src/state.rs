@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::ask::{AskId, AskKind};
 use crate::event::{
     Actor, AgentId, CheckReport, Event, EventKind, FallbackAction, Finding, ProviderClass,
     ReportStatus, ResourceAction, ResourceKind, ReviewSource, TaskId,
@@ -25,6 +26,12 @@ pub struct RunState {
     pub agents: BTreeMap<AgentId, AgentInfo>,
     /// Escalations raised during the run, in order.
     pub escalations: Vec<Escalation>,
+    /// Asks raised during the run, keyed by task and ask id.
+    ///
+    /// The queue's files hold the same asks; the fold is what the board and
+    /// the derived status read, so an answer recorded here is the one every
+    /// view sees.
+    pub asks: BTreeMap<(TaskId, AskId), AskRecord>,
     /// Rule overrides that name no task, so they apply to the whole run.
     ///
     /// Per-task overrides live on [`Task::overrides`]; these have no task to
@@ -138,6 +145,45 @@ pub struct RunInfo {
     pub base_branch: String,
     /// Branch landed work is integrated on.
     pub integration_branch: String,
+}
+
+/// One ask as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskRecord {
+    /// Its id, unique inside the task.
+    pub id: AskId,
+    /// The task it belongs to.
+    pub task: TaskId,
+    /// Question, permission or plan.
+    pub kind: AskKind,
+    /// What the person is asked.
+    pub text: String,
+    /// The choices a card offers, when it has any.
+    pub options: Vec<String>,
+    /// When it was raised, ms since the Unix epoch.
+    pub created_at_ms: u64,
+    /// When it stops being open, ms since the Unix epoch, when it does.
+    pub expires_at_ms: Option<u64>,
+    /// The log sequence that raised it.
+    pub raised_seq: u64,
+    /// Its answer, once one was recorded.
+    pub answer: Option<AskAnswerRecord>,
+}
+
+impl AskRecord {
+    /// Whether it still waits for an answer at `now_ms`.
+    pub fn is_open_at(&self, now_ms: u64) -> bool {
+        self.answer.is_none() && self.expires_at_ms.is_none_or(|until| until > now_ms)
+    }
+}
+
+/// One ask's answer as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskAnswerRecord {
+    /// What the person answered.
+    pub text: String,
+    /// The log sequence that recorded the answer.
+    pub seq: u64,
 }
 
 /// A task in the run plan, plus its progress.
@@ -567,6 +613,38 @@ impl RunState {
                     entry.last_status = Some(TaskProgress {
                         message: message.clone(),
                         progress: *progress,
+                        seq: event.seq,
+                    });
+                }
+            }
+            EventKind::AskRaised {
+                task,
+                ask,
+                ask_kind,
+                text,
+                options,
+                created_at_ms,
+                expires_at_ms,
+            } => {
+                self.asks.insert(
+                    (task.clone(), ask.clone()),
+                    AskRecord {
+                        id: ask.clone(),
+                        task: task.clone(),
+                        kind: *ask_kind,
+                        text: text.clone(),
+                        options: options.clone(),
+                        created_at_ms: *created_at_ms,
+                        expires_at_ms: *expires_at_ms,
+                        raised_seq: event.seq,
+                        answer: None,
+                    },
+                );
+            }
+            EventKind::AskAnswered { task, ask, answer } => {
+                if let Some(record) = self.asks.get_mut(&(task.clone(), ask.clone())) {
+                    record.answer = Some(AskAnswerRecord {
+                        text: answer.clone(),
                         seq: event.seq,
                     });
                 }

@@ -90,9 +90,10 @@ sources = ["osc7501", "hook", "screen"]
 
 [asks]
 # opencode has a plugin API and herdr's plugin sees `permission.asked` and
-# `question.asked`; shprd has no installer for one yet, so no card is claimed.
-# unverified: that an opencode plugin can hold an ask until a person answers it —
-# M9.5 checks.
+# `question.asked`; shprd has no installer for one yet, so its installer is a
+# documented no-op (M9.5) and the watchdog falls back to screen detection.
+# unverified: that an opencode plugin can hold an ask until a person answers it
+# — a later adapter can add it when it can.
 supported = false
 
 [records]

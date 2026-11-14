@@ -473,6 +473,8 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
         EventKind::TaskStatus { .. } => "task_status",
+        EventKind::AskRaised { .. } => "ask_raised",
+        EventKind::AskAnswered { .. } => "ask_answered",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
@@ -509,6 +511,8 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::Spawned { task, .. }
         | EventKind::Reported { task, .. }
         | EventKind::TaskStatus { task, .. }
+        | EventKind::AskRaised { task, .. }
+        | EventKind::AskAnswered { task, .. }
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }

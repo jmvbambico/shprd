@@ -22,13 +22,14 @@ use axum::{Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
 use shprd_core::event::Actor;
+use shprd_core::log::{Clock, SystemClock};
 use tower_http::trace::TraceLayer;
 
 use crate::actions;
 use crate::auth;
 use crate::dto::{
-    Action, ActionReply, ChangeDto, ClientMessage, ErrorCode, HealthDto, SettingsDto,
-    SettingsWriteDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ClientMessage, ErrorCode,
+    HealthDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
@@ -189,6 +190,11 @@ impl App {
         self.state.hub.clone()
     }
 
+    /// The repository whose log this service serves.
+    pub fn repo(&self) -> &Path {
+        &self.state.repo
+    }
+
     /// What the service tells a client about itself.
     pub fn info(&self) -> ServiceInfo {
         ServiceInfo {
@@ -264,6 +270,8 @@ pub(crate) fn router(state: AppState) -> Router {
     let guarded = Router::new()
         .route("/api/state", get(snapshot_handler))
         .route("/api/changes", get(changes))
+        .route("/api/asks", get(asks))
+        .route("/api/asks/answer", post(answer))
         .route("/api/action", post(action))
         .route("/api/settings", get(settings).put(put_settings))
         .route("/api/ws", get(socket))
@@ -290,7 +298,38 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let repo = state.repo.clone();
     let loaded = blocking(move || ledger::load(&repo)).await?;
     let (folded, _) = loaded.map_err(|err| ApiReject::internal(err.to_string()))?;
-    Ok(Json(SnapshotDto::from_state(&folded)))
+    Ok(Json(SnapshotDto::from_state(&folded, SystemClock.now_ms())))
+}
+
+/// `GET /api/asks`: every ask still waiting for the person.
+async fn asks(State(state): State<AppState>) -> Result<Json<AskListDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let now_ms = SystemClock.now_ms();
+    let list = blocking(move || actions::list_asks(&repo, now_ms)).await?;
+    Ok(Json(list?))
+}
+
+/// `POST /api/asks/answer`: answer one ask, exactly once.
+async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskReply>, ApiReject> {
+    let body: AnswerAsk = serde_json::from_slice(&body)
+        .map_err(|err| ApiReject::bad_request(format!("the body is not an answer: {err}")))?;
+    let repo = state.repo.clone();
+    let actor = state.actor.clone();
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let reply = blocking(move || {
+        actions::answer_ask(
+            &repo,
+            &actor,
+            &hub,
+            after_write.as_ref(),
+            &body.task,
+            &body.ask,
+            &body.answer,
+        )
+    })
+    .await?;
+    Ok(Json(reply?))
 }
 
 /// The query `GET /api/changes` takes.

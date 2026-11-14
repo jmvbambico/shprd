@@ -102,11 +102,12 @@ file = "path"
 sources = ["osc7501", "hook", "screen"]
 
 [asks]
-# pi has extensions but shprd has no installer for an ask hook of its own, so no
-# card is claimed.
+# pi has extensions but shprd has no installer for an ask hook of its own, so
+# its installer is a documented no-op (M9.5) and no card is claimed.
 # unverified: whether a pi extension can hold a permission, question or plan
-# ask until a person answers it — M9.5 checks. To check: load an extension on
-# `tool_call` in a scratch session and see whether pi waits for its answer.
+# ask until a person answers it — a later adapter can add it when it can. To
+# check: load an extension on `tool_call` in a scratch session and see whether
+# pi waits for its answer.
 supported = false
 
 [records]
