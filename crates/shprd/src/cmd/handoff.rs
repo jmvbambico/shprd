@@ -862,7 +862,7 @@ project_dirs = []
     }
 
     #[test]
-    fn a_backup_hand_off_starts_with_the_backup_roles_words() {
+    fn a_backup_hand_off_uses_the_backup_roles_words() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.env(&ctx, &["sh", "pi"]);
@@ -878,18 +878,19 @@ project_dirs = []
         };
         let report = handoff(&mux, &env, &request).unwrap_or_else(|err| panic!("{err}"));
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
-        // The backup role's shipped words come first, then the takeover
-        // context, then the task itself — not the brief the stopped worker was
-        // launched with.
+        // The backup role's shipped words and a freshly rendered task, not the
+        // brief the stopped worker was launched with, with the ladder's
+        // takeover context before both.
         assert!(
             brief.contains("You are taking over one shprd task"),
-            "the backup role's prompt leads: {brief}"
+            "the backup role's prompt is in the brief: {brief}"
         );
         assert!(brief.contains("<shprd-backup>"), "{brief}");
+        assert!(brief.contains("# T1 Hand a task over"), "{brief}");
         assert!(brief.contains("## Your settings"), "{brief}");
         assert!(
-            brief.contains("# T1 Hand a task over"),
-            "the task is still described: {brief}"
+            brief.contains("- Program: pi (this task)"),
+            "the block names the program that took over: {brief}"
         );
     }
 
