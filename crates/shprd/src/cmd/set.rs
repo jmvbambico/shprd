@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
+use shprd_agents::models::{AgentRef, list_models, parse_effort};
+use shprd_agents::spec::{HarnessSpec, load_dir};
 use shprd_core::config;
-use shprd_roster::models::{AgentRef, list_models, parse_effort};
-use shprd_roster::spec::{HarnessSpec, load_dir};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 use crate::cli::{SetArgs, SetRole, Toggle};

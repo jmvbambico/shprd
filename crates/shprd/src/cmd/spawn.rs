@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
+use shprd_agents::models::AgentRef;
+use shprd_agents::skills::{CompatEntry, Role as SkillRole, Verdict};
+use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 use shprd_core::config::Skills;
 use shprd_core::event::{Actor, EventKind, Finding, ResourceAction, ResourceKind, Severity};
 use shprd_core::state::{GateResult, ResourceStatus, RunState, Task, TaskStatus};
@@ -23,10 +27,6 @@ use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{AgentState, Mux};
-use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
-use shprd_roster::models::AgentRef;
-use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
-use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -1354,14 +1354,14 @@ pub fn render_brief(input: &BriefInput<'_>) -> String {
 pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, CliError> {
     let home = crate::ctx::resolve_home(home)?;
     let data = crate::cmd::roster::resolve_data_dir()?;
-    let specs = shprd_roster::spec::load_dir(&data.join("harness")).map_err(|err| {
+    let specs = shprd_agents::spec::load_dir(&data.join("harness")).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("loading {}", data.display())))
     })?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     let programs: Vec<Program> = specs
         .iter()
         .map(|spec| Program {
-            installed: shprd_roster::detect::find_binary(&spec.detect.binary, &path_env).is_some(),
+            installed: shprd_agents::detect::find_binary(&spec.detect.binary, &path_env).is_some(),
             spec: spec.clone(),
         })
         .collect();
@@ -1404,7 +1404,7 @@ fn read_compat(path: &Path) -> Result<Vec<CompatEntry>, CliError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let list = shprd_roster::skills::CompatList::load(path).map_err(|err| {
+    let list = shprd_agents::skills::CompatList::load(path).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("loading {}", path.display())))
     })?;
     Ok(list.skills)
@@ -2874,8 +2874,8 @@ project_dirs = []
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shprd_agents::skills::Role as SkillRole;
     use shprd_core::state::TaskStatus;
-    use shprd_roster::skills::Role as SkillRole;
 
     #[test]
     fn a_task_tab_record_is_matched_by_its_whole_name() {

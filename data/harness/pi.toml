@@ -45,11 +45,56 @@ system_prompt_args = ["--append-system-prompt", "{prompt_file}"]
 resume_args = ["--session-id", "{session}"]
 verified = false
 
+[permissions]
+# pi cannot ask for an approval: `pi --help` (1.4.0) has `--approve/--no-approve`
+# for trusting project files only, and no permission mode, so "ask before acting"
+# is the one mode a pi role cannot have (M7c 3.2's third refusal). There are two
+# modes it can keep: exactly as the person set pi up, and read-only.
+default = "default"
+full = "default"
+readonly = "read-only"
+modes = [
+  { id = "default", label = "As you set it up", args = [] },
+  { id = "read-only", label = "Read only", args = ["--tools", "read,grep,find,ls"] },
+]
+
+[permissions.across]
+# No cross-program map: Shepherdr maps only Claude and Codex, and pi's modes are
+# its own. A role that moves to pi starts at [permissions].default.
+
 [models]
 list_command = ["pi", "--list-models"]
 # `pi auth check --model <name>` wants the provider too, e.g.
 # `Command Code/deepseek/deepseek-v4.1-flash`; a bare model is ambiguous.
 provider_qualified = true
+
+[models.efforts]
+# `pi --help` (1.4.0): `--thinking <level> ... off, minimal, low, medium, high,
+# xhigh, max`.
+source = "static"
+levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[brief]
+# `--append-system-prompt` carries the brief as a path, like the launch flag
+# above. pi's own help says "text or file contents"; the M7 study reads it as a
+# path too (herdr-projects' table).
+# unverified: that pi reads a path given to `--append-system-prompt` rather than
+# appending the path itself as text — confirm on the first live launch (M9.2).
+delivery = "system-prompt-file"
+file = "path"
+
+[status]
+# The agent's own OSC 7501 report first, then the extension it runs for us, then
+# the bottom of its pane. Verified on this machine: herdr installs
+# ~/.pi/agent/extensions/herdr-agent-state.ts, which reports pi's state.
+sources = ["osc7501", "hook", "screen"]
+
+[asks]
+# pi has extensions but shprd has no installer for an ask hook of its own, so no
+# card is claimed.
+# unverified: whether a pi extension can hold a permission, question or plan
+# ask until a person answers it — M9.5 checks.
+supported = false
 
 [records]
 kind = "jsonl"

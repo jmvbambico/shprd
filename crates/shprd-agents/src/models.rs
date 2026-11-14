@@ -6,10 +6,17 @@
 //! so the string splits at the *first* `/` only. Some CLIs (pi) need the
 //! provider to be part of the model name; a spec says so with
 //! [`crate::spec::ModelsSpec::provider_qualified`].
+//!
+//! A program lists its models one of two ways, as
+//! [`crate::spec::CatalogSource`] says: asked of the program, or read from a
+//! static list in `data/models/` ([`StaticCatalog`]).
 
 use std::collections::BTreeSet;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::detect::{self, DetectError};
@@ -57,6 +64,24 @@ pub enum ModelError {
     /// The list command failed to run or timed out.
     #[error(transparent)]
     Detect(#[from] DetectError),
+    /// A static model catalog could not be read.
+    #[error("failed to read the static model catalog {path}: {source}")]
+    CatalogRead {
+        /// The file that failed.
+        path: PathBuf,
+        /// The underlying I/O error.
+        #[source]
+        source: io::Error,
+    },
+    /// A static model catalog is not valid TOML or does not match the schema.
+    #[error("failed to parse the static model catalog {path}: {source}")]
+    CatalogParse {
+        /// The file that failed.
+        path: PathBuf,
+        /// The underlying TOML error.
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 /// The effort levels a roster accepts, lowest to highest.
@@ -183,6 +208,73 @@ pub fn list_models(
     let output = detect::run_with_timeout(&binary, &args, &[], timeout)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(Some(model_names(&stdout)))
+}
+
+impl ModelsSpec {
+    /// Where this spec's static catalog lives under a `data/models` directory,
+    /// if it names one.
+    ///
+    /// The file name is validated when the harness loads: a bare `*.toml` name
+    /// with no directory in it, so the catalogue can only sit in `data/models/`.
+    pub fn static_list_path(&self, models_dir: &Path) -> Option<PathBuf> {
+        self.static_list.as_ref().map(|name| models_dir.join(name))
+    }
+}
+
+/// A program's static model list, as one `data/models/<program>.toml` file.
+///
+/// For a program with no model-list command (Claude Code), the harness names
+/// this file with [`ModelsSpec::static_list`] and the picker reads the models
+/// and their effort levels from it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticCatalog {
+    /// The file's schema version; 1 is the only one this crate reads.
+    pub schema: u32,
+    /// The models, in the order the picker shows them.
+    #[serde(default)]
+    pub model: Vec<StaticModel>,
+}
+
+/// One model in a [`StaticCatalog`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticModel {
+    /// The name the program's model flag takes.
+    pub id: String,
+    /// The words a person sees, when they differ from the id.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The effort levels this model takes, lowest first.
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    /// The level this model starts at when a role names none, if it is known.
+    #[serde(default)]
+    pub default_effort: Option<String>,
+}
+
+impl StaticCatalog {
+    /// Read one static catalog file.
+    pub fn load(path: &Path) -> Result<StaticCatalog, ModelError> {
+        let source = std::fs::read_to_string(path).map_err(|source| ModelError::CatalogRead {
+            path: path.to_owned(),
+            source,
+        })?;
+        toml::from_str(&source).map_err(|source| ModelError::CatalogParse {
+            path: path.to_owned(),
+            source,
+        })
+    }
+
+    /// The model names, in the file's order.
+    pub fn names(&self) -> Vec<&str> {
+        self.model.iter().map(|model| model.id.as_str()).collect()
+    }
+
+    /// The model called `id`, if the list names one.
+    pub fn model(&self, id: &str) -> Option<&StaticModel> {
+        self.model.iter().find(|model| model.id == id)
+    }
 }
 
 /// The model names in `text`: the first token of each line, de-duplicated.
@@ -417,6 +509,49 @@ project_dirs = []
     fn a_spec_without_a_list_command_lists_nothing() {
         let spec = spec("fake", "", false);
         assert_eq!(listed(&spec, ""), None);
+    }
+
+    fn models_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/models")
+    }
+
+    #[test]
+    fn loads_the_shipped_claude_catalog() {
+        let path = models_dir().join("claude.toml");
+        let catalog = match StaticCatalog::load(&path) {
+            Ok(catalog) => catalog,
+            Err(error) => panic!("data/models/claude.toml should load: {error}"),
+        };
+        assert_eq!(catalog.schema, 1);
+        assert!(catalog.names().contains(&"opus"), "{:?}", catalog.names());
+        let opus = match catalog.model("opus") {
+            Some(model) => model,
+            None => panic!("the catalog should name opus"),
+        };
+        assert_eq!(opus.name.as_deref(), Some("Opus"));
+        assert!(opus.efforts.contains(&"xhigh".to_owned()));
+    }
+
+    #[test]
+    fn a_spec_static_list_sits_in_the_models_dir() {
+        let spec = spec("claude", "", false);
+        assert_eq!(spec.models.static_list_path(&models_dir()), None);
+        let mut spec = spec;
+        spec.models.static_list = Some("claude.toml".to_owned());
+        assert_eq!(
+            spec.models.static_list_path(&models_dir()),
+            Some(models_dir().join("claude.toml"))
+        );
+    }
+
+    #[test]
+    fn an_unreadable_static_catalog_is_an_error() {
+        let path = models_dir().join("nope.toml");
+        let error = match StaticCatalog::load(&path) {
+            Ok(_) => panic!("a missing catalog should be refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ModelError::CatalogRead { .. }), "{error}");
     }
 
     #[test]

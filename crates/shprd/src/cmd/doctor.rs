@@ -9,14 +9,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use shprd_agents::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
+use shprd_agents::env::{self, EnvContext, LaunchEnv, Role};
+use shprd_agents::families::{Families, agent_vendor};
+use shprd_agents::models::AgentRef;
+use shprd_agents::quota::{self, ProbeContext, QuotaReport, QuotaState};
+use shprd_agents::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
+use shprd_agents::spec::{HarnessSpec, load_dir};
 use shprd_core::config::{self, Config, Roster};
-use shprd_roster::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
-use shprd_roster::env::{self, EnvContext, LaunchEnv, Role};
-use shprd_roster::families::{Families, agent_vendor};
-use shprd_roster::models::AgentRef;
-use shprd_roster::quota::{self, ProbeContext, QuotaReport, QuotaState};
-use shprd_roster::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
-use shprd_roster::spec::{HarnessSpec, load_dir};
 
 use crate::cli::DoctorArgs;
 use crate::ctx::{CliError, resolve_home};
@@ -798,7 +798,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use shprd_roster::quota::Tier;
+    use shprd_agents::quota::Tier;
 
     /// A report in `state`, as a probe would return it.
     fn report(agent: &str, state: QuotaState) -> QuotaReport {

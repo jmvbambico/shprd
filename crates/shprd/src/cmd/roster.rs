@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use shprd_roster::detect::{Detection, SignIn, detect_all, vendor_name};
-use shprd_roster::spec::{HarnessSpec, load_dir};
+use shprd_agents::detect::{Detection, SignIn, detect_all, vendor_name};
+use shprd_agents::spec::{HarnessSpec, load_dir};
 
 use crate::cli::RosterArgs;
 use crate::ctx::CliError;
