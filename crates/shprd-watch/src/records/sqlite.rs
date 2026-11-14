@@ -7,12 +7,16 @@
 //!
 //! The database is opened read-only through a `mode=ro` URI: a watchdog must
 //! never be the reason a live CLI's store is locked or migrated.
+//!
+//! The cut reader is ported from Shepherdr's `provider_cut`
+//! (`mods/tasks/bin/herdr_task/provider.py`, commit `a3f327a`, MIT); see
+//! `THIRD_PARTY_NOTICES.md`.
 
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::{ReadError, RecordError, Scan, classify, truncate};
+use super::{Cut, NUDGE_MARK, ReadError, RecordError, Scan, classify, truncate};
 
 /// The error name opencode uses for a user-cancelled message; not a provider
 /// fault, so it is never reported.
@@ -47,6 +51,154 @@ pub fn scan_sqlite(db: &Path, session_dir: &Path, since_ms: u64) -> Result<Scan,
         apply_message(&mut scan, &data, created);
     }
     Ok(scan)
+}
+
+/// The provider cut a session ends on, or `None` when it carried on.
+///
+/// opencode and kilo keep the error on the message row itself; a later
+/// assistant message, or a person's message that is not shprd's carry-on,
+/// means the turn is over. A person's words live in the `part` table, which a
+/// database that predates it may not have: the words are then simply absent,
+/// which starts the tries again, as any other message from a person does.
+pub fn cut_sqlite(db: &Path, session_dir: &Path) -> Result<Option<Cut>, ReadError> {
+    let connection = open_read_only(db)?;
+    let directory = session_dir.to_string_lossy().to_string();
+    let mut messages = connection
+        .prepare(
+            "SELECT m.id, m.data, m.time_created FROM message m \
+             JOIN session s ON m.session_id = s.id \
+             WHERE s.directory = ?1 ORDER BY m.time_created, m.id",
+        )
+        .map_err(|e| ReadError::storage(db, e))?;
+    let rows = messages
+        .query_map((&directory,), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| ReadError::storage(db, e))?;
+    let mut cut: Option<Cut> = None;
+    let mut tries = 0u32;
+    for row in rows {
+        let (id, data, created) = row.map_err(|e| ReadError::storage(db, e))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+            continue;
+        };
+        let at = value
+            .get("time")
+            .and_then(|t| t.get("created"))
+            .and_then(|v| v.as_i64())
+            .and_then(|ms| u64::try_from(ms).ok())
+            .unwrap_or_else(|| u64::try_from(created).unwrap_or_default());
+        match value.get("role").and_then(|v| v.as_str()) {
+            Some("assistant") => {
+                let error = value.get("error").filter(|e| !e.is_null());
+                let Some(error) = error else {
+                    cut = None;
+                    continue;
+                };
+                let name = error
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("error");
+                if name == ABORTED {
+                    cut = None;
+                    continue;
+                }
+                tries = tries.saturating_add(1);
+                let detail = error
+                    .get("data")
+                    .and_then(|d| d.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(name);
+                cut = Some(Cut {
+                    id: id.clone(),
+                    kind: classify(&format!("{name} {detail}")),
+                    message: truncate(detail),
+                    at_ms: at,
+                    resets_at_ms: None,
+                    tries,
+                });
+            }
+            Some("user") => {
+                let words = part_text(&connection, &id);
+                cut = None;
+                if !words.contains(NUDGE_MARK) {
+                    tries = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(cut) = &mut cut {
+        cut.tries = cut.tries.max(1);
+    }
+    Ok(cut)
+}
+
+/// The conversation of one session, latest last, as a handover carries it.
+///
+/// The message row names who spoke and the `part` rows hold the words; a
+/// database without the part table has no text to read, which is `None` rather
+/// than an empty chat that would claim the agent said nothing.
+pub fn chat_tail_sqlite(db: &Path, session_dir: &Path) -> Result<String, ReadError> {
+    let connection = open_read_only(db)?;
+    let directory = session_dir.to_string_lossy().to_string();
+    let mut messages = connection
+        .prepare(
+            "SELECT m.id, m.data FROM message m \
+             JOIN session s ON m.session_id = s.id \
+             WHERE s.directory = ?1 ORDER BY m.time_created, m.id",
+        )
+        .map_err(|e| ReadError::storage(db, e))?;
+    let rows = messages
+        .query_map((&directory,), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| ReadError::storage(db, e))?;
+    let mut said = Vec::new();
+    let mut any = false;
+    for row in rows {
+        let (id, data) = row.map_err(|e| ReadError::storage(db, e))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+            continue;
+        };
+        let person = match value.get("role").and_then(|v| v.as_str()) {
+            Some("assistant") => false,
+            Some("user") => true,
+            _ => continue,
+        };
+        any = true;
+        said.push((person, part_text(&connection, &id)));
+    }
+    if !any {
+        return Err(ReadError::storage(db, "no message rows to read"));
+    }
+    Ok(super::tail_lines(said))
+}
+
+/// The words of one message's parts, or empty when the table or row is absent.
+fn part_text(connection: &Connection, message_id: &str) -> String {
+    let Ok(mut parts) =
+        connection.prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY id")
+    else {
+        return String::new();
+    };
+    let Ok(rows) = parts.query_map((message_id,), |row| row.get::<_, String>(0)) else {
+        return String::new();
+    };
+    rows.filter_map(Result::ok)
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .filter_map(|value| {
+            value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Open `db` read-only, refusing to create or migrate anything.
@@ -117,7 +269,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::records::ErrorKind;
+    use crate::records::{ErrorKind, NUDGE_MARK, Verdict};
 
     /// One message row: session id, session directory, created ms, data JSON.
     type Row<'a> = (&'a str, &'a str, i64, &'a str);
@@ -131,7 +283,8 @@ mod tests {
             .execute_batch(
                 "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER);
                  CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
-                    time_updated INTEGER, data TEXT);",
+                    time_updated INTEGER, data TEXT);
+                 CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT);",
             )
             .unwrap();
         for (index, (session, directory, created, data)) in rows.iter().enumerate() {
@@ -211,6 +364,183 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Quota);
         assert_eq!(error.message, "insufficient credit");
         assert_eq!(error.at_ms, Some(1_793_077_200_000));
+    }
+
+    /// Add the words of user message `m<index>` to a fixture database.
+    fn add_words(path: &Path, index: usize, text: &str) {
+        let connection = Connection::open(path).unwrap();
+        let data = serde_json::json!({"type": "text", "text": text}).to_string();
+        connection
+            .execute(
+                "INSERT INTO part (id, message_id, data) VALUES (?1, ?2, ?3)",
+                (format!("p{index}"), format!("m{index}"), data),
+            )
+            .unwrap();
+    }
+
+    /// An assistant message row with an error, or a plain answer when `error` is None.
+    fn assistant(created: i64, error: Option<(&str, &str)>) -> String {
+        match error {
+            Some((name, message)) => serde_json::json!({
+                "role": "assistant",
+                "time": {"created": created},
+                "error": {"name": name, "data": {"message": message}},
+            })
+            .to_string(),
+            None => serde_json::json!({
+                "role": "assistant",
+                "time": {"created": created},
+            })
+            .to_string(),
+        }
+    }
+
+    fn user(created: i64) -> String {
+        serde_json::json!({"role": "user", "time": {"created": created}}).to_string()
+    }
+
+    #[test]
+    fn a_cut_is_classified_per_error_class() {
+        let worktree = Path::new("/tmp/worktree");
+        let cases = [
+            (
+                "APIError",
+                "rate limit reached",
+                ErrorKind::RateLimit,
+                Verdict::Passing,
+                "Rate limited",
+            ),
+            (
+                "UnknownError",
+                "insufficient credit",
+                ErrorKind::Quota,
+                Verdict::Lasting,
+                "Out of allowance",
+            ),
+            (
+                "APIError",
+                "401 Unauthorized: invalid api key",
+                ErrorKind::Auth,
+                Verdict::Lasting,
+                "Signed out",
+            ),
+            (
+                "APIError",
+                "server overloaded",
+                ErrorKind::Overloaded,
+                Verdict::Passing,
+                "Provider overloaded",
+            ),
+            (
+                "APIError",
+                "invalid request",
+                ErrorKind::Other,
+                Verdict::Lasting,
+                "Provider error",
+            ),
+        ];
+        for (name, message, kind, verdict, reason) in cases {
+            let data = assistant(1_793_073_600_000, Some((name, message)));
+            let (_dir, path) = fixture(
+                "opencode.db",
+                &[("s1", "/tmp/worktree", 1_793_073_600_000, &data)],
+            );
+            let cut = cut_sqlite(&path, worktree).unwrap().expect("a cut");
+            assert_eq!(cut.kind, kind, "{message}");
+            assert_eq!(cut.verdict(), verdict, "{message}");
+            assert_eq!(cut.reason(), reason, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_later_answer_ends_the_cut() {
+        let worktree = Path::new("/tmp/worktree");
+        let error = assistant(1_793_073_600_000, Some(("APIError", "rate limit reached")));
+        let answer = assistant(1_793_074_000_000, None);
+        let (_dir, path) = fixture(
+            "opencode.db",
+            &[
+                ("s1", "/tmp/worktree", 1_793_073_600_000, &error),
+                ("s1", "/tmp/worktree", 1_793_074_000_000, &answer),
+            ],
+        );
+        assert!(cut_sqlite(&path, worktree).unwrap().is_none());
+    }
+
+    #[test]
+    fn tries_count_cut_turns_since_a_person_wrote() {
+        let worktree = Path::new("/tmp/worktree");
+        let error = assistant(1_793_073_600_000, Some(("APIError", "server overloaded")));
+        let nudge_words = format!("Carry on: {NUDGE_MARK} (provider overloaded)");
+        let (_dir, path) = fixture(
+            "kilo.db",
+            &[
+                ("s1", "/tmp/worktree", 1_793_073_600_000, &error),
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_600_100,
+                    &user(1_793_073_600_100),
+                ),
+                ("s1", "/tmp/worktree", 1_793_074_000_000, &error),
+            ],
+        );
+        add_words(&path, 1, &nudge_words);
+        assert_eq!(cut_sqlite(&path, worktree).unwrap().unwrap().tries, 2);
+
+        let person = r#"{"role":"user","time":{"created":1793074200000}}"#;
+        let third = assistant(1_793_075_000_000, Some(("APIError", "server overloaded")));
+        let (_dir, path) = fixture(
+            "kilo.db",
+            &[
+                ("s1", "/tmp/worktree", 1_793_073_600_000, &error),
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_600_100,
+                    &user(1_793_073_600_100),
+                ),
+                ("s1", "/tmp/worktree", 1_793_074_000_000, &error),
+                ("s1", "/tmp/worktree", 1_793_074_100_000, person),
+                ("s1", "/tmp/worktree", 1_793_075_000_000, &third),
+            ],
+        );
+        add_words(&path, 1, &nudge_words);
+        add_words(&path, 3, "try again");
+        assert_eq!(cut_sqlite(&path, worktree).unwrap().unwrap().tries, 1);
+    }
+
+    #[test]
+    fn a_chat_tail_skips_the_brief_and_keeps_the_conversation() {
+        let worktree = Path::new("/tmp/worktree");
+        let (_dir, path) = fixture(
+            "opencode.db",
+            &[
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_600_000,
+                    &user(1_793_073_600_000),
+                ),
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_700_000,
+                    &assistant(1_793_073_700_000, None),
+                ),
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_800_000,
+                    &user(1_793_073_800_000),
+                ),
+            ],
+        );
+        add_words(&path, 0, "the brief");
+        add_words(&path, 2, "carry on");
+        let tail = chat_tail_sqlite(&path, worktree).unwrap();
+        assert!(!tail.contains("the brief"), "{tail}");
+        assert!(tail.contains("person: carry on"), "{tail}");
     }
 
     #[test]

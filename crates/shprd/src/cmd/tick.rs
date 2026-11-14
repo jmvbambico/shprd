@@ -12,6 +12,7 @@
 //!   "steps": [
 //!     {
 //!       "action": "start",            // start | land | mark_landed | needs_you
+//!                                     // | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
 //!       "detail": "started T1 attempt 1 with claude in ...",
@@ -104,11 +105,31 @@ pub(crate) fn worker_with_hub(
         let spawn_ctx = Ctx::new(repo.to_path_buf(), spawn_actor.clone(), false, true);
         crate::cmd::agent::start_for_tick(&spawn_ctx, &spawn_home, task)
     });
+    // The fallback ladder's host: transcript facts, sign-in probes, and the two
+    // effects it may have. A record-only pass has no tabs and no CLIs to probe,
+    // so it is not wired there.
+    let fallback: Option<shprd_server::FallbackSourceArc> = if record_only() {
+        None
+    } else {
+        let name = repo
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        ctx.state()
+            .ok()
+            .and_then(|state| state.run.map(|run| run.run_id))
+            .map(|run| {
+                std::sync::Arc::new(crate::cmd::live_fallback::LiveFallback::new(
+                    &repo, home, &run, &name,
+                )) as shprd_server::FallbackSourceArc
+            })
+    };
     Ok(Worker {
         repo,
         home: home.to_path_buf(),
         config,
         facts,
+        fallback,
         forge,
         start,
         actor,

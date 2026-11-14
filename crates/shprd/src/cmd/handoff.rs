@@ -37,6 +37,12 @@ pub struct HandoffRequest {
     /// the picker may choose the same agent again (and does, before it looks
     /// elsewhere), which is the only way a one-agent roster keeps working.
     pub same_worker: bool,
+    /// The opening the newcomer reads before the attempt's own brief.
+    ///
+    /// A backup handover supplies its own text — the chat tail and the work so
+    /// far — which then stands where the usual "you are taking over" section
+    /// would; the attempt's original brief still follows it.
+    pub opening: Option<String>,
 }
 
 /// The attempt being handed over: the latest one, which must be Working.
@@ -400,18 +406,22 @@ pub fn handoff(
         // A handoff is the same attempt, so nothing was archived for it.
         archive: None,
     };
-    let brief = handoff_brief(
-        &base_brief(env, &task.id, attempt.n, &start),
-        &Transfer {
-            from: &from,
-            to: &to.agent,
-            reason: &req.reason,
-            checkpoint: &checkpoint,
-            base_branch: &env.base_branch,
-            diffstat: &stats,
-            pane_tail: pane_tail.as_deref(),
-        },
-    );
+    let base = base_brief(env, &task.id, attempt.n, &start);
+    let brief = match &req.opening {
+        Some(opening) => format!("{opening}\n\n{base}"),
+        None => handoff_brief(
+            &base,
+            &Transfer {
+                from: &from,
+                to: &to.agent,
+                reason: &req.reason,
+                checkpoint: &checkpoint,
+                base_branch: &env.base_branch,
+                diffstat: &stats,
+                pane_tail: pane_tail.as_deref(),
+            },
+        ),
+    };
     spawn::write_brief(&brief_path, &brief)?;
     // Two agents in one worktree would both write the same files, so the
     // hand-off stops here: the checkpoint commit is already the record of the
@@ -576,6 +586,7 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
         reason: args.reason.clone(),
         to: args.to.clone(),
         same_worker: false,
+        opening: None,
     };
     let report = handoff(&mux, &env, &request)?;
     if ctx.json {
@@ -786,6 +797,7 @@ project_dirs = []
             reason: "the agent hit its limit".to_string(),
             to: to.map(str::to_string),
             same_worker: false,
+            opening: None,
         }
     }
 

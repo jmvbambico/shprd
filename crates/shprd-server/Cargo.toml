@@ -14,6 +14,7 @@ serde_json.workspace = true
 shprd-core = { path = "../shprd-core" }
 shprd-git = { path = "../shprd-git" }
 shprd-views = { path = "../shprd-views" }
+shprd-watch = { path = "../shprd-watch" }
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
