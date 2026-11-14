@@ -16,7 +16,6 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -30,7 +29,7 @@ use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
 
 use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg};
-use crate::ctx::{CliError, Ctx, resolve_root};
+use crate::ctx::{CliError, Ctx, resolve_checkout, resolve_root};
 
 /// The environment variable a worker's launch sets with its task id.
 const TASK_ENV: &str = "SHPRD_TASK";
@@ -180,7 +179,9 @@ pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
         // prompt is the only way left to answer.
         return Ok(());
     };
-    let root = resolve_run_repo(repo)?;
+    // The hook runs in a worker's worktree, and the queue it writes to is the
+    // run's: `resolve_root` follows a linked worktree to the repository.
+    let root = resolve_root(repo)?;
     let payload = Payload::read();
     let made = match (&args.kind, &args.text) {
         // A test, or a program whose payload shprd cannot read, may spell the
@@ -304,9 +305,11 @@ fn load_harness(dir: &Path, program: &str) -> Result<Harness, CliError> {
 pub fn install(args: &AskInstallArgs, repo: Option<&Path>) -> Result<(), CliError> {
     let dir = crate::cmd::roster::resolve_data_dir()?;
     let harness = load_harness(&dir, &args.program)?;
+    // The installer writes into the checkout it is pointed at, so a worktree
+    // stays a worktree here: only the run's log follows the repository.
     let worktree = match &args.worktree {
         Some(path) => path.clone(),
-        None => resolve_root(repo)?,
+        None => resolve_checkout(repo)?,
     };
     let binary = std::env::current_exe()
         .map_err(|err| CliError::other(anyhow!(err).context("finding the shprd binary")))?;
@@ -441,47 +444,6 @@ fn wait_and_print(
 fn ask_id(now_ms: u64) -> String {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     format!("{now_ms}.{}.{n}", std::process::id())
-}
-
-/// The run's repository, from a worktree when the hook runs in one.
-///
-/// A worker's working directory is its worktree, outside the repository, so
-/// `git rev-parse --show-toplevel` names the worktree and not the run. The git
-/// common directory's parent is the repository whose `.shprd/` holds the log
-/// and the ask queue.
-fn resolve_run_repo(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
-    let root = resolve_root(explicit)?;
-    if root.join(".git").is_dir() || root.join(".shprd").is_dir() {
-        return Ok(root);
-    }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["rev-parse", "--git-common-dir"])
-        .output();
-    let Ok(output) = output else {
-        return Ok(root);
-    };
-    if !output.status.success() {
-        return Ok(root);
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        return Ok(root);
-    }
-    let common = PathBuf::from(text);
-    let common = if common.is_absolute() {
-        common
-    } else {
-        root.join(common)
-    };
-    // A linked worktree's common dir is `<repo>/.git`; its parent is the repo.
-    if common.file_name().and_then(|name| name.to_str()) == Some(".git")
-        && let Some(parent) = common.parent()
-    {
-        return Ok(parent.to_path_buf());
-    }
-    Ok(root)
 }
 
 #[cfg(test)]

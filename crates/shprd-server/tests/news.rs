@@ -133,6 +133,7 @@ impl Fixture {
             forge: Arc::new(NoForge),
             local: false,
             start,
+            review: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),

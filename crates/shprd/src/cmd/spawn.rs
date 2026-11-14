@@ -3,7 +3,10 @@
 //! Spawning is the one verb that has effects outside the log, so all of it lives
 //! in [`spawn`], which takes the [`Mux`] as a parameter: the binary hands it a
 //! real adapter, and the tests hand it a [`shprd_mux::fake::FakeMux`]. Nothing in
-//! this module reads the environment or starts a process of its own.
+//! this module reads the environment or starts a process of its own, with one
+//! exception: when an effort level has to be checked against a model, the chosen
+//! program is asked for its catalog through [`shprd_agents::adapter::catalog`],
+//! and a test injects that catalog into [`SpawnEnv::catalogs`] instead.
 //!
 //! A spawn is one attempt at one task: it picks an agent, selects the skills
 //! that attempt must load, writes the brief, creates the worktree, opens the
@@ -17,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
-use shprd_agents::models::AgentRef;
+use shprd_agents::models::{AgentRef, Catalog};
 use shprd_agents::skills::{CompatEntry, Role as SkillRole, Verdict};
 use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 use shprd_core::config::Skills;
@@ -33,6 +36,13 @@ use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{AgentState, Mux};
 
 use crate::ctx::{CliError, Ctx};
+
+/// How long one model listing may take while a spawn decides whether to pass an
+/// effort flag.
+///
+/// The listing only feeds a warning, so a slow or absent CLI must not hold the
+/// spawn: a catalog that does not answer in time leaves the setting as it was.
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One agent CLI the spawn can launch.
 #[derive(Debug, Clone)]
@@ -73,6 +83,18 @@ pub struct SpawnEnv<'a> {
     pub workers: Vec<String>,
     /// `[skills]` from the config: the skills every worker is given.
     pub skills: Skills,
+    /// The repository's worker gate commands, from its resolved `[gates]`
+    /// config. Empty when it configures none, and then the brief says so rather
+    /// than telling the worker to run another project's gates.
+    pub gates: Vec<String>,
+    /// The model catalogs already read for this spawn, by program id. A test
+    /// injects fixtures here; on a machine the map is empty and the spawn asks
+    /// only the program it picked.
+    pub catalogs: BTreeMap<String, Catalog>,
+    /// The `data/` directory, where a program's static catalog lives. The
+    /// launched CLI is told it as `SHPRD_DATA_DIR`, so the agent's own `shprd`
+    /// finds the same harnesses the engine did.
+    pub data_dir: PathBuf,
     /// The curated skill compatibility list.
     pub compat: Vec<CompatEntry>,
     /// The environment the launched CLI would inherit.
@@ -115,6 +137,9 @@ pub struct SpawnReport {
     pub brief: PathBuf,
     /// The skills the attempt must load, in the order they were selected.
     pub skills: Vec<String>,
+    /// What the person should know about the launch: an effort level the model
+    /// cannot use, and so on. Nothing here is fatal.
+    pub warnings: Vec<String>,
     /// The attempt this spawn archived and replaced, when it was a retry.
     pub replaced: Option<Replaced>,
 }
@@ -191,6 +216,12 @@ pub fn spawn(
                 .filter(|effort| !effort.trim().is_empty())
         })
         .filter(|effort| !effort.trim().is_empty());
+    // What the catalog says about the level decides whether the flag is passed;
+    // the setting itself stays as it was written, so the brief can say both what
+    // was asked for and why it does nothing.
+    let (launch_effort, effort_warning) =
+        effective_effort(env, &pick.agent, pick.model.as_deref(), effort.clone());
+    let warnings: Vec<String> = effort_warning.into_iter().collect();
     let attempt = task.attempts.len() as u32 + 1;
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
@@ -225,10 +256,12 @@ pub fn spawn(
         branch: &branch,
         worktree: &worktree.display().to_string(),
         skills: &skills,
+        gates: &env.gates,
         archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
         prompt: Some(&context.prompt),
         settings: Some(&context.settings),
         role: context.role.as_ref(),
+        warnings: &warnings,
     });
     write_brief(&brief_path, &brief)?;
     // The workspace must exist before a worktree does, so a repo the human has
@@ -245,7 +278,7 @@ pub fn spawn(
             pick: &pick,
             applied: &chosen,
             task: &task.id,
-            effort: effort.as_deref(),
+            effort: launch_effort.as_deref(),
             brief: &brief,
             brief_path: &brief_path,
             worktree: &created,
@@ -279,8 +312,57 @@ pub fn spawn(
         tab,
         brief: brief_path,
         skills,
+        warnings,
         replaced,
     })
+}
+
+/// The effort to pass and the warning when the model cannot use it.
+///
+/// The setting itself is not changed here, only what reaches the argv: a level
+/// the catalog says the model cannot use is not passed, and the warning says
+/// why, so a person is not left believing it applies.
+fn effective_effort(
+    env: &SpawnEnv<'_>,
+    program: &str,
+    model: Option<&str>,
+    effort: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let Some(effort) = effort else {
+        return (None, None);
+    };
+    let Some(catalog) = catalog_for(env, program) else {
+        return (Some(effort), None);
+    };
+    match catalog.effort_warning(program, model, &effort) {
+        Some(warning) => (None, Some(warning)),
+        None => (Some(effort), None),
+    }
+}
+
+/// The catalog for `program`: the one a caller injected, else the one the
+/// program gives itself.
+///
+/// A test injects a fixture into [`SpawnEnv::catalogs`] and no CLI runs. On a
+/// machine the map is empty, and only the program the spawn picked is asked,
+/// with [`CATALOG_TIMEOUT`]; a listing that cannot be read is `None`, because
+/// this only ever feeds a warning.
+fn catalog_for(env: &SpawnEnv<'_>, program: &str) -> Option<Catalog> {
+    if let Some(catalog) = env.catalogs.get(program) {
+        return Some(catalog.clone());
+    }
+    let spec = env
+        .programs
+        .iter()
+        .find(|candidate| candidate.spec.id == program)
+        .map(|candidate| &candidate.spec)?;
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    shprd_agents::adapter::catalog(
+        spec,
+        &env.data_dir.join("models"),
+        &path_env,
+        CATALOG_TIMEOUT,
+    )
 }
 
 /// The name of the workspace that hosts a repository's tabs.
@@ -411,6 +493,8 @@ fn start_in_tab(
             task: Some(task.to_string()),
             run: Some(env.run.clone()),
             repo: worktree.path.clone(),
+            home: Some(env.home.clone()),
+            data: Some(env.data_dir.clone()),
         },
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
@@ -1461,6 +1545,9 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         programs,
         workers: config.roster.workers.clone(),
         skills: config.skills.clone(),
+        gates: config.gates.worker.clone(),
+        catalogs: BTreeMap::new(),
+        data_dir: data.clone(),
         compat,
         base_env,
         ready_wait: super::deliver::ready_wait(),
@@ -1920,6 +2007,9 @@ project_dirs = []
                     workers: vec!["tdd".to_string()],
                     ..Skills::default()
                 },
+                gates: vec!["cargo test --workspace".to_string()],
+                catalogs: BTreeMap::new(),
+                data_dir: self.home.path().to_path_buf(),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
@@ -2130,6 +2220,64 @@ project_dirs = []
         assert!(brief.contains("- Effort: high (you)"), "{brief}");
     }
 
+    /// A model its catalog says cannot think is not passed an effort flag, and
+    /// the launch says so: the setting looks applied but is not.
+    #[test]
+    fn a_no_thinking_model_is_not_passed_the_effort_flag() {
+        use shprd_agents::models::{Catalog, CatalogModel};
+
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"pi\"\nmodel = \"Command Code/deepseek/x\"\neffort = \"high\"\n",
+        );
+        env.programs.push(Program {
+            spec: fake_spec("pi"),
+            installed: true,
+        });
+        let catalog = Catalog {
+            models: vec![CatalogModel {
+                id: "Command Code/deepseek/x".to_string(),
+                name: "x".to_string(),
+                efforts: Vec::new(),
+                default_effort: None,
+                fast: false,
+            }],
+            efforts: vec!["off".to_string(), "low".to_string(), "high".to_string()],
+        };
+        env.catalogs.insert("pi".to_string(), catalog);
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("not thinking"),
+            "{:?}",
+            report.warnings
+        );
+        let launched: Vec<Vec<String>> = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv),
+                _ => None,
+            })
+            .collect();
+        let argv = launched
+            .first()
+            .unwrap_or_else(|| panic!("no CLI was started"));
+        assert!(
+            !argv.iter().any(|arg| arg == "--thinking"),
+            "a model that cannot think must not be passed a level: {argv:?}"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("## Warnings"), "{brief}");
+    }
+
     /// The shipped Claude Code spec, so a test uses the access modes and fast
     /// switch a real role can set.
     fn claude_spec() -> HarnessSpec {
@@ -2317,6 +2465,22 @@ project_dirs = []
         assert!(pairs.contains(&("SHPRD_TASK".to_string(), Some("T1".to_string()))));
         assert!(pairs.contains(&("SHPRD_RUN".to_string(), Some("t1".to_string()))));
         assert!(pairs.contains(&("SHPRD_ACTOR".to_string(), Some("agent:sh".to_string()))));
+        // The worker's own `shprd` must resolve this engine's config and
+        // harnesses, not whatever `$HOME` holds (bug 11).
+        assert!(
+            pairs.contains(&(
+                "SHPRD_HOME".to_string(),
+                Some(env.home.display().to_string())
+            )),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&(
+                "SHPRD_DATA_DIR".to_string(),
+                Some(env.data_dir.display().to_string())
+            )),
+            "{pairs:?}"
+        );
         assert!(!pairs.contains(&("GH_TOKEN".to_string(), Some("secret".to_string()))));
         assert!(pairs.contains(&("GH_TOKEN".to_string(), None)));
         // The spec has no system-prompt arguments, so the brief is typed in.
@@ -3477,10 +3641,12 @@ off = ["--no-fast"]
             branch: "shprd/m4/M4.4",
             worktree: "/wt/m4/M4.4",
             skills: &skills,
+            gates: &["cargo test --workspace".to_string()],
             archive: None,
             prompt: None,
             settings: None,
             role: None,
+            warnings: &[],
         });
         for needle in [
             "# M4.4 Make spawn real",
@@ -3525,10 +3691,12 @@ off = ["--no-fast"]
             branch: "shprd/m4/M4.4",
             worktree: "/wt/m4/M4.4",
             skills: &skills,
+            gates: &[],
             archive: None,
             prompt: None,
             settings: None,
             role: None,
+            warnings: &[],
         });
         for needle in [
             "## Why the previous attempt was sent back",
@@ -3559,10 +3727,12 @@ off = ["--no-fast"]
                 branch: "shprd/m4/M4.4",
                 worktree: "/wt/m4/M4.4",
                 skills: &skills,
+                gates: &[],
                 archive: None,
                 prompt: None,
                 settings: None,
                 role: None,
+                warnings: &[],
             })
         };
         assert!(!brief_for(1).contains("sent back"));

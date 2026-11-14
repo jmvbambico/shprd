@@ -59,6 +59,13 @@ impl Fixture {
         }
     }
 
+    /// Writes the person's settings file: a named reviewer, as M9.3 stores it.
+    fn settings(&self, text: &str) {
+        let dir = self.home.join(".config").join("shprd");
+        std::fs::create_dir_all(&dir).expect("mkdir the settings dir");
+        std::fs::write(dir.join("settings.toml"), text).expect("write the settings");
+    }
+
     /// Every event in the log, oldest first.
     fn events(&self) -> Vec<Event> {
         let path = self.repo.join(".shprd").join("events.jsonl");
@@ -87,6 +94,7 @@ impl Fixture {
             forge,
             local: false,
             start,
+            review: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),
@@ -417,6 +425,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         forge,
         local: false,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: None,
         actor: Actor::Engine,
         after_write: None,
         hub: hub.clone(),
@@ -473,6 +482,234 @@ fn a_pass_that_starts_a_task_records_it_once() {
     assert_eq!(report.steps.len(), 1);
     assert!(report.steps[0].ok);
     assert_eq!(*calls.lock().expect("the call log"), vec!["A".to_string()]);
+}
+
+/// A task that spawned and handed in, with one passing check and no review yet.
+fn handed_in(seq: u64) -> Vec<Event> {
+    vec![
+        ev(
+            seq,
+            EventKind::Spawned {
+                task: String::from("A"),
+                attempt: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/A"),
+                branch: String::from("shprd/r1/A"),
+            },
+        ),
+        ev(
+            seq + 1,
+            EventKind::Reported {
+                task: String::from("A"),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: String::from("done"),
+                tests: Vec::new(),
+                checks: vec![CheckReport {
+                    gate: String::from("tests"),
+                    command: String::from("cargo test"),
+                    exit_code: Some(0),
+                    output_tail: String::new(),
+                }],
+                changed_paths: Vec::new(),
+                commit: Some(String::from("abc123")),
+                skills_used: Vec::new(),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn a_hand_in_starts_the_engine_reviewer() {
+    // The worker hands in and the pass starts the reviewer, through the same
+    // review path the verb uses.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    // A reviewer is configured the M9.3 way: a role that names a program.
+    fixture
+        .settings("version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5-codex\"\n");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&calls);
+    let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, task: &str| {
+        recorded
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(task.to_string());
+        Ok(format!("started a reviewer on {task}"))
+    });
+    let worker = Worker {
+        repo: fixture.repo.clone(),
+        home: fixture.home.clone(),
+        config: config(shprd_core::config::MergePolicy::Auto),
+        facts: Arc::new(Scripted::default()),
+        fallback: None,
+        forge: Arc::new(NoForge),
+        start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: Some(review),
+        actor: Actor::Engine,
+        after_write: None,
+        hub: Hub::new(),
+        news: None,
+    };
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert_eq!(report.steps.len(), 1, "{:?}", report.steps);
+    assert!(report.steps[0].ok, "{:?}", report.steps);
+    assert_eq!(report.steps[0].action, "review");
+    assert_eq!(report.steps[0].task, "A");
+    assert_eq!(*calls.lock().expect("the call log"), vec!["A".to_string()]);
+}
+
+#[test]
+fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
+    // The review path is wired, but the settings name no reviewer, so there is
+    // nothing to start and the pass plans no review step.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    let review: shprd_server::Reviewer =
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}")));
+    let worker = Worker {
+        repo: fixture.repo.clone(),
+        home: fixture.home.clone(),
+        config: config(shprd_core::config::MergePolicy::Auto),
+        facts: Arc::new(Scripted::default()),
+        fallback: None,
+        forge: Arc::new(NoForge),
+        start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: Some(review),
+        actor: Actor::Engine,
+        after_write: None,
+        hub: Hub::new(),
+        news: None,
+    };
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert!(report.steps.is_empty(), "{:?}", report.steps);
+}
+
+/// A worker over `fixture` whose review path is `review`.
+fn reviewing(fixture: &Fixture, review: shprd_server::Reviewer) -> Worker {
+    Worker {
+        repo: fixture.repo.clone(),
+        home: fixture.home.clone(),
+        config: config(shprd_core::config::MergePolicy::Auto),
+        facts: Arc::new(Scripted::default()),
+        fallback: None,
+        forge: Arc::new(NoForge),
+        start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: Some(review),
+        actor: Actor::Engine,
+        after_write: None,
+        hub: Hub::new(),
+        news: None,
+    }
+}
+
+/// Every escalation the fixture's log holds, as (task, body, default action).
+fn escalations(fixture: &Fixture) -> Vec<(Option<String>, String, String)> {
+    fixture
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Escalated {
+                task,
+                body,
+                default_action,
+            } => Some((task, body, default_action)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_review_that_fails_after_its_request_is_escalated_once() {
+    // The real review records its request before it opens the tab (so `land`
+    // can trust it), so a multiplexer that is down leaves a request with no
+    // reviewer and no request-less retry. The pass must tell the person.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    fixture
+        .settings("version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5-codex\"\n");
+    let review: shprd_server::Reviewer = Arc::new(move |repo: &Path, task: &str| {
+        // What `review()` does before the tab: record who reviews this attempt.
+        let path = repo.join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).map_err(|err| err.to_string())?;
+        log.append(
+            Actor::Engine,
+            EventKind::ReviewRequested {
+                task: task.to_string(),
+                attempt: 1,
+                reviewer: String::from("codex"),
+                degraded: false,
+            },
+            &SystemClock,
+        )
+        .map_err(|err| err.to_string())?;
+        Err(String::from("the multiplexer is not running"))
+    });
+    let worker = reviewing(&fixture, review);
+
+    let first = worker.tick().expect("the pass ran");
+    assert_eq!(first.steps.len(), 1, "{:?}", first.steps);
+    assert_eq!(first.steps[0].action, "review");
+    assert!(!first.steps[0].ok, "{:?}", first.steps);
+
+    let recorded = escalations(&fixture);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let (task, body, action) = &recorded[0];
+    assert_eq!(task.as_deref(), Some("A"));
+    assert!(
+        body.starts_with("A: the engine's review did not start: "),
+        "{body}"
+    );
+    assert!(body.contains("the multiplexer is not running"), "{body}");
+    assert!(action.contains("--again"), "{action}");
+
+    // The recorded request is what stops the next pass planning it again.
+    let second = worker.tick().expect("the second pass ran");
+    assert!(second.steps.is_empty(), "{:?}", second.steps);
+    assert_eq!(
+        escalations(&fixture).len(),
+        1,
+        "the escalation is said once"
+    );
+}
+
+#[test]
+fn a_review_the_cross_vendor_rule_refuses_is_escalated_once() {
+    // A refusal records no request, so every pass plans the step again; the
+    // person hears once, not once per pass.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    fixture.settings("version = 1\n\n[roles.reviewer]\nagent = \"pi\"\nmodel = \"deepseek/deepseek-v4.1-flash\"\n");
+    let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, _task: &str| {
+        Err(String::from(
+            "the reviewer and the worker both run models from the deepseek family",
+        ))
+    });
+    let worker = reviewing(&fixture, review);
+
+    for _ in 0..2 {
+        let report = worker.tick().expect("the pass ran");
+        assert_eq!(report.steps.len(), 1, "{:?}", report.steps);
+        assert!(!report.steps[0].ok, "{:?}", report.steps);
+    }
+
+    let escalations = escalations(&fixture);
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    assert!(
+        escalations[0]
+            .1
+            .contains("both run models from the deepseek family"),
+        "{escalations:?}"
+    );
 }
 
 #[test]

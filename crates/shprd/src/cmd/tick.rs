@@ -11,8 +11,8 @@
 //! {
 //!   "steps": [
 //!     {
-//!       "action": "start",            // start | land | mark_landed | needs_you
-//!                                     // | nudge | backup | give_up
+//!       "action": "start",            // start | review | land | mark_landed
+//!                                     // | needs_you | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
 //!       "detail": "started T1 attempt 1 with claude in ...",
@@ -117,6 +117,19 @@ pub(crate) fn worker_with_hub(
         let spawn_ctx = Ctx::new(repo.to_path_buf(), spawn_actor.clone(), false, true);
         crate::cmd::agent::start_for_tick(&spawn_ctx, &spawn_home, task)
     });
+    // The engine starts the reviewer on a hand-in, as `shprd agent review` does:
+    // the closure is that verb's own `review()`, so the cross-vendor rule, the
+    // packet, the brief and the kickoff cannot drift between the two callers. A
+    // pass plans a review step only when the settings name a reviewer (the
+    // service asks on every pass) and the caller is not record-only.
+    let review_home = home.to_path_buf();
+    let review_actor = actor.clone();
+    let review: Option<shprd_server::Reviewer> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str| {
+            let review_ctx = Ctx::new(repo.to_path_buf(), review_actor.clone(), false, true);
+            crate::cmd::review::review_for_tick(&review_ctx, &review_home, task)
+        }) as shprd_server::Reviewer
+    });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two
     // effects it may have. A record-only pass has no tabs and no CLIs to probe,
     // so it is not wired there.
@@ -159,6 +172,7 @@ pub(crate) fn worker_with_hub(
         forge,
         local,
         start,
+        review,
         actor,
         after_write: None,
         hub,

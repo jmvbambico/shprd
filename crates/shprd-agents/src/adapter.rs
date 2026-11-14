@@ -29,13 +29,16 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
 use crate::env::{self, EnvContext, LaunchEnv, Role as EnvRole};
 use crate::harness::Harness;
 use crate::models::{self, Catalog, ModelError};
-use crate::spec::{BriefDelivery, CatalogSource, EffortSource, SpecError, Values, render_args};
+use crate::spec::{
+    BriefDelivery, CatalogSource, EffortSource, HarnessSpec, SpecError, Values, render_args,
+};
 
 /// One role's choice of program settings: `{program, model, effort, fast, perm}`.
 ///
@@ -90,6 +93,9 @@ pub struct Launch {
     pub env: LaunchEnv,
     /// Where the brief goes: in this argv, or typed into the pane.
     pub brief: BriefRoute,
+    /// What a person should know about the launch: an effort level the model
+    /// cannot use, and so on. Nothing here is fatal; the launch still runs.
+    pub warnings: Vec<String>,
 }
 
 /// Where a brief reaches the program.
@@ -114,9 +120,27 @@ pub fn launch(
     brief: &Brief,
     host: &Host<'_>,
 ) -> Result<Launch, AdapterError> {
+    launch_with_catalog(harness, pick, brief, host, None)
+}
+
+/// [`launch`], with the program's model catalog to check the effort against.
+///
+/// A level the catalog says the model cannot use — `pi --list-models` prints
+/// `thinking: no` for some models — is not passed as a flag, and the launch
+/// carries the warning instead, so a setting that does nothing does not look as
+/// if it applied. Without a catalog the level is kept: a listing nobody read is
+/// not a reason to take a working setting away.
+pub fn launch_with_catalog(
+    harness: &Harness,
+    pick: &Pick,
+    brief: &Brief,
+    host: &Host<'_>,
+    catalog: Option<&Catalog>,
+) -> Result<Launch, AdapterError> {
     pick.validate(harness)?;
     let spec = harness.spec();
     let mut argv = spec.launch.interactive.clone();
+    let mut warnings = Vec::new();
 
     if let Some(model) = &pick.model {
         let values = Values {
@@ -128,11 +152,18 @@ pub fn launch(
     if let Some(effort) = &pick.effort
         && let Some(template) = &spec.launch.effort_args
     {
-        let values = Values {
-            effort: Some(effort.clone()),
-            ..Values::default()
-        };
-        argv.extend(render_args(template, &values)?);
+        match catalog
+            .and_then(|catalog| catalog.effort_warning(harness.id(), pick.model.as_deref(), effort))
+        {
+            Some(warning) => warnings.push(warning),
+            None => {
+                let values = Values {
+                    effort: Some(effort.clone()),
+                    ..Values::default()
+                };
+                argv.extend(render_args(template, &values)?);
+            }
+        }
     }
     if harness.fast().available() {
         argv.extend(harness.fast().args(pick.fast).iter().cloned());
@@ -161,6 +192,7 @@ pub fn launch(
         argv,
         env: env::launch_env(host.base_env, host.role, host.env),
         brief: route,
+        warnings,
     })
 }
 
@@ -196,6 +228,25 @@ pub fn catalog_from_static(
     models_dir: &Path,
 ) -> Result<Option<Catalog>, AdapterError> {
     Ok(models::static_catalog(harness.spec(), models_dir)?)
+}
+
+/// Read a program's catalog for a check that may not fail.
+///
+/// The static list is read from `models_dir`; a program that lists its models
+/// itself is asked, with `timeout`. `None` when the program has no catalog or
+/// the call failed, because everything this feeds — a warning about an effort
+/// level — is a hint, never a refusal.
+pub fn catalog(
+    spec: &HarnessSpec,
+    models_dir: &Path,
+    path_env: &str,
+    timeout: Duration,
+) -> Option<Catalog> {
+    match spec.models.catalog_source() {
+        CatalogSource::Static => models::static_catalog(spec, models_dir).ok().flatten(),
+        CatalogSource::Command => models::load_catalog(spec, path_env, timeout).ok().flatten(),
+        CatalogSource::None => None,
+    }
 }
 
 impl Pick {
@@ -371,6 +422,8 @@ mod tests {
             task: Some("M9.2".to_owned()),
             run: Some("run-1".to_owned()),
             repo: PathBuf::from("/repo"),
+            home: None,
+            data: None,
         }
     }
 
@@ -609,6 +662,122 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The catalog a captured pi listing describes, read the way the picker
+    /// reads one: the shipped pi spec's parser over a fixture table.
+    fn pi_catalog(name: &str) -> Catalog {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => panic!("{} should be readable: {error}", path.display()),
+        };
+        match catalog_from_output(&harness("pi"), &text) {
+            Ok(catalog) => catalog,
+            Err(error) => panic!("the pi catalog should read: {error}"),
+        }
+    }
+
+    #[test]
+    fn a_no_thinking_model_does_not_get_the_effort_flag() {
+        let catalog = pi_catalog("pi-models-thinking.txt");
+        let choice = Pick {
+            model: Some("Command Code/deepseek/deepseek-v4.1-flash".to_owned()),
+            effort: Some("high".to_owned()),
+            ..pick("pi")
+        };
+        let base = base_env();
+        let env = ctx();
+        let launch = match launch_with_catalog(
+            &harness("pi"),
+            &choice,
+            &brief(),
+            &host(&base, &env),
+            Some(&catalog),
+        ) {
+            Ok(launch) => launch,
+            Err(error) => panic!("pi should launch: {error}"),
+        };
+        assert!(
+            !launch.argv.iter().any(|arg| arg == "--thinking"),
+            "a model that cannot think must not be passed a level: {:?}",
+            launch.argv
+        );
+        assert_eq!(
+            launch.warnings.len(),
+            1,
+            "the dropped level is said out loud: {:?}",
+            launch.warnings
+        );
+        assert!(
+            launch.warnings[0].contains("not thinking") && launch.warnings[0].contains("dropped"),
+            "{:?}",
+            launch.warnings
+        );
+    }
+
+    #[test]
+    fn a_thinking_model_keeps_the_effort_flag() {
+        let catalog = pi_catalog("pi-models-thinking.txt");
+        let choice = Pick {
+            model: Some("anthropic/claude-opus-4-8".to_owned()),
+            effort: Some("high".to_owned()),
+            ..pick("pi")
+        };
+        let base = base_env();
+        let env = ctx();
+        let launch = match launch_with_catalog(
+            &harness("pi"),
+            &choice,
+            &brief(),
+            &host(&base, &env),
+            Some(&catalog),
+        ) {
+            Ok(launch) => launch,
+            Err(error) => panic!("pi should launch: {error}"),
+        };
+        assert!(
+            launch
+                .argv
+                .windows(2)
+                .any(|pair| pair == argv(&["--thinking", "high"]).as_slice()),
+            "a model that thinks keeps its level: {:?}",
+            launch.argv
+        );
+        assert!(launch.warnings.is_empty(), "{:?}", launch.warnings);
+    }
+
+    #[test]
+    fn a_catalog_that_does_not_know_the_model_keeps_the_level() {
+        let catalog = pi_catalog("pi-models.txt");
+        let choice = Pick {
+            model: Some("somevendor/some-model".to_owned()),
+            effort: Some("high".to_owned()),
+            ..pick("pi")
+        };
+        let base = base_env();
+        let env = ctx();
+        let launch = match launch_with_catalog(
+            &harness("pi"),
+            &choice,
+            &brief(),
+            &host(&base, &env),
+            Some(&catalog),
+        ) {
+            Ok(launch) => launch,
+            Err(error) => panic!("pi should launch: {error}"),
+        };
+        assert!(
+            launch
+                .argv
+                .windows(2)
+                .any(|pair| pair == argv(&["--thinking", "high"]).as_slice()),
+            "a stale listing must not take a working level away: {:?}",
+            launch.argv
+        );
+        assert!(launch.warnings.is_empty());
     }
 
     #[test]
