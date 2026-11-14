@@ -94,12 +94,13 @@ pub enum Command {
     /// outlived a merged pull request lands cleanly. Merges, never rebases; a
     /// conflict is undone and escalated. Needs no terminal.
     Sync,
-    /// Push the integration branch and open its pull request; with `--merge`,
-    /// merge it when `[land]` allows.
+    /// Land a task through its own pull request, as `[land] merge` says; with
+    /// no task, push the run's integration branch and open its pull request,
+    /// merging it with `--merge` when `[land]` allows.
     Land(LandArgs),
-    /// Approve the run's pull request in shprd, for a maintainer whose forge
-    /// will not let them approve their own. It asks on the terminal, which an
-    /// agent's shell tool never has.
+    /// Approve a pull request in shprd, for a maintainer whose forge will not
+    /// let them approve their own: the run's, or with a task, that task's. It
+    /// asks on the terminal, which an agent's shell tool never has.
     Approve(ApproveArgs),
     /// Re-admit a dry agent: record that the run may use it again, so a spawn
     /// or a handoff stops refusing it. A human's verb, needing no terminal.
@@ -143,7 +144,15 @@ pub struct EndRunArgs {
 /// Arguments for `land`.
 #[derive(Debug, Args)]
 pub struct LandArgs {
-    /// Merge the pull request instead of only opening it.
+    /// The task to land through its own pull request. Without one, `land`
+    /// pushes the run's integration branch instead (the pre-M8.3 run-level
+    /// pull request), where `--merge` applies.
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
+    /// Merge the run's pull request instead of only opening it.
+    ///
+    /// A task's landing merges as `[land] merge` says, so this flag belongs to
+    /// the run-level pull request and is refused with a task.
     #[arg(long)]
     pub merge: bool,
 }
@@ -151,6 +160,9 @@ pub struct LandArgs {
 /// Arguments for `approve`.
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
+    /// Approve this task's own pull request instead of the run's.
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
     /// Answer the question for the record without asking, in a debug build
     /// only: a release binary ignores it and still needs a terminal.
     /// `SHPRD_ACTOR` still has to be unset or `human`.
