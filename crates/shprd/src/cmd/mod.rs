@@ -84,6 +84,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         },
         Some(Command::Ask { cmd }) => match cmd {
             AskCommand::Hook(args) => ask::hook(&args, cli.global.repo.as_deref()),
+            AskCommand::Raise(args) => ask::raise(&args, &ctx),
             AskCommand::Install(args) => ask::install(&args, cli.global.repo.as_deref()),
         },
         Some(Command::State) => dump(&ctx),

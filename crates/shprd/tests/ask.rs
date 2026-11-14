@@ -521,6 +521,132 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
 }
 
 #[test]
+fn a_raise_waits_for_an_answer_a_card_posts_and_prints_it() {
+    let (repo, state, home) = repo_with_a_task();
+    let service = Service::start(repo.path(), state.path(), home.path());
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(record_path(state.path())).expect("the record is there"),
+    )
+    .expect("the record is JSON");
+    let port = record["port"].as_u64().expect("a port");
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+
+    // The verb a worker runs when its CLI has no ask hook of its own. It is
+    // launched the way a worker is: inside the task's worktree, with the
+    // task's environment and no flags naming the run.
+    let wait = hook_timeout_secs().to_string();
+    let mut child = spawn_env(
+        repo.path(),
+        &[
+            "ask",
+            "raise",
+            "--kind",
+            "question",
+            "--text",
+            "Should add_ints stay two-argument?",
+            "--option",
+            "Keep two arguments",
+            "--option",
+            "Make it variadic",
+            "--id",
+            "raise-1",
+            "--timeout-secs",
+            &wait,
+        ],
+        &[("SHPRD_TASK", "T1"), ("SHPRD_ACTOR", "agent:pi")],
+    );
+
+    // The ask reaches the ledger and the queue, and the verb is still
+    // blocking: it exits only when an answer is there.
+    let ask_path = repo.path().join(".shprd/asks/T1/raise-1.json");
+    wait_until("the raise reaches the ledger", || {
+        raised_count(repo.path()) == 1 && ask_path.exists()
+    });
+    match child.try_wait() {
+        Ok(None) => {}
+        Ok(Some(status)) => panic!("the raise exited before any answer, with {status}"),
+        Err(err) => panic!("waiting for the raise failed: {err}"),
+    }
+
+    // The card is the worker's, with the choices the verb was given.
+    let raised = events(repo.path())
+        .into_iter()
+        .find(|event| event["kind"] == "ask_raised")
+        .expect("the ledger holds the raise");
+    assert_eq!(raised["actor"]["type"], "agent");
+    assert_eq!(raised["actor"]["id"], "pi");
+    let (status, body) = get(&format!("{base}/api/asks"), Some(&token)).expect("asks answer");
+    assert_eq!(status, 200);
+    let listed: Value = serde_json::from_str(&body).expect("asks are JSON");
+    assert_eq!(listed["asks"][0]["id"], "raise-1");
+    assert_eq!(listed["asks"][0]["task"], "T1");
+    assert_eq!(listed["asks"][0]["kind"], "question");
+    assert_eq!(listed["asks"][0]["options"][1], "Make it variadic");
+
+    // The person answers the card through the API.
+    let answer = serde_json::json!({
+        "task": "T1",
+        "ask": "raise-1",
+        "answer": "Keep two arguments"
+    });
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &answer);
+    assert_eq!(status, 200, "{body}");
+
+    // The blocking verb prints the answer in the person's own words and exits
+    // 0, which is what the worker carries on with.
+    let output = wait_for_child(child);
+    assert!(
+        output.status.success(),
+        "the raise failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Keep two arguments"
+    );
+
+    // The ledger records the answer once, and the card is gone.
+    assert_eq!(
+        events(repo.path())
+            .iter()
+            .filter(|event| event["kind"] == "ask_answered")
+            .count(),
+        1
+    );
+    let (_, body) = get(&format!("{base}/api/asks"), Some(&token)).expect("asks answer");
+    let listed: Value = serde_json::from_str(&body).expect("asks are JSON");
+    assert_eq!(listed["asks"].as_array().map(Vec::len), Some(0), "{body}");
+
+    service.stop();
+}
+
+/// A raise outside any task's worktree says so at once, rather than waiting for
+/// an answer to a card the run could never show.
+#[test]
+fn a_raise_without_a_task_says_what_is_missing() {
+    let (repo, _state, _home) = repo_with_a_task();
+    let output = run(
+        repo.path(),
+        &[
+            "ask",
+            "raise",
+            "--kind",
+            "question",
+            "--text",
+            "Which database?",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "a raise with no task must be refused"
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no task for this ask"), "{said}");
+    assert!(said.contains("--task"), "{said}");
+}
+
+#[test]
 fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
     let (repo, state, home) = repo_with_a_task();
     let service = Service::start(repo.path(), state.path(), home.path());
