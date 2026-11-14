@@ -46,6 +46,12 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
+    /// A task already had its one backup handover.
+    #[error("task {task:?} already had its backup handover")]
+    TaskAlreadyBackedUp {
+        /// The task.
+        task: TaskId,
+    },
     /// The task declares no scope.
     #[error("task {task:?} has an empty scope")]
     EmptyScope {
@@ -763,6 +769,26 @@ fn check_with(
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
             check_handed_off(state, task, to_agent, now_ms, provenance)
+        }
+        // The fallback ladder acts on an agent that is already running: the
+        // task it names must be one the run still holds, and nothing else is
+        // the log's to judge. A backup may only be recorded when the same task
+        // has no backup yet, which is the once-per-task rule read where the
+        // fact is written rather than trusted to the planner.
+        EventKind::Nudged { task, .. } | EventKind::ProviderGaveUp { task, .. } => {
+            check_not_dropped(state, task, provenance)
+        }
+        EventKind::Backup { task, .. } => {
+            check_not_dropped(state, task, provenance)?;
+            if state.tasks.get(task).is_some_and(|entry| {
+                entry
+                    .fallbacks
+                    .iter()
+                    .any(|record| record.action == crate::event::FallbackAction::Backup)
+            }) {
+                return Err(RuleError::TaskAlreadyBackedUp { task: task.clone() });
+            }
+            Ok(())
         }
         EventKind::Escalated { task, .. } => match task {
             Some(task) => task_in(state, task).map(|_| ()),

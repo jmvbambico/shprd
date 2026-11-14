@@ -13,6 +13,7 @@ pub mod handoff;
 pub mod integrate;
 pub mod janitor;
 pub mod land;
+pub mod live_fallback;
 pub mod override_rule;
 pub mod readmit;
 pub mod review;
@@ -180,6 +181,9 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::Nudged { .. } => "nudged",
+        EventKind::Backup { .. } => "backup",
+        EventKind::ProviderGaveUp { .. } => "provider_gave_up",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }

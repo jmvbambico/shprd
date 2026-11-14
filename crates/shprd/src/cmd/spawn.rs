@@ -1594,7 +1594,7 @@ pub fn live_tasks(
 /// Only `run`'s directory is read: a task id reused in a later run must not
 /// resolve to the older run's tab. The attempt number is part of the file name,
 /// so the highest one names the tab a prompt should reach.
-fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
+pub(crate) fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
     let prefix = format!("{task}-a");
     let mut best: Option<(u32, PathBuf)> = None;
     for file in std::fs::read_dir(briefs.join(run)).ok()?.flatten() {
@@ -2994,6 +2994,7 @@ mod tests {
             pr: None,
             last_status: None,
             nothing_to_merge: None,
+            fallbacks: Vec::new(),
         }
     }
 

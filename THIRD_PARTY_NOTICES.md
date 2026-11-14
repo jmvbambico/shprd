@@ -43,8 +43,12 @@ SOFTWARE.
   `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`),
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
   `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
-  `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`, `service/asks.ts`,
-  `core/asks.js`
+  `mods/tasks/bin/herdr_task/provider.py` (`PROVIDER_WAITS`, `NUDGE`,
+  `provider_cut`, `provider_error`),
+  `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
+  `takes_over`, `head`), `mods/tasks/bin/herdr_task/tick.py` (`retry_one`,
+  `retry_pass`), `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`,
+  `service/asks.ts`, `core/asks.js`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -54,10 +58,15 @@ SOFTWARE.
   and the agent-adapter facts — the Claude and Codex permission modes and the
   cross-program map between them, and where an ask hook is installed and how
   long it waits — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`,
-  and the ask file queue and waiting hook — one request file, one answer,
-  never a decision by the hook itself — in `crates/shprd-core/src/ask.rs` and
-  `crates/shprd/src/cmd/ask.rs`
+  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`; the
+  ask file queue and waiting hook — one request file, one answer, never a
+  decision by the hook itself — in `crates/shprd-core/src/ask.rs` and
+  `crates/shprd/src/cmd/ask.rs`; and the provider fallback ladder — the error
+  classes, the carry-on message and its waits, the record-tail reading of a
+  cut, the one backup handover and its chat-tail brief — in
+  `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
+  `crates/shprd-watch/src/fallback.rs` and the events that record it in
+  `crates/shprd-core/src/{event,state,rules}.rs`
 - License: MIT
 
 MIT License
