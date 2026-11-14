@@ -1,0 +1,32 @@
+# Claude Code's models, for a program that has no model-list command.
+#
+# `claude --help` (2.1.311) says `--model <model>` takes "an alias for the latest
+# model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name", and has no
+# verb that lists models, so this static list is what the picker shows.
+#
+# unverified: the exact aliases a 2.1.311 build accepts. The three below are the
+# ones its help text names; nothing on this machine lists the rest, so `haiku`
+# and the full model names are not claimed until a live check (M9.2). A name
+# typed by id is always passed through, so a missing entry only costs a menu row.
+#
+# Efforts: one list for every model, from `claude --help`:
+# `--effort <level> ... (low, medium, high, xhigh, max)`.
+#
+# unverified: which level a model starts at when a role names none, so no
+# `default_effort` is claimed here; M9.2 reads it off a launch.
+schema = 1
+
+[[model]]
+id = "fable"
+name = "Fable"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+
+[[model]]
+id = "opus"
+name = "Opus"
+efforts = ["low", "medium", "high", "xhigh", "max"]
+
+[[model]]
+id = "sonnet"
+name = "Sonnet"
+efforts = ["low", "medium", "high", "xhigh", "max"]
