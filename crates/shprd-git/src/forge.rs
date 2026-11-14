@@ -1,10 +1,13 @@
 //! The forge seam: everything shprd knows about pull requests.
 //!
-//! A run's work lands as one pull request, and shprd drives it through a
-//! forge — `gh` in production, [`FakeForge`] in tests. The trait is the whole
-//! contract: find an open pull request, create one, refresh its body, read its
-//! status, merge it. Nothing here pushes, and nothing here decides policy: the
-//! caller asks the questions, and [`PrStatus`] holds the answers.
+//! Work lands through pull requests, and shprd drives them through a forge —
+//! `gh` in production, [`FakeForge`] in tests. Since M8.3 every task has its
+//! own pull request, so the caller passes the task's branch to [`Forge::find_open`]
+//! and the commit it means to merge to [`Forge::merge`]; the run-wide path is
+//! kept for the old integration branch and uses the same calls. The trait is the
+//! whole contract: find an open pull request, create one, refresh its body, read
+//! its status, merge one commit. Nothing here pushes, and nothing here decides
+//! policy: the caller asks the questions, and [`PrStatus`] holds the answers.
 //!
 //! Every command runs as a program, never through a shell, so a branch name or
 //! a title can never turn into a command.
@@ -117,12 +120,17 @@ pub trait Forge {
     /// Fails when the forge cannot be asked.
     fn status(&self, number: u64) -> Result<PrStatus, ForgeError>;
 
-    /// Merges pull request `number`.
+    /// Squash-merges pull request `number`, and only while its head is
+    /// `head_sha`.
+    ///
+    /// Naming the commit is what keeps a landing honest: a branch that moved
+    /// between the read and the merge is refused by the forge rather than
+    /// merged at a commit nobody looked at.
     ///
     /// # Errors
     ///
     /// Fails when the forge refuses to merge it.
-    fn merge(&self, number: u64) -> Result<(), ForgeError>;
+    fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError>;
 }
 
 /// The real forge: `gh`, run in the repository the pull request belongs to.
@@ -322,12 +330,14 @@ impl Forge for GhForge {
         })
     }
 
-    fn merge(&self, number: u64) -> Result<(), ForgeError> {
+    fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
         let args = vec![
             "pr".to_string(),
             "merge".to_string(),
             number.to_string(),
-            "--merge".to_string(),
+            "--squash".to_string(),
+            "--match-head-commit".to_string(),
+            head_sha.to_string(),
         ];
         self.run(&args).map(|_| ())
     }
@@ -361,6 +371,11 @@ struct FakeState {
     next_number: u64,
     /// The URL the next `create` answers with, when the script sets one.
     create_url: Option<String>,
+    /// True when `merge` must fail, standing in for a forge that refuses.
+    merge_fails: bool,
+    /// True when `merge` leaves the pull request unmerged, standing in for a
+    /// forge that accepted the call without merging anything.
+    merge_silent: bool,
 }
 
 impl Default for FakeState {
@@ -371,6 +386,8 @@ impl Default for FakeState {
             calls: Vec::new(),
             next_number: 1,
             create_url: None,
+            merge_fails: false,
+            merge_silent: false,
         }
     }
 }
@@ -428,6 +445,9 @@ impl FakeForge {
         if let Some(url) = value.get("create_url").and_then(Value::as_str) {
             state.create_url = Some(url.to_string());
         }
+        if let Some(fails) = value.get("merge_fails").and_then(Value::as_bool) {
+            state.merge_fails = fails;
+        }
         Ok(state)
     }
 
@@ -472,6 +492,18 @@ impl FakeForge {
     /// The calls made so far, in order.
     pub fn calls(&self) -> Vec<String> {
         self.state.borrow().calls.clone()
+    }
+
+    /// Makes every `merge` fail, as a forge that refused would.
+    pub fn refuse_merges(&self) {
+        self.state.borrow_mut().merge_fails = true;
+    }
+
+    /// Makes every `merge` succeed without merging, as a forge that accepted
+    /// the call and did nothing would. It is how a caller's check that the
+    /// merge settled gets tested.
+    pub fn silence_merges(&self) {
+        self.state.borrow_mut().merge_silent = true;
     }
 
     /// Scripts the status `status` for pull request `number`.
@@ -565,8 +597,28 @@ impl Forge for FakeForge {
             }))
     }
 
-    fn merge(&self, number: u64) -> Result<(), ForgeError> {
-        self.record(format!("merge {number}"));
+    fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
+        self.record(format!("merge {number} {head_sha}"));
+        let mut state = self.state.borrow_mut();
+        if state.merge_fails {
+            return Err(ForgeError::Failed {
+                args: vec![
+                    "pr".to_string(),
+                    "merge".to_string(),
+                    number.to_string(),
+                    head_sha.to_string(),
+                ],
+                code: Some(1),
+                stderr: "the forge refused the merge".to_string(),
+            });
+        }
+        // A real merge moves the pull request to merged; the status keeps the
+        // head it was reported at, which is the commit that landed.
+        if !state.merge_silent
+            && let Some(status) = state.statuses.get_mut(&number)
+        {
+            status.merged = true;
+        }
         Ok(())
     }
 }
@@ -765,12 +817,15 @@ mod tests {
         let body = script.dir.join("body.md");
         let outcome = script.forge().and_then(|forge| {
             forge.edit_body(7, body.as_path())?;
-            forge.merge(7)
+            forge.merge(7, "abc1234")
         });
         assert!(outcome.is_ok(), "edit then merge must both work");
         let calls = script.calls();
         assert!(calls.contains("pr edit 7 --body-file"), "{calls}");
-        assert!(calls.contains("pr merge 7 --merge"), "{calls}");
+        assert!(
+            calls.contains("pr merge 7 --squash --match-head-commit abc1234"),
+            "{calls}"
+        );
     }
 
     #[test]
@@ -815,7 +870,7 @@ mod tests {
             let created = forge.create("main", "shprd/r1/int", "run t1", body)?;
             assert_eq!(created.number, 1, "the fake numbers from one");
             assert_eq!(forge.status(7)?, passed("abc1234"));
-            forge.merge(7)?;
+            forge.merge(7, "abc1234")?;
             Ok(())
         })();
         assert!(outcome.is_ok());
@@ -826,7 +881,7 @@ mod tests {
                 "edit_body 7 /tmp/body.md".to_string(),
                 "create main shprd/r1/int run t1 /tmp/body.md".to_string(),
                 "status 7".to_string(),
-                "merge 7".to_string(),
+                "merge 7 abc1234".to_string(),
             ]
         );
     }

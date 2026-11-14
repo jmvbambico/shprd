@@ -10,5 +10,6 @@ pub mod gate;
 pub mod git;
 pub mod integrate;
 pub mod janitor;
+pub mod land;
 pub mod sync;
 pub mod worktree;

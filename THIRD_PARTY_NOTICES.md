@@ -38,10 +38,15 @@ SOFTWARE.
 - Paths: `mods/tasks/bin/herdr_task/agents.py` (`task_status()` and the
   helpers it uses), `core/tasks.js` (`place()` and `readyWait()`),
   `mods/tasks/bin/herdr_task/queues.py` (`queue_reason()`),
-  `mods/tasks/bin/herdr_task/when.py` (`starts_words()`)
+  `mods/tasks/bin/herdr_task/when.py` (`starts_words()`),
+  `mods/tasks/bin/herdr_task/github.py` (`pr_body()` and the merge path),
+  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`)
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
-  `crates/shprd-views/src/derived.rs`
+  `crates/shprd-views/src/derived.rs`, and the per-task landing workflow —
+  the fresh start a new worktree branches from, the merge policy and
+  pull-request path, and the per-task pull-request body — in
+  `crates/shprd-git/src/{land,worktree}.rs` and `crates/shprd-views/src/pr.rs`
 - License: MIT
 
 MIT License

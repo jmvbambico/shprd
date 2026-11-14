@@ -35,23 +35,39 @@ pub enum Mux {
     Tuios,
 }
 
-/// When `shprd land --merge` may merge the run's pull request.
+/// When a task's pull request may be merged.
+///
+/// The policy is one answer for every landing: `ask` waits for the human,
+/// `checks` waits for the forge's checks, `auto` merges as soon as the pull
+/// request is open. A protected base branch outranks both of the automatic
+/// ones (see [`Land::policy_for`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MergePolicy {
     /// Merge only after a human approved the pull request.
     #[default]
     Ask,
-    /// Merge without approval, unless the base branch is protected.
-    Allow,
+    /// Merge once the pull request's checks pass.
+    Checks,
+    /// Merge as soon as the pull request is open.
+    ///
+    /// `allow` is the name this policy had before `checks` existed: a config
+    /// file that still says `allow` reads as `auto`, because that is what it
+    /// asked for.
+    #[serde(alias = "allow")]
+    Auto,
 }
 
-/// How a run's pull request is landed.
+/// How a pull request is landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Land {
-    /// Whether a merge needs a human's approval.
+    /// The policy for a base branch that is not protected.
     pub merge: MergePolicy,
-    /// Branches `allow` never merges into without approval.
+    /// Branches no policy merges into without a human's approval.
+    ///
+    /// The list is a guard against automatic merges into the branch that
+    /// ships, so it outranks `checks` and `auto` rather than being checked by
+    /// them: landing into one of these always waits for the human.
     pub protected: Vec<String>,
 }
 
@@ -60,6 +76,20 @@ impl Default for Land {
         Self {
             merge: MergePolicy::Ask,
             protected: vec!["main".to_string(), "master".to_string()],
+        }
+    }
+}
+
+impl Land {
+    /// The policy that applies to a pull request into `base`.
+    ///
+    /// A protected branch always asks. Every other branch uses the configured
+    /// policy.
+    pub fn policy_for(&self, base: &str) -> MergePolicy {
+        if self.protected.iter().any(|branch| branch == base) {
+            MergePolicy::Ask
+        } else {
+            self.merge
         }
     }
 }
@@ -360,9 +390,9 @@ pub struct ReviewLayer {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandLayer {
-    /// Whether a merge needs a human's approval.
+    /// The policy for a base branch that is not protected.
     pub merge: Option<MergePolicy>,
-    /// Branches `allow` never merges into without approval.
+    /// Branches no policy merges into without a human's approval.
     pub protected: Option<Vec<String>>,
 }
 
@@ -584,11 +614,11 @@ mod tests {
         let global = layer(
             r#"
             [land]
-            merge = "allow"
+            merge = "checks"
             "#,
         );
         let config = from_layers(std::slice::from_ref(&global));
-        assert_eq!(config.land.merge, MergePolicy::Allow);
+        assert_eq!(config.land.merge, MergePolicy::Checks);
         assert_eq!(
             config.land.protected,
             vec!["main".to_string(), "master".to_string()],
@@ -601,8 +631,49 @@ mod tests {
             "#,
         );
         let config = from_layers(&[global, repo]);
-        assert_eq!(config.land.merge, MergePolicy::Allow);
+        assert_eq!(config.land.merge, MergePolicy::Checks);
         assert_eq!(config.land.protected, vec!["trunk".to_string()]);
+    }
+
+    #[test]
+    fn the_policy_that_was_called_allow_reads_as_auto() {
+        // A config file written before `checks` existed asked for an automatic
+        // merge; `allow` is that same request under its old name.
+        let old = layer(
+            r#"
+            [land]
+            merge = "allow"
+            "#,
+        );
+        assert_eq!(
+            from_layers(std::slice::from_ref(&old)).land.merge,
+            MergePolicy::Auto
+        );
+        let auto = layer(
+            r#"
+            [land]
+            merge = "auto"
+            "#,
+        );
+        assert_eq!(
+            from_layers(std::slice::from_ref(&auto)).land.merge,
+            MergePolicy::Auto
+        );
+    }
+
+    #[test]
+    fn a_protected_branch_always_asks() {
+        let land = Land {
+            merge: MergePolicy::Auto,
+            protected: vec!["main".to_string()],
+        };
+        assert_eq!(land.policy_for("main"), MergePolicy::Ask);
+        assert_eq!(land.policy_for("integration/m8"), MergePolicy::Auto);
+        let checks = Land {
+            merge: MergePolicy::Checks,
+            protected: Vec::new(),
+        };
+        assert_eq!(checks.policy_for("main"), MergePolicy::Checks);
     }
 
     #[test]
@@ -613,7 +684,7 @@ mod tests {
             merge = "always"
             "#,
         );
-        assert!(parsed.is_err(), "only ask and allow are policies");
+        assert!(parsed.is_err(), "only ask, checks and auto are policies");
     }
 
     #[test]

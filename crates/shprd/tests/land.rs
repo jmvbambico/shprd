@@ -1,7 +1,8 @@
-//! End-to-end tests for `shprd land`: the run's pull request, and its merge
-//! policy. They drive the real binary against a throwaway repository whose
-//! `origin` is a local bare repository, with a scripted forge standing in for
-//! `gh` through `SHPRD_FAKE_FORGE`.
+//! End-to-end tests for `shprd land`: one task's own pull request, and the
+//! run-level pull request the integration branch used to land from. They drive
+//! the real binary against a throwaway repository whose `origin` is a local bare
+//! repository, with a scripted forge standing in for `gh` through
+//! `SHPRD_FAKE_FORGE`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -512,6 +513,178 @@ impl Fixture {
             |event| matches!(&event.kind, EventKind::PrMerged { number: n, .. } if *n == number),
         )
     }
+
+    /// Writes `[land]` with `merge`, protecting exactly `protected`.
+    ///
+    /// The per-task tests need `main` unprotected to exercise an automatic
+    /// merge, which the default list protects on purpose.
+    fn write_land_config(&self, merge: &str, protected: &[&str]) {
+        let dir = self.root.join(".shprd");
+        mkdir(&dir);
+        let list = protected
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write(
+            &dir.join("config.toml"),
+            &format!(
+                "[gates]\nworker = [\"true\"]\n\n[land]\nmerge = \"{merge}\"\nprotected = [{list}]\n"
+            ),
+        );
+    }
+
+    /// A real worktree for `task` on `branch`, cut from `main`.
+    fn task_worktree(&self, task: &str, branch: &str) -> PathBuf {
+        let layout = shprd_git::worktree::Layout::default_for_home(&self.home);
+        match shprd_git::worktree::create(&self.root, &layout, "r1", task, "main") {
+            Ok(worktree) => {
+                assert_eq!(worktree.branch, branch, "the layout names the branch");
+                worktree.path
+            }
+            Err(err) => panic!("creating the task's worktree: {err}"),
+        }
+    }
+
+    /// A task that reported a commit, passed a gate and was reviewed
+    /// independently, with its attempt working in `worktree` on `branch`.
+    fn passed_task_in(&self, id: &str, worktree: &Path, branch: &str) {
+        let path = worktree.display().to_string();
+        let head = self.git_in(worktree, &["rev-parse", "HEAD"]);
+        self.ok(&[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            id,
+            "--title",
+            "a task",
+            "--scope",
+            "a.txt",
+            "--acceptance",
+            "it works",
+        ]);
+        self.ok(&[
+            "agent",
+            "spawn",
+            "--record-only",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--agent",
+            "w1",
+            "--worktree",
+            &path,
+            "--branch",
+            branch,
+        ]);
+        self.ok(&[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "done",
+            "--changed",
+            "a.txt",
+            "--commit",
+            &head,
+        ]);
+        self.review_requested(id, "c1", false);
+        self.ok(&[
+            "agent",
+            "gate",
+            "pass",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--gate",
+            "lint",
+        ]);
+        let packet = self
+            .home
+            .join(".shprd")
+            .join("reviews")
+            .join("r1")
+            .join(format!("{id}-a1"));
+        if let Err(err) = std::fs::create_dir_all(&packet) {
+            panic!("mkdir {}: {err}", packet.display());
+        }
+        write(&packet.join("findings.json"), "[]");
+        self.ok(&[
+            "--as",
+            "engine",
+            "agent",
+            "review-verdict",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+        ]);
+    }
+
+    /// A task with work to land: its own worktree with one commit, reported and
+    /// reviewed. Returns the worktree and its head.
+    fn landable_task(&self, id: &str, branch: &str) -> (PathBuf, String) {
+        let worktree = self.task_worktree(id, branch);
+        write(&worktree.join("a.txt"), "the task's work\n");
+        self.git_in(&worktree, &["add", "--", "a.txt"]);
+        self.git_in(&worktree, &["commit", "-m", "the task's work"]);
+        let head = self.git_in(&worktree, &["rev-parse", "HEAD"]);
+        self.passed_task_in(id, &worktree, branch);
+        (worktree, head)
+    }
+
+    /// The outcomes the log recorded for `task`, oldest first.
+    fn landed_outcomes(&self, task: &str) -> Vec<EventKind> {
+        self.events()
+            .into_iter()
+            .filter(
+                |event| matches!(&event.kind, EventKind::TaskLanded { task: t, .. } if t == task),
+            )
+            .map(|event| event.kind)
+            .collect()
+    }
+}
+
+/// A forge script for one task's pull request: #1 at `head`, optionally already
+/// open for `branch`.
+fn task_script(branch: &str, head: &str, checks: Option<bool>, open: bool) -> String {
+    let mut script = serde_json::json!({
+        "status": [{
+            "number": 1,
+            "approved": false,
+            "checks_passed": checks,
+            "merged": false,
+            "head_sha": head,
+        }],
+    });
+    if open {
+        script["open"] = serde_json::json!([{
+            "number": 1,
+            "url": "https://example.invalid/pull/1",
+            "head": branch,
+        }]);
+    }
+    script.to_string()
+}
+
+/// The two vars a per-task landing test starts from: a run cut from `main`,
+/// a landable task on its own branch, and the config the policy needs.
+fn landing_task_fixture(merge: &str) -> (Fixture, String) {
+    let fixture = Fixture::new();
+    fixture.write_land_config(merge, &[]);
+    fixture.start();
+    let (_, head) = fixture.landable_task("T1", "shprd/r1/T1");
+    (fixture, head)
 }
 
 /// The calls the scripted forge recorded that start with `prefix`.
@@ -777,7 +950,8 @@ fn merge_waits_for_approval_and_merges_once_a_human_approves() {
     );
     assert_eq!(
         calls_with(&fixture.forge_calls(), "merge "),
-        vec!["merge 1".to_string()]
+        vec![format!("merge 1 {head}")],
+        "the merge names the commit it merges"
     );
     assert!(fixture.recorded_merge(1), "the merge is in the log");
 }
@@ -874,7 +1048,8 @@ fn a_shprd_approval_at_the_head_merges() {
     );
     assert_eq!(
         calls_with(&fixture.forge_calls(), "merge "),
-        vec!["merge 1".to_string()]
+        vec![format!("merge 1 {head}")],
+        "the merge names the commit it merges"
     );
     assert!(fixture.recorded_merge(1), "the merge is in the log");
 }
@@ -921,15 +1096,15 @@ fn a_stale_head_is_refused() {
 }
 
 #[test]
-fn allow_never_merges_into_a_protected_base() {
+fn auto_never_merges_into_a_protected_base() {
     let fixture = landed();
-    fixture.write_config("allow", None);
+    fixture.write_config("auto", None);
     let head = fixture.integration_head();
     fixture.script_forge(&status_script(&head, false, Some(true)));
     let message = fixture.refused(&["land", "--merge"]);
     assert!(
         message.contains("waiting for your approval: run `shprd approve`"),
-        "main is protected, so allow still waits: {message}"
+        "main is protected, so auto still waits: {message}"
     );
     assert!(!fixture.recorded_merge(1));
 }
@@ -1181,4 +1356,220 @@ fn drop_is_refused_without_a_terminal_and_for_an_agent_actor() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fixture.events().len(), before, "nothing was logged");
+}
+
+#[test]
+fn auto_landing_opens_one_task_pull_request_and_merges_it() {
+    let (fixture, head) = landing_task_fixture("auto");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(
+        printed.contains("merged https://example.invalid/pull/1 (task T1)"),
+        "{printed}"
+    );
+    let calls = fixture.forge_calls();
+    assert_eq!(calls_with(&calls, "create").len(), 1, "{calls:?}");
+    assert_eq!(
+        calls_with(&calls, &format!("merge 1 {head}")).len(),
+        1,
+        "the merge names the commit it merges: {calls:?}"
+    );
+    // The branch is on the remote, which is what the pull request proposes.
+    assert_eq!(
+        fixture.git(&["rev-parse", "refs/remotes/origin/shprd/r1/T1"]),
+        head
+    );
+    // The body is the task's own, written under shprd's home, never the repo.
+    let body_file = body_of(&calls_with(&calls, "create")[0]);
+    let body = match std::fs::read_to_string(&body_file) {
+        Ok(body) => body,
+        Err(err) => panic!("read {}: {err}", body_file.display()),
+    };
+    assert!(body.starts_with("Task: T1"), "{body}");
+    assert!(body.contains("## Summary\n\ndone"), "{body}");
+    assert!(body.contains("cross-vendor-review: passed"), "{body}");
+    assert!(
+        body_file.starts_with(&fixture.home),
+        "the body lives in shprd's home: {}",
+        body_file.display()
+    );
+    let outcomes = fixture.landed_outcomes("T1");
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert!(
+        matches!(&outcomes[0], EventKind::TaskLanded { outcome, head: h, number, base, .. }
+            if *outcome == shprd_core::event::LandOutcome::Merged
+                && h == &head
+                && *number == Some(1)
+                && base == "main"),
+        "{outcomes:?}"
+    );
+}
+
+#[test]
+fn a_second_landing_of_a_merged_task_records_nothing() {
+    let (fixture, head) = landing_task_fixture("auto");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    fixture.ok(&["land", "T1"]);
+    let before = fixture.events().len();
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(
+        printed.contains("already merged https://example.invalid/pull/1"),
+        "{printed}"
+    );
+    assert_eq!(
+        fixture.events().len(),
+        before,
+        "a landing that already finished writes no second record"
+    );
+}
+
+#[test]
+fn ask_landing_waits_for_the_human_then_merges_after_approve() {
+    let (fixture, head) = landing_task_fixture("ask");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(
+        printed.contains("waiting for your approval: run `shprd approve T1`"),
+        "{printed}"
+    );
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge").is_empty(),
+        "nothing merges before the human: {:?}",
+        fixture.forge_calls()
+    );
+    assert!(
+        fixture.landed_outcomes("T1").is_empty(),
+        "a waiting landing has no outcome"
+    );
+
+    let approved = fixture.ok(&["approve", "T1", "--yes"]);
+    assert!(
+        approved.contains("approved https://example.invalid/pull/1"),
+        "{approved}"
+    );
+    let head_approved = fixture
+        .events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::TaskApproved {
+                task,
+                number,
+                head_sha,
+            } if task == "T1" && number == 1 => Some(head_sha),
+            _ => None,
+        });
+    assert_eq!(head_approved.as_deref(), Some(head.as_str()));
+
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), true));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(printed.contains("merged"), "{printed}");
+    let outcomes = fixture.landed_outcomes("T1");
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+}
+
+#[test]
+fn checks_landing_waits_for_the_checks_and_merges_once_they_pass() {
+    let (fixture, head) = landing_task_fixture("checks");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, None, false));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(printed.contains("waiting for its checks"), "{printed}");
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge").is_empty(),
+        "{:?}",
+        fixture.forge_calls()
+    );
+
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), true));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(printed.contains("merged"), "{printed}");
+    let calls = fixture.forge_calls();
+    assert!(
+        calls_with(&calls, "create").is_empty(),
+        "the open pull request is reused, not opened again: {calls:?}"
+    );
+    assert_eq!(calls_with(&calls, "edit_body").len(), 1, "{calls:?}");
+}
+
+#[test]
+fn a_task_without_an_independent_review_is_refused_and_asks_no_forge() {
+    let fixture = Fixture::new();
+    fixture.write_land_config("auto", &[]);
+    fixture.start();
+    fixture.passed_task_with("T1", true);
+    fixture.script_forge("{}");
+    let message = fixture.refused(&["land", "T1"]);
+    assert!(message.contains("may not land yet"), "{message}");
+    assert!(message.contains("not independent"), "{message}");
+    assert!(
+        fixture.forge_calls().is_empty(),
+        "a refusal asks the forge nothing: {:?}",
+        fixture.forge_calls()
+    );
+}
+
+#[test]
+fn a_task_landing_refuses_the_run_level_merge_flag() {
+    let fixture = Fixture::new();
+    fixture.start();
+    let message = fixture.refused(&["land", "T1", "--merge"]);
+    assert!(
+        message.contains("`--merge` merges the run's pull request"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_dropped_task_has_nothing_to_land() {
+    let (fixture, head) = landing_task_fixture("auto");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    fixture.ok(&[
+        "drop",
+        "T1",
+        "--reason",
+        "the human changed their mind",
+        "--yes",
+    ]);
+    let message = fixture.refused(&["land", "T1"]);
+    assert!(message.contains("was dropped"), "{message}");
+    assert!(
+        fixture.forge_calls().is_empty(),
+        "nothing reaches the forge: {:?}",
+        fixture.forge_calls()
+    );
+}
+
+#[test]
+fn a_task_whose_checks_failed_is_refused_until_they_pass() {
+    let (fixture, head) = landing_task_fixture("checks");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(false), false));
+    let message = fixture.refused(&["land", "T1"]);
+    assert!(message.contains("checks failed"), "{message}");
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge").is_empty(),
+        "{:?}",
+        fixture.forge_calls()
+    );
+    assert!(
+        fixture.landed_outcomes("T1").is_empty(),
+        "a refused landing records no outcome"
+    );
+}
+
+#[test]
+fn a_protected_base_waits_for_a_human_even_under_auto() {
+    let fixture = Fixture::new();
+    fixture.write_land_config("auto", &["main"]);
+    fixture.start();
+    let (_, head) = fixture.landable_task("T1", "shprd/r1/T1");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(
+        printed.contains("waiting for your approval: run `shprd approve T1`"),
+        "{printed}"
+    );
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge").is_empty(),
+        "a protected base is never merged without the human: {:?}",
+        fixture.forge_calls()
+    );
 }

@@ -2870,6 +2870,7 @@ mod tests {
             attempts: Vec::new(),
             overrides: Vec::new(),
             dropped_reason: None,
+            pr: None,
             last_status: None,
         }
     }
