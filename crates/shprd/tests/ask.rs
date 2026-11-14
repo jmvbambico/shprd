@@ -509,6 +509,11 @@ fn an_install_writes_the_hook_only_inside_the_worktree() {
         Vec::<String>::new(),
         "the person's home is never written"
     );
+    assert_eq!(
+        tree(repo.path()),
+        Vec::<String>::new(),
+        "nothing outside the worktree is written, not even the run repo"
+    );
 
     // Installing again changes nothing.
     let output = ok_env(
@@ -569,6 +574,11 @@ fn a_codex_install_turns_the_worktrees_own_hooks_on() {
         tree(home.path()),
         Vec::<String>::new(),
         "the person's ~/.codex is never written"
+    );
+    assert_eq!(
+        tree(repo.path()),
+        Vec::<String>::new(),
+        "nothing outside the worktree is written, not even the run repo"
     );
     assert_eq!(
         tree(worktree.path()),

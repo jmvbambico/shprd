@@ -1287,7 +1287,6 @@ fn check_task_status(
     Ok(())
 }
 
-/// Rules for recording a gate outcome: it needs a completed report.
 /// Rules for raising an ask: it names a task the run holds, is new, and says
 /// something.
 fn check_ask_raised(
@@ -1357,6 +1356,7 @@ fn check_ask_answered(
     Ok(())
 }
 
+/// Rules for recording a gate outcome: it needs a completed report.
 fn check_gate(
     state: &RunState,
     task: &str,
