@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::event::{Actor, Event, EventKind};
-use shprd_core::log::{Clock, EventLog, SystemClock};
+use shprd_core::log::{AppendError, Clock, EventLog, SystemClock};
 use shprd_core::rules::RuleError;
 use shprd_core::state::RunState;
 use shprd_git::worktree::Layout;
@@ -145,15 +145,33 @@ impl Ctx {
 
     /// Checks `kind` against the current state, then appends it.
     ///
-    /// A refused event is never written. Returns the appended event.
+    /// A refused event is never written. The check runs with the log's lock
+    /// held ([`EventLog::append_checked`]), so two writers that would both pass
+    /// a check against the same state cannot both write: the second sees the
+    /// first's event and is refused rather than corrupting a log that must
+    /// fold.
     pub fn commit(&self, kind: EventKind) -> Result<Event, CliError> {
+        // The first check is the cheap one, against the log as it stands: a
+        // refused verb must leave no log file behind, and opening one to ask
+        // would create it. The second, under the lock, is the one that makes
+        // two writers safe.
         self.check(&kind)?;
         let clock = SystemClock;
         let mut log = EventLog::open(&self.log_path)
             .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
+        let actor = self.actor.clone();
+        let checked = kind.clone();
         let event = log
-            .append(self.actor.clone(), kind, &clock)
-            .map_err(|err| CliError::other(anyhow!(err).context("appending to the event log")))?;
+            .append_checked(actor.clone(), kind, &clock, move |events| {
+                let state = RunState::fold(events)?;
+                state.check_as(&actor, &checked, SystemClock.now_ms())
+            })
+            .map_err(|err| match err {
+                AppendError::Refused(refused) => CliError::Refused(refused),
+                AppendError::Log(err) => {
+                    CliError::other(anyhow!(err).context("appending to the event log"))
+                }
+            })?;
         Ok(event)
     }
 }
