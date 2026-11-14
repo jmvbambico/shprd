@@ -47,7 +47,11 @@ SOFTWARE.
   `core/settings.js` (`ROLES`, the role pick and level resolution,
   `otherCli()`), `mods/shepherdr-settings/main.js` (the per-scope level switch
   and the rule that a value equal to the inherited one is deleted),
-  `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
+  `mods/tasks/bin/herdr_task/provider.py` (`PROVIDER_WAITS`, `NUDGE`,
+  `provider_cut`, `provider_error`),
+  `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
+  `takes_over`, `head`), `mods/tasks/bin/herdr_task/tick.py` (`retry_one`,
+  `retry_pass`), `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -57,7 +61,16 @@ SOFTWARE.
   and the agent-adapter facts — the Claude and Codex permission modes and the
   cross-program map between them, and where an ask hook is installed and how
   long it waits — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`
+  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`; also
+  the settings model — the layered resolution and the layer each value comes
+  from, the reserved built-in roles and the keyed role table, the
+  per-repository entry and the "a value equal to the inherited one is stored
+  nowhere" write rule — in `crates/shprd-core/src/settings/`; and the provider
+  fallback ladder — the error classes, the carry-on message and
+  its waits, the record-tail reading of a cut, the one backup handover and its
+  chat-tail brief — in `crates/shprd-watch/src/records/{mod,claude,codex,pi,
+  sqlite}.rs`, `crates/shprd-watch/src/fallback.rs` and the events that record
+  it in `crates/shprd-core/src/{event,state,rules}.rs`
 - License: MIT
 
 MIT License

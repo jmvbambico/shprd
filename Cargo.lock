@@ -1199,6 +1199,7 @@ dependencies = [
  "shprd-core",
  "shprd-git",
  "shprd-views",
+ "shprd-watch",
  "tempfile",
  "thiserror",
  "tokio",

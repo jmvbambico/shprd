@@ -5,12 +5,16 @@
 //! marked with `isApiErrorMessage`, carry an `error` code (and sometimes an
 //! `apiError`), and phrase the limit and its reset time in
 //! `message.content[].text`.
+//!
+//! The cut reader is ported from Shepherdr's `provider_cut`
+//! (`mods/tasks/bin/herdr_task/provider.py`, commit `a3f327a`, MIT); see
+//! `THIRD_PARTY_NOTICES.md`.
 
 use std::path::Path;
 
 use super::{
-    ReadError, RecordError, Scan, classify, each_json_line, parse_rfc3339_ms, truncate, utc_year,
-    zoned_ms,
+    Cut, NUDGE_MARK, ReadError, RecordError, Scan, classify, each_json_line, parse_rfc3339_ms,
+    truncate, utc_year, zoned_ms,
 };
 
 /// Scan one Claude session record for errors and usage.
@@ -52,6 +56,93 @@ pub fn scan_claude(path: &Path, since_ms: u64) -> Result<Scan, ReadError> {
         }
     })?;
     Ok(scan)
+}
+
+/// The provider cut a Claude session ends on, or `None` when it carried on.
+///
+/// A line with `isApiErrorMessage` is a cut turn; a normal assistant answer
+/// clears the cut but keeps the count, and a person's own message (anything but
+/// shprd's carry-on) starts the count again. Sidechain lines are the agent's
+/// own helpers, not its conversation, so they are ignored.
+pub fn cut_claude(path: &Path) -> Result<Option<Cut>, ReadError> {
+    let mut cut: Option<Cut> = None;
+    let mut tries = 0u32;
+    each_json_line(path, |line| {
+        if line.get("isSidechain").and_then(|v| v.as_bool()) == Some(true) {
+            return;
+        }
+        match line.get("type").and_then(|v| v.as_str()) {
+            Some("assistant") => {
+                if line.get("isApiErrorMessage").and_then(|v| v.as_bool()) == Some(true) {
+                    tries = tries.saturating_add(1);
+                    let error = text_of(line.get("error"));
+                    let api_error = text_of(line.get("apiError"));
+                    let text = message_text(line);
+                    let at = line
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_rfc3339_ms)
+                        .unwrap_or_default();
+                    let id = line
+                        .get("uuid")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .or_else(|| {
+                            line.get("timestamp")
+                                .and_then(|v| v.as_str())
+                                .map(|at| format!("claude-{at}"))
+                        })
+                        .unwrap_or_else(|| format!("claude-{at}"));
+                    cut = Some(Cut {
+                        id,
+                        kind: classify(&format!("{error} {api_error} {text}")),
+                        message: truncated_message(&text, &error, &api_error),
+                        at_ms: at,
+                        resets_at_ms: parse_reset(&text, at),
+                        tries,
+                    });
+                } else {
+                    cut = None;
+                }
+            }
+            Some("user") => {
+                let Some(words) = user_text(line) else {
+                    return;
+                };
+                cut = None;
+                if !words.contains(NUDGE_MARK) {
+                    tries = 0;
+                }
+            }
+            _ => {}
+        }
+    })?;
+    if let Some(cut) = &mut cut {
+        cut.tries = cut.tries.max(1);
+    }
+    Ok(cut)
+}
+
+/// What a person wrote in a `user` line, or `None` when it is a tool result.
+fn user_text(line: &serde_json::Value) -> Option<String> {
+    let content = line.get("message").and_then(|m| m.get("content"))?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let parts = content.as_array()?;
+    if parts
+        .iter()
+        .any(|part| part.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+    {
+        return None;
+    }
+    Some(
+        parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// The string form of a JSON value, or empty when it is absent.
@@ -151,7 +242,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::records::ErrorKind;
+    use crate::records::{ErrorKind, NUDGE_MARK, Verdict};
 
     /// Write `lines` to `name` inside a fresh temp dir and return its path.
     fn fixture(name: &str, lines: &[&str]) -> (tempfile::TempDir, PathBuf) {
@@ -174,12 +265,98 @@ mod tests {
         );
         let scan = scan_claude(&path, 1_792_972_800_000).unwrap();
         let error = scan.last_error.unwrap();
-        assert_eq!(error.kind, ErrorKind::RateLimit);
+        assert_eq!(error.kind, ErrorKind::Quota);
         assert!(error.message.contains("weekly limit"));
         assert_eq!(error.at_ms, Some(1_793_082_600_000));
         assert_eq!(error.resets_at_ms, Some(1_793_077_200_000));
         assert_eq!(scan.last_activity_ms, Some(1_793_084_400_000));
         assert!(scan.usage.is_none());
+    }
+
+    /// One Claude error line for each class the ladder acts on.
+    fn error_line(code: &str, text: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-10-27T06:30:00Z","type":"assistant","isApiErrorMessage":true,"error":"{code}","message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_cut_is_classified_per_error_class() {
+        let cases = [
+            (
+                "rate_limit",
+                "Rate limit reached",
+                ErrorKind::RateLimit,
+                Verdict::Passing,
+                "Rate limited",
+            ),
+            (
+                "usage_limit_exceeded",
+                "You've hit your weekly limit",
+                ErrorKind::Quota,
+                Verdict::Lasting,
+                "Out of allowance",
+            ),
+            (
+                "authentication_failed",
+                "Invalid API key",
+                ErrorKind::Auth,
+                Verdict::Lasting,
+                "Signed out",
+            ),
+            (
+                "overloaded_error",
+                "Provider overloaded",
+                ErrorKind::Overloaded,
+                Verdict::Passing,
+                "Provider overloaded",
+            ),
+            (
+                "invalid_request",
+                "The request was not supported",
+                ErrorKind::Other,
+                Verdict::Lasting,
+                "Provider error",
+            ),
+        ];
+        for (code, text, kind, verdict, reason) in cases {
+            let line = error_line(code, text);
+            let (_dir, path) = fixture("s.jsonl", &[&line]);
+            let cut = cut_claude(&path).unwrap().expect("a cut");
+            assert_eq!(cut.kind, kind, "{code}");
+            assert_eq!(cut.verdict(), verdict, "{code}");
+            assert_eq!(cut.reason(), reason, "{code}");
+            assert_eq!(cut.tries, 1, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_later_answer_ends_the_cut() {
+        let error = error_line("rate_limit", "Rate limit reached");
+        let (_dir, path) = fixture("s.jsonl", &[&error, NORMAL]);
+        assert!(cut_claude(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn tries_count_cut_turns_since_a_person_wrote() {
+        let error = error_line("overloaded_error", "Provider overloaded");
+        let nudge = format!(
+            r#"{{"timestamp":"2026-10-27T06:31:00Z","type":"user","message":{{"role":"user","content":[{{"type":"text","text":"Please carry on: {NUDGE_MARK} (provider overloaded)"}}]}}}}"#
+        );
+        let (_dir, path) = fixture("s.jsonl", &[&error, &nudge, &error]);
+        assert_eq!(cut_claude(&path).unwrap().unwrap().tries, 2);
+
+        let person = r#"{"timestamp":"2026-10-27T06:32:00Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"try again"}]}}"#;
+        let (_dir, path) = fixture("s.jsonl", &[&error, &nudge, &error, person, &error]);
+        assert_eq!(cut_claude(&path).unwrap().unwrap().tries, 1);
+    }
+
+    #[test]
+    fn a_tool_result_does_not_start_the_tries_again() {
+        let error = error_line("overloaded_error", "Provider overloaded");
+        let tool = r#"{"timestamp":"2026-10-27T06:31:00Z","type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#;
+        let (_dir, path) = fixture("s.jsonl", &[&error, tool, &error]);
+        assert_eq!(cut_claude(&path).unwrap().unwrap().tries, 2);
     }
 
     #[test]
@@ -188,7 +365,8 @@ mod tests {
         let (_dir, path) = fixture("s.jsonl", &[line]);
         let scan = scan_claude(&path, 0).unwrap();
         let error = scan.last_error.unwrap();
-        assert_eq!(error.kind, ErrorKind::RateLimit);
+        // An exhausted allowance outranks the passing rate-limit code.
+        assert_eq!(error.kind, ErrorKind::Quota);
         assert_eq!(error.message, "rate_limit usage_limit_reached");
         assert!(error.resets_at_ms.is_none());
     }

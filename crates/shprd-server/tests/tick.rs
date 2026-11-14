@@ -16,13 +16,15 @@ use std::time::Duration;
 
 use shprd_core::config::{Config, Land};
 use shprd_core::event::{Actor, CheckReport, Event, EventKind, ReportStatus, ReviewSource};
-use shprd_core::log::{EventLog, SystemClock};
+use shprd_core::log::{Clock, EventLog, SystemClock};
 use shprd_core::state::RunState;
 use shprd_core::tick::PrFacts;
 use shprd_git::forge::{FakeForge, Forge, ForgeError, Pr, PrStatus};
 use shprd_server::Worker;
 use shprd_server::hub::Hub;
-use shprd_server::tick::{self, FactsSource, SharedForge, StepReport};
+use shprd_server::tick::{self, FactsSource, FallbackSource, SharedForge, StepReport};
+use shprd_watch::fallback::{AgentFacts, Handover, Role};
+use shprd_watch::records::{Cut, ErrorKind};
 use tempfile::TempDir;
 
 /// A repository whose log is a fixture, and the states it is advanced through.
@@ -81,6 +83,7 @@ impl Fixture {
             home: self.home.clone(),
             config,
             facts,
+            fallback: None,
             forge,
             start,
             actor: Actor::Engine,
@@ -408,6 +411,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         home: fixture.home.clone(),
         config: config(shprd_core::config::MergePolicy::Ask),
         facts: Arc::new(facts),
+        fallback: None,
         forge,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         actor: Actor::Engine,
@@ -625,5 +629,275 @@ fn two_passes_never_overlap() {
         peak.load(Ordering::SeqCst),
         1,
         "two passes ran their steps at the same time"
+    );
+}
+
+/// A fallback host a test scripts: the facts it hands in and the calls it saw.
+#[derive(Default)]
+struct ScriptedFallback {
+    /// The live agents and their cuts.
+    agents: Vec<AgentFacts>,
+    /// Every nudge the ladder sent.
+    nudges: Arc<Mutex<Vec<String>>>,
+    /// Every backup the ladder started.
+    backups: Arc<Mutex<Vec<String>>>,
+    /// Programs installed here.
+    installed: BTreeSet<String>,
+    /// Programs signed in here.
+    signed_in: BTreeSet<String>,
+}
+
+impl FallbackSource for ScriptedFallback {
+    fn agents(&self, _state: &RunState) -> Vec<AgentFacts> {
+        self.agents.clone()
+    }
+
+    fn installed(&self) -> BTreeSet<String> {
+        self.installed.clone()
+    }
+
+    fn signed_in(&self) -> BTreeSet<String> {
+        self.signed_in.clone()
+    }
+
+    fn nudge(&self, task: &str, agent: &str, text: &str) -> Result<String, String> {
+        self.nudges
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(format!("{task}/{agent}: {text}"));
+        Ok(format!("told {agent} to carry on"))
+    }
+
+    fn backup(
+        &self,
+        task: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+        brief: &str,
+    ) -> Result<String, String> {
+        self.backups
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(format!("{task} a{attempt} {from}->{to}: {brief}"));
+        Ok(format!("started {to} on {task}"))
+    }
+}
+
+/// The log of one task `A` with its first attempt spawned.
+fn spawned_task() -> Fixture {
+    Fixture::new(vec![
+        started(),
+        added(2, "A"),
+        ev(
+            3,
+            EventKind::Spawned {
+                task: String::from("A"),
+                attempt: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/A"),
+                branch: String::from("shprd/r1/A"),
+            },
+        ),
+    ])
+}
+
+/// One live worker's facts with a cut `kind` seen `age_ms` ago.
+fn cut_facts(kind: ErrorKind, tries: u32, age_ms: u64, role: Role) -> AgentFacts {
+    AgentFacts {
+        task: String::from("A"),
+        attempt: 1,
+        agent: String::from("claude"),
+        role,
+        working: false,
+        cut: Some(Cut {
+            id: String::from("cut-1"),
+            kind,
+            message: String::from("the provider said so"),
+            at_ms: SystemClock.now_ms().saturating_sub(age_ms),
+            resets_at_ms: None,
+            tries,
+        }),
+        handover: Handover {
+            title: String::from("task A"),
+            where_: String::from("/wt/A"),
+            branch: Some(String::from("shprd/r1/A")),
+            commits: String::from("abc123 first"),
+            changes: String::from(" M src/a.rs"),
+            chat_tail: String::from("agent: I am halfway"),
+        },
+    }
+}
+
+/// A pass over one task whose worker's turn a provider cut off.
+fn ladder_pass(source: ScriptedFallback) -> (Fixture, Worker, Arc<Mutex<Vec<String>>>) {
+    let nudges = Arc::clone(&source.nudges);
+    let backups = Arc::clone(&source.backups);
+    let fixture = spawned_task();
+    let mut config = config(shprd_core::config::MergePolicy::Ask);
+    config.roster.workers = vec![String::from("claude"), String::from("codex")];
+    let mut worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config,
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    worker.fallback = Some(Arc::new(source));
+    let _ = (nudges, backups);
+    (fixture, worker, Arc::new(Mutex::new(Vec::new())))
+}
+
+#[test]
+fn a_cut_is_nudged_once_when_its_wait_is_up() {
+    let source = ScriptedFallback {
+        agents: vec![cut_facts(ErrorKind::Overloaded, 1, 120_000, Role::Worker)],
+        installed: BTreeSet::from([String::from("claude"), String::from("codex")]),
+        signed_in: BTreeSet::from([String::from("claude"), String::from("codex")]),
+        ..ScriptedFallback::default()
+    };
+    let nudges = Arc::clone(&source.nudges);
+    let (fixture, worker, _) = ladder_pass(source);
+    let report = worker.tick().expect("the pass ran");
+    let step = report
+        .steps
+        .iter()
+        .find(|step| step.action == "nudge")
+        .expect("a nudge");
+    assert!(step.ok, "{step:?}");
+    assert_eq!(nudges.lock().unwrap().len(), 1);
+    assert!(nudges.lock().unwrap()[0].contains("cut off by the model's provider"));
+    let events = fixture.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::Nudged { .. })),
+        "the nudge is in the ledger"
+    );
+
+    // A second pass reads the ledger and sends nothing more for this cut.
+    let report = worker.tick().expect("the second pass ran");
+    assert!(
+        report.steps.iter().all(|step| step.action != "nudge"),
+        "a recorded nudge is not sent twice: {report:?}"
+    );
+    assert_eq!(nudges.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_task_is_backed_up_once_and_never_to_its_own_program() {
+    let source = ScriptedFallback {
+        agents: vec![cut_facts(ErrorKind::Quota, 1, 0, Role::Worker)],
+        installed: BTreeSet::from([String::from("claude"), String::from("codex")]),
+        signed_in: BTreeSet::from([String::from("claude"), String::from("codex")]),
+        ..ScriptedFallback::default()
+    };
+    let backups = Arc::clone(&source.backups);
+    let (fixture, worker, _) = ladder_pass(source);
+    let report = worker.tick().expect("the pass ran");
+    let step = report
+        .steps
+        .iter()
+        .find(|step| step.action == "backup")
+        .expect("a backup");
+    assert!(step.ok, "{step:?}");
+    // The fallback list starts with the program already running, so codex
+    // takes over.
+    assert!(backups.lock().unwrap()[0].contains("claude->codex"));
+    assert!(backups.lock().unwrap()[0].contains("<shprd-backup"));
+    let events = fixture.events();
+    let backup = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Backup {
+                from_agent,
+                to_agent,
+                worktree,
+                branch,
+                started,
+                ..
+            } => Some((
+                from_agent.clone(),
+                to_agent.clone(),
+                worktree.clone(),
+                branch.clone(),
+                *started,
+            )),
+            _ => None,
+        })
+        .expect("the backup is in the ledger");
+    assert_eq!(
+        backup,
+        (
+            String::from("claude"),
+            String::from("codex"),
+            String::from("/wt/A"),
+            String::from("shprd/r1/A"),
+            true
+        )
+    );
+
+    // One per task: the next pass does not hand over again.
+    let report = worker.tick().expect("the second pass ran");
+    assert!(
+        report.steps.iter().all(|step| step.action != "backup"),
+        "a task is backed up once: {report:?}"
+    );
+    assert_eq!(backups.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_reviewer_is_never_nudged() {
+    let source = ScriptedFallback {
+        agents: vec![cut_facts(ErrorKind::Overloaded, 1, 120_000, Role::Reviewer)],
+        installed: BTreeSet::from([String::from("claude"), String::from("codex")]),
+        signed_in: BTreeSet::from([String::from("claude"), String::from("codex")]),
+        ..ScriptedFallback::default()
+    };
+    let nudges = Arc::clone(&source.nudges);
+    let (_fixture, worker, _) = ladder_pass(source);
+    let report = worker.tick().expect("the pass ran");
+    assert!(
+        report.steps.iter().all(|step| step.action != "nudge"),
+        "{report:?}"
+    );
+    assert!(nudges.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_cut_with_no_backup_asks_the_person_once() {
+    let source = ScriptedFallback {
+        agents: vec![cut_facts(ErrorKind::Quota, 1, 0, Role::Worker)],
+        // The only fallback is the program already running.
+        installed: BTreeSet::from([String::from("claude")]),
+        signed_in: BTreeSet::from([String::from("claude")]),
+        ..ScriptedFallback::default()
+    };
+    let backups = Arc::clone(&source.backups);
+    let (fixture, worker, _) = ladder_pass(source);
+    let report = worker.tick().expect("the pass ran");
+    let step = report
+        .steps
+        .iter()
+        .find(|step| step.action == "give_up")
+        .expect("a give-up");
+    assert!(step.ok, "{step:?}");
+    assert!(backups.lock().unwrap().is_empty());
+    let events = fixture.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ProviderGaveUp { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::Escalated { .. }))
+    );
+
+    let report = worker.tick().expect("the second pass ran");
+    assert!(
+        report.steps.iter().all(|step| step.action != "give_up"),
+        "a give-up is recorded once: {report:?}"
     );
 }

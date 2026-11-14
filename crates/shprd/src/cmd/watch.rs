@@ -709,6 +709,7 @@ fn tick_task(
                     // process died is still perfectly able to take its own
                     // task back in a fresh process.
                     same_worker: !dry,
+                    opening: None,
                 };
                 match handoff(mux, env, &request) {
                     Ok(report) => {
