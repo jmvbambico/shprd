@@ -23,7 +23,7 @@ use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
-use crate::cmd::launch;
+use crate::cmd::deliver;
 use crate::cmd::spawn::{self, Program, SpawnEnv};
 use crate::ctx::{CliError, Ctx};
 
@@ -766,14 +766,14 @@ fn deliver_review_brief(
     reviewer: &Reviewer,
     tab: &shprd_mux::Tab,
     text: &str,
-) -> launch::Delivery {
+) -> deliver::Delivery {
     let wait = env.spawn.ready_wait;
-    let first = launch::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait);
-    if matches!(first, launch::Delivery::Delivered) {
+    let first = deliver::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait);
+    if matches!(first, deliver::Delivery::Delivered) {
         return first;
     }
     std::thread::sleep(env.brief_retry_wait);
-    launch::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait)
+    deliver::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait)
 }
 
 /// The argv a reviewer's CLI starts with.
@@ -808,7 +808,7 @@ fn reviewer_argv(
     };
     argv.extend(render(
         launch_spec,
-        launch::model_args(launch_spec, model),
+        deliver::model_args(launch_spec, model),
         &values,
     )?);
     let mut brief_in_args = false;
@@ -1205,7 +1205,7 @@ project_dirs = []
             self.with_workspace(FakeMux::default())
         }
 
-        /// Records this repository's workspace in `mux`, as `shprd up` would.
+        /// Records this repository's workspace in `mux`, as a launcher would.
         fn with_workspace(&self, mux: FakeMux) -> FakeMux {
             mux.create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
@@ -2070,11 +2070,11 @@ project_dirs = []
         );
         // The task is only reported, so the run ends the one way it can with
         // work still in it: abandoned, which is what closes its tabs.
-        crate::cmd::up::down(
+        crate::cmd::run::finish(
             &mux,
             &ctx,
             Some(scratch.home.path()),
-            crate::cmd::up::EndRun::down(true, true),
+            crate::cmd::run::EndRun::finish(true, true),
         )
         .unwrap_or_else(|err| panic!("{err}"));
 

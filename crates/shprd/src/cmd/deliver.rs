@@ -1,8 +1,13 @@
-//! The rules every verb that starts an agent CLI shares.
+//! Handing a brief to an agent CLI shprd has just started.
 //!
-//! Only two verbs launch an agent: `up` (the orchestrator) and `spawn` (a
-//! task). They build their argv from the same [`LaunchSpec`], so the decisions
-//! that are not verb-specific live here and are made once.
+//! `spawn` (a task's agent), `review` (a reviewer) and `watch` (a notice typed
+//! into an orchestrator) all start a process and then have to get text into it
+//! once the host has detected an agent there. The decisions that are not
+//! verb-specific live here and are made once: the argv-flag rules, how long to
+//! wait, and whether a prompt of the CLI's own is in the way.
+//!
+//! // M10.2: the space-per-task host model replaces the tab a process starts
+//! in; the delivery rules below stay.
 
 use std::time::{Duration, Instant};
 
@@ -228,7 +233,7 @@ mod tests {
                 Ok(workspace) => workspace,
                 Err(error) => panic!("{error}"),
             };
-        let tab = match mux.create_tab(&workspace.id, "● sh·w1", std::path::Path::new("/tmp")) {
+        let tab = match mux.create_tab(&workspace.id, "sh·w1", std::path::Path::new("/tmp")) {
             Ok(tab) => tab,
             Err(error) => panic!("{error}"),
         };

@@ -246,7 +246,9 @@ pub(crate) fn workspace_of(
     mux.find_workspace(&name)
         .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
         .ok_or_else(|| {
-            CliError::Invalid(anyhow!("no workspace {name:?} yet: run `shprd up` first"))
+            CliError::Invalid(anyhow!(
+                "no workspace {name:?} yet: create it in your multiplexer first"
+            ))
         })
 }
 
@@ -349,11 +351,11 @@ fn start_in_tab(
     // first turn, so it gets a one-line kickoff; an agent with no system-prompt
     // flag gets the whole brief typed in, as before.
     let (text, what) = if brief_in_args {
-        (super::launch::KICKOFF, "kickoff")
+        (super::deliver::KICKOFF, "kickoff")
     } else {
         (brief, "brief")
     };
-    let delivery = super::launch::deliver_brief(
+    let delivery = super::deliver::deliver_brief(
         mux,
         &tab.root_pane,
         text,
@@ -430,24 +432,6 @@ pub(crate) fn close_pane_leftover(
     match mux.close_pane(pane) {
         Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => None,
         Err(_) => Some(Leftover::new(what, pane.as_str())),
-    }
-}
-
-/// Closes a pane shprd opened, counting a pane the host has forgotten as
-/// closed, and answers whether the pane is gone.
-///
-/// The same rule [`close_recorded`] applies to a tab, for the panes a run
-/// splits off a tab it keeps: a pane a human already closed is in the state
-/// the caller wanted, and a refusal is warned about rather than fatal. A
-/// caller for which the refusal is not fatal but *decisive* — `up` taking a
-/// watchdog replacement back down — reads the answer instead of the warning.
-pub(crate) fn close_pane(mux: &dyn Mux, pane: &shprd_mux::PaneId) -> bool {
-    match mux.close_pane(pane) {
-        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => true,
-        Err(err) => {
-            eprintln!("warning: could not close pane {}: {err}", pane.as_str());
-            false
-        }
     }
 }
 
@@ -1389,7 +1373,7 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         skills: config.skills.clone(),
         compat,
         base_env,
-        ready_wait: super::launch::ready_wait(),
+        ready_wait: super::deliver::ready_wait(),
     })
 }
 
@@ -1443,7 +1427,9 @@ fn prompt_in(
         .find_workspace(&name)
         .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
         .ok_or_else(|| {
-            CliError::Invalid(anyhow!("no workspace {name:?} yet: run `shprd up` first"))
+            CliError::Invalid(anyhow!(
+                "no workspace {name:?} yet: create it in your multiplexer first"
+            ))
         })?;
     let tabs = mux
         .list_tabs(&workspace.id)
@@ -1466,8 +1452,8 @@ fn prompt_in(
 /// A prompt outside a run has no tab to reach: the run id is half of every tab
 /// record's path.
 ///
-/// A finished run counts as no run at all: after `shprd down` its tabs are
-/// gone, and its tab records are history rather than somewhere to type.
+/// A finished run counts as no run at all: after `shprd run finish` its tabs
+/// are gone, and its tab records are history rather than somewhere to type.
 fn active_run(ctx: &Ctx) -> Result<String, CliError> {
     let state = ctx.state()?;
     if state.finished {
@@ -1570,7 +1556,7 @@ fn launch_argv(
     };
     argv.extend(render(
         launch,
-        super::launch::model_args(launch, model),
+        super::deliver::model_args(launch, model),
         &values,
     )?);
     if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
@@ -1997,7 +1983,7 @@ project_dirs = []
         git_out(dir, &["rev-parse", "HEAD"])
     }
 
-    /// A host with the repository's workspace open, as `shprd up` leaves it.
+    /// A host with the repository's workspace open, the way a launcher leaves it.
     fn host(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
         mux.create_workspace(
@@ -2319,9 +2305,9 @@ project_dirs = []
             argv.iter().any(|arg| arg.ends_with(".md")),
             "the brief travels as a file path: {argv:?}"
         );
-        assert_eq!(prompts(&calls), [crate::cmd::launch::KICKOFF.to_string()]);
+        assert_eq!(prompts(&calls), [crate::cmd::deliver::KICKOFF.to_string()]);
         assert!(
-            !crate::cmd::launch::KICKOFF.contains('\n'),
+            !crate::cmd::deliver::KICKOFF.contains('\n'),
             "the kickoff is one line"
         );
     }
@@ -2576,7 +2562,7 @@ project_dirs = []
     }
 
     #[test]
-    fn spawn_without_a_workspace_says_to_run_up_first() {
+    fn spawn_without_a_workspace_says_to_create_one_first() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
@@ -2586,7 +2572,10 @@ project_dirs = []
             Ok(report) => panic!("spawn should have failed, got {report:?}"),
             Err(err) => err.to_string(),
         };
-        assert!(message.contains("shprd up"), "{message}");
+        assert!(
+            message.contains("create it in your multiplexer"),
+            "{message}"
+        );
     }
 
     /// Writes the tab record a spawn would have written for one attempt.
@@ -2740,7 +2729,7 @@ project_dirs = []
     }
 
     /// A finished run is over: its tab records are history, and a prompt after
-    /// `shprd down` has nowhere to go.
+    /// `shprd run finish` has nowhere to go.
     #[test]
     fn prompt_after_the_run_finished_says_there_is_no_active_run() {
         let scratch = Scratch::new();

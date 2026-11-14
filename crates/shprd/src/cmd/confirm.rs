@@ -4,7 +4,8 @@
 //! can claim to be a human by setting it. The terminal is the barrier that
 //! holds anyway: an agent's shell tool has no TTY, so a question asked of the
 //! terminal is a question only a person can answer. `shprd approve` and the
-//! abandon of `shprd down` are both this kind of verb, and both ask here.
+//! abandon of `shprd run finish --abandon` are both this kind of verb, and both
+//! ask here.
 //!
 //! Only a debug build may answer for the record with `--yes`, which is how the
 //! end-to-end tests drive these verbs; a release binary always asks.

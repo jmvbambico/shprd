@@ -86,12 +86,6 @@ pub enum Command {
     Set(SetArgs),
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
-    /// Print, install or remove herdr's shprd keybinds.
-    Keys(KeysArgs),
-    /// Start or resume the run and lay out this repository's workspace.
-    Up,
-    /// Finish the run; refuses while any task is still unfinished.
-    Down(EndRunArgs),
     /// Watch every working agent and hand work over when one goes dry.
     Watch(WatchArgs),
     /// Run the integration branch's gate commands once, in its worktree.
@@ -128,7 +122,7 @@ pub struct FullGateArgs {
     pub timeout_secs: u64,
 }
 
-/// Arguments for `down` and `run finish`: the two verbs that end a run.
+/// Arguments for `run finish`, the verb that ends a run.
 #[derive(Debug, Args)]
 pub struct EndRunArgs {
     /// End the run even though tasks are unfinished, keeping their branches.
@@ -627,29 +621,4 @@ pub enum GateOutcome {
     Pass,
     /// The gate failed.
     Fail,
-}
-
-/// Arguments for `keys`.
-#[derive(Debug, Args)]
-pub struct KeysArgs {
-    /// Which keybind verb.
-    #[command(subcommand)]
-    pub cmd: KeysCommand,
-    /// The herdr config file to read and write.
-    ///
-    /// Defaults to `$HERDR_CONFIG_PATH`, then
-    /// `$HOME/.config/herdr/config.toml`.
-    #[arg(long, global = true, value_name = "PATH")]
-    pub config: Option<PathBuf>,
-}
-
-/// The keybind verbs.
-#[derive(Debug, Subcommand)]
-pub enum KeysCommand {
-    /// Print the block shprd installs.
-    Show,
-    /// Install the block, or refresh an existing one in place.
-    Install,
-    /// Remove the block.
-    Uninstall,
 }
