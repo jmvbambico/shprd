@@ -3,7 +3,12 @@
 //! The plan comes from [`shprd_git::janitor::plan`], which reads only the run's
 //! own ledger. `--apply` runs it and appends one `resource` event per step that
 //! succeeded, through the same check-then-append path every other verb uses.
-//! A dry run writes nothing at all.
+//! A dry run writes nothing at all, so it takes no lock either.
+//!
+//! `--apply` deletes the run's branches and worktrees, which `land`, `sync`,
+//! `gate` and `approve` read, so it takes the run's integration lock first and
+//! plans and executes while holding it: a worktree removed under a gate is a
+//! failure that reads like a broken tree.
 //!
 //! A run's review packet folder is shprd's own directory, at
 //! `<home>/.shprd/reviews/<run>`, and it is spent once the run has finished.
@@ -22,6 +27,7 @@ use shprd_core::state::RunState;
 
 use crate::cli::{JanitorArgs, RestoreArgs};
 use crate::cmd::emit;
+use crate::cmd::run_lock;
 use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 use shprd_core::config::{self as config, Config};
 use shprd_git::archive;
@@ -38,15 +44,21 @@ pub fn plan_verb(
     let archive_days = args.archive_days.unwrap_or(loaded.janitor.archive_days);
     let (state, events) = ctx.load()?;
     // A plan without a run would be empty; say so instead of printing nothing.
-    let _ = run_id(&state)?;
+    let run = run_id(&state)?;
     let now_ms = SystemClock.now_ms();
-    let actions = janitor::plan(&state, &events, &layout, now_ms, archive_days);
-
     if !args.apply {
+        let actions = janitor::plan(&state, &events, &layout, now_ms, archive_days);
         print_plan(ctx, &actions);
         return Ok(());
     }
 
+    // Held from the plan to the last executed action: a gate or a cherry-pick
+    // may not read a worktree this run is about to delete, and the plan must
+    // not list something another verb has already moved.
+    let home = resolve_home(home)?;
+    let repo_name = crate::cmd::land::repo_name(ctx)?;
+    let _lock = run_lock::lock_run(&home, &repo_name, &run)?;
+    let actions = janitor::plan(&state, &events, &layout, now_ms, archive_days);
     let outcomes = janitor::execute(&ctx.root, &layout, &actions);
     let mut failures = 0u32;
     for outcome in &outcomes {
@@ -326,6 +338,45 @@ mod tests {
                 Ok(text) => text,
                 Err(err) => panic!("read log: {err}"),
             }
+        }
+    }
+
+    /// An apply deletes the run's worktrees and branches, so it waits for the
+    /// run's integration lock instead of pulling a worktree out from under a
+    /// verb that is reading it.
+    #[test]
+    fn an_apply_waits_for_the_runs_integration_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let fixture = Fixture::new();
+        fixture.start();
+        let held = match run_lock::lock_run(&fixture.home, "repo", "r1") {
+            Ok(lock) => lock,
+            Err(err) => panic!("the first lock: {err}"),
+        };
+        let (tx, rx) = mpsc::channel();
+        let root = fixture.ctx.root.clone();
+        let home = fixture.home.clone();
+        let waiting = std::thread::spawn(move || {
+            let ctx = Ctx::new(root, Actor::Engine, false, true);
+            let args = JanitorArgs {
+                apply: true,
+                archive_days: None,
+            };
+            let _ = tx.send(plan_verb(&ctx, &args, Some(&home)).is_ok());
+        });
+        match rx.recv_timeout(Duration::from_millis(300)) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("the apply did not wait for the lock: {other:?}"),
+        }
+        drop(held);
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(true) => {}
+            other => panic!("the apply never got the lock: {other:?}"),
+        }
+        if let Err(err) = waiting.join() {
+            panic!("the waiting thread panicked: {err:?}");
         }
     }
 

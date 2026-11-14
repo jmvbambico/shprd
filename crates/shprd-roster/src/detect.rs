@@ -25,13 +25,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How long to wait before each retry of a spawn the kernel refused with
 /// `ETXTBSY`, one delay per retry after the first attempt.
-const BUSY_RETRY_DELAYS: [Duration; 5] = [
+const BUSY_RETRY_DELAYS: [Duration; 4] = [
     Duration::from_millis(10),
     Duration::from_millis(20),
     Duration::from_millis(40),
     Duration::from_millis(80),
-    Duration::from_millis(160),
 ];
+
+/// `ETXTBSY`, as the kernel reports it in [`io::Error::raw_os_error`].
+#[cfg(unix)]
+const ETXTBSY: i32 = 26;
 
 /// The placeholder a sign-in probe may use for the model it depends on.
 const MODEL_PLACEHOLDER: &str = "{model}";
@@ -148,22 +151,45 @@ fn is_executable(path: &Path) -> bool {
 /// spawn refused for a few milliseconds, so that one error is retried with a
 /// short backoff. Any other error is returned at once, and so is `ETXTBSY` once
 /// the retries are spent.
+///
+/// This mirrors the retry in `shprd_core::spawn`, which this crate cannot
+/// share: `shprd-roster` deliberately does not depend on the event model.
 fn spawn_retrying_busy(command: &mut Command) -> io::Result<Child> {
+    retry_busy(|| command.spawn())
+}
+
+/// Runs `attempt` until it no longer fails with `ETXTBSY`.
+fn retry_busy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut backoffs = BUSY_RETRY_DELAYS.iter();
     loop {
-        let busy = match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(source) => {
-                if source.kind() != io::ErrorKind::ExecutableFileBusy {
-                    return Err(source);
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if !is_text_file_busy(&error) {
+                    return Err(error);
                 }
-                source
+                match backoffs.next() {
+                    Some(backoff) => thread::sleep(*backoff),
+                    None => return Err(error),
+                }
             }
-        };
-        match backoffs.next() {
-            Some(backoff) => thread::sleep(*backoff),
-            None => return Err(busy),
         }
+    }
+}
+
+/// Whether `error` is the kernel refusing to execute a file that is open for
+/// writing.
+fn is_text_file_busy(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::ExecutableFileBusy {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 
@@ -284,13 +310,13 @@ fn kill_group(leader: u32) -> bool {
         return false;
     };
     let group = format!("-{leader}");
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(["-KILL", "--", group.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .stderr(Stdio::null());
+    retry_busy(|| command.status()).is_ok_and(|status| status.success())
 }
 
 /// Runs the version probe and scrapes a version number out of its output.
@@ -466,20 +492,57 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_busy_spawn_is_retried_until_it_succeeds() {
+        let mut attempts = 0;
+        let outcome = retry_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from_raw_os_error(26))
+            } else {
+                Ok("ran")
+            }
+        });
+        assert_eq!(outcome.unwrap_or_default(), "ran");
+        assert_eq!(attempts, 3, "two busy refusals, then the run");
+    }
+
+    #[test]
+    fn a_spawn_that_stays_busy_returns_the_last_busy_error() {
+        let mut attempts = 0;
+        let outcome: io::Result<()> = retry_busy(|| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(26))
+        });
+        assert_eq!(
+            outcome.err().and_then(|error| error.raw_os_error()),
+            Some(26),
+            "the error the kernel reported is passed through"
+        );
+        assert_eq!(
+            attempts,
+            BUSY_RETRY_DELAYS.len() + 1,
+            "one attempt plus one per backoff"
+        );
+    }
+
+    #[test]
+    fn another_error_is_not_retried() {
+        let mut attempts = 0;
+        let outcome: io::Result<()> = retry_busy(|| {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        });
+        assert_eq!(
+            outcome.err().map(|error| error.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+        assert_eq!(attempts, 1, "only a busy file is worth retrying");
+    }
+
     /// A script interactive shell can run, standing in for a real agent CLI.
     fn write_script(dir: &Path, name: &str, body: &str) {
-        let path = dir.join(name);
-        if let Err(error) = fs::write(&path, format!("#!/bin/sh\n{body}\n")) {
-            panic!("writing {name} failed: {error}");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::Permissions::from_mode(0o755);
-            if let Err(error) = fs::set_permissions(&path, mode) {
-                panic!("chmod {name} failed: {error}");
-            }
-        }
+        crate::scripted::write_executable(&dir.join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     /// A spec whose `[detect]` block and templates the caller chooses.

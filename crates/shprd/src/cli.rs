@@ -61,6 +61,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: AgentCommand,
     },
+    /// Agent-callable task verbs: record where a task stands.
+    Task {
+        /// Which task verb.
+        #[command(subcommand)]
+        cmd: TaskVerb,
+    },
     /// Print the folded run state.
     State,
     /// Print the rehydration brief: what an agent needs to resume.
@@ -86,12 +92,6 @@ pub enum Command {
     Set(SetArgs),
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
-    /// Print, install or remove herdr's shprd keybinds.
-    Keys(KeysArgs),
-    /// Start or resume the run and lay out this repository's workspace.
-    Up,
-    /// Finish the run; refuses while any task is still unfinished.
-    Down(EndRunArgs),
     /// Watch every working agent and hand work over when one goes dry.
     Watch(WatchArgs),
     /// Run the integration branch's gate commands once, in its worktree.
@@ -100,12 +100,13 @@ pub enum Command {
     /// outlived a merged pull request lands cleanly. Merges, never rebases; a
     /// conflict is undone and escalated. Needs no terminal.
     Sync,
-    /// Push the integration branch and open its pull request; with `--merge`,
-    /// merge it when `[land]` allows.
+    /// Land a task through its own pull request, as `[land] merge` says; with
+    /// no task, push the run's integration branch and open its pull request,
+    /// merging it with `--merge` when `[land]` allows.
     Land(LandArgs),
-    /// Approve the run's pull request in shprd, for a maintainer whose forge
-    /// will not let them approve their own. It asks on the terminal, which an
-    /// agent's shell tool never has.
+    /// Approve a pull request in shprd, for a maintainer whose forge will not
+    /// let them approve their own: the run's, or with a task, that task's. It
+    /// asks on the terminal, which an agent's shell tool never has.
     Approve(ApproveArgs),
     /// Re-admit a dry agent: record that the run may use it again, so a spawn
     /// or a handoff stops refusing it. A human's verb, needing no terminal.
@@ -117,6 +118,35 @@ pub enum Command {
     /// its branch is kept. It asks on the terminal, which an agent's shell tool
     /// never has.
     Drop(DropArgs),
+    /// Serve this run over a loopback HTTP API, for every UI that calls it.
+    Serve(ServeArgs),
+    /// Advance the run once, now: start what may start, land what may land.
+    ///
+    /// This is the same pass `shprd serve` runs every `[tick] interval_secs`
+    /// (15 by default). It starts a queued task whose `deps` have all landed, up
+    /// to `[tick] max_running` (4 by default) tasks running at once, lands a task
+    /// `[land] merge` allows, records a pull request merged outside shprd, and
+    /// says once when a ready task's policy is `ask`.
+    ///
+    /// `--once` spells out that this invocation is one pass; the verb never
+    /// loops. With `--json` it prints one document, `{"steps": [...]}`, each step being
+    /// `{action, task, ok, detail, seq?}` where `action` is one of `start`,
+    /// `land`, `mark_landed`, `needs_you` and `seq` is the log line it appended
+    /// when it appended one. Without `--json` it prints one line per action, or
+    /// `ok nothing to advance` when the pass found nothing to do.
+    ///
+    /// A step that fails is printed and left in the report; the pass carries on
+    /// with the next task.
+    Tick(TickArgs),
+}
+
+/// Arguments for `tick`.
+#[derive(Debug, Args)]
+pub struct TickArgs {
+    /// Run one pass and exit. This is what the verb does; the flag spells it
+    /// out, as `shprd watch --once` does for its own loop.
+    #[arg(long)]
+    pub once: bool,
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -128,7 +158,7 @@ pub struct FullGateArgs {
     pub timeout_secs: u64,
 }
 
-/// Arguments for `down` and `run finish`: the two verbs that end a run.
+/// Arguments for `run finish`, the verb that ends a run.
 #[derive(Debug, Args)]
 pub struct EndRunArgs {
     /// End the run even though tasks are unfinished, keeping their branches.
@@ -149,7 +179,15 @@ pub struct EndRunArgs {
 /// Arguments for `land`.
 #[derive(Debug, Args)]
 pub struct LandArgs {
-    /// Merge the pull request instead of only opening it.
+    /// The task to land through its own pull request. Without one, `land`
+    /// pushes the run's integration branch instead (the pre-M8.3 run-level
+    /// pull request), where `--merge` applies.
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
+    /// Merge the run's pull request instead of only opening it.
+    ///
+    /// A task's landing merges as `[land] merge` says, so this flag belongs to
+    /// the run-level pull request and is refused with a task.
     #[arg(long)]
     pub merge: bool,
 }
@@ -157,6 +195,9 @@ pub struct LandArgs {
 /// Arguments for `approve`.
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
+    /// Approve this task's own pull request instead of the run's.
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
     /// Answer the question for the record without asking, in a debug build
     /// only: a release binary ignores it and still needs a terminal.
     /// `SHPRD_ACTOR` still has to be unset or `human`.
@@ -179,6 +220,17 @@ pub struct DropArgs {
     /// still has to be unset or `human`.
     #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
+}
+
+/// Arguments for `serve`.
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Port to listen on, on 127.0.0.1 only. `0` picks a free one.
+    ///
+    /// The port a service really bound is written to `service.json` in the
+    /// state directory, so a client reads it there rather than guessing.
+    #[arg(long, value_name = "PORT", default_value_t = 0)]
+    pub port: u16,
 }
 
 /// Arguments for `readmit`.
@@ -378,6 +430,32 @@ pub enum AgentCommand {
 pub enum TaskCommand {
     /// Add a task to the run plan.
     Add(TaskAddArgs),
+    /// Hand the attempt in: what it did, and the checks it ran.
+    ///
+    /// The same verb as `shprd agent report`; this is the spelling a worker's
+    /// brief uses.
+    Report(ReportArgs),
+}
+
+/// Agent-callable task verbs.
+#[derive(Debug, Subcommand)]
+pub enum TaskVerb {
+    /// Record a short progress line for a task.
+    Status(TaskStatusArgs),
+}
+
+/// Arguments for `task status`.
+#[derive(Debug, Args)]
+pub struct TaskStatusArgs {
+    /// The task.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// One short line saying where the work stands; capped at 40 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub msg: String,
+    /// How far along the task is, from 0 to 100.
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub progress: Option<u8>,
 }
 
 /// Arguments for `agent task add`.
@@ -506,6 +584,21 @@ pub struct ReportArgs {
     /// What the agent says it did.
     #[arg(long, value_name = "TEXT")]
     pub summary: String,
+    /// A gate the worker ran, as `GATE|COMMAND|EXIT[|OUTPUT]`; repeatable.
+    ///
+    /// `EXIT` is the exit code, or `none` when a timeout killed the command.
+    /// `OUTPUT` is the tail of what it printed; the last 20 lines are kept.
+    /// A command containing `|` cannot be written this way; such a check can
+    /// be given as a JSON object instead, e.g.
+    /// `{"gate":"tests","command":"cargo test | tail -20","exit_code":0}`.
+    /// A completed hand-in needs at least one, and every one must have exited
+    /// 0, or the hand-in is refused.
+    #[arg(
+        long = "check",
+        value_name = "GATE|COMMAND|EXIT[|OUTPUT]",
+        action = clap::ArgAction::Append
+    )]
+    pub checks: Vec<String>,
     /// Test command and its result; repeatable.
     #[arg(long = "test", value_name = "CMD")]
     pub tests: Vec<String>,
@@ -627,29 +720,4 @@ pub enum GateOutcome {
     Pass,
     /// The gate failed.
     Fail,
-}
-
-/// Arguments for `keys`.
-#[derive(Debug, Args)]
-pub struct KeysArgs {
-    /// Which keybind verb.
-    #[command(subcommand)]
-    pub cmd: KeysCommand,
-    /// The herdr config file to read and write.
-    ///
-    /// Defaults to `$HERDR_CONFIG_PATH`, then
-    /// `$HOME/.config/herdr/config.toml`.
-    #[arg(long, global = true, value_name = "PATH")]
-    pub config: Option<PathBuf>,
-}
-
-/// The keybind verbs.
-#[derive(Debug, Subcommand)]
-pub enum KeysCommand {
-    /// Print the block shprd installs.
-    Show,
-    /// Install the block, or refresh an existing one in place.
-    Install,
-    /// Remove the block.
-    Uninstall,
 }

@@ -16,14 +16,14 @@ use shprd_core::event::{EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
-use shprd_mux::{Mux, naming};
+use shprd_mux::Mux;
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::families::{Families, agent_vendor};
 use shprd_roster::models::AgentRef;
 use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
-use crate::cmd::launch;
+use crate::cmd::deliver;
 use crate::cmd::spawn::{self, Program, SpawnEnv};
 use crate::ctx::{CliError, Ctx};
 
@@ -667,14 +667,7 @@ fn open_reviewer(
     brief_path: &Path,
 ) -> Result<(shprd_mux::TabId, String), CliError> {
     let workspace = spawn::workspace_of(mux, &env.spawn)?;
-    let wanted = naming::tab_title(naming::Role::Reviewer, &reviewer.agent, task, false);
-    let existing = mux
-        .list_tabs(&workspace.id)
-        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?
-        .into_iter()
-        .map(|tab| tab.title)
-        .collect::<Vec<String>>();
-    let title = naming::disambiguate(&existing, &wanted, task);
+    let title = reviewer_title(&reviewer.agent, task);
     let tab = mux
         .create_tab(&workspace.id, &title, dir)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the reviewer tab")))?;
@@ -689,6 +682,17 @@ fn open_reviewer(
             Err(err)
         }
     }
+}
+
+/// The title of a reviewer's tab: `<agent>·<task>·review`.
+///
+/// The `review` suffix is what keeps a reviewer's tab from reading as the
+/// worker's, now that the role glyphs are gone.
+///
+/// // M10.2: a task's space holds both its worker and its reviewer, told apart
+/// by role there.
+fn reviewer_title(agent: &str, task: &str) -> String {
+    format!("{agent}·{task}·review")
 }
 
 /// Starts the reviewer's CLI in `tab` and hands it the brief.
@@ -766,14 +770,14 @@ fn deliver_review_brief(
     reviewer: &Reviewer,
     tab: &shprd_mux::Tab,
     text: &str,
-) -> launch::Delivery {
+) -> deliver::Delivery {
     let wait = env.spawn.ready_wait;
-    let first = launch::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait);
-    if matches!(first, launch::Delivery::Delivered) {
+    let first = deliver::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait);
+    if matches!(first, deliver::Delivery::Delivered) {
         return first;
     }
     std::thread::sleep(env.brief_retry_wait);
-    launch::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait)
+    deliver::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait)
 }
 
 /// The argv a reviewer's CLI starts with.
@@ -808,7 +812,7 @@ fn reviewer_argv(
     };
     argv.extend(render(
         launch_spec,
-        launch::model_args(launch_spec, model),
+        deliver::model_args(launch_spec, model),
         &values,
     )?);
     let mut brief_in_args = false;
@@ -967,7 +971,6 @@ mod tests {
     use shprd_core::event::{Actor, ReviewSource};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
-    use shprd_mux::naming;
     use shprd_mux::{AgentState, PaneId};
     use tempfile::TempDir;
 
@@ -1128,6 +1131,10 @@ project_dirs = []
                 status: ReportStatus::Completed,
                 summary: "made it real".to_string(),
                 tests: vec!["cargo test".to_string()],
+                checks: vec![shprd_core::event::CheckReport::passed(
+                    "tests",
+                    "cargo test",
+                )],
                 changed_paths: vec!["README.md".to_string()],
                 commit: None,
                 skills_used: Vec::new(),
@@ -1205,9 +1212,9 @@ project_dirs = []
             self.with_workspace(FakeMux::default())
         }
 
-        /// Records this repository's workspace in `mux`, as `shprd up` would.
+        /// Records this repository's workspace in `mux`, as a launcher would.
         fn with_workspace(&self, mux: FakeMux) -> FakeMux {
-            mux.create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
+            mux.create_workspace(&spawn::workspace_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
             mux
         }
@@ -1510,12 +1517,9 @@ project_dirs = []
             std::path::PathBuf::from("/tmp/wt/T1"),
             "the tab must never start in the worktree"
         );
-        // A reviewer is prefixed with its own glyph, so it never reads as a worker.
-        assert_eq!(
-            title,
-            naming::tab_title(naming::Role::Reviewer, "codex", "T1", false)
-        );
-        assert!(title.starts_with('\u{25c7}'), "{title}");
+        // A reviewer's title says so, so it never reads as the worker's.
+        assert_eq!(title, reviewer_title("codex", "T1"));
+        assert_ne!(title, spawn::worker_title("codex", "T1"), "{title}");
 
         let pairs = calls
             .iter()
@@ -2070,11 +2074,11 @@ project_dirs = []
         );
         // The task is only reported, so the run ends the one way it can with
         // work still in it: abandoned, which is what closes its tabs.
-        crate::cmd::up::down(
+        crate::cmd::run::finish(
             &mux,
             &ctx,
             Some(scratch.home.path()),
-            crate::cmd::up::EndRun::down(true, true),
+            crate::cmd::run::EndRun::finish(true, true),
         )
         .unwrap_or_else(|err| panic!("{err}"));
 

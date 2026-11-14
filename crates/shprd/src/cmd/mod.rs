@@ -4,25 +4,25 @@ pub mod agent;
 pub mod approve;
 pub mod confirm;
 pub mod dagr;
+pub mod deliver;
 pub mod doctor;
 pub mod drop;
 pub mod fullgate;
 pub mod handoff;
 pub mod integrate;
 pub mod janitor;
-pub mod keys;
 pub mod land;
-pub mod launch;
 pub mod override_rule;
 pub mod readmit;
 pub mod review;
 pub mod roster;
 pub mod run;
 pub mod run_lock;
+pub mod serve;
 pub mod set;
 pub mod spawn;
 pub mod sync;
-pub mod up;
+pub mod tick;
 pub mod verdict;
 pub mod view;
 pub mod watch;
@@ -30,7 +30,7 @@ pub mod watch;
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
-use crate::cli::{Cli, Command, DagrCommand, RunCommand};
+use crate::cli::{Cli, Command, DagrCommand, RunCommand, TaskVerb};
 use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
 
 /// Runs whichever verb the command line asked for.
@@ -42,10 +42,6 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // `set` writes a config file, not a log, so it too needs no repository.
     if let Some(Command::Set(args)) = &cli.command {
         return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
-    }
-    // `keys` edits herdr's config file, so it too needs no repository.
-    if let Some(Command::Keys(args)) = &cli.command {
-        return keys::run(args, cli.global.home.as_deref());
     }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
@@ -62,6 +58,9 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             RunCommand::Finish(args) => run::finish_verb(&ctx, &args, cli.global.home.as_deref()),
         },
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
+        Some(Command::Task { cmd }) => match cmd {
+            TaskVerb::Status(args) => agent::task_status(&ctx, &args),
+        },
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
         Some(Command::Status) => view::status(&ctx),
@@ -81,9 +80,6 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.repo.as_deref(),
         ),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
-        Some(Command::Keys(args)) => keys::run(&args, None),
-        Some(Command::Up) => up::up_verb(&ctx, cli.global.home.as_deref()),
-        Some(Command::Down(args)) => up::down_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Sync) => sync::sync_verb(&ctx, cli.global.home.as_deref()),
@@ -94,6 +90,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
         Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
         Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Tick(args)) => tick::tick_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 
@@ -152,6 +150,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::TaskAdded { .. } => "task_added",
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
+        EventKind::TaskStatus { .. } => "task_status",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
@@ -167,6 +166,9 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
         EventKind::Approved { .. } => "approved",
+        EventKind::TaskPrOpened { .. } => "task_pr_opened",
+        EventKind::TaskApproved { .. } => "task_approved",
+        EventKind::TaskLanded { .. } => "task_landed",
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",

@@ -4,11 +4,23 @@
 //! setup wizard) and an optional per-repo override (`<repo>/.shprd/config.toml`).
 //! The repo file overrides the global file *field by field*: a scalar or list
 //! present in the repo layer replaces the global value, and maps merge by key.
+//!
+//! The `[tick]` section is what the service's advance pass reads:
+//!
+//! ```toml
+//! [tick]
+//! max_running = 4      # tasks of one repository running at once (default 4)
+//! interval_secs = 15   # seconds between two passes (default 15)
+//! ```
+//!
+//! Both are documented defaults rather than footguns: a repository that wants
+//! every task of its plan running says so with `max_running`, and a test that
+//! wants to watch two passes back to back sets `interval_secs = 1`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::event::Severity;
@@ -35,23 +47,39 @@ pub enum Mux {
     Tuios,
 }
 
-/// When `shprd land --merge` may merge the run's pull request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+/// When a task's pull request may be merged.
+///
+/// The policy is one answer for every landing: `ask` waits for the human,
+/// `checks` waits for the forge's checks, `auto` merges as soon as the pull
+/// request is open. A protected base branch outranks both of the automatic
+/// ones (see [`Land::policy_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MergePolicy {
     /// Merge only after a human approved the pull request.
     #[default]
     Ask,
-    /// Merge without approval, unless the base branch is protected.
-    Allow,
+    /// Merge once the pull request's checks pass.
+    Checks,
+    /// Merge as soon as the pull request is open.
+    ///
+    /// `allow` is the name this policy had before `checks` existed: a config
+    /// file that still says `allow` reads as `auto`, because that is what it
+    /// asked for.
+    #[serde(alias = "allow")]
+    Auto,
 }
 
-/// How a run's pull request is landed.
+/// How a pull request is landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Land {
-    /// Whether a merge needs a human's approval.
+    /// The policy for a base branch that is not protected.
     pub merge: MergePolicy,
-    /// Branches `allow` never merges into without approval.
+    /// Branches no policy merges into without a human's approval.
+    ///
+    /// The list is a guard against automatic merges into the branch that
+    /// ships, so it outranks `checks` and `auto` rather than being checked by
+    /// them: landing into one of these always waits for the human.
     pub protected: Vec<String>,
 }
 
@@ -60,6 +88,20 @@ impl Default for Land {
         Self {
             merge: MergePolicy::Ask,
             protected: vec!["main".to_string(), "master".to_string()],
+        }
+    }
+}
+
+impl Land {
+    /// The policy that applies to a pull request into `base`.
+    ///
+    /// A protected branch always asks. Every other branch uses the configured
+    /// policy.
+    pub fn policy_for(&self, base: &str) -> MergePolicy {
+        if self.protected.iter().any(|branch| branch == base) {
+            MergePolicy::Ask
+        } else {
+            self.merge
         }
     }
 }
@@ -131,6 +173,36 @@ pub struct Review {
     pub rounds: u32,
 }
 
+/// The tick: how often the service advances the world, and how far.
+///
+/// The values are documented defaults rather than secrets: a repository that
+/// wants every task of its plan running at once says so here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tick {
+    /// How many tasks of one repository may be running at the same time.
+    ///
+    /// The tick starts a queued task only while fewer than this many tasks
+    /// count as running, so one plan of twenty tasks does not put twenty agents
+    /// on one machine. A task that reported and waits on its landing is not
+    /// running any more and frees its slot.
+    pub max_running: u32,
+    /// How long the service waits between passes, in seconds.
+    ///
+    /// Shepherdr's own tick runs every fifteen seconds, which is short enough
+    /// that a human never waits on it and long enough that a pass costs a fold
+    /// of the log every time rather than a spin.
+    pub interval_secs: u64,
+}
+
+impl Default for Tick {
+    fn default() -> Self {
+        Self {
+            max_running: 4,
+            interval_secs: 15,
+        }
+    }
+}
+
 /// The resolved configuration: defaults with every layer applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -150,6 +222,8 @@ pub struct Config {
     pub review: Review,
     /// Land policy: whether a merge needs a human's approval.
     pub land: Land,
+    /// How often the service advances the world, and how far.
+    pub tick: Tick,
 }
 
 impl Default for Config {
@@ -172,6 +246,7 @@ impl Default for Config {
                 rounds: 2,
             },
             land: Land::default(),
+            tick: Tick::default(),
         }
     }
 }
@@ -260,6 +335,14 @@ impl Config {
                 self.land.protected = protected.clone();
             }
         }
+        if let Some(tick) = &layer.tick {
+            if let Some(max_running) = tick.max_running {
+                self.tick.max_running = max_running;
+            }
+            if let Some(interval_secs) = tick.interval_secs {
+                self.tick.interval_secs = interval_secs;
+            }
+        }
     }
 }
 
@@ -283,6 +366,8 @@ pub struct ConfigLayer {
     pub review: Option<ReviewLayer>,
     /// The `[land]` section.
     pub land: Option<LandLayer>,
+    /// The `[tick]` section.
+    pub tick: Option<TickLayer>,
 }
 
 /// The `[roster]` section of a config file.
@@ -360,10 +445,20 @@ pub struct ReviewLayer {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandLayer {
-    /// Whether a merge needs a human's approval.
+    /// The policy for a base branch that is not protected.
     pub merge: Option<MergePolicy>,
-    /// Branches `allow` never merges into without approval.
+    /// Branches no policy merges into without a human's approval.
     pub protected: Option<Vec<String>>,
+}
+
+/// The `[tick]` section of a config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TickLayer {
+    /// How many tasks of one repository may run at once.
+    pub max_running: Option<u32>,
+    /// Seconds between two passes of the service's tick.
+    pub interval_secs: Option<u64>,
 }
 
 /// Everything that can go wrong loading configuration.
@@ -474,6 +569,18 @@ impl Config {
                 reason: format!("must be at least 1, got {}", self.review.rounds),
             });
         }
+        if self.tick.max_running < 1 {
+            return Err(ConfigError::Invalid {
+                field: "tick.max_running",
+                reason: format!("must be at least 1, got {}", self.tick.max_running),
+            });
+        }
+        if self.tick.interval_secs < 1 {
+            return Err(ConfigError::Invalid {
+                field: "tick.interval_secs",
+                reason: format!("must be at least 1, got {}", self.tick.interval_secs),
+            });
+        }
         if let Some(reviewer) = &self.roster.reviewer
             && Some(reviewer) == self.roster.orchestrator.as_ref()
         {
@@ -566,7 +673,51 @@ mod tests {
             }
         );
         assert_eq!(config.land, Land::default());
+        assert_eq!(config.tick, super::Tick::default());
+        assert_eq!(config.tick.max_running, 4);
+        assert_eq!(config.tick.interval_secs, 15);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn tick_section_is_merged_field_by_field() {
+        let global = layer(
+            r#"
+            [tick]
+            max_running = 2
+            "#,
+        );
+        let config = from_layers(std::slice::from_ref(&global));
+        assert_eq!(config.tick.max_running, 2);
+        assert_eq!(
+            config.tick.interval_secs, 15,
+            "the defaults survive a section that only sets the cap"
+        );
+        let repo = layer(
+            r#"
+            [tick]
+            interval_secs = 30
+            "#,
+        );
+        let config = from_layers(&[global, repo]);
+        assert_eq!(config.tick.max_running, 2);
+        assert_eq!(config.tick.interval_secs, 30);
+    }
+
+    #[test]
+    fn a_tick_setting_of_zero_is_invalid() {
+        let mut config = Config::default();
+        config.tick.max_running = 0;
+        match config.validate() {
+            Err(ConfigError::Invalid { field, .. }) => assert_eq!(field, "tick.max_running"),
+            other => panic!("expected a tick.max_running refusal, got {other:?}"),
+        }
+        let mut config = Config::default();
+        config.tick.interval_secs = 0;
+        match config.validate() {
+            Err(ConfigError::Invalid { field, .. }) => assert_eq!(field, "tick.interval_secs"),
+            other => panic!("expected a tick.interval_secs refusal, got {other:?}"),
+        }
     }
 
     #[test]
@@ -584,11 +735,11 @@ mod tests {
         let global = layer(
             r#"
             [land]
-            merge = "allow"
+            merge = "checks"
             "#,
         );
         let config = from_layers(std::slice::from_ref(&global));
-        assert_eq!(config.land.merge, MergePolicy::Allow);
+        assert_eq!(config.land.merge, MergePolicy::Checks);
         assert_eq!(
             config.land.protected,
             vec!["main".to_string(), "master".to_string()],
@@ -601,8 +752,49 @@ mod tests {
             "#,
         );
         let config = from_layers(&[global, repo]);
-        assert_eq!(config.land.merge, MergePolicy::Allow);
+        assert_eq!(config.land.merge, MergePolicy::Checks);
         assert_eq!(config.land.protected, vec!["trunk".to_string()]);
+    }
+
+    #[test]
+    fn the_policy_that_was_called_allow_reads_as_auto() {
+        // A config file written before `checks` existed asked for an automatic
+        // merge; `allow` is that same request under its old name.
+        let old = layer(
+            r#"
+            [land]
+            merge = "allow"
+            "#,
+        );
+        assert_eq!(
+            from_layers(std::slice::from_ref(&old)).land.merge,
+            MergePolicy::Auto
+        );
+        let auto = layer(
+            r#"
+            [land]
+            merge = "auto"
+            "#,
+        );
+        assert_eq!(
+            from_layers(std::slice::from_ref(&auto)).land.merge,
+            MergePolicy::Auto
+        );
+    }
+
+    #[test]
+    fn a_protected_branch_always_asks() {
+        let land = Land {
+            merge: MergePolicy::Auto,
+            protected: vec!["main".to_string()],
+        };
+        assert_eq!(land.policy_for("main"), MergePolicy::Ask);
+        assert_eq!(land.policy_for("integration/m8"), MergePolicy::Auto);
+        let checks = Land {
+            merge: MergePolicy::Checks,
+            protected: Vec::new(),
+        };
+        assert_eq!(checks.policy_for("main"), MergePolicy::Checks);
     }
 
     #[test]
@@ -613,7 +805,7 @@ mod tests {
             merge = "always"
             "#,
         );
-        assert!(parsed.is_err(), "only ask and allow are policies");
+        assert!(parsed.is_err(), "only ask, checks and auto are policies");
     }
 
     #[test]

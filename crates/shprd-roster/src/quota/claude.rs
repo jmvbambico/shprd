@@ -414,17 +414,7 @@ mod tests {
     /// access prompt nobody will answer.
     fn write_hanging_script(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        if let Err(error) = std::fs::write(&path, "#!/bin/sh\nsleep 30\n") {
-            panic!("writing {name} failed: {error}");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::Permissions::from_mode(0o755);
-            if let Err(error) = std::fs::set_permissions(&path, mode) {
-                panic!("chmod {name} failed: {error}");
-            }
-        }
+        crate::scripted::write_executable(&path, "#!/bin/sh\nsleep 30\n");
         path
     }
 

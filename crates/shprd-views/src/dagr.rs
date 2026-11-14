@@ -35,6 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 use shprd_core::event::{Event, EventKind};
+use shprd_core::spawn;
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 
 /// dagr schema version this projector writes.
@@ -471,6 +472,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::TaskAdded { .. } => "task_added",
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
+        EventKind::TaskStatus { .. } => "task_status",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
@@ -486,6 +488,9 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
         EventKind::Approved { .. } => "approved",
+        EventKind::TaskPrOpened { .. } => "task_pr_opened",
+        EventKind::TaskApproved { .. } => "task_approved",
+        EventKind::TaskLanded { .. } => "task_landed",
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
@@ -500,10 +505,14 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         EventKind::TaskAdded { task, .. }
         | EventKind::Spawned { task, .. }
         | EventKind::Reported { task, .. }
+        | EventKind::TaskStatus { task, .. }
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
         | EventKind::ReviewRequested { task, .. }
+        | EventKind::TaskPrOpened { task, .. }
+        | EventKind::TaskApproved { task, .. }
+        | EventKind::TaskLanded { task, .. }
         | EventKind::HandedOff { task, .. } => Some(task),
         EventKind::Escalated { task, .. } => task.as_deref(),
         _ => None,
@@ -706,16 +715,12 @@ fn unique_nanos() -> u64 {
 
 /// Runs `<checker> check <tmp> --strict --json` and requires no findings.
 fn check(checker: &Path, tmp: &Path) -> Result<(), ViewError> {
-    let output = Command::new(checker)
-        .arg("check")
-        .arg(tmp)
-        .arg("--strict")
-        .arg("--json")
-        .output()
-        .map_err(|source| ViewError::Io {
-            path: checker.to_path_buf(),
-            source,
-        })?;
+    let mut command = Command::new(checker);
+    command.arg("check").arg(tmp).arg("--strict").arg("--json");
+    let output = spawn::output(&mut command).map_err(|source| ViewError::Io {
+        path: checker.to_path_buf(),
+        source,
+    })?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if output.status.success() && is_empty_findings(&text) {
         return Ok(());
@@ -786,6 +791,7 @@ mod tests {
             status,
             summary: "done".to_string(),
             tests: Vec::new(),
+            checks: Vec::new(),
             changed_paths: vec![path.to_string()],
             commit: None,
             skills_used: Vec::new(),
@@ -1325,12 +1331,34 @@ mod tests {
     /// A `dagr` stand-in that always reports one finding.
     #[cfg(unix)]
     fn failing_checker(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("fake-dagr");
         let script = "#!/bin/sh\necho '[{\"code\":\"E001\",\"level\":\"error\"}]'\nexit 1\n";
-        assert!(fs::write(&path, script).is_ok());
-        assert!(fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).is_ok());
+        write_executable(&path, script);
         path
+    }
+
+    /// Writes an executable script at `path`, through a temporary name beside it
+    /// and a rename.
+    ///
+    /// The path a later test executes is then never open for writing, so no
+    /// sibling thread's child can inherit a write descriptor on it and make the
+    /// exec fail with `ETXTBSY` on Linux. The temporary shares the directory, so
+    /// the rename is inside one filesystem.
+    #[cfg(unix)]
+    fn write_executable(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = path.with_extension("tmp");
+        assert!(fs::write(&temp, body).is_ok(), "writing {}", temp.display());
+        assert!(
+            fs::set_permissions(&temp, fs::Permissions::from_mode(0o755)).is_ok(),
+            "chmod {}",
+            temp.display()
+        );
+        assert!(
+            fs::rename(&temp, path).is_ok(),
+            "renaming {} into place",
+            temp.display()
+        );
     }
 
     #[cfg(unix)]

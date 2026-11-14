@@ -1,10 +1,13 @@
 //! The forge seam: everything shprd knows about pull requests.
 //!
-//! A run's work lands as one pull request, and shprd drives it through a
-//! forge — `gh` in production, [`FakeForge`] in tests. The trait is the whole
-//! contract: find an open pull request, create one, refresh its body, read its
-//! status, merge it. Nothing here pushes, and nothing here decides policy: the
-//! caller asks the questions, and [`PrStatus`] holds the answers.
+//! Work lands through pull requests, and shprd drives them through a forge —
+//! `gh` in production, [`FakeForge`] in tests. Since M8.3 every task has its
+//! own pull request, so the caller passes the task's branch to [`Forge::find_open`]
+//! and the commit it means to merge to [`Forge::merge`]; the run-wide path is
+//! kept for the old integration branch and uses the same calls. The trait is the
+//! whole contract: find an open pull request, create one, refresh its body, read
+//! its status, merge one commit. Nothing here pushes, and nothing here decides
+//! policy: the caller asks the questions, and [`PrStatus`] holds the answers.
 //!
 //! Every command runs as a program, never through a shell, so a branch name or
 //! a title can never turn into a command.
@@ -15,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
+use shprd_core::spawn;
 use thiserror::Error;
 
 /// A pull request, as the forge numbers and links it.
@@ -117,12 +121,17 @@ pub trait Forge {
     /// Fails when the forge cannot be asked.
     fn status(&self, number: u64) -> Result<PrStatus, ForgeError>;
 
-    /// Merges pull request `number`.
+    /// Squash-merges pull request `number`, and only while its head is
+    /// `head_sha`.
+    ///
+    /// Naming the commit is what keeps a landing honest: a branch that moved
+    /// between the read and the merge is refused by the forge rather than
+    /// merged at a commit nobody looked at.
     ///
     /// # Errors
     ///
     /// Fails when the forge refuses to merge it.
-    fn merge(&self, number: u64) -> Result<(), ForgeError>;
+    fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError>;
 }
 
 /// The real forge: `gh`, run in the repository the pull request belongs to.
@@ -160,14 +169,14 @@ impl GhForge {
 
     /// Runs the program and returns its raw output, whatever its exit status.
     fn exec(&self, args: &[String]) -> Result<Output, ForgeError> {
-        Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(args)
             .current_dir(&self.dir)
             .env("GH_PROMPT_DISABLED", "1")
             .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|source| ForgeError::Spawn { source })
+            .stdin(Stdio::null());
+        spawn::output(&mut command).map_err(|source| ForgeError::Spawn { source })
     }
 
     /// Runs the program and returns its trimmed stdout, or why it failed.
@@ -322,12 +331,14 @@ impl Forge for GhForge {
         })
     }
 
-    fn merge(&self, number: u64) -> Result<(), ForgeError> {
+    fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
         let args = vec![
             "pr".to_string(),
             "merge".to_string(),
             number.to_string(),
-            "--merge".to_string(),
+            "--squash".to_string(),
+            "--match-head-commit".to_string(),
+            head_sha.to_string(),
         ];
         self.run(&args).map(|_| ())
     }
@@ -361,6 +372,11 @@ struct FakeState {
     next_number: u64,
     /// The URL the next `create` answers with, when the script sets one.
     create_url: Option<String>,
+    /// True when `merge` must fail, standing in for a forge that refuses.
+    merge_fails: bool,
+    /// True when `merge` leaves the pull request unmerged, standing in for a
+    /// forge that accepted the call without merging anything.
+    merge_silent: bool,
 }
 
 impl Default for FakeState {
@@ -371,6 +387,8 @@ impl Default for FakeState {
             calls: Vec::new(),
             next_number: 1,
             create_url: None,
+            merge_fails: false,
+            merge_silent: false,
         }
     }
 }
@@ -428,6 +446,9 @@ impl FakeForge {
         if let Some(url) = value.get("create_url").and_then(Value::as_str) {
             state.create_url = Some(url.to_string());
         }
+        if let Some(fails) = value.get("merge_fails").and_then(Value::as_bool) {
+            state.merge_fails = fails;
+        }
         Ok(state)
     }
 
@@ -472,6 +493,18 @@ impl FakeForge {
     /// The calls made so far, in order.
     pub fn calls(&self) -> Vec<String> {
         self.state.borrow().calls.clone()
+    }
+
+    /// Makes every `merge` fail, as a forge that refused would.
+    pub fn refuse_merges(&self) {
+        self.state.borrow_mut().merge_fails = true;
+    }
+
+    /// Makes every `merge` succeed without merging, as a forge that accepted
+    /// the call and did nothing would. It is how a caller's check that the
+    /// merge settled gets tested.
+    pub fn silence_merges(&self) {
+        self.state.borrow_mut().merge_silent = true;
     }
 
     /// Scripts the status `status` for pull request `number`.
@@ -565,8 +598,28 @@ impl Forge for FakeForge {
             }))
     }
 
-    fn merge(&self, number: u64) -> Result<(), ForgeError> {
-        self.record(format!("merge {number}"));
+    fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
+        self.record(format!("merge {number} {head_sha}"));
+        let mut state = self.state.borrow_mut();
+        if state.merge_fails {
+            return Err(ForgeError::Failed {
+                args: vec![
+                    "pr".to_string(),
+                    "merge".to_string(),
+                    number.to_string(),
+                    head_sha.to_string(),
+                ],
+                code: Some(1),
+                stderr: "the forge refused the merge".to_string(),
+            });
+        }
+        // A real merge moves the pull request to merged; the status keeps the
+        // head it was reported at, which is the commit that landed.
+        if !state.merge_silent
+            && let Some(status) = state.statuses.get_mut(&number)
+        {
+            status.merged = true;
+        }
         Ok(())
     }
 }
@@ -613,14 +666,7 @@ mod tests {
                   edit|merge) exit 0 ;;\n\
                   *) echo 'unknown verb' >&2; exit 3 ;;\n\
                 esac\n";
-            let path = forge.dir.join("gh");
-            if let Err(err) = std::fs::write(&path, body) {
-                panic!("write the fake gh: {err}");
-            }
-            let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
-            if let Err(err) = std::fs::set_permissions(&path, mode) {
-                panic!("chmod the fake gh: {err}");
-            }
+            forge.write_script("gh", body);
             forge
         }
 
@@ -629,6 +675,23 @@ mod tests {
             let path = self.dir.join(name);
             if let Err(err) = std::fs::write(&path, body) {
                 panic!("write {}: {err}", path.display());
+            }
+        }
+
+        /// Writes an executable stand-in through a temporary name beside it and
+        /// a rename, so the path a test runs is never open for writing.
+        fn write_script(&self, name: &str, body: &str) {
+            let path = self.dir.join(name);
+            let temp = self.dir.join(format!("{name}.tmp"));
+            if let Err(err) = std::fs::write(&temp, body) {
+                panic!("write {}: {err}", temp.display());
+            }
+            let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+            if let Err(err) = std::fs::set_permissions(&temp, mode) {
+                panic!("chmod {}: {err}", temp.display());
+            }
+            if let Err(err) = std::fs::rename(&temp, &path) {
+                panic!("rename {} into place: {err}", path.display());
             }
         }
 
@@ -765,18 +828,21 @@ mod tests {
         let body = script.dir.join("body.md");
         let outcome = script.forge().and_then(|forge| {
             forge.edit_body(7, body.as_path())?;
-            forge.merge(7)
+            forge.merge(7, "abc1234")
         });
         assert!(outcome.is_ok(), "edit then merge must both work");
         let calls = script.calls();
         assert!(calls.contains("pr edit 7 --body-file"), "{calls}");
-        assert!(calls.contains("pr merge 7 --merge"), "{calls}");
+        assert!(
+            calls.contains("pr merge 7 --squash --match-head-commit abc1234"),
+            "{calls}"
+        );
     }
 
     #[test]
     fn a_failing_forge_reports_its_exit_code_and_stderr() {
         let script = Script::new("0");
-        script.write("gh", "#!/bin/sh\necho 'boom' >&2\nexit 3\n");
+        script.write_script("gh", "#!/bin/sh\necho 'boom' >&2\nexit 3\n");
         let err = match script.forge().and_then(|forge| forge.find_open("a")) {
             Ok(found) => panic!("a failing gh must not answer: {found:?}"),
             Err(err) => err,
@@ -815,7 +881,7 @@ mod tests {
             let created = forge.create("main", "shprd/r1/int", "run t1", body)?;
             assert_eq!(created.number, 1, "the fake numbers from one");
             assert_eq!(forge.status(7)?, passed("abc1234"));
-            forge.merge(7)?;
+            forge.merge(7, "abc1234")?;
             Ok(())
         })();
         assert!(outcome.is_ok());
@@ -826,7 +892,7 @@ mod tests {
                 "edit_body 7 /tmp/body.md".to_string(),
                 "create main shprd/r1/int run t1 /tmp/body.md".to_string(),
                 "status 7".to_string(),
-                "merge 7".to_string(),
+                "merge 7 abc1234".to_string(),
             ]
         );
     }

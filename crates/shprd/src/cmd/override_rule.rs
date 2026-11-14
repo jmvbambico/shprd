@@ -7,7 +7,7 @@
 //! itself could push through exactly the work a review stopped, which is the
 //! hole this verb closes.
 //!
-//! Two barriers hold, the same pair `shprd approve` and `shprd down --abandon`
+//! Two barriers hold, the same pair `shprd approve` and `shprd run finish --abandon`
 //! use. `SHPRD_ACTOR` is an environment variable, so an agent pane always has
 //! it set and [`confirm::require_human`] refuses on the name itself; a pane
 //! restored without it still has no TTY, so the question is one only a person
@@ -188,6 +188,10 @@ mod tests {
                     status: shprd_core::event::ReportStatus::Completed,
                     summary: "done".to_string(),
                     tests: Vec::new(),
+                    checks: vec![shprd_core::event::CheckReport::passed(
+                        "tests",
+                        "cargo test",
+                    )],
                     changed_paths: vec!["crates/janitor/x.rs".to_string()],
                     commit: Some("abc123".to_string()),
                     skills_used: Vec::new(),

@@ -176,9 +176,9 @@ pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
 
 /// Asks git for the top level of the current working directory.
 fn git_top_level() -> Result<PathBuf, CliError> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
+    let mut command = std::process::Command::new("git");
+    command.args(["rev-parse", "--show-toplevel"]);
+    let output = shprd_core::spawn::output(&mut command)
         .context("running `git rev-parse --show-toplevel`")
         .map_err(CliError::other)?;
     if !output.status.success() {

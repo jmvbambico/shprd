@@ -1,14 +1,20 @@
-//! `shprd land`: the run's work leaves as one pull request.
+//! `shprd land`: one task's own pull request, or (before M8.3) the run's.
 //!
 //! Landing is the only place shprd talks to a forge, and the only place it
-//! pushes. Everything it decides comes from the log: the run must be active,
-//! no task may still be in flight, at least one task must have landed, and the
-//! run-wide gate must have passed on the very head being pushed. A refusal
-//! writes nothing and exits 2.
+//! pushes. With a task named, the task's branch gets its own pull request into
+//! the run's base branch, and `[land] merge` decides what happens next: `ask`
+//! waits for the human's `shprd approve <task>`, `checks` for the forge's
+//! checks, `auto` merges at once. A protected base branch always asks. Landing
+//! refuses a task whose latest attempt has no passing hand-in or no
+//! engine-recorded cross-vendor review, because a pull request nobody checked
+//! is not a landing.
 //!
-//! With `--merge` the same verb applies `[land] merge`: a human's approval is
-//! always enough, and the `allow` policy merges an unapproved pull request only
-//! when its base branch is not protected.
+//! Without a task, the old run-level path runs unchanged: the run's integration
+//! branch leaves as one pull request, everything it decides comes from the log
+//! (the run must be active, no task may still be in flight, at least one task
+//! must have landed, and the run-wide gate must have passed on the very head
+//! being pushed), and `--merge` applies `[land] merge` to it. A refusal writes
+//! nothing and exits 2.
 
 use std::path::{Path, PathBuf};
 
@@ -16,10 +22,12 @@ use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind};
 use shprd_core::gate::REVIEW_GATE;
+use shprd_core::rules;
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_git::forge::{FakeForge, Forge, GhForge};
 use shprd_git::git::Git;
 use shprd_git::integrate;
+use shprd_git::land;
 use shprd_git::sync;
 
 use crate::cli::LandArgs;
@@ -32,20 +40,26 @@ use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 /// call goes to the script named here instead of the network.
 pub const FAKE_FORGE_ENV: &str = "SHPRD_FAKE_FORGE";
 
-/// The line a body ends with, as the run's policy requires.
-const REVIEW_PASSED: &str = "cross-vendor-review: passed";
+/// The line a task's body ends with when its review was independent.
+///
+/// The composition itself lives in `shprd_views::pr::task_pr_body_marked`, so
+/// the service's tick pushes the same bytes this verb does.
+const REVIEW_PASSED: &str = shprd_views::pr::REVIEW_PASSED;
 
 /// The line a body ends with when no independent review could be had.
 const REVIEW_DEGRADED: &str = "degraded-review";
 
 /// The attribution line every generated pull request ends with.
-const ATTRIBUTION: &str = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+const ATTRIBUTION: &str = shprd_views::pr::ATTRIBUTION;
 
 /// How much of a sha a human line shows.
 const SHORT_SHA: usize = 7;
 
-/// Opens the run's pull request, or with `--merge` applies the merge policy.
+/// Lands one task, or with no task opens the run's pull request.
 pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), CliError> {
+    if let Some(task) = &args.task {
+        return land_task(ctx, args, home, task);
+    }
     let config = load_config(ctx, home)?;
     let (state, events) = ctx.load()?;
     let run = state.run.as_ref().ok_or_else(|| {
@@ -90,6 +104,254 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
         return merge(ctx, &config, &worktree, &head);
     }
     open(ctx, &state, &events, &worktree, &integrated)
+}
+
+/// Lands one task through its own pull request, as `[land] merge` says.
+///
+/// Everything is decided from the log before anything is pushed: the task must
+/// exist, its latest attempt must have handed in and been reviewed
+/// independently, and a landing that already finished is reported as finished
+/// rather than repeated.
+fn land_task(
+    ctx: &Ctx,
+    args: &LandArgs,
+    home: Option<&Path>,
+    task_id: &str,
+) -> Result<(), CliError> {
+    if args.merge {
+        return Err(CliError::Invalid(anyhow!(
+            "`--merge` merges the run's pull request; a task lands by `[land] merge` in the config"
+        )));
+    }
+    let config = load_config(ctx, home)?;
+    let (state, events) = ctx.load()?;
+    let run = state.run.as_ref().ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no run yet: start one with `shprd run start` before landing"
+        ))
+    })?;
+    let run_id = run.run_id.clone();
+    let base = run.base_branch.clone();
+    if state.finished {
+        return Err(CliError::Invalid(anyhow!(
+            "the run {run_id} has finished: there is nothing left to land"
+        )));
+    }
+    let task = state.tasks.get(task_id).ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no task {task_id:?} in this run: `shprd status` lists the ones it holds"
+        ))
+    })?;
+    if task.status == TaskStatus::Dropped {
+        return Err(CliError::Invalid(anyhow!(
+            "task {task_id:?} was dropped: there is nothing to land"
+        )));
+    }
+    if let Some(pr) = &task.pr
+        && pr.merged
+    {
+        // The landing already finished, and the log says so: nothing to push,
+        // nothing to merge, nothing to record.
+        if !ctx.json {
+            println!("already merged {}", pr.url);
+        }
+        return Ok(());
+    }
+    // The hand-in and the review are the engine's to judge, and the rule that
+    // judges them is the one every landing verb asks: M8.4's own gates, so a
+    // task whose hand-in names no checks, or whose checks failed, cannot reach
+    // a pull request through this path.
+    if let Err(refusal) = rules::ready_to_land(task) {
+        return Err(CliError::Invalid(anyhow!(
+            "task {task_id:?} may not land yet: {refusal}"
+        )));
+    }
+    let attempt = task
+        .latest_attempt()
+        .ok_or_else(|| CliError::Invalid(anyhow!("task {task_id:?} has no attempt to land")))?;
+    let worktree = PathBuf::from(&attempt.worktree);
+    let branch = attempt.branch.clone();
+    let git = Git::new(&worktree);
+    let head = git.head_sha().map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "reading the head of {} in {}",
+            attempt.branch,
+            worktree.display()
+        )))
+    })?;
+    // An approval counts only for the commit it named: a human who approved an
+    // older head said nothing about the commits pushed since.
+    let approved =
+        task.pr.as_ref().and_then(|pr| pr.approved_head.as_deref()) == Some(head.as_str());
+    // Whether the branch had work of its own, for the one case git cannot tell
+    // a merged branch from one that never moved.
+    let has_work = attempt
+        .report
+        .as_ref()
+        .and_then(|report| report.commit.as_ref())
+        .is_some()
+        || task.pr.is_some();
+    let title = format!("{task_id}: {}", task.title);
+    let body = render_task_body(task);
+    let home = resolve_home(home)?;
+    let repo_name = repo_name(ctx)?;
+    // Held from here to the merge: a spawn replacing the attempt meanwhile
+    // would delete the branch under the push.
+    let _lock = run_lock::lock_run(&home, &repo_name, &run_id)?;
+    let body_file = write_task_body(&home, &run_id, task_id, &body)?;
+    let landing = land::Landing {
+        task: task_id,
+        branch: &branch,
+        base: &base,
+        title: &title,
+        body: &body_file,
+        has_work,
+    };
+    let forge = forge(&worktree)?;
+    let policy = config.land.policy_for(&base);
+    let landed = match land::land(forge.as_ref(), &git, &landing, policy, approved) {
+        Ok(landed) => landed,
+        // These three leave the pull request where a human can look at it, and
+        // the next landing can act: they are refusals (exit 2), not failures.
+        Err(
+            err @ (land::LandError::ChecksFailed { .. }
+            | land::LandError::HeadMoved { .. }
+            | land::LandError::NotMerged { .. }),
+        ) => {
+            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+        }
+        Err(err) => {
+            return Err(CliError::other(anyhow!(err).context(format!(
+                "landing task {task_id:?} from {}",
+                worktree.display()
+            ))));
+        }
+    };
+    record_landing(ctx, &events, task_id, &base, &landed)?;
+    if !ctx.json {
+        println!("{}", landing_line(task_id, &base, &landed));
+    }
+    Ok(())
+}
+
+/// The line a landing prints: what happened, and what a human does next.
+fn landing_line(task_id: &str, base: &str, landed: &land::Landed) -> String {
+    match landed {
+        land::Landed::Merged { pr, .. } => format!("merged {} (task {task_id})", pr.url),
+        land::Landed::AlreadyMerged { pr: Some(pr), .. } => {
+            format!("already merged {} (task {task_id})", pr.url)
+        }
+        land::Landed::AlreadyMerged { pr: None, .. } => {
+            format!("{task_id} is already in {base}")
+        }
+        land::Landed::SquashMerged { .. } => {
+            format!("{task_id}'s work is already in {base}, as other commits")
+        }
+        land::Landed::NothingToMerge { .. } => {
+            format!("nothing to merge: {task_id}'s branch has no work beyond {base}")
+        }
+        land::Landed::Waiting { pr, reason, .. } => {
+            format!("{} ({})", reason.advice(task_id), pr.url)
+        }
+    }
+}
+
+/// Records what the landing touched: its pull request, then its outcome.
+///
+/// Both are recorded once. A landing a human re-runs reads the log, sees the
+/// same pull request at the same head and the same outcome, and records
+/// nothing: the log is a history, not a tally.
+fn record_landing(
+    ctx: &Ctx,
+    events: &[Event],
+    task_id: &str,
+    base: &str,
+    landed: &land::Landed,
+) -> Result<(), CliError> {
+    if let Some(pr) = landed.pr() {
+        let known = events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::TaskPrOpened { task, number, head, .. }
+                    if task == task_id && *number == pr.number && head == &pr.head
+            )
+        });
+        if !known {
+            let event = ctx.commit(EventKind::TaskPrOpened {
+                task: task_id.to_string(),
+                number: pr.number,
+                url: pr.url.clone(),
+                head: pr.head.clone(),
+            })?;
+            crate::cmd::emit(ctx, &event)?;
+        }
+    }
+    let Some(outcome) = landed.outcome() else {
+        return Ok(());
+    };
+    let head = landed.head().to_string();
+    let known = events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::TaskLanded { task, head: recorded, outcome: recorded_outcome, .. }
+                if task == task_id && recorded == &head && *recorded_outcome == outcome
+        )
+    });
+    if known {
+        return Ok(());
+    }
+    let event = ctx.commit(EventKind::TaskLanded {
+        task: task_id.to_string(),
+        base: base.to_string(),
+        head,
+        number: landed.number(),
+        outcome,
+    })?;
+    crate::cmd::emit(ctx, &event)?;
+    Ok(())
+}
+
+/// The per-task body: the task's facts, the review line, the attribution.
+///
+/// Landing refuses a task without an engine-recorded cross-vendor review, so
+/// the marker is a claim the log already proves by the time this runs.
+fn render_task_body(task: &Task) -> String {
+    shprd_views::pr::task_pr_body_marked(task)
+}
+
+/// Writes one task's pull request body under shprd's own home.
+///
+/// Never in the repository: a landing must not leave a file in the tree it is
+/// proposing to merge.
+fn write_task_body(home: &Path, run: &str, task: &str, body: &str) -> Result<PathBuf, CliError> {
+    let dir = home.join(".shprd").join("pr");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("creating {}", dir.display())))
+    })?;
+    let path = dir.join(format!("{}-{}.md", file_stem(run), file_stem(task)));
+    std::fs::write(&path, body).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("writing {}", path.display())))
+    })?;
+    Ok(path)
+}
+
+/// A run or task id reduced to something a file name can hold.
+fn file_stem(id: &str) -> String {
+    let stem: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if stem.is_empty() {
+        String::from("task")
+    } else {
+        stem
+    }
 }
 
 /// Refuses while any task is still working or waiting to be gated.
@@ -422,20 +684,21 @@ fn merge(
             "the pull request's checks have not passed on {head}: wait for CI and try again"
         )));
     }
-    let protected = config.land.protected.contains(&base);
+    let policy = config.land.policy_for(&base);
     // An approval recorded in shprd counts exactly like the forge's, as long as
     // it names this head: what a human said about older commits says nothing
     // about the ones pushed since.
     let approved_here = pr.approved_head.as_deref() == Some(head);
-    let allowed =
-        status.approved || approved_here || (config.land.merge == MergePolicy::Allow && !protected);
+    let allowed = status.approved
+        || approved_here
+        || matches!(policy, MergePolicy::Checks | MergePolicy::Auto);
     if !allowed {
         return Err(CliError::Invalid(anyhow!(
             "waiting for your approval: run `shprd approve`, or approve {url} on GitHub"
         )));
     }
     forge
-        .merge(number)
+        .merge(number, head)
         .map_err(|err| CliError::other(anyhow!(err).context("merging the pull request")))?;
     let event = ctx.commit(EventKind::PrMerged {
         number,
@@ -565,6 +828,10 @@ mod tests {
                     status: ReportStatus::Completed,
                     summary: "done".to_string(),
                     tests: Vec::new(),
+                    checks: vec![shprd_core::event::CheckReport::passed(
+                        "tests",
+                        "cargo test",
+                    )],
                     changed_paths: vec!["a.txt".to_string()],
                     commit: Some("abc123".to_string()),
                     skills_used: Vec::new(),

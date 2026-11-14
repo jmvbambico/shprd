@@ -138,7 +138,8 @@ pub struct Tab {
 pub struct Workspace {
     /// The host's identifier for the workspace.
     pub id: WorkspaceId,
-    /// The workspace name; see [`crate::naming::workspace_name`].
+    /// The workspace name, which the caller picks: shprd names it after the
+    /// repository.
     pub name: String,
 }
 

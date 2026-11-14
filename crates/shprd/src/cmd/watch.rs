@@ -1,5 +1,10 @@
 //! The `watch` verb: poll every working agent and apply the dry/hand-off state
 //! machine to what its pane and its transcript say.
+//!
+//! A working agent the host calls idle is watched as closely as one that is
+//! quiet: past the machine's idle ceiling, and with no report or gate result
+//! since it stopped, the attempt is escalated with "idle, no report". A pane
+//! parked at its own prompt is the one stall the silence rule can never see.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +14,7 @@ use shprd_core::event::{Actor, Event, EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
-use shprd_mux::{AgentState, Mux, MuxError, PaneId, naming};
+use shprd_mux::{AgentState, Mux, MuxError, PaneId};
 use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
@@ -20,7 +25,7 @@ use shprd_watch::screen::{Sampler, ScreenSignal, sample};
 use crate::cli::WatchArgs;
 use crate::cmd::handoff::{HandoffRequest, handoff};
 use crate::cmd::spawn::{self, Program, SpawnEnv};
-use crate::cmd::{launch, review, verdict};
+use crate::cmd::{deliver, review, verdict};
 use crate::ctx::{CliError, Ctx};
 
 /// The newest `*.jsonl` file in `dir`, if the directory holds one.
@@ -90,6 +95,14 @@ fn record_error(
     };
     scan.ok()?.last_error
 }
+
+/// The reason an [`EventKind::Available`] event carries.
+///
+/// A canary that spends quota is not wired yet: the watchdog re-admits a dry
+/// agent when its cooldown elapses, and nothing probed the agent at all. The
+/// record says so rather than claiming a reset the provider never gave, so a
+/// reader of the log is not told about a check that never happened.
+const CANARY_REASON: &str = "cooldown elapsed, unprobed";
 
 /// How long the orchestrator may sit on a prompt of its own before the
 /// watchdog says so.
@@ -250,6 +263,7 @@ impl Watcher {
             serve: None,
             screen: None,
             process_exited: false,
+            report_or_gate_ms: None,
         };
         let mut finished: Vec<String> = Vec::new();
         for (agent, watch) in self.cooldowns.iter_mut() {
@@ -264,9 +278,10 @@ impl Watcher {
             if !probe_due {
                 continue;
             }
-            // No quota call is wired yet, so a probe that is due always reads
-            // as recovered: the dry mark existed to make the agent wait, and
-            // the wait is over.
+            // No quota call is wired yet, so a probe that is due reads as
+            // recovered because the cooldown is over, not because anything
+            // asked the agent: the dry mark existed to make it wait, and the
+            // wait is over. The recorded reason says exactly that.
             let follow = watch.canary_result(true, now_ms, &policy);
             if !follow
                 .iter()
@@ -281,7 +296,7 @@ impl Watcher {
                 .as_actor(Actor::Engine)
                 .commit(EventKind::Available {
                     agent: agent.clone(),
-                    reason: String::from("reset time passed"),
+                    reason: String::from(CANARY_REASON),
                 })?;
             lines.push(format!("available again: {agent}"));
             finished.push(agent.clone());
@@ -411,9 +426,9 @@ fn blocked_on_a_prompt(mux: &dyn Mux, env: &SpawnEnv<'_>, pane: &PaneId) -> bool
     if matches!(mux.agent_state(pane), Ok(AgentState::Blocked)) {
         return true;
     }
-    env.programs
-        .iter()
-        .any(|program| launch::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_some())
+    env.programs.iter().any(|program| {
+        deliver::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_some()
+    })
 }
 
 /// One thing the orchestrator has to act on, and the event that says so.
@@ -664,6 +679,7 @@ fn tick_task(
         serve: None,
         screen,
         process_exited,
+        report_or_gate_ms: reported_or_gated_ms(events, &task.id, attempt.n, now_ms),
     };
     let mut queue = watch.step(&inputs, &watcher.policy);
     let mut handed_off: Option<(String, bool)> = None;
@@ -717,9 +733,9 @@ fn tick_task(
                 })?;
                 lines.push(format!("escalated {}: {reason}", task.id));
             }
-            // No quota call is wired yet, so a probe that is due always reads
-            // as recovered: the dry mark existed to make the agent wait, and
-            // the wait is over.
+            // No quota call is wired yet, so a probe that is due reads as
+            // recovered because the cooldown is over, not because anything
+            // asked the agent. The recorded reason says exactly that.
             Action::Canary => {
                 let due = matches!(
                     &watch.health,
@@ -734,7 +750,7 @@ fn tick_task(
             Action::MarkAvailable => {
                 env.ctx.commit(EventKind::Available {
                     agent: agent.clone(),
-                    reason: String::from("reset time passed"),
+                    reason: String::from(CANARY_REASON),
                 })?;
                 lines.push(format!("available again: {agent}"));
             }
@@ -842,7 +858,7 @@ fn awaiting_review(task: &Task) -> Option<u32> {
 /// transient failure would otherwise mark a working agent dry and hand its task
 /// to somebody else.
 fn pane_for(mux: &dyn Mux, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
-    let name = naming::workspace_name(&env.repo_name);
+    let name = spawn::workspace_name(&env.repo_name);
     let Some(workspace) = mux.find_workspace(&name)? else {
         return Ok(None);
     };
@@ -869,6 +885,35 @@ fn observe(
         Err(MuxError::NotFound { .. }) => (None, true),
         Err(_) => (None, false),
     }
+}
+
+/// When the attempt last reported or recorded a gate result, if it ever did.
+///
+/// The idle ceiling is about *no news*, so this is the newest thing the attempt
+/// itself said. A timestamp the log places after `now_ms` is left out: the two
+/// clocks disagree, which proves nothing about when it happened.
+fn reported_or_gated_ms(events: &[Event], task: &str, attempt: u32, now_ms: u64) -> Option<u64> {
+    events.iter().rev().find_map(|event| {
+        let mine = match &event.kind {
+            EventKind::Reported {
+                task: id,
+                attempt: n,
+                ..
+            }
+            | EventKind::GatePassed {
+                task: id,
+                attempt: n,
+                ..
+            }
+            | EventKind::GateFailed {
+                task: id,
+                attempt: n,
+                ..
+            } => id == task && *n == attempt,
+            _ => false,
+        };
+        (mine && event.at_ms <= now_ms).then_some(event.at_ms)
+    })
 }
 
 /// When the attempt's current worker started: its spawn, or the hand-off that
@@ -996,11 +1041,11 @@ fn lock_path(log_path: &Path) -> PathBuf {
 /// Claims the run's watchdog slot, holding it until the process exits.
 ///
 /// One watchdog per run is what makes the verdicts and the hand-offs add up,
-/// and `up` cannot promise it alone: when a host refuses to close both the
-/// stale pane and its replacement, two `shprd watch` processes are left in one
-/// run. The kernel's lock settles that without one polling the other: the OS
-/// drops it when the process dies, so a crashed watchdog never leaves a claim
-/// behind, and a duplicate gets `Ok(None)` and steps aside.
+/// and nothing that starts one can promise it alone: when a host refuses to
+/// close both the stale pane and its replacement, two `shprd watch` processes
+/// are left in one run. The kernel's lock settles that without one polling the
+/// other: the OS drops it when the process dies, so a crashed watchdog never
+/// leaves a claim behind, and a duplicate gets `Ok(None)` and steps aside.
 ///
 /// `Ok(None)` is not an error: the duplicate is harmless once it exits.
 fn claim_run(log_path: &Path) -> Result<Option<std::fs::File>, CliError> {
@@ -1073,6 +1118,7 @@ mod tests {
 
     use crate::cmd::spawn::SpawnRequest;
     use crate::cmd::spawn::fault::{Fault, FlakyMux};
+    use shprd_watch::machine::IDLE_REPORT_FACTOR;
 
     use super::*;
 
@@ -1366,11 +1412,8 @@ project_dirs = []
     /// A fake multiplexer holding the repo's workspace.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&spawn::workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
 
@@ -1400,7 +1443,7 @@ project_dirs = []
 
     /// The pane the tab `tab` holds.
     fn pane_of_tab(mux: &FakeMux, scratch: &Scratch, tab: &str) -> PaneId {
-        let name = naming::workspace_name(&scratch.repo_name());
+        let name = spawn::workspace_name(&scratch.repo_name());
         let workspace = mux
             .find_workspace(&name)
             .unwrap_or_else(|err| panic!("{err}"))
@@ -1486,6 +1529,10 @@ project_dirs = []
             status: ReportStatus::Completed,
             summary: "did it".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
@@ -1577,6 +1624,95 @@ project_dirs = []
             dry_after_ms,
             Some(300_000),
             "the agent must go dry 120s after it is merely suspect"
+        );
+    }
+
+    /// A worker the host calls idle is the one stall the silence rule cannot
+    /// see: nothing moves, no record errors, and no screen pattern matches.
+    /// Past the idle ceiling the attempt is escalated once, naming the task and
+    /// the fact, and the notice the orchestrator gets says the same.
+    #[test]
+    fn an_idle_worker_that_never_reports_is_escalated() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_screen(&pane, "> ");
+        mux.set_state(&pane, AgentState::Idle);
+
+        let policy = Policy::default();
+        let limit = policy.suspect_after_ms * IDLE_REPORT_FACTOR;
+        let mut watcher = Watcher::new(policy);
+        let t0 = 1_700_000_000_000u64;
+        let mut escalated_at = None;
+        for step in 0..=(limit / 10_000 + 5) {
+            let now = t0 + 10_000 * step;
+            let before = events(&ctx).len();
+            let lines = watcher
+                .tick(&mux, &env, now)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let log = events(&ctx);
+            let fresh = &log[before..];
+            if !appended(fresh, is_escalation) {
+                continue;
+            }
+            escalated_at = Some(now);
+            let bodies: Vec<&String> = fresh
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::Escalated { task, body, .. } => {
+                        assert_eq!(task.as_deref(), Some("T1"), "the escalation names T1");
+                        Some(body)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                bodies.len(),
+                1,
+                "one escalation, not one per tick: {fresh:?}"
+            );
+            assert!(
+                bodies[0].contains("idle, no report"),
+                "the reason says what was seen: {}",
+                bodies[0]
+            );
+            // The orchestrator is told the same thing, not left to guess.
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("ask the human") && line.contains("idle, no report")),
+                "the notice must name the idle worker: {lines:?}"
+            );
+            break;
+        }
+        assert_eq!(
+            escalated_at,
+            Some(t0 + limit + 10_000),
+            "the escalation lands one tick past two suspect windows"
+        );
+        assert_eq!(
+            count(&events(&ctx), is_escalation),
+            1,
+            "the attempt is escalated exactly once"
+        );
+        assert_eq!(
+            count(&events(&ctx), |kind| matches!(kind, EventKind::Dry { .. })),
+            0,
+            "a stopped agent is not a dry program"
+        );
+
+        // Further ticks change nothing: the task is a human's now.
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, t0 + limit + 20_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            events(&ctx).len(),
+            before,
+            "an escalated attempt is not escalated again"
         );
     }
 
@@ -2073,6 +2209,10 @@ project_dirs = []
             status: ReportStatus::Failed,
             summary: "died four times".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
@@ -2664,14 +2804,23 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         let log = events(&ctx);
         let fresh = &log[before..];
-        assert!(
-            appended(fresh, |kind| matches!(
-                kind,
-                EventKind::Available { agent, .. } if agent == "sh"
-            )),
+        let available: Vec<&EventKind> = fresh
+            .iter()
+            .map(|event| &event.kind)
+            .filter(|kind| matches!(kind, EventKind::Available { .. }))
+            .collect();
+        assert_eq!(
+            available,
+            vec![&EventKind::Available {
+                agent: "sh".to_string(),
+                reason: CANARY_REASON.to_string(),
+            }],
             "the handed-off agent stayed dry: {} events",
             fresh.len()
         );
+        // Nothing probed the agent, so the record must not claim a reset the
+        // provider never gave.
+        assert!(!format!("{available:?}").contains("reset time passed"));
     }
     /// The reviewer writes findings and stops: the tick that sees them records
     /// the pass, and a file still being written is left alone.
@@ -2784,12 +2933,12 @@ project_dirs = []
         );
     }
 
-    /// The orchestrator `up` started, recorded in `mux` and the log.
+    /// The orchestrator a launcher started, recorded in `mux` and the log.
     ///
     /// The pane is a real tab in the fake host, because a prompt to a pane the
     /// host has never heard of fails.
     fn record_orchestrator(mux: &FakeMux, ctx: &Ctx, scratch: &Scratch) -> PaneId {
-        let name = naming::workspace_name(&scratch.repo_name());
+        let name = spawn::workspace_name(&scratch.repo_name());
         let workspace = mux
             .find_workspace(&name)
             .unwrap_or_else(|err| panic!("{err}"))
@@ -2835,6 +2984,10 @@ project_dirs = []
             status: ReportStatus::Completed,
             summary: "did it".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
@@ -3000,6 +3153,10 @@ project_dirs = []
                 status: ReportStatus::Completed,
                 summary: "did it".to_string(),
                 tests: Vec::new(),
+                checks: vec![shprd_core::event::CheckReport::passed(
+                    "tests",
+                    "cargo test",
+                )],
                 changed_paths: Vec::new(),
                 commit: None,
                 skills_used: Vec::new(),

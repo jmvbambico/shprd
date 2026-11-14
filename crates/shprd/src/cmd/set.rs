@@ -48,6 +48,24 @@ fn execute(
     root: Option<&Path>,
     local: bool,
 ) -> Result<(), CliError> {
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    execute_with_path(args, home, root, local, &path_env)
+}
+
+/// [`execute`], with the `PATH` the model listing runs under.
+///
+/// The model listing starts a harness's own CLI, so the `PATH` decides which
+/// program is started and whose state it touches. This verb reads the caller's
+/// `PATH`; the tests hand in a private one holding a scripted harness CLI, so
+/// the unit gate never starts a vendor binary against the developer's own
+/// home.
+fn execute_with_path(
+    args: &SetArgs,
+    home: Option<&Path>,
+    root: Option<&Path>,
+    local: bool,
+    path_env: &str,
+) -> Result<(), CliError> {
     let dir = roster::resolve_data_dir()?;
     let specs = load_dir(&dir.join("harness")).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("loading {}", dir.display())))
@@ -85,9 +103,10 @@ fn execute(
     // an edit that lands while the temp file is written is caught too.
     replace_checked(&path, &edited, previous.as_deref(), || {})?;
 
-    let path_env = std::env::var("PATH").unwrap_or_default();
     for agent in &change.agents {
-        warn_unknown_model(agent, &specs, &path_env);
+        if let Some(warning) = unknown_model_warning(agent, &specs, path_env) {
+            eprintln!("{warning}");
+        }
     }
     match change.switch {
         Some(on) => println!("ok {} = {}", change.role, if on { "on" } else { "off" }),
@@ -404,22 +423,21 @@ fn apply(document: &mut DocumentMut, change: &Change) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Warn when the harness lists models and the chosen one is not among them.
-fn warn_unknown_model(agent: &str, specs: &[HarnessSpec], path_env: &str) {
-    let Ok(parsed) = AgentRef::parse(agent, specs) else {
-        return;
-    };
-    let (Some(spec), Some(model)) = (parsed.spec(specs), parsed.model.as_deref()) else {
-        return;
-    };
+/// The warning for a harness that lists models and does not name this one.
+///
+/// `None` when there is nothing to warn about: the agent did not name a model,
+/// the harness lists none, or the listing could not be read. A listing is only
+/// ever a hint, so a missing binary or a failed call is silent.
+fn unknown_model_warning(agent: &str, specs: &[HarnessSpec], path_env: &str) -> Option<String> {
+    let parsed = AgentRef::parse(agent, specs).ok()?;
+    let spec = parsed.spec(specs)?;
+    let model = parsed.model.as_deref()?;
     match list_models(spec, path_env, LIST_TIMEOUT) {
-        Ok(Some(models)) if !models.contains(&model.to_owned()) => {
-            eprintln!(
-                "warning: `{model}` is not in what `{}` lists; setting it anyway",
-                spec.id
-            );
-        }
-        _ => {}
+        Ok(Some(models)) if !models.contains(&model.to_owned()) => Some(format!(
+            "warning: `{model}` is not in what `{}` lists; setting it anyway",
+            spec.id
+        )),
+        _ => None,
     }
 }
 
@@ -432,18 +450,53 @@ mod tests {
     use super::*;
     use crate::cli::{OneAgent, Switch};
 
-    /// A temp home and repo, so nothing in the real checkout is ever written.
+    /// A temp home, repo, and private `PATH`, so nothing in the real checkout
+    /// or the developer's own harness state is ever written.
     struct Fixture {
         home: TempDir,
         root: TempDir,
+        path: TempDir,
     }
 
     impl Fixture {
         fn new() -> Fixture {
-            Fixture {
+            let fixture = Fixture {
                 home: temp("home"),
                 root: temp("root"),
+                path: temp("path"),
+            };
+            fixture.script_harness("opencode", "opencode/other-model");
+            fixture
+        }
+
+        /// Writes an executable `name` into the private `PATH` that prints
+        /// `listing` as its model listing.
+        ///
+        /// The script is written beside its final path and renamed into place, so
+        /// the path that gets executed is never open for writing: a sibling test
+        /// thread's child cannot inherit a write descriptor on it and make the
+        /// exec fail with `ETXTBSY` on Linux.
+        fn script_harness(&self, name: &str, listing: &str) {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = self.path.path().join(name);
+            let temp = self.path.path().join(format!("{name}.tmp"));
+            let script =
+                format!("#!/bin/sh\n# a scripted harness for the unit tests\necho \"{listing}\"\n");
+            if let Err(error) = fs::write(&temp, script) {
+                panic!("writing {}: {error}", temp.display());
             }
+            if let Err(error) = fs::set_permissions(&temp, fs::Permissions::from_mode(0o755)) {
+                panic!("chmod {}: {error}", temp.display());
+            }
+            if let Err(error) = fs::rename(&temp, &path) {
+                panic!("renaming {} into place: {error}", path.display());
+            }
+        }
+
+        /// The private `PATH`: the scripted harnesses, and nothing else.
+        fn path_env(&self) -> String {
+            self.path.path().display().to_string()
         }
 
         /// The global config file the fixture's home holds.
@@ -462,12 +515,24 @@ mod tests {
 
         /// Run `set` with this fixture's home, as a global write.
         fn run(&self, args: &SetArgs) -> Result<(), CliError> {
-            execute(args, Some(self.home.path()), Some(self.root.path()), false)
+            execute_with_path(
+                args,
+                Some(self.home.path()),
+                Some(self.root.path()),
+                false,
+                &self.path_env(),
+            )
         }
 
         /// Run `set` with this fixture's home and repo, as a repo write.
         fn run_in_repo(&self, args: &SetArgs) -> Result<(), CliError> {
-            execute(args, Some(self.home.path()), Some(self.root.path()), true)
+            execute_with_path(
+                args,
+                Some(self.home.path()),
+                Some(self.root.path()),
+                true,
+                &self.path_env(),
+            )
         }
     }
 
@@ -665,6 +730,33 @@ mod tests {
         assert!(
             text.contains("\"claude/claude-opus-5-5\" = \"high\""),
             "{text}"
+        );
+    }
+
+    /// The model listing starts the harness the caller's `PATH` names, so this
+    /// test proves the warning comes from the fixture's scripted `opencode`:
+    /// the real vendor CLI is never on the fixture's `PATH`, so it can neither
+    /// be started nor write into the developer's own state.
+    #[test]
+    fn a_model_the_scripted_harness_does_not_list_warns() {
+        let fixture = Fixture::new();
+        let dir = roster::resolve_data_dir().unwrap_or_else(|err| panic!("{err}"));
+        let specs = load_dir(&dir.join("harness")).unwrap_or_else(|err| panic!("{err}"));
+
+        let warning = unknown_model_warning(
+            "opencode/opencode/deepseek-v4.1-flash-free",
+            &specs,
+            &fixture.path_env(),
+        )
+        .unwrap_or_else(|| panic!("the scripted opencode must produce the warning"));
+        assert!(warning.contains("deepseek-v4.1-flash-free"), "{warning}");
+        assert!(warning.contains("`opencode` lists"), "{warning}");
+
+        // The model the scripted listing names is not a warning.
+        assert!(
+            unknown_model_warning("opencode/opencode/other-model", &specs, &fixture.path_env())
+                .is_none(),
+            "a listed model must not warn"
         );
     }
 

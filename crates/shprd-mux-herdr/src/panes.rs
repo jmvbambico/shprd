@@ -328,8 +328,13 @@ mod tests {
             "#!/bin/sh\ncat >&2 <<'JSON'\n{}\nJSON\nexit 1\n",
             NOT_FOUND.trim()
         );
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Written beside the final path and renamed into place: the path that is
+        // executed is never open for writing, so no sibling thread's child can
+        // have a write descriptor on it and make the exec fail with `ETXTBSY`.
+        let temp = dir.join("herdr.tmp");
+        std::fs::write(&temp, script).unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&temp, &bin).unwrap();
         HerdrMux::with_bin(&bin)
     }
 

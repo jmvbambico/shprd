@@ -338,6 +338,7 @@ mod tests {
             status: ReportStatus::Completed,
             summary: "done".to_string(),
             tests: vec!["cargo test".to_string()],
+            checks: Vec::new(),
             changed_paths: vec![],
             commit: None,
             skills_used: vec![],

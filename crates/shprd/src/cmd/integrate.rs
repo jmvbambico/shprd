@@ -240,8 +240,8 @@ mod tests {
 
     use shprd_core::event::{Actor, ReportStatus, ReviewSource};
     use shprd_core::gate::REVIEW_GATE;
+    use shprd_mux::TabId;
     use shprd_mux::fake::FakeMux;
-    use shprd_mux::{TabId, naming};
     use tempfile::TempDir;
 
     use super::*;
@@ -341,6 +341,10 @@ mod tests {
                 status: ReportStatus::Completed,
                 summary: "did the work".to_string(),
                 tests: vec!["cargo test".to_string()],
+                checks: vec![shprd_core::event::CheckReport::passed(
+                    "tests",
+                    "cargo test",
+                )],
                 changed_paths: vec!["README.md".to_string()],
                 commit: None,
                 skills_used: Vec::new(),
@@ -391,7 +395,7 @@ mod tests {
         fn mux_with_worker(&self) -> (FakeMux, String) {
             let mux = FakeMux::default();
             let workspace = mux
-                .create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
+                .create_workspace(&spawn::workspace_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
             let tab = mux
                 .create_tab(&workspace.id, "worker", self.root())
@@ -405,7 +409,7 @@ mod tests {
         /// Whether `tab` is still open on `mux`.
         fn still_open(&self, mux: &FakeMux, tab: &str) -> bool {
             let workspace = mux
-                .find_workspace(&naming::workspace_name(&self.repo_name()))
+                .find_workspace(&spawn::workspace_name(&self.repo_name()))
                 .unwrap_or_else(|err| panic!("{err}"))
                 .unwrap_or_else(|| panic!("the workspace is gone"));
             mux.list_tabs(&workspace.id)

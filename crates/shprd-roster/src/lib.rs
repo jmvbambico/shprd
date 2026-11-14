@@ -5,5 +5,7 @@ pub mod env;
 pub mod families;
 pub mod models;
 pub mod quota;
+#[cfg(test)]
+mod scripted;
 pub mod skills;
 pub mod spec;

@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    Actor, AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind,
-    ReviewSource, TaskId,
+    Actor, AgentId, CheckReport, Event, EventKind, Finding, ReportStatus, ResourceAction,
+    ResourceKind, ReviewSource, TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -41,7 +41,7 @@ pub struct RunState {
     pub finished: bool,
     /// The tasks the finished run ended with unfinished, in log order.
     ///
-    /// Non-empty only when a human ended the run anyway (`shprd down
+    /// Non-empty only when a human ended the run anyway (`shprd run finish
     /// --abandon`): it names the work that was left behind, and the branches
     /// that keep it alive after the run is archived.
     pub abandoned: Vec<TaskId>,
@@ -87,7 +87,7 @@ pub struct RunState {
     pub last_seq: u64,
 }
 
-/// What the run knows about its pull request.
+/// What the log knows about one pull request: the run's, or a task's own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInfo {
     /// The forge's number for it.
@@ -169,6 +169,39 @@ pub struct Task {
     /// view that draws a task reads the folded state: the pull request's
     /// `## Dropped` section is the reason a reader is looking for.
     pub dropped_reason: Option<String>,
+    /// The last progress line an agent recorded, with how far it said it had
+    /// got.
+    ///
+    /// Only the newest one is kept: the full history is the log's job, and a
+    /// progress line is about where the work is now.
+    pub last_status: Option<TaskProgress>,
+    /// The task's own pull request, once landing opened one.
+    ///
+    /// The per-task workflow lands every task through its own pull request, so
+    /// the task carries what the run used to: the forge's number, its URL, the
+    /// head a human approved and whether it merged. `None` until a landing
+    /// asks the forge for one.
+    pub pr: Option<PrInfo>,
+    /// The head a landing found nothing of its own to merge at, if one did.
+    ///
+    /// It is the one landing outcome that moves nothing: the branch had no work
+    /// beyond its base, so the task is not integrated and its status is
+    /// unchanged. What it does say is that a landing already looked at this
+    /// attempt and found nothing — which is what keeps a tick from landing the
+    /// same attempt again on every pass. A new attempt clears it, because fresh
+    /// work is exactly what a landing has not looked at yet.
+    pub nothing_to_merge: Option<String>,
+}
+
+/// The last progress line an agent recorded for a task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProgress {
+    /// The short line the agent reported.
+    pub message: String,
+    /// How far along it said the task was, from 0 to 100.
+    pub progress: Option<u8>,
+    /// Sequence number of the event that recorded it.
+    pub seq: u64,
 }
 
 /// Where a task sits in its lifecycle.
@@ -209,7 +242,7 @@ pub struct Attempt {
     pub worktree: String,
     /// Branch the agent committed on.
     pub branch: String,
-    /// The agent's report, once it has reported.
+    /// The attempt's report, once it has reported.
     pub report: Option<Report>,
     /// Gates run against this attempt, in order.
     pub gates: Vec<GateResult>,
@@ -244,6 +277,12 @@ pub struct Report {
     pub summary: String,
     /// Test commands the agent ran, with their result.
     pub tests: Vec<String>,
+    /// The gates the agent ran for the hand-in, with their result.
+    ///
+    /// Empty for a report recorded before hand-ins carried checks. A completed
+    /// hand-in recorded now always names at least one, and every one of them
+    /// passed.
+    pub checks: Vec<CheckReport>,
     /// Normalized paths the agent changed.
     pub changed_paths: Vec<String>,
     /// Commit the agent made, if any.
@@ -415,6 +454,9 @@ impl RunState {
                         attempts: Vec::new(),
                         overrides: Vec::new(),
                         dropped_reason: None,
+                        last_status: None,
+                        pr: None,
+                        nothing_to_merge: None,
                     },
                 );
             }
@@ -429,6 +471,10 @@ impl RunState {
                 self.agents.entry(agent.clone()).or_default();
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Working;
+                    // A fresh attempt is fresh work, so a "nothing to merge"
+                    // a landing found on the attempt before it says nothing
+                    // about this one.
+                    entry.nothing_to_merge = None;
                     entry.attempts.push(Attempt {
                         n: *attempt,
                         agent: agent.clone(),
@@ -446,6 +492,7 @@ impl RunState {
                 status,
                 summary,
                 tests,
+                checks,
                 changed_paths,
                 commit,
                 skills_used,
@@ -466,6 +513,7 @@ impl RunState {
                             status: *status,
                             summary: summary.clone(),
                             tests: tests.clone(),
+                            checks: checks.clone(),
                             changed_paths: changed_paths
                                 .iter()
                                 .filter_map(|path| scope::normalize(path).ok())
@@ -474,6 +522,21 @@ impl RunState {
                             skills_used: skills_used.clone(),
                         });
                     }
+                }
+            }
+            EventKind::TaskStatus {
+                task,
+                message,
+                progress,
+            } => {
+                // A progress line never moves the task's status: the report
+                // and the gates decide that.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.last_status = Some(TaskProgress {
+                        message: message.clone(),
+                        progress: *progress,
+                        seq: event.seq,
+                    });
                 }
             }
             EventKind::GatePassed {
@@ -652,6 +715,61 @@ impl RunState {
                     pr.approved_head = Some(head_sha.clone());
                 }
             }
+            EventKind::TaskPrOpened {
+                task,
+                number,
+                url,
+                head,
+            } => {
+                // Refreshing the body is not a new approval, exactly as for the
+                // run's pull request: the approval names one head, and landing
+                // honours it only while that head is still the tip.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    let approved_head = entry.pr.as_ref().and_then(|pr| pr.approved_head.clone());
+                    entry.pr = Some(PrInfo {
+                        number: *number,
+                        url: url.clone(),
+                        head: head.clone(),
+                        approved_head,
+                        merged: false,
+                    });
+                }
+            }
+            EventKind::TaskApproved {
+                task,
+                number,
+                head_sha,
+            } => {
+                if let Some(pr) = self.tasks.get_mut(task).and_then(|entry| entry.pr.as_mut())
+                    && pr.number == *number
+                {
+                    pr.approved_head = Some(head_sha.clone());
+                }
+            }
+            EventKind::TaskLanded {
+                task,
+                number,
+                head,
+                outcome,
+                ..
+            } => {
+                // The head is kept for every outcome, because it is what says a
+                // landing already looked at this commit. Only a landing that
+                // moved something changes the status.
+                let head = Some(head.clone());
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    if outcome.is_landed() {
+                        entry.status = TaskStatus::Integrated;
+                        if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
+                            && pr.number == *number
+                        {
+                            pr.merged = true;
+                        }
+                    } else {
+                        entry.nothing_to_merge = head;
+                    }
+                }
+            }
             EventKind::OrchestratorLaunched {
                 title,
                 pane,
@@ -690,6 +808,7 @@ impl RunState {
 mod tests {
     use super::*;
     use crate::event::Actor;
+    use crate::event::LandOutcome;
     use crate::event::ResourceAction;
 
     /// An event with `kind` at position `seq`.
@@ -1126,6 +1245,231 @@ mod tests {
     }
 
     #[test]
+    fn a_task_pull_request_and_its_outcome_fold_onto_the_task() {
+        let state = match fold_extra(vec![
+            ev(
+                3,
+                EventKind::TaskPrOpened {
+                    task: "a".to_string(),
+                    number: 12,
+                    url: "https://example.invalid/pull/12".to_string(),
+                    head: "shprd/r1/a".to_string(),
+                },
+            ),
+            ev(
+                4,
+                EventKind::TaskApproved {
+                    task: "a".to_string(),
+                    number: 12,
+                    head_sha: "bbb222".to_string(),
+                },
+            ),
+            ev(
+                5,
+                EventKind::TaskLanded {
+                    task: "a".to_string(),
+                    base: "main".to_string(),
+                    head: "bbb222".to_string(),
+                    number: Some(12),
+                    outcome: LandOutcome::Merged,
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("open, approve then land must fold: {err}"),
+        };
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert_eq!(task.status, TaskStatus::Integrated);
+        let pr = match &task.pr {
+            Some(pr) => pr,
+            None => panic!("the pull request must be in the state"),
+        };
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.approved_head, Some("bbb222".to_string()));
+        assert!(pr.merged, "a merged landing marks the pull request merged");
+    }
+
+    #[test]
+    fn a_task_landed_with_nothing_to_merge_leaves_it_unlanded() {
+        let state = match fold_extra(vec![ev(
+            3,
+            EventKind::TaskLanded {
+                task: "a".to_string(),
+                base: "main".to_string(),
+                head: "bbb222".to_string(),
+                number: None,
+                outcome: LandOutcome::NothingToMerge,
+            },
+        )]) {
+            Ok(state) => state,
+            Err(err) => panic!("a nothing-to-merge landing must fold: {err}"),
+        };
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert_eq!(
+            task.status,
+            TaskStatus::Queued,
+            "nothing of it landed, so it is not integrated"
+        );
+        assert!(task.pr.is_none());
+        assert_eq!(
+            task.nothing_to_merge.as_deref(),
+            Some("bbb222"),
+            "the landing's head is kept, so a tick does not land it again"
+        );
+    }
+
+    #[test]
+    fn a_new_attempt_clears_a_nothing_to_merge_landing() {
+        // Attempt 1 failed, a landing found nothing of its own to merge at that
+        // attempt, and attempt 2 starts: the fact belongs to attempt 1 and must
+        // not hold attempt 2 back.
+        let mut events = log("a", "no_main_push");
+        events.truncate(2);
+        for event in [
+            ev(
+                3,
+                EventKind::Spawned {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt/a".to_string(),
+                    branch: "feature/a".to_string(),
+                },
+            ),
+            ev(
+                4,
+                EventKind::Reported {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    status: crate::event::ReportStatus::Failed,
+                    summary: "gave up".to_string(),
+                    tests: Vec::new(),
+                    checks: Vec::new(),
+                    changed_paths: vec!["src/a/x.rs".to_string()],
+                    commit: Some("bbb222".to_string()),
+                    skills_used: Vec::new(),
+                },
+            ),
+            ev(
+                5,
+                EventKind::TaskLanded {
+                    task: "a".to_string(),
+                    base: "main".to_string(),
+                    head: "bbb222".to_string(),
+                    number: None,
+                    outcome: LandOutcome::NothingToMerge,
+                },
+            ),
+            ev(
+                6,
+                EventKind::Spawned {
+                    task: "a".to_string(),
+                    attempt: 2,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt/a".to_string(),
+                    branch: "feature/a".to_string(),
+                },
+            ),
+        ] {
+            events.push(event);
+        }
+        let state = match RunState::fold(&events) {
+            Ok(state) => state,
+            Err(err) => panic!("the fixture must fold: {err}"),
+        };
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert_eq!(task.attempts.len(), 2, "attempt 2 started");
+        assert!(
+            task.nothing_to_merge.is_none(),
+            "fresh work has not been landed yet: {:?}",
+            task.nothing_to_merge
+        );
+    }
+
+    #[test]
+    fn a_task_approval_without_its_pull_request_is_refused() {
+        let state = match fold_extra(vec![]) {
+            Ok(state) => state,
+            Err(err) => panic!("the bare run must fold: {err}"),
+        };
+        let kind = EventKind::TaskApproved {
+            task: "a".to_string(),
+            number: 12,
+            head_sha: "bbb222".to_string(),
+        };
+        assert!(matches!(
+            state.check(&kind, 3_000),
+            Err(RuleError::UnopenedPullRequest { number: 12 })
+        ));
+    }
+
+    #[test]
+    fn an_agent_cannot_approve_a_task_pull_request() {
+        let mut events = log("a", "no_main_push");
+        events.truncate(2);
+        events.push(ev(
+            3,
+            EventKind::TaskPrOpened {
+                task: "a".to_string(),
+                number: 12,
+                url: "https://example.invalid/pull/12".to_string(),
+                head: "shprd/r1/a".to_string(),
+            },
+        ));
+        events.push(Event {
+            seq: 4,
+            at_ms: 4_000,
+            actor: Actor::Orchestrator,
+            kind: EventKind::TaskApproved {
+                task: "a".to_string(),
+                number: 12,
+                head_sha: "bbb222".to_string(),
+            },
+        });
+        assert!(matches!(
+            RunState::fold(&events),
+            Err(RuleError::NotHuman {
+                actor: Actor::Orchestrator
+            })
+        ));
+    }
+
+    #[test]
+    fn a_task_pull_request_for_a_dropped_task_is_refused() {
+        let state = match fold_extra(vec![ev(
+            3,
+            EventKind::TaskDropped {
+                task: "a".to_string(),
+                reason: "not doing it".to_string(),
+            },
+        )]) {
+            Ok(state) => state,
+            Err(err) => panic!("a drop must fold: {err}"),
+        };
+        let kind = EventKind::TaskPrOpened {
+            task: "a".to_string(),
+            number: 12,
+            url: "https://example.invalid/pull/12".to_string(),
+            head: "shprd/r1/a".to_string(),
+        };
+        assert!(matches!(
+            state.check(&kind, 4_000),
+            Err(RuleError::TaskIsDropped { .. })
+        ));
+    }
+
+    #[test]
     fn a_merge_without_an_opened_pull_request_is_refused() {
         let state = match fold_extra(vec![]) {
             Ok(state) => state,
@@ -1162,6 +1506,47 @@ mod tests {
             state.check(&kind, 4_000),
             Err(RuleError::UnknownPullRequest { number: 8 })
         ));
+    }
+
+    #[test]
+    fn a_task_status_folds_into_the_task_it_names() {
+        let state = match fold_extra(vec![
+            ev(
+                3,
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: "halfway through".to_string(),
+                    progress: Some(50),
+                },
+            ),
+            ev(
+                4,
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: "nearly there".to_string(),
+                    progress: None,
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("status lines must fold: {err}"),
+        };
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        let status = match &task.last_status {
+            Some(status) => status,
+            None => panic!("the status line must be kept: {task:?}"),
+        };
+        assert_eq!(status.message, "nearly there", "the newest one wins");
+        assert_eq!(status.progress, None);
+        assert_eq!(status.seq, 4);
+        assert_eq!(
+            task.status,
+            TaskStatus::Queued,
+            "a progress line must not move the task's status"
+        );
     }
 
     #[test]

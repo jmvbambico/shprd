@@ -13,87 +13,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::process::{Command, Output};
 
-/// A private `herdr server` that stops itself when the test ends.
-struct Server {
-    home: PathBuf,
-    socket: PathBuf,
-    child: Option<Child>,
-}
+#[path = "../../shprd-mux-herdr/tests/support/live_server.rs"]
+mod live_server;
 
-impl Server {
-    /// Starts a server in a short temporary path, waiting until it answers.
-    fn start() -> Server {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
-        let home = std::env::temp_dir()
-            .join("shprd-spawn")
-            .join(format!("{}-{stamp}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let socket = home.join("herdr.sock");
-        let child = Command::new("herdr")
-            .arg("server")
-            .env("HOME", &home)
-            .env("HERDR_SOCKET_PATH", &socket)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::fs::File::create(home.join("server.log")).unwrap())
-            .spawn()
-            .expect("herdr must be installed to run this test");
-        let server = Server {
-            home,
-            socket,
-            child: Some(child),
-        };
-        let started = Instant::now();
-        loop {
-            match server.herdr(&["workspace", "list"]) {
-                Ok(_) => break,
-                Err(err) => assert!(
-                    started.elapsed() < Duration::from_secs(20),
-                    "herdr server did not answer on {}: {err}",
-                    server.socket.display()
-                ),
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        server
-    }
-
-    /// Runs one `herdr` command against this server.
-    fn herdr(&self, args: &[&str]) -> Result<Output, String> {
-        let output = Command::new("herdr")
-            .args(args)
-            .env("HOME", &self.home)
-            .env("HERDR_SOCKET_PATH", &self.socket)
-            .output()
-            .map_err(|err| err.to_string())?;
-        if output.status.success() {
-            Ok(output)
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).to_string())
-        }
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = Command::new("herdr")
-                .args(["server", "stop"])
-                .env("HOME", &self.home)
-                .env("HERDR_SOCKET_PATH", &self.socket)
-                .status();
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        let _ = std::fs::remove_dir_all(&self.home);
-    }
-}
+use live_server::LiveServer;
 
 /// Runs one `git` command in `dir`, failing the test when it does.
 fn git(dir: &Path, args: &[&str]) {
@@ -119,10 +45,14 @@ const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 #[test]
 #[ignore = "starts a real herdr server; run by hand"]
 fn spawn_opens_a_worker_tab_in_the_worktree() {
-    let server = Server::start();
+    // A skip is the machine's answer, not a failure: no `herdr`, or a `TMPDIR`
+    // too long for a unix socket path. The helper says which, in one line.
+    let Some(server) = LiveServer::start() else {
+        return;
+    };
 
     // A repository with one commit and the integration branch in it.
-    let repo = server.home.join("repo");
+    let repo = server.home().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("README.md"), "live\n").unwrap();
@@ -131,7 +61,7 @@ fn spawn_opens_a_worker_tab_in_the_worktree() {
     git(&repo, &["branch", "integration/m4"]);
 
     // A data directory whose only agent CLI is `sh`, so no real CLI starts.
-    let data = server.home.join("data");
+    let data = server.home().join("data");
     std::fs::create_dir_all(data.join("harness")).unwrap();
     std::fs::write(
         data.join("harness").join("sh.toml"),
@@ -164,7 +94,7 @@ project_dirs = []
     )
     .unwrap();
 
-    let home = server.home.join("home");
+    let home = server.home().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let shprd = |args: &[&str]| -> Output {
         Command::new(BIN)
@@ -172,7 +102,7 @@ project_dirs = []
             .env("HOME", &home)
             .env("SHPRD_HOME", &home)
             .env("SHPRD_DATA_DIR", &data)
-            .env("HERDR_SOCKET_PATH", &server.socket)
+            .env("HERDR_SOCKET_PATH", server.socket())
             // A plain `sh` is never detected as an agent, so the wait is short
             // and the delivery is expected to fail its way into a warning.
             .env("SHPRD_AGENT_READY_TIMEOUT_MS", "2000")
@@ -217,7 +147,7 @@ project_dirs = []
         "--acceptance",
         "spawn opens a tab",
     ]);
-    // The workspace `shprd up` would have made, created by hand here.
+    // The workspace shprd looks for, created by hand here.
     let name = format!(
         "shprd \u{b7} {}",
         repo.file_name().unwrap().to_string_lossy()
@@ -245,7 +175,7 @@ project_dirs = []
     // only prompts a pane it has detected as an agent. Nobody detected this
     // shell, so the spawn says so and stays successful.
     assert!(
-        warning.contains("brief not delivered to \u{25cf} sh\u{b7}M4.4"),
+        warning.contains("brief not delivered to sh\u{b7}M4.4"),
         "no warning in {warning}"
     );
     assert!(warning.contains("brief not delivered"), "{warning}");
@@ -260,7 +190,7 @@ project_dirs = []
     let snapshot =
         String::from_utf8_lossy(&server.herdr(&["api", "snapshot"]).unwrap().stdout).to_string();
     assert!(
-        snapshot.contains("\u{25cf} sh\u{b7}M4.4"),
+        snapshot.contains("sh\u{b7}M4.4"),
         "no worker tab in {snapshot}"
     );
     assert!(

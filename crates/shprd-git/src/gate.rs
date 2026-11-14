@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use shprd_core::event::{GATE_OUTPUT_TAIL_CHARS, GateStep};
+use shprd_core::spawn;
 
 /// The shell every gate command runs in.
 const SHELL: &str = "/bin/sh";
@@ -102,7 +103,7 @@ fn run_step(
         shell.process_group(0);
     }
 
-    let mut child = match shell.spawn() {
+    let mut child = match spawn::child(&mut shell) {
         Ok(child) => child,
         Err(source) => {
             return GateStep {
@@ -270,13 +271,13 @@ fn kill_group(leader: u32) -> bool {
         return false;
     };
     let group = format!("-{leader}");
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(["-KILL", "--", group.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .stderr(Stdio::null());
+    spawn::status(&mut command).is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]

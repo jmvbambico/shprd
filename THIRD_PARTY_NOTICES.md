@@ -30,3 +30,43 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Shepherdr
+
+- Project: Shepherdr
+- URL: https://github.com/eliasstravik/shepherdr
+- Paths: `mods/tasks/bin/herdr_task/agents.py` (`task_status()` and the
+  helpers it uses), `core/tasks.js` (`place()` and `readyWait()`),
+  `mods/tasks/bin/herdr_task/queues.py` (`queue_reason()`),
+  `mods/tasks/bin/herdr_task/when.py` (`starts_words()`),
+  `mods/tasks/bin/herdr_task/github.py` (`pr_body()` and the merge path),
+  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`)
+- Commit: a3f327a (tag v3.1.34)
+- Used for: the derived task status rules in
+  `crates/shprd-views/src/derived.rs`, and the per-task landing workflow —
+  the fresh start a new worktree branches from, the merge policy and
+  pull-request path, and the per-task pull-request body — in
+  `crates/shprd-git/src/{land,worktree}.rs` and `crates/shprd-views/src/pr.rs`
+- License: MIT
+
+MIT License
+
+Copyright (c) 2026 Elias Stravik
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
