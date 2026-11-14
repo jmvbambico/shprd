@@ -48,6 +48,10 @@ verified = false
 # opencode has one approval switch, `--auto` ("auto-approve permissions that are
 # not explicitly denied", `opencode --help` 1.18.35), and no permission mode, so
 # there are two modes: the program's own prompts, and auto-approval.
+# unverified: that leaving `--auto` off really leaves opencode asking before it
+# acts — the one-shot live launch in crates/shprd-agents/tests/live_launch.rs
+# approves nothing, so it does not exercise it. To check: run `opencode` with no
+# `--auto` and ask it to write a file.
 default = "ask"
 full = "auto"
 modes = [
