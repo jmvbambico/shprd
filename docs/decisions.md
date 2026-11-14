@@ -70,3 +70,32 @@ truth; this log holds how we got there.
   `cross-vendor-review: passed` requires that record.
 - **Review rounds stay at two before asking the human**, as configured; going
   past them is the human's call, recorded in the PR body.
+
+## 2026-11-14
+
+- **Pivot: re-implement Shepherdr's design in Rust.** Shepherdr (MIT) is the
+  reference for workflow and agent settings; shprd adds more agent CLIs, custom
+  roles with system prompts, a dagr-like graph, more tunnels with a password
+  login, and its engine guarantees. Forking Shepherdr's JS was rejected for
+  performance and stack reasons.
+- **Herdr desktop first, then herdr TUI and tuios.** Desktop: a layout plus thin
+  JS mods over `shprd serve`. herdr TUI: a plugin; tuios installs the same
+  plugin. The terminal hosts may lose some UX but stay as close to desktop as
+  they can. rex is planned later.
+- **No setup wizard**; agent setup is a settings page. The tab-per-agent
+  launcher (`shprd up`) is retired in favour of a space per task.
+- **The web app is TypeScript**; everything else stays in this repo in Rust.- **One PR per task, as in Shepherdr.** Each task's branch gets its own PR,
+  merged by policy (`ask`, `checks`, `auto`). The run-level integration branch
+  is retired from the product workflow.
+- **Review stays cross-vendor and engine-recorded.** The worker must hand in
+  work it has tested in good faith (it runs the repo's checks and says which);
+  the engine then sends the diff to a reviewer from a different vendor and
+  records the findings. A worker's own self-review is not a review.
+- **Remote: one user in v1.** Tailscale is used automatically when present;
+  a public tunnel (Cloudflare, ngrok, tunnl.gg) can't be turned on until a
+  password is set.
+- **Out of v1:** voice and dictation, the agent-driven browser view, and
+  multi-machine "serve from". Automations and artifacts come after M10.
+- **Smaller calls:** agents report status through `shprd` commands that append
+  to the ledger under its lock; a Shepherdr "space" maps to a repo; permission
+  modes use Shepherdr's set; the look follows Herdr's default theme.

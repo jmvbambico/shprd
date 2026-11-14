@@ -1,6 +1,7 @@
 # Build plan
 
-Status: proposed 2026-10-27, awaiting approval. Language: Rust.
+Status: M0–M6 done (gate passed 2026-10-29). Re-planned from M7 on 2026-11-14:
+see "M7 onward · the pivot". Language: Rust (service) and TypeScript (web app).
 
 The plan is cut into milestones. Each one ends at a **gate**: a demo you can run
 and a check that has to pass before the next milestone starts. Inside a
@@ -10,7 +11,7 @@ without touching the same files (see "Parallel lanes").
 ```
 M0 foundations ─► M1 engine ─┬─► M2 git ─────────┐
                              ├─► M3 roster ──────┼─► M5 watchdog ─┐
-                             └─► M4 herdr + up ──┘                ├─► M6 review & land ─► ★ dogfood ─► M7 TUI ─► M8 tuios ─► M9 v0.1.0
+                             └─► M4 herdr + up ──┘                ├─► M6 review & land ─► ★ dogfood ─► M7… (re-planned, see below)
                                                                   │
                                        (M3 also feeds M6) ────────┘
 ```
@@ -21,7 +22,7 @@ og.
 
 ---
 
-## Workspace layout (decided in M0, then fixed)
+## Workspace layout (decided in M0; changed from M7, see "Workspace changes")
 
 ```
 crates/
@@ -203,46 +204,182 @@ From this point, shprd is built with shprd.
 
 ---
 
-## M7 · TUI
+## M7 onward · the pivot (decided 2026-11-14)
 
-| ID | Task | Scope | Size |
-|---|---|---|---|
-| M7.1 | Transcript readers for the orchestrator CLIs (claude and codex first) | `shprd-tui/src/transcript/` | M |
-| M7.2 | `shprd·chat`, Transcript design: messages, event cards, pinned attention, composer, `/` commands | `shprd-tui/src/chat/` | L |
-| M7.3 | Right column: `dagr view` split + remote box (collapsed, expanded, invite with countdown via the relay's `setup-link`) | `shprd-tui/src/{layout,remote}.rs` | M |
-| M7.4 | `shprd setup` wizard: agents → skills → **security (autonomy style, see [governance](governance.md#autonomy-styles-chosen-in-shprd-setup))** → remote & layout → write | `shprd-tui/src/setup/` | L |
-| M7.5 | `[autonomy] style` preset in config + `shprd set autonomy <style>` (the switches it sets stay individually overridable) | `shprd-core/src/config.rs`, `shprd/src/cmd/set.rs` | S |
+M0–M6 built a command-line engine that runs in herdr tabs. From M7 the product
+changes shape (see [Decisions](decisions.md#2026-11-14)):
 
-Lanes: M7.1 ∥ M7.3 ∥ M7.4; then M7.2.
+- **Shepherdr is the design reference.** shprd re-implements Shepherdr's
+  workflow and agent settings in Rust: a space per task, the coordinator, the
+  tasks panel, the approve card, the agents settings page. Shepherdr is MIT;
+  logic ported from it carries a file header and a `THIRD_PARTY_NOTICES.md`
+  entry, like any borrowed code.
+- **What shprd adds:** more agent CLIs (Pi, OpenCode and the rest), custom
+  roles with their own system prompt, a dagr-like task graph, more tunnels
+  (Cloudflare, ngrok, tunnl.gg, Tailscale) with a password login, and the
+  engine's guarantees (ledger, engine-recorded review, integration gate).
+- **Herdr desktop first, then the terminal hosts.** Herdr desktop gets a
+  layout plus thin JS mods. herdr TUI gets a plugin, and tuios installs the same
+  plugin (`tuios plugins install`, with `[herdr] manifest`). rex is planned
+  later.
+- **One Rust service, many thin UIs.** `shprd serve` holds all logic. The
+  desktop mods, the TypeScript web app and the terminal panels are clients; the
+  mods hold no logic because Herdr desktop only loads JavaScript mods.
+- **No setup wizard.** Agent setup is a settings page, as in Shepherdr.
 
-**Gate:** the prototype screens (`research/prototypes/shprd-tui.html`) are
-reproduced in a real terminal, and a full run is driven from `shprd·chat` and
-from the phone via the relay.
+```
+M7 study + spikes ─► M8 clean-up + service ─► M9 agents ─► M10 Herdr desktop ─┬─► M11 web + remote ─┐
+                                                                                └─► M12 herdr TUI + tuios ┴─► M13 release ─► (later) rex
+```
+
+### Workspace changes
+
+| Crate | Change |
+|---|---|
+| `shprd-core`, `shprd-git`, `shprd-views`, `shprd-watch` | keep |
+| `shprd-roster` | becomes `shprd-agents`: Shepherdr-style roles plus custom roles, one adapter per agent CLI; detection, models, quota and launch env stay |
+| `shprd-mux` | moves from tabs to Shepherdr's space-per-task model; `naming.rs` goes |
+| `shprd-mux-herdr` | kept for the herdr TUI and tuios port; `keys.rs` goes (the plugin manifest declares keys); detects host capabilities at connect |
+| `shprd-mux-hc` | **new**: Herdr desktop through herdr-core (`hc`) |
+| `shprd-server` | **new**: axum HTTP + WebSocket API, login, tunnels, embedded web app |
+| `shprd-tui` | emptied now; rebuilt in M12 as terminal versions of the desktop panels |
+| `shprd-mux-tuios` | deleted: tuios speaks the herdr protocol |
+| `shprd` | `up`, `launch`, `keys` deleted (tab-per-agent); `spawn` loses its tab handling; the other verbs stay and the service calls them |
+| `web/` | **new**: Vite + React 19 + TypeScript, types generated from Rust with ts-rs |
+| `host/` | **new**: the Herdr desktop layout and mods, `plugin/herdr-plugin.toml`, `plugin/tuios-plugin.toml` |
+
+Stack: tokio, axum, tower-http, ts-rs, rust-embed, argon2, tower_governor,
+notify, portable-pty, tracing on the Rust side; Vite, React 19, Tailwind 4,
+TanStack Query and Router, xterm.js, React Flow + elkjs, Radix, Vitest,
+Playwright, Biome on the web side; ratatui + crossterm for `shprd-tui`.
 
 ---
 
-## M8 · tuios adapter
+## M7 · Study and spikes
 
 | ID | Task | Scope | Size |
 |---|---|---|---|
-| M8.0 | Run the herdr adapter against tuios's herdr-compatible socket (`herdr_protocol = "always"`); list what breaks. Also test herdr-mobile-relay on tuios | report only | S |
-| M8.1 | tuios protocol client (JSON lines on the daemon socket, `hello` feature flags) | `shprd-mux-tuios/src/proto.rs` | M |
-| M8.2 | Adapter: session per repo, workspaces 1–4, windows and naming, events via `subscribe`, pane grants | `shprd-mux-tuios/src/adapter.rs` | L |
-| M8.3 | Keybind writer for `[[keybindings.command]]`; remote box shows `tuios-web` | `shprd-mux-tuios/src/keys.rs`, `shprd-tui/src/remote.rs` | S |
+| M7.1 | Shepherdr workflow and service spec | report only | M |
+| M7.2 | Shepherdr desktop UI spec (layout, mods, how mods reach the service, visual tokens) | report only | M |
+| M7.3 | Shepherdr agents and settings spec, adapter and custom-role design | report only | M |
+| M7.4 | Shepherdr web app and remote access spec, paddock comparison, login threat model | report only | M |
+| M7.5 | Spike: drive `hc` against a real Herdr desktop | report only | S |
+| M7.6 | Spike: a mod calling a local service (fetch to 127.0.0.1 with a token) on a real Herdr desktop | report only | S |
+| M7.7 | Spike: `tuios plugins install` of a test plugin whose `tuios-plugin.toml` points at a `herdr-plugin.toml` | report only | S |
+| M7.8 | This plan updated from M7.1–M7.7: task lists for M8–M10 | `docs/` | S |
 
-**Gate:** the M6 dogfood scenario passes on tuios.
+Lanes: M7.1 ∥ M7.2 ∥ M7.3 ∥ M7.4 ∥ M7.7; M7.5 ∥ M7.6 once Herdr desktop is
+installed; then M7.8.
+
+**Gate:** the four specs and three spike results exist, and the M8–M10 task
+lists are approved.
+
+**Done 2026-11-14** (board tasks SHP-11..16, all passed review). Results that
+shaped M8–M10: the mod runtime has `fetch` but no streaming (no WebSocket, SSE
+or stream reader), so mods use long-poll plus a watched file; `hc` is
+JSON-RPC 2.0 with an event stream and the window's layout in the `herdr-app`
+document; one plugin folder serves herdr TUI and tuios, with commands only in
+`herdr-plugin.toml` and `tuios-plugin.toml` holding `schema = 1`, id, grants
+and `[herdr] manifest`; on tuios, creating panes needs the `admin` grant, no
+`worktree.created` event fires, and `worktree.create` refuses `path`.
 
 ---
 
-## M9 · v0.1.0
+## M8 · Clean-up and service core
 
-| ID | Task | Size |
-|---|---|---|
-| M9.1 | Skills curation pack published as an `npx skills` source (`shprd-orchestrator` + compat list) | M |
-| M9.2 | Install paths: `cargo install`, Homebrew tap, release binaries via CI | M |
-| M9.3 | herdr thin plugin (actions → `shprd <verb>`), marketplace listing | S |
-| M9.4 | `THIRD_PARTY_NOTICES.md` audit, README status table updated, release notes | S |
-| M9.5 | Release on every merge (below) | M |
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M8.1 | Retire tab-per-agent: delete `cmd/{up,launch,keys}.rs`, `shprd-mux/naming.rs`, `shprd-mux-herdr/keys.rs`, the `shprd-mux-tuios` crate and `shprd-tui`'s stub; fix every caller and test | `crates/shprd`, `shprd-mux`, `shprd-mux-herdr`, `Cargo.toml` | M |
+| M8.2 | Fixes from the M0–M6 assessment: run lock on `approve`, watchdog treats idle as unhealthy only with evidence, canary reports real success, opencode test uses a scratch HOME, live tests use short socket paths | `shprd/src/cmd/{approve,run_lock}.rs`, `shprd-watch`, `shprd-roster` tests | M |
+| M8.3 | Per-task landing: one PR per task from its branch, `MergePolicy{Ask, Checks, Auto}`, already-merged and squash-merged detection, nothing-to-merge, branch from the fresh remote base | `shprd-git/{land,forge,worktree}.rs`, `shprd-core/config.rs` | L |
+| M8.4 | Agent-callable verbs that append under the ledger lock (`shprd task status / ready / …`); `ready` refuses without the worker's checks report (which gates ran, their result) and an engine-recorded cross-vendor review | `shprd-core/{event,rules}.rs`, `shprd/src/cmd/` | M |
+| M8.5 | Derived status: port Shepherdr's ordered status rules (8 statuses from stored state + live agent state) as a pure function with fixtures (MIT header + notice) | `shprd-views/status.rs` | M |
+| M8.6 | `shprd-server` + `shprd serve`: axum on 127.0.0.1, `service.json {port, id}` + token file + `/api/health` handshake, `GET /api/state`, long-poll `/api/changes?since=<seq>`, `POST /api/action`, WebSocket for the web app, ts-rs types into `web/src/gen/` | new crate, workspace deps | L |
+| M8.7 | The tick: an idempotent "advance the world" pass in the service (queue starts, `--after` waits, merge-policy checks) | `shprd-server`, `shprd-core` | M |
+
+Lanes: M8.1 alone first; then M8.2 ∥ M8.3 ∥ M8.4 ∥ M8.5 ∥ M8.6; then M8.7.
+
+**Gate:** the existing gates pass after the clean-up, and with the fake host a
+task is added, delegated, handed in with its checks, reviewed and landed as its
+own PR through the API.
+
+---
+
+## M9 · Agents
+
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M9.1 | `shprd-roster` → `shprd-agents`; harness schema gains permission modes (Shepherdr's set), model catalog source, brief delivery (first message or system-prompt file), status source (OSC 7501, hook, screen), ask-hook installer | `crates/shprd-agents`, `data/harness/` | M |
+| M9.2 | Adapters with verified harness files for Claude, Codex, Pi, OpenCode (one real launch each, `#[ignore]` tests) | `shprd-agents`, `data/harness/` | M |
+| M9.3 | Settings model: roles as a keyed table (coordinator, worker, reviewer, backup) plus custom roles, each `{program, model, effort, fast, perm, fallback, template}`; layers everywhere > repo > task; reviewer vendor must differ from the worker's | `shprd-agents`, `shprd-core/config.rs` | M |
+| M9.4 | Role templates as editable files (Shepherdr's structure, credited) and a brief with a Settings block that says where each value came from | `shprd-views/brief.rs`, `data/templates/` | M |
+| M9.5 | Needs-you cards: question / permission / plan asks in a file queue, per-CLI hooks (Claude and Codex first, Pi and OpenCode where they allow), answer API in the service | `shprd-core`, `shprd-agents`, `shprd-server` | L |
+| M9.6 | Fallback ladder: provider-error classes, nudges at 1/2/4/8 min, one backup-agent handover per task with the chat tail | `shprd-watch` | M |
+| M9.7 | News to the coordinator: derived-status diffs, a settle window, one message per space, re-checked before sending | `shprd-server`, `shprd-views` | M |
+
+Lanes: M9.1 first; then M9.2 ∥ M9.3 ∥ M9.5 ∥ M9.6; then M9.4 ∥ M9.7.
+
+**Gate:** one real task runs end to end with Pi as the worker and a reviewer
+from another vendor, including one needs-you card answered through the API.
+
+---
+
+## M10 · Herdr desktop
+
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M10.1 | `shprd-mux-hc`: framed JSON-RPC over `hc connect`, version gate, reconnect, event fold with `missed`/reset re-reads, placement by `herdr.space`/`herdr.tab` labels, OSC 7501 parsing (fixture for the `:` grammar) | new crate | L |
+| M10.2 | Host trait reshaped around spawn / write / keys / read / wait / kill / subscribe / doc / exec and a space per task; fake host updated; `shprd-mux-herdr` maps tuios's `forbidden` | `shprd-mux`, `shprd-mux-herdr` | M |
+| M10.3 | `host/herdr-desktop/`: `layouts/shprd.json` on Shepherdr's skeleton, a shared UI-token module, mod-to-service client (long-poll + watched change file), `shprd install herdr-desktop` that owns only its files and merges keys | `host/herdr-desktop/`, `shprd/src/cmd/` | M |
+| M10.4 | Mods A: spaces sidebar, tab strip, status bar, toasts | `host/herdr-desktop/mods/` | L |
+| M10.5 | Mods B: tasks panel, accept card (changes, checks, review), task PR | `host/herdr-desktop/mods/` | L |
+| M10.6 | Mods C: settings (agents, roles, custom roles, templates), coordinator, needs-you cards | `host/herdr-desktop/mods/` | L |
+| M10.7 | Graph: dagr in a terminal block, refreshed on every ledger write | `shprd-views`, layout | S |
+| M10.8 | Coordinator chat: transcript readers for Claude, Codex, Pi, OpenCode and the chat mod | `shprd-agents`, `host/herdr-desktop/mods/` | L |
+
+Lanes: M10.1 ∥ M10.2 ∥ M10.3; then M10.4 ∥ M10.5 ∥ M10.6 ∥ M10.7 ∥ M10.8.
+Every mod passes `herdr-app check` and is screenshotted in a private window
+(`HC_SESSION` + `HERDR_APP_HOME`) before review.
+
+**Gate:** on Herdr desktop, shprd works the way Shepherdr does, and also runs
+Pi and OpenCode agents.
+
+---
+
+## M11 · Web app and remote access
+
+The web app (board, graph, terminal, settings; phone and desktop layouts) and
+the tunnels (Cloudflare quick and named, ngrok, tunnl.gg, Tailscale serve) with
+a password login (argon2, session cookie, rate limiting, origin checks), QR
+code in the UI.
+
+**Gate:** the M10 flow runs from a desktop browser and from a phone over each
+tunnel, and every request without a session is refused.
+
+---
+
+## M12 · herdr TUI and tuios
+
+`plugin/herdr-plugin.toml` (actions, panes, events) and
+`plugin/tuios-plugin.toml`; `shprd-tui` panels that mirror the desktop mods as
+closely as a terminal allows; capability checks in `shprd-mux-herdr` with a
+polling fallback where tuios lacks `terminal.attach`.
+
+**Gate:** the M10 flow passes on herdr TUI and on tuios.
+
+---
+
+## M13 · v0.1.0
+
+Release binaries with the web app embedded, Homebrew tap, install docs per
+host, a clean-machine run on each host, `THIRD_PARTY_NOTICES.md` audit.
+
+### Later: rex
+
+A Lua action that opens `shprd-tui` in a block, once rex is public; native
+blocks when rex publishes its block-plugin API.
+
+---
 
 ### Releases after v0.1.0
 
@@ -276,7 +413,7 @@ release.** No release PRs and no manual tagging.
 - **Safety:** the workflow refuses to tag if the CI run for that commit didn't
   pass, or if the tag already exists. A failed publish leaves no tag behind.
 - **Before v0.1.0:** no automatic releases. Milestone merges stay untagged
-  until M9 ships v0.1.0.
+  until M13 ships v0.1.0.
 
 ---
 
@@ -285,12 +422,13 @@ release.** No release PRs and no manual tagging.
 1. **Kickoff.** I post the milestone's task list with scopes and acceptance
    criteria. You approve or adjust it.
 2. **Fan-out.** Tasks in the same lane step go out in parallel, one worktree
-   each. Small bounded tasks go to the free-tier workers; tasks marked L or
-   long-running go to Pi.
+   each, run from the work board. Workers are Pi (DeepSeek); the coordinator
+   only plans, integrates and reports.
 3. **Integrate.** Finished tasks are combined on one integration branch, and
    the integration gate runs there once.
-4. **Review.** The combined diff goes to the reviewer (Codex, a different vendor
-   from the DeepSeek and Kilo workers) with the acceptance criteria.
+4. **Review.** The combined diff goes to a reviewer from a different vendor
+   than the workers (today GLM, reviewing DeepSeek workers) with the
+   acceptance criteria.
 5. **PR.** One PR per milestone step, with review findings in the body. You
    approve the merge.
 6. **Milestone gate.** The demo above is run and recorded in
