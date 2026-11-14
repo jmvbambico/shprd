@@ -10,6 +10,11 @@
 //! The result is a [`LaunchEnv`]: a small diff over the caller's base
 //! environment, which a supervisor applies with [`LaunchEnv::apply_to`] or
 //! translates into `Command` calls with [`LaunchEnv::as_pairs`].
+//!
+//! The rule that an agent never inherits a parent Claude Code session is
+//! borrowed from Shepherdr (MIT), `mods/tasks/bin/herdr_task/launch.py`
+//! (`CLEAN_ENV`), tag v3.1.34, commit a3f327a.
+//! https://github.com/eliasstravik/shepherdr
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -67,6 +72,25 @@ const FOREIGN_VARS: &[&str] = &[
 
 /// Prefixes reserved by other orchestrators; anything under them is removed.
 const FOREIGN_PREFIXES: &[&str] = &["OMNIGENT_", "OG_"];
+
+/// Names a parent Claude Code session leaves in the environment, exactly.
+///
+/// A terminal holder started from inside Claude Code hands every CLI it starts
+/// these: with them Claude Code saves no transcript and skips its folder-trust
+/// prompt, so an agent shprd starts never inherits them (Shepherdr's
+/// `CLEAN_ENV`, `mods/tasks/bin/herdr_task/launch.py`, SHEP-86).
+const PARENT_CLAUDE_EXACT: &[&str] = &["CLAUDECODE", "CLAUDE_PID"];
+
+/// The prefix a parent Claude Code session's own variables carry.
+const PARENT_CLAUDE_PREFIX: &str = "CLAUDE_CODE_";
+
+/// `CLAUDE_CODE_*` suffixes that are the person's own configuration, kept.
+///
+/// `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+/// friends set how Claude Code behaves, not which session it is in.
+const PARENT_CLAUDE_KEEP: &[&str] = &[
+    "USE_", "SKIP_", "DISABLE_", "ENABLE_", "MAX_", "OAUTH_", "CLIENT_", "API_",
+];
 
 /// What shprd knows about the launch and wants the CLI to inherit.
 #[derive(Debug, Clone)]
@@ -165,6 +189,11 @@ pub fn launch_env(base: &BTreeMap<String, String>, role: Role, ctx: &EnvContext)
             remove.insert(name.clone());
         }
     }
+    for name in base.keys() {
+        if is_parent_claude_marker(name) {
+            remove.insert(name.clone());
+        }
+    }
     remove.retain(|name| !is_protected(name));
 
     set.insert("SHPRD_ACTOR".to_string(), ctx.actor.clone());
@@ -196,6 +225,21 @@ fn blank_credential_helper(base: &BTreeMap<String, String>, set: &mut BTreeMap<S
     );
     set.insert(format!("GIT_CONFIG_VALUE_{existing}"), String::new());
     set.insert("GIT_CONFIG_COUNT".to_string(), (existing + 1).to_string());
+}
+
+/// Whether a name marks the session a parent Claude Code runs.
+///
+/// `CLAUDECODE`, `CLAUDE_PID` and `CLAUDE_CODE_*` are markers; a `CLAUDE_CODE_*`
+/// name under one of [`PARENT_CLAUDE_KEEP`] is configuration and stays, and
+/// `CLAUDE_CONFIG_DIR` is neither.
+fn is_parent_claude_marker(name: &str) -> bool {
+    if PARENT_CLAUDE_EXACT.contains(&name) {
+        return true;
+    }
+    match name.strip_prefix(PARENT_CLAUDE_PREFIX) {
+        Some(rest) => !PARENT_CLAUDE_KEEP.iter().any(|keep| rest.starts_with(keep)),
+        None => false,
+    }
 }
 
 /// Whether a name is off limits for removal regardless of any prefix rule.
@@ -236,6 +280,14 @@ mod tests {
             ("OPENCODE_CONFIG_DIR", "/tmp/opencode"),
             ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
             ("OPENCODE_DISABLE_CLAUDE_CODE", "1"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_PID", "4242"),
+            ("CLAUDE_CODE_CHILD_SESSION", "1"),
+            ("CLAUDE_CODE_SESSION_ID", "fake-session"),
+            ("CLAUDE_CODE_MESSAGING_TOKEN", "secret"),
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+            ("CLAUDE_CONFIG_DIR", "/home/dev/.claude"),
             ("HERDR_SESSION", "s1"),
             ("TUIOS_SOCKET", "/tmp/tuios.sock"),
         ] {
@@ -321,6 +373,40 @@ mod tests {
             applied.get("SHPRD_ACTOR").map(String::as_str),
             Some("engine")
         );
+    }
+
+    #[test]
+    fn a_parent_claude_code_session_is_not_inherited() {
+        let base = base_env();
+        for role in [
+            Role::Engine,
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+        ] {
+            let env = launch_env(&base, role, &ctx());
+            let applied = env.apply_to(&base);
+            for name in [
+                "CLAUDECODE",
+                "CLAUDE_PID",
+                "CLAUDE_CODE_CHILD_SESSION",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_MESSAGING_TOKEN",
+            ] {
+                assert!(!applied.contains_key(name), "{role:?} kept {name}");
+            }
+            for name in [
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CONFIG_DIR",
+            ] {
+                assert_eq!(
+                    applied.get(name),
+                    base.get(name),
+                    "{role:?} dropped the person's own {name}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -40,9 +40,10 @@ SOFTWARE.
   `mods/tasks/bin/herdr_task/queues.py` (`queue_reason()`),
   `mods/tasks/bin/herdr_task/when.py` (`starts_words()`),
   `mods/tasks/bin/herdr_task/github.py` (`pr_body()` and the merge path),
-  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`),
+  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`, `CLEAN_ENV`),
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
-  `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
+  `argvFor` and its fast-mode values),
+  `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
   `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
@@ -51,9 +52,11 @@ SOFTWARE.
   pull-request path, and the per-task pull-request body — in
   `crates/shprd-git/src/{land,worktree}.rs` and `crates/shprd-views/src/pr.rs`,
   and the agent-adapter facts — the Claude and Codex permission modes and the
-  cross-program map between them, and where an ask hook is installed and how
-  long it waits — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`
+  cross-program map between them, where an ask hook is installed and how
+  long it waits, the launch argument order and the two fast-mode values, and
+  the environment strip that keeps an agent from inheriting a parent Claude
+  Code session — in `data/harness/{claude,codex}.toml`,
+  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`
 - License: MIT
 
 MIT License
