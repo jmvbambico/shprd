@@ -172,7 +172,7 @@ pub fn spawn(
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     // The role's words and the Settings block are read before anything is
     // touched: an agent whose prompt cannot be read must cost nothing.
-    let context = brief_context(env, &pick, req.effort.as_deref())?;
+    let context = brief_context(env, BRIEF_ROLE, &pick, req.effort.as_deref())?;
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
@@ -1231,14 +1231,15 @@ pub(crate) const BRIEF_ROLE: &str = "worker";
 /// event: an agent started without its words would do the wrong work quickly.
 pub(crate) fn brief_context(
     env: &SpawnEnv<'_>,
+    role_id: &str,
     pick: &Pick,
     effort: Option<&str>,
 ) -> Result<BriefContext, CliError> {
     let base = env.settings.resolve(None);
     let mut task = Layer::new();
-    if let Some(role) = base.role(BRIEF_ROLE) {
+    if let Some(role) = base.role(role_id) {
         let key = |field: RoleField| Key::Role {
-            id: BRIEF_ROLE.to_owned(),
+            id: role_id.to_owned(),
             field,
         };
         if role.agent.is_none() {
@@ -1256,8 +1257,8 @@ pub(crate) fn brief_context(
         }
     }
     let settings = env.settings.resolve(Some(&task));
-    let role = settings.role(BRIEF_ROLE);
-    let prompt = role_prompt(env, BRIEF_ROLE)?;
+    let role = settings.role(role_id);
+    let prompt = role_prompt(env, role_id)?;
     Ok(BriefContext {
         prompt,
         settings,

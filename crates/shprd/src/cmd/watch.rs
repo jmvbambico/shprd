@@ -705,6 +705,7 @@ fn tick_task(
                     task: task.id.clone(),
                     reason,
                     to: None,
+                    role: None,
                     // A dry agent needs a different worker; an agent whose
                     // process died is still perfectly able to take its own
                     // task back in a fresh process.

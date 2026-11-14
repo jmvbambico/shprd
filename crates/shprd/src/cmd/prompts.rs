@@ -35,7 +35,10 @@ pub fn run(command: &PromptsCommand, json: bool, home: Option<&Path>) -> Result<
 fn list(dir: &Path, json: bool) -> Result<(), CliError> {
     let prompts = prompts::list(dir).map_err(invalid)?;
     if json {
-        let prompt: Vec<serde_json::Value> = prompts.iter().map(document).collect();
+        let prompt: Vec<serde_json::Value> = prompts
+            .iter()
+            .map(|prompt| document(prompt, false))
+            .collect();
         let value = serde_json::json!({
             "dir": dir.display().to_string(),
             "prompts": prompt,
@@ -53,7 +56,7 @@ fn list(dir: &Path, json: bool) -> Result<(), CliError> {
 fn show(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
     let installed = prompts::ensure(dir, &args.id).map_err(invalid)?;
     if json {
-        println!("{}", document(&installed));
+        println!("{}", document(&installed, true));
     } else {
         print!("{}", installed.text);
     }
@@ -64,7 +67,7 @@ fn show(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
 fn path(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
     let installed = prompts::ensure(dir, &args.id).map_err(invalid)?;
     if json {
-        println!("{}", document(&installed));
+        println!("{}", document(&installed, true));
     } else {
         println!("{}", installed.path.display());
     }
@@ -75,7 +78,7 @@ fn path(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
 fn reset(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
     let installed = prompts::reset(dir, &args.id).map_err(invalid)?;
     if json {
-        println!("{}", document(&installed));
+        println!("{}", document(&installed, true));
     } else {
         println!(
             "ok {} {}: {}",
@@ -87,17 +90,25 @@ fn reset(dir: &Path, args: &PromptIdArgs, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-/// One prompt as JSON: the file, its words and what the command did.
-fn document(installed: &Installed) -> serde_json::Value {
-    serde_json::json!({
+/// One prompt as JSON: the file, its state and what the command did, with its
+/// words when the caller asked for them.
+///
+/// `list` leaves the words out — four prompts of prose per line is noise — and
+/// `show`, `path` and `reset` carry them, so one document describes one prompt
+/// completely.
+fn document(installed: &Installed, with_text: bool) -> serde_json::Value {
+    let mut value = serde_json::json!({
         "id": installed.id,
         "path": installed.path.display().to_string(),
         "state": installed.state.name(),
         "change": installed.change.name(),
         "shipped": installed.shipped,
         "about": installed.about,
-        "text": installed.text,
-    })
+    });
+    if with_text && let Some(object) = value.as_object_mut() {
+        object.insert("text".to_owned(), installed.text.clone().into());
+    }
+    value
 }
 
 /// A prompt failure is the person's to fix, so it is a refusal (exit 2), not a
