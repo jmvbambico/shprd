@@ -169,6 +169,14 @@ pub fn create(
     })
 }
 
+/// Whether the repository has a remote a landing could push to.
+///
+/// A repository with no remote lands locally: its task branches are merged into
+/// the run's integration branch in shprd's own worktree, and nothing is pushed.
+pub fn has_remote(git: &Git) -> bool {
+    remote_of(git).is_some()
+}
+
 /// The remote a landing fetches from and pushes to: `origin` when the
 /// repository has it, else the only remote it has, else `None`.
 ///

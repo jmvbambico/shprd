@@ -107,6 +107,13 @@ pub struct Facts {
     pub prs: BTreeMap<String, PrFacts>,
     /// The tasks that have an agent running now.
     pub live: BTreeSet<String>,
+    /// True when the repository has no remote or no forge, so a landing goes to
+    /// the run's integration branch locally rather than through a pull request.
+    ///
+    /// The `checks` policy then reads the hand-in's own checks report, because a
+    /// repository with no forge has no CI to ask.
+    #[serde(default)]
+    pub local: bool,
 }
 
 impl Facts {
@@ -273,7 +280,10 @@ fn step_for(
         return match policy {
             MergePolicy::Auto => Some(land),
             // The checks are the forge's to report: while they run, or while the
-            // forge cannot say, nothing depends on them being green.
+            // forge cannot say, nothing depends on them being green. A local
+            // landing has no forge to ask, so its checks are the hand-in's own
+            // report, which `ready_to_land` already read and accepted.
+            MergePolicy::Checks if facts.local => Some(land),
             MergePolicy::Checks => (pr.and_then(|pr| pr.checks) == Some(true)).then_some(land),
             MergePolicy::Ask => {
                 if approval_matches(task, pr) {
@@ -679,6 +689,25 @@ mod tests {
             vec![Step::Land {
                 task: "A".to_string(),
                 policy: MergePolicy::Auto,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_local_checks_policy_lands_on_the_hand_ins_own_report() {
+        // A repository with no forge has no CI to ask: the checks policy reads
+        // the hand-in's passing report, which `ready_to_land` already accepted.
+        let state = folded(&ready_log("A"));
+        let facts = Facts {
+            local: true,
+            ..Facts::default()
+        };
+        let steps = plan_for(&state, &facts, &config(MergePolicy::Checks, 4));
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Checks,
             }]
         );
     }
