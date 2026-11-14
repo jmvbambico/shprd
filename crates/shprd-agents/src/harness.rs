@@ -148,6 +148,31 @@ impl Harness {
     }
 }
 
+/// Environment variable pointing shprd at the data directory, for a checkout or
+/// a packaged install.
+pub const DATA_ENV: &str = "SHPRD_DATA_DIR";
+
+/// The data directory: `$SHPRD_DATA_DIR`, else `<root>/data` when it is one,
+/// else the `../share/shprd/data` a packaged install puts next to the binary.
+///
+/// `root` is the repository the caller works in, when it has one: a checkout
+/// keeps its harness table in `data/`, and an installation keeps it beside the
+/// binary.
+pub fn data_dir(root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(DATA_ENV).filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let packaged = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join("../share/shprd/data"));
+    let candidates = [root.map(|root| root.join("data")), packaged];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_dir())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

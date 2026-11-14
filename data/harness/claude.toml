@@ -55,8 +55,8 @@ verified = false
 # The default is conservative: Shepherdr reads the person's own
 # `permissions.defaultMode` from ~/.claude/settings.json, which a data table
 # cannot, so shprd starts a role that names no mode at Ask (manual).
-# unverified: that a role with no mode should start at `manual` rather than at
-# whatever the person's settings already say — M9.3 decides.
+# Decided in M9.3: a role that names no `perm` runs this `default`; the settings
+# model never substitutes a mode of its own (see `crates/shprd-core/src/settings`).
 default = "manual"
 full = "bypassPermissions"
 readonly = "plan"
