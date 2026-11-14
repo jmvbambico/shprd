@@ -288,6 +288,9 @@ pub struct BriefInput<'a> {
     pub worktree: &'a str,
     /// The skills the attempt must load first.
     pub skills: &'a [String],
+    /// The repository's worker gate commands, from the resolved `[gates]`
+    /// config. Empty when this repository configures none.
+    pub gates: &'a [String],
     /// The archive ref the previous attempt's commits are held under, when this
     /// attempt replaced one.
     pub archive: Option<&'a str>,
@@ -297,6 +300,9 @@ pub struct BriefInput<'a> {
     pub settings: Option<&'a Resolved>,
     /// The role whose values the Settings block describes.
     pub role: Option<&'a ResolvedRole>,
+    /// What the launch already knows the agent should be told: an effort level
+    /// its model cannot use, for one. Empty for most briefs.
+    pub warnings: &'a [String],
 }
 
 /// The longest detail the brief keeps from a previous attempt's finding, so one
@@ -319,6 +325,12 @@ pub fn task_brief(input: &BriefInput<'_>) -> String {
     if let Some(resolved) = input.settings {
         out.push('\n');
         out.push_str(&settings_block(resolved, input.role));
+    }
+    if !input.warnings.is_empty() {
+        out.push_str("\n## Warnings\n\n");
+        for warning in input.warnings {
+            out.push_str(&format!("- {warning}\n"));
+        }
     }
     out
 }
@@ -380,7 +392,7 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         "- commit on your branch `{}`; never push, never open a pull request\n",
         input.branch
     ));
-    out.push_str("- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n");
+    out.push_str(&gate_rule(input.gates));
     out.push_str(&format!(
         "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
         t = input.task.id
@@ -394,6 +406,33 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         a = input.attempt
     ));
     out
+}
+
+/// The Rules line that tells the agent which gates to run.
+///
+/// The commands come from the run's repository (`[gates] worker` in its config),
+/// so a Python repository is told its tests and a Rust one its cargo gates. A
+/// repository that configures none says so instead of borrowing another
+/// project's commands, and the agent is asked to find the repository's own test
+/// command and name what it ran.
+fn gate_rule(gates: &[String]) -> String {
+    if gates.is_empty() {
+        return "- this repository configures no worker gates: run the repository's own test command \
+                if you can find one, and say which command you ran\n"
+            .to_string();
+    }
+    let commands: Vec<String> = gates
+        .iter()
+        .filter(|gate| !gate.trim().is_empty())
+        .map(|gate| format!("`{gate}`"))
+        .collect();
+    if commands.is_empty() {
+        return gate_rule(&[]);
+    }
+    format!(
+        "- run the worker gates before you report: {}\n",
+        commands.join(", ")
+    )
 }
 
 /// The settings that shape one task, each with the layer that set it.
@@ -700,6 +739,101 @@ mod tests {
         )
     }
 
+    /// The worker gates a repository's config sets, read the way a spawn reads
+    /// them: a `config.toml` under `[gates] worker`.
+    fn gates_of(text: &str) -> Vec<String> {
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(err) => panic!("a temp dir: {err}"),
+        };
+        let path = dir.path().join("config.toml");
+        if let Err(err) = std::fs::write(&path, text) {
+            panic!("the fixture config should be written: {err}");
+        }
+        match shprd_core::config::load(Some(&path), None) {
+            Ok(config) => config.gates.worker,
+            Err(err) => panic!("the fixture config should load: {err}"),
+        }
+    }
+
+    /// The Rules block of a brief for `gates`.
+    fn rules_with(gates: &[String]) -> String {
+        let plan = brief_task();
+        let text = task_brief(&BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt: 1,
+            agent: "claude",
+            model: None,
+            branch: "task/30-m9-4",
+            worktree: "/wt/M9.4",
+            skills: &[],
+            gates,
+            archive: None,
+            prompt: None,
+            settings: None,
+            role: None,
+            warnings: &[],
+        });
+        match text.split_once("## Rules\n\n") {
+            Some((_, rules)) => rules.to_string(),
+            None => panic!("the brief has a Rules section: {text}"),
+        }
+    }
+
+    #[test]
+    fn a_python_repositories_brief_carries_its_own_gates() {
+        let gates =
+            gates_of("[gates]\nworker = [\"python3 -m pytest -q\", \"python3 -m ruff check .\"]\n");
+        let rules = rules_with(&gates);
+        assert!(
+            rules.contains(
+                "- run the worker gates before you report: `python3 -m pytest -q`, `python3 -m ruff check .`\n"
+            ),
+            "{rules}"
+        );
+        assert!(
+            !rules.contains("cargo"),
+            "shprd's own gates must not leak: {rules}"
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_gates_says_so_and_asks_for_its_own_test_command() {
+        let rules = rules_with(&gates_of(""));
+        assert!(
+            rules.contains(
+                "- this repository configures no worker gates: run the repository's own test command if you can find one, and say which command you ran\n"
+            ),
+            "{rules}"
+        );
+        assert!(
+            !rules.contains("cargo") && !rules.contains("pytest"),
+            "a repository with no gates must not be given anyone else's: {rules}"
+        );
+    }
+
+    /// The worker gates this very repository's config sets. The file is
+    /// shprd's own, so the test fails if its three cargo gates leave the config
+    /// and go back into the code.
+    #[test]
+    fn shprds_own_gates_come_from_its_config() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.shprd/config.toml");
+        let config = match shprd_core::config::load(Some(&path), None) {
+            Ok(config) => config,
+            Err(err) => panic!("{} should load: {err}", path.display()),
+        };
+        let gates = config.gates.worker;
+        let rules = rules_with(&gates);
+        assert!(
+            rules.contains(
+                "- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n"
+            ),
+            "{rules}"
+        );
+    }
+
     #[test]
     fn settings_block_lists_every_value_with_the_layer_that_set_it() {
         let (resolved, role) = settings_fixture();
@@ -744,6 +878,10 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
         let (resolved, role) = settings_fixture();
         let plan = brief_task();
         let skills = vec!["tdd".to_string()];
+        let gates = vec![
+            "cargo fmt --all --check".to_string(),
+            "cargo test --workspace".to_string(),
+        ];
         let text = task_brief(&BriefInput {
             task: &plan,
             run: "m9",
@@ -753,10 +891,12 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             branch: "task/30-m9-4",
             worktree: "/home/me/.shprd/worktrees/shprd/m9/M9.4",
             skills: &skills,
+            gates: &gates,
             archive: None,
             prompt: Some("You work on one shprd task.\nStay within scope.\n"),
             settings: Some(&resolved),
             role: Some(&role),
+            warnings: &[],
         });
         let expected = "You work on one shprd task.
 Stay within scope.
@@ -783,7 +923,7 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 - work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change nothing outside the scope above
 - commit on your branch `task/30-m9-4`; never push, never open a pull request
-- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
+- run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
 - say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
 - report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used
 
@@ -823,16 +963,71 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             branch: "task/30-m9-4",
             worktree: "/wt/M9.4",
             skills: &[],
+            gates: &[],
             archive: None,
             prompt: None,
             settings: None,
             role: None,
+            warnings: &[],
         });
         assert!(
             text.starts_with("# M9.4 role templates and a brief\n"),
             "{text}"
         );
         assert!(!text.contains("## Your settings"), "{text}");
+    }
+
+    #[test]
+    fn a_warning_from_the_launch_is_part_of_the_brief() {
+        let plan = brief_task();
+        let warnings = vec![
+            "`pi` lists `m` as not thinking, so the effort `low` has no effect: the flag is dropped"
+                .to_string(),
+        ];
+        let text = task_brief(&BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt: 1,
+            agent: "pi",
+            model: Some("m"),
+            branch: "task/30-m9-4",
+            worktree: "/wt/M9.4",
+            skills: &[],
+            gates: &[],
+            archive: None,
+            prompt: None,
+            settings: None,
+            role: None,
+            warnings: &warnings,
+        });
+        assert!(
+            text.contains(
+                "## Warnings\n\n- `pi` lists `m` as not thinking, so the effort `low` has no effect: the flag is dropped\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_brief_without_warnings_has_no_warning_section() {
+        let plan = brief_task();
+        let text = task_brief(&BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt: 1,
+            agent: "claude",
+            model: None,
+            branch: "task/30-m9-4",
+            worktree: "/wt/M9.4",
+            skills: &[],
+            gates: &[],
+            archive: None,
+            prompt: None,
+            settings: None,
+            role: None,
+            warnings: &[],
+        });
+        assert!(!text.contains("## Warnings"), "{text}");
     }
 
     #[test]

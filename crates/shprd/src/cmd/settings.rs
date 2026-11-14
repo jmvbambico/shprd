@@ -25,7 +25,9 @@
 //! ran is the nearest layer, which is the only per-task fact the log holds. A
 //! task's own settings cannot be written from here, and the refusal says so.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use shprd_agents::roles::{Checked, Checker, Review};
@@ -36,6 +38,12 @@ use crate::cli::{
     SettingsCommand, SettingsGetArgs, SettingsSetArgs, SettingsShowArgs, SettingsUnsetArgs,
 };
 use crate::ctx::{CliError, Ctx, resolve_home};
+
+/// How long one model listing may take while a read is answered.
+///
+/// The catalog only feeds a warning, so a slow or absent CLI must not hold the
+/// verb: a listing that does not answer in time simply says nothing.
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runs `shprd settings`, whichever verb the command line asked for.
 ///
@@ -133,7 +141,8 @@ fn show(
 ) -> Result<(), CliError> {
     let task = task_layer(root, args.task.as_deref())?;
     let resolved = loaded.resolve(task.as_ref());
-    let checked = check(&resolved, checker);
+    let checker = with_catalogs(checker.clone(), &resolved, root);
+    let checked = check(&resolved, &checker);
     let skipped = skipped_note(&checked, &resolved);
     if json {
         let values: Vec<serde_json::Value> = resolved
@@ -145,6 +154,7 @@ fn show(
             "repo": loaded.repo,
             "values": values,
             "problems": checked.messages(),
+            "warnings": checked.warnings(),
             "not_checked": skipped,
         });
         print_json(&document)?;
@@ -155,6 +165,9 @@ fn show(
     }
     for problem in checked.messages() {
         eprintln!("warning: {problem}");
+    }
+    for warning in checked.warnings() {
+        eprintln!("warning: {warning}");
     }
     if let Some(note) = skipped {
         eprintln!("warning: {note}");
@@ -174,17 +187,22 @@ fn get(
     let task = task_layer(root, args.task.as_deref())?;
     let resolved = loaded.resolve(task.as_ref());
     let row = row_of(&resolved, &key);
-    let checked = check(&resolved, checker);
+    let checker = with_catalogs(checker.clone(), &resolved, root);
+    let checked = check(&resolved, &checker);
     let skipped = skipped_note(&checked, &resolved);
     if json {
         let mut document = row_json(&row);
         document["not_checked"] = serde_json::json!(skipped);
+        document["warnings"] = serde_json::json!(checked.warnings());
         print_json(&document)?;
         return Ok(());
     }
     println!("{}", line(&row));
     for problem in checked.messages() {
         eprintln!("warning: {problem}");
+    }
+    for warning in checked.warnings() {
+        eprintln!("warning: {warning}");
     }
     if let Some(note) = skipped {
         eprintln!("warning: {note}");
@@ -302,6 +320,46 @@ fn skipped_note(checked: &Checked, resolved: &Resolved) -> Option<String> {
 /// checked.
 fn check(resolved: &Resolved, checker: &Checker) -> Checked {
     checker.check(resolved, Review::default())
+}
+
+/// The checker with the catalogs of the programs some role names an effort for.
+///
+/// Only those are read: a program no role gives an effort is never asked, so a
+/// read of the settings stays a read. A listing that cannot be read is skipped —
+/// the effort check then says nothing rather than guessing.
+fn with_catalogs(checker: Checker, resolved: &Resolved, root: Option<&Path>) -> Checker {
+    let roles = resolved.roles();
+    let programs: Vec<&str> = roles
+        .iter()
+        .filter(|role| role.effort.is_some())
+        .filter_map(|role| role.agent.as_ref().map(|agent| agent.value.as_str()))
+        .collect();
+    if programs.is_empty() {
+        return checker;
+    }
+    let Some(data) = shprd_agents::harness::data_dir(root) else {
+        return checker;
+    };
+    let Some(specs) = checker.specs() else {
+        return checker;
+    };
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let models_dir = data.join("models");
+    let mut catalogs = BTreeMap::new();
+    for program in programs {
+        if catalogs.contains_key(program) {
+            continue;
+        }
+        let Some(spec) = specs.iter().find(|spec| spec.id == program) else {
+            continue;
+        };
+        if let Some(catalog) =
+            shprd_agents::adapter::catalog(spec, &models_dir, &path_env, CATALOG_TIMEOUT)
+        {
+            catalogs.insert(program.to_owned(), catalog);
+        }
+    }
+    checker.with_catalogs(catalogs)
 }
 
 /// One key's line as the verb prints it.

@@ -1502,6 +1502,9 @@ project_dirs = []
                     programs,
                     workers: vec!["sh".to_string()],
                     skills: Skills::default(),
+                    gates: Vec::new(),
+                    catalogs: std::collections::BTreeMap::new(),
+                    data_dir: self.home.path().to_path_buf(),
                     compat: Vec::new(),
                     base_env,
                     // No wait: a fake pane that never reports an agent would
