@@ -601,7 +601,10 @@ fn the_old_roster_reviewer_is_the_lower_layer_of_the_reviewer_role() {
     let loaded = Loaded::read(home.path(), None).expect("the old config loads");
     let resolved = loaded.resolve(None);
     let reviewer = resolved.role("reviewer").expect("the built-in reviewer");
-    assert_eq!(reviewer.agent.as_ref().map(|a| a.value.as_str()), Some("codex"));
+    assert_eq!(
+        reviewer.agent.as_ref().map(|a| a.value.as_str()),
+        Some("codex")
+    );
     assert_eq!(
         reviewer.model.as_ref().map(|m| m.value.as_str()),
         Some("gpt-5-codex")

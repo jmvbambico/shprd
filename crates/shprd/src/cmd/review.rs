@@ -1174,6 +1174,26 @@ pub fn review_verb(ctx: &Ctx, args: &ReviewArgs, home: Option<&Path>) -> Result<
     Ok(())
 }
 
+/// Starts the review of one task on the engine's behalf, as the tick does.
+///
+/// It is [`review`] with the verb's own arguments, so the service runs exactly
+/// the code a person's `shprd agent review` runs. It returns one line for the
+/// pass's report: which reviewer was started, and where.
+pub fn review_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, String> {
+    let mux = spawn::real_mux();
+    let env = ReviewEnv::build(ctx, Some(home)).map_err(|err| err.to_string())?;
+    let request = ReviewRequest {
+        task: task.to_string(),
+        degraded: false,
+        again: false,
+    };
+    let report = review(&mux, &env, &request).map_err(|err| err.to_string())?;
+    Ok(format!(
+        "started {} on {} attempt {} in tab {}",
+        report.agent, report.task, report.attempt, report.tab
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1864,20 +1884,28 @@ project_dirs = []
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         scratch.reported(&ctx);
-        let mut env = scratch.review_env_with(&ctx, None, vec![
-            Program {
-                spec: fake_spec("sh", "pi"),
-                installed: true,
-            },
-            Program {
-                spec: fake_spec("codex", "openai"),
-                installed: true,
-            },
-        ]);
+        let mut env = scratch.review_env_with(
+            &ctx,
+            None,
+            vec![
+                Program {
+                    spec: fake_spec("sh", "pi"),
+                    installed: true,
+                },
+                Program {
+                    spec: fake_spec("codex", "openai"),
+                    installed: true,
+                },
+            ],
+        );
         env.reviewer = settings_reviewer(
             "[roles.reviewer]\nagent = \"codex\"\nmodel = \"m1\"\neffort = \"high\"\nperm = \"read-only\"\n",
         );
-        let reviewer = env.reviewer.agent.as_ref().unwrap_or_else(|| panic!("no program"));
+        let reviewer = env
+            .reviewer
+            .agent
+            .as_ref()
+            .unwrap_or_else(|| panic!("no program"));
         assert_eq!(reviewer.value, "codex");
         assert_eq!(
             reviewer.source,
@@ -2051,7 +2079,10 @@ project_dirs = []
 
         let err = review(&mux, &env, &request(false)).expect_err("the review is already out");
         let message = format!("{err}");
-        assert!(message.contains("already has a review requested"), "{message}");
+        assert!(
+            message.contains("already has a review requested"),
+            "{message}"
+        );
         assert!(message.contains("--again"), "{message}");
         assert_eq!(opened_tabs(&mux).len(), 1, "no second reviewer is opened");
         assert_eq!(
@@ -2459,8 +2490,9 @@ project_dirs = []
                 continue;
             }
             checked += 1;
-            let (argv, _) = reviewer_argv(&spec, Some("m1"), None, None, "brief", Path::new("b.md"))
-                .unwrap_or_else(|err| panic!("{}: {err}", spec.id));
+            let (argv, _) =
+                reviewer_argv(&spec, Some("m1"), None, None, "brief", Path::new("b.md"))
+                    .unwrap_or_else(|err| panic!("{}: {err}", spec.id));
             for flag in auto {
                 assert!(
                     !argv.contains(&flag),

@@ -825,11 +825,9 @@ mod tests {
             "#,
         )
         .settings_projection();
-        let role = |field| {
-            Key::Role {
-                id: "reviewer".to_owned(),
-                field,
-            }
+        let role = |field| Key::Role {
+            id: "reviewer".to_owned(),
+            field,
         };
         assert_eq!(
             reviewer.get(&role(crate::settings::RoleField::Agent)),
