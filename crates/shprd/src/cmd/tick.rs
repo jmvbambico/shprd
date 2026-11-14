@@ -113,6 +113,20 @@ pub(crate) fn worker_with_hub(
         let spawn_ctx = Ctx::new(repo.to_path_buf(), spawn_actor.clone(), false, true);
         crate::cmd::agent::start_for_tick(&spawn_ctx, &spawn_home, task)
     });
+    // The engine starts the reviewer on a hand-in, as `shprd agent review` does:
+    // the closure is that verb's own `review()`, so the cross-vendor rule, the
+    // packet, the brief and the kickoff cannot drift between the two callers. A
+    // machine whose settings name no reviewer, and a record-only pass, plan no
+    // review step at all.
+    let review_enabled = !record_only() && reviews_hand_ins(home, &repo, &config);
+    let review_home = home.to_path_buf();
+    let review_actor = actor.clone();
+    let review: Option<shprd_server::Reviewer> = review_enabled.then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str| {
+            let review_ctx = Ctx::new(repo.to_path_buf(), review_actor.clone(), false, true);
+            crate::cmd::review::review_for_tick(&review_ctx, &review_home, task)
+        }) as shprd_server::Reviewer
+    });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two
     // effects it may have. A record-only pass has no tabs and no CLIs to probe,
     // so it is not wired there.
@@ -153,11 +167,35 @@ pub(crate) fn worker_with_hub(
         fallback,
         forge,
         start,
+        review,
         actor,
         after_write: None,
         hub,
         news,
     })
+}
+
+/// Whether the engine starts a reviewer when a task hands in.
+///
+/// The answer is the settings': a `reviewer` role that may review and names a
+/// program to run. The pre-M9 `[roster] reviewer` in `config.toml` reaches the
+/// same answer through the settings' legacy layer active below the person's own
+/// defaults. A settings file that cannot be read falls back to the config's own
+/// roster entry, so a broken file cannot silently switch review off.
+fn reviews_hand_ins(home: &Path, repo: &Path, config: &config::Config) -> bool {
+    match shprd_core::settings::Loaded::read(home, Some(repo)) {
+        Ok(loaded) => {
+            let resolved = loaded.resolve(None);
+            resolved.role("reviewer").is_some_and(|role| {
+                role.may_review()
+                    && role
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| !agent.value.trim().is_empty())
+            })
+        }
+        Err(_) => config.roster.reviewer.is_some(),
+    }
 }
 
 /// How long a change must hold before the coordinator is told, ms.

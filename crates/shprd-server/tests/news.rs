@@ -132,6 +132,7 @@ impl Fixture {
             fallback: None,
             forge: Arc::new(NoForge),
             start,
+            review: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),

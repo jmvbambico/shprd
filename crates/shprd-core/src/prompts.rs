@@ -64,12 +64,22 @@ pub struct ShippedPrompt {
 #[cfg(test)]
 const WORKER_FIRST: &str = include_str!("../../../data/templates/history/worker-first.md");
 
-/// The SHA-256 of [`WORKER_FIRST`], the worker's retired default.
+/// The SHA-256 of [`WORKER_FIRST`], the worker's first retired default.
 const WORKER_FIRST_DIGEST: &str =
     "4751c29cd19041fe050ad5d8fbda4b28e4ea783a22ae99ff1cfe177e1a1ed547";
 
+/// The worker wording M9.4 shipped, which told the worker to start its own
+/// reviewer. The engine reviews on hand-in now, so a file byte-identical to it
+/// is upgraded too; the text is kept under `data/templates/history/` for the
+/// test that proves [`WORKER_M9`]'s digest is the one listed.
+#[cfg(test)]
+const WORKER_M9: &str = include_str!("../../../data/templates/history/worker-m9.md");
+
+/// The SHA-256 of [`WORKER_M9`], the worker's second retired default.
+const WORKER_M9_DIGEST: &str = "900f82be310d6ad3f688dc4276a9bd7bc0817ae18310a331960c880b50dd0872";
+
 /// The worker's retired defaults.
-const WORKER_OLD: &[&str] = &[WORKER_FIRST_DIGEST];
+const WORKER_OLD: &[&str] = &[WORKER_FIRST_DIGEST, WORKER_M9_DIGEST];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [

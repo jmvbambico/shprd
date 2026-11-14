@@ -255,6 +255,13 @@ impl TickReport {
 /// did.
 pub type Starter = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
+/// What the tick needs to start the reviewer on a task that handed in.
+///
+/// It is the binary's `agent review`, passed in the way [`Starter`] is, so the
+/// engine and a person start a review through exactly one code path. The
+/// closure returns one line about the reviewer it opened.
+pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
+
 /// Everything one pass runs against.
 pub struct Worker {
     /// The repository whose run log is advanced.
@@ -275,6 +282,11 @@ pub struct Worker {
     pub forge: SharedForge,
     /// Starts an agent on a task.
     pub start: Starter,
+    /// Starts the engine's reviewer on a hand-in, when review is on.
+    ///
+    /// `None` when no reviewer is configured in the settings, or when the
+    /// caller has no review path: the planner then plans no `review` step.
+    pub review: Option<Reviewer>,
     /// Who the pass's writes act as. The engine, always: the tick is shprd's
     /// own automation rather than a human's or an agent's action.
     pub actor: Actor,
@@ -311,6 +323,7 @@ impl Worker {
             phases: &phases,
             facts: &facts,
             config: &self.config,
+            review: self.review.is_some(),
         });
         let mut report = TickReport::default();
         for step in steps {
@@ -676,6 +689,7 @@ impl Worker {
     fn run_step(&self, state: &RunState, step: &Step) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
+            Step::Review { task } => self.review_task(task),
             Step::Land { task, policy: _ } => self.land_task(state, task),
             Step::MarkLanded {
                 task,
@@ -700,6 +714,28 @@ impl Worker {
     fn start_task(&self, task: &str) -> Result<StepReport, String> {
         let detail = (self.start)(&self.repo, task)?;
         let step = Step::Start {
+            task: task.to_string(),
+        };
+        let seq = self.last_seq();
+        self.notify(seq);
+        after_write(&self.after_write, &self.repo);
+        Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Starts the reviewer on a task that handed in, through the caller's
+    /// review path.
+    ///
+    /// It is `shprd agent review` with the same arguments the verb uses, so the
+    /// cross-vendor rule, the packet, the brief and the kickoff are one code
+    /// path, and the request it records is what stops the next pass repeating
+    /// the step.
+    fn review_task(&self, task: &str) -> Result<StepReport, String> {
+        let review = self
+            .review
+            .as_ref()
+            .ok_or_else(|| String::from("no reviewer is configured"))?;
+        let detail = review(&self.repo, task)?;
+        let step = Step::Review {
             task: task.to_string(),
         };
         let seq = self.last_seq();

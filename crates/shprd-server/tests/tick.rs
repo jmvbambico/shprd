@@ -86,6 +86,7 @@ impl Fixture {
             fallback: None,
             forge,
             start,
+            review: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),
@@ -415,6 +416,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         fallback: None,
         forge,
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: None,
         actor: Actor::Engine,
         after_write: None,
         hub: hub.clone(),
@@ -471,6 +473,99 @@ fn a_pass_that_starts_a_task_records_it_once() {
     assert_eq!(report.steps.len(), 1);
     assert!(report.steps[0].ok);
     assert_eq!(*calls.lock().expect("the call log"), vec!["A".to_string()]);
+}
+
+/// A task that spawned and handed in, with one passing check and no review yet.
+fn handed_in(seq: u64) -> Vec<Event> {
+    vec![
+        ev(
+            seq,
+            EventKind::Spawned {
+                task: String::from("A"),
+                attempt: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/A"),
+                branch: String::from("shprd/r1/A"),
+            },
+        ),
+        ev(
+            seq + 1,
+            EventKind::Reported {
+                task: String::from("A"),
+                attempt: 1,
+                status: ReportStatus::Completed,
+                summary: String::from("done"),
+                tests: Vec::new(),
+                checks: vec![CheckReport {
+                    gate: String::from("tests"),
+                    command: String::from("cargo test"),
+                    exit_code: Some(0),
+                    output_tail: String::new(),
+                }],
+                changed_paths: Vec::new(),
+                commit: Some(String::from("abc123")),
+                skills_used: Vec::new(),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn a_hand_in_starts_the_engine_reviewer() {
+    // The worker hands in and the pass starts the reviewer, through the same
+    // review path the verb uses.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&calls);
+    let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, task: &str| {
+        recorded
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(task.to_string());
+        Ok(format!("started a reviewer on {task}"))
+    });
+    let worker = Worker {
+        repo: fixture.repo.clone(),
+        home: fixture.home.clone(),
+        config: config(shprd_core::config::MergePolicy::Auto),
+        facts: Arc::new(Scripted::default()),
+        fallback: None,
+        forge: Arc::new(NoForge),
+        start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: Some(review),
+        actor: Actor::Engine,
+        after_write: None,
+        hub: Hub::new(),
+        news: None,
+    };
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert_eq!(report.steps.len(), 1, "{:?}", report.steps);
+    assert!(report.steps[0].ok, "{:?}", report.steps);
+    assert_eq!(report.steps[0].action, "review");
+    assert_eq!(report.steps[0].task, "A");
+    assert_eq!(*calls.lock().expect("the call log"), vec!["A".to_string()]);
+}
+
+#[test]
+fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert!(report.steps.is_empty(), "{:?}", report.steps);
 }
 
 #[test]

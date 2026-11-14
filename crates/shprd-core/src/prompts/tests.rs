@@ -261,6 +261,35 @@ fn the_worker_first_digest_is_the_listed_one() {
 }
 
 #[test]
+fn the_worker_m9_digest_is_the_listed_one() {
+    assert_eq!(digest(WORKER_M9.as_bytes()), WORKER_M9_DIGEST);
+    assert!(
+        worker().old.contains(&WORKER_M9_DIGEST),
+        "the retired default is in the worker's list"
+    );
+    assert!(WORKER_M9.as_bytes() != worker().text.as_bytes());
+}
+
+#[test]
+fn the_worker_prompt_hands_in_and_never_starts_its_own_review() {
+    // Decided in prose: the worker hands in; the engine reviews. A brief that
+    // told the worker to run the review itself would be a wrong instruction.
+    let text = worker().text;
+    assert!(
+        !text.contains("shprd agent review"),
+        "the worker is not told to review: {text}"
+    );
+    assert!(
+        text.contains("Reviewing is the engine's job"),
+        "the review belongs to the engine: {text}"
+    );
+    assert!(
+        text.contains("hand in"),
+        "the worker's job is to hand in: {text}"
+    );
+}
+
+#[test]
 fn every_shipped_prompt_credits_shepherdr() {
     for prompt in shipped() {
         assert!(
