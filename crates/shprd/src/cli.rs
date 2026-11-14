@@ -452,6 +452,29 @@ pub enum AskCommand {
     /// a `PermissionRequest` hook. Nothing is printed on timeout or on any
     /// error: the hook never decides by itself.
     Hook(AskHookArgs),
+    /// Write a program's ask hook into a task's worktree-local config file.
+    ///
+    /// The target is the program's own project file — Claude Code's
+    /// `.claude/settings.local.json`, Codex's `.codex/hooks.json` plus
+    /// `.codex/config.toml` — never the person's global config. A program with
+    /// no hook of its own (pi, opencode) is left untouched, and the board falls
+    /// back to reading its screen.
+    Install(AskInstallArgs),
+}
+
+/// Arguments for `ask install`.
+#[derive(Debug, Args)]
+pub struct AskInstallArgs {
+    /// The program whose hook is installed: `claude`, `codex`, and so on.
+    #[arg(long, value_name = "PROGRAM", default_value = "claude")]
+    pub program: String,
+    /// The task's worktree, whose config file gets the hook. Defaults to the
+    /// working directory.
+    #[arg(long, value_name = "DIR")]
+    pub worktree: Option<PathBuf>,
+    /// Where the hook script goes. Defaults to `<worktree>/.shprd/ask-hook.sh`.
+    #[arg(long, value_name = "PATH")]
+    pub hook: Option<PathBuf>,
 }
 
 /// What kind of ask a flag names.

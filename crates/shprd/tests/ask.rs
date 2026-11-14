@@ -119,6 +119,78 @@ fn ok(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+/// Runs the binary with an extra environment variable set.
+fn ok_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+    let mut all: Vec<String> = vec![
+        "--repo".into(),
+        root.display().to_string(),
+        "--no-dagr".into(),
+    ];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    let mut command = Command::new(BIN);
+    command
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_TASK");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("the binary runs")
+}
+
+/// The shipped `data/` directory, which holds the real harness files.
+fn data_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data")
+        .canonicalize()
+        .expect("the shipped data directory")
+}
+
+/// Every file under `dir`, relative, sorted; empty when there is none.
+fn tree(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(dir) {
+                found.push(relative.display().to_string());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Spawns the binary with an extra environment, without waiting for it.
+fn spawn_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Child {
+    let mut all: Vec<String> = vec![
+        "--repo".into(),
+        root.display().to_string(),
+        "--no-dagr".into(),
+    ];
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    let mut command = Command::new(BIN);
+    command
+        .args(&all)
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_TASK")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.spawn().expect("the binary starts")
+}
+
 /// A throwaway repository with a run and one task.
 fn repo_with_a_task() -> (TempDir, TempDir, TempDir) {
     let repo = TempDir::new().expect("repo dir");
@@ -381,5 +453,188 @@ fn a_hook_that_times_out_prints_nothing() {
         output.stdout.is_empty(),
         "a timeout decides nothing, got {:?}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn an_install_writes_the_hook_only_inside_the_worktree() {
+    let repo = TempDir::new().expect("repo dir");
+    let worktree = TempDir::new().expect("worktree");
+    let home = TempDir::new().expect("home dir");
+    let data = data_dir().display().to_string();
+    let output = ok_env(
+        repo.path(),
+        &[
+            "ask",
+            "install",
+            "--program",
+            "claude",
+            "--worktree",
+            &worktree.path().display().to_string(),
+        ],
+        &[
+            ("SHPRD_DATA_DIR", &data),
+            ("HOME", &home.path().display().to_string()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Claude Code's own project file gets the hook, and the script it runs.
+    let settings = worktree.path().join(".claude/settings.local.json");
+    let value: Value = serde_json::from_str(&fs::read_to_string(&settings).expect("read settings"))
+        .expect("settings are JSON");
+    let command = value["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("a command");
+    let hook = worktree.path().join(".shprd/ask-hook.sh");
+    assert!(
+        command.contains(hook.to_str().expect("hook path")),
+        "{command}"
+    );
+    assert!(hook.exists(), "the hook script is written");
+    assert_eq!(
+        tree(worktree.path()),
+        vec![".claude/settings.local.json", ".shprd/ask-hook.sh"],
+        "nothing else is written into the worktree"
+    );
+
+    // Not one byte lands outside the worktree: the person's home is untouched,
+    // and no global config file appeared there.
+    assert_eq!(
+        tree(home.path()),
+        Vec::<String>::new(),
+        "the person's home is never written"
+    );
+
+    // Installing again changes nothing.
+    let output = ok_env(
+        repo.path(),
+        &[
+            "ask",
+            "install",
+            "--program",
+            "claude",
+            "--worktree",
+            &worktree.path().display().to_string(),
+        ],
+        &[
+            ("SHPRD_DATA_DIR", &data),
+            ("HOME", &home.path().display().to_string()),
+        ],
+    );
+    assert!(output.status.success());
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(printed.contains("already installed"), "{printed}");
+    let again: Value = serde_json::from_str(&fs::read_to_string(&settings).expect("read settings"))
+        .expect("settings are JSON");
+    assert_eq!(again, value, "the second install changed the file");
+}
+
+#[test]
+fn a_codex_install_turns_the_worktrees_own_hooks_on() {
+    let repo = TempDir::new().expect("repo dir");
+    let worktree = TempDir::new().expect("worktree");
+    let home = TempDir::new().expect("home dir");
+    let data = data_dir().display().to_string();
+    let output = ok_env(
+        repo.path(),
+        &[
+            "ask",
+            "install",
+            "--program",
+            "codex",
+            "--worktree",
+            &worktree.path().display().to_string(),
+        ],
+        &[
+            ("SHPRD_DATA_DIR", &data),
+            ("HOME", &home.path().display().to_string()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hooks = worktree.path().join(".codex/hooks.json");
+    assert!(hooks.exists(), "the project hooks file is written");
+    let config = fs::read_to_string(worktree.path().join(".codex/config.toml"))
+        .expect("read the project config");
+    assert!(config.contains("hooks = true"), "{config}");
+    assert_eq!(
+        tree(home.path()),
+        Vec::<String>::new(),
+        "the person's ~/.codex is never written"
+    );
+    assert_eq!(
+        tree(worktree.path()),
+        vec![
+            ".codex/config.toml",
+            ".codex/hooks.json",
+            ".shprd/ask-hook.sh"
+        ],
+        "nothing else is written into the worktree"
+    );
+}
+
+#[test]
+fn a_programs_harness_says_how_long_its_hook_waits() {
+    let (repo, _state, _home) = repo_with_a_task();
+    // A data directory whose claude harness asks for a one-second wait, so a
+    // hook that reads it returns at once and one that does not would sit for
+    // the 1800-second default.
+    let data = TempDir::new().expect("data dir");
+    fs::create_dir_all(data.path().join("harness")).expect("harness dir");
+    let text = fs::read_to_string(data_dir().join("harness/claude.toml")).expect("read harness");
+    let text = text.replace("timeout_seconds = 1800", "timeout_seconds = 1");
+    assert!(
+        text.contains("timeout_seconds = 1"),
+        "the harness was edited"
+    );
+    fs::write(data.path().join("harness/claude.toml"), text).expect("write harness");
+    let started = Instant::now();
+    let child = spawn_env(
+        repo.path(),
+        &[
+            "ask",
+            "hook",
+            "--program",
+            "claude",
+            "--task",
+            "T1",
+            "--kind",
+            "question",
+            "--text",
+            "Which database?",
+            "--id",
+            "ask-3",
+        ],
+        &[("SHPRD_DATA_DIR", &data.path().display().to_string())],
+    );
+    let output = wait_for_child(child);
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "a timeout decides nothing, got {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the hook waited far longer than its harness says"
+    );
+    let raised: Value = serde_json::from_str(
+        &fs::read_to_string(repo.path().join(".shprd/asks/T1/ask-3.json"))
+            .expect("the ask is there"),
+    )
+    .expect("the ask is JSON");
+    assert_eq!(
+        raised["expires_at_ms"].as_u64().expect("an expiry")
+            - raised["created_at_ms"].as_u64().expect("a start"),
+        1_000,
+        "the ask expires when the harness's timeout says"
     );
 }

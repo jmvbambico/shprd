@@ -22,11 +22,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use serde_json::{Map, Value, json};
+use shprd_agents::asks::{AskHookInstall, AskHookInstaller, AskHookPaths};
+use shprd_agents::harness::Harness;
 use shprd_core::ask::{Ask, AskKind, AskQueue};
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{Clock, SystemClock};
 
-use crate::cli::{AskHookArgs, AskKindArg};
+use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg};
 use crate::ctx::{CliError, Ctx, resolve_root};
 
 /// The environment variable a worker's launch sets with its task id.
@@ -204,7 +206,10 @@ pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
         return Ok(());
     };
     let now_ms = SystemClock.now_ms();
-    let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout_secs = args
+        .timeout_secs
+        .or_else(|| harness_timeout(&args.program))
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let id = args.id.clone().unwrap_or_else(|| ask_id(now_ms));
     let ask = Ask::new(
         id.clone(),
@@ -241,6 +246,73 @@ pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
         return Ok(());
     }
     wait_and_print(&queue, &task, &id, made, &payload, timeout_secs)
+}
+
+/// The ask timeout the program's own harness names, in seconds.
+///
+/// A run with no data directory, or a program shprd has no harness for, says
+/// nothing, and the caller falls back to [`DEFAULT_TIMEOUT_SECS`].
+fn harness_timeout(program: &str) -> Option<u64> {
+    let dir = crate::cmd::roster::resolve_data_dir().ok()?;
+    let harness = Harness::load(&harness_file(&dir, program)).ok()?;
+    harness
+        .asks()
+        .timeout_seconds
+        .map(u64::from)
+        .filter(|secs| *secs > 0)
+}
+
+/// One program's harness file under a data directory.
+fn harness_file(dir: &Path, program: &str) -> PathBuf {
+    dir.join("harness").join(format!("{program}.toml"))
+}
+
+/// The program's harness, loaded and checked, naming the file it came from.
+fn load_harness(dir: &Path, program: &str) -> Result<Harness, CliError> {
+    let path = harness_file(dir, program);
+    Harness::load(&path).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "no harness for {program:?} at {} (set SHPRD_DATA_DIR to a directory holding `harness/`)",
+            path.display()
+        )))
+    })
+}
+
+/// Runs `ask install`: writes the program's ask hook into the task's worktree.
+///
+/// The config file is the program's own worktree-local one
+/// (`.claude/settings.local.json`, `.codex/hooks.json`), never the person's
+/// global config; the installer refuses a harness that names a `~/...` target.
+pub fn install(args: &AskInstallArgs, repo: Option<&Path>) -> Result<(), CliError> {
+    let dir = crate::cmd::roster::resolve_data_dir()?;
+    let harness = load_harness(&dir, &args.program)?;
+    let worktree = match &args.worktree {
+        Some(path) => path.clone(),
+        None => resolve_root(repo)?,
+    };
+    let binary = std::env::current_exe()
+        .map_err(|err| CliError::other(anyhow!(err).context("finding the shprd binary")))?;
+    let hook = args
+        .hook
+        .clone()
+        .unwrap_or_else(|| worktree.join(".shprd").join("ask-hook.sh"));
+    let installer = harness.ask_installer();
+    let paths = AskHookPaths::new(&hook, &worktree, &binary);
+    let outcome = installer.install(&paths).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "installing the {} ask hook in {}",
+            args.program,
+            worktree.display()
+        )))
+    })?;
+    let config = harness.spec().asks.config.as_deref().unwrap_or("-");
+    let word = match outcome {
+        AskHookInstall::Added => "installed",
+        AskHookInstall::AlreadyThere => "already installed",
+        AskHookInstall::Unsupported => "no hook to install",
+    };
+    println!("{}\t{word}\t{config}\t{}", args.program, hook.display());
+    Ok(())
 }
 
 /// What a flag-only ask says when it names no text.
