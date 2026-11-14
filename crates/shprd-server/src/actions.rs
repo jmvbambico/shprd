@@ -197,10 +197,11 @@ fn commit(
         step.call(repo);
     }
     let (state, _) = ledger::load(repo).map_err(read_error)?;
+    let now_ms = SystemClock.now_ms();
     let folded: Option<TaskDto> = task
         .as_deref()
         .and_then(|task| state.tasks.get(task))
-        .map(snapshot::task);
+        .map(|task| snapshot::task_of(&state, task, now_ms));
     Ok(ActionReply {
         ok: true,
         seq: event.seq,

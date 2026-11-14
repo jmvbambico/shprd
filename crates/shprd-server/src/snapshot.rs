@@ -6,10 +6,11 @@
 //! the CLI uses and hands the result here.
 
 use shprd_core::state::RunState;
+use shprd_views::status;
 
 use crate::dto::{
-    AgentDto, AskDto, AttemptDto, FindingDto, GateDto, NeedDto, ReportDto, ReviewDto, RunDto,
-    SnapshotDto, TaskDto, TaskProgressDto,
+    AgentDto, AskDto, AttemptDto, DerivedStatusDto, FindingDto, GateDto, NeedDto, NeedKindDto,
+    ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskProgressDto,
 };
 
 /// Folds a run into the snapshot a client draws, as of `now_ms`.
@@ -22,7 +23,11 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
             base_branch: run.base_branch.clone(),
             integration_branch: run.integration_branch.clone(),
         }),
-        tasks: state.tasks.values().map(task).collect(),
+        tasks: state
+            .tasks
+            .values()
+            .map(|task| task_of(state, task, now_ms))
+            .collect(),
         agents: state
             .agents
             .iter()
@@ -80,12 +85,24 @@ pub(crate) fn ask(record: &shprd_core::state::AskRecord) -> AskDto {
     }
 }
 
-/// One task, with its attempts in the order they were made.
-pub(crate) fn task(task: &shprd_core::state::Task) -> TaskDto {
+/// One task, with its attempts in the order they were made, and the word a
+/// person sees for it at `now_ms`.
+///
+/// The derived word comes from the same projector `shprd status` prints
+/// ([`shprd_views::status::reading`]), so a card and the CLI agree while an ask
+/// is open. A task the fold has no signal for — impossible for one in the plan
+/// — reads as nothing started rather than failing the whole snapshot.
+pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: u64) -> TaskDto {
+    let derived = status::reading(state, &task.id, now_ms).unwrap_or_default();
     TaskDto {
         id: task.id.clone(),
         title: task.title.clone(),
         status: task.status.into(),
+        derived: TaskDerivedDto {
+            status: DerivedStatusDto::from(derived.status),
+            need: derived.needs.map(NeedKindDto::from),
+            reason: derived.reason,
+        },
         scope: task.scope.clone(),
         acceptance: task.acceptance.clone(),
         tags: task.tags.clone(),
@@ -157,8 +174,13 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{RunState, snapshot};
+    use crate::dto::{DerivedStatusDto, NeedKindDto, TaskStatusDto};
     use shprd_core::ask::AskKind;
+    use shprd_core::event::{Actor, Event, EventKind};
     use shprd_core::state::{AskAnswerRecord, AskRecord};
+
+    /// The moment the tests read the snapshot at.
+    const NOW: u64 = 1_700_000_000_000;
 
     fn record(id: &str, expires_at_ms: Option<u64>, answer: Option<&str>) -> AskRecord {
         AskRecord {
@@ -175,6 +197,38 @@ mod tests {
                 seq: 2,
             }),
         }
+    }
+
+    /// A run with one queued task `T1`.
+    fn run_with_a_task() -> RunState {
+        let events = vec![
+            Event {
+                seq: 1,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind: EventKind::RunStarted {
+                    run_id: "r1".to_string(),
+                    repo: "/repo/shprd".to_string(),
+                    base_branch: "main".to_string(),
+                    integration_branch: "integration/m9".to_string(),
+                },
+            },
+            Event {
+                seq: 2,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind: EventKind::TaskAdded {
+                    task: "T1".to_string(),
+                    title: "a task".to_string(),
+                    scope: vec!["a.txt".to_string()],
+                    acceptance: vec!["it works".to_string()],
+                    tags: Vec::new(),
+                    skills: Vec::new(),
+                    deps: Vec::new(),
+                },
+            },
+        ];
+        RunState::fold(&events).expect("the fixture log folds")
     }
 
     #[test]
@@ -199,5 +253,91 @@ mod tests {
         let snap = snapshot(&state, 6_000);
         let ids: Vec<&str> = snap.asks.iter().map(|ask| ask.id.as_str()).collect();
         assert_eq!(ids, vec!["open"]);
+    }
+
+    #[test]
+    fn an_open_ask_makes_the_tasks_derived_word_needs_you() {
+        // The bug the M9 gate found: `GET /api/state` carried no derived word,
+        // so a card an agent was waiting on was invisible on the board.
+        let mut state = run_with_a_task();
+        let before = snapshot(&state, NOW);
+        assert_eq!(before.tasks[0].derived.status, DerivedStatusDto::ToDo);
+        assert_eq!(before.tasks[0].derived.need, None);
+        assert_eq!(
+            before.tasks[0].status,
+            TaskStatusDto::Queued,
+            "the stored state stays its own field"
+        );
+
+        state.asks.insert(
+            ("T1".to_string(), "ask-1".to_string()),
+            record("ask-1", None, None),
+        );
+        let open = snapshot(&state, NOW);
+        assert_eq!(open.tasks[0].derived.status, DerivedStatusDto::NeedsYou);
+        assert_eq!(open.tasks[0].derived.need, Some(NeedKindDto::Asks));
+        assert_eq!(
+            open.tasks[0].derived.reason.as_deref(),
+            Some("Run: cargo test")
+        );
+
+        // The answer takes it back out.
+        state.asks.insert(
+            ("T1".to_string(), "ask-1".to_string()),
+            record("ask-1", None, Some("allow")),
+        );
+        let answered = snapshot(&state, NOW);
+        assert_eq!(answered.tasks[0].derived.status, DerivedStatusDto::ToDo);
+        assert_eq!(answered.tasks[0].derived.need, None);
+    }
+
+    #[test]
+    fn a_working_task_is_not_called_stopped_by_the_board() {
+        // The snapshot reads the log alone and has no terminal to look at, so
+        // it must not turn "no overlay" into "no agent left".
+        let events = vec![
+            Event {
+                seq: 1,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind: EventKind::RunStarted {
+                    run_id: "r1".to_string(),
+                    repo: "/repo/shprd".to_string(),
+                    base_branch: "main".to_string(),
+                    integration_branch: "integration/m9".to_string(),
+                },
+            },
+            Event {
+                seq: 2,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind: EventKind::TaskAdded {
+                    task: "T1".to_string(),
+                    title: "a task".to_string(),
+                    scope: vec!["a.txt".to_string()],
+                    acceptance: vec!["it works".to_string()],
+                    tags: Vec::new(),
+                    skills: Vec::new(),
+                    deps: Vec::new(),
+                },
+            },
+            Event {
+                seq: 3,
+                at_ms: NOW,
+                actor: Actor::Engine,
+                kind: EventKind::Spawned {
+                    task: "T1".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt/T1".to_string(),
+                    branch: "shprd/r1/T1".to_string(),
+                },
+            },
+        ];
+        let state = RunState::fold(&events).expect("the fixture log folds");
+        let snap = snapshot(&state, NOW);
+        assert_eq!(snap.tasks[0].derived.status, DerivedStatusDto::Working);
+        assert_eq!(snap.tasks[0].derived.need, None);
     }
 }

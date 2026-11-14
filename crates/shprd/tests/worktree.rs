@@ -294,12 +294,12 @@ fn a_worker_reads_the_run_status_from_its_worktree() {
     fixture.started_run();
 
     let stdout = fixture.worker_ok(&["status"]);
+    // `shprd status` prints the derived word (M8.5's rules) for each task, so a
+    // task nothing has started on reads "To do" rather than its stored
+    // "queued". The test is that the worktree reached the run's log, so the
+    // line has to name the run's task and its title.
     assert!(
-        stdout.contains("T1"),
-        "the worktree's status names no task: {stdout}"
-    );
-    assert!(
-        stdout.contains("queued"),
+        stdout.contains("○ T1 To do · add a sum helper"),
         "the worktree's status is the run's: {stdout}"
     );
 }
