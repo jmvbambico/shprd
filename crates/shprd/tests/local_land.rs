@@ -366,6 +366,16 @@ fn a_repository_without_a_remote_lands_locally_and_escalates_a_conflict() {
         "the second task's commit is in the integration branch"
     );
 
+    // Landing an already integrated task again reports it and records nothing.
+    let before_relaunch = fixture.integration_head();
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(printed.contains("already integrated"), "{printed}");
+    assert_eq!(
+        fixture.integration_head(),
+        before_relaunch,
+        "a re-run moved nothing"
+    );
+
     // The user's checkout never moved, and never held the work in progress.
     assert_eq!(
         fixture.rev(&fixture.root, "HEAD"),

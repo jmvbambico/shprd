@@ -163,6 +163,14 @@ fn land_task(
         }
         return Ok(());
     }
+    if task.status == TaskStatus::Integrated {
+        // A local landing leaves no pull request to name, so this is how a
+        // re-run reports the work is already in rather than refusing it.
+        if !ctx.json {
+            println!("{task_id} is already integrated");
+        }
+        return Ok(());
+    }
     // The hand-in and the review are the engine's to judge, and the rule that
     // judges them is the one every landing verb asks: M8.4's own gates, so a
     // task whose hand-in names no checks, or whose checks failed, cannot reach
