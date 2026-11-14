@@ -283,10 +283,11 @@ pub struct Worker {
     pub forge: SharedForge,
     /// Starts an agent on a task.
     pub start: Starter,
-    /// Starts the engine's reviewer on a hand-in, when review is on.
+    /// Starts the engine's reviewer on a hand-in.
     ///
-    /// `None` when no reviewer is configured in the settings, or when the
-    /// caller has no review path: the planner then plans no `review` step.
+    /// `None` when the caller has no review path (a record-only pass): the
+    /// planner then plans no `review` step. Whether a reviewer is configured is
+    /// asked of the settings on every pass, not fixed here.
     pub review: Option<Reviewer>,
     /// Who the pass's writes act as. The engine, always: the tick is shprd's
     /// own automation rather than a human's or an agent's action.
