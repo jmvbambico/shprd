@@ -416,6 +416,11 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         "- commit on your branch `{}`; never push, never open a pull request\n",
         input.branch
     ));
+    out.push_str(
+        "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and \
+         the worktree's git already ignores them. Never commit them, never add them to the \
+         repository's `.gitignore`, and leave them out of your changes\n",
+    );
     out.push_str(&gate_rule(input.gates));
     out.push_str(&format!(
         "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
@@ -992,6 +997,7 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 - work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change nothing outside the scope above
 - commit on your branch `task/30-m9-4`; never push, never open a pull request
+- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes
 - run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
 - say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
 - report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used
@@ -1157,6 +1163,19 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
         assert!(
             !text.contains("ask with your CLI's own question tool"),
             "a program with no hook must not be told to use its own tool: {text}"
+        );
+    }
+
+    /// shprd's own state in the worktree is never the worker's to commit, and
+    /// the ignoring is git's, not a change to the repository's `.gitignore`.
+    #[test]
+    fn the_rules_say_shprds_state_directories_are_not_the_workers() {
+        let text = plain_brief(AskRoute::Hook);
+        assert!(
+            text.contains(
+                "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes\n"
+            ),
+            "{text}"
         );
     }
 

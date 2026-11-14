@@ -123,6 +123,14 @@ pub enum WorktreeError {
     },
 }
 
+/// The directories shprd writes into the root of a checkout, which belong to
+/// the run and never to the repository: `.shprd/` (the log, config and asks)
+/// and `.dagr/` (the projected graph).
+pub const STATE_DIRS: [&str; 2] = [".shprd/", ".dagr/"];
+
+/// The comment written above [`STATE_DIRS`] in git's exclude file.
+const EXCLUDE_COMMENT: &str = "# shprd: the run's own state, never committed";
+
 /// Creates a worktree for one task attempt of `run` in `repo`.
 ///
 /// The branch starts where [`fresh_start`] says: the base branch's fetched
@@ -162,11 +170,68 @@ pub fn create(
     }
     let path_text = path_string(&path)?;
     git.run(&["worktree", "add", "-b", &branch, &path_text, &base_sha])?;
+    // A worker must never see shprd's own state as an untracked change, and the
+    // repository's tracked `.gitignore` is not shprd's to edit: git's own
+    // per-repository exclude list is. A failure undoes the worktree, so a create
+    // that returns an error leaves nothing behind.
+    if let Err(err) = exclude_state_dirs(&path) {
+        let _ = git.run(&["worktree", "remove", "--force", &path_text]);
+        let _ = git.run(&["branch", "-D", &branch]);
+        return Err(err);
+    }
     Ok(Worktree {
         path,
         branch,
         base_sha,
     })
+}
+
+/// Adds [`STATE_DIRS`] to the repository's `info/exclude` for `worktree`.
+///
+/// The file is git's own per-repository exclude list
+/// (`<git-common-dir>/info/exclude`): git never tracks it, every worktree of
+/// the repository reads it, and the repository's `.gitignore` is left
+/// untouched. Only the entries that are missing are added, so calling this on a
+/// worktree that already excludes the state adds nothing, and a person's own
+/// entries are kept exactly as they were.
+pub fn exclude_state_dirs(worktree: &Path) -> Result<(), WorktreeError> {
+    let git = Git::new(worktree);
+    let listed = git.run(&["rev-parse", "--git-path", "info/exclude"])?;
+    // git may print the path relative to the worktree or absolute; joining
+    // keeps both readings.
+    let path = worktree.join(listed.trim());
+    let current = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => return Err(WorktreeError::Io { path, source }),
+    };
+    let missing: Vec<String> = STATE_DIRS
+        .iter()
+        .map(|dir| format!("/{dir}"))
+        .filter(|pattern| !current.lines().any(|line| line.trim() == pattern))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut text = current;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.lines().any(|line| line.trim() == EXCLUDE_COMMENT) {
+        text.push_str(EXCLUDE_COMMENT);
+        text.push('\n');
+    }
+    for pattern in missing {
+        text.push_str(&pattern);
+        text.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| WorktreeError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(&path, text).map_err(|source| WorktreeError::Io { path, source })
 }
 
 /// Whether the repository has a remote a landing could push to.
@@ -390,5 +455,104 @@ fn path_string(path: &Path) -> Result<String, WorktreeError> {
             what: "path",
             id: path.display().to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A repository with one commit on `main`, and a home outside it.
+    fn fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let home = tempfile::tempdir().expect("home dir");
+        let git = Git::new(repo.path());
+        git.run(&["init", "-b", "main"]).expect("git init");
+        git.run(&["config", "user.name", "shprd tests"])
+            .expect("user.name");
+        git.run(&["config", "user.email", "tests@example.invalid"])
+            .expect("user.email");
+        git.run(&["config", "commit.gpgsign", "false"])
+            .expect("gpgsign");
+        std::fs::write(
+            repo.path().join("calc.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .expect("a seed file");
+        git.run(&["add", "--", "calc.py"]).expect("git add");
+        git.run(&["commit", "-m", "seed"]).expect("git commit");
+        (repo, home)
+    }
+
+    /// The repository's own exclude file, as git points at it.
+    fn exclude_of(repo: &Path) -> PathBuf {
+        let listed = Git::new(repo)
+            .run(&["rev-parse", "--git-path", "info/exclude"])
+            .expect("git path");
+        repo.join(listed.trim())
+    }
+
+    #[test]
+    fn a_new_worktree_excludes_shprds_state_directories() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path());
+        let created = create(repo.path(), &layout, "m9", "T1", "main").expect("a worktree");
+        let text = std::fs::read_to_string(exclude_of(repo.path())).expect("the exclude file");
+        for pattern in ["/.shprd/", "/.dagr/"] {
+            assert!(
+                text.lines().any(|line| line.trim() == pattern),
+                "{pattern} is missing from:\n{text}"
+            );
+        }
+
+        // What the engine and a worker's own verbs write there no longer shows
+        // up as an untracked change in the worker's checkout.
+        std::fs::create_dir_all(created.path.join(".shprd")).expect("state dir");
+        std::fs::create_dir_all(created.path.join(".dagr")).expect("graph dir");
+        std::fs::write(created.path.join(".shprd/events.jsonl"), "{}\n").expect("an event");
+        std::fs::write(created.path.join(".dagr/run.json"), "{}\n").expect("a graph");
+        assert!(
+            Git::new(&created.path).is_clean().expect("git status"),
+            "shprd's own state must not show as a change"
+        );
+
+        // The repository's tracked ignore file is never written: only git's own
+        // untracked, per-repository exclude list is.
+        assert!(
+            !repo.path().join(".gitignore").exists(),
+            "the repository's .gitignore is not shprd's to edit"
+        );
+    }
+
+    #[test]
+    fn a_second_worktree_does_not_duplicate_the_exclusions() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path());
+        create(repo.path(), &layout, "m9", "T1", "main").expect("the first worktree");
+        create(repo.path(), &layout, "m9", "T2", "main").expect("the second worktree");
+        let text = std::fs::read_to_string(exclude_of(repo.path())).expect("the exclude file");
+        for pattern in ["/.shprd/", "/.dagr/"] {
+            assert_eq!(
+                text.lines().filter(|line| line.trim() == pattern).count(),
+                1,
+                "{pattern} appears once in:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_persons_own_exclude_entries_are_kept() {
+        let (repo, home) = fixture();
+        let path = exclude_of(repo.path());
+        std::fs::create_dir_all(path.parent().expect("the info dir")).expect("info dir");
+        std::fs::write(&path, "# mine\n*.local\n").expect("the person's entries");
+        let layout = Layout::default_for_home(home.path());
+        create(repo.path(), &layout, "m9", "T1", "main").expect("a worktree");
+        let text = std::fs::read_to_string(&path).expect("the exclude file");
+        assert!(text.contains("# mine\n*.local\n"), "{text}");
+        assert!(text.contains("/.shprd/"), "{text}");
+        assert!(text.contains("/.dagr/"), "{text}");
     }
 }
