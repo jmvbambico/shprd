@@ -124,6 +124,16 @@ pub enum IntegrateError {
     },
 }
 
+/// Makes sure the integration worktree excludes shprd's own state.
+///
+/// An integration worktree an older build made has no `info/exclude` entries, so
+/// a landing that reuses it would see `.shprd/` and `.dagr/` as untracked work.
+/// The repair is idempotent and costs one file read, so every open makes it.
+fn repair_state_excluded(path: &Path) -> Result<(), IntegrateError> {
+    crate::worktree::ensure_state_excluded(path)?;
+    Ok(())
+}
+
 /// Opens, and on first use creates, the integration worktree of `run`.
 ///
 /// Both the branch `<namespace><run>/int` and the path
@@ -154,6 +164,7 @@ pub fn open_integration(
                     detail: format!("it is on {checked_out:?}"),
                 });
             }
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch,
@@ -173,6 +184,7 @@ pub fn open_integration(
             }
             let path_text = path_text(&path)?;
             git.run(&["worktree", "add", "-b", &branch, &path_text, &base_sha])?;
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch,
@@ -227,6 +239,7 @@ pub fn open_integration_branch(
                     detail: format!("it is on {checked_out:?}"),
                 });
             }
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch: branch.to_string(),
@@ -237,6 +250,7 @@ pub fn open_integration_branch(
             create_parent(&path)?;
             let path_text = path_text(&path)?;
             git.run(&["worktree", "add", &path_text, branch])?;
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch: branch.to_string(),
@@ -248,6 +262,7 @@ pub fn open_integration_branch(
             create_parent(&path)?;
             let path_text = path_text(&path)?;
             git.run(&["worktree", "add", "-b", branch, &path_text, &base_sha])?;
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch: branch.to_string(),

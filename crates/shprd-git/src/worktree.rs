@@ -174,7 +174,7 @@ pub fn create(
     // repository's tracked `.gitignore` is not shprd's to edit: git's own
     // per-repository exclude list is. A failure undoes the worktree, so a create
     // that returns an error leaves nothing behind.
-    if let Err(err) = exclude_state_dirs(&path) {
+    if let Err(err) = ensure_state_excluded(&path) {
         let _ = git.run(&["worktree", "remove", "--force", &path_text]);
         let _ = git.run(&["branch", "-D", &branch]);
         return Err(err);
@@ -186,15 +186,21 @@ pub fn create(
     })
 }
 
-/// Adds [`STATE_DIRS`] to the repository's `info/exclude` for `worktree`.
+/// Makes sure the repository a checkout belongs to excludes [`STATE_DIRS`].
 ///
 /// The file is git's own per-repository exclude list
 /// (`<git-common-dir>/info/exclude`): git never tracks it, every worktree of
-/// the repository reads it, and the repository's `.gitignore` is left
+/// the repository reads it, and the repository's tracked `.gitignore` is left
 /// untouched. Only the entries that are missing are added, so calling this on a
-/// worktree that already excludes the state adds nothing, and a person's own
-/// entries are kept exactly as they were.
-pub fn exclude_state_dirs(worktree: &Path) -> Result<(), WorktreeError> {
+/// checkout whose repository already excludes the state writes nothing, and a
+/// person's own entries are kept exactly as they were.
+///
+/// [`create`] calls it for every worktree it makes, and a caller that *reuses* a
+/// worktree — a hand-off, an integration worktree, every tick pass over the live
+/// worktrees — calls it too, because a worktree an older build made excludes
+/// nothing and its worker would see shprd's own state as an untracked change.
+/// Being idempotent, it is safe to call on every pass.
+pub fn ensure_state_excluded(worktree: &Path) -> Result<(), WorktreeError> {
     let git = Git::new(worktree);
     let listed = git.run(&["rev-parse", "--git-path", "info/exclude"])?;
     // git may print the path relative to the worktree or absolute; joining
@@ -540,6 +546,50 @@ mod tests {
                 "{pattern} appears once in:\n{text}"
             );
         }
+    }
+
+    /// A worktree an older build made (or one a human restored) has no
+    /// exclusions; the repair adds them without touching anything else.
+    #[test]
+    fn a_worktree_made_before_the_change_is_repaired() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path());
+        let created = create(repo.path(), &layout, "m9", "T1", "main").expect("a worktree");
+        // Simulate the old state: the entries removed again.
+        let path = exclude_of(repo.path());
+        std::fs::write(&path, "").expect("an empty exclude file");
+
+        ensure_state_excluded(&created.path).expect("the repair runs");
+        let text = std::fs::read_to_string(&path).expect("the exclude file");
+        for pattern in ["/.shprd/", "/.dagr/"] {
+            assert!(
+                text.lines().any(|line| line.trim() == pattern),
+                "{pattern} was not repaired into:\n{text}"
+            );
+        }
+
+        // And what the worker writes there is invisible to git again.
+        std::fs::create_dir_all(created.path.join(".shprd")).expect("state dir");
+        std::fs::write(created.path.join(".shprd/events.jsonl"), "{}\n").expect("an event");
+        assert!(
+            Git::new(&created.path).is_clean().expect("git status"),
+            "the repaired worktree still shows the state"
+        );
+    }
+
+    /// The repair is idempotent: running it on a worktree that already excludes
+    /// the state changes nothing, so a caller may run it on every pass.
+    #[test]
+    fn the_repair_is_idempotent() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path());
+        let created = create(repo.path(), &layout, "m9", "T1", "main").expect("a worktree");
+        let path = exclude_of(repo.path());
+        let before = std::fs::read_to_string(&path).expect("the exclude file");
+        ensure_state_excluded(&created.path).expect("the first repair");
+        ensure_state_excluded(&created.path).expect("the second repair");
+        let after = std::fs::read_to_string(&path).expect("the exclude file");
+        assert_eq!(before, after, "a repeated repair rewrote the file");
     }
 
     #[test]

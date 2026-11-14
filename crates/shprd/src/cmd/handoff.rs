@@ -415,6 +415,15 @@ pub fn handoff(
     // touched: a prompt that cannot be read must cost nothing.
     let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
     let workspace = spawn::workspace_of(mux, env)?;
+    // The newcomer keeps the worktree the attempt already has, which an older
+    // build may have made without shprd's state excluded. A warning, not a
+    // failure: the hand-off is about the work, not a tidy `git status`.
+    if let Err(err) = shprd_git::worktree::ensure_state_excluded(&worktree) {
+        eprintln!(
+            "warning: could not exclude shprd's state in {}: {err}",
+            worktree.display()
+        );
+    }
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
     let start = BriefInput {
