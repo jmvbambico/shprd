@@ -96,6 +96,17 @@ pub enum Command {
     /// Write a roster role into the global config, or with `--repo <PATH>`
     /// into that repository's `.shprd/config.toml`.
     Set(SetArgs),
+    /// Read and write the settings: roles, the workflow keys, their layers.
+    ///
+    /// The layers are resolved nearest first: the task's own record, your entry
+    /// for this repository, your defaults, the repository's committed
+    /// `.shprd/settings.toml` (allow-listed keys only) and then the values shprd
+    /// ships. Every value is printed with the layer it came from.
+    Settings {
+        /// Which settings verb.
+        #[command(subcommand)]
+        cmd: SettingsCommand,
+    },
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
     /// Watch every working agent and hand work over when one goes dry.
@@ -349,6 +360,77 @@ pub struct ManyAgents {
     /// `<program>/<model>`, repeated in fallback order.
     #[arg(value_name = "AGENT", required = true)]
     pub agents: Vec<String>,
+}
+
+/// Settings verbs.
+#[derive(Debug, Subcommand)]
+pub enum SettingsCommand {
+    /// Print every key, its value and the layer it came from.
+    Show(SettingsShowArgs),
+    /// Print one key's value and where it came from.
+    Get(SettingsGetArgs),
+    /// Set one key: your own default, or this repository's entry with `--for-repo`.
+    Set(SettingsSetArgs),
+    /// Remove one key, so it inherits again.
+    Unset(SettingsUnsetArgs),
+}
+
+/// Arguments for `settings show`.
+#[derive(Debug, Args)]
+pub struct SettingsShowArgs {
+    /// Resolve for this task: the agent its own newest attempt ran is the
+    /// nearest layer.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `settings get`.
+#[derive(Debug, Args)]
+pub struct SettingsGetArgs {
+    /// The key, e.g. `tasks.merge` or `roles.worker.agent`. The names the old
+    /// config file used (`tick.max_running`, `janitor.archive_days`, ...) are
+    /// accepted too.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// Resolve for this task.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `settings set`.
+#[derive(Debug, Args)]
+pub struct SettingsSetArgs {
+    /// The key, e.g. `roles.reviewer.agent` or `tasks.max_running`.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// The value. Lists are items separated by commas, switches are
+    /// `true`/`false` (or `on`/`off`), and everything else is taken as written.
+    #[arg(value_name = "VALUE")]
+    pub value: String,
+    /// Write this repository's entry instead of your own defaults.
+    ///
+    /// The entry is keyed by the repository folder's name; a repository's
+    /// committed `.shprd/settings.toml` is not written from here, because
+    /// changing it is a commit in that repository.
+    #[arg(long = "for-repo")]
+    pub for_repo: bool,
+    /// Refused: a task's own settings come from its attempts in the run log.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `settings unset`.
+#[derive(Debug, Args)]
+pub struct SettingsUnsetArgs {
+    /// The key to remove.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// Remove it from this repository's entry instead of your own defaults.
+    #[arg(long = "for-repo")]
+    pub for_repo: bool,
+    /// Refused: a task's own settings come from its attempts in the run log.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
 }
 
 /// Arguments for `doctor`.

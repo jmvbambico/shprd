@@ -1138,6 +1138,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "shprd-core",
  "tempfile",
  "thiserror",
  "toml",
@@ -1154,6 +1155,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]
@@ -1193,6 +1195,7 @@ dependencies = [
  "http-body-util",
  "serde",
  "serde_json",
+ "shprd-agents",
  "shprd-core",
  "shprd-git",
  "shprd-views",

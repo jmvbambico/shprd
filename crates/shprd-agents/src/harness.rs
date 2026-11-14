@@ -154,6 +154,49 @@ impl Harness {
     }
 }
 
+/// Environment variable pointing shprd at the data directory, for a checkout or
+/// a packaged install.
+pub const DATA_ENV: &str = "SHPRD_DATA_DIR";
+
+/// The data directory: `$SHPRD_DATA_DIR`, else `<root>/data` when it is one,
+/// else the `../share/shprd/data` a packaged install puts next to the binary,
+/// else `$XDG_DATA_HOME/shprd/data` (`~/.local/share/shprd/data` by default),
+/// which is where an install keeps it for every repository on the machine.
+///
+/// `root` is the repository the caller works in, when it has one: a checkout
+/// keeps its harness table in `data/`, and an installation keeps it beside the
+/// binary or under the data home. The environment wins, because a person who set
+/// the variable means it.
+pub fn data_dir(root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(DATA_ENV).filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let packaged = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join("../share/shprd/data"));
+    let installed = installed_data_dir();
+    let candidates = [root.map(|root| root.join("data")), packaged, installed];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_dir())
+}
+
+/// Where an install keeps the data next to a person's own files:
+/// `$XDG_DATA_HOME/shprd/data`, or `~/.local/share/shprd/data`.
+fn installed_data_dir() -> Option<PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".local").join("share"))
+        })?;
+    Some(data_home.join("shprd").join("data"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
