@@ -175,3 +175,85 @@ fn a_sibling_directory_sharing_a_name_prefix_is_outside_the_root() {
     assert!(matches!(err, WorktreeError::OutsideRoot { .. }), "{err:?}");
     assert!(is_dir(&sibling), "the worktree must survive the refusal");
 }
+
+/// A repository with a bare `origin`, its `main` pushed there.
+fn repo_with_origin() -> (Repo, std::path::PathBuf) {
+    let repo = Repo::new();
+    let base = match repo.path.parent() {
+        Some(base) => base.to_path_buf(),
+        None => panic!("the repository must have a parent"),
+    };
+    let origin = base.join("origin.git");
+    let origin_text = origin.display().to_string();
+    support::git_in(&base, &["init", "--bare", &origin_text]);
+    repo.git(&["remote", "add", "origin", &origin_text]);
+    repo.git(&["push", "-u", "origin", "main"]);
+    (repo, origin)
+}
+
+#[test]
+fn a_new_worktree_starts_from_the_fetched_remote_base() {
+    let (repo, origin) = repo_with_origin();
+    let layout = repo.layout();
+    let base = match repo.path.parent() {
+        Some(base) => base.to_path_buf(),
+        None => panic!("the repository must have a parent"),
+    };
+    // Someone else's work lands on the remote: another clone commits and pushes.
+    let other = base.join("other");
+    support::git_in(
+        &base,
+        &[
+            "clone",
+            "-b",
+            "main",
+            &origin.display().to_string(),
+            "other",
+        ],
+    );
+    support::git_in(&other, &["config", "user.name", "someone else"]);
+    support::git_in(&other, &["config", "user.email", "other@example.invalid"]);
+    let merged = support::commit_in(&other, "b.txt", "merged elsewhere\n", "elsewhere");
+    support::git_in(&other, &["push", "origin", "main"]);
+    assert_ne!(
+        merged,
+        repo.head_sha(),
+        "the local base is behind, which is the point"
+    );
+
+    let local_before = repo.head_sha();
+    let created = match worktree::create(&repo.path, &layout, "r1", "M2.1", "main") {
+        Ok(worktree) => worktree,
+        Err(err) => panic!("create must succeed: {err}"),
+    };
+    assert_eq!(
+        created.base_sha, merged,
+        "the task branches from the remote's latest, not the stale local base"
+    );
+    assert_eq!(
+        support::head_in(&created.path),
+        merged,
+        "the worktree's HEAD is the fetched tip"
+    );
+    assert_eq!(
+        repo.head_sha(),
+        local_before,
+        "the local base branch itself never moves"
+    );
+}
+
+#[test]
+fn a_local_base_with_work_of_its_own_is_used_instead_of_the_remote() {
+    let (repo, _origin) = repo_with_origin();
+    let layout = repo.layout();
+    let local = support::commit_in(&repo.path, "local.txt", "not pushed\n", "local only");
+
+    let created = match worktree::create(&repo.path, &layout, "r1", "M2.1", "main") {
+        Ok(worktree) => worktree,
+        Err(err) => panic!("create must succeed: {err}"),
+    };
+    assert_eq!(
+        created.base_sha, local,
+        "the remote lacks this commit, so the local branch is where the task starts"
+    );
+}

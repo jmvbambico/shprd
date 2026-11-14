@@ -736,6 +736,15 @@ fn check_with(
             _ => Err(RuleError::UnknownPullRequest { number: *number }),
         },
         EventKind::Approved { number, head_sha } => check_approved(state, actor, *number, head_sha),
+        EventKind::TaskPrOpened { task, .. } => check_not_dropped(state, task, provenance),
+        EventKind::TaskApproved {
+            task,
+            number,
+            head_sha,
+        } => check_task_approved(state, actor, task, *number, head_sha),
+        // Landing is a fact git and the forge reported: nothing here can judge
+        // it, and the task it names must be one the run still holds.
+        EventKind::TaskLanded { task, .. } => check_not_dropped(state, task, provenance),
         EventKind::OrchestratorLaunched { .. } => Ok(()),
         EventKind::WatchLaunched { .. } => Ok(()),
         // A delivery record moves nothing: it is the watchdog's own bookmark,
@@ -848,6 +857,34 @@ fn check_approved(
         });
     }
     match &state.pr {
+        Some(pr) if pr.number == number && pr.merged => {
+            Err(RuleError::MergedPullRequest { number })
+        }
+        Some(pr) if pr.number == number && !head_sha.trim().is_empty() => Ok(()),
+        _ => Err(RuleError::UnopenedPullRequest { number }),
+    }
+}
+
+/// Rules for a human's approval of a task's own pull request.
+///
+/// The same rule as [`check_approved`], read off the task: the approval is the
+/// human's alone, it names the pull request the log holds for that task, and a
+/// pull request that already merged could not have been gated by it. Asking
+/// that the head be non-empty keeps an approval from naming nothing.
+fn check_task_approved(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    number: u64,
+    head_sha: &str,
+) -> Result<(), RuleError> {
+    if !matches!(actor, Actor::Human) {
+        return Err(RuleError::NotHuman {
+            actor: actor.clone(),
+        });
+    }
+    let found = task_in(state, task)?;
+    match &found.pr {
         Some(pr) if pr.number == number && pr.merged => {
             Err(RuleError::MergedPullRequest { number })
         }

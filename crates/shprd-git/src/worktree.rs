@@ -1,3 +1,8 @@
+// The fresh start a new worktree branches from is adapted from shepherdr (MIT),
+// mods/tasks/bin/herdr_task/launch.py (fresh_start), commit a3f327a.
+// Copyright (c) 2026 Elias Stravik
+// https://github.com/eliasstravik/shepherdr
+//
 //! Per-attempt git worktrees, and the only removal path shprd may take.
 //!
 //! A worktree is created on a branch inside the layout's namespace and removed
@@ -53,7 +58,8 @@ pub struct Worktree {
     pub path: PathBuf,
     /// The branch checked out in it.
     pub branch: String,
-    /// The commit it was cut from.
+    /// The commit it was cut from: the base branch's fetched remote tip when
+    /// the remote had one, else the local branch's.
     pub base_sha: String,
 }
 
@@ -119,6 +125,11 @@ pub enum WorktreeError {
 
 /// Creates a worktree for one task attempt of `run` in `repo`.
 ///
+/// The branch starts where [`fresh_start`] says: the base branch's fetched
+/// remote tip when the remote holds everything the local branch has, so a task
+/// branches from the latest even when others merged on the forge. The
+/// repository's own checkout is never moved.
+///
 /// Refuses when the branch or the path already exists: recreating over either
 /// would either lose someone else's commits or adopt work shprd did not make.
 pub fn create(
@@ -140,7 +151,7 @@ pub fn create(
     if path.exists() {
         return Err(WorktreeError::PathExists { path });
     }
-    let base_sha = git.rev_parse(base)?;
+    let base_sha = git.rev_parse(&fresh_start(&git, base))?;
     if let Some(parent) = path.parent()
         && let Err(source) = std::fs::create_dir_all(parent)
     {
@@ -156,6 +167,64 @@ pub fn create(
         branch,
         base_sha,
     })
+}
+
+/// The remote a landing fetches from and pushes to: `origin` when the
+/// repository has it, else the only remote it has, else `None`.
+///
+/// Shepherdr reads the remotes the same way, and a repository with no remote at
+/// all simply branches from its local base.
+pub(crate) fn remote_of(git: &Git) -> Option<String> {
+    let remotes = git.run(&["remote"]).ok()?;
+    let names: Vec<&str> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.contains(&"origin") {
+        return Some(String::from("origin"));
+    }
+    names.first().map(|name| (*name).to_string())
+}
+
+/// Where a new worktree on `base` starts.
+///
+/// The base is fetched from the remote first, and the remote's tip is used when
+/// it holds everything the local branch has — which is the ordinary case, where
+/// the local branch is only behind. The local branch is used instead when it has
+/// work of its own that the remote lacks, when there is no remote, or when the
+/// remote has no such branch: a task then branches from what the repository
+/// actually has, and nothing is moved behind a human's back.
+///
+/// This is Shepherdr's `fresh_start` (MIT): a task branches from the latest
+/// base, even when other work merged on the forge since the checkout was last
+/// fetched.
+pub fn fresh_start(git: &Git, base: &str) -> String {
+    let Some(remote) = remote_of(git) else {
+        return base.to_string();
+    };
+    if !git.branch_exists(base).unwrap_or(false) {
+        return base.to_string();
+    }
+    let tracking = format!("refs/remotes/{remote}/{base}");
+    let fetch = git.run(&[
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        &remote,
+        &format!("+refs/heads/{base}:{tracking}"),
+    ]);
+    if fetch.is_err() || git.rev_parse(&tracking).is_err() {
+        return base.to_string();
+    }
+    let behind = git
+        .run(&["merge-base", "--is-ancestor", base, &tracking])
+        .is_ok();
+    if behind {
+        format!("{remote}/{base}")
+    } else {
+        base.to_string()
+    }
 }
 
 /// Removes a worktree and, with it, the branch it has checked out.

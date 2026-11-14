@@ -487,6 +487,9 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::PrOpened { .. } => "pr_opened",
         EventKind::PrMerged { .. } => "pr_merged",
         EventKind::Approved { .. } => "approved",
+        EventKind::TaskPrOpened { .. } => "task_pr_opened",
+        EventKind::TaskApproved { .. } => "task_approved",
+        EventKind::TaskLanded { .. } => "task_landed",
         EventKind::OrchestratorLaunched { .. } => "orchestrator_launched",
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
@@ -506,6 +509,9 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
         | EventKind::ReviewRequested { task, .. }
+        | EventKind::TaskPrOpened { task, .. }
+        | EventKind::TaskApproved { task, .. }
+        | EventKind::TaskLanded { task, .. }
         | EventKind::HandedOff { task, .. } => Some(task),
         EventKind::Escalated { task, .. } => task.as_deref(),
         _ => None,

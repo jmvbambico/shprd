@@ -1,4 +1,14 @@
+// The per-task pull-request body is adapted from shepherdr (MIT),
+// mods/tasks/bin/herdr_task/github.py (pr_body), commit a3f327a.
+// Copyright (c) 2026 Elias Stravik
+// https://github.com/eliasstravik/shepherdr
+//
 //! The pull-request body: the log, rendered as Markdown.
+//!
+//! Two shapes. [`pr_body`] is the run's own pull request, the one the
+//! integration branch used to land from. [`task_pr_body`] is one task's pull
+//! request, which is how work lands from M8.3 on: its own branch, its base, its
+//! hand-in and the gates it passed.
 //!
 //! Facts only. Every row comes from an event, so a reviewer can check the body
 //! against `run.jsonl` line by line; nothing here summarises, praises or
@@ -86,6 +96,106 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
         }
     }
     out.join("\n")
+}
+
+/// The Markdown body of one task's own pull request.
+///
+/// Adapted from Shepherdr's per-task body (MIT): the task's ref, what its
+/// hand-in said, and the facts a reviewer checks it against. Shepherdr's
+/// `## Details` and `## Proof` have no shprd equivalent yet, so the sections
+/// are the task's acceptance and scope, the tests it reported, and its gates.
+/// The brief is left out on purpose, as Shepherdr leaves it out: it stays with
+/// the task.
+///
+/// Every line is a fact the folded task holds, so the body needs no log of its
+/// own: what a review reads here is what the task's attempts recorded.
+pub fn task_pr_body(task: &Task) -> String {
+    let mut out: Vec<String> = Vec::new();
+    out.push(format!("Task: {}", task.id));
+    out.push(String::new());
+
+    out.push("## Summary".to_string());
+    out.push(String::new());
+    let attempt = task.latest_attempt();
+    let report = attempt.and_then(|attempt| attempt.report.as_ref());
+    match report {
+        Some(report) if !report.summary.trim().is_empty() => {
+            out.push(cell(report.summary.trim()));
+        }
+        _ => out.push("none".to_string()),
+    }
+
+    out.push(String::new());
+    out.push("## Task".to_string());
+    out.push(String::new());
+    out.push("| id | title | agent | model | branch | commit |".to_string());
+    out.push("| --- | --- | --- | --- | --- | --- |".to_string());
+    out.push(task_detail_row(task));
+
+    out.push(String::new());
+    out.push("## Gates".to_string());
+    out.push(String::new());
+    let gates = gate_lines(task);
+    if gates.is_empty() {
+        out.push("none".to_string());
+    } else {
+        out.extend(gates);
+    }
+
+    out.push(String::new());
+    out.push("## Tests".to_string());
+    out.push(String::new());
+    push_bullets(
+        &mut out,
+        report.map(|report| &report.tests[..]).unwrap_or(&[]),
+    );
+
+    out.push(String::new());
+    out.push("## Acceptance".to_string());
+    out.push(String::new());
+    push_bullets(&mut out, &task.acceptance);
+
+    out.push(String::new());
+    out.push("## Scope".to_string());
+    out.push(String::new());
+    push_bullets(&mut out, &task.scope);
+
+    out.join("\n")
+}
+
+/// One task row for the per-task body: what it is, who ran it, where its work is.
+fn task_detail_row(task: &Task) -> String {
+    let attempt = task.latest_attempt();
+    let report = attempt.and_then(|attempt| attempt.report.as_ref());
+    let cells = [
+        task.id.clone(),
+        task.title.clone(),
+        attempt
+            .map(|attempt| attempt.agent.clone())
+            .unwrap_or_default(),
+        attempt
+            .and_then(|attempt| attempt.model.clone())
+            .unwrap_or_default(),
+        attempt
+            .map(|attempt| attempt.branch.clone())
+            .unwrap_or_default(),
+        report
+            .and_then(|report| report.commit.clone())
+            .unwrap_or_default(),
+    ];
+    let rendered: Vec<String> = cells.iter().map(|text| blank_as_dash(text)).collect();
+    format!("| {} |", rendered.join(" | "))
+}
+
+/// One bullet per entry, or `none` when there are none.
+fn push_bullets(out: &mut Vec<String>, entries: &[String]) {
+    if entries.is_empty() {
+        out.push("none".to_string());
+        return;
+    }
+    for entry in entries {
+        out.push(format!("- {}", cell(entry)));
+    }
 }
 
 /// One line per dropped task: which task, and why it is not in the work.
@@ -299,6 +409,56 @@ mod tests {
         assert!(
             body.contains("| M1.3 | roster | - | - | - | - | - |"),
             "a task nobody ran is all dashes: {body}"
+        );
+    }
+
+    #[test]
+    fn a_task_body_is_the_task_and_its_facts() {
+        let state = fixture::state();
+        let task = match state.tasks.get("M1.1") {
+            Some(task) => task,
+            None => panic!("the fixture has M1.1"),
+        };
+        let body = task_pr_body(task);
+        assert!(body.starts_with("Task: M1.1"), "{body}");
+        assert!(
+            body.contains("## Summary\n\nwrote the log"),
+            "the hand-in's summary is the summary: {body}"
+        );
+        assert!(
+            body.contains("| M1.1 | event log | claude | opus | feature/m1-events | abc123 |"),
+            "{body}"
+        );
+        assert!(body.contains("- M1.1 a1 `lint`: pass"), "{body}");
+        assert!(
+            body.contains("## Tests\n\n- cargo test -p shprd-core: ok"),
+            "{body}"
+        );
+        assert!(body.contains("## Acceptance\n\n- M1.1 is done"), "{body}");
+        assert!(
+            body.contains("## Scope\n\n- crates/shprd-core"),
+            "the scope a reviewer checks the diff against: {body}"
+        );
+        assert!(
+            !body.contains("## Dropped") && !body.contains("## Escalations"),
+            "one task's pull request says nothing about the run: {body}"
+        );
+    }
+
+    #[test]
+    fn a_task_nobody_ran_says_none_where_it_has_no_facts() {
+        let state = fixture::state();
+        let task = match state.tasks.get("M1.3") {
+            Some(task) => task,
+            None => panic!("the fixture has M1.3"),
+        };
+        let body = task_pr_body(task);
+        assert!(body.contains("## Summary\n\nnone"), "{body}");
+        assert!(body.contains("## Gates\n\nnone"), "{body}");
+        assert!(body.contains("## Tests\n\nnone"), "{body}");
+        assert!(
+            body.contains("| M1.3 | roster | - | - | - | - |"),
+            "a task with no attempt is all dashes: {body}"
         );
     }
 
