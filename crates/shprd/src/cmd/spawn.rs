@@ -91,7 +91,9 @@ pub struct SpawnEnv<'a> {
     /// injects fixtures here; on a machine the map is empty and the spawn asks
     /// only the program it picked.
     pub catalogs: BTreeMap<String, Catalog>,
-    /// The `data/` directory, where a program's static catalog lives.
+    /// The `data/` directory, where a program's static catalog lives. The
+    /// launched CLI is told it as `SHPRD_DATA_DIR`, so the agent's own `shprd`
+    /// finds the same harnesses the engine did.
     pub data_dir: PathBuf,
     /// The curated skill compatibility list.
     pub compat: Vec<CompatEntry>,
@@ -491,6 +493,8 @@ fn start_in_tab(
             task: Some(task.to_string()),
             run: Some(env.run.clone()),
             repo: worktree.path.clone(),
+            home: Some(env.home.clone()),
+            data: Some(env.data_dir.clone()),
         },
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
@@ -2461,6 +2465,22 @@ project_dirs = []
         assert!(pairs.contains(&("SHPRD_TASK".to_string(), Some("T1".to_string()))));
         assert!(pairs.contains(&("SHPRD_RUN".to_string(), Some("t1".to_string()))));
         assert!(pairs.contains(&("SHPRD_ACTOR".to_string(), Some("agent:sh".to_string()))));
+        // The worker's own `shprd` must resolve this engine's config and
+        // harnesses, not whatever `$HOME` holds (bug 11).
+        assert!(
+            pairs.contains(&(
+                "SHPRD_HOME".to_string(),
+                Some(env.home.display().to_string())
+            )),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&(
+                "SHPRD_DATA_DIR".to_string(),
+                Some(env.data_dir.display().to_string())
+            )),
+            "{pairs:?}"
+        );
         assert!(!pairs.contains(&("GH_TOKEN".to_string(), Some("secret".to_string()))));
         assert!(pairs.contains(&("GH_TOKEN".to_string(), None)));
         // The spec has no system-prompt arguments, so the brief is typed in.

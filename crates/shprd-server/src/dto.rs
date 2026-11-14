@@ -741,7 +741,7 @@ pub enum ClientMessage {
 /// The layer one settings value came from, nearest first.
 ///
 /// The same names `shprd settings show` prints: `task`, `repo_entry`, `you`,
-/// `repo_file` and `built_in`.
+/// `legacy`, `repo_file` and `built_in`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export_to = "SettingsSourceDto.ts")]
@@ -752,6 +752,8 @@ pub enum SettingsSourceDto {
     RepoEntry,
     /// The person's own defaults.
     You,
+    /// The keys the person's pre-M9 `config.toml` still sets.
+    Legacy,
     /// The repository's committed `.shprd/settings.toml`.
     RepoFile,
     /// The values shprd ships.
@@ -892,6 +894,7 @@ impl From<shprd_core::settings::Source> for SettingsSourceDto {
             shprd_core::settings::Source::Task => Self::Task,
             shprd_core::settings::Source::RepoEntry => Self::RepoEntry,
             shprd_core::settings::Source::You => Self::You,
+            shprd_core::settings::Source::Legacy => Self::Legacy,
             shprd_core::settings::Source::RepoFile => Self::RepoFile,
             shprd_core::settings::Source::BuiltIn => Self::BuiltIn,
         }

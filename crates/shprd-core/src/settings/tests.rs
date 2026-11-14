@@ -555,8 +555,8 @@ fn the_old_config_keys_still_load() {
     assert_eq!(tasks.review_rounds, 3);
     assert_eq!(
         source_of(&resolved, "tasks.merge"),
-        Some(Source::You),
-        "an old key is the person's own setting"
+        Some(Source::Legacy),
+        "an old key is supplied by the old config file, and says so"
     );
     assert_eq!(
         shown(&resolved, "tasks.proof"),
@@ -575,6 +575,79 @@ fn the_old_config_keys_still_load() {
         resolved.tasks().merge,
         MergePolicy::Checks,
         "the keys the settings file leaves alone still come from the old file"
+    );
+}
+
+#[test]
+fn the_old_roster_reviewer_is_the_lower_layer_of_the_reviewer_role() {
+    // A person who set the reviewer the pre-M9 way keeps that reviewer: the
+    // role resolves from the old file, the source says so, and a settings value
+    // set on top wins key by key.
+    let home = home();
+    let path = user_config(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(
+        &path,
+        r#"
+        [roster]
+        reviewer = "codex/gpt-5-codex"
+
+        [roster.effort]
+        "codex/gpt-5-codex" = "high"
+        "#,
+    )
+    .expect("the old config is written");
+
+    let loaded = Loaded::read(home.path(), None).expect("the old config loads");
+    let resolved = loaded.resolve(None);
+    let reviewer = resolved.role("reviewer").expect("the built-in reviewer");
+    assert_eq!(
+        reviewer.agent.as_ref().map(|a| a.value.as_str()),
+        Some("codex")
+    );
+    assert_eq!(
+        reviewer.model.as_ref().map(|m| m.value.as_str()),
+        Some("gpt-5-codex")
+    );
+    assert_eq!(
+        reviewer.effort.as_ref().map(|e| e.value.as_str()),
+        Some("high")
+    );
+    assert_eq!(
+        source_of(&resolved, "roles.reviewer.agent"),
+        Some(Source::Legacy),
+        "the reviewer's program comes from the old config file"
+    );
+    assert_eq!(
+        source_of(&resolved, "roles.reviewer.model"),
+        Some(Source::Legacy)
+    );
+
+    // The settings file sits above the old file, per key: setting the model
+    // there keeps the old program and effort.
+    let settings = user_file(home.path());
+    std::fs::write(&settings, "[roles.reviewer]\nmodel = \"gpt-6\"\n")
+        .expect("the settings are written");
+    let loaded = Loaded::read(home.path(), None).expect("both files load");
+    let resolved = loaded.resolve(None);
+    let reviewer = resolved.role("reviewer").expect("the built-in reviewer");
+    assert_eq!(
+        reviewer.agent.as_ref().map(|a| a.value.as_str()),
+        Some("codex"),
+        "the program the old file set still applies"
+    );
+    assert_eq!(
+        reviewer.model.as_ref().map(|m| m.value.as_str()),
+        Some("gpt-6")
+    );
+    assert_eq!(
+        source_of(&resolved, "roles.reviewer.model"),
+        Some(Source::You),
+        "the settings file is nearer than the old config file"
+    );
+    assert_eq!(
+        source_of(&resolved, "roles.reviewer.effort"),
+        Some(Source::Legacy)
     );
 }
 

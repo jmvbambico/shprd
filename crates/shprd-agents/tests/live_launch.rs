@@ -187,6 +187,8 @@ fn live(id: &str) {
         task: None,
         run: None,
         repo: dir.path().to_owned(),
+        home: None,
+        data: None,
     };
     let launch = match launch(
         &harness,
