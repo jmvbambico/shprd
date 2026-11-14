@@ -2,10 +2,13 @@
 //! integration worktree or judges it.
 //!
 //! `integrate` cherry-picks onto the branch, `sync` merges the base into it,
-//! `gate` reads its head and runs commands in it, and `land` reads the head it
-//! pushes. Any two of those at once race over one worktree and one index, and a
-//! reader can see a half-merged tree as if it were a result. So they all take
-//! this lock: one run, one writer, at a time.
+//! `gate` reads its head and runs commands in it, `land` reads the head it
+//! pushes, `approve` reads the head it stamps an approval on, and
+//! `janitor --apply` deletes the branches and worktrees the others read. Any
+//! two of those at once race over one worktree and one index, and a reader can
+//! see a half-merged tree as if it were a result. So they all take this lock:
+//! one run, one writer, at a time. A dry run - `janitor` without `--apply`,
+//! `status`, `brief` - writes nothing and judges nothing, so it takes none.
 
 use std::path::{Path, PathBuf};
 

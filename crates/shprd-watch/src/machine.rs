@@ -3,6 +3,13 @@
 //! Nothing here reads a clock or touches the filesystem; callers pass
 //! [`Inputs`] with `now_ms` already filled in, which keeps the decision logic
 //! deterministic and testable with plain numbers.
+//!
+//! Silence is only half the availability story. A worker parked at its own
+//! prompt moves nothing, so a screen that never changes reads as healthy work
+//! for ever. The other half is [`IDLE_REPORT_FACTOR`]: an agent that sits
+//! [`AgentState::Idle`] (or [`AgentState::Done`]) for that many times the
+//! policy's [`Policy::suspect_after_ms`] without reporting or recording a gate
+//! result is escalated, because no news for that long is not work.
 
 use crate::records::{ErrorKind, RecordError};
 use crate::screen::ScreenSignal;
@@ -11,6 +18,27 @@ use shprd_mux::AgentState;
 
 /// Backoff used when a [`Policy`] supplies an empty backoff list.
 const FALLBACK_BACKOFF_MS: u64 = 900_000;
+
+/// How many times [`Policy::suspect_after_ms`] an agent may sit idle without
+/// reporting before the watchdog escalates.
+///
+/// A stopped agent is legitimate for a while: it may be reading, running a
+/// tool, or waiting for a brief. But a worker that reports nothing and whose
+/// pane says it stopped is only visible here, so the ceiling is deliberately
+/// short - two suspect windows - and the escalation names the fact ("idle, no
+/// report") rather than guessing at a quota.
+pub const IDLE_REPORT_FACTOR: u64 = 2;
+
+/// The longest an agent may sit idle without reporting, in milliseconds.
+fn idle_limit_ms(p: &Policy) -> u64 {
+    p.suspect_after_ms.saturating_mul(IDLE_REPORT_FACTOR)
+}
+
+/// The reason an attempt that sat idle without reporting is escalated with.
+///
+/// It names what was seen - an idle agent, and no report - and never a guess at
+/// why, so a human reading the log can tell this apart from a quota or a crash.
+pub const IDLE_ESCALATION_REASON: &str = "idle, no report";
 
 /// Why a worker's process ending hands its attempt on.
 ///
@@ -177,6 +205,14 @@ pub struct Inputs {
     pub screen: Option<ScreenSignal>,
     /// Whether the agent's process has ended.
     pub process_exited: bool,
+    /// When this attempt last reported or recorded a gate result, in epoch
+    /// milliseconds, if it ever did.
+    ///
+    /// The idle ceiling is about *no news*, so a report or a gate result after
+    /// the pane stopped is news: it restarts the clock. A caller must leave out
+    /// a timestamp it cannot compare with `now_ms`; two clocks that disagree
+    /// prove nothing.
+    pub report_or_gate_ms: Option<u64>,
 }
 
 /// Thresholds and backoff schedules for the watchdog.
@@ -240,6 +276,13 @@ pub struct Watch {
     /// makes a worker that dies every time escalate instead of being replaced
     /// for ever.
     exit_count: usize,
+    /// When the agent was first seen stopped without having reported since, in
+    /// epoch milliseconds.
+    ///
+    /// `None` while it is not stopped. A report or a gate result after this
+    /// moment moves it forward ([`Inputs::report_or_gate_ms`]), so the ceiling
+    /// is measured from the newest thing the attempt said.
+    idle_since_ms: Option<u64>,
 }
 
 impl Default for Watch {
@@ -256,6 +299,7 @@ impl Watch {
             transient_since_ms: None,
             dry_count: 0,
             exit_count: 0,
+            idle_since_ms: None,
         }
     }
 
@@ -287,6 +331,7 @@ impl Watch {
         let backoff_end = now_ms.saturating_add(backoff);
         let retry_at_ms = reset_at_ms.unwrap_or(backoff_end);
         self.transient_since_ms = None;
+        self.idle_since_ms = None;
         self.health = Health::Dry {
             since_ms: now_ms,
             reason: reason.clone(),
@@ -312,6 +357,7 @@ impl Watch {
     fn on_exit(&mut self, now_ms: u64, p: &Policy) -> Vec<Action> {
         self.exit_count = self.exit_count.saturating_add(1);
         self.transient_since_ms = None;
+        self.idle_since_ms = None;
         let reason = String::from(EXIT_REASON);
         if self.exit_count > p.exit_budget.max(1) {
             self.health = Health::Escalated {
@@ -372,15 +418,18 @@ impl Watch {
     pub fn after_handoff(&mut self) {
         self.health = Health::Working;
         self.transient_since_ms = None;
+        self.idle_since_ms = None;
     }
 
     /// Fold one polling instant into the health verdict.
     ///
     /// Rules run in priority order: an exited worker, an unretryable provider
-    /// error, serve retries, a dry screen pattern, then silence. An exit hands
-    /// the attempt on without drying anything; every other verdict dries the
-    /// agent. While already dry only the canary is considered, and while
-    /// escalated nothing is.
+    /// error, serve retries, a dry screen pattern, an agent that stopped and
+    /// said nothing for too long, then silence. An exit hands the attempt on
+    /// without drying anything; every other verdict dries the agent except the
+    /// idle ceiling, which escalates: a stopped agent proves nothing about its
+    /// program, so nothing is marked dry on its account. While already dry only
+    /// the canary is considered, and while escalated nothing is.
     ///
     /// The screen pattern is the fallback, not a peer of the others: a harness
     /// whose record or serve instance reports something is judged by that, and
@@ -457,9 +506,34 @@ impl Watch {
 
         if matches!(screen.agent_state, AgentState::Idle | AgentState::Done) {
             self.transient_since_ms = None;
+            // A stopped agent is not suspect - it may be waiting on a brief, a
+            // tool or a human. It is also not proof of work: a pane that never
+            // moves and a record that never reports look the same for ever, so
+            // the attempt is escalated once the idle ceiling passes.
+            let since = *self.idle_since_ms.get_or_insert(i.now_ms);
+            // A report or a gate result after the pane stopped is the attempt
+            // saying something, so the ceiling is measured from the newest of
+            // them rather than from when the screen stopped moving.
+            let since = match i.report_or_gate_ms {
+                Some(spoke_at) if spoke_at > since => spoke_at,
+                _ => since,
+            };
+            self.idle_since_ms = Some(since);
+            if i.now_ms.saturating_sub(since) > idle_limit_ms(p) {
+                let reason = String::from(IDLE_ESCALATION_REASON);
+                self.health = Health::Escalated {
+                    since_ms: i.now_ms,
+                    reason: reason.clone(),
+                };
+                return vec![Action::Escalate { reason }];
+            }
             self.health = Health::Working;
             return Vec::new();
         }
+
+        // Anything else is a moving agent (or one the host cannot place), so
+        // the idle clock stops.
+        self.idle_since_ms = None;
 
         // A moving screen means the agent is producing again, so the retry
         // budget restarts.
@@ -535,6 +609,7 @@ mod tests {
             serve: None,
             screen: None,
             process_exited: false,
+            report_or_gate_ms: None,
         }
     }
 
@@ -798,16 +873,105 @@ mod tests {
         assert_eq!(w.health, Health::Working);
     }
 
+    /// One polling instant of a pane the host calls idle, with the attempt's
+    /// last report or gate result (if any) given.
+    fn idling(now_ms: u64, report_or_gate_ms: Option<u64>) -> Inputs {
+        Inputs {
+            screen: Some(still(AgentState::Idle, 10_000_000)),
+            report_or_gate_ms,
+            ..inputs(now_ms)
+        }
+    }
+
+    /// An idle agent is not suspect: a stopped pane moves nothing, so the
+    /// silence rule can never see it. It is also not work: past the idle
+    /// ceiling the attempt is escalated, and the reason says what was seen.
     #[test]
-    fn an_idle_agent_is_never_suspect() {
+    fn an_idle_agent_that_never_reports_is_escalated() {
         let p = Policy::default();
         let mut w = Watch::new();
-        let i = Inputs {
-            screen: Some(still(AgentState::Idle, 10_000_000)),
-            ..inputs(NOW)
-        };
-        assert_eq!(w.step(&i, &p), Vec::new());
+        let limit = idle_limit_ms(&p);
+        assert_eq!(limit, 360_000, "two suspect windows by default");
+
+        // The clock starts with the first instant the pane is seen stopped.
+        assert_eq!(w.step(&idling(NOW, None), &p), Vec::new());
         assert_eq!(w.health, Health::Working);
+
+        // Exactly one ceiling later it is still inside the window.
+        assert_eq!(w.step(&idling(NOW + limit, None), &p), Vec::new());
+        assert_eq!(w.health, Health::Working);
+
+        // One millisecond past it is an escalation, not a dry mark: an idle
+        // agent proves nothing about its program.
+        let escalated_at = NOW + limit + 1;
+        assert_eq!(
+            w.step(&idling(escalated_at, None), &p),
+            vec![Action::Escalate {
+                reason: String::from("idle, no report"),
+            }]
+        );
+        assert_eq!(
+            w.health,
+            Health::Escalated {
+                since_ms: escalated_at,
+                reason: String::from("idle, no report"),
+            }
+        );
+
+        // One escalation, not one per tick.
+        assert_eq!(w.step(&idling(escalated_at + 1_000, None), &p), Vec::new());
+    }
+
+    /// A report or a gate result after the pane stopped is the attempt saying
+    /// something, so the ceiling is measured from it, not from the pause.
+    #[test]
+    fn a_report_after_the_pane_stopped_restarts_the_idle_clock() {
+        let p = Policy::default();
+        let limit = idle_limit_ms(&p);
+        let mut w = Watch::new();
+
+        assert_eq!(w.step(&idling(NOW, None), &p), Vec::new());
+        // It reported while idle: the clock starts from the report.
+        let reported_at = NOW + 100_000;
+        assert_eq!(
+            w.step(&idling(reported_at, Some(reported_at)), &p),
+            Vec::new()
+        );
+        assert_eq!(
+            w.step(&idling(reported_at + limit, Some(reported_at)), &p),
+            Vec::new(),
+            "a report inside the window keeps the attempt out of the escalation"
+        );
+        assert!(matches!(
+            w.step(&idling(reported_at + limit + 1, Some(reported_at)), &p).as_slice(),
+            [Action::Escalate { reason }] if reason == "idle, no report"
+        ));
+    }
+
+    /// An agent that starts moving again is working, whatever its pause was.
+    #[test]
+    fn a_moving_agent_clears_the_idle_clock() {
+        let p = Policy::default();
+        let limit = idle_limit_ms(&p);
+        let mut w = Watch::new();
+
+        assert_eq!(w.step(&idling(NOW, None), &p), Vec::new());
+        let moving = Inputs {
+            screen: Some(ScreenSignal {
+                liveness: Liveness {
+                    changed: true,
+                    unchanged_for_ms: 0,
+                },
+                ..still(AgentState::Working, 0)
+            }),
+            ..inputs(NOW + 10_000)
+        };
+        assert_eq!(w.step(&moving, &p), Vec::new());
+
+        // Stopped again: the ceiling starts over.
+        assert_eq!(w.step(&idling(NOW + 20_000, None), &p), Vec::new());
+        assert_eq!(w.step(&idling(NOW + 20_000 + limit, None), &p), Vec::new());
+        assert!(matches!(w.health, Health::Working));
     }
 
     /// One polling instant in which the attempt's worker is gone.
