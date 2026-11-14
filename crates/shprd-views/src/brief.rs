@@ -1,8 +1,15 @@
-//! The brief: the block an agent is handed after losing its context.
+//! The briefs an agent reads: the one a task's agent starts with, and the
+//! rehydration block an agent gets after losing its context.
 //!
-//! A brief is a pure function of the run state and the event log, and never
-//! longer than [`BRIEF_MAX_LINES`] lines, so it fits in a prompt next to the
-//! task it describes. No model writes any of it.
+//! [`task_brief`] is what one attempt is handed before its first turn: the
+//! role's standing words, the task itself (title, acceptance, scope, skills and
+//! the rules of the attempt) and a Settings block naming every value that shapes
+//! the work and the layer that set it.
+//!
+//! [`brief`] is the same run told briefly: the table of tasks, the gates, the
+//! dry agents and the overrides. It is a pure function of the run state and the
+//! event log, and never longer than [`BRIEF_MAX_LINES`] lines, so it fits in a
+//! prompt next to the task it describes. No model writes any of it.
 
 use shprd_core::event::{Event, Finding, Severity};
 use shprd_core::settings::{Key, Resolved, ResolvedRole, Sourced, TaskKey, Value};

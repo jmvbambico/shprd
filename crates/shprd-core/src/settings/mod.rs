@@ -663,9 +663,11 @@ impl Key {
             ..
         } = self
             && let Some(text) = value.text()
-            && text.trim().is_empty()
         {
-            return Err("takes `prompt:<id>` or a path, not nothing".to_owned());
+            // A prompt is `prompt:<id>` or a path: the same rule the role is
+            // read with, checked when it is set so a broken reference is a
+            // refusal now rather than a spawn that cannot read its words.
+            crate::prompts::PromptRef::parse(text).map_err(|err| err.to_string())?;
         }
         Ok(())
     }
