@@ -145,6 +145,14 @@ impl DerivedStatus {
     }
 }
 
+/// A row for a task nothing has started on, which is what a view shows when a
+/// reading is missing rather than failing.
+impl Default for Derived {
+    fn default() -> Self {
+        Self::new(DerivedStatus::ToDo, None, None)
+    }
+}
+
 /// What kind of Needs you a task is (`agents.py:106-170`, the `needs` field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -554,11 +562,7 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
     // An ask the agent is waiting on needs the person at once, whatever else is
     // happening: the hook that raised it holds the agent until an answer comes
     // back. An ask whose hook timed out is no longer open and says nothing.
-    if let Some(ask) = signal
-        .open_asks
-        .iter()
-        .find(|ask| ask.expires_at_ms.is_none_or(|until| until > now_ms))
-    {
+    if let Some(ask) = open_ask(signal, now_ms) {
         return Derived::needs(Need::Asks, &ask_reason(ask));
     }
     // A problem found a moment ago reads as the task would without it
@@ -661,6 +665,53 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
         return Derived::needs(Need::Reply, REPLY);
     }
     Derived::needs(Need::Stopped, STOPPED)
+}
+
+/// A task's status as a reader that holds only the log sees it.
+///
+/// [`derive_status`] reads the agent terminals as well as the fold. A CLI and
+/// an API have no terminals to read: passing an empty overlay would make every
+/// task the fold still has [`TaskStatus::Working`] read "Needs you · Agent
+/// stopped", which is a claim about a terminal nobody looked at. So a working
+/// task is read with its agent assumed at work — its own recorded state — and
+/// everything else, an open ask included, derives from the fold alone.
+///
+/// What this reader cannot say, it does not: a task whose agent went quiet
+/// without saying ready, or one whose process exited, reads as Working here
+/// until the fold says otherwise. The service's tick, which has the host's
+/// word, reads those from [`derive_status`] itself.
+pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
+    // An open ask is a fact of the log, and the harness hook that raised it is
+    // holding an agent until an answer comes back, so it is read before the
+    // stored state — a hook can raise one before the spawn is folded, which
+    // would otherwise park the task and hide the card. A task that is already
+    // finished says nothing it still needs.
+    if !matches!(
+        signal.status,
+        TaskStatus::Failed | TaskStatus::Dropped | TaskStatus::Integrated
+    ) && let Some(ask) = open_ask(signal, now_ms)
+    {
+        return Derived::needs(Need::Asks, &ask_reason(ask));
+    }
+    if matches!(signal.status, TaskStatus::Working) {
+        let at_work = LiveAgents::new(vec![LiveAgent {
+            activity: Some(Activity::Working),
+            ..LiveAgent::default()
+        }]);
+        return derive_status(signal, &at_work, now_ms);
+    }
+    derive_status(signal, &LiveAgents::default(), now_ms)
+}
+
+/// The first ask still open at `now_ms`, if one is.
+///
+/// A hook that timed out leaves its ask behind; it is no longer open, so it
+/// says nothing about what the task needs.
+fn open_ask(signal: &TaskSignal, now_ms: u64) -> Option<&AskFacts> {
+    signal
+        .open_asks
+        .iter()
+        .find(|ask| ask.expires_at_ms.is_none_or(|until| until > now_ms))
 }
 
 /// The statuses that are no agent's business right now: a task nothing has
@@ -1735,5 +1786,71 @@ mod tests {
         let got = derive_status(&signal, &one(Some(Activity::Working)), NOW);
         assert_eq!(got.status, DerivedStatus::Working);
         assert_ne!(got.needs, Some(Need::Asks));
+    }
+
+    #[test]
+    fn a_log_only_reader_sees_an_open_ask_as_needs_you() {
+        let mut signal = task(TaskStatus::Working);
+        signal.open_asks.push(AskFacts {
+            kind: AskKind::Question,
+            text: "Which database should this use?".to_string(),
+            expires_at_ms: None,
+        });
+        let got = derive_from_fold(&signal, NOW);
+        assert_eq!(got.status, DerivedStatus::NeedsYou);
+        assert_eq!(got.needs, Some(Need::Asks));
+        assert_eq!(
+            got.reason.as_deref(),
+            Some("Which database should this use?")
+        );
+    }
+
+    #[test]
+    fn a_log_only_reader_never_calls_a_working_task_stopped() {
+        // The CLI and the API cannot see the agent terminals; an empty overlay
+        // would read "Needs you · Agent stopped" about every working task,
+        // which is a claim about a terminal nobody looked at.
+        let signal = task(TaskStatus::Working);
+        assert_eq!(derive_from_fold(&signal, NOW), Derived::working(None));
+        assert_eq!(
+            derive_status(&signal, &LiveAgents::default(), NOW).needs,
+            Some(Need::Stopped),
+            "the rule itself still reads a known-empty overlay as no agent left"
+        );
+        // Neither does an ask that has already timed out.
+        let mut expired = task(TaskStatus::Working);
+        expired.open_asks.push(AskFacts {
+            kind: AskKind::Permission,
+            text: "Run: cargo test".to_string(),
+            expires_at_ms: Some(NOW),
+        });
+        assert_eq!(derive_from_fold(&expired, NOW), Derived::working(None));
+    }
+
+    #[test]
+    fn a_log_only_reader_reads_the_parked_states_from_the_fold() {
+        assert_eq!(
+            derive_from_fold(&task(TaskStatus::Queued), NOW).status,
+            DerivedStatus::ToDo
+        );
+        assert_eq!(
+            derive_from_fold(&task(TaskStatus::Integrated), NOW).status,
+            DerivedStatus::Done
+        );
+        let mut failed = task(TaskStatus::Failed);
+        failed.failure = Some("unwrap used".to_string());
+        let got = derive_from_fold(&failed, NOW);
+        assert_eq!(got.status, DerivedStatus::NeedsYou);
+        assert_eq!(got.needs, Some(Need::Attention));
+        assert_eq!(got.reason.as_deref(), Some("unwrap used"));
+        // A finished task needs nothing, even if a hook's ask is still open
+        // behind it: the live rules park it too, and the news must agree.
+        let mut landed = task(TaskStatus::Integrated);
+        landed.open_asks.push(AskFacts {
+            kind: AskKind::Question,
+            text: "Too late?".to_string(),
+            expires_at_ms: None,
+        });
+        assert_eq!(derive_from_fold(&landed, NOW).status, DerivedStatus::Done);
     }
 }

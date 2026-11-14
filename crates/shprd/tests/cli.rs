@@ -485,7 +485,10 @@ fn a_scripted_run_writes_the_document_and_the_views() {
 
     let status = ok_with_path(root, &["status"], bin_dir);
     assert!(status.contains("T1"), "status was {status:?}");
-    assert!(status.contains('✓'), "status was {status:?}");
+    assert!(
+        status.contains("Done (landed)"),
+        "a landed task says so: {status:?}"
+    );
 
     let body = ok_with_path(root, &["pr-body"], bin_dir);
     assert!(body.contains("## Tasks"), "pr-body was {body:?}");

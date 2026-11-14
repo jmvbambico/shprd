@@ -1,10 +1,17 @@
 //! The status line: where every task sits, in one glance.
 //!
-//! `shprd status` prints this; nothing here asks a model anything.
+//! `shprd status` prints this; nothing here asks a model anything. The word a
+//! row shows is the derived status (M8.5's rules, [`crate::derived`]), so a
+//! task an open ask is waiting on reads **Needs you** here exactly as it does
+//! in the service's board; the stored lifecycle state is printed beside it in
+//! this view's JSON, where a script reads `status`, `derived.status`, `need`
+//! and `reason` as separate fields.
 
+use serde_json::{Value, json};
 use shprd_core::state::{AgentInfo, RunState, TaskStatus};
 
 use crate::clock;
+use crate::derived::{self, Derived, TaskSignal};
 
 /// One line per task, then one line per agent that is dry at `now_ms`.
 ///
@@ -13,12 +20,15 @@ use crate::clock;
 /// with shprd agent task add`: an empty screen would otherwise look like a
 /// broken run.
 ///
-/// Each task line starts with a symbol: `○` queued, `●` working, `◇` reported
-/// and awaiting review, `✓` for a passed task (`✓ <task> passed <title>`) or
-/// one whose work landed (`✓ <task> landed <title>`), `✗` failed, or `⊘` for a
-/// task a human dropped (`⊘ <task> dropped <title>`). Tasks are listed in id order. A dry agent is `◌ <agent> dry
-/// until HH:MM (reason) — shprd readmit <agent>` in UTC; an agent dry with no
-/// known reset time shows `unknown`.
+/// Each task line is `<glyph> <task> <derived word> · <title>`, with the
+/// derived row's reason between the word and the title when it has one. The
+/// word is the one a person acts on: `○ To do`, `◷ Queued` (waiting on a task
+/// that has not landed), `◐ Working` (with what it waits on when the fold
+/// knows), `● Needs you` (with why), `✓ Ready`, `↻ Merging`, `✔ Done`. A task
+/// that has landed also says `(landed)`, since Done alone would not say whether
+/// its work is in. Tasks are listed in id order. A dry agent is
+/// `◌ <agent> dry until HH:MM (reason) — shprd readmit <agent>` in UTC; an
+/// agent dry with no known reset time shows `unknown`.
 pub fn status(state: &RunState, now_ms: u64) -> String {
     let mut lines: Vec<String> = Vec::new();
     match &state.run {
@@ -29,13 +39,10 @@ pub fn status(state: &RunState, now_ms: u64) -> String {
         )),
         Some(_) => {
             for task in state.tasks.values() {
-                lines.push(format!(
-                    "{} {} {} {}",
-                    symbol(task.status),
-                    task.id,
-                    word(task.status),
-                    task.title
-                ));
+                let Some(reading) = reading(state, &task.id, now_ms) else {
+                    continue;
+                };
+                lines.push(line(&task.id, &task.title, task.status, &reading));
             }
         }
     }
@@ -47,27 +54,101 @@ pub fn status(state: &RunState, now_ms: u64) -> String {
     lines.join("\n")
 }
 
-/// The symbol shown in front of a task in `status`.
-fn symbol(status: TaskStatus) -> char {
-    match status {
-        TaskStatus::Queued => '○',
-        TaskStatus::Working => '●',
-        TaskStatus::Reported => '◇',
-        TaskStatus::Passed | TaskStatus::Integrated => '✓',
-        TaskStatus::Failed => '✗',
-        TaskStatus::Dropped => '⊘',
-    }
+/// The same board as one JSON document, for a script or a card.
+///
+/// The stored lifecycle state stays its own field (`status`): the derived word
+/// and what it needs are [`status`]'s projection of the log, and a client that
+/// wants the fold's state does not have to reverse it. An agent dry at `now_ms`
+/// is listed for the same reason the human line names it.
+pub fn json(state: &RunState, now_ms: u64) -> Value {
+    let run = match &state.run {
+        Some(info) => json!({
+            "run_id": info.run_id,
+            "repo": info.repo,
+            "base_branch": info.base_branch,
+            "integration_branch": info.integration_branch,
+            "finished": state.finished,
+        }),
+        None => Value::Null,
+    };
+    let tasks: Vec<Value> = state
+        .tasks
+        .values()
+        .map(|task| {
+            let derived = reading(state, &task.id, now_ms).unwrap_or_default();
+            json!({
+                "id": task.id,
+                "title": task.title,
+                "status": stored_name(task.status),
+                "derived": {
+                    "status": derived.status,
+                    "word": derived.status.word(),
+                    "need": derived.needs,
+                    "reason": derived.reason,
+                },
+            })
+        })
+        .collect();
+    let dry: Vec<Value> = state
+        .agents
+        .iter()
+        .filter(|(_, info)| is_dry_now(info, now_ms))
+        .map(|(agent, info)| {
+            json!({
+                "agent": agent,
+                "until_ms": info.dry_until_ms,
+                "reason": info.dry_reason,
+            })
+        })
+        .collect();
+    json!({
+        "run": run,
+        "tasks": tasks,
+        "dry_agents": dry,
+    })
 }
 
-/// The word printed after the task id.
-fn word(status: TaskStatus) -> &'static str {
+/// What one task reads as for a caller that has only the log, or `None` when
+/// the run has no such task.
+///
+/// It is [`derived::derive_from_fold`] with the fold's facts filled in: the
+/// CLI and the service's snapshot both come through here, so the two never
+/// disagree about the word a person sees.
+pub fn reading(state: &RunState, id: &str, now_ms: u64) -> Option<Derived> {
+    let signal = TaskSignal::from_state(state, id)?;
+    Some(derived::derive_from_fold(&signal, now_ms))
+}
+
+/// One task's line: its derived word, why, and its title.
+fn line(id: &str, title: &str, stored: TaskStatus, reading: &Derived) -> String {
+    let mut line = format!(
+        "{} {} {}",
+        reading.status.glyph(),
+        id,
+        reading.status.word()
+    );
+    if stored == TaskStatus::Integrated {
+        // Done alone cannot say whether the work is in or the task was dropped.
+        line.push_str(" (landed)");
+    }
+    if let Some(reason) = &reading.reason {
+        line.push_str(" · ");
+        line.push_str(reason);
+    }
+    line.push_str(" · ");
+    line.push_str(title);
+    line
+}
+
+/// The stored lifecycle state's name, as `state --json` and the API spell it.
+fn stored_name(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Queued => "queued",
         TaskStatus::Working => "working",
         TaskStatus::Reported => "reported",
         TaskStatus::Passed => "passed",
-        TaskStatus::Integrated => "landed",
         TaskStatus::Failed => "failed",
+        TaskStatus::Integrated => "integrated",
         TaskStatus::Dropped => "dropped",
     }
 }
@@ -95,8 +176,10 @@ fn is_dry_now(info: &AgentInfo, now_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::derived::DerivedStatus;
     use crate::fixture;
-    use shprd_core::state::RunInfo;
+    use shprd_core::ask::AskKind;
+    use shprd_core::state::{AskRecord, RunInfo};
 
     /// The single line mentioning `needle`.
     fn line_of(text: &str, needle: &str) -> String {
@@ -119,6 +202,26 @@ mod tests {
         }
     }
 
+    /// The fixture with one open ask on `task`.
+    fn asked(task: &str) -> RunState {
+        let mut state = fixture::state();
+        state.asks.insert(
+            (task.to_string(), "ask-1".to_string()),
+            AskRecord {
+                id: "ask-1".to_string(),
+                task: task.to_string(),
+                kind: AskKind::Question,
+                text: "Should the sum be variadic?".to_string(),
+                options: Vec::new(),
+                created_at_ms: fixture::NOW,
+                expires_at_ms: None,
+                raised_seq: 20,
+                answer: None,
+            },
+        );
+        state
+    }
+
     #[test]
     fn a_directory_with_no_run_says_how_to_start_one() {
         assert_eq!(
@@ -138,13 +241,16 @@ mod tests {
     #[test]
     fn each_status_gets_its_own_symbol() {
         let text = status(&fixture::state(), fixture::NOW);
-        assert_eq!(line_of(&text, "M1.1"), "✓ M1.1 landed event log");
-        assert_eq!(line_of(&text, "M1.2"), "✗ M1.2 failed views");
-        assert_eq!(line_of(&text, "M1.3"), "○ M1.3 queued roster");
+        assert_eq!(line_of(&text, "M1.1"), "✔ M1.1 Done (landed) · event log");
+        assert_eq!(
+            line_of(&text, "M1.2"),
+            "● M1.2 Needs you · unwrap used · views"
+        );
+        assert_eq!(line_of(&text, "M1.3"), "○ M1.3 To do · roster");
     }
 
     #[test]
-    fn a_passed_task_says_passed_until_its_work_lands() {
+    fn a_passed_task_reads_ready_until_its_work_lands() {
         let events = fixture::events();
         let passed = match RunState::fold(&events[..7]) {
             Ok(state) => state,
@@ -152,7 +258,7 @@ mod tests {
         };
         assert_eq!(
             line_of(&status(&passed, fixture::NOW), "M1.1"),
-            "✓ M1.1 passed event log"
+            "✓ M1.1 Ready · event log"
         );
     }
 
@@ -165,7 +271,7 @@ mod tests {
         };
         assert_eq!(
             line_of(&status(&working, fixture::NOW), "M1.2"),
-            "● M1.2 working views"
+            "◐ M1.2 Working · views"
         );
         let reported = match RunState::fold(&events[..10]) {
             Ok(state) => state,
@@ -173,7 +279,7 @@ mod tests {
         };
         assert_eq!(
             line_of(&status(&reported, fixture::NOW), "M1.2"),
-            "◇ M1.2 reported views"
+            "◐ M1.2 Working · Running its gates · views"
         );
     }
 
@@ -189,8 +295,63 @@ mod tests {
         }
         assert_eq!(
             line_of(&status(&state, fixture::NOW), "M1.3"),
-            "⊘ M1.3 dropped roster"
+            "✔ M1.3 Done · Dropped · not needed · roster"
         );
+    }
+
+    #[test]
+    fn an_open_ask_is_visible_as_needs_you() {
+        // The bug the M9 gate found: a card an agent is waiting on changed
+        // nothing a person reading `shprd status` could see.
+        let text = status(&asked("M1.3"), fixture::NOW);
+        assert_eq!(
+            line_of(&text, "M1.3"),
+            "● M1.3 Needs you · Should the sum be variadic? · roster"
+        );
+    }
+
+    #[test]
+    fn the_json_keeps_the_stored_state_and_adds_the_derived_one() {
+        let doc = json(&asked("M1.3"), fixture::NOW);
+        let tasks = match doc.get("tasks").and_then(Value::as_array) {
+            Some(tasks) => tasks,
+            None => panic!("no tasks array in {doc}"),
+        };
+        let task = match tasks.iter().find(|task| task["id"] == "M1.3") {
+            Some(task) => task,
+            None => panic!("M1.3 missing from {doc}"),
+        };
+        assert_eq!(task["status"], json!("queued"), "the fold's own state");
+        assert_eq!(task["derived"]["status"], json!("needs_you"));
+        assert_eq!(task["derived"]["word"], json!("Needs you"));
+        assert_eq!(task["derived"]["need"], json!("asks"));
+        assert_eq!(
+            task["derived"]["reason"],
+            json!("Should the sum be variadic?")
+        );
+
+        // A task with nothing waiting on it keeps the stored state and reads
+        // the derived one from the fold alone.
+        let plain = json(&fixture::state(), fixture::NOW);
+        let tasks = match plain.get("tasks").and_then(Value::as_array) {
+            Some(tasks) => tasks,
+            None => panic!("no tasks array in {plain}"),
+        };
+        let integrated = match tasks.iter().find(|task| task["id"] == "M1.1") {
+            Some(task) => task,
+            None => panic!("M1.1 missing from {plain}"),
+        };
+        assert_eq!(integrated["status"], json!("integrated"));
+        assert_eq!(integrated["derived"]["status"], json!("done"));
+        assert_eq!(integrated["derived"]["need"], Value::Null);
+    }
+
+    #[test]
+    fn the_json_of_a_directory_with_no_run_is_empty_but_whole() {
+        let doc = json(&RunState::default(), fixture::NOW);
+        assert_eq!(doc["run"], Value::Null);
+        assert_eq!(doc["tasks"], json!([]));
+        assert_eq!(doc["dry_agents"], json!([]));
     }
 
     #[test]
@@ -228,5 +389,18 @@ mod tests {
             !later.contains('◌'),
             "a cooled-down agent drops out: {later}"
         );
+    }
+
+    #[test]
+    fn the_fixture_reads_as_its_people_would() {
+        let state = fixture::state();
+        let read = |id: &str| match reading(&state, id, fixture::NOW) {
+            Some(reading) => reading,
+            None => panic!("the fixture has {id}"),
+        };
+        assert_eq!(read("M1.1").status, DerivedStatus::Done);
+        assert_eq!(read("M1.2").status, DerivedStatus::NeedsYou);
+        assert_eq!(read("M1.3"), Derived::default());
+        assert_eq!(reading(&state, "M9.9", fixture::NOW), None);
     }
 }

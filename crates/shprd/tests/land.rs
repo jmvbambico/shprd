@@ -1264,7 +1264,7 @@ fn a_dropped_task_stops_blocking_landing_and_is_listed_in_the_pull_request() {
     ]);
     assert!(printed.contains("dropped T2"), "{printed}");
     assert!(
-        fixture.ok(&["status"]).contains("⊘ T2 dropped"),
+        fixture.ok(&["status"]).contains("✔ T2 Done · Dropped"),
         "the task reads dropped"
     );
 
