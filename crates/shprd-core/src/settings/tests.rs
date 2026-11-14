@@ -350,6 +350,35 @@ fn unset_removes_the_key_and_leaves_the_file_readable() {
 }
 
 #[test]
+fn a_file_that_changed_while_it_was_being_edited_is_refused() {
+    let home = home();
+    let path = user_file(home.path());
+    std::fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    std::fs::write(&path, "[tasks]\nmerge = \"checks\"\n").expect("the file is written");
+    let loaded = Loaded::read(home.path(), None).expect("the file loads");
+
+    // Someone else — the service, an editor — saves the file first.
+    let theirs = "[tasks]\nmerge = \"auto\"\n";
+    std::fs::write(&path, theirs).expect("the file is written again");
+    let refused = loaded.write(
+        home.path(),
+        &Scope::You,
+        &Key::Task(TaskKey::MaxRunning),
+        Some(Value::Number(2)),
+        None,
+    );
+    match refused {
+        Err(SettingsError::Changed { path: named }) => assert_eq!(named, path),
+        other => panic!("expected a changed-file refusal, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file is there"),
+        theirs,
+        "the other writer's file is left exactly as it was"
+    );
+}
+
+#[test]
 fn an_unset_of_a_key_nobody_set_does_not_create_a_file() {
     let home = home();
     let loaded = Loaded::read(home.path(), None).expect("an empty home loads");

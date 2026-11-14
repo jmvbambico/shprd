@@ -23,12 +23,15 @@ use super::{File, Key, Scope, SettingsError, Value};
 /// Apply one change to the settings file at `path` and write it back.
 ///
 /// [`None`] removes the key. The file is created when it does not exist yet, and
-/// stamped with `version = 1`.
+/// stamped with `version = 1`. `expected` is the text the caller read before it
+/// decided on the change: a file that no longer holds it was changed by someone
+/// else in the meantime, and is refused rather than replaced.
 pub(super) fn edit(
     path: &Path,
     scope: &Scope,
     key: &Key,
     change: Option<&Value>,
+    expected: Option<&str>,
 ) -> Result<(), SettingsError> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -40,6 +43,11 @@ pub(super) fn edit(
             });
         }
     };
+    if expected != Some(existing.as_str()) && !(expected.is_none() && existing.is_empty()) {
+        return Err(SettingsError::Changed {
+            path: path.to_path_buf(),
+        });
+    }
     let mut document = match existing.parse::<DocumentMut>() {
         Ok(document) => document,
         Err(source) => {

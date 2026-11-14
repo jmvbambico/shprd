@@ -68,6 +68,15 @@
 //! role inherited, which is what makes a Settings block able to name a source
 //! per line.
 //!
+//! # Writing
+//!
+//! [`Loaded::write`] applies the same rule a settings page needs: a value equal
+//! to the one the scope would inherit is not stored at all, so "set it back" and
+//! "reset it" are the same edit. The file is edited rather than rewritten (see
+//! [`store`]), and a write refuses when the file changed between being read and
+//! being written, so two writers — a page and a terminal — never silently
+//! replace each other's work.
+//!
 //! # Keys the old config file still sets
 //!
 //! `~/.config/shprd/config.toml` predates this model and keeps working: its
@@ -81,8 +90,9 @@
 //!
 //! Borrowed behaviour: the layered resolution, the reserved built-in rows, the
 //! "a value equal to the inherited one is stored nowhere" rule and the keyed
-//! role table follow Shepherdr (`eliasstravik/shepherdr`, `herdr_task/settings.py`
-//! and `core/settings.js`, commit a3f327a, MIT). The Rust shape is shprd's own.
+//! role table follow Shepherdr (`eliasstravik/shepherdr`, `herdr_task/settings.py`,
+//! `core/settings.js` and `mods/shepherdr-settings/main.js`, commit a3f327a,
+//! MIT). The Rust shape is shprd's own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -718,6 +728,12 @@ pub enum SettingsError {
         /// The underlying error.
         source: std::io::Error,
     },
+    /// The settings file changed between being read and being written.
+    #[error("{path} changed while it was being edited; nothing was written, try again")]
+    Changed {
+        /// The file that moved.
+        path: PathBuf,
+    },
     /// A settings file holds something this build does not read.
     #[error("{path}: {source}")]
     InFile {
@@ -926,7 +942,7 @@ impl File {
                             reason: "must be a table of settings keys".to_owned(),
                         })?;
                         let origin = format!("repos.{repo}.");
-                        repos.insert(repo.clone(), parse_limits(entry, &origin, Limit::All)?);
+                        repos.insert(repo.clone(), parse_sections(entry, &origin, Limit::All)?);
                     }
                 }
                 _ => {
@@ -934,7 +950,7 @@ impl File {
                 }
             }
         }
-        let you = parse_limits(&defaults, "", Limit::All)?;
+        let you = parse_sections(&defaults, "", Limit::All)?;
         Ok(File { you, repos })
     }
 
@@ -943,8 +959,9 @@ impl File {
     ///
     /// A missing file is an empty layer: a fresh install has no settings and
     /// resolves to the built-in ones. A file that exists but cannot be read or
-    /// parsed is an error, never silently dropped.
-    pub fn load(home: &Path) -> Result<File, SettingsError> {
+    /// parsed is an error, never silently dropped. The text the settings file
+    /// held comes back too, because a write compares against it.
+    fn read(home: &Path) -> Result<(File, Option<String>), SettingsError> {
         let mut file = File::default();
         if let Some(legacy) = read_optional(&user_config(home))? {
             let layer: ConfigLayer =
@@ -956,8 +973,9 @@ impl File {
                 })?;
             file.you = layer.settings_projection();
         }
-        if let Some(text) = read_optional(&user_file(home))? {
-            let parsed = File::parse(&text).map_err(|source| SettingsError::InFile {
+        let text = read_optional(&user_file(home))?;
+        if let Some(text) = &text {
+            let parsed = File::parse(text).map_err(|source| SettingsError::InFile {
                 path: user_file(home),
                 source: Box::new(source),
             })?;
@@ -966,7 +984,7 @@ impl File {
                 file.repos.insert(name, layer);
             }
         }
-        Ok(file)
+        Ok((file, text))
     }
 }
 
@@ -1082,14 +1100,14 @@ fn parse_repo_committed(text: &str) -> Result<Layer, SettingsError> {
     if !tasks.is_empty() {
         root.insert("tasks".to_owned(), toml::Value::Table(tasks));
     }
-    parse_limits(&root, "", Limit::RepoCommitted)
+    parse_sections(&root, "", Limit::RepoCommitted)
 }
 
 /// Parse the `roles`, `tasks` and `review` tables of one layer.
 ///
 /// `origin` prefixes the key names in error messages, so a bad key inside
 /// `[repos.mine.tasks]` reads as `repos.mine.tasks.merge`.
-fn parse_limits(table: &toml::Table, origin: &str, limit: Limit) -> Result<Layer, SettingsError> {
+fn parse_sections(table: &toml::Table, origin: &str, limit: Limit) -> Result<Layer, SettingsError> {
     let mut layer = Layer::new();
     for (name, item) in table {
         match name.as_str() {
@@ -1853,12 +1871,17 @@ pub struct Loaded {
     pub repo: Option<String>,
     /// The repository's committed layer.
     pub repo_file: Layer,
+    /// The text the person's settings file held when it was read.
+    ///
+    /// A write compares against it, so a file that changed in between — another
+    /// verb, the service, a person's editor — is refused instead of replaced.
+    settings_text: Option<String>,
 }
 
 impl Loaded {
     /// Read the person's file and `root`'s committed file.
     pub fn read(home: &Path, root: Option<&Path>) -> Result<Loaded, SettingsError> {
-        let file = File::load(home)?;
+        let (file, settings_text) = File::read(home)?;
         let (repo, repo_file) = match root {
             Some(root) => (repo_name(root), read_repo_file(root)?),
             None => (None, Layer::new()),
@@ -1867,6 +1890,7 @@ impl Loaded {
             file,
             repo,
             repo_file,
+            settings_text,
         })
     }
 
@@ -1955,7 +1979,13 @@ impl Loaded {
             _ => true,
         };
         if should_write {
-            store::edit(&user_file(home), scope, key, decided.as_ref())?;
+            store::edit(
+                &user_file(home),
+                scope,
+                key,
+                decided.as_ref(),
+                self.settings_text.as_deref(),
+            )?;
         }
         Ok(Written { outcome, resolved })
     }
