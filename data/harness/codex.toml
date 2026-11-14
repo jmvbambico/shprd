@@ -111,11 +111,17 @@ delivery = "first-message"
 sources = ["osc7501", "hook", "screen"]
 
 [asks]
-# Codex fires `PermissionRequest` for an approval. Codex 0.167 reads a trusted
-# project's `.codex/hooks.json` and only when its `.codex/config.toml` says
-# `hooks = true`, so the installer writes both into the task's worktree, never
-# the person's ~/.codex/hooks.json (M9.5). It waits up to 1800 s for an answer,
-# as Shepherdr's hook does (v3.1.34).
+# Codex's own config docs name a project `.codex/config.toml` as "settings for a
+# trusted repository, including sandbox, MCP, hooks, model, and reasoning
+# defaults", so the project config is where a task's hook belongs — never the
+# person's ~/.codex/hooks.json (M9.5). The installer writes `.codex/hooks.json`
+# and turns hooks on in the worktree's own `.codex/config.toml`. It waits up to
+# 1800 s for an answer, as Shepherdr's hook does (v3.1.34).
+# unverified: that `hooks = true` is the key that turns project hooks on (codex
+# 0.167 also carries a `hooks` feature flag), that the file is `.codex/hooks.json`
+# rather than a `.codex/hooks/` directory, and that a fresh project hook needs its
+# trust recorded (codex has `--dangerously-bypass-hook-trust` for that). M9.2's
+# live pass settles all three.
 supported = true
 config = ".codex/hooks.json"
 format = "codex_hooks"
