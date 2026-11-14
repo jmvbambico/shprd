@@ -78,8 +78,46 @@ const WORKER_M9: &str = include_str!("../../../data/templates/history/worker-m9.
 /// The SHA-256 of [`WORKER_M9`], the worker's second retired default.
 const WORKER_M9_DIGEST: &str = "900f82be310d6ad3f688dc4276a9bd7bc0817ae18310a331960c880b50dd0872";
 
+/// The worker wording M9.5 shipped, which told every worker to ask with its
+/// CLI's own question tool. A program with no ask hook cannot raise a card that
+/// way, so today's wording sends the worker to the `Asking the person` section
+/// of its brief, which names the route from the program's harness.
+#[cfg(test)]
+const WORKER_M9_ASKS: &str = include_str!("../../../data/templates/history/worker-m9-asks.md");
+
+/// The SHA-256 of [`WORKER_M9_ASKS`], the worker's third retired default.
+const WORKER_M9_ASKS_DIGEST: &str =
+    "59e22b0f71d7810c737e8ead9937852cd1166f3867653aea7fea92970081583f";
+
 /// The worker's retired defaults.
-const WORKER_OLD: &[&str] = &[WORKER_FIRST_DIGEST, WORKER_M9_DIGEST];
+const WORKER_OLD: &[&str] = &[WORKER_FIRST_DIGEST, WORKER_M9_DIGEST, WORKER_M9_ASKS_DIGEST];
+
+/// The backup wording M9.5 shipped, retired for the same reason as the worker's:
+/// the ask route is the program's, not one CLI tool's.
+#[cfg(test)]
+const BACKUP_M9_ASKS: &str = include_str!("../../../data/templates/history/backup-m9-asks.md");
+
+/// The SHA-256 of [`BACKUP_M9_ASKS`], the backup's first retired default.
+const BACKUP_M9_ASKS_DIGEST: &str =
+    "870902264b1bcf1c89e6fddb66dd04728fcfca510aa0722c639d1236023670f4";
+
+/// The backup's retired defaults.
+const BACKUP_OLD: &[&str] = &[BACKUP_M9_ASKS_DIGEST];
+
+/// The coordinator wording M9.5 shipped, retired because it named only the
+/// CLI's own question tool: a coordinator on a program with no ask hook raises
+/// its card with `shprd ask raise`.
+#[cfg(test)]
+const ASSISTANT_M9_ASKS: &str =
+    include_str!("../../../data/templates/history/assistant-m9-asks.md");
+
+/// The SHA-256 of [`ASSISTANT_M9_ASKS`], the coordinator's first retired
+/// default.
+const ASSISTANT_M9_ASKS_DIGEST: &str =
+    "55fc1fde127f7208667ccf62caaa6d5c57f6a3678a74d78fc8ea4583fce8ebb3";
+
+/// The coordinator's retired defaults.
+const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [
@@ -88,7 +126,7 @@ pub const SHIPPED: [ShippedPrompt; 4] = [
         role: "coordinator",
         about: "Plans the work and starts a task for each part.",
         text: include_str!("../../../data/templates/assistant.md"),
-        old: &[],
+        old: ASSISTANT_OLD,
     },
     ShippedPrompt {
         id: "worker",
@@ -109,7 +147,7 @@ pub const SHIPPED: [ShippedPrompt; 4] = [
         role: "backup",
         about: "Takes a task over once, when the worker's CLI cannot go on.",
         text: include_str!("../../../data/templates/backup.md"),
-        old: &[],
+        old: BACKUP_OLD,
     },
 ];
 

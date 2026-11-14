@@ -271,6 +271,65 @@ fn the_worker_m9_digest_is_the_listed_one() {
 }
 
 #[test]
+fn the_worker_m9_asks_digest_is_the_listed_one() {
+    assert_eq!(digest(WORKER_M9_ASKS.as_bytes()), WORKER_M9_ASKS_DIGEST);
+    assert!(
+        worker().old.contains(&WORKER_M9_ASKS_DIGEST),
+        "the retired default is in the worker's list"
+    );
+    assert!(WORKER_M9_ASKS.as_bytes() != worker().text.as_bytes());
+}
+
+/// A build that installed the wording which only knew the CLI's question tool
+/// upgrades it: the ask route is the program's, and the old words say otherwise.
+#[test]
+fn an_untouched_asks_default_is_upgraded() {
+    let temp = dir();
+    std::fs::write(worker_path(temp.path()), WORKER_M9_ASKS).expect("an old install");
+    let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert_eq!(installed.text, worker().text, "today's words won");
+}
+
+#[test]
+fn the_backup_m9_asks_digest_is_the_listed_one() {
+    let backup = shipped_prompt("backup").expect("the backup prompt is shipped");
+    assert_eq!(digest(BACKUP_M9_ASKS.as_bytes()), BACKUP_M9_ASKS_DIGEST);
+    assert!(
+        backup.old.contains(&BACKUP_M9_ASKS_DIGEST),
+        "the retired default is in the backup's list"
+    );
+    assert!(BACKUP_M9_ASKS.as_bytes() != backup.text.as_bytes());
+}
+
+#[test]
+fn the_coordinators_m9_asks_digest_is_the_listed_one() {
+    let assistant = shipped_prompt("assistant").expect("the coordinator prompt is shipped");
+    assert_eq!(
+        digest(ASSISTANT_M9_ASKS.as_bytes()),
+        ASSISTANT_M9_ASKS_DIGEST
+    );
+    assert!(
+        assistant.old.contains(&ASSISTANT_M9_ASKS_DIGEST),
+        "the retired default is in the coordinator's list"
+    );
+    assert!(ASSISTANT_M9_ASKS.as_bytes() != assistant.text.as_bytes());
+}
+
+/// The worker's words point at the brief for the mechanism, because only the
+/// brief knows the program's harness; naming one CLI's tool would be wrong for
+/// every other program.
+#[test]
+fn the_worker_prompt_points_at_the_brief_for_how_to_ask() {
+    let text = worker().text;
+    assert!(text.contains("`Asking the person` section"), "{text}");
+    assert!(
+        !text.contains("ask with your CLI's own question tool"),
+        "the mechanism is the brief's to name: {text}"
+    );
+}
+
+#[test]
 fn the_worker_prompt_hands_in_and_never_starts_its_own_review() {
     // Decided in prose: the worker hands in; the engine reviews. A brief that
     // told the worker to run the review itself would be a wrong instruction.
