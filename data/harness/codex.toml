@@ -107,7 +107,8 @@ delivery = "first-message"
 [status]
 # The agent's own OSC 7501 report first, then a hook it runs for us, then the
 # bottom of its pane. Verified on this machine: herdr installs a SessionStart
-# hook into ~/.codex/hooks.json, the same file the ask hook goes into below.
+# hook into ~/.codex/hooks.json (status hooks are the person's own; the ask hook
+# below is worktree-local).
 sources = ["osc7501", "hook", "screen"]
 
 [asks]

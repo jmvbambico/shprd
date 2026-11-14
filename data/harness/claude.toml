@@ -97,7 +97,7 @@ file = "path"
 # The agent's own OSC 7501 report first, then a hook it runs for us, then the
 # bottom of its pane. Verified on this machine: herdr installs SessionStart,
 # PreToolUse, PostToolUse and UserPromptSubmit hooks into ~/.claude/settings.json
-# (the same file the ask hook goes into below).
+# (status hooks are the person's own; the ask hook below is worktree-local).
 sources = ["osc7501", "hook", "screen"]
 
 [asks]
