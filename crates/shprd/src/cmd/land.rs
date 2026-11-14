@@ -436,7 +436,7 @@ fn merge(
         )));
     }
     forge
-        .merge(number)
+        .merge(number, head)
         .map_err(|err| CliError::other(anyhow!(err).context("merging the pull request")))?;
     let event = ctx.commit(EventKind::PrMerged {
         number,
