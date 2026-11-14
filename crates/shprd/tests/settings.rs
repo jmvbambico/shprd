@@ -54,6 +54,19 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
 
+    /// Runs any shprd verb in this fixture's repository.
+    fn shprd(&self, args: &[&str]) -> Output {
+        Command::new(BIN)
+            .args(args)
+            .arg("--repo")
+            .arg(&self.repo)
+            .arg("--no-dagr")
+            .env("SHPRD_HOME", self.home.path())
+            .env("SHPRD_DATA_DIR", data_dir())
+            .output()
+            .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
+    }
+
     /// Runs a verb and returns its stdout, asserting it succeeded.
     fn ok(&self, args: &[&str]) -> String {
         let output = self.run(args);
@@ -421,4 +434,79 @@ fn a_key_nobody_knows_is_refused_with_the_keys_that_exist() {
         "{refused}"
     );
     assert!(refused.contains("roles.order"), "{refused}");
+}
+
+#[test]
+fn a_task_is_the_nearest_layer_and_setting_one_is_refused() {
+    let fixture = Fixture::new();
+    // A run with one task, whose own attempt ran on Claude Code.
+    for args in [
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+        ][..],
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "t",
+            "--scope",
+            "a",
+            "--acceptance",
+            "b",
+        ][..],
+        &[
+            "agent",
+            "spawn",
+            "--task",
+            "T1",
+            "--record-only",
+            "--attempt",
+            "1",
+            "--worktree",
+            "/tmp/w",
+            "--branch",
+            "task/T1",
+            "--agent",
+            "claude/claude-opus-5-5",
+        ][..],
+    ] {
+        let output = fixture.shprd(args);
+        assert!(
+            output.status.success(),
+            "`{}` should succeed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let shown = fixture.ok(&["get", "roles.worker.agent", "--task", "T1"]);
+    assert_eq!(shown.trim(), "roles.worker.agent = \"claude\"  (this task)");
+    let shown = fixture.ok(&["get", "roles.worker.model", "--task", "T1"]);
+    assert_eq!(
+        shown.trim(),
+        "roles.worker.model = \"claude-opus-5-5\"  (this task)"
+    );
+    // Every other key still comes from its own layer.
+    assert_eq!(
+        fixture.ok(&["get", "tasks.merge", "--task", "T1"]).trim(),
+        "tasks.merge = \"ask\"  (built in)"
+    );
+
+    let refused = fixture.refused(&["set", "tasks.merge", "checks", "--task", "T1"]);
+    assert!(
+        refused.contains("a task's own settings cannot be written from here"),
+        "{refused}"
+    );
+    let refused = fixture.refused(&["get", "tasks.merge", "--task", "NOPE"]);
+    assert!(refused.contains("no task `NOPE`"), "{refused}");
 }

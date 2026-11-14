@@ -45,10 +45,10 @@ pub fn run(
     let loaded = load(&home, root)?;
     let table = harness_table(root);
     match command {
-        SettingsCommand::Show(args) => show(&loaded, &home, root, args, json, table.as_ref()),
-        SettingsCommand::Get(args) => get(&loaded, &home, root, args, json, table.as_ref()),
-        SettingsCommand::Set(args) => set(&loaded, &home, root, args, json, table.as_ref()),
-        SettingsCommand::Unset(args) => unset(&loaded, &home, root, args, json, table.as_ref()),
+        SettingsCommand::Show(args) => show(&loaded, root, args, json, table.as_ref()),
+        SettingsCommand::Get(args) => get(&loaded, root, args, json, table.as_ref()),
+        SettingsCommand::Set(args) => set(&loaded, &home, args, json, table.as_ref()),
+        SettingsCommand::Unset(args) => unset(&loaded, &home, args, json, table.as_ref()),
     }
 }
 
@@ -127,7 +127,6 @@ fn task_layer(root: Option<&Path>, task: Option<&str>) -> Result<Option<Layer>, 
 /// Runs `settings show`.
 fn show(
     loaded: &Loaded,
-    _home: &Path,
     root: Option<&Path>,
     args: &SettingsShowArgs,
     json: bool,
@@ -162,7 +161,6 @@ fn show(
 /// Runs `settings get`.
 fn get(
     loaded: &Loaded,
-    _home: &Path,
     root: Option<&Path>,
     args: &SettingsGetArgs,
     json: bool,
@@ -188,7 +186,6 @@ fn get(
 fn set(
     loaded: &Loaded,
     home: &Path,
-    _root: Option<&Path>,
     args: &SettingsSetArgs,
     json: bool,
     table: Option<&Table>,
@@ -229,7 +226,6 @@ fn set(
 fn unset(
     loaded: &Loaded,
     home: &Path,
-    _root: Option<&Path>,
     args: &SettingsUnsetArgs,
     json: bool,
     _table: Option<&Table>,
