@@ -590,6 +590,126 @@ fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
     assert!(report.steps.is_empty(), "{:?}", report.steps);
 }
 
+/// A worker over `fixture` whose review path is `review`.
+fn reviewing(fixture: &Fixture, review: shprd_server::Reviewer) -> Worker {
+    Worker {
+        repo: fixture.repo.clone(),
+        home: fixture.home.clone(),
+        config: config(shprd_core::config::MergePolicy::Auto),
+        facts: Arc::new(Scripted::default()),
+        fallback: None,
+        forge: Arc::new(NoForge),
+        start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: Some(review),
+        actor: Actor::Engine,
+        after_write: None,
+        hub: Hub::new(),
+        news: None,
+    }
+}
+
+/// Every escalation the fixture's log holds, as (task, body, default action).
+fn escalations(fixture: &Fixture) -> Vec<(Option<String>, String, String)> {
+    fixture
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Escalated {
+                task,
+                body,
+                default_action,
+            } => Some((task, body, default_action)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_review_that_fails_after_its_request_is_escalated_once() {
+    // The real review records its request before it opens the tab (so `land`
+    // can trust it), so a multiplexer that is down leaves a request with no
+    // reviewer and no request-less retry. The pass must tell the person.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    fixture
+        .settings("version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5-codex\"\n");
+    let review: shprd_server::Reviewer = Arc::new(move |repo: &Path, task: &str| {
+        // What `review()` does before the tab: record who reviews this attempt.
+        let path = repo.join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).map_err(|err| err.to_string())?;
+        log.append(
+            Actor::Engine,
+            EventKind::ReviewRequested {
+                task: task.to_string(),
+                attempt: 1,
+                reviewer: String::from("codex"),
+                degraded: false,
+            },
+            &SystemClock,
+        )
+        .map_err(|err| err.to_string())?;
+        Err(String::from("the multiplexer is not running"))
+    });
+    let worker = reviewing(&fixture, review);
+
+    let first = worker.tick().expect("the pass ran");
+    assert_eq!(first.steps.len(), 1, "{:?}", first.steps);
+    assert_eq!(first.steps[0].action, "review");
+    assert!(!first.steps[0].ok, "{:?}", first.steps);
+
+    let recorded = escalations(&fixture);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let (task, body, action) = &recorded[0];
+    assert_eq!(task.as_deref(), Some("A"));
+    assert!(
+        body.starts_with("A: the engine's review did not start: "),
+        "{body}"
+    );
+    assert!(body.contains("the multiplexer is not running"), "{body}");
+    assert!(action.contains("--again"), "{action}");
+
+    // The recorded request is what stops the next pass planning it again.
+    let second = worker.tick().expect("the second pass ran");
+    assert!(second.steps.is_empty(), "{:?}", second.steps);
+    assert_eq!(
+        escalations(&fixture).len(),
+        1,
+        "the escalation is said once"
+    );
+}
+
+#[test]
+fn a_review_the_cross_vendor_rule_refuses_is_escalated_once() {
+    // A refusal records no request, so every pass plans the step again; the
+    // person hears once, not once per pass.
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    let fixture = Fixture::new(log);
+    fixture.settings("version = 1\n\n[roles.reviewer]\nagent = \"pi\"\nmodel = \"deepseek/deepseek-v4.1-flash\"\n");
+    let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, _task: &str| {
+        Err(String::from(
+            "the reviewer and the worker both run models from the deepseek family",
+        ))
+    });
+    let worker = reviewing(&fixture, review);
+
+    for _ in 0..2 {
+        let report = worker.tick().expect("the pass ran");
+        assert_eq!(report.steps.len(), 1, "{:?}", report.steps);
+        assert!(!report.steps[0].ok, "{:?}", report.steps);
+    }
+
+    let escalations = escalations(&fixture);
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    assert!(
+        escalations[0]
+            .1
+            .contains("both run models from the deepseek family"),
+        "{escalations:?}"
+    );
+}
+
 #[test]
 fn a_merge_the_forge_made_is_recorded_and_never_repeated() {
     let mut log = vec![started()];

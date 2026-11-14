@@ -712,7 +712,7 @@ impl Worker {
     fn run_step(&self, state: &RunState, step: &Step) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
-            Step::Review { task } => self.review_task(task),
+            Step::Review { task } => self.review_task(state, task),
             Step::Land { task, policy: _ } => self.land_task(state, task),
             Step::MarkLanded {
                 task,
@@ -752,12 +752,29 @@ impl Worker {
     /// cross-vendor rule, the packet, the brief and the kickoff are one code
     /// path, and the request it records is what stops the next pass repeating
     /// the step.
-    fn review_task(&self, task: &str) -> Result<StepReport, String> {
+    ///
+    /// A review that does not start is escalated once, in the task's own name:
+    /// the request may already be in the log, which stops the next pass planning
+    /// the step again, so without the escalation the task would sit at Reported
+    /// for ever with nothing in the ledger saying why. The escalation names the
+    /// failure and the one verb that recovers it.
+    fn review_task(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
         let review = self
             .review
             .as_ref()
             .ok_or_else(|| String::from("no reviewer is configured"))?;
-        let detail = review(&self.repo, task)?;
+        let detail = match review(&self.repo, task) {
+            Ok(detail) => detail,
+            Err(reason) => {
+                let escalated = self.escalate_review_failure(state, task, &reason);
+                return match escalated {
+                    Ok(()) => Err(reason),
+                    Err(escalation) => Err(format!(
+                        "{reason}; the escalation could not be recorded either: {escalation}"
+                    )),
+                };
+            }
+        };
         let step = Step::Review {
             task: task.to_string(),
         };
@@ -765,6 +782,67 @@ impl Worker {
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
         Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Records once that the engine's review of `task` did not start.
+    ///
+    /// The body begins with [`review_failure_prefix`], so a second failed pass
+    /// finds the first escalation and says nothing again. The default action is
+    /// the way forward for the state the failure left: a request may already be
+    /// in the log (which stops the next pass planning the step, so only
+    /// `--again` recovers it), or none is (so the engine retries on the next
+    /// pass once the cause is fixed).
+    fn escalate_review_failure(
+        &self,
+        state: &RunState,
+        task: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        let marker = review_failure_prefix(task);
+        let already = state.escalations.iter().any(|escalation| {
+            escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)
+        });
+        if already {
+            return Ok(());
+        }
+        let default_action = if self.review_requested(task) {
+            format!(
+                "fix what the escalation names, then run `shprd agent review --task {task} \
+                 --again`: it closes the reviewer tab and starts a new review"
+            )
+        } else {
+            format!(
+                "fix what the escalation names; the engine retries the review on its next \
+                 pass, or run `shprd agent review --task {task}` by hand"
+            )
+        };
+        let seq = self.commit(EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: format!("{marker}{reason}"),
+            default_action,
+        })?;
+        self.notify(Some(seq));
+        Ok(())
+    }
+
+    /// Whether the log, as the failed review left it, holds a request for the
+    /// task's newest attempt.
+    ///
+    /// The state a pass was planned from is older than the failed review, so it
+    /// cannot answer this: the review records its request before the step that
+    /// fails. A log that cannot be read answers `false`, which only makes the
+    /// escalation suggest a plain review.
+    fn review_requested(&self, task: &str) -> bool {
+        ledger::load(&self.repo)
+            .ok()
+            .and_then(|(latest, _)| {
+                latest
+                    .tasks
+                    .get(task)
+                    .and_then(|task| task.latest_attempt())
+                    .map(|attempt| !attempt.reviews.is_empty())
+            })
+            .unwrap_or(false)
     }
 
     /// Lands a task through its own pull request, as `shprd land` does.
@@ -1012,6 +1090,15 @@ fn ladder_state(state: &RunState) -> LadderState {
         }
     }
     ladder
+}
+
+/// What every escalation body for a review the engine could not start begins
+/// with.
+///
+/// It is the marker a later pass compares, so one failed review is one
+/// escalation rather than one per pass.
+fn review_failure_prefix(task: &str) -> String {
+    format!("{task}: the engine's review did not start: ")
 }
 
 /// The log's spelling of a provider class.

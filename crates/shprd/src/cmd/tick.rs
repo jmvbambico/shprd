@@ -11,8 +11,8 @@
 //! {
 //!   "steps": [
 //!     {
-//!       "action": "start",            // start | land | mark_landed | needs_you
-//!                                     // | nudge | backup | give_up
+//!       "action": "start",            // start | review | land | mark_landed
+//!                                     // | needs_you | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
 //!       "detail": "started T1 attempt 1 with claude in ...",
