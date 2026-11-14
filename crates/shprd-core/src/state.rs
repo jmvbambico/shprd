@@ -182,6 +182,15 @@ pub struct Task {
     /// head a human approved and whether it merged. `None` until a landing
     /// asks the forge for one.
     pub pr: Option<PrInfo>,
+    /// The head a landing found nothing of its own to merge at, if one did.
+    ///
+    /// It is the one landing outcome that moves nothing: the branch had no work
+    /// beyond its base, so the task is not integrated and its status is
+    /// unchanged. What it does say is that a landing already looked at this
+    /// attempt and found nothing — which is what keeps a tick from landing the
+    /// same attempt again on every pass. A new attempt clears it, because fresh
+    /// work is exactly what a landing has not looked at yet.
+    pub nothing_to_merge: Option<String>,
 }
 
 /// The last progress line an agent recorded for a task.
@@ -447,6 +456,7 @@ impl RunState {
                         dropped_reason: None,
                         last_status: None,
                         pr: None,
+                        nothing_to_merge: None,
                     },
                 );
             }
@@ -461,6 +471,10 @@ impl RunState {
                 self.agents.entry(agent.clone()).or_default();
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Working;
+                    // A fresh attempt is fresh work, so a "nothing to merge"
+                    // a landing found on the attempt before it says nothing
+                    // about this one.
+                    entry.nothing_to_merge = None;
                     entry.attempts.push(Attempt {
                         n: *attempt,
                         agent: agent.clone(),
@@ -735,17 +749,24 @@ impl RunState {
             EventKind::TaskLanded {
                 task,
                 number,
+                head,
                 outcome,
                 ..
             } => {
-                if let Some(entry) = self.tasks.get_mut(task)
-                    && outcome.is_landed()
-                {
-                    entry.status = TaskStatus::Integrated;
-                    if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
-                        && pr.number == *number
-                    {
-                        pr.merged = true;
+                // The head is kept for every outcome, because it is what says a
+                // landing already looked at this commit. Only a landing that
+                // moved something changes the status.
+                let head = Some(head.clone());
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    if outcome.is_landed() {
+                        entry.status = TaskStatus::Integrated;
+                        if let (Some(pr), Some(number)) = (entry.pr.as_mut(), number)
+                            && pr.number == *number
+                        {
+                            pr.merged = true;
+                        }
+                    } else {
+                        entry.nothing_to_merge = head;
                     }
                 }
             }
@@ -1296,6 +1317,84 @@ mod tests {
             "nothing of it landed, so it is not integrated"
         );
         assert!(task.pr.is_none());
+        assert_eq!(
+            task.nothing_to_merge.as_deref(),
+            Some("bbb222"),
+            "the landing's head is kept, so a tick does not land it again"
+        );
+    }
+
+    #[test]
+    fn a_new_attempt_clears_a_nothing_to_merge_landing() {
+        // Attempt 1 failed, a landing found nothing of its own to merge at that
+        // attempt, and attempt 2 starts: the fact belongs to attempt 1 and must
+        // not hold attempt 2 back.
+        let mut events = log("a", "no_main_push");
+        events.truncate(2);
+        for event in [
+            ev(
+                3,
+                EventKind::Spawned {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt/a".to_string(),
+                    branch: "feature/a".to_string(),
+                },
+            ),
+            ev(
+                4,
+                EventKind::Reported {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    status: crate::event::ReportStatus::Failed,
+                    summary: "gave up".to_string(),
+                    tests: Vec::new(),
+                    checks: Vec::new(),
+                    changed_paths: vec!["src/a/x.rs".to_string()],
+                    commit: Some("bbb222".to_string()),
+                    skills_used: Vec::new(),
+                },
+            ),
+            ev(
+                5,
+                EventKind::TaskLanded {
+                    task: "a".to_string(),
+                    base: "main".to_string(),
+                    head: "bbb222".to_string(),
+                    number: None,
+                    outcome: LandOutcome::NothingToMerge,
+                },
+            ),
+            ev(
+                6,
+                EventKind::Spawned {
+                    task: "a".to_string(),
+                    attempt: 2,
+                    agent: "claude".to_string(),
+                    model: None,
+                    worktree: "/wt/a".to_string(),
+                    branch: "feature/a".to_string(),
+                },
+            ),
+        ] {
+            events.push(event);
+        }
+        let state = match RunState::fold(&events) {
+            Ok(state) => state,
+            Err(err) => panic!("the fixture must fold: {err}"),
+        };
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert_eq!(task.attempts.len(), 2, "attempt 2 started");
+        assert!(
+            task.nothing_to_merge.is_none(),
+            "fresh work has not been landed yet: {:?}",
+            task.nothing_to_merge
+        );
     }
 
     #[test]

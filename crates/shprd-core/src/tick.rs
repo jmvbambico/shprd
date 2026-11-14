@@ -255,10 +255,16 @@ fn step_for(
                 .or_else(|| task.pr.as_ref().map(|known| known.number)),
         });
     }
+    // A landing already looked at this attempt and found nothing of its own to
+    // merge, so there is nothing left to do: the branch has no work beyond its
+    // base, and landing it again would record the same fact every pass without
+    // moving the task. The fold clears this when a new attempt starts, so only
+    // that attempt is held back.
+    let nothing_to_merge = task.nothing_to_merge.is_some();
     // Not while its agent has taken the work up again: a landing judges the
     // commit the branch is at, and an agent that is writing produces another.
     let busy = facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging);
-    if !busy && rules::ready_to_land(task).is_ok() {
+    if !busy && !nothing_to_merge && rules::ready_to_land(task).is_ok() {
         let policy = input.config.land.policy_for(base);
         let land = Step::Land {
             task: task.id.clone(),
@@ -893,6 +899,33 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_task_whose_branch_had_nothing_to_merge_is_not_landed_again() {
+        // The landing found nothing of the branch's own to merge, so nothing
+        // moved — and a pass must not record that same fact every tick.
+        let mut log = ready_log("A");
+        log.push(ev(
+            7,
+            EventKind::TaskLanded {
+                task: "A".to_string(),
+                base: "main".to_string(),
+                head: "A-commit".to_string(),
+                number: None,
+                outcome: LandOutcome::NothingToMerge,
+            },
+        ));
+        let state = folded(&log);
+        assert_eq!(
+            state
+                .tasks
+                .get("A")
+                .and_then(|task| task.nothing_to_merge.as_deref()),
+            Some("A-commit")
+        );
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "nothing is left to land: {steps:?}");
     }
 
     #[test]

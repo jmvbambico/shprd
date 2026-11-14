@@ -269,6 +269,52 @@ impl Fixture {
         std::fs::write(&path, format!("{text}{line}\n")).expect("append the request");
     }
 
+    /// A hand-in whose attempt made no commit of its own, and named none.
+    ///
+    /// The worktree is left exactly as it branched and the hand-in names no
+    /// commit, so the landing has nothing to push and nothing of the branch's
+    /// own to merge: the one outcome that moves nothing, `NothingToMerge`.
+    fn hand_in_without_a_commit(&self, id: &str) -> String {
+        let (worktree, _branch) = self.attempt_of(id);
+        let head = self.git_in(&worktree, &["rev-parse", "HEAD"]);
+        self.ok(&[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "nothing to change after all",
+            "--changed",
+            &format!("task-{id}.txt"),
+        ]);
+        self.review_requested(id, "c1");
+        let packet = self
+            .home
+            .join(".shprd")
+            .join("reviews")
+            .join("r1")
+            .join(format!("{id}-a1"));
+        std::fs::create_dir_all(&packet).expect("mkdir the packet");
+        std::fs::write(packet.join("findings.json"), "[]").expect("write the findings");
+        self.ok(&[
+            "--as",
+            "engine",
+            "agent",
+            "review-verdict",
+            "--task",
+            id,
+            "--attempt",
+            "1",
+        ]);
+        head
+    }
+
     /// Drives `id` from started to ready to land: a commit, a hand-in with a
     /// passing check, an independent review and a passing review gate.
     fn hand_in(&self, id: &str) -> String {
@@ -521,6 +567,50 @@ fn a_pull_request_merged_outside_shprd_is_recorded_as_landed() {
         "nothing was merged or opened: {:?}",
         fixture.forge_calls()
     );
+}
+
+#[test]
+fn a_branch_with_nothing_of_its_own_is_landed_once_and_not_every_pass() {
+    // The reviewer of this task found the hole: a landing that finds nothing of
+    // the branch's own to merge moves nothing, so the fold kept no trace of it
+    // and every later pass landed the same attempt again. It is recorded once
+    // now, and the pass after it has nothing left to do.
+    let fixture = Fixture::new("auto");
+    fixture.start();
+    fixture.add_task("A", "task-A.txt", None);
+    fixture.tick();
+    // The attempt is ready to land but commits nothing: its worktree is exactly
+    // what it branched from.
+    let head = fixture.hand_in_without_a_commit("A");
+    fixture.script_forge(&forge_at("A", &head));
+
+    let first = fixture.tick();
+    assert_eq!(actions(&first), vec!["land:A".to_string()], "{first:?}");
+    assert!(
+        first[0]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nothing to merge"),
+        "the landing found nothing of its own: {first:?}"
+    );
+    let recorded = fixture
+        .events()
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::TaskLanded { task, .. } if task == "A"))
+        .count();
+    assert_eq!(recorded, 1, "one landing recorded, not one per pass");
+
+    let second = fixture.tick();
+    assert!(
+        second.is_empty(),
+        "the same attempt is not landed twice: {second:?}"
+    );
+    let recorded = fixture
+        .events()
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::TaskLanded { task, .. } if task == "A"))
+        .count();
+    assert_eq!(recorded, 1, "and still exactly one, after a second pass");
 }
 
 #[test]
