@@ -142,6 +142,7 @@ mod tests {
             pr: None,
             last_status: None,
             nothing_to_merge: None,
+            fallbacks: Vec::new(),
         }
     }
 
