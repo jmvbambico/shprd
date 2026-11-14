@@ -348,6 +348,7 @@ impl Worker {
             &state,
             &self.facts.live(&state),
             retries,
+            Some(&news::started_at(&events)),
             desk.clock.now_ms(),
         );
         let snapshot = news::readings(&state, &self.repo, &rows, &events);
@@ -428,7 +429,7 @@ impl Worker {
         facts: &Facts,
         retries: &BTreeMap<String, derived::ProviderCut>,
     ) -> BTreeMap<String, Phase> {
-        self.rows(state, &facts.live, retries, SystemClock.now_ms())
+        self.rows(state, &facts.live, retries, None, SystemClock.now_ms())
             .into_iter()
             .map(|(id, (row, _))| (id, phase_of(row.status)))
             .collect()
@@ -447,11 +448,17 @@ impl Worker {
     /// The derived status and its signal are returned together because the news
     /// needs both: the row a person sees, and the facts behind it (why an
     /// attempt failed, which reviews it had).
+    ///
+    /// `started` is when each task's newest attempt was spawned, when the caller
+    /// has the log at hand: the status rules then hold a just-started task as
+    /// at work for a moment, even before the host reports its agent. A caller
+    /// without the log passes `None` and gets the rules without that grace.
     fn rows(
         &self,
         state: &RunState,
         live: &BTreeSet<String>,
         retries: &BTreeMap<String, derived::ProviderCut>,
+        started: Option<&BTreeMap<String, u64>>,
         now_ms: u64,
     ) -> BTreeMap<String, (Derived, TaskSignal)> {
         state
@@ -460,6 +467,7 @@ impl Worker {
             .map(|id| {
                 let mut signal = TaskSignal::from_state(state, id).unwrap_or_default();
                 signal.provider_cut = retries.get(id).cloned();
+                signal.started_ms = started.and_then(|at| at.get(id).copied());
                 let agents = if live.contains(id) {
                     LiveAgents::new(vec![LiveAgent {
                         address: id.clone(),

@@ -198,6 +198,23 @@ fn space_of(state: &RunState, repo: &Path) -> String {
     }
 }
 
+/// When each task's newest attempt was spawned, ms, from the log.
+///
+/// The status rules read it as the start grace (`STARTING_MS`): an agent that
+/// was started a moment ago is at work even before the host has noticed its
+/// terminal, which is what keeps a task that just started from being told as
+/// one whose agent stopped.
+pub fn started_at(events: &[Event]) -> BTreeMap<String, u64> {
+    let mut at: BTreeMap<String, u64> = BTreeMap::new();
+    for event in events {
+        if let shprd_core::event::EventKind::Spawned { task, .. } = &event.kind {
+            let seen = at.entry(task.clone()).or_insert(event.at_ms);
+            *seen = (*seen).max(event.at_ms);
+        }
+    }
+    at
+}
+
 /// When anything last happened to each task, ms, from the log.
 ///
 /// Shepherdr reads a task's agent status, its own status line and its session
@@ -347,9 +364,9 @@ mod tests {
         }
     }
 
-    /// The state `kinds` folds to, as a run's log would leave it.
-    fn folded(kinds: Vec<EventKind>) -> RunState {
-        let events: Vec<Event> = kinds
+    /// The log `kinds` makes, one event a second apart from [`NOW`].
+    fn kinds_events(kinds: Vec<EventKind>) -> Vec<Event> {
+        kinds
             .into_iter()
             .enumerate()
             .map(|(i, kind)| Event {
@@ -358,8 +375,12 @@ mod tests {
                 actor: Actor::Engine,
                 kind,
             })
-            .collect();
-        RunState::fold(&events).expect("the fixture log folds")
+            .collect()
+    }
+
+    /// The state `kinds` folds to, as a run's log would leave it.
+    fn folded(kinds: Vec<EventKind>) -> RunState {
+        RunState::fold(&kinds_events(kinds)).expect("the fixture log folds")
     }
 
     /// A run on `/repo/shprd`, with nothing else.
@@ -623,6 +644,22 @@ mod tests {
         let at = activity(&events);
         assert_eq!(at.get("T1"), Some(&2_000));
         assert_eq!(at.get("T2"), Some(&1_500));
+    }
+
+    #[test]
+    fn a_spawn_time_is_read_from_the_log() {
+        let events = {
+            let mut kinds = run();
+            kinds.extend([added(), spawned(1), spawned(2)]);
+            kinds
+        };
+        let events: Vec<Event> = kinds_events(events);
+        let at = started_at(&events);
+        assert_eq!(
+            at.get("A"),
+            Some(&(NOW + 3_000)),
+            "the newest attempt's spawn is what the grace counts from"
+        );
     }
 
     #[test]

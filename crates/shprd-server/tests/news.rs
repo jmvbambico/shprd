@@ -437,6 +437,37 @@ fn a_refused_delivery_is_tried_again() {
     assert!(told[0].1.contains("A started"));
 }
 
+/// A task just started is news as started, not as an agent that stopped: the
+/// host has not seen the new terminal yet, and the start grace says so.
+#[test]
+fn a_task_just_spawned_is_not_told_as_failed_before_the_host_sees_it() {
+    let fixture = Fixture::new();
+    fixture.plan(&["A"]);
+    fixture.coordinator("pane-1");
+    let host = FakeHost::new();
+    // The real clock: the spawn the test records is a moment ago, as a real
+    // pass's is.
+    let worker = fixture.worker(
+        &[],
+        Some(NewsDesk {
+            coordinator: host.clone(),
+            settle_ms: 0,
+            clock: Arc::new(SystemClock),
+        }),
+    );
+
+    fixture.pass(&worker);
+    fixture.spawn("A");
+    worker.tick().expect("the pass after the spawn ran");
+    let told = host.told();
+    assert_eq!(told.len(), 1, "one line: {told:?}");
+    assert!(
+        told[0].1.contains("A started"),
+        "a just-started task is news as started: {:?}",
+        told[0].1
+    );
+}
+
 /// A pass with no news desk never writes to a coordinator.
 #[test]
 fn a_pass_without_a_news_desk_tells_nobody() {
