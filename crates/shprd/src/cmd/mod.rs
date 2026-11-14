@@ -22,6 +22,7 @@ pub mod serve;
 pub mod set;
 pub mod spawn;
 pub mod sync;
+pub mod tick;
 pub mod verdict;
 pub mod view;
 pub mod watch;
@@ -90,6 +91,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
         Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Tick(args)) => tick::tick_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 

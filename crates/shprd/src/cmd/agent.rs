@@ -173,6 +173,91 @@ fn prompt_cmd(ctx: &Ctx, args: &PromptArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Starts an agent on a task, for the service's tick.
+///
+/// It is [`spawn_cmd`] without the printing: the tick runs the same spawn the
+/// verb does — the same worktree, tab, brief and ledger events — and answers
+/// with one line about what happened instead of writing to stdout, because a
+/// service has no terminal to write to.
+///
+/// `SHPRD_TICK_RECORD_ONLY` makes it record the attempt without a worktree, a
+/// tab or a CLI. Only a test sets it: the integration tests have no multiplexer
+/// and no installed agent, and what they assert is that the tick started the
+/// task, not that a terminal appeared.
+pub(crate) fn start_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, String> {
+    if record_only_for_tick() {
+        return record_attempt_only(ctx, home, task);
+    }
+    let mux = spawn::real_mux();
+    let env = spawn::build_env(ctx, Some(home)).map_err(|err| err.to_string())?;
+    let request = spawn::SpawnRequest {
+        task: task.to_string(),
+        agent: None,
+        effort: None,
+    };
+    let report = spawn::spawn(&mux, &env, &request).map_err(|err| err.to_string())?;
+    Ok(format!(
+        "started {} attempt {} with {} in {} (tab {:?})",
+        report.task,
+        report.attempt,
+        report.agent,
+        report.worktree.display(),
+        report.tab
+    ))
+}
+
+/// Environment variable that makes a tick's start record the attempt only.
+pub(crate) const RECORD_ONLY_ENV: &str = "SHPRD_TICK_RECORD_ONLY";
+
+/// True when the environment asks for a record-only start, in a debug build.
+fn record_only_for_tick() -> bool {
+    cfg!(debug_assertions) && std::env::var_os(RECORD_ONLY_ENV).is_some_and(|value| value == "1")
+}
+
+/// Records the attempt a start would have made, and starts nothing.
+///
+/// The event is the one a spawn appends, so a task the tick started this way
+/// reads as Working and everything downstream — the derived status, the next
+/// pass, the landing — behaves exactly as it would with a live agent.
+fn record_attempt_only(ctx: &Ctx, home: &Path, task: &str) -> Result<String, String> {
+    let state = ctx.state().map_err(|err| err.to_string())?;
+    let found = state
+        .tasks
+        .get(task)
+        .ok_or_else(|| format!("no task {task:?} in this run"))?;
+    let attempt = found.attempts.len() as u32 + 1;
+    let run = state
+        .run
+        .as_ref()
+        .ok_or_else(|| String::from("no run yet"))?;
+    // The worktree is real, cut from the run's integration branch exactly as a
+    // spawn cuts it: a test has to commit in it to make a landing possible, and
+    // a landing reads the branch's head there.
+    let layout = shprd_git::worktree::Layout::default_for_home(home);
+    let created = shprd_git::worktree::create(
+        &ctx.root,
+        &layout,
+        &run.run_id,
+        task,
+        &run.integration_branch,
+    )
+    .map_err(|err| err.to_string())?;
+    ctx.commit(EventKind::Spawned {
+        task: task.to_string(),
+        attempt,
+        agent: String::from("recorded"),
+        model: None,
+        worktree: created.path.display().to_string(),
+        branch: created.branch.clone(),
+    })
+    .map_err(|err| err.to_string())?;
+    Ok(format!(
+        "recorded {task} attempt {attempt} on {} in {}",
+        created.branch,
+        created.path.display()
+    ))
+}
+
 /// Records a short progress line for a task.
 ///
 /// This is the verb a worker calls to say where it is. It appends under the

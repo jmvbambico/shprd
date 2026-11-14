@@ -29,15 +29,19 @@ pub mod dto;
 pub mod error;
 pub mod service;
 pub mod snapshot;
+pub mod tick;
 
 pub(crate) mod actions;
 pub(crate) mod auth;
-pub(crate) mod hub;
+pub mod hub;
 pub(crate) mod ledger;
 
 pub use api::{App, WsLimits};
 pub use error::{ApiReject, ServerError};
 pub use service::{
-    AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, VERSION, serve,
-    shutdown_signal, state_dir,
+    AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig, VERSION,
+    serve, shutdown_signal, state_dir,
+};
+pub use tick::{
+    FactsSource, LiveFacts, LiveFn, SharedForge, Starter, StepReport, TickReport, Worker,
 };

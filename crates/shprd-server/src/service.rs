@@ -362,6 +362,38 @@ pub struct Config {
     pub actor: shprd_core::event::Actor,
     /// A step to run after every action that appended an event.
     pub after_write: Option<AfterWrite>,
+    /// The change counter the API and the tick share.
+    ///
+    /// Both write the one log, so both wake the one set of waiters: a task the
+    /// tick started reaches an open page exactly as a task added through the API
+    /// does.
+    pub hub: crate::hub::Hub,
+    /// The tick the service runs beside the API, when the binary supplies one.
+    ///
+    /// The service's job is to advance the world by itself, so this is what
+    /// makes `shprd serve` more than an HTTP front end. A service prepared
+    /// without it — every test that only drives the router — answers requests
+    /// and advances nothing.
+    pub tick: Option<TickConfig>,
+}
+
+/// How the service runs its tick.
+#[derive(Clone)]
+pub struct TickConfig {
+    /// The worker one pass runs against.
+    pub worker: std::sync::Arc<crate::tick::Worker>,
+    /// How long to wait between passes.
+    pub interval: std::time::Duration,
+    /// How many tasks of this repository may run at once, for the startup line.
+    pub max_running: u32,
+}
+
+impl std::fmt::Debug for TickConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TickConfig")
+            .field("interval", &self.interval)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Config {
@@ -373,6 +405,8 @@ impl Config {
             port: 0,
             actor: shprd_core::event::Actor::Human,
             after_write: None,
+            hub: crate::hub::Hub::new(),
+            tick: None,
         }
     }
 }
@@ -383,6 +417,7 @@ pub struct Service {
     app: App,
     listener: TcpListener,
     info: ServiceInfo,
+    tick: Option<TickConfig>,
 }
 
 impl Service {
@@ -399,19 +434,22 @@ impl Service {
             .local_addr()
             .map_err(ServerError::NoAddress)?
             .port();
-        let app = App::prepare(
+        let app = App::prepare_with_hub(
             &config.repo,
             port,
             &config.actor,
             &config.state_dir,
             config.after_write.clone(),
+            config.hub.clone(),
         )?;
         let info = app.info();
+        let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");
         Ok(Self {
             app,
             listener,
             info,
+            tick,
         })
     }
 
@@ -428,14 +466,46 @@ impl Service {
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServerError> {
+        let tick = self.tick.clone();
+        self.run_with_tick(shutdown, tick).await
+    }
+
+    /// Serves, running `tick` beside the API until `shutdown`.
+    ///
+    /// The tick is one more task in the same runtime, so stopping the service
+    /// stops it: a pass in flight finishes, and no pass starts after the
+    /// shutdown resolves.
+    pub async fn run_with_tick(
+        self,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+        tick: Option<TickConfig>,
+    ) -> Result<(), ServerError> {
         let Self {
             app,
             listener,
             info,
+            tick: _,
         } = self;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let ticker = tick.map(|tick| {
+            let worker = std::sync::Arc::clone(&tick.worker);
+            let interval = tick.interval;
+            tokio::spawn(async move {
+                crate::tick::run(worker, interval, async {
+                    // The service's own shutdown is awaited here, so the
+                    // loop ends with it rather than with the socket.
+                    let _ = stopped.await;
+                })
+                .await;
+            })
+        });
         let served = axum::serve(listener, app.router())
             .with_graceful_shutdown(shutdown)
             .await;
+        let _ = stop.send(());
+        if let Some(ticker) = ticker {
+            let _ = ticker.await;
+        }
         let removed = app.remove_record();
         tracing::info!(port = info.port, "shprd service stopped");
         served.map_err(ServerError::Serve)?;

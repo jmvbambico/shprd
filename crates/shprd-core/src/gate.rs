@@ -141,6 +141,7 @@ mod tests {
             dropped_reason: None,
             pr: None,
             last_status: None,
+            nothing_to_merge: None,
         }
     }
 

@@ -120,6 +120,33 @@ pub enum Command {
     Drop(DropArgs),
     /// Serve this run over a loopback HTTP API, for every UI that calls it.
     Serve(ServeArgs),
+    /// Advance the run once, now: start what may start, land what may land.
+    ///
+    /// This is the same pass `shprd serve` runs every `[tick] interval_secs`
+    /// (15 by default). It starts a queued task whose `deps` have all landed, up
+    /// to `[tick] max_running` (4 by default) tasks running at once, lands a task
+    /// `[land] merge` allows, records a pull request merged outside shprd, and
+    /// says once when a ready task's policy is `ask`.
+    ///
+    /// `--once` spells out that this invocation is one pass; the verb never
+    /// loops. With `--json` it prints one document, `{"steps": [...]}`, each step being
+    /// `{action, task, ok, detail, seq?}` where `action` is one of `start`,
+    /// `land`, `mark_landed`, `needs_you` and `seq` is the log line it appended
+    /// when it appended one. Without `--json` it prints one line per action, or
+    /// `ok nothing to advance` when the pass found nothing to do.
+    ///
+    /// A step that fails is printed and left in the report; the pass carries on
+    /// with the next task.
+    Tick(TickArgs),
+}
+
+/// Arguments for `tick`.
+#[derive(Debug, Args)]
+pub struct TickArgs {
+    /// Run one pass and exit. This is what the verb does; the flag spells it
+    /// out, as `shprd watch --once` does for its own loop.
+    #[arg(long)]
+    pub once: bool,
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is

@@ -11,7 +11,7 @@
 //! step after the worktree undoes the earlier ones when it fails, so a refused
 //! or broken spawn leaves neither a worktree nor an event behind.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ use shprd_core::state::{GateResult, ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
-use shprd_mux::Mux;
+use shprd_mux::{AgentState, Mux};
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::models::AgentRef;
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
@@ -1526,6 +1526,69 @@ pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(
         .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
+/// The tasks that have an agent running right now, as the host reports it.
+///
+/// A task counts as live when the tab its newest attempt opened still exists and
+/// the host says an agent is in it: Working, Idle and Blocked all mean the
+/// process is there, and only Done or Unknown mean it is not. The id comes from
+/// the `.tab` record a spawn writes, so a title that happens to match is never
+/// mistaken for the attempt's own tab.
+///
+/// A host that cannot be asked answers "nothing is live", which is the safe
+/// direction for the tick: a task it cannot see is a task it will not start a
+/// second attempt on.
+pub fn live_tasks(
+    mux: &dyn Mux,
+    home: &Path,
+    repo_name: &str,
+    state: &RunState,
+) -> BTreeSet<String> {
+    let mut live = BTreeSet::new();
+    let Some(run) = state.run.as_ref() else {
+        return live;
+    };
+    let Some(workspace) = mux
+        .find_workspace(&workspace_name(repo_name))
+        .ok()
+        .flatten()
+    else {
+        return live;
+    };
+    let Ok(tabs) = mux.list_tabs(&workspace.id) else {
+        return live;
+    };
+    let briefs = home.join(".shprd").join("briefs");
+    for (id, task) in &state.tasks {
+        // A task that cannot have an agent at work is not asked about: a long
+        // plan would otherwise cost one host call per task per pass.
+        if !matches!(
+            task.status,
+            TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+        ) {
+            continue;
+        }
+        let Some(record) = latest_tab_record(&briefs, &run.run_id, id) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&record) else {
+            continue;
+        };
+        let wanted = text.trim();
+        let Some(tab) = tabs.iter().find(|tab| tab.id.as_str() == wanted) else {
+            continue;
+        };
+        // Done, Unknown or a host error all mean the same thing here: no agent
+        // is at work in that pane, or nobody can say — and either way the task
+        // is not "live".
+        if let Ok(AgentState::Working | AgentState::Idle | AgentState::Blocked) =
+            mux.agent_state(&tab.root_pane)
+        {
+            live.insert(id.clone());
+        }
+    }
+    live
+}
+
 /// The tab record of a task's latest attempt in one run.
 ///
 /// Only `run`'s directory is read: a task id reused in a later run must not
@@ -1872,6 +1935,64 @@ project_dirs = []
             .collect();
         assert!(live.is_empty(), "still live: {live:?}");
         assert!(!created.path.exists(), "the worktree is still there");
+    }
+
+    #[test]
+    fn live_tasks_reads_the_host_state_of_each_attempts_own_tab() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let workspace = mux
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let pane = mux
+            .list_tabs(&workspace.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .into_iter()
+            .find(|tab| tab.title == report.tab)
+            .map(|tab| tab.root_pane)
+            .unwrap_or_else(|| panic!("no tab for {:?}", report.tab));
+
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let mut live = live_tasks(&mux, scratch.home.path(), &scratch.repo_name(), &state);
+        assert!(
+            live.remove("T1"),
+            "a working agent's task is live: {live:?}"
+        );
+        assert!(live.is_empty());
+
+        // The agent's turn ended: its process is still there, so the task is
+        // still live — a landing would judge a commit it may yet move.
+        mux.set_state(&pane, AgentState::Idle);
+        let live = live_tasks(&mux, scratch.home.path(), &scratch.repo_name(), &state);
+        assert!(
+            live.contains("T1"),
+            "an idle agent is still there: {live:?}"
+        );
+
+        // The process ended: nothing is live any more.
+        mux.set_state(&pane, AgentState::Done);
+        let live = live_tasks(&mux, scratch.home.path(), &scratch.repo_name(), &state);
+        assert!(live.is_empty(), "a finished agent is not live: {live:?}");
+    }
+
+    #[test]
+    fn live_tasks_sees_nothing_without_the_repositorys_workspace() {
+        // A repository the human never opened in the multiplexer has no tabs,
+        // and the answer is "nothing is live" rather than an error: a pass must
+        // not stop because a host was never asked.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let live = live_tasks(
+            &FakeMux::default(),
+            scratch.home.path(),
+            &scratch.repo_name(),
+            &state,
+        );
+        assert!(live.is_empty());
     }
 
     #[test]
@@ -2872,6 +2993,7 @@ mod tests {
             dropped_reason: None,
             pr: None,
             last_status: None,
+            nothing_to_merge: None,
         }
     }
 
