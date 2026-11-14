@@ -19,13 +19,16 @@ shprd-git = { path = "../shprd-git" }
 shprd-mux = { path = "../shprd-mux" }
 shprd-mux-herdr = { path = "../shprd-mux-herdr" }
 shprd-roster = { path = "../shprd-roster" }
+shprd-server = { path = "../shprd-server" }
 shprd-watch = { path = "../shprd-watch" }
 shprd-views = { path = "../shprd-views" }
+tokio.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true

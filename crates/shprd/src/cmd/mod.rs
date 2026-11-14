@@ -18,6 +18,7 @@ pub mod review;
 pub mod roster;
 pub mod run;
 pub mod run_lock;
+pub mod serve;
 pub mod set;
 pub mod spawn;
 pub mod sync;
@@ -88,6 +89,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
         Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
         Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref()),
     }
 }
 
