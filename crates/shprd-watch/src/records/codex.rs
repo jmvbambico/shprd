@@ -4,12 +4,16 @@
 //! `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Each line is an envelope
 //! with a `type` and a `payload`; `event_msg` payloads carry the rate-limit
 //! snapshot (`token_count`) and the provider errors.
+//!
+//! The cut reader is ported from Shepherdr's `provider_cut`
+//! (`mods/tasks/bin/herdr_task/provider.py`, commit `a3f327a`, MIT); see
+//! `THIRD_PARTY_NOTICES.md`.
 
 use std::path::Path;
 
 use super::{
-    ReadError, RecordError, Scan, Usage, classify, each_json_line, parse_rfc3339_ms, secs_to_ms,
-    truncate,
+    Cut, NUDGE_MARK, ReadError, RecordError, Scan, Usage, classify, each_json_line,
+    parse_rfc3339_ms, secs_to_ms, truncate,
 };
 
 /// Scan one Codex rollout for errors and usage.
@@ -58,6 +62,79 @@ pub fn scan_codex(path: &Path, since_ms: u64) -> Result<Scan, ReadError> {
     Ok(scan)
 }
 
+/// The provider cut a Codex rollout ends on, or `None` when it carried on.
+///
+/// Codex records a turn's end as `task_complete` or `turn_aborted` with an
+/// `error` object; a new turn (`task_started`), a normal assistant item, or a
+/// person's message after it means the cut is over. A message shprd itself sent
+/// to carry on does not start the tries again (`NUDGE_MARK`).
+pub fn cut_codex(path: &Path) -> Result<Option<Cut>, ReadError> {
+    let mut cut: Option<Cut> = None;
+    let mut tries = 0u32;
+    each_json_line(path, |line| {
+        let Some(payload) = line.get("payload") else {
+            return;
+        };
+        let kind = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match (line.get("type").and_then(|v| v.as_str()), kind) {
+            (Some("event_msg"), "task_started") => cut = None,
+            (Some("event_msg"), "task_complete" | "turn_aborted") => {
+                let Some(error) = payload.get("error").filter(|e| e.is_object()) else {
+                    cut = None;
+                    return;
+                };
+                tries = tries.saturating_add(1);
+                let message = error
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("codex reported an error");
+                let code = error
+                    .get("codex_error_info")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let at = line
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_rfc3339_ms)
+                    .unwrap_or_default();
+                let id = payload
+                    .get("turn_id")
+                    .and_then(|v| v.as_str())
+                    .map(|turn| format!("codex-{turn}"))
+                    .unwrap_or_else(|| format!("codex-{at}"));
+                cut = Some(Cut {
+                    id,
+                    kind: classify(&format!("{code} {message}")),
+                    message: truncate(message),
+                    at_ms: at,
+                    resets_at_ms: None,
+                    tries,
+                });
+            }
+            (Some("response_item"), _) => {
+                if payload.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+                    cut = None;
+                }
+            }
+            (Some("event_msg"), "user_message") => {
+                let words = payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                cut = None;
+                if !words.contains(NUDGE_MARK) {
+                    tries = 0;
+                }
+            }
+            _ => {}
+        }
+    })?;
+    if let Some(cut) = &mut cut {
+        cut.tries = cut.tries.max(1);
+    }
+    Ok(cut)
+}
+
 /// The usage of the busiest rate-limit window in a `token_count` payload.
 ///
 /// Codex reports a `primary` window and sometimes a `secondary` one; the one
@@ -96,7 +173,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::records::ErrorKind;
+    use crate::records::{ErrorKind, NUDGE_MARK, Verdict};
 
     /// Write `lines` to `name` inside a fresh temp dir and return its path.
     fn fixture(name: &str, lines: &[&str]) -> (tempfile::TempDir, PathBuf) {
@@ -148,6 +225,96 @@ mod tests {
         let error = scan.last_error.unwrap();
         assert_eq!(error.kind, ErrorKind::Auth);
         assert_eq!(error.at_ms, Some(1_793_080_800_000));
+    }
+
+    /// One Codex turn that ended on `message` with code `code`.
+    fn cut_line(turn: &str, code: &str, message: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-10-27T06:30:00Z","type":"event_msg","payload":{{"type":"task_complete","turn_id":"{turn}","error":{{"message":"{message}","codex_error_info":"{code}"}}}}}}"#
+        )
+    }
+
+    const ANSWER: &str = r#"{"timestamp":"2026-10-27T06:40:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"carrying on"}]}}"#;
+    const NEW_TURN: &str = r#"{"timestamp":"2026-10-27T06:41:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t9"}}"#;
+
+    #[test]
+    fn a_cut_is_classified_per_error_class() {
+        let cases = [
+            (
+                "t1",
+                "rate_limit",
+                "rate limit reached",
+                ErrorKind::RateLimit,
+                Verdict::Passing,
+                "Rate limited",
+            ),
+            (
+                "t2",
+                "usage_limit_exceeded",
+                "usage limit reached",
+                ErrorKind::Quota,
+                Verdict::Lasting,
+                "Out of allowance",
+            ),
+            (
+                "t3",
+                "unauthorized",
+                "401 Unauthorized",
+                ErrorKind::Auth,
+                Verdict::Lasting,
+                "Signed out",
+            ),
+            (
+                "t4",
+                "server_overloaded",
+                "server overloaded",
+                ErrorKind::Overloaded,
+                Verdict::Passing,
+                "Provider overloaded",
+            ),
+            (
+                "t5",
+                "invalid_request",
+                "invalid request",
+                ErrorKind::Other,
+                Verdict::Lasting,
+                "Provider error",
+            ),
+        ];
+        for (turn, code, message, kind, verdict, reason) in cases {
+            let line = cut_line(turn, code, message);
+            let (_dir, path) = fixture("rollout.jsonl", &[&line]);
+            let cut = cut_codex(&path).unwrap().expect("a cut");
+            assert_eq!(cut.kind, kind, "{code}");
+            assert_eq!(cut.verdict(), verdict, "{code}");
+            assert_eq!(cut.reason(), reason, "{code}");
+            assert_eq!(cut.id, format!("codex-{turn}"));
+        }
+    }
+
+    #[test]
+    fn a_later_answer_or_a_new_turn_ends_the_cut() {
+        let error = cut_line("t1", "rate_limit", "rate limit reached");
+        let (_dir, path) = fixture("rollout.jsonl", &[&error, ANSWER]);
+        assert!(cut_codex(&path).unwrap().is_none());
+        let (_dir, path) = fixture("rollout.jsonl", &[&error, NEW_TURN]);
+        assert!(cut_codex(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn tries_count_cut_turns_since_a_person_wrote() {
+        let first = cut_line("t1", "server_overloaded", "server overloaded");
+        let second = cut_line("t2", "server_overloaded", "server overloaded");
+        let nudge = format!(
+            r#"{{"timestamp":"2026-10-27T06:31:00Z","type":"event_msg","payload":{{"type":"user_message","message":"Carry on: {NUDGE_MARK} (provider overloaded)"}}}}"#
+        );
+        let (_dir, path) = fixture("rollout.jsonl", &[&first, &nudge, &second]);
+        assert_eq!(cut_codex(&path).unwrap().unwrap().tries, 2);
+
+        let person = r#"{"timestamp":"2026-10-27T06:32:00Z","type":"event_msg","payload":{"type":"user_message","message":"try again"}}"#;
+        let third = cut_line("t3", "server_overloaded", "server overloaded");
+        let (_dir, path) = fixture("rollout.jsonl", &[&first, &nudge, &second, person, &third]);
+        assert_eq!(cut_codex(&path).unwrap().unwrap().tries, 1);
     }
 
     #[test]

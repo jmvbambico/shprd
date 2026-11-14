@@ -81,6 +81,38 @@ pub fn status_line(text: &str) -> String {
     capped
 }
 
+/// What kind of provider trouble cut a turn off, as the fallback ladder reads
+/// it.
+///
+/// It mirrors `shprd_watch::records::ErrorKind`; the tick maps one onto the
+/// other because `shprd-core` sits below the watchdog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderClass {
+    /// A rate limit: waiting and trying again is the fix.
+    RateLimit,
+    /// The account is out of allowance: a quota, credit or billing limit.
+    Quota,
+    /// The credentials were rejected: the login is gone.
+    Auth,
+    /// The provider is down or overloaded.
+    Overloaded,
+    /// Anything else the reader could not classify.
+    Other,
+}
+
+/// What the fallback ladder did about one provider cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackAction {
+    /// A carry-on message was sent.
+    Nudged,
+    /// The task was handed to another program, once.
+    Backup,
+    /// The ladder ended and a person was asked.
+    GaveUp,
+}
+
 /// How many lines of a hand-in check's output the event keeps.
 pub const CHECK_OUTPUT_LINES: usize = 20;
 
@@ -663,6 +695,72 @@ pub enum EventKind {
         /// The integration branch's head after the merge.
         int_sha: String,
     },
+    /// A provider cut a turn off and the fallback ladder sent the agent a
+    /// carry-on message.
+    ///
+    /// The event is the ladder's own clock: it names the cut it answers, so a
+    /// later pass neither sends the same nudge twice nor restarts the waits.
+    Nudged {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+        /// The program that was cut off.
+        agent: AgentId,
+        /// A stable identity for the cut, from the CLI's own record.
+        cut: String,
+        /// What kind of provider trouble it was.
+        class: ProviderClass,
+        /// Why, in a few words.
+        reason: String,
+        /// Which try this nudge is.
+        tries: u32,
+    },
+    /// The fallback ladder handed a task to another program, once.
+    ///
+    /// `started` is false when the handover was attempted and could not be
+    /// made: it is still recorded, because Shepherdr's rule is one try per
+    /// task and the person decides after a failed one. A backup is never
+    /// recorded twice for one task.
+    Backup {
+        /// The task.
+        task: TaskId,
+        /// The attempt that continues.
+        attempt: u32,
+        /// The program handing the task over.
+        from_agent: AgentId,
+        /// The program taking it over.
+        to_agent: AgentId,
+        /// The cut that ended the ladder.
+        cut: String,
+        /// What kind of provider trouble ended it.
+        class: ProviderClass,
+        /// Why the handover happened.
+        reason: String,
+        /// The worktree the newcomer continues in.
+        worktree: String,
+        /// The branch the newcomer commits on.
+        branch: String,
+        /// Whether the backup actually started.
+        started: bool,
+    },
+    /// The fallback ladder ended without a backup: a person has to decide.
+    ProviderGaveUp {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+        /// The program that cannot go on.
+        agent: AgentId,
+        /// The cut that ended the ladder.
+        cut: String,
+        /// What kind of provider trouble it was.
+        class: ProviderClass,
+        /// Why it needs the person, in one line.
+        reason: String,
+        /// Which try ended the ladder.
+        tries: u32,
+    },
     /// The run finished.
     RunFinished {
         /// The tasks the run ended with unfinished, when a human abandoned
@@ -858,6 +956,36 @@ mod tests {
                 base_sha: "abc1234".to_string(),
                 int_sha: "def5678".to_string(),
             },
+            EventKind::Nudged {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                agent: "claude".to_string(),
+                cut: "cut-1".to_string(),
+                class: ProviderClass::Overloaded,
+                reason: "Provider overloaded".to_string(),
+                tries: 1,
+            },
+            EventKind::Backup {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                from_agent: "claude".to_string(),
+                to_agent: "codex".to_string(),
+                cut: "cut-5".to_string(),
+                class: ProviderClass::RateLimit,
+                reason: "Rate limited, still after 5 tries".to_string(),
+                worktree: "/tmp/wt".to_string(),
+                branch: "feature/m1-events".to_string(),
+                started: true,
+            },
+            EventKind::ProviderGaveUp {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                agent: "codex".to_string(),
+                cut: "cut-6".to_string(),
+                class: ProviderClass::Other,
+                reason: "Provider error".to_string(),
+                tries: 1,
+            },
             EventKind::RunFinished {
                 abandoned: Vec::new(),
             },
@@ -867,7 +995,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 23, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 26, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

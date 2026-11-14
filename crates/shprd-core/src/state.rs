@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    Actor, AgentId, CheckReport, Event, EventKind, Finding, ReportStatus, ResourceAction,
-    ResourceKind, ReviewSource, TaskId,
+    Actor, AgentId, CheckReport, Event, EventKind, FallbackAction, Finding, ProviderClass,
+    ReportStatus, ResourceAction, ResourceKind, ReviewSource, TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -191,6 +191,37 @@ pub struct Task {
     /// same attempt again on every pass. A new attempt clears it, because fresh
     /// work is exactly what a landing has not looked at yet.
     pub nothing_to_merge: Option<String>,
+    /// What the fallback ladder already did about provider cuts, in order.
+    ///
+    /// The ladder is idempotent by reading this: a nudge or a give-up names the
+    /// cut it answers, so the same one is never acted on twice, and a backup is
+    /// a `Backup` record whether or not its process started.
+    pub fallbacks: Vec<FallbackRecord>,
+}
+
+/// One thing the fallback ladder did, as the ledger recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackRecord {
+    /// Which kind of action it was.
+    pub action: FallbackAction,
+    /// The program the action was about.
+    pub agent: AgentId,
+    /// The program that took over, for a backup.
+    pub to_agent: Option<AgentId>,
+    /// The cut the action answers.
+    pub cut: String,
+    /// What kind of provider trouble it was.
+    pub class: ProviderClass,
+    /// Why, in a few words.
+    pub reason: String,
+    /// Which try it was.
+    pub tries: u32,
+    /// Whether a backup actually started, for a backup action.
+    pub started: Option<bool>,
+    /// When the event was appended, ms since the Unix epoch.
+    pub at_ms: u64,
+    /// Sequence number of the event that recorded it.
+    pub seq: u64,
 }
 
 /// The last progress line an agent recorded for a task.
@@ -457,6 +488,7 @@ impl RunState {
                         last_status: None,
                         pr: None,
                         nothing_to_merge: None,
+                        fallbacks: Vec::new(),
                     },
                 );
             }
@@ -623,6 +655,79 @@ impl RunState {
                     && let Some(current) = entry.attempts.last_mut()
                 {
                     current.agent = to_agent.clone();
+                }
+            }
+            EventKind::Nudged {
+                task,
+                agent,
+                cut,
+                class,
+                reason,
+                tries,
+                ..
+            } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.fallbacks.push(FallbackRecord {
+                        action: FallbackAction::Nudged,
+                        agent: agent.clone(),
+                        to_agent: None,
+                        cut: cut.clone(),
+                        class: *class,
+                        reason: reason.clone(),
+                        tries: *tries,
+                        started: None,
+                        at_ms: event.at_ms,
+                        seq: event.seq,
+                    });
+                }
+            }
+            EventKind::Backup {
+                task,
+                from_agent,
+                to_agent,
+                cut,
+                class,
+                reason,
+                started,
+                ..
+            } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.fallbacks.push(FallbackRecord {
+                        action: FallbackAction::Backup,
+                        agent: from_agent.clone(),
+                        to_agent: Some(to_agent.clone()),
+                        cut: cut.clone(),
+                        class: *class,
+                        reason: reason.clone(),
+                        tries: 0,
+                        started: Some(*started),
+                        at_ms: event.at_ms,
+                        seq: event.seq,
+                    });
+                }
+            }
+            EventKind::ProviderGaveUp {
+                task,
+                agent,
+                cut,
+                class,
+                reason,
+                tries,
+                ..
+            } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.fallbacks.push(FallbackRecord {
+                        action: FallbackAction::GaveUp,
+                        agent: agent.clone(),
+                        to_agent: None,
+                        cut: cut.clone(),
+                        class: *class,
+                        reason: reason.clone(),
+                        tries: *tries,
+                        started: None,
+                        at_ms: event.at_ms,
+                        seq: event.seq,
+                    });
                 }
             }
             EventKind::Escalated {
@@ -911,6 +1016,90 @@ mod tests {
         events.truncate(2);
         events.extend(extra);
         RunState::fold(&events)
+    }
+
+    #[test]
+    fn the_fallback_ladder_records_its_three_actions_on_the_task() {
+        let state = match fold_extra(vec![
+            ev(
+                3,
+                EventKind::Nudged {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    cut: "cut-1".to_string(),
+                    class: ProviderClass::Overloaded,
+                    reason: "Provider overloaded".to_string(),
+                    tries: 1,
+                },
+            ),
+            ev(
+                4,
+                EventKind::Backup {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    from_agent: "claude".to_string(),
+                    to_agent: "codex".to_string(),
+                    cut: "cut-2".to_string(),
+                    class: ProviderClass::Quota,
+                    reason: "Out of allowance".to_string(),
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/a".to_string(),
+                    started: true,
+                },
+            ),
+            ev(
+                5,
+                EventKind::ProviderGaveUp {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "codex".to_string(),
+                    cut: "cut-3".to_string(),
+                    class: ProviderClass::Other,
+                    reason: "Provider error".to_string(),
+                    tries: 1,
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("the ladder events must fold: {err}"),
+        };
+        let records = &state.tasks["a"].fallbacks;
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].action, FallbackAction::Nudged);
+        assert_eq!(records[0].agent, "claude");
+        assert_eq!(records[0].cut, "cut-1");
+        assert_eq!(records[1].action, FallbackAction::Backup);
+        assert_eq!(records[1].to_agent.as_deref(), Some("codex"));
+        assert_eq!(records[1].started, Some(true));
+        assert_eq!(records[2].action, FallbackAction::GaveUp);
+        assert_eq!(records[2].reason, "Provider error");
+    }
+
+    #[test]
+    fn a_task_gets_only_one_backup_handover() {
+        let backup = |seq: u64, to: &str| {
+            ev(
+                seq,
+                EventKind::Backup {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    from_agent: "claude".to_string(),
+                    to_agent: to.to_string(),
+                    cut: "cut-2".to_string(),
+                    class: ProviderClass::Quota,
+                    reason: "Out of allowance".to_string(),
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/a".to_string(),
+                    started: true,
+                },
+            )
+        };
+        let folded = fold_extra(vec![backup(3, "codex"), backup(4, "pi")]);
+        assert!(matches!(
+            folded,
+            Err(RuleError::TaskAlreadyBackedUp { ref task }) if task == "a"
+        ));
     }
 
     #[test]

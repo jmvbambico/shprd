@@ -44,7 +44,11 @@ SOFTWARE.
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
   `argvFor` and its fast-mode values),
   `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
-  `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
+  `mods/tasks/bin/herdr_task/provider.py` (`PROVIDER_WAITS`, `NUDGE`,
+  `provider_cut`, `provider_error`),
+  `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
+  `takes_over`, `head`), `mods/tasks/bin/herdr_task/tick.py` (`retry_one`,
+  `retry_pass`), `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -56,7 +60,12 @@ SOFTWARE.
   long it waits, the launch argument order and the two fast-mode values, and
   the environment strip that keeps an agent from inheriting a parent Claude
   Code session — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`
+  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`; and the provider
+  fallback ladder — the error classes, the carry-on message and its waits, the
+  record-tail reading of a cut, the one backup handover and its chat-tail brief
+  — in `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
+  `crates/shprd-watch/src/fallback.rs` and the events that record it in
+  `crates/shprd-core/src/{event,state,rules}.rs`
 - License: MIT
 
 MIT License
