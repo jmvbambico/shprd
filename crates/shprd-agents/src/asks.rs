@@ -153,8 +153,10 @@ impl AskHookInstaller for ClaudeAskHook<'_> {
             return Ok(AskHookInstall::Unsupported);
         }
         let command = self.command(paths).ok_or(AskHookError::Incomplete)?;
-        write_hook_script(paths, self.program)?;
+        // The config target is checked before anything is written, so a spec
+        // that names the person's global config leaves the worktree untouched.
         let config = config_path(self.spec, paths.worktree)?;
+        write_hook_script(paths, self.program)?;
         install_into_json(&config, self.spec, &command)
     }
 }
@@ -183,8 +185,8 @@ impl AskHookInstaller for CodexAskHook<'_> {
             return Ok(AskHookInstall::Unsupported);
         }
         let command = self.command(paths).ok_or(AskHookError::Incomplete)?;
-        write_hook_script(paths, self.program)?;
         let config = config_path(self.spec, paths.worktree)?;
+        write_hook_script(paths, self.program)?;
         let installed = install_into_json(&config, self.spec, &command)?;
         // Codex only reads hooks when `hooks = true` is in its config. The
         // project file is the worktree's own copy, never the person's.
@@ -719,7 +721,10 @@ mod tests {
                 Err(super::AskHookError::OutsideWorktree { .. }) => {}
                 other => panic!("expected OutsideWorktree, got {other:?}"),
             }
+            // A refused target writes nothing at all, not even the script.
+            assert!(!worktree.join(".shprd").exists());
         }
         assert!(!worktree.join(".claude").exists());
+        assert!(!worktree.join(".codex").exists());
     }
 }
