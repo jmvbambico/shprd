@@ -11,6 +11,13 @@
 //! a pane restored without its environment still has no TTY. Only a debug
 //! build may answer for the record with `--yes`, which is how the end-to-end
 //! tests drive this verb; a release binary always asks.
+//!
+//! The approval is pinned to a head, so the verb takes the run's integration
+//! lock before it reads that head, like `land`, `sync` and `gate` do: a sync or
+//! a cherry-pick landing while the head is read and the approval is written
+//! would stamp an approval on a head nobody was shown. The lock is held while
+//! the question is asked and until the approval is recorded, so the head the
+//! human answers about is the head the log holds.
 
 use std::path::Path;
 
@@ -22,7 +29,8 @@ use shprd_git::integrate;
 use crate::cli::ApproveArgs;
 use crate::cmd::confirm;
 use crate::cmd::land;
-use crate::ctx::{CliError, Ctx, resolve_layout};
+use crate::cmd::run_lock;
+use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 
 /// Approves the run's pull request, or with a task, that task's own.
 pub fn approve_verb(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Result<(), CliError> {
@@ -107,8 +115,12 @@ fn approve_run(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Result<(),
     let url = pr.url.clone();
     let run_id = run.run_id.clone();
     let base_branch = run.base_branch.clone();
-    let layout = resolve_layout(home, &config.janitor.namespace)?;
+    let home = resolve_home(home)?;
+    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
     let repo_name = land::repo_name(ctx)?;
+    // Held from the head read to the recorded approval: the head is what the
+    // approval is about, so it must not move between the two.
+    let _lock = run_lock::lock_run(&home, &repo_name, &run_id)?;
     let worktree =
         integrate::open_integration(&ctx.root, &layout, &repo_name, &run_id, &base_branch)
             .map_err(|err| {

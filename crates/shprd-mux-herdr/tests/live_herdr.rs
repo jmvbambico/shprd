@@ -13,95 +13,26 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::time::Duration;
+
+#[path = "support/live_server.rs"]
+mod live_server;
+
+use live_server::LiveServer;
 use shprd_mux::{Direction, Mux, WorkspaceId};
 use shprd_mux_herdr::HerdrMux;
-use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
-
-/// A private `herdr server` that stops and cleans up when the test ends.
-struct Scratch {
-    home: PathBuf,
-    socket: PathBuf,
-    server: Option<Child>,
-}
-
-impl Scratch {
-    /// Start a server in a fresh directory, waiting until it answers.
-    fn start() -> Scratch {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
-        // A short path: a unix socket path must stay under about 100 bytes and
-        // `std::env::temp_dir()` on macOS is already long.
-        let home = std::env::temp_dir()
-            .join("shprd-live")
-            .join(format!("{}-{stamp}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let socket = home.join("herdr.sock");
-        let mut scratch = Scratch {
-            home,
-            socket,
-            server: None,
-        };
-        let child = Command::new("herdr")
-            .arg("server")
-            .env("HOME", &scratch.home)
-            .env("HERDR_SOCKET_PATH", &scratch.socket)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::fs::File::create(scratch.home.join("server.log")).unwrap())
-            .spawn()
-            .expect("herdr must be installed to run this test");
-        scratch.server = Some(child);
-        let mute = scratch.adapter();
-        let started = Instant::now();
-        let mut last;
-        loop {
-            match mute.find_workspace("does-not-exist") {
-                Ok(None) => break,
-                other => last = format!("{other:?}"),
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(20),
-                "herdr server did not answer on {} (last answer {last}): {}",
-                scratch.socket.display(),
-                std::fs::read_to_string(scratch.home.join("server.log")).unwrap_or_default(),
-            );
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        scratch
-    }
-
-    /// An adapter pointed at this scratch server, never at the human's.
-    fn adapter(&self) -> HerdrMux {
-        HerdrMux::new().with_environment(&self.socket, &self.home)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(mut server) = self.server.take() {
-            let _ = Command::new("herdr")
-                .args(["server", "stop"])
-                .env("HOME", &self.home)
-                .env("HERDR_SOCKET_PATH", &self.socket)
-                .status();
-            let _ = server.kill();
-            let _ = server.wait();
-        }
-        let _ = std::fs::remove_dir_all(&self.home);
-    }
-}
 
 /// The whole adapter, against one private server, once.
 #[test]
 #[ignore = "starts a real herdr server; run by hand"]
 fn the_whole_adapter_works_against_an_isolated_server() {
-    let scratch = Scratch::start();
-    let mux = scratch.adapter();
-    let cwd = scratch.home.clone();
-
+    // A skip is the machine's answer, not a failure: no `herdr`, or a `TMPDIR`
+    // too long for a unix socket path. The helper says which, in one line.
+    let Some(server) = LiveServer::start() else {
+        return;
+    };
+    let mux = HerdrMux::new().with_environment(server.socket(), server.home());
+    let cwd = server.home().to_path_buf();
     let capabilities = mux.capabilities();
     assert!(capabilities.split_ratio);
     assert!(capabilities.agent_state);
