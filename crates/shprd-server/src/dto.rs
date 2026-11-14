@@ -720,6 +720,46 @@ pub struct SettingsPutDto {
     pub for_repo: bool,
 }
 
+/// One prompt, as the file on this machine holds it.
+///
+/// `state` says whether the file is exactly the words this build ships
+/// (`default`) or the person's own (`edited`); `path` is the file an editor
+/// opens, and `text` is what an agent is given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptDto.ts")]
+pub struct PromptDto {
+    /// The id the prompt is stored under.
+    pub id: String,
+    /// The file it lives in.
+    pub path: String,
+    /// Its words.
+    pub text: String,
+    /// Whether the file is the shipped default or the person's own words.
+    pub state: PromptStateDto,
+}
+
+/// Whether one prompt file is the shipped default or the person's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "PromptStateDto.ts")]
+pub enum PromptStateDto {
+    /// The file holds exactly the words this build ships.
+    Default,
+    /// The file holds the person's own words, or an older build's untracked
+    /// default.
+    Edited,
+    /// There is no file and nothing to write for this id.
+    Missing,
+}
+
+/// One prompt write: the words to store over the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptPutDto.ts")]
+pub struct PromptPutDto {
+    /// The role's standing words, exactly as they should be stored.
+    pub text: String,
+}
+
 /// What one write did, and the settings as they now resolve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "SettingsWriteDto.ts")]
@@ -840,6 +880,9 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<SettingsDto>()?,
         one::<SettingsPutDto>()?,
         one::<SettingsWriteDto>()?,
+        one::<PromptDto>()?,
+        one::<PromptStateDto>()?,
+        one::<PromptPutDto>()?,
         one::<SettingsOutcomeDto>()?,
     ])
 }
