@@ -795,10 +795,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shprd-mux-tuios"
-version = "0.0.0"
-
-[[package]]
 name = "shprd-roster"
 version = "0.0.0"
 dependencies = [
@@ -809,10 +805,6 @@ dependencies = [
  "toml",
  "ureq",
 ]
-
-[[package]]
-name = "shprd-tui"
-version = "0.0.0"
 
 [[package]]
 name = "shprd-views"
