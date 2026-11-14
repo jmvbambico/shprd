@@ -70,3 +70,18 @@ truth; this log holds how we got there.
   `cross-vendor-review: passed` requires that record.
 - **Review rounds stay at two before asking the human**, as configured; going
   past them is the human's call, recorded in the PR body.
+
+## 2026-11-14
+
+- **Pivot: re-implement Shepherdr's design in Rust.** Shepherdr (MIT) is the
+  reference for workflow and agent settings; shprd adds more agent CLIs, custom
+  roles with system prompts, a dagr-like graph, more tunnels with a password
+  login, and its engine guarantees. Forking Shepherdr's JS was rejected for
+  performance and stack reasons.
+- **Herdr desktop first, then herdr TUI and tuios.** Desktop: a layout plus thin
+  JS mods over `shprd serve`. herdr TUI: a plugin; tuios installs the same
+  plugin. The terminal hosts may lose some UX but stay as close to desktop as
+  they can. rex is planned later.
+- **No setup wizard**; agent setup is a settings page. The tab-per-agent
+  launcher (`shprd up`) is retired in favour of a space per task.
+- **The web app is TypeScript**; everything else stays in this repo in Rust.
