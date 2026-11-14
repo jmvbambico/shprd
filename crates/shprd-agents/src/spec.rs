@@ -1363,7 +1363,8 @@ pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     Ok(specs)
 }
 
-fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
+/// Parse one harness file, without the checks [`HarnessSpec::validate`] runs.
+pub(crate) fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
     let source = fs::read_to_string(path).map_err(|source| SpecError::ReadFile {
         path: path.to_owned(),
         source,

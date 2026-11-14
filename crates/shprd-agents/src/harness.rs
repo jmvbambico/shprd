@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::asks::{AskHookInstaller, NoAskHook};
 use crate::spec::{
-    AskHookSpec, BriefSpec, CatalogSource, EffortSpec, HarnessSpec, ModelsSpec, PermissionsSpec,
-    SpecError, StatusSource, Vendor,
+    AskHookSpec, BriefSpec, CatalogSource, EffortSpec, HarnessSpec, ModelsSpec, PermissionMode,
+    PermissionsSpec, SpecError, StatusSource, Vendor,
 };
 
 /// One program's harness: its spec, checked, and the file it came from.
@@ -27,7 +27,7 @@ impl Harness {
     /// the TOML schema, and [`HarnessSpec::validate`] checks what the type
     /// cannot express. A spec that fails either is an error naming the file.
     pub fn load(path: &Path) -> Result<Harness, SpecError> {
-        let spec = load_one(path)?;
+        let spec = crate::spec::load_file(path)?;
         spec.validate().map_err(|source| SpecError::Invalid {
             path: path.to_owned(),
             source: Box::new(source),
@@ -76,27 +76,27 @@ impl Harness {
     }
 
     /// The access mode called `id`, if this program has one.
-    pub fn permission(&self, id: &str) -> Option<&crate::spec::PermissionMode> {
+    pub fn permission(&self, id: &str) -> Option<&PermissionMode> {
         self.spec.permissions.mode(id)
     }
 
     /// The access mode a role gets when it names none.
-    pub fn default_permission(&self) -> Option<&crate::spec::PermissionMode> {
+    pub fn default_permission(&self) -> Option<&PermissionMode> {
         self.spec.permissions.default_mode()
     }
 
     /// The access mode that counts as full access, for the cross-program carry.
-    pub fn full_permission(&self) -> Option<&crate::spec::PermissionMode> {
+    pub fn full_permission(&self) -> Option<&PermissionMode> {
         self.spec.permissions.full_mode()
     }
 
     /// The access mode a reviewer runs in.
-    pub fn readonly_permission(&self) -> Option<&crate::spec::PermissionMode> {
+    pub fn readonly_permission(&self) -> Option<&PermissionMode> {
         self.spec.permissions.readonly_mode()
     }
 
     /// This program's nearest mode to another program's `<program>:<mode>`.
-    pub fn permission_across(&self, from: &str) -> Option<&crate::spec::PermissionMode> {
+    pub fn permission_across(&self, from: &str) -> Option<&PermissionMode> {
         self.spec.permissions.across_mode(from)
     }
 
@@ -146,18 +146,6 @@ impl Harness {
     pub fn ask_installer(&self) -> impl AskHookInstaller + '_ {
         NoAskHook::new(&self.spec.asks)
     }
-}
-
-/// Parse one harness file, without the checks [`HarnessSpec::validate`] runs.
-fn load_one(path: &Path) -> Result<HarnessSpec, SpecError> {
-    let source = std::fs::read_to_string(path).map_err(|source| SpecError::ReadFile {
-        path: path.to_owned(),
-        source,
-    })?;
-    toml::from_str(&source).map_err(|source| SpecError::Parse {
-        path: path.to_owned(),
-        source,
-    })
 }
 
 #[cfg(test)]
