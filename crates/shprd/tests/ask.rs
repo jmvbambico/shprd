@@ -13,11 +13,61 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
+
+/// How often a wait looks again, ms: short, so an idle machine finishes at once.
+const POLL: Duration = Duration::from_millis(20);
+
+/// How long one wait in this file may take before the test gives up, seconds.
+///
+/// Every wait here crosses a process boundary — a service binding a socket, a
+/// hook raising an ask, a log append another process makes — while the rest of
+/// the workspace's tests run on the same machine. An idle machine satisfies
+/// each in milliseconds; a loaded one can take far longer, so the deadline is
+/// generous, and `SHPRD_TEST_DEADLINE_SECS` stretches it further for a slow
+/// box without editing the test.
+fn deadline_secs() -> u64 {
+    std::env::var("SHPRD_TEST_DEADLINE_SECS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(120)
+}
+
+/// When a wait that starts now gives up.
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(deadline_secs())
+}
+
+/// How long a hook waits for its answer: past the test's own deadline, so a
+/// slow answer is never mistaken for a hook that timed out.
+fn hook_timeout_secs() -> u64 {
+    deadline_secs().saturating_mul(2)
+}
+
+/// Waits until `done` holds, or fails saying what was waited for.
+///
+/// A poll re-checks a fact another process makes true; nothing here sleeps to
+/// give another process time, so a loaded machine loses no race — it only
+/// waits longer for the fact to appear.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = deadline();
+    loop {
+        if done() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not happen within {}s",
+            deadline_secs()
+        );
+        sleep(POLL);
+    }
+}
 
 /// A child `shprd serve`, stopped on drop so a failing test leaves nothing
 /// running.
@@ -52,14 +102,9 @@ impl Service {
     /// Polls for `service.json`, which the service writes after it binds.
     fn wait_for_record(&self, state: &Path) {
         let path = record_path(state);
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            if path.exists() {
-                return;
-            }
-            sleep(Duration::from_millis(50));
-        }
-        panic!("the service never wrote {}", path.display());
+        wait_until(&format!("the service wrote {}", path.display()), || {
+            path.exists()
+        });
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
@@ -68,15 +113,15 @@ impl Service {
             .arg("-TERM")
             .arg(self.child.id().to_string())
             .status();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
+        let deadline = deadline();
+        loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => return,
-                Ok(None) => sleep(Duration::from_millis(50)),
+                Ok(None) if Instant::now() < deadline => sleep(POLL),
+                Ok(None) => panic!("the service did not stop after SIGTERM"),
                 Err(err) => panic!("waiting for the service failed: {err}"),
             }
         }
-        panic!("the service did not stop after SIGTERM");
     }
 }
 
@@ -257,9 +302,18 @@ fn get(url: &str, token: Option<&str>) -> Result<(u16, String), u16> {
     }
 }
 
-/// One POST of an ask's answer.
-fn post_answer(url: &str, token: &str, body: &Value) -> Result<(u16, String), u16> {
-    match ureq::post(url)
+/// One POST of an ask's answer, as `(status, body)` whatever the status.
+///
+/// The body is read on a refusal too, so a failure message carries the
+/// service's own words instead of only its status.
+fn post_answer(url: &str, token: &str, body: &Value) -> (u16, String) {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    match agent
+        .post(url)
         .header("authorization", &format!("Bearer {token}"))
         .header("content-type", "application/json")
         .header("x-shprd", "1")
@@ -268,26 +322,25 @@ fn post_answer(url: &str, token: &str, body: &Value) -> Result<(u16, String), u1
         Ok(mut response) => {
             let status = response.status().as_u16();
             let body = response.body_mut().read_to_string().unwrap_or_default();
-            Ok((status, body))
+            (status, body)
         }
-        Err(ureq::Error::StatusCode(code)) => Err(code),
         Err(err) => panic!("the answer failed: {err}"),
     }
 }
 
 /// Waits for a child that should finish, and returns what it printed.
 fn wait_for_child(mut child: Child) -> std::process::Output {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = deadline();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return child.wait_with_output().expect("the child's output"),
-            Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(50)),
+            Ok(None) if Instant::now() < deadline => sleep(POLL),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("the ask hook never finished");
+                panic!("the child never finished");
             }
-            Err(err) => panic!("waiting for the ask hook failed: {err}"),
+            Err(err) => panic!("waiting for the child failed: {err}"),
         }
     }
 }
@@ -310,6 +363,18 @@ fn raised_count(repo: &Path) -> usize {
         .count()
 }
 
+/// The task object `id` names, from a `status --json` or `/api/state` document.
+fn task_of(document: &str, id: &str) -> Value {
+    let doc: Value = serde_json::from_str(document).expect("the document is JSON");
+    match doc["tasks"]
+        .as_array()
+        .and_then(|tasks| tasks.iter().find(|task| task["id"] == id))
+    {
+        Some(task) => task.clone(),
+        None => panic!("task {id} missing from {document}"),
+    }
+}
+
 #[test]
 fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
     let (repo, state, home) = repo_with_a_task();
@@ -323,6 +388,7 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
     let token = read_token(state.path());
 
     // The hook a program runs: it raises the ask and waits for an answer.
+    let hook_timeout = hook_timeout_secs().to_string();
     let hook = Command::new(BIN)
         .args([
             "--repo",
@@ -345,7 +411,7 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
             "--id",
             "ask-1",
             "--timeout-secs",
-            "30",
+            &hook_timeout,
         ])
         .env_remove("SHPRD_ACTOR")
         .env_remove("SHPRD_TASK")
@@ -355,12 +421,13 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
         .spawn()
         .expect("the ask hook starts");
 
-    // The ask reaches the queue and the API lists it.
+    // The ask reaches the ledger, the queue and the API. The ledger's line is
+    // the fact every reader folds, so that is what is waited for — a queue file
+    // seen a moment before the append would make `status` and the board race.
     let ask_path = repo.path().join(".shprd/asks/T1/ask-1.json");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline && !ask_path.exists() {
-        sleep(Duration::from_millis(50));
-    }
+    wait_until("the ask reaches the ledger", || {
+        raised_count(repo.path()) == 1 && ask_path.exists()
+    });
     assert!(
         ask_path.exists(),
         "the hook wrote no ask at {}",
@@ -375,14 +442,42 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
     assert_eq!(listed["asks"][0]["text"], "Run: cargo test");
     assert_eq!(listed["asks"][0]["options"][0], "Allow");
 
+    // The open card is visible where a person looks: the CLI's status (both the
+    // human line and `--json`) and the service's board.
+    let human = ok(repo.path(), &["status"]);
+    assert!(
+        human.contains("T1 Needs you"),
+        "the status line must name the open ask: {human}"
+    );
+    let after_raise = task_of(&ok(repo.path(), &["status", "--json"]), "T1");
+    assert_eq!(after_raise["status"], json!("queued"), "the stored state");
+    assert_eq!(after_raise["derived"]["status"], json!("needs_you"));
+    assert_eq!(after_raise["derived"]["need"], json!("asks"));
+    assert_eq!(after_raise["derived"]["reason"], json!("Run: cargo test"));
+    let (status, body) = get(&format!("{base}/api/state"), Some(&token)).expect("state answers");
+    assert_eq!(status, 200);
+    let board: Value = serde_json::from_str(&body).expect("the state is JSON");
+    assert_eq!(board["tasks"][0]["status"], json!("queued"));
+    assert_eq!(board["tasks"][0]["derived"]["status"], json!("needs_you"));
+    assert_eq!(board["tasks"][0]["derived"]["need"], json!("asks"));
+
     // A card answers it through the API.
     let answer = serde_json::json!({"task": "T1", "ask": "ask-1", "answer": "allow"});
-    let (status, body) =
-        post_answer(&format!("{base}/api/asks/answer"), &token, &answer).expect("the answer lands");
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &answer);
     assert_eq!(status, 200, "{body}");
     let reply: Value = serde_json::from_str(&body).expect("the reply is JSON");
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["ask"]["id"], "ask-1");
+
+    // The answer takes Needs you back out of both views.
+    let after_answer = task_of(&ok(repo.path(), &["status", "--json"]), "T1");
+    assert_eq!(after_answer["status"], json!("queued"));
+    assert_eq!(after_answer["derived"]["status"], json!("to_do"));
+    assert_eq!(after_answer["derived"]["need"], Value::Null);
+    let (_, body) = get(&format!("{base}/api/state"), Some(&token)).expect("state answers");
+    let board: Value = serde_json::from_str(&body).expect("the state is JSON");
+    assert_eq!(board["tasks"][0]["derived"]["status"], json!("to_do"));
+    assert_eq!(board["tasks"][0]["derived"]["need"], Value::Null);
 
     // The waiting hook prints the program's decision and exits 0.
     let output = wait_for_child(hook);
@@ -411,10 +506,8 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
     assert_eq!(kinds, vec!["ask_raised", "ask_answered"]);
 
     // A second answer is refused: an ask is answered once.
-    assert_eq!(
-        post_answer(&format!("{base}/api/asks/answer"), &token, &answer),
-        Err(409)
-    );
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &answer);
+    assert_eq!(status, 409, "{body}");
     let (status, body) = get(&format!("{base}/api/asks"), Some(&token)).expect("asks answer");
     assert_eq!(status, 200);
     let listed: Value = serde_json::from_str(&body).expect("asks are JSON");
@@ -440,7 +533,10 @@ fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
     let token = read_token(state.path());
 
     // Two hooks, the same explicit id. The queue's create-new raise lets only
-    // one own the ask; the other must not delete the winner's file.
+    // one own the ask; the other must not delete the winner's file, and the
+    // ledger must end up with one `ask_raised` however the two commits
+    // interleave — a duplicate would leave a log no reader can fold.
+    let hook_timeout = hook_timeout_secs().to_string();
     let hook_args = [
         "ask",
         "hook",
@@ -455,19 +551,34 @@ fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
         "--id",
         "dup-1",
         "--timeout-secs",
-        "30",
+        &hook_timeout,
     ];
-    let first = spawn_env(repo.path(), &hook_args, &[]);
-    let second = spawn_env(repo.path(), &hook_args, &[]);
+    let mut hooks = vec![
+        spawn_env(repo.path(), &hook_args, &[]),
+        spawn_env(repo.path(), &hook_args, &[]),
+    ];
 
     let ask_path = repo.path().join(".shprd/asks/T1/dup-1.json");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline && !(ask_path.exists() && raised_count(repo.path()) == 1) {
-        sleep(Duration::from_millis(50));
+    let give_up = deadline();
+    while !(ask_path.exists() && raised_count(repo.path()) == 1) {
+        if Instant::now() >= give_up {
+            // Say what the hooks themselves said, or the failure is only
+            // "nothing happened" on a machine nobody can look at again.
+            let mut said = String::new();
+            for mut child in hooks.drain(..) {
+                let _ = child.kill();
+                if let Ok(output) = child.wait_with_output() {
+                    said.push_str(&String::from_utf8_lossy(&output.stderr));
+                    said.push_str(&String::from_utf8_lossy(&output.stdout));
+                }
+            }
+            panic!(
+                "one hook never raised the ask within {}s; the hooks said: {said}",
+                deadline_secs()
+            );
+        }
+        sleep(POLL);
     }
-    // Let a losing hook finish its attempt to clean up, then prove it left the
-    // winner's file alone.
-    sleep(Duration::from_millis(500));
     assert_eq!(raised_count(repo.path()), 1, "exactly one ask_raised");
     assert!(
         ask_path.exists(),
@@ -476,14 +587,13 @@ fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
 
     // The ask is answerable, not stranded as a 404.
     let answer = serde_json::json!({"task": "T1", "ask": "dup-1", "answer": "allow"});
-    let (status, body) =
-        post_answer(&format!("{base}/api/asks/answer"), &token, &answer).expect("the answer lands");
+    let (status, body) = post_answer(&format!("{base}/api/asks/answer"), &token, &answer);
     assert_eq!(status, 200, "{body}");
 
     // Both hooks exit cleanly once the answer is there; at least one printed the
     // program's decision.
     let mut printed = 0;
-    for child in [first, second] {
+    for child in hooks {
         let output = wait_for_child(child);
         assert!(
             output.status.success(),
@@ -496,7 +606,19 @@ fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
             printed += 1;
         }
     }
+    // A losing hook's cleanup, if it ran at all, has run by now: both have
+    // exited, so nothing is sleeping to give one time. The winner's file is
+    // still there to be read.
+    assert!(
+        ask_path.exists(),
+        "a losing hook deleted the winner's ask file"
+    );
     assert!(printed >= 1, "no hook printed the answer");
+    assert_eq!(
+        raised_count(repo.path()),
+        1,
+        "two hooks still raise the ask once, however they interleave"
+    );
     assert_eq!(
         events(repo.path())
             .iter()
@@ -505,6 +627,9 @@ fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
         1,
         "the ask is answered once"
     );
+    // The log still folds, so every reader keeps answering.
+    let (status, body) = get(&format!("{base}/api/state"), Some(&token)).expect("state answers");
+    assert_eq!(status, 200, "the log still folds: {body}");
 
     service.stop();
 }
@@ -723,7 +848,7 @@ fn a_programs_harness_says_how_long_its_hook_waits() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        started.elapsed() < Duration::from_secs(20),
+        started.elapsed() < Duration::from_secs(deadline_secs()),
         "the hook waited far longer than its harness says"
     );
     let raised: Value = serde_json::from_str(
