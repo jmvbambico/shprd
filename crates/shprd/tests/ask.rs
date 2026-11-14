@@ -644,6 +644,9 @@ fn a_raise_without_a_task_says_what_is_missing() {
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(said.contains("no task for this ask"), "{said}");
     assert!(said.contains("--task"), "{said}");
+    // A coordinator's launch carries no `$SHPRD_TASK`, so the refusal must name
+    // the verb that does work without one.
+    assert!(said.contains("shprd agent escalate"), "{said}");
 }
 
 #[test]

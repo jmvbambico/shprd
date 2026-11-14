@@ -316,6 +316,60 @@ fn the_coordinators_m9_asks_digest_is_the_listed_one() {
     assert!(ASSISTANT_M9_ASKS.as_bytes() != assistant.text.as_bytes());
 }
 
+#[test]
+fn the_coordinators_asks_raise_digest_is_the_listed_one() {
+    let assistant = shipped_prompt("assistant").expect("the coordinator prompt is shipped");
+    assert_eq!(
+        digest(ASSISTANT_ASKS_RAISE.as_bytes()),
+        ASSISTANT_ASKS_RAISE_DIGEST
+    );
+    assert!(
+        assistant.old.contains(&ASSISTANT_ASKS_RAISE_DIGEST),
+        "the retired default is in the coordinator's list"
+    );
+    assert!(ASSISTANT_ASKS_RAISE.as_bytes() != assistant.text.as_bytes());
+}
+
+/// A build that installed the wording which sent a hookless coordinator to
+/// `shprd ask raise` upgrades it: that verb needs a task, and a coordinator has
+/// none, so the route it promised could not work.
+#[test]
+fn an_untouched_asks_raise_default_is_upgraded() {
+    let temp = dir();
+    let path = path_of(temp.path(), "assistant");
+    std::fs::write(&path, ASSISTANT_ASKS_RAISE).expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert_eq!(
+        installed.text,
+        shipped_prompt("assistant").expect("shipped").text,
+        "today's words won"
+    );
+}
+
+/// The coordinator has no task (`$SHPRD_TASK` is set only for a task), so its
+/// run-wide question must name a verb that works without one: `shprd agent
+/// escalate` takes no task and shows on the board as waiting for the person.
+#[test]
+fn the_coordinator_is_not_sent_to_the_task_only_raise_verb() {
+    let assistant = shipped_prompt("assistant").expect("the coordinator prompt is shipped");
+    let text = assistant.text;
+    assert!(
+        text.contains("shprd agent escalate"),
+        "the coordinator needs a verb that takes no task: {text}"
+    );
+    assert!(
+        !text.contains("with `shprd ask raise`"),
+        "`ask raise` needs a task the coordinator has not got: {text}"
+    );
+    // The task-only verb may still be named, but only as something a task's
+    // question uses, with the reason spelled out.
+    assert!(
+        text.contains("`shprd ask raise` needs one"),
+        "the wording must say why a card is not the coordinator's route: {text}"
+    );
+}
+
 /// The worker's words point at the brief for the mechanism, because only the
 /// brief knows the program's harness; naming one CLI's tool would be wrong for
 /// every other program.

@@ -105,8 +105,7 @@ const BACKUP_M9_ASKS_DIGEST: &str =
 const BACKUP_OLD: &[&str] = &[BACKUP_M9_ASKS_DIGEST];
 
 /// The coordinator wording M9.5 shipped, retired because it named only the
-/// CLI's own question tool: a coordinator on a program with no ask hook raises
-/// its card with `shprd ask raise`.
+/// CLI's own question tool, which a program with no ask hook does not have.
 #[cfg(test)]
 const ASSISTANT_M9_ASKS: &str =
     include_str!("../../../data/templates/history/assistant-m9-asks.md");
@@ -116,8 +115,22 @@ const ASSISTANT_M9_ASKS: &str =
 const ASSISTANT_M9_ASKS_DIGEST: &str =
     "55fc1fde127f7208667ccf62caaa6d5c57f6a3678a74d78fc8ea4583fce8ebb3";
 
+/// The coordinator wording this task shipped first, which sent a coordinator on
+/// a program with no ask hook to `shprd ask raise`. That verb needs a task, and
+/// a coordinator's launch carries none (`SHPRD_TASK` is set only for a task), so
+/// the route it named could not work for the program it was written for. Today's
+/// words use `shprd agent escalate` for a run-wide question instead.
+#[cfg(test)]
+const ASSISTANT_ASKS_RAISE: &str =
+    include_str!("../../../data/templates/history/assistant-asks-raise.md");
+
+/// The SHA-256 of [`ASSISTANT_ASKS_RAISE`], the coordinator's second retired
+/// default.
+const ASSISTANT_ASKS_RAISE_DIGEST: &str =
+    "5759b6e936356e985db7ef39f21037b9e68a2d0a955714be3bd65c1d327af027";
+
 /// The coordinator's retired defaults.
-const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST];
+const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST, ASSISTANT_ASKS_RAISE_DIGEST];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [

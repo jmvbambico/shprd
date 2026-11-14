@@ -248,9 +248,13 @@ pub fn raise(args: &AskRaiseArgs, ctx: &Ctx) -> Result<(), CliError> {
     let task = match args.task.clone().or_else(task_of_env) {
         Some(task) => task,
         None => {
+            // A coordinator has no task (`$SHPRD_TASK` is set only for a task),
+            // so this points it at the run-wide verb rather than leaving it
+            // with a refusal it cannot act on.
             return Err(CliError::other(anyhow!(
                 "no task for this ask: run it in the task's worktree (where `$SHPRD_TASK` is set) \
-                 or name one with `--task`"
+                 or name one with `--task`; a run-wide question has no task, so raise it with \
+                 `shprd agent escalate --body <question> --default <what happens if nobody answers>`"
             )));
         }
     };
