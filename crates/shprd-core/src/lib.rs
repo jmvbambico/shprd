@@ -1,6 +1,7 @@
 //! Events, fold, task model, transition rules, config (no I/O beyond the log
 //! file), and the spawn retry every external program shprd runs goes through.
 
+pub mod ask;
 pub mod config;
 pub mod event;
 pub mod gate;

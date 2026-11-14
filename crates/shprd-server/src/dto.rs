@@ -8,6 +8,7 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+use shprd_core::ask::AskKind;
 use shprd_core::state::{RunState, TaskStatus};
 use ts_rs::TS;
 
@@ -271,6 +272,82 @@ pub struct AgentDto {
     pub dry_until_ms: Option<u64>,
 }
 
+/// What an agent is waiting for, as a card shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "AskKindDto.ts")]
+pub enum AskKindDto {
+    /// The agent asks a question and waits for an answer.
+    Question,
+    /// The agent asks permission to run a tool.
+    Permission,
+    /// The agent offers a plan and waits for approval.
+    Plan,
+}
+
+impl From<AskKind> for AskKindDto {
+    fn from(kind: AskKind) -> Self {
+        match kind {
+            AskKind::Question => Self::Question,
+            AskKind::Permission => Self::Permission,
+            AskKind::Plan => Self::Plan,
+        }
+    }
+}
+
+/// One ask still waiting for the person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AskDto.ts")]
+pub struct AskDto {
+    /// Its id, unique inside the task.
+    pub id: String,
+    /// The task it belongs to.
+    pub task: String,
+    /// Question, permission or plan.
+    pub kind: AskKindDto,
+    /// What the person is asked.
+    pub text: String,
+    /// The choices a card offers, when it has any.
+    pub options: Vec<String>,
+    /// When it was raised, ms since the Unix epoch.
+    pub created_at_ms: u64,
+    /// When it stops being open, ms since the Unix epoch, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expires_at_ms: Option<u64>,
+}
+
+/// What `GET /api/asks` answers with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AskListDto.ts")]
+pub struct AskListDto {
+    /// Every open ask, oldest first.
+    pub asks: Vec<AskDto>,
+}
+
+/// The body of `POST /api/asks/answer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AnswerAsk.ts")]
+pub struct AnswerAsk {
+    /// The task the ask belongs to.
+    pub task: String,
+    /// The ask to answer.
+    pub ask: String,
+    /// What the person answered: `allow`/`deny`, `approve`/`reject`, or their
+    /// own words for a question.
+    pub answer: String,
+}
+
+/// What answering an ask answers with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AskReply.ts")]
+pub struct AskReply {
+    /// True; a refusal answers with [`ErrorBody`] and a failure status.
+    pub ok: bool,
+    /// The ask as it now stands, with its answer.
+    pub ask: AskDto,
+}
+
 /// Something waiting on a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "NeedDto.ts")]
@@ -307,6 +384,8 @@ pub struct SnapshotDto {
     pub agents: Vec<AgentDto>,
     /// Everything waiting on a human, oldest first.
     pub needs: Vec<NeedDto>,
+    /// Every ask still waiting for the person, oldest first.
+    pub asks: Vec<AskDto>,
     /// Whether the run has finished.
     pub finished: bool,
 }
@@ -582,6 +661,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ReviewDto>()?,
         one::<AgentDto>()?,
         one::<NeedDto>()?,
+        one::<AskKindDto>()?,
+        one::<AskDto>()?,
+        one::<AskListDto>()?,
+        one::<AnswerAsk>()?,
+        one::<AskReply>()?,
         one::<SnapshotDto>()?,
         one::<HealthDto>()?,
         one::<EventNoticeDto>()?,

@@ -367,6 +367,46 @@ pub enum RuleError {
         /// The number the event named.
         number: u64,
     },
+    /// An ask the log never saw raised cannot be answered.
+    #[error("task {task:?} has no ask {ask:?}")]
+    UnknownAsk {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+    },
+    /// An ask already has an answer; a second one is refused.
+    #[error("ask {ask:?} of task {task:?} was already answered")]
+    AskAlreadyAnswered {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+    },
+    /// The ask timed out before anyone answered it.
+    #[error("ask {ask:?} of task {task:?} expired at {expires_at_ms}")]
+    AskExpired {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+        /// When it stopped being answerable.
+        expires_at_ms: u64,
+    },
+    /// An ask with that id was already raised for the task.
+    #[error("ask {ask:?} of task {task:?} was already raised")]
+    AskAlreadyRaised {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+    },
+    /// An ask or its answer had no words.
+    #[error("task {task:?}: an ask and its answer must say something")]
+    EmptyAsk {
+        /// The task.
+        task: TaskId,
+    },
     /// An approval was recorded by something that is not a human.
     #[error("{actor:?} cannot approve a pull request: only a human can")]
     NotHuman {
@@ -706,6 +746,16 @@ fn check_with(
             message,
             progress,
         } => check_task_status(state, task, message, *progress, provenance),
+        EventKind::AskRaised {
+            task,
+            ask,
+            text,
+            created_at_ms,
+            ..
+        } => check_ask_raised(state, task, ask, text, *created_at_ms, provenance),
+        EventKind::AskAnswered {
+            task, ask, answer, ..
+        } => check_ask_answered(state, task, ask, answer, now_ms, provenance),
         EventKind::TaskDropped { task, reason } => {
             check_task_dropped(state, actor, task, reason, provenance)
         }
@@ -1238,6 +1288,75 @@ fn check_task_status(
 }
 
 /// Rules for recording a gate outcome: it needs a completed report.
+/// Rules for raising an ask: it names a task the run holds, is new, and says
+/// something.
+fn check_ask_raised(
+    state: &RunState,
+    task: &str,
+    ask: &str,
+    text: &str,
+    _created_at_ms: u64,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    task_in(state, task)?;
+    check_not_dropped(state, task, provenance)?;
+    if text.trim().is_empty() {
+        return Err(RuleError::EmptyAsk {
+            task: task.to_string(),
+        });
+    }
+    if state
+        .asks
+        .contains_key(&(task.to_string(), ask.to_string()))
+    {
+        return Err(RuleError::AskAlreadyRaised {
+            task: task.to_string(),
+            ask: ask.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Rules for answering an ask: the log knows it, it has no answer yet, it has
+/// not timed out, and the answer says something.
+fn check_ask_answered(
+    state: &RunState,
+    task: &str,
+    ask: &str,
+    answer: &str,
+    now_ms: u64,
+    _provenance: Provenance,
+) -> Result<(), RuleError> {
+    task_in(state, task)?;
+    let Some(record) = state.asks.get(&(task.to_string(), ask.to_string())) else {
+        return Err(RuleError::UnknownAsk {
+            task: task.to_string(),
+            ask: ask.to_string(),
+        });
+    };
+    if record.answer.is_some() {
+        return Err(RuleError::AskAlreadyAnswered {
+            task: task.to_string(),
+            ask: ask.to_string(),
+        });
+    }
+    if let Some(until) = record.expires_at_ms
+        && until <= now_ms
+    {
+        return Err(RuleError::AskExpired {
+            task: task.to_string(),
+            ask: ask.to_string(),
+            expires_at_ms: until,
+        });
+    }
+    if answer.trim().is_empty() {
+        return Err(RuleError::EmptyAsk {
+            task: task.to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn check_gate(
     state: &RunState,
     task: &str,
@@ -1717,6 +1836,8 @@ fn expect_current_attempt<'a>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use crate::event::{Actor, Event, Finding, Severity};
 
@@ -3975,5 +4096,132 @@ mod tests {
             },
         ));
         assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
+    }
+
+    fn ask_raised(seq: u64, id: &str, ask: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AskRaised {
+                task: id.to_string(),
+                ask: ask.to_string(),
+                ask_kind: crate::ask::AskKind::Permission,
+                text: "Run: cargo test".to_string(),
+                options: vec!["Allow".to_string(), "Deny".to_string()],
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            },
+        )
+    }
+
+    fn ask_answered(seq: u64, id: &str, ask: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AskAnswered {
+                task: id.to_string(),
+                ask: ask.to_string(),
+                answer: "allow".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn an_ask_is_raised_against_a_task_the_run_holds() {
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ask_raised(3, "a", "q1"),
+        ]);
+        let record = state
+            .asks
+            .get(&("a".to_string(), "q1".to_string()))
+            .expect("the ask is in the fold");
+        assert_eq!(record.text, "Run: cargo test");
+        assert!(record.answer.is_none());
+
+        let mut log = vec![started(1), added(2, "a", &["src/a"], &[])];
+        log.push(ask_raised(3, "missing", "q1"));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::UnknownTask { .. })
+        ));
+    }
+
+    #[test]
+    fn an_ask_can_only_be_raised_once() {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ask_raised(3, "a", "q1"),
+        ];
+        log.push(ask_raised(4, "a", "q1"));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::AskAlreadyRaised { .. })
+        ));
+    }
+
+    #[test]
+    fn an_answer_to_an_unknown_ask_is_refused() {
+        let state = folded(&[started(1), added(2, "a", &["src/a"], &[])]);
+        let kind = EventKind::AskAnswered {
+            task: "a".to_string(),
+            ask: "never-raised".to_string(),
+            answer: "allow".to_string(),
+        };
+        assert!(matches!(
+            state.check_as(
+                &Actor::Agent {
+                    id: "claude".to_string()
+                },
+                &kind,
+                2_000
+            ),
+            Err(RuleError::UnknownAsk { .. })
+        ));
+    }
+
+    #[test]
+    fn an_ask_is_answered_only_once() {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ask_raised(3, "a", "q1"),
+            ask_answered(4, "a", "q1"),
+        ];
+        let state = folded(&log);
+        assert_eq!(
+            state
+                .asks
+                .get(&("a".to_string(), "q1".to_string()))
+                .and_then(|record| record.answer.as_ref())
+                .map(|answer| answer.text.as_str()),
+            Some("allow")
+        );
+        log.push(ask_answered(5, "a", "q1"));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::AskAlreadyAnswered { .. })
+        ));
+    }
+
+    #[test]
+    fn a_question_that_says_nothing_is_refused() {
+        let mut log = vec![started(1), added(2, "a", &["src/a"], &[])];
+        log.push(ev(
+            3,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "q1".to_string(),
+                ask_kind: crate::ask::AskKind::Question,
+                text: "  ".to_string(),
+                options: Vec::new(),
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            },
+        ));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::EmptyAsk { .. })
+        ));
     }
 }

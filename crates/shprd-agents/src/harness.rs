@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::asks::{AskHookInstaller, NoAskHook};
+use crate::asks::{AskHookInstaller, HarnessAskHook};
 use crate::spec::{
     AskHookSpec, BriefSpec, CatalogSource, EffortSpec, HarnessSpec, ModelsSpec, PermissionMode,
     PermissionsSpec, SpecError, StatusSource, Vendor,
@@ -141,10 +141,11 @@ impl Harness {
 
     /// The ask-hook installer for this program.
     ///
-    /// Until M9.5 ships the adapters this is [`NoAskHook`]: it reports what the
-    /// harness says and touches no file.
+    /// It is chosen by the harness's `[asks] format`: Claude Code gets its
+    /// worktree-local project settings, Codex its project hooks, and every
+    /// other program a no-op that touches nothing (M9.5).
     pub fn ask_installer(&self) -> impl AskHookInstaller + '_ {
-        NoAskHook::new(&self.spec.asks)
+        HarnessAskHook::for_spec(&self.spec.asks, &self.spec.id)
     }
 }
 
@@ -242,7 +243,7 @@ mod tests {
         let asks = claude.asks();
         assert!(asks.supported);
         assert_eq!(asks.format, AskHookConfig::ClaudeSettings);
-        assert_eq!(asks.config.as_deref(), Some("~/.claude/settings.json"));
+        assert_eq!(asks.config.as_deref(), Some(".claude/settings.local.json"));
         let installer = claude.ask_installer();
         assert!(installer.available());
     }

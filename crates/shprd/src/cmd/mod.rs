@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod approve;
+pub mod ask;
 pub mod confirm;
 pub mod dagr;
 pub mod deliver;
@@ -30,7 +31,7 @@ pub mod watch;
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
-use crate::cli::{Cli, Command, DagrCommand, RunCommand, TaskVerb};
+use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, TaskVerb};
 use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
 
 /// Runs whichever verb the command line asked for.
@@ -60,6 +61,9 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Agent { cmd }) => agent::dispatch(&ctx, cmd, cli.global.home.as_deref()),
         Some(Command::Task { cmd }) => match cmd {
             TaskVerb::Status(args) => agent::task_status(&ctx, &args),
+        },
+        Some(Command::Ask { cmd }) => match cmd {
+            AskCommand::Hook(args) => ask::hook(&args, cli.global.repo.as_deref()),
         },
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
@@ -151,6 +155,8 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
         EventKind::TaskStatus { .. } => "task_status",
+        EventKind::AskRaised { .. } => "ask_raised",
+        EventKind::AskAnswered { .. } => "ask_answered",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",

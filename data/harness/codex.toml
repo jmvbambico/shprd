@@ -111,10 +111,13 @@ delivery = "first-message"
 sources = ["osc7501", "hook", "screen"]
 
 [asks]
-# Codex fires `PermissionRequest` for an approval. Shepherdr (v3.1.34) installs
-# the same hook into ~/.codex/hooks.json and waits up to 1800 s for an answer.
+# Codex fires `PermissionRequest` for an approval. Codex 0.167 reads a trusted
+# project's `.codex/hooks.json` and only when its `.codex/config.toml` says
+# `hooks = true`, so the installer writes both into the task's worktree, never
+# the person's ~/.codex/hooks.json (M9.5). It waits up to 1800 s for an answer,
+# as Shepherdr's hook does (v3.1.34).
 supported = true
-config = "~/.codex/hooks.json"
+config = ".codex/hooks.json"
 format = "codex_hooks"
 command = "sh '{hook}'"
 timeout_seconds = 1800

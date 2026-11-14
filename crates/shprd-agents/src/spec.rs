@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -807,7 +807,11 @@ pub struct AskHookSpec {
     /// Whether the program has a hook that can surface an ask at all.
     #[serde(default)]
     pub supported: bool,
-    /// The config file the adapter writes the hook into, home-relative (`~/...`).
+    /// The config file the adapter writes the hook into, relative to the task's
+    /// worktree (`.claude/settings.local.json`, `.codex/hooks.json`).
+    ///
+    /// Never a `~/...` path: a task's hook belongs to the task, and shprd never
+    /// edits the person's global config.
     #[serde(default)]
     pub config: Option<String>,
     /// The file's shape, which picks the installer.
@@ -859,13 +863,20 @@ impl AskHookSpec {
         let Some(config) = &self.config else {
             return Err(SpecError::IncompleteAskHook { missing: "config" });
         };
-        match config.strip_prefix("~/") {
-            Some(rest) if !rest.is_empty() => {}
-            _ => {
-                return Err(SpecError::InvalidAskConfig {
-                    config: config.clone(),
-                });
-            }
+        let relative = Path::new(config);
+        let outside = config.is_empty()
+            || config.starts_with('~')
+            || relative.is_absolute()
+            || relative.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            });
+        if outside {
+            return Err(SpecError::InvalidAskConfig {
+                config: config.clone(),
+            });
         }
         if self.format == AskHookConfig::Unsupported {
             return Err(SpecError::IncompleteAskHook { missing: "format" });
@@ -906,9 +917,11 @@ pub enum AskHookConfig {
     /// The program takes no ask hook.
     #[default]
     Unsupported,
-    /// Claude Code's `~/.claude/settings.json`: `hooks.<Event>[].hooks[]`.
+    /// Claude Code's worktree-local `.claude/settings.local.json`:
+    /// `hooks.<Event>[].hooks[]`.
     ClaudeSettings,
-    /// Codex's `~/.codex/hooks.json`: the same shape in its own file.
+    /// Codex's worktree-local `.codex/hooks.json`: the same shape in its own
+    /// file, with `.codex/config.toml` turning hooks on.
     CodexHooks,
 }
 
@@ -1586,7 +1599,7 @@ sources = [\"hook\", \"osc7501\", \"screen\"]
 
 [asks]
 supported = true
-config = \"~/.fake/hooks.json\"
+config = \".fake/hooks.json\"
 format = \"codex_hooks\"
 command = \"sh '{{hook}}'\"
 timeout_seconds = 60
@@ -1878,15 +1891,24 @@ levels = [\"low\", \"high\"]
 
     #[test]
     fn a_supported_ask_hook_names_its_installer_facts() {
-        let fixture = full_spec_text().replace("config = \"~/.fake/hooks.json\"\n", "");
+        let fixture = full_spec_text().replace("config = \".fake/hooks.json\"\n", "");
         assert!(matches!(
             full_spec_error(&fixture),
             SpecError::IncompleteAskHook { missing: "config" }
         ));
 
         let fixture = full_spec_text().replace(
-            "config = \"~/.fake/hooks.json\"",
+            "config = \".fake/hooks.json\"",
             "config = \"/etc/hooks.json\"",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidAskConfig { .. }
+        ));
+
+        let fixture = full_spec_text().replace(
+            "config = \".fake/hooks.json\"",
+            "config = \"~/.claude/settings.json\"",
         );
         assert!(matches!(
             full_spec_error(&fixture),

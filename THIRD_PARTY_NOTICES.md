@@ -43,7 +43,8 @@ SOFTWARE.
   `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`),
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
   `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
-  `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
+  `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`, `service/asks.ts`,
+  `core/asks.js`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -53,7 +54,10 @@ SOFTWARE.
   and the agent-adapter facts — the Claude and Codex permission modes and the
   cross-program map between them, and where an ask hook is installed and how
   long it waits — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`
+  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`,
+  and the ask file queue and waiting hook — one request file, one answer,
+  never a decision by the hook itself — in `crates/shprd-core/src/ask.rs` and
+  `crates/shprd/src/cmd/ask.rs`
 - License: MIT
 
 MIT License

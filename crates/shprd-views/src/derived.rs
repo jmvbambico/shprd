@@ -23,6 +23,7 @@
 
 use std::collections::BTreeMap;
 
+use shprd_core::ask::AskKind;
 use shprd_core::event::ReportStatus;
 use shprd_core::state::{RunState, Task, TaskStatus};
 
@@ -319,6 +320,17 @@ pub struct ProviderCut {
     pub due_ms: Option<u64>,
 }
 
+/// One ask still waiting for the person, as the status rules see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskFacts {
+    /// Question, permission or plan.
+    pub kind: AskKind,
+    /// What the person is asked.
+    pub text: String,
+    /// When it stops being open, ms since the Unix epoch, when it does.
+    pub expires_at_ms: Option<u64>,
+}
+
 /// What a task's landing waits on (Shepherdr's `merge_requested`,
 /// `merge_queued`, `auto_merge` and its `pr` record, `agents.py:184-193`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -382,6 +394,12 @@ pub struct TaskSignal {
     pub failure: Option<String>,
     /// Why a person dropped it, when one did.
     pub dropped_reason: Option<String>,
+    /// Asks still waiting for the person, oldest first.
+    ///
+    /// The fold records every raised ask and its answer; the derived status
+    /// shows the first one still open, so a card and the board agree without a
+    /// second source of truth.
+    pub open_asks: Vec<AskFacts>,
 }
 
 impl Default for TaskSignal {
@@ -401,6 +419,7 @@ impl Default for TaskSignal {
             merge: MergeFacts::default(),
             failure: None,
             dropped_reason: None,
+            open_asks: Vec::new(),
         }
     }
 }
@@ -422,6 +441,16 @@ impl TaskSignal {
             wait: reported_wait(task),
             failure: failure_reason(task),
             dropped_reason: task.dropped_reason.clone(),
+            open_asks: state
+                .asks
+                .values()
+                .filter(|ask| ask.task == id && ask.answer.is_none())
+                .map(|ask| AskFacts {
+                    kind: ask.kind,
+                    text: ask.text.clone(),
+                    expires_at_ms: ask.expires_at_ms,
+                })
+                .collect(),
             ..Self::default()
         })
     }
@@ -520,6 +549,16 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
         _ => return parked(signal),
     };
     let mine = live.mine();
+    // An ask the agent is waiting on needs the person at once, whatever else is
+    // happening: the hook that raised it holds the agent until an answer comes
+    // back. An ask whose hook timed out is no longer open and says nothing.
+    if let Some(ask) = signal
+        .open_asks
+        .iter()
+        .find(|ask| ask.expires_at_ms.is_none_or(|until| until > now_ms))
+    {
+        return Derived::needs(Need::Asks, &ask_reason(ask));
+    }
     // A problem found a moment ago reads as the task would without it
     // (agents.py:118-120): its agent is usually told and takes it up, and the
     // row must not flicker at the person for a few seconds.
@@ -837,6 +876,21 @@ fn retry_line(cut: &ProviderCut, now_ms: u64) -> String {
 /// Shepherdr says it in the reader's local days ("Starts Fri 9:00 (in 6h)",
 /// `when.py:164-168`); shprd's clock is UTC and has no calendar yet, so the
 /// hour stands in for the day words.
+/// The few words a row shows for an open ask.
+fn ask_reason(ask: &AskFacts) -> String {
+    match ask.kind {
+        AskKind::Plan => "Plan to approve".to_string(),
+        AskKind::Question | AskKind::Permission => {
+            let text = ask.text.trim();
+            if text.is_empty() {
+                QUESTION.to_string()
+            } else {
+                fit(text)
+            }
+        }
+    }
+}
+
 fn starts_words(at_ms: u64, now_ms: u64) -> String {
     if at_ms <= now_ms {
         "Starts now".to_string()
@@ -1629,5 +1683,55 @@ mod tests {
         assert_eq!(words.len(), all.len());
         assert_eq!(glyphs.len(), all.len());
         assert_eq!(DerivedStatus::NeedsYou.word(), "Needs you");
+    }
+
+    #[test]
+    fn an_open_ask_makes_the_task_need_you() {
+        let mut signal = task(TaskStatus::Working);
+        signal.open_asks.push(AskFacts {
+            kind: AskKind::Permission,
+            text: "Run: cargo test".to_string(),
+            expires_at_ms: None,
+        });
+        let got = derive_status(&signal, &one(Some(Activity::Working)), NOW);
+        assert_eq!(got.status, DerivedStatus::NeedsYou);
+        assert_eq!(got.needs, Some(Need::Asks));
+        assert_eq!(got.reason.as_deref(), Some("Run: cargo test"));
+    }
+
+    #[test]
+    fn a_question_and_a_plan_say_what_they_need() {
+        let mut question = task(TaskStatus::Working);
+        question.open_asks.push(AskFacts {
+            kind: AskKind::Question,
+            text: "Which database should this use?".to_string(),
+            expires_at_ms: None,
+        });
+        let got = derive_status(&question, &one(Some(Activity::Working)), NOW);
+        assert_eq!(got.status, DerivedStatus::NeedsYou);
+        assert!(got.reason.unwrap_or_default().starts_with("Which database"));
+
+        let mut plan = task(TaskStatus::Working);
+        plan.open_asks.push(AskFacts {
+            kind: AskKind::Plan,
+            text: "1. Add a queue".to_string(),
+            expires_at_ms: None,
+        });
+        let got = derive_status(&plan, &one(Some(Activity::Working)), NOW);
+        assert_eq!(got.status, DerivedStatus::NeedsYou);
+        assert_eq!(got.reason.as_deref(), Some("Plan to approve"));
+    }
+
+    #[test]
+    fn an_answered_or_expired_ask_does_not_need_you() {
+        let mut signal = task(TaskStatus::Working);
+        signal.open_asks.push(AskFacts {
+            kind: AskKind::Permission,
+            text: "Run: cargo test".to_string(),
+            expires_at_ms: Some(NOW),
+        });
+        let got = derive_status(&signal, &one(Some(Activity::Working)), NOW);
+        assert_eq!(got.status, DerivedStatus::Working);
+        assert_ne!(got.needs, Some(Need::Asks));
     }
 }

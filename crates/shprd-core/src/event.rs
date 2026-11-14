@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ask::{AskId, AskKind};
+
 /// Identifies a task inside a run.
 pub type TaskId = String;
 
@@ -381,6 +383,45 @@ pub enum EventKind {
         message: String,
         /// How far the agent says it has got, from 0 to 100.
         progress: Option<u8>,
+    },
+    /// An agent raised a question, permission or plan and waits for an answer.
+    ///
+    /// The ask itself lives in the file queue beside the log
+    /// ([`crate::ask::AskQueue`]); this event is the durable record the fold
+    /// and every view read, so a card and the board cannot disagree about
+    /// whether something still needs the person.
+    AskRaised {
+        /// The task it belongs to.
+        task: TaskId,
+        /// Its id, unique inside the task.
+        ask: AskId,
+        /// Question, permission or plan.
+        ///
+        /// Spelled `ask_kind` because `kind` is the event tag itself.
+        ask_kind: AskKind,
+        /// What the person is asked.
+        text: String,
+        /// The choices a card offers, when it has any.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+        /// When it was raised, ms since the Unix epoch.
+        created_at_ms: u64,
+        /// When it stops being open, ms since the Unix epoch, when it does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at_ms: Option<u64>,
+    },
+    /// A raised ask was answered; the answer is what the waiting hook prints.
+    ///
+    /// An answer to an ask the log does not know, or to one already answered,
+    /// is refused by the rules ([`crate::rules::RuleError::UnknownAsk`],
+    /// [`crate::rules::RuleError::AskAlreadyAnswered`]).
+    AskAnswered {
+        /// The task it belongs to.
+        task: TaskId,
+        /// The ask.
+        ask: AskId,
+        /// What the person answered.
+        answer: String,
     },
     /// A gate passed for an attempt.
     GatePassed {

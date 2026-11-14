@@ -487,6 +487,11 @@ impl Service {
             tick: _,
         } = self;
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        // Writers outside this process — a program's ask hook, the CLI — append
+        // to the same log. Watching its stamp is what wakes a long poll for an
+        // ask raised that way, so a card arrives without waiting for a client
+        // to poll the file.
+        let watcher = tokio::spawn(watch_log(app.repo().to_path_buf(), app.hub()));
         let ticker = tick.map(|tick| {
             let worker = std::sync::Arc::clone(&tick.worker);
             let interval = tick.interval;
@@ -503,6 +508,7 @@ impl Service {
             .with_graceful_shutdown(shutdown)
             .await;
         let _ = stop.send(());
+        watcher.abort();
         if let Some(ticker) = ticker {
             let _ = ticker.await;
         }
@@ -510,6 +516,28 @@ impl Service {
         tracing::info!(port = info.port, "shprd service stopped");
         served.map_err(ServerError::Serve)?;
         removed
+    }
+}
+
+/// Publishes every log change a writer outside this process makes.
+///
+/// The log is re-read only when its stamp changes, so a quiet run costs a
+/// `stat` per tick; the publish is what wakes long polls and sockets.
+async fn watch_log(repo: std::path::PathBuf, hub: crate::hub::Hub) {
+    let mut seen: Option<crate::ledger::Stamp> = None;
+    let mut last = 0;
+    loop {
+        let current = crate::ledger::stamp(&repo).ok().flatten();
+        if current != seen {
+            seen = current;
+            if let Ok(seq) = crate::ledger::last_seq(&repo)
+                && seq > last
+            {
+                last = seq;
+                hub.publish(seq);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 

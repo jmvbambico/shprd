@@ -7,8 +7,8 @@
 use shprd_core::state::RunState;
 
 use crate::dto::{
-    AgentDto, AttemptDto, FindingDto, GateDto, NeedDto, ReportDto, ReviewDto, RunDto, SnapshotDto,
-    TaskDto, TaskProgressDto,
+    AgentDto, AskDto, AttemptDto, FindingDto, GateDto, NeedDto, ReportDto, ReviewDto, RunDto,
+    SnapshotDto, TaskDto, TaskProgressDto,
 };
 
 /// Folds a run into the snapshot a client draws.
@@ -42,7 +42,36 @@ pub fn snapshot(state: &RunState) -> SnapshotDto {
                 seq: escalation.seq,
             })
             .collect(),
+        asks: open_asks(state),
         finished: state.finished,
+    }
+}
+
+/// Every ask the fold has not seen an answer for, oldest first.
+fn open_asks(state: &RunState) -> Vec<AskDto> {
+    let mut asks: Vec<&shprd_core::state::AskRecord> = state
+        .asks
+        .values()
+        .filter(|ask| ask.answer.is_none())
+        .collect();
+    asks.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.task.cmp(&right.task))
+    });
+    asks.into_iter().map(ask).collect()
+}
+
+/// One ask as a card draws it.
+pub(crate) fn ask(record: &shprd_core::state::AskRecord) -> AskDto {
+    AskDto {
+        id: record.id.clone(),
+        task: record.task.clone(),
+        kind: record.kind.into(),
+        text: record.text.clone(),
+        options: record.options.clone(),
+        created_at_ms: record.created_at_ms,
+        expires_at_ms: record.expires_at_ms,
     }
 }
 

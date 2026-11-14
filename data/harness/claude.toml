@@ -103,10 +103,12 @@ sources = ["osc7501", "hook", "screen"]
 [asks]
 # Claude Code fires one `PermissionRequest` hook for a permission, a question
 # (`AskUserQuestion`) and a plan (`ExitPlanMode`); the payload says which. Same
-# config file and entry shape as Shepherdr's HOOKS table (v3.1.34), which waits
-# up to 1800 s for a person's answer.
+# entry shape as Shepherdr's HOOKS table (v3.1.34), which waits up to 1800 s for
+# a person's answer — but in the task's worktree, never the person's
+# ~/.claude/settings.json: Claude Code reads .claude/settings.local.json from
+# the project it runs in, so that is what the installer writes (M9.5).
 supported = true
-config = "~/.claude/settings.json"
+config = ".claude/settings.local.json"
 format = "claude_settings"
 command = "sh '{hook}'"
 timeout_seconds = 1800
