@@ -29,6 +29,10 @@
 //! { "steps": [], "news": [{ "space": "shprd", "lines": ["<shprd-news …>…"] }] }
 //! ```
 //!
+//! A repository with no remote, or no forge, lands its tasks on the run's
+//! integration branch in shprd's own worktree instead of through a pull
+//! request; the policy is the same one a forge landing reads.
+//!
 //! Without JSON, one line per action and one per told line. A pass whose steps
 //! all worked exits 0; one that could not read the run exits 1. A step that
 //! failed is printed and stays in the report — it never stops the other steps,
@@ -158,6 +162,7 @@ pub(crate) fn worker_with_hub(
             clock: Arc::new(shprd_core::log::SystemClock),
         })
     };
+    let local = crate::cmd::land::local_landing(&shprd_git::git::Git::new(&repo));
     Ok(Worker {
         repo,
         home: home.to_path_buf(),
@@ -165,6 +170,7 @@ pub(crate) fn worker_with_hub(
         facts,
         fallback,
         forge,
+        local,
         start,
         review,
         actor,

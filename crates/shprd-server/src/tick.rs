@@ -33,13 +33,17 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use shprd_core::config::Config;
-use shprd_core::event::{Actor, EventKind, FallbackAction, LandOutcome, ProviderClass};
+use shprd_core::event::{
+    Actor, EventKind, FallbackAction, Finding, LandOutcome, ProviderClass, Severity,
+};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::{Forge, ForgeError};
 use shprd_git::git::Git;
-use shprd_git::land::{self, LandError, Landing};
+use shprd_git::integrate;
+use shprd_git::land::{self, LandError, Landing, LocalLanding};
+use shprd_git::worktree::Layout;
 use shprd_views::derived::{
     self, Activity, Derived, DerivedStatus, LiveAgent, LiveAgents, TaskSignal,
 };
@@ -281,6 +285,10 @@ pub struct Worker {
     /// The forge a landing drives. It is the same one the facts come from, so a
     /// pass reads and writes one forge's story rather than two.
     pub forge: SharedForge,
+    /// True when the repository has no remote or no forge: a landing then goes
+    /// to the run's integration branch in shprd's own worktree, with no push and
+    /// no pull request.
+    pub local: bool,
     /// Starts an agent on a task.
     pub start: Starter,
     /// Starts the engine's reviewer on a hand-in.
@@ -315,6 +323,7 @@ impl Worker {
         let facts = Facts {
             prs: self.state_prs(&state),
             live: self.facts.live(&state),
+            local: self.local,
         };
         // The ladder's facts are read before the phases because a provider cut
         // is what makes a task read "Needs you" rather than "Working".
@@ -470,8 +479,14 @@ impl Worker {
     }
 
     /// The forge's word on every task with a branch, by task id.
+    ///
+    /// A local landing has no forge to ask, so there is no pull request fact to
+    /// have; the planner reads the hand-in's checks instead.
     fn state_prs(&self, state: &RunState) -> BTreeMap<String, PrFacts> {
         let mut prs = BTreeMap::new();
+        if self.local {
+            return prs;
+        }
         for (id, task) in &state.tasks {
             if task.latest_attempt().is_none() {
                 continue;
@@ -871,14 +886,16 @@ impl Worker {
         let worktree = PathBuf::from(&attempt.worktree);
         let git = Git::new(&worktree);
         let head = git.head_sha().map_err(|err| err.to_string())?;
-        let approved =
-            found.pr.as_ref().and_then(|pr| pr.approved_head.as_deref()) == Some(head.as_str());
+        let approved = found.approved_head.as_deref() == Some(head.as_str());
         let has_work = attempt
             .report
             .as_ref()
             .and_then(|report| report.commit.as_ref())
             .is_some()
             || found.pr.is_some();
+        if self.local {
+            return self.land_locally(&step, found, &attempt.branch, run, approved, has_work);
+        }
         let base = run.base_branch.clone();
         let title = format!("{task}: {}", found.title);
         let body = write_body(
@@ -905,6 +922,134 @@ impl Worker {
             landed_line(task, &base, &landed),
             seq,
         ))
+    }
+
+    /// Lands a task into the run's integration branch, with no forge involved.
+    ///
+    /// The worktree is shprd's own integration worktree on
+    /// `run.integration_branch`, so the user's checkout is never touched. The
+    /// policy is the same one the forge path applies; `checks` reads the
+    /// hand-in's own checks report because there is no CI to ask.
+    fn land_locally(
+        &self,
+        step: &Step,
+        task: &Task,
+        branch: &str,
+        run: &shprd_core::state::RunInfo,
+        approved: bool,
+        has_work: bool,
+    ) -> Result<StepReport, String> {
+        let repo_name = self
+            .repo
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                format!(
+                    "cannot name the repository: {} has no last path component",
+                    self.repo.display()
+                )
+            })?;
+        let layout = Layout::default_for_home(&self.home);
+        let worktree = integrate::open_integration_branch(
+            &self.repo,
+            &layout,
+            &repo_name,
+            &run.run_id,
+            &run.integration_branch,
+            &run.base_branch,
+        )
+        .map_err(|err| err.to_string())?;
+        let policy = self.config.land.policy_for(&run.integration_branch);
+        let landing = LocalLanding {
+            task: &task.id,
+            branch,
+            base: &run.integration_branch,
+            has_work,
+        };
+        let landed = match land::land_local(
+            &worktree,
+            &landing,
+            policy,
+            approved,
+            local_checks_passed(task),
+        ) {
+            Ok(landed) => landed,
+            Err(err @ LandError::Conflict { .. }) => {
+                self.record_conflict(task, branch, &err)?;
+                return Err(describe_land_error(err, &task.id));
+            }
+            Err(err) => return Err(describe_land_error(err, &task.id)),
+        };
+        let seq = self.record_local_landing(&task.id, &run.integration_branch, &landed)?;
+        Ok(StepReport::done(
+            step,
+            local_landed_line(&task.id, &run.integration_branch, &landed),
+            seq,
+        ))
+    }
+
+    /// Records a local landing's outcome once.
+    ///
+    /// A local landing has no pull request, so there is no `TaskPrOpened` to
+    /// record. The outcome is idempotent for the same reason the forge path's
+    /// is: a landing that finished moves the task to `Integrated`, and the
+    /// planner then has nothing left to land.
+    fn record_local_landing(
+        &self,
+        task: &str,
+        base: &str,
+        landed: &land::LocalLanded,
+    ) -> Result<Option<u64>, String> {
+        let Some(outcome) = landed.outcome() else {
+            return Ok(None);
+        };
+        let event = self.commit(EventKind::TaskLanded {
+            task: task.to_string(),
+            base: base.to_string(),
+            head: landed.head().to_string(),
+            number: None,
+            outcome,
+        })?;
+        self.notify(Some(event));
+        Ok(Some(event))
+    }
+
+    /// Records a local merge that conflicted, and the human it needs.
+    ///
+    /// A failed `integrate` gate takes the task out of `Passed`, so the next
+    /// pass does not try the same conflicting merge again; the escalation is
+    /// what a person sees and acts on.
+    fn record_conflict(&self, task: &Task, commit: &str, err: &LandError) -> Result<(), String> {
+        let LandError::Conflict { files, .. } = err else {
+            return Ok(());
+        };
+        let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
+        let finding = Finding {
+            severity: Severity::Major,
+            title: "conflicts with the integration branch".to_string(),
+            location: files.first().cloned(),
+            detail: format!("merging {commit} conflicts in {}", files.join(", ")),
+        };
+        let failed = self.commit(EventKind::GateFailed {
+            task: task.id.clone(),
+            attempt,
+            gate: "integrate".to_string(),
+            findings: vec![finding],
+            source: None,
+        })?;
+        self.notify(Some(failed));
+        let body = format!(
+            "{}: its work conflicts with the integration branch ({}), so it needs a person",
+            task.id,
+            files.join(", ")
+        );
+        let escalated = self.commit(EventKind::Escalated {
+            task: Some(task.id.clone()),
+            body,
+            default_action: String::from("send the task back to a worker"),
+        })?;
+        self.notify(Some(escalated));
+        Ok(())
     }
 
     /// Records what a landing touched, once per pull request and outcome.
@@ -1165,6 +1310,39 @@ fn landed_line(task: &str, base: &str, landed: &land::Landed) -> String {
             format!("{} ({})", reason.advice(task), pr.url)
         }
     }
+}
+
+/// The line a local landing prints.
+fn local_landed_line(task: &str, base: &str, landed: &land::LocalLanded) -> String {
+    match landed {
+        land::LocalLanded::Merged { head } => {
+            format!(
+                "merged {task} into {base} at {}",
+                &head[..head.len().min(7)]
+            )
+        }
+        land::LocalLanded::AlreadyMerged { .. } => format!("{task} is already in {base}"),
+        land::LocalLanded::SquashMerged { .. } => {
+            format!("{task}'s work is already in {base}, as other commits")
+        }
+        land::LocalLanded::NothingToMerge { .. } => {
+            format!("nothing to merge: {task}'s branch has no work beyond {base}")
+        }
+        land::LocalLanded::Waiting { reason, .. } => reason.local_advice(task),
+    }
+}
+
+/// Whether the task's own hand-in says its checks passed.
+///
+/// A repository with no forge has no CI to ask, so the hand-in's checks are the
+/// local report the `checks` policy reads.
+fn local_checks_passed(task: &Task) -> bool {
+    task.latest_attempt()
+        .and_then(|attempt| attempt.report.as_ref())
+        .is_some_and(|report| {
+            !report.checks.is_empty()
+                && report.checks.iter().all(|check| check.exit_code == Some(0))
+        })
 }
 
 /// Why a landing failed, in the words the CLI would use.

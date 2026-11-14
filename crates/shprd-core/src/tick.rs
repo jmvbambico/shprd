@@ -110,6 +110,13 @@ pub struct Facts {
     pub prs: BTreeMap<String, PrFacts>,
     /// The tasks that have an agent running now.
     pub live: BTreeSet<String>,
+    /// True when the repository has no remote or no forge, so a landing goes to
+    /// the run's integration branch locally rather than through a pull request.
+    ///
+    /// The `checks` policy then reads the hand-in's own checks report, because a
+    /// repository with no forge has no CI to ask.
+    #[serde(default)]
+    pub local: bool,
 }
 
 impl Facts {
@@ -297,7 +304,10 @@ fn step_for(
         return match policy {
             MergePolicy::Auto => Some(land),
             // The checks are the forge's to report: while they run, or while the
-            // forge cannot say, nothing depends on them being green.
+            // forge cannot say, nothing depends on them being green. A local
+            // landing has no forge to ask, so its checks are the hand-in's own
+            // report, which `ready_to_land` already read and accepted.
+            MergePolicy::Checks if facts.local => Some(land),
             MergePolicy::Checks => (pr.and_then(|pr| pr.checks) == Some(true)).then_some(land),
             MergePolicy::Ask => {
                 if approval_matches(task, pr) {
@@ -306,9 +316,14 @@ fn step_for(
                     // Said once already: a pass must not repeat itself.
                     None
                 } else {
+                    let body = if facts.local {
+                        needs_you_body_local(&task.id)
+                    } else {
+                        needs_you_body(&task.id, pr.and_then(|pr| pr.number))
+                    };
                     Some(Step::NeedsYou {
                         task: task.id.clone(),
-                        body: needs_you_body(&task.id, pr.and_then(|pr| pr.number)),
+                        body,
                     })
                 }
             }
@@ -394,11 +409,7 @@ fn deps_landed(state: &RunState, task: &Task) -> bool {
 /// about the commits now on top of it. The head is the forge's word when it
 /// could be asked, else the commit the hand-in named.
 fn approval_matches(task: &Task, pr: Option<&PrFacts>) -> bool {
-    let Some(approved) = task
-        .pr
-        .as_ref()
-        .and_then(|known| known.approved_head.as_deref())
-    else {
+    let Some(approved) = task.approved_head.as_deref() else {
         return false;
     };
     let head = pr.and_then(|pr| pr.head.as_deref()).or_else(|| {
@@ -425,6 +436,14 @@ fn already_asked(state: &RunState, task: &Task) -> bool {
 /// What every `needs you` message for `task` begins with.
 pub fn needs_you_prefix(task: &str) -> String {
     format!("{task} is ready to land")
+}
+
+/// What a human is told when a ready task's `ask` has no forge to approve on.
+///
+/// A local landing has no pull request, so the only approval path is shprd's
+/// own `shprd approve <task>`: the message must not send the reader to a forge.
+pub fn needs_you_body_local(task: &str) -> String {
+    format!("{}: run `shprd approve {task}`", needs_you_prefix(task))
 }
 
 /// What a human is told when a ready task's policy is `ask`.
@@ -735,6 +754,25 @@ mod tests {
             vec![Step::Land {
                 task: "A".to_string(),
                 policy: MergePolicy::Auto,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_local_checks_policy_lands_on_the_hand_ins_own_report() {
+        // A repository with no forge has no CI to ask: the checks policy reads
+        // the hand-in's passing report, which `ready_to_land` already accepted.
+        let state = folded(&ready_log("A"));
+        let facts = Facts {
+            local: true,
+            ..Facts::default()
+        };
+        let steps = plan_for(&state, &facts, &config(MergePolicy::Checks, 4));
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Checks,
             }]
         );
     }

@@ -131,6 +131,7 @@ impl Fixture {
             facts: Arc::new(Scripted { live }),
             fallback: None,
             forge: Arc::new(NoForge),
+            local: false,
             start,
             review: None,
             actor: Actor::Engine,

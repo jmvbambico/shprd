@@ -947,6 +947,10 @@ fn check_approved(
 /// human's alone, it names the pull request the log holds for that task, and a
 /// pull request that already merged could not have been gated by it. Asking
 /// that the head be non-empty keeps an approval from naming nothing.
+///
+/// A local landing has no pull request, so number `0` with a head is the
+/// approval of the task itself: there is nothing to open and nothing to merge
+/// on a forge, and a human still has to say yes.
 fn check_task_approved(
     state: &RunState,
     actor: &Actor,
@@ -965,6 +969,7 @@ fn check_task_approved(
             Err(RuleError::MergedPullRequest { number })
         }
         Some(pr) if pr.number == number && !head_sha.trim().is_empty() => Ok(()),
+        None if number == 0 && !head_sha.trim().is_empty() => Ok(()),
         _ => Err(RuleError::UnopenedPullRequest { number }),
     }
 }

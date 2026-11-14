@@ -9,6 +9,11 @@
 //! engine-recorded cross-vendor review, because a pull request nobody checked
 //! is not a landing.
 //!
+//! A repository with no remote, or with no usable forge, has nothing to push
+//! and no pull request to open: with a task named, the same landing rules apply
+//! locally, merging the task's branch into the run's integration branch inside
+//! shprd's own worktree. A conflict there is undone and escalated.
+//!
 //! Without a task, the old run-level path runs unchanged: the run's integration
 //! branch leaves as one pull request, everything it decides comes from the log
 //! (the run must be active, no task may still be in flight, at least one task
@@ -17,10 +22,11 @@
 //! nothing and exits 2.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};
-use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind};
+use shprd_core::event::{Event, EventKind, Finding, ResourceAction, ResourceKind, Severity};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::rules;
 use shprd_core::state::{RunState, Task, TaskStatus};
@@ -157,6 +163,14 @@ fn land_task(
         }
         return Ok(());
     }
+    if task.status == TaskStatus::Integrated {
+        // A local landing leaves no pull request to name, so this is how a
+        // re-run reports the work is already in rather than refusing it.
+        if !ctx.json {
+            println!("{task_id} is already integrated");
+        }
+        return Ok(());
+    }
     // The hand-in and the review are the engine's to judge, and the rule that
     // judges them is the one every landing verb asks: M8.4's own gates, so a
     // task whose hand-in names no checks, or whose checks failed, cannot reach
@@ -180,9 +194,9 @@ fn land_task(
         )))
     })?;
     // An approval counts only for the commit it named: a human who approved an
-    // older head said nothing about the commits pushed since.
-    let approved =
-        task.pr.as_ref().and_then(|pr| pr.approved_head.as_deref()) == Some(head.as_str());
+    // older head said nothing about the commits pushed since. A local landing
+    // has no pull request, so the approval is read from the task itself.
+    let approved = task.approved_head.as_deref() == Some(head.as_str());
     // Whether the branch had work of its own, for the one case git cannot tell
     // a merged branch from one that never moved.
     let has_work = attempt
@@ -191,6 +205,14 @@ fn land_task(
         .and_then(|report| report.commit.as_ref())
         .is_some()
         || task.pr.is_some();
+    // A repository with no remote, or with no forge to drive, lands locally:
+    // the task's branch is merged into the run's integration branch in shprd's
+    // own worktree, and nothing is pushed anywhere.
+    if local_landing(&Git::new(&ctx.root)) {
+        return land_task_local(
+            ctx, &events, task, task_id, run, &branch, approved, has_work, &base, &config, home,
+        );
+    }
     let title = format!("{task_id}: {}", task.title);
     let body = render_task_body(task);
     let home = resolve_home(home)?;
@@ -231,6 +253,179 @@ fn land_task(
     if !ctx.json {
         println!("{}", landing_line(task_id, &base, &landed));
     }
+    Ok(())
+}
+
+/// Lands one task into the run's integration branch, with no forge involved.
+///
+/// The worktree is shprd's own worktree on `run.integration_branch`, so the
+/// user's checkout is never touched. The merge policy is the same one the forge
+/// path applies; `checks` reads the task's own hand-in because there is no CI
+/// to ask. A conflicting merge is undone and recorded as a failed gate plus an
+/// escalation, and the task can then be sent back to a worker.
+#[expect(clippy::too_many_arguments, reason = "one local landing's whole input")]
+fn land_task_local(
+    ctx: &Ctx,
+    events: &[Event],
+    task: &Task,
+    task_id: &str,
+    run: &shprd_core::state::RunInfo,
+    branch: &str,
+    approved: bool,
+    has_work: bool,
+    base: &str,
+    config: &Config,
+    home: Option<&Path>,
+) -> Result<(), CliError> {
+    let home = resolve_home(home)?;
+    let repo_name = repo_name(ctx)?;
+    // Held from the head read to the merge: a spawn replacing the attempt
+    // meanwhile would move the branch under the merge.
+    let _lock = run_lock::lock_run(&home, &repo_name, &run.run_id)?;
+    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let worktree = integrate::open_integration_branch(
+        &ctx.root,
+        &layout,
+        &repo_name,
+        &run.run_id,
+        &run.integration_branch,
+        base,
+    )
+    .map_err(|err| CliError::other(anyhow!(err).context("opening the integration worktree")))?;
+    let policy = config.land.policy_for(&run.integration_branch);
+    let landing = land::LocalLanding {
+        task: task_id,
+        branch,
+        base: &run.integration_branch,
+        has_work,
+    };
+    let checks_passed = local_checks_passed(task);
+    let landed = match land::land_local(&worktree, &landing, policy, approved, checks_passed) {
+        Ok(landed) => landed,
+        Err(err @ land::LandError::Conflict { .. }) => {
+            record_conflict(ctx, task, task_id, branch, &err)?;
+            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+        }
+        Err(err) => {
+            return Err(CliError::other(anyhow!(err).context(format!(
+                "landing task {task_id:?} in {}",
+                worktree.path.display()
+            ))));
+        }
+    };
+    record_local_landing(ctx, events, task_id, &run.integration_branch, &landed)?;
+    if !ctx.json {
+        println!(
+            "{}",
+            local_landing_line(task_id, &run.integration_branch, &landed)
+        );
+    }
+    Ok(())
+}
+
+/// The line a local landing prints: what happened, and what a human does next.
+fn local_landing_line(task_id: &str, base: &str, landed: &land::LocalLanded) -> String {
+    match landed {
+        land::LocalLanded::Merged { head } => {
+            format!("merged {task_id} into {base} at {}", short(head))
+        }
+        land::LocalLanded::AlreadyMerged { .. } => format!("{task_id} is already in {base}"),
+        land::LocalLanded::SquashMerged { .. } => {
+            format!("{task_id}'s work is already in {base}, as other commits")
+        }
+        land::LocalLanded::NothingToMerge { .. } => {
+            format!("nothing to merge: {task_id}'s branch has no work beyond {base}")
+        }
+        land::LocalLanded::Waiting { reason, .. } => reason.local_advice(task_id),
+    }
+}
+
+/// Whether the task's own hand-in says its checks passed.
+///
+/// A repository with no forge has no CI to ask, so the hand-in's checks are the
+/// local report the `checks` policy reads.
+fn local_checks_passed(task: &Task) -> bool {
+    task.latest_attempt()
+        .and_then(|attempt| attempt.report.as_ref())
+        .is_some_and(|report| {
+            !report.checks.is_empty()
+                && report.checks.iter().all(|check| check.exit_code == Some(0))
+        })
+}
+
+/// Records a local landing's outcome, once.
+fn record_local_landing(
+    ctx: &Ctx,
+    events: &[Event],
+    task_id: &str,
+    base: &str,
+    landed: &land::LocalLanded,
+) -> Result<(), CliError> {
+    let Some(outcome) = landed.outcome() else {
+        return Ok(());
+    };
+    let head = landed.head().to_string();
+    let known = events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::TaskLanded { task, head: recorded, outcome: recorded_outcome, .. }
+                if task == task_id && recorded == &head && *recorded_outcome == outcome
+        )
+    });
+    if known {
+        return Ok(());
+    }
+    let event = ctx.commit(EventKind::TaskLanded {
+        task: task_id.to_string(),
+        base: base.to_string(),
+        head,
+        number: None,
+        outcome,
+    })?;
+    crate::cmd::emit(ctx, &event)?;
+    Ok(())
+}
+
+/// Records a local merging conflict as a failed gate and an escalation.
+///
+/// The failed `integrate` gate takes the task out of `Passed`, so the next tick
+/// does not try the same conflicting merge again; the escalation is what a
+/// person sees and acts on.
+fn record_conflict(
+    ctx: &Ctx,
+    task: &Task,
+    task_id: &str,
+    branch: &str,
+    err: &land::LandError,
+) -> Result<(), CliError> {
+    let land::LandError::Conflict { files, .. } = err else {
+        return Ok(());
+    };
+    let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
+    let finding = Finding {
+        severity: Severity::Major,
+        title: "conflicts with the integration branch".to_string(),
+        location: files.first().cloned(),
+        detail: format!("merging {branch} conflicts in {}", files.join(", ")),
+    };
+    let event = ctx.commit(EventKind::GateFailed {
+        task: task_id.to_string(),
+        attempt,
+        gate: "integrate".to_string(),
+        findings: vec![finding],
+        source: None,
+    })?;
+    crate::cmd::emit(ctx, &event)?;
+    let body = format!(
+        "{task_id}: its work conflicts with the integration branch ({}), so it needs a person",
+        files.join(", ")
+    );
+    let event = ctx.commit(EventKind::Escalated {
+        task: Some(task_id.to_string()),
+        body,
+        default_action: String::from("send the task back to a worker"),
+    })?;
+    crate::cmd::emit(ctx, &event)?;
     Ok(())
 }
 
@@ -750,6 +945,45 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
         }
         ForgeChoice::Gh => Ok(Box::new(GhForge::new(dir))),
     }
+}
+
+/// Whether a landing must take the local path instead of a forge.
+///
+/// A repository with no remote has nowhere to push and no pull request to open,
+/// so it lands locally. So does one with a remote but no usable forge: `gh` is
+/// missing or signed out, and a landing that would fail at the first forge call
+/// can still put the work on the run's integration branch. A scripted forge in a
+/// debug build is always usable, so the tests that drive one never take this
+/// path by accident.
+pub(crate) fn local_landing(git: &Git) -> bool {
+    if !shprd_git::worktree::has_remote(git) {
+        return true;
+    }
+    if cfg!(debug_assertions)
+        && std::env::var_os(FAKE_FORGE_ENV).is_some_and(|value| !value.is_empty())
+    {
+        return false;
+    }
+    !gh_ready(git.dir())
+}
+
+/// Whether `gh` is installed and signed in, asked in the repository it would
+/// drive.
+///
+/// `gh auth status` answers from the local configuration, so this makes no
+/// network call; anything it cannot answer counts as "no forge", which is the
+/// safe answer because the local path writes to shprd's own worktree only.
+fn gh_ready(dir: &Path) -> bool {
+    Command::new("gh")
+        .args(["auth", "status"])
+        .current_dir(dir)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The config's `[land]`, with the repo file winning over the global one.

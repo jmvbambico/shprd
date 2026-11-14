@@ -24,6 +24,12 @@
 //! The old run-level integration branch is not written here. Its code
 //! ([`crate::integrate`]) still compiles and still lands runs; M8.3 only adds
 //! this path.
+//!
+//! A repository with no remote, or with no forge to drive, lands through
+//! [`land_local`] instead: the same checks and the same merge policy, but the
+//! task's branch is merged into the run's integration branch inside shprd's own
+//! integration worktree. Nothing is pushed and the user's checkout is never
+//! touched.
 
 use std::path::Path;
 
@@ -34,6 +40,7 @@ use shprd_core::event::LandOutcome;
 
 use crate::forge::{Forge, ForgeError, Pr};
 use crate::git::{Git, GitError};
+use crate::integrate::IntegrationWorktree;
 use crate::worktree::remote_of;
 
 /// The remote named when a repository has none to pick from: every failure
@@ -64,6 +71,24 @@ pub struct Landing<'a> {
     pub has_work: bool,
 }
 
+/// One task's landing when the repository has no forge.
+///
+/// It names the same branch and the same work as [`Landing`], but the target is
+/// the run's integration branch in shprd's own worktree rather than a pull
+/// request on a remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalLanding<'a> {
+    /// The task's id, as the log names it.
+    pub task: &'a str,
+    /// The branch the task's attempt commits on.
+    pub branch: &'a str,
+    /// The run's integration branch: what the task's work is merged into.
+    pub base: &'a str,
+    /// Whether the log says the branch has work of its own, as [`Landing::has_work`]
+    /// says it.
+    pub has_work: bool,
+}
+
 /// Why a pull request waits instead of merging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitReason {
@@ -80,6 +105,19 @@ impl WaitReason {
             WaitReason::Approval => format!(
                 "waiting for your approval: run `shprd approve {task}`, or approve the pull request"
             ),
+            WaitReason::Checks => {
+                String::from("waiting for its checks: run `shprd land` again once they pass")
+            }
+        }
+    }
+
+    /// The same advice for a local landing, which has no pull request to
+    /// approve on a forge.
+    pub fn local_advice(self, task: &str) -> String {
+        match self {
+            WaitReason::Approval => {
+                format!("waiting for your approval: run `shprd approve {task}`")
+            }
             WaitReason::Checks => {
                 String::from("waiting for its checks: run `shprd land` again once they pass")
             }
@@ -172,6 +210,69 @@ impl Landed {
     }
 }
 
+/// What a local landing did.
+///
+/// It mirrors [`Landed`] without the pull request: a repository with no forge
+/// has no pull request, so the integration branch is the only thing that moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalLanded {
+    /// The task's branch was merged into the integration branch.
+    Merged {
+        /// The integration branch's head after the merge.
+        head: String,
+    },
+    /// The branch's own commits were already in the integration branch.
+    AlreadyMerged {
+        /// The branch tip that was looked at.
+        head: String,
+    },
+    /// The branch's work is in the integration branch as other commits.
+    SquashMerged {
+        /// The integration branch holding the work.
+        base: String,
+        /// The branch tip that was looked at.
+        head: String,
+    },
+    /// The branch held no work of its own beyond its integration branch.
+    NothingToMerge {
+        /// The integration branch it had nothing to add to.
+        base: String,
+        /// The branch tip that was looked at.
+        head: String,
+    },
+    /// The policy waits before anything is merged.
+    Waiting {
+        /// What the landing waits for.
+        reason: WaitReason,
+        /// The branch tip that waits.
+        head: String,
+    },
+}
+
+impl LocalLanded {
+    /// The outcome to record, or `None` while the landing waits.
+    pub fn outcome(&self) -> Option<LandOutcome> {
+        match self {
+            LocalLanded::Merged { .. } => Some(LandOutcome::Merged),
+            LocalLanded::AlreadyMerged { .. } => Some(LandOutcome::AlreadyMerged),
+            LocalLanded::SquashMerged { .. } => Some(LandOutcome::SquashMerged),
+            LocalLanded::NothingToMerge { .. } => Some(LandOutcome::NothingToMerge),
+            LocalLanded::Waiting { .. } => None,
+        }
+    }
+
+    /// The branch tip this landing looked at.
+    pub fn head(&self) -> &str {
+        match self {
+            LocalLanded::Merged { head }
+            | LocalLanded::AlreadyMerged { head }
+            | LocalLanded::SquashMerged { head, .. }
+            | LocalLanded::NothingToMerge { head, .. }
+            | LocalLanded::Waiting { head, .. } => head,
+        }
+    }
+}
+
 /// Why a landing could not finish.
 #[derive(Debug, Error)]
 pub enum LandError {
@@ -201,6 +302,29 @@ pub enum LandError {
     ChecksFailed {
         /// The pull request whose checks failed.
         number: u64,
+    },
+    /// The integration worktree has uncommitted work, so merging there would
+    /// mix someone else's changes into the task's landing.
+    #[error("integration worktree {path:?} has uncommitted changes")]
+    Dirty {
+        /// The worktree that is not clean.
+        path: std::path::PathBuf,
+    },
+    /// A local merge conflicted. The integration worktree was put back on the
+    /// head it had before the attempt.
+    #[error("merging {commit} into the integration branch conflicted in {} file(s)", files.len())]
+    Conflict {
+        /// The commit that could not be merged.
+        commit: String,
+        /// The files git reported as unmerged.
+        files: Vec<String>,
+    },
+    /// A failed merge could not be undone, so the integration branch is not
+    /// where the caller may assume it is.
+    #[error("integration worktree is not back at {expected:?} after a failed merge")]
+    NotRestored {
+        /// The head that should have been restored.
+        expected: String,
     },
 }
 
@@ -279,6 +403,134 @@ pub fn land(
         Some(reason) => Ok(Landed::Waiting { pr, reason, head }),
         None => merge_now(forge, pr, head),
     }
+}
+
+/// Lands one task into its integration branch, with no forge involved.
+///
+/// The worktree is the run's own integration worktree, already checked out on
+/// `landing.base`; the task's branch is merged into it there, never in the
+/// user's checkout. The decision is the same one [`land`] makes: work the base
+/// already holds is reported as such, `ask` waits for an approval at this head,
+/// `checks` waits for the task's own checks report, and a landing the policy
+/// allows is merged as a fast-forward when it can be, else as a merge commit.
+///
+/// `checks_passed` is the task's local checks report: a repository with no
+/// forge has no CI to ask, and the hand-in's checks are the only word there is.
+///
+/// A conflicting merge is undone before it returns: the worktree is left on the
+/// head it started from, and the error names the files git could not merge.
+///
+/// # Errors
+///
+/// Fails when git cannot be driven, when the integration worktree is dirty,
+/// when the merge conflicts, or when a failed merge cannot be undone.
+pub fn land_local(
+    int: &IntegrationWorktree,
+    landing: &LocalLanding<'_>,
+    policy: MergePolicy,
+    approved: bool,
+    checks_passed: bool,
+) -> Result<LocalLanded, LandError> {
+    let git = Git::new(&int.path);
+    if !git.is_clean()? {
+        return Err(LandError::Dirty {
+            path: int.path.clone(),
+        });
+    }
+    let head = git.rev_parse(landing.branch)?;
+    let base = git.head_sha()?;
+    if let Some(reached) = already_landed(&git, &head, &base, landing.has_work)? {
+        return Ok(match reached {
+            Reached::AlreadyMerged => LocalLanded::AlreadyMerged { head },
+            Reached::SquashMerged => LocalLanded::SquashMerged {
+                base: landing.base.to_string(),
+                head,
+            },
+            Reached::NothingToMerge => LocalLanded::NothingToMerge {
+                base: landing.base.to_string(),
+                head,
+            },
+        });
+    }
+    let reason = match policy {
+        MergePolicy::Auto => None,
+        MergePolicy::Ask if approved => None,
+        MergePolicy::Ask => Some(WaitReason::Approval),
+        MergePolicy::Checks if checks_passed => None,
+        MergePolicy::Checks => Some(WaitReason::Checks),
+    };
+    if let Some(reason) = reason {
+        return Ok(LocalLanded::Waiting { reason, head });
+    }
+    let merged = merge_local(&git, &base, &head, landing)?;
+    Ok(LocalLanded::Merged { head: merged })
+}
+
+/// Merges `head` into the integration worktree, fast-forwarding when it can.
+///
+/// A branch cut from the integration branch merges as a fast-forward, which is
+/// the ordinary case and leaves the branch's own commits as they were made. A
+/// branch that has moved apart gets a merge commit, so neither side's history is
+/// rewritten. A conflict is undone and reported, never left in the worktree.
+fn merge_local(
+    git: &Git,
+    base: &str,
+    head: &str,
+    landing: &LocalLanding<'_>,
+) -> Result<String, LandError> {
+    let can_fast_forward = git
+        .run(&["merge-base", "--is-ancestor", base, head])
+        .is_ok();
+    let message = format!(
+        "{}: merge {} into {}",
+        landing.task, landing.branch, landing.base
+    );
+    let result = if can_fast_forward {
+        git.run(&["merge", "--ff-only", head])
+    } else {
+        git.run(&["merge", "--no-ff", "--no-edit", "-m", &message, head])
+    };
+    if result.is_err() {
+        return Err(undo_failed_merge(git, base, head));
+    }
+    Ok(git.head_sha()?)
+}
+
+/// Collects the unmerged files of a failed merge, undoes it, and returns what
+/// went wrong.
+///
+/// The worktree is put back on `base` and the result is verified rather than
+/// assumed, so a caller that sees [`LandError::Conflict`] can trust the
+/// integration branch is where it was.
+fn undo_failed_merge(git: &Git, base: &str, commit: &str) -> LandError {
+    let files = match git.run(&["diff", "--name-only", "-z", "--diff-filter=U"]) {
+        Ok(raw) => split_nul(&raw),
+        Err(_) => Vec::new(),
+    };
+    // `--abort` restores what git recorded for itself; the reset that follows
+    // is authoritative, and both are needed because a merge that failed before
+    // starting leaves no state to abort.
+    let _ = git.run(&["merge", "--abort"]);
+    let restored = git.run(&["reset", "--hard", base]).is_ok()
+        && git.head_sha().ok().as_deref() == Some(base)
+        && git.is_clean().unwrap_or(false);
+    if !restored {
+        return LandError::NotRestored {
+            expected: base.to_string(),
+        };
+    }
+    LandError::Conflict {
+        commit: commit.to_string(),
+        files,
+    }
+}
+
+/// Splits NUL-separated git output into fields, dropping the empty tail.
+fn split_nul(text: &str) -> Vec<String> {
+    text.split('\0')
+        .filter(|field| !field.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The outcome for a task whose work the base already holds.
@@ -436,6 +688,7 @@ fn merge_now(forge: &dyn Forge, pr: Pr, head: String) -> Result<Landed, LandErro
 mod tests {
     use super::*;
     use crate::forge::{FakeForge, PrStatus};
+    use crate::worktree::Layout;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -899,5 +1152,307 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, LandError::NotMerged { .. }), "{err}");
+    }
+
+    /// A repository with no remote, an `integration/m9` branch, one task branch
+    /// cut from it, and shprd's own integration worktree.
+    struct LocalFixture {
+        /// Keeps the temp directory alive.
+        _temp: tempfile::TempDir,
+        /// The user's checkout.
+        root: PathBuf,
+        /// The task's worktree.
+        task: PathBuf,
+        /// The task branch's head.
+        task_head: String,
+        /// The integration worktree.
+        int: IntegrationWorktree,
+        /// The seed commit `main` and `integration/m9` started from.
+        seed: String,
+    }
+
+    impl LocalFixture {
+        /// Builds the fixture, with `task_change` written on the task branch.
+        fn new(task_change: &str) -> LocalFixture {
+            let temp = match tempfile::tempdir() {
+                Ok(temp) => temp,
+                Err(err) => panic!("tempdir: {err}"),
+            };
+            let base = temp.path().to_path_buf();
+            let root = base.join("repo");
+            let home = base.join("home");
+            let task = base.join("wt");
+            if let Err(err) = std::fs::create_dir_all(&root) {
+                panic!("mkdir {}: {err}", root.display());
+            }
+            let fixture = LocalFixture {
+                _temp: temp,
+                root: root.clone(),
+                task,
+                task_head: String::new(),
+                int: IntegrationWorktree {
+                    path: base.join("unused"),
+                    branch: String::new(),
+                    created: false,
+                },
+                seed: String::new(),
+            };
+            fixture.git(&["init", "-q", "-b", "main"]);
+            fixture.git(&["config", "user.name", "shprd tests"]);
+            fixture.git(&["config", "user.email", "tests@example.invalid"]);
+            fixture.git(&["config", "commit.gpgsign", "false"]);
+            fixture.commit(&fixture.root.clone(), "a.txt", "one\n", "seed");
+            fixture.git(&["branch", "integration/m9"]);
+            let seed = fixture.rev(&fixture.root, "main");
+            let path = fixture.task.clone();
+            let path_text = path.display().to_string();
+            fixture.git(&[
+                "worktree",
+                "add",
+                "-b",
+                "shprd/r1/T1",
+                &path_text,
+                "integration/m9",
+            ]);
+            fixture.commit(&path, "a.txt", task_change, "the task's work");
+            let layout = Layout::default_for_home(&home);
+            let int = match crate::integrate::open_integration_branch(
+                &root,
+                &layout,
+                "repo",
+                "r1",
+                "integration/m9",
+                "main",
+            ) {
+                Ok(int) => int,
+                Err(err) => panic!("opening the integration worktree: {err}"),
+            };
+            let mut fixture = fixture;
+            fixture.task_head = fixture.rev(&fixture.task.clone(), "HEAD");
+            fixture.int = int;
+            fixture.seed = seed;
+            fixture
+        }
+
+        /// Runs git in the repository, asserting success.
+        fn git(&self, args: &[&str]) -> String {
+            self.git_in(&self.root.clone(), args)
+        }
+
+        /// Runs git in `dir`, asserting success.
+        fn git_in(&self, dir: &Path, args: &[&str]) -> String {
+            let output = match Command::new("git").args(args).current_dir(dir).output() {
+                Ok(output) => output,
+                Err(err) => panic!("git {args:?} in {}: {err}", dir.display()),
+            };
+            assert!(
+                output.status.success(),
+                "git {args:?} in {} failed: {}",
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        /// Resolves `rev` in `dir`.
+        fn rev(&self, dir: &Path, rev: &str) -> String {
+            self.git_in(dir, &["rev-parse", rev])
+        }
+
+        /// Commits `body` to `file` in `dir`.
+        fn commit(&self, dir: &Path, file: &str, body: &str, message: &str) {
+            let path = dir.join(file);
+            if let Err(err) = std::fs::write(&path, body) {
+                panic!("write {}: {err}", path.display());
+            }
+            self.git_in(dir, &["add", "--", file]);
+            self.git_in(dir, &["commit", "-q", "-m", message]);
+        }
+
+        /// A landing of `branch` into `integration/m9`.
+        fn landing<'a>(&'a self, branch: &'a str) -> LocalLanding<'a> {
+            LocalLanding {
+                task: "T1",
+                branch,
+                base: "integration/m9",
+                has_work: true,
+            }
+        }
+
+        /// The integration branch's head in the repository.
+        fn integration_head(&self) -> String {
+            self.rev(&self.root.clone(), "refs/heads/integration/m9")
+        }
+    }
+
+    #[test]
+    fn a_local_auto_landing_fast_forwards_the_integration_branch() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let landed = match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Auto,
+            false,
+            true,
+        ) {
+            Ok(landed) => landed,
+            Err(err) => panic!("auto must land locally: {err}"),
+        };
+        assert_eq!(
+            landed,
+            LocalLanded::Merged {
+                head: fixture.task_head.clone(),
+            }
+        );
+        assert_eq!(fixture.integration_head(), fixture.task_head);
+        assert_eq!(
+            fixture.git_in(&fixture.int.path, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "integration/m9",
+            "the merge happened in shprd's own integration worktree"
+        );
+        assert_eq!(
+            fixture.rev(&fixture.root.clone(), "HEAD"),
+            fixture.seed,
+            "the user's checkout never moved"
+        );
+        assert_eq!(
+            fixture.git_in(&fixture.root.clone(), &["status", "--porcelain"]),
+            "",
+            "the user's checkout stayed clean"
+        );
+    }
+
+    #[test]
+    fn a_local_ask_waits_and_merges_once_approved() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let waiting = match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Ask,
+            false,
+            true,
+        ) {
+            Ok(landed) => landed,
+            Err(err) => panic!("ask waits, it does not fail: {err}"),
+        };
+        assert_eq!(
+            waiting,
+            LocalLanded::Waiting {
+                reason: WaitReason::Approval,
+                head: fixture.task_head.clone(),
+            }
+        );
+        assert!(waiting.outcome().is_none());
+        assert_eq!(fixture.integration_head(), fixture.seed);
+
+        let merged = match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Ask,
+            true,
+            true,
+        ) {
+            Ok(landed) => landed,
+            Err(err) => panic!("an approved landing must merge: {err}"),
+        };
+        assert!(matches!(merged, LocalLanded::Merged { .. }), "{merged:?}");
+        assert_eq!(fixture.integration_head(), fixture.task_head);
+    }
+
+    #[test]
+    fn a_local_checks_landing_reads_the_hand_ins_report() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let waiting = match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Checks,
+            false,
+            false,
+        ) {
+            Ok(landed) => landed,
+            Err(err) => panic!("checks waits, it does not fail: {err}"),
+        };
+        assert!(matches!(
+            waiting,
+            LocalLanded::Waiting {
+                reason: WaitReason::Checks,
+                ..
+            }
+        ));
+        assert_eq!(fixture.integration_head(), fixture.seed);
+
+        let merged = match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Checks,
+            false,
+            true,
+        ) {
+            Ok(landed) => landed,
+            Err(err) => panic!("passing local checks must land: {err}"),
+        };
+        assert!(matches!(merged, LocalLanded::Merged { .. }), "{merged:?}");
+    }
+
+    #[test]
+    fn a_conflicting_local_merge_is_undone() {
+        let fixture = LocalFixture::new("the task's work\n");
+        // The first task lands, so the integration branch now holds its change.
+        match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Auto,
+            false,
+            true,
+        ) {
+            Ok(_) => {}
+            Err(err) => panic!("the first landing must work: {err}"),
+        }
+        let before = fixture.rev(&fixture.int.path, "HEAD");
+        // A second branch cut from the old integration head writes the same
+        // file differently: merging it must conflict.
+        let other = fixture._temp.path().join("other");
+        let other_text = other.display().to_string();
+        fixture.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "shprd/r1/T2",
+            &other_text,
+            &fixture.seed,
+        ]);
+        fixture.commit(&other, "a.txt", "someone else's work\n", "the other task");
+        let other_head = fixture.rev(&other, "HEAD");
+        let landing = LocalLanding {
+            task: "T2",
+            branch: "shprd/r1/T2",
+            base: "integration/m9",
+            has_work: true,
+        };
+        let err = match land_local(&fixture.int, &landing, MergePolicy::Auto, false, true) {
+            Ok(landed) => panic!("a conflicting merge must not land: {landed:?}"),
+            Err(err) => err,
+        };
+        match &err {
+            LandError::Conflict { files, .. } => {
+                assert_eq!(files, &vec!["a.txt".to_string()]);
+            }
+            other => panic!("expected a conflict, got: {other}"),
+        }
+        assert_eq!(
+            fixture.rev(&fixture.int.path, "HEAD"),
+            before,
+            "the integration branch is back where it was"
+        );
+        assert_eq!(
+            fixture.git_in(&fixture.int.path, &["status", "--porcelain"]),
+            "",
+            "the integration worktree is clean after the undo"
+        );
+        assert_eq!(
+            fixture.rev(&fixture.root.clone(), "refs/heads/shprd/r1/T2"),
+            other_head,
+            "the task's branch was never touched"
+        );
     }
 }

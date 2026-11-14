@@ -3560,6 +3560,7 @@ off = ["--no-fast"]
             overrides: Vec::new(),
             dropped_reason: None,
             pr: None,
+            approved_head: None,
             last_status: None,
             nothing_to_merge: None,
             fallbacks: Vec::new(),
