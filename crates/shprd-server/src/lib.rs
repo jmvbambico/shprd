@@ -51,6 +51,6 @@ pub use service::{
     serve, shutdown_signal, state_dir,
 };
 pub use tick::{
-    FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, SharedForge, Starter,
-    StepReport, TickReport, Worker,
+    FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, Reviewer, SharedForge,
+    Starter, StepReport, TickReport, Worker,
 };

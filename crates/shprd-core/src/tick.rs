@@ -12,13 +12,16 @@
 //!
 //! - [`Step::Start`] a queued task whose `deps` have all landed, up to the
 //!   configured concurrency cap ([`crate::config::Tick::max_running`]);
+//! - [`Step::Review`] a task that handed in work which passed its own checks,
+//!   when it has no review request for that attempt: the engine starts the
+//!   reviewer, not the worker (see `docs/decisions.md`, 2026-11-14);
 //! - [`Step::Land`] a task `shprd_core::rules::ready_to_land` accepts, when its
 //!   merge policy allows it;
 //! - [`Step::MarkLanded`] a task whose pull request merged outside shprd;
 //! - [`Step::NeedsYou`] for a task whose policy is `ask`, recorded once and not
 //!   again on every pass.
 //!
-//! Review, hand-in and agent nudges are not the tick's business.
+//! Hand-in and agent nudges are not the tick's business.
 //!
 //! Two properties hold and are tested: the same input always yields the same
 //! actions, and a state that already recorded an action's effect yields none of
@@ -29,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, MergePolicy};
-use crate::event::LandOutcome;
+use crate::event::{LandOutcome, ReportStatus};
 use crate::rules;
 use crate::state::{RunState, Task, TaskStatus};
 
@@ -130,6 +133,11 @@ pub enum Step {
         /// The task to start.
         task: String,
     },
+    /// Start the engine's reviewer on a task that just handed in.
+    Review {
+        /// The task to review.
+        task: String,
+    },
     /// Land a task through its own pull request.
     Land {
         /// The task to land.
@@ -162,6 +170,7 @@ impl Step {
     pub fn task(&self) -> &str {
         match self {
             Self::Start { task }
+            | Self::Review { task }
             | Self::Land { task, .. }
             | Self::MarkLanded { task, .. }
             | Self::NeedsYou { task, .. } => task,
@@ -172,6 +181,7 @@ impl Step {
     pub fn action(&self) -> &'static str {
         match self {
             Self::Start { .. } => "start",
+            Self::Review { .. } => "review",
             Self::Land { .. } => "land",
             Self::MarkLanded { .. } => "mark_landed",
             Self::NeedsYou { .. } => "needs_you",
@@ -190,6 +200,12 @@ pub struct Input<'a> {
     pub facts: &'a Facts,
     /// The resolved config: the merge policy and the tick's own settings.
     pub config: &'a Config,
+    /// Whether the engine reviews a task when it hands in.
+    ///
+    /// It comes from the settings: a reviewer role that may review and names a
+    /// program to run it. With no reviewer configured there is nothing to
+    /// start, so a pass plans no [`Step::Review`].
+    pub review: bool,
 }
 
 /// Plans one pass: every action to take now, in task id order.
@@ -253,6 +269,14 @@ fn step_for(
             number: pr
                 .number
                 .or_else(|| task.pr.as_ref().map(|known| known.number)),
+        });
+    }
+    // The worker hands in; the engine reviews (decisions.md, 2026-11-14). A
+    // hand-in that passed its own checks and has no request yet gets one, and
+    // that recorded request is what stops the next pass asking again.
+    if input.review && awaiting_review(task) {
+        return Some(Step::Review {
+            task: task.id.clone(),
         });
     }
     // A landing already looked at this attempt and found nothing of its own to
@@ -327,6 +351,31 @@ fn is_running(id: &str, task: &Task, facts: &Facts, phases: &BTreeMap<String, Ph
     facts.is_live(id)
         || matches!(phases.get(id), Some(Phase::Working | Phase::Merging))
         || task.status == TaskStatus::Working
+}
+
+/// Whether a task handed in work that passed its own checks and has no review
+/// request for that attempt.
+///
+/// The check report is the worker's own word that it ran the project's gates and
+/// they exited zero, which is what `rules::ready_to_land` also demands. A request
+/// already in the log means a reviewer is out, so the pass leaves it alone; a
+/// verdict moves the task out of `Reported`, so it is not reviewable either.
+fn awaiting_review(task: &Task) -> bool {
+    if task.status != TaskStatus::Reported {
+        return false;
+    }
+    let Some(attempt) = task.latest_attempt() else {
+        return false;
+    };
+    if !attempt.reviews.is_empty() {
+        return false;
+    }
+    let Some(report) = &attempt.report else {
+        return false;
+    };
+    report.status == ReportStatus::Completed
+        && !report.checks.is_empty()
+        && report.checks.iter().all(|check| check.exit_code == Some(0))
 }
 
 /// Whether every task `task` waits for has landed.
@@ -585,14 +634,21 @@ mod tests {
             .collect()
     }
 
-    /// Plans a pass over `state` with `facts` under `config`.
-    fn plan_for(state: &RunState, facts: &Facts, config: &Config) -> Vec<Step> {
+    /// Plans a pass over `state` with `facts` under `config`, with the engine
+    /// reviewing a hand-in when `review` says so.
+    fn plan_with(state: &RunState, facts: &Facts, config: &Config, review: bool) -> Vec<Step> {
         plan(&Input {
             state,
             phases: &phases(state),
             facts,
             config,
+            review,
         })
+    }
+
+    /// Plans a pass with review off, which is what most rules are about.
+    fn plan_for(state: &RunState, facts: &Facts, config: &Config) -> Vec<Step> {
+        plan_with(state, facts, config, false)
     }
 
     #[test]
@@ -935,6 +991,77 @@ mod tests {
         facts.live.insert("A".to_string());
         let steps = plan_for(&state, &facts, &config(MergePolicy::Auto, 4));
         assert!(steps.is_empty(), "its agent is working again: {steps:?}");
+    }
+
+    #[test]
+    fn a_handed_in_task_is_reviewed_once() {
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        let state = folded(&log);
+        let steps = plan_with(
+            &state,
+            &Facts::default(),
+            &config(MergePolicy::Auto, 4),
+            true,
+        );
+        assert_eq!(
+            steps,
+            vec![Step::Review {
+                task: "A".to_string()
+            }],
+            "the engine reviews the hand-in"
+        );
+
+        // The request is the record that stops the next pass asking again.
+        let mut asked = log;
+        asked.push(review_requested(5, "A", 1));
+        let state = folded(&asked);
+        let steps = plan_with(
+            &state,
+            &Facts::default(),
+            &config(MergePolicy::Auto, 4),
+            true,
+        );
+        assert!(steps.is_empty(), "the review is already out: {steps:?}");
+    }
+
+    #[test]
+    fn a_hand_in_whose_checks_failed_is_not_reviewed() {
+        let mut failed = reported(4, "A", 1);
+        if let EventKind::Reported { checks, .. } = &mut failed.kind {
+            checks[0].exit_code = Some(1);
+        }
+        let log = vec![started(1), added(2, "A", &[]), spawned(3, "A", 1), failed];
+        let state = folded(&log);
+        let steps = plan_with(
+            &state,
+            &Facts::default(),
+            &config(MergePolicy::Auto, 4),
+            true,
+        );
+        assert!(
+            steps.is_empty(),
+            "a failed check is not a hand-in: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_hand_in_is_not_reviewed_when_no_reviewer_is_configured() {
+        // With no reviewer in the settings there is nothing to start, so the
+        // pass leaves the hand-in alone rather than failing a step every tick.
+        let log = vec![
+            started(1),
+            added(2, "A", &[]),
+            spawned(3, "A", 1),
+            reported(4, "A", 1),
+        ];
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "{steps:?}");
     }
 
     #[test]

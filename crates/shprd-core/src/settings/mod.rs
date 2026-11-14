@@ -82,9 +82,15 @@
 //! `~/.config/shprd/config.toml` predates this model and keeps working: its
 //! `[land] merge`, `[tick] max_running`, `[tick] interval_secs`,
 //! `[janitor] archive_days`, `[janitor] namespace`, `[review] must_fix` and
-//! `[review] rounds` project onto the same `tasks.*` keys (see
-//! [`crate::config::ConfigLayer::settings_projection`]) and sit just under the
-//! settings file, so a person who has not migrated loses nothing. The old
+//! `[review] rounds` project onto the same `tasks.*` keys, and its
+//! `[roster] reviewer` (with the reviewer's `[roster.effort]` entry) projects
+//! onto `roles.reviewer.agent`, `roles.reviewer.model` and
+//! `roles.reviewer.effort` (see
+//! [`crate::config::ConfigLayer::settings_projection`]). That layer sits under
+//! the settings file — under your own defaults and under your entry for a
+//! repository, because it is the same person's older file — and every value it
+//! supplies is reported as [`Source::Legacy`], so a person who has not migrated
+//! loses nothing and can see what still comes from the old file. The old
 //! spellings are also accepted as key names on the command line
 //! ([`Key::parse`]).
 //!
@@ -156,6 +162,8 @@ pub enum Source {
     RepoEntry,
     /// The person's own defaults.
     You,
+    /// The person's pre-M9 `config.toml`: the keys the old file still sets.
+    Legacy,
     /// The repository's committed `.shprd/settings.toml`.
     RepoFile,
     /// The values this build ships.
@@ -169,6 +177,7 @@ impl Source {
             Self::Task => "this task",
             Self::RepoEntry => "this repo",
             Self::You => "you",
+            Self::Legacy => "your old config file",
             Self::RepoFile => "the repo's file",
             Self::BuiltIn => "built in",
         }
@@ -180,6 +189,7 @@ impl Source {
             Self::Task => "task",
             Self::RepoEntry => "repo_entry",
             Self::You => "you",
+            Self::Legacy => "legacy",
             Self::RepoFile => "repo_file",
             Self::BuiltIn => "built_in",
         }
@@ -932,6 +942,8 @@ impl Layer {
 pub struct File {
     /// The defaults: the top level of `settings.toml`.
     pub you: Layer,
+    /// The keys the old `config.toml` still sets, one layer below [`Self::you`].
+    pub legacy: Layer,
     /// One entry per repository, keyed by the repository's own name.
     pub repos: BTreeMap<String, Layer>,
 }
@@ -973,7 +985,11 @@ impl File {
             }
         }
         let you = parse_sections(&defaults, "", Limit::All)?;
-        Ok(File { you, repos })
+        Ok(File {
+            you,
+            legacy: Layer::new(),
+            repos,
+        })
     }
 
     /// Read the person's settings, with the keys their old config file still
@@ -993,7 +1009,7 @@ impl File {
                         source: Box::new(source),
                     }),
                 })?;
-            file.you = layer.settings_projection();
+            file.legacy = layer.settings_projection();
         }
         let text = read_optional(&user_file(home))?;
         if let Some(text) = &text {
@@ -1493,18 +1509,19 @@ pub struct Request<'a> {
 /// Resolve every key, nearest layer first, and say where each value came from.
 ///
 /// The chain is the task's own record, the person's entry for this repository,
-/// the person's defaults, the repository's committed file and then the built-in
-/// values. A role named in any layer, or one of the built-ins, is reported with
-/// every field: a field nobody set is reported unset, and a custom role gets its
-/// built-in identity (its id as its title, `helper` as its kind, its own prompt
-/// file).
+/// the person's defaults, the keys their old `config.toml` still sets, the
+/// repository's committed file and then the built-in values. A role named in any
+/// layer, or one of the built-ins, is reported with every field: a field nobody
+/// set is reported unset, and a custom role gets its built-in identity (its id
+/// as its title, `helper` as its kind, its own prompt file).
 pub fn resolve(file: &File, request: &Request<'_>) -> Resolved {
     let builtin = builtin();
     let repo_entry = request.repo.and_then(|name| file.repos.get(name));
-    let chain: [(Option<&Layer>, Source); 5] = [
+    let chain: [(Option<&Layer>, Source); 6] = [
         (request.task, Source::Task),
         (repo_entry, Source::RepoEntry),
         (Some(&file.you), Source::You),
+        (Some(&file.legacy), Source::Legacy),
         (request.repo_file, Source::RepoFile),
         (Some(&builtin), Source::BuiltIn),
     ];
