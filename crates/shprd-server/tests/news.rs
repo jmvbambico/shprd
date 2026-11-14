@@ -134,6 +134,7 @@ impl Fixture {
             local: false,
             start,
             review: None,
+            close_reviewer: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),

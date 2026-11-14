@@ -67,6 +67,17 @@ impl Fixture {
         fixture
     }
 
+    /// Writes the person's `settings.toml` with `tasks.merge = merge`.
+    ///
+    /// It is the file the brief's Settings block is printed from, so the test
+    /// that lands under it proves the tick and the brief read one answer.
+    fn write_settings(&self, merge: &str) {
+        let dir = self.home.join(".config").join("shprd");
+        std::fs::create_dir_all(&dir).expect("mkdir the settings dir");
+        let body = format!("version = 1\n\n[tasks]\nmerge = \"{merge}\"\n");
+        std::fs::write(dir.join("settings.toml"), body).expect("write the settings");
+    }
+
     /// Writes `.shprd/config.toml` with merge policy `merge`.
     fn write_config(&self, merge: &str) {
         let dir = self.root.join(".shprd");
@@ -512,4 +523,45 @@ fn a_local_ask_can_be_approved_on_the_task_itself() {
         fixture.git(&["show", "integration/m9:a.txt"]),
         "the task's work"
     );
+}
+
+#[test]
+fn the_settings_file_alone_sets_the_merge_policy_the_tick_lands_under() {
+    // The M9 gate's bugs 2 and 6 in one run: `tasks.merge` in the person's
+    // settings was what the brief printed, but the tick read the legacy
+    // `config.toml`, so `auto` needed a restart and a file nobody was editing.
+    let fixture = Fixture::new();
+    // Nothing in `config.toml` says how a task lands: only the settings do.
+    std::fs::remove_file(fixture.root.join(".shprd").join("config.toml"))
+        .expect("the repo config is removed");
+    fixture.write_settings("auto");
+    fixture.start();
+    let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the first task's work\n");
+    let seed = fixture.integration_head();
+    assert_ne!(
+        seed, head,
+        "the hand-in is on a branch, not the integration one"
+    );
+
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:T1".to_string()], "{steps:?}");
+    assert_eq!(steps[0].get("ok"), Some(&Value::Bool(true)), "{steps:?}");
+    assert_eq!(
+        fixture.integration_head(),
+        head,
+        "the landing wrote the branch the settings allow"
+    );
+
+    // A settings change to `ask` applies on the next pass, with no restart and
+    // nothing written to `config.toml`.
+    fixture.write_settings("ask");
+    fixture.hand_in("T2", "integration/m9", "b.txt", "the second task's work\n");
+    let before = fixture.integration_head();
+    let steps = fixture.tick();
+    assert_eq!(
+        actions(&steps),
+        vec!["needs_you:T2".to_string()],
+        "an ask never lands by itself: {steps:?}"
+    );
+    assert_eq!(fixture.integration_head(), before, "the ask moved nothing");
 }
