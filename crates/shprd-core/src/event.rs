@@ -60,6 +60,93 @@ pub enum ReportStatus {
     Failed,
 }
 
+/// How many characters a task's status line may carry.
+///
+/// A status is a progress line, not a message: the cap is what keeps a pasted
+/// agent message out of the log.
+pub const TASK_STATUS_MAX_CHARS: usize = 40;
+
+/// A one-line task status, trimmed and capped for the log.
+///
+/// Whitespace runs collapse to one space, so a pasted block of text becomes a
+/// single line, and anything past [`TASK_STATUS_MAX_CHARS`] is cut with an
+/// ellipsis rather than stored whole.
+pub fn status_line(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= TASK_STATUS_MAX_CHARS {
+        return collapsed;
+    }
+    let mut capped: String = collapsed.chars().take(TASK_STATUS_MAX_CHARS - 1).collect();
+    capped.push('\u{2026}');
+    capped
+}
+
+/// How many lines of a hand-in check's output the event keeps.
+pub const CHECK_OUTPUT_LINES: usize = 20;
+
+/// How many characters of a hand-in check's output the event keeps.
+///
+/// A failing build can print megabytes on one line, and the log is folded on
+/// every command, so the tail is capped by characters as well as by lines.
+pub const CHECK_OUTPUT_TAIL_CHARS: usize = 2000;
+
+/// The last few lines of `text`, capped for the log.
+///
+/// At most [`CHECK_OUTPUT_LINES`] lines and [`CHECK_OUTPUT_TAIL_CHARS`]
+/// characters are kept, counted from the end so the failure itself survives.
+pub fn output_tail(text: &str) -> String {
+    let mut lines: Vec<&str> = text.trim_end().lines().collect();
+    if lines.len() > CHECK_OUTPUT_LINES {
+        lines.drain(..lines.len() - CHECK_OUTPUT_LINES);
+    }
+    let mut tail = lines.join("\n");
+    while tail.chars().count() > CHECK_OUTPUT_TAIL_CHARS {
+        match tail.split_once('\n') {
+            Some((_, rest)) => tail = rest.to_string(),
+            None => {
+                let skip = tail.chars().count() - CHECK_OUTPUT_TAIL_CHARS;
+                tail = tail.chars().skip(skip).collect();
+            }
+        }
+    }
+    tail
+}
+
+/// One gate a worker ran before handing its work in.
+///
+/// The hand-in is the worker's claim that the work is tested: this records what
+/// it actually ran, so the engine and the reviewer can check the claim instead
+/// of trusting the summary. A hand-in that names no check is refused, and so is
+/// one whose check did not pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckReport {
+    /// Gate name, e.g. `format`, `lint`, `tests`.
+    pub gate: String,
+    /// The command, as the worker ran it.
+    pub command: String,
+    /// Its exit code, or `None` when a timeout killed it.
+    pub exit_code: Option<i32>,
+    /// The last lines it printed, capped at [`CHECK_OUTPUT_LINES`].
+    #[serde(default)]
+    pub output_tail: String,
+}
+
+impl CheckReport {
+    /// A check that passed, for a caller that only needs the shape.
+    ///
+    /// The hand-in verbs build one from what the worker actually ran; this is
+    /// for fixtures and for the engine recording a check it ran itself.
+    pub fn passed(gate: &str, command: &str) -> Self {
+        Self {
+            gate: gate.to_string(),
+            command: command.to_string(),
+            exit_code: Some(0),
+            output_tail: String::new(),
+        }
+    }
+}
+
 /// How bad a gate finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -269,12 +356,31 @@ pub enum EventKind {
         summary: String,
         /// Test commands the agent ran, with their result.
         tests: Vec<String>,
+        /// The gates the agent ran for the hand-in, with their result.
+        ///
+        /// Defaulted so a log written before hand-ins carried checks still
+        /// folds; the fold does not re-judge history.
+        #[serde(default)]
+        checks: Vec<CheckReport>,
         /// Paths the agent changed.
         changed_paths: Vec<String>,
         /// Commit the agent made, if any.
         commit: Option<String>,
         /// Skills the agent used.
         skills_used: Vec<String>,
+    },
+    /// An agent recorded where it is on a task.
+    ///
+    /// This is a progress line, not a report: it never moves the task's status
+    /// and it is capped at [`TASK_STATUS_MAX_CHARS`], so a stream of them costs
+    /// the log a short line each.
+    TaskStatus {
+        /// The task.
+        task: TaskId,
+        /// A short progress line, trimmed and capped by the writer.
+        message: String,
+        /// How far the agent says it has got, from 0 to 100.
+        progress: Option<u8>,
     },
     /// A gate passed for an attempt.
     GatePassed {
@@ -599,6 +705,15 @@ mod tests {
         }
     }
 
+    fn check() -> CheckReport {
+        CheckReport {
+            gate: "tests".to_string(),
+            command: "cargo test --workspace".to_string(),
+            exit_code: Some(0),
+            output_tail: "test result: ok. 42 passed".to_string(),
+        }
+    }
+
     /// Every kind, with non-trivial field values.
     fn every_kind() -> Vec<EventKind> {
         vec![
@@ -631,9 +746,15 @@ mod tests {
                 status: ReportStatus::Completed,
                 summary: "done".to_string(),
                 tests: vec!["cargo test".to_string()],
+                checks: vec![check()],
                 changed_paths: vec!["crates/shprd-core/src/event.rs".to_string()],
                 commit: Some("abc123".to_string()),
                 skills_used: vec!["tdd".to_string()],
+            },
+            EventKind::TaskStatus {
+                task: "M1.1".to_string(),
+                message: "writing the fold".to_string(),
+                progress: Some(40),
             },
             EventKind::GatePassed {
                 task: "M1.1".to_string(),
@@ -746,7 +867,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 22, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 23, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {
@@ -833,6 +954,43 @@ mod tests {
         assert_eq!(to_json(&Severity::Major), "\"major\"");
         assert_eq!(to_json(&Severity::Minor), "\"minor\"");
         assert_eq!(to_json(&Severity::Trivial), "\"trivial\"");
+    }
+
+    #[test]
+    fn a_report_recorded_before_hand_ins_carried_checks_still_parses() {
+        // Old logs predate `checks`: the field defaults to empty rather than
+        // failing to parse, and the fold does not re-judge it.
+        let text = r#"{"seq":6,"at_ms":5,"actor":{"type":"agent","id":"w1"},"kind":"reported","task":"M1.1","attempt":1,"status":"completed","summary":"done","tests":[],"changed_paths":[],"commit":null,"skills_used":[]}"#;
+        let event: Event = from_json(text);
+        match &event.kind {
+            EventKind::Reported { checks, .. } => assert!(checks.is_empty()),
+            other => panic!("expected a report, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_status_line_collapses_whitespace_and_is_capped() {
+        assert_eq!(status_line("  writing   the fold \n"), "writing the fold");
+        let pasted = "a whole paragraph the agent pasted instead of a status line";
+        let capped = status_line(pasted);
+        assert_eq!(capped.chars().count(), TASK_STATUS_MAX_CHARS);
+        assert!(capped.ends_with('\u{2026}'), "{capped:?}");
+    }
+
+    #[test]
+    fn an_output_tail_keeps_the_last_lines_and_caps_characters() {
+        let mut text = String::new();
+        for line in 1..=30 {
+            text.push_str(&format!("line {line}\n"));
+        }
+        let tail = output_tail(&text);
+        assert_eq!(tail.lines().count(), CHECK_OUTPUT_LINES);
+        assert!(tail.starts_with("line 11"), "{tail:?}");
+        assert!(tail.ends_with("line 30"), "{tail:?}");
+
+        let long = "x".repeat(CHECK_OUTPUT_TAIL_CHARS + 500);
+        assert_eq!(output_tail(&long).chars().count(), CHECK_OUTPUT_TAIL_CHARS);
+        assert!(output_tail("").is_empty());
     }
 
     #[test]

@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use crate::event::{
-    Actor, AgentId, EventKind, ReportStatus, ResourceAction, ResourceKind, ReviewSource, TaskId,
+    Actor, AgentId, CheckReport, EventKind, ReportStatus, ResourceAction, ResourceKind,
+    ReviewSource, TASK_STATUS_MAX_CHARS, TaskId,
 };
 use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
@@ -187,6 +188,104 @@ pub enum RuleError {
         task: TaskId,
         /// The status it actually has.
         found: TaskStatus,
+    },
+    /// A completed hand-in did not report the gates it ran.
+    ///
+    /// The hand-in is the worker's claim that its work is tested. A claim with
+    /// no checks recorded is exactly what the engine cannot verify, so it is
+    /// refused rather than stored.
+    #[error(
+        "task {task:?} attempt {attempt} was handed in without its checks: name each gate it ran with `--check GATE|COMMAND|EXIT[|OUTPUT]`"
+    )]
+    HandInWithoutChecks {
+        /// The task.
+        task: TaskId,
+        /// The attempt that was handed in.
+        attempt: u32,
+    },
+    /// A hand-in reported a gate that did not pass.
+    #[error(
+        "task {task:?} attempt {attempt}: gate {gate:?} exited {exit:?}, so the hand-in is refused until it passes"
+    )]
+    HandInCheckFailed {
+        /// The task.
+        task: TaskId,
+        /// The attempt that was handed in.
+        attempt: u32,
+        /// The gate that failed.
+        gate: String,
+        /// Its exit code, or `None` when a timeout killed it.
+        exit: Option<i32>,
+    },
+    /// A checks report entry named no gate, or no command.
+    #[error(
+        "task {task:?} attempt {attempt}: a checks report entry needs a gate name and a command"
+    )]
+    EmptyCheck {
+        /// The task.
+        task: TaskId,
+        /// The attempt that was handed in.
+        attempt: u32,
+    },
+    /// A task has no attempt, so there is no hand-in to judge.
+    #[error("task {task:?} has no attempt to hand in")]
+    NoAttempt {
+        /// The task.
+        task: TaskId,
+    },
+    /// No review was ever handed out for the attempt.
+    #[error(
+        "task {task:?} attempt {attempt} has no review request, so no independent review happened"
+    )]
+    NoReviewRequest {
+        /// The task.
+        task: TaskId,
+        /// The attempt that would be reviewed.
+        attempt: u32,
+    },
+    /// The only review requested for the attempt shares the worker's vendor.
+    #[error(
+        "task {task:?} attempt {attempt}: reviewer {reviewer:?} shares the worker's vendor, so the review is not independent"
+    )]
+    ReviewNotIndependent {
+        /// The task.
+        task: TaskId,
+        /// The attempt that was reviewed.
+        attempt: u32,
+        /// The reviewer that shared the vendor.
+        reviewer: AgentId,
+    },
+    /// The attempt's newest review gate did not pass.
+    #[error("task {task:?} attempt {attempt} has no passed review gate")]
+    ReviewNotPassed {
+        /// The task.
+        task: TaskId,
+        /// The attempt that was reviewed.
+        attempt: u32,
+    },
+    /// A task's status line was empty after trimming.
+    #[error("task {task:?} needs a non-empty status message")]
+    EmptyStatusMessage {
+        /// The task.
+        task: TaskId,
+    },
+    /// A task's status line was longer than the cap.
+    #[error("task {task:?} status message is {found} characters; the cap is {max}")]
+    StatusMessageTooLong {
+        /// The task.
+        task: TaskId,
+        /// How long the message was.
+        found: usize,
+        /// The cap it broke.
+        max: usize,
+    },
+    /// A task status carried progress outside 0 to 100.
+    #[error("task {task:?} progress is {progress}, which is not between 0 and 100")]
+    ProgressOutOfRange {
+        /// The task.
+        task: TaskId,
+        /// The value it carried.
+        progress: u8,
     },
     /// An override did not name a rule or give a reason.
     #[error("override for task {task:?} needs a non-empty rule and reason")]
@@ -568,9 +667,19 @@ fn check_with(
         EventKind::Reported {
             task,
             attempt,
+            status,
+            checks,
             changed_paths,
             ..
-        } => check_reported(state, task, *attempt, changed_paths, provenance),
+        } => check_reported(
+            state,
+            task,
+            *attempt,
+            *status,
+            checks,
+            changed_paths,
+            provenance,
+        ),
         EventKind::GatePassed {
             task,
             attempt,
@@ -592,6 +701,11 @@ fn check_with(
             check_review_requested(state, task, *attempt, provenance)
         }
         EventKind::Integrated { task, .. } => check_integrated(state, task, provenance),
+        EventKind::TaskStatus {
+            task,
+            message,
+            progress,
+        } => check_task_status(state, task, message, *progress, provenance),
         EventKind::TaskDropped { task, reason } => {
             check_task_dropped(state, actor, task, reason, provenance)
         }
@@ -1001,10 +1115,23 @@ fn first_overlap(a: &[String], b: &[String]) -> Option<String> {
 }
 
 /// Rules for an agent reporting the outcome of an attempt.
+///
+/// A completed report is the worker's hand-in, so it must carry the checks the
+/// worker ran: at least one gate, each with a name, a command and a passing
+/// exit code. A hand-in without them, or with a failing gate, is refused rather
+/// than stored, because the engine and the reviewer judge the work by what the
+/// worker says it tested. A blocked or failed report is not a hand-in and needs
+/// none.
+///
+/// History is not re-judged: a report written before hand-ins carried checks
+/// still folds, and so does one whose checks are not shaped the way this rule
+/// wants.
 fn check_reported(
     state: &RunState,
     task: &str,
     attempt: u32,
+    status: ReportStatus,
+    checks: &[CheckReport],
     changed_paths: &[String],
     provenance: Provenance,
 ) -> Result<(), RuleError> {
@@ -1041,6 +1168,71 @@ fn check_reported(
                 path: path.clone(),
             });
         }
+    }
+    if provenance == Provenance::Historical || status != ReportStatus::Completed {
+        return Ok(());
+    }
+    if checks.is_empty() {
+        return Err(RuleError::HandInWithoutChecks {
+            task: task.to_string(),
+            attempt,
+        });
+    }
+    for check in checks {
+        if check.gate.trim().is_empty() || check.command.trim().is_empty() {
+            return Err(RuleError::EmptyCheck {
+                task: task.to_string(),
+                attempt,
+            });
+        }
+        if check.exit_code != Some(0) {
+            return Err(RuleError::HandInCheckFailed {
+                task: task.to_string(),
+                attempt,
+                gate: check.gate.clone(),
+                exit: check.exit_code,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rules for an agent's task status line.
+///
+/// Any actor may record one: this is how a worker says where it is, and it
+/// never moves the task's status. The line is capped so a pasted agent message
+/// cannot become an event, and progress stays inside 0 to 100. A dropped task
+/// takes no status: the worker posting it was left behind by the drop.
+fn check_task_status(
+    state: &RunState,
+    task: &str,
+    message: &str,
+    progress: Option<u8>,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
+    task_in(state, task)?;
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err(RuleError::EmptyStatusMessage {
+            task: task.to_string(),
+        });
+    }
+    let found = trimmed.chars().count();
+    if found > TASK_STATUS_MAX_CHARS {
+        return Err(RuleError::StatusMessageTooLong {
+            task: task.to_string(),
+            found,
+            max: TASK_STATUS_MAX_CHARS,
+        });
+    }
+    if let Some(progress) = progress
+        && progress > 100
+    {
+        return Err(RuleError::ProgressOutOfRange {
+            task: task.to_string(),
+            progress,
+        });
     }
     Ok(())
 }
@@ -1225,6 +1417,108 @@ fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Res
             task: task.to_string(),
             gate: failed.gate.clone(),
         })
+    }
+}
+
+/// Whether a task is ready to land: a passing hand-in and an independent,
+/// engine-recorded review both say so.
+///
+/// This is a pure function over the folded task, so the landing verbs, the
+/// watchdog and the service can all ask the same question and get the same
+/// answer with the same reason. It is the rule behind the review marker: a task
+/// whose latest attempt was handed in with passing checks and whose review was
+/// dispatched by the engine to a reviewer from another vendor, with the
+/// engine's own verdict answering that request, is ready. Anything else is a
+/// refusal naming what is missing.
+///
+/// The vendor question is answered by [`crate::event::EventKind::ReviewRequested`]
+/// as it was recorded: the engine compared the reviewer's vendor with the
+/// worker's when it dispatched the review and set `degraded` when they matched.
+/// The review gate must carry [`ReviewSource`] provenance that answers that
+/// same request, which is what proves the engine read the reviewer's packet
+/// rather than a claim someone typed.
+///
+/// The task also has to be `Passed`: a task that failed a gate after its
+/// review is not ready, however good the review was.
+pub fn ready_to_land(task: &Task) -> Result<(), RuleError> {
+    if task.status != TaskStatus::Passed {
+        return Err(RuleError::NotPassed {
+            task: task.id.clone(),
+            found: task.status,
+        });
+    }
+    let attempt = task.latest_attempt().ok_or_else(|| RuleError::NoAttempt {
+        task: task.id.clone(),
+    })?;
+    match &attempt.report {
+        Some(report) if report.status == ReportStatus::Completed => {
+            if report.checks.is_empty() {
+                return Err(RuleError::HandInWithoutChecks {
+                    task: task.id.clone(),
+                    attempt: attempt.n,
+                });
+            }
+            if let Some(check) = report
+                .checks
+                .iter()
+                .find(|check| check.exit_code != Some(0))
+            {
+                return Err(RuleError::HandInCheckFailed {
+                    task: task.id.clone(),
+                    attempt: attempt.n,
+                    gate: check.gate.clone(),
+                    exit: check.exit_code,
+                });
+            }
+        }
+        Some(report) => {
+            return Err(RuleError::ReportNotCompleted {
+                task: task.id.clone(),
+                attempt: attempt.n,
+                status: report.status,
+            });
+        }
+        None => {
+            return Err(RuleError::NotReported {
+                task: task.id.clone(),
+                attempt: attempt.n,
+            });
+        }
+    }
+    let request = attempt
+        .reviews
+        .last()
+        .ok_or_else(|| RuleError::NoReviewRequest {
+            task: task.id.clone(),
+            attempt: attempt.n,
+        })?;
+    if request.degraded {
+        return Err(RuleError::ReviewNotIndependent {
+            task: task.id.clone(),
+            attempt: attempt.n,
+            reviewer: request.reviewer.clone(),
+        });
+    }
+    let verdict = attempt
+        .gates
+        .iter()
+        .rev()
+        .find(|gate| gate.gate == REVIEW_GATE);
+    match verdict {
+        Some(gate) if gate.passed => match &gate.source {
+            Some(source)
+                if source.request_seq == request.seq && source.reviewer == request.reviewer =>
+            {
+                Ok(())
+            }
+            _ => Err(RuleError::UnprovenVerdict {
+                task: task.id.clone(),
+            }),
+        },
+        _ => Err(RuleError::ReviewNotPassed {
+            task: task.id.clone(),
+            attempt: attempt.n,
+        }),
     }
 }
 
@@ -1489,6 +1783,7 @@ mod tests {
                 status: ReportStatus::Completed,
                 summary: "done".to_string(),
                 tests: strings(&["cargo test"]),
+                checks: vec![check("tests", Some(0))],
                 changed_paths: strings(paths),
                 commit: Some("abc123".to_string()),
                 skills_used: Vec::new(),
@@ -1505,6 +1800,35 @@ mod tests {
                 status: outcome,
                 summary: "gave up".to_string(),
                 tests: Vec::new(),
+                checks: Vec::new(),
+                changed_paths: strings(&["src/a"]),
+                commit: None,
+                skills_used: Vec::new(),
+            },
+        )
+    }
+
+    /// One hand-in check, for a report that carries them.
+    fn check(gate: &str, exit_code: Option<i32>) -> CheckReport {
+        CheckReport {
+            gate: gate.to_string(),
+            command: format!("cargo {gate}"),
+            exit_code,
+            output_tail: "ok".to_string(),
+        }
+    }
+
+    /// A completed report whose checks are `checks`.
+    fn hand_in(seq: u64, id: &str, attempt: u32, checks: Vec<CheckReport>) -> Event {
+        ev(
+            seq,
+            EventKind::Reported {
+                task: id.to_string(),
+                attempt,
+                status: ReportStatus::Completed,
+                summary: "done".to_string(),
+                tests: Vec::new(),
+                checks,
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
@@ -1812,6 +2136,22 @@ mod tests {
         }
     }
 
+    /// The refusal a verb would get for the last event: the state is folded from
+    /// everything before it, and the last event is checked as one being
+    /// appended now. History is read, not re-judged, so a rule that only holds
+    /// for new appends (the hand-in checks) is only seen this way.
+    fn refused_append(events: &[Event]) -> RuleError {
+        let (last, earlier) = match events.split_last() {
+            Some(split) => split,
+            None => panic!("there is no event to append"),
+        };
+        let state = folded(earlier);
+        match state.check_as(&last.actor, &last.kind, last.at_ms) {
+            Ok(()) => panic!("the append should have been refused: {:?}", last.kind),
+            Err(err) => err,
+        }
+    }
+
     fn status(state: &RunState, id: &str) -> TaskStatus {
         match state.tasks.get(id) {
             Some(task) => task.status,
@@ -2025,6 +2365,7 @@ mod tests {
                 status: ReportStatus::Blocked,
                 summary: "stuck".to_string(),
                 tests: Vec::new(),
+                checks: Vec::new(),
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
@@ -2039,6 +2380,242 @@ mod tests {
                 gated(5, "a", 1, "clippy", true),
             ]),
             RuleError::ReportNotCompleted { .. }
+        ));
+    }
+
+    /// A completed hand-in without its checks is refused: the claim that the
+    /// work is tested is exactly what the checks are for.
+    #[test]
+    fn a_hand_in_without_checks_is_refused() {
+        assert!(matches!(
+            refused_append(&[
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                hand_in(4, "a", 1, Vec::new()),
+            ]),
+            RuleError::HandInWithoutChecks { attempt: 1, .. }
+        ));
+        // A report that is not a hand-in needs none: blocked and failed work is
+        // not claimed to be tested.
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported_with(4, "a", 1, ReportStatus::Blocked),
+        ]);
+        assert_eq!(status(&state, "a"), TaskStatus::Failed);
+    }
+
+    /// A hand-in that names a failing gate is refused, and the refusal names
+    /// the gate and its exit code so the worker knows what to fix.
+    #[test]
+    fn a_hand_in_with_a_failing_check_is_refused() {
+        let error = refused_append(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            hand_in(
+                4,
+                "a",
+                1,
+                vec![check("format", Some(0)), check("clippy", Some(101))],
+            ),
+        ]);
+        match error {
+            RuleError::HandInCheckFailed { gate, exit, .. } => {
+                assert_eq!(gate, "clippy");
+                assert_eq!(exit, Some(101));
+            }
+            other => panic!("a failing check was accepted: {other:?}"),
+        }
+        // A check a timeout killed reports no exit code, which is not a pass.
+        assert!(matches!(
+            refused_append(&[
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                hand_in(4, "a", 1, vec![check("tests", None)]),
+            ]),
+            RuleError::HandInCheckFailed { exit: None, .. }
+        ));
+    }
+
+    /// A checks report entry with no gate name or no command is refused: it
+    /// records nothing a reviewer can act on.
+    #[test]
+    fn a_hand_in_check_needs_a_gate_and_a_command() {
+        let mut nameless = check("tests", Some(0));
+        nameless.gate = "  ".to_string();
+        assert!(matches!(
+            refused_append(&[
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                hand_in(4, "a", 1, vec![nameless]),
+            ]),
+            RuleError::EmptyCheck { .. }
+        ));
+        let mut empty = check("tests", Some(0));
+        empty.command = String::new();
+        assert!(matches!(
+            refused_append(&[
+                started(1),
+                added(2, "a", &["src/a"], &[]),
+                spawned(3, "a", 1, "agent-1"),
+                hand_in(4, "a", 1, vec![empty]),
+            ]),
+            RuleError::EmptyCheck { .. }
+        ));
+    }
+
+    /// A passing hand-in is stored with every gate it named.
+    #[test]
+    fn a_hand_in_with_passing_checks_folds_into_the_report() {
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            hand_in(
+                4,
+                "a",
+                1,
+                vec![check("format", Some(0)), check("tests", Some(0))],
+            ),
+        ]);
+        assert_eq!(status(&state, "a"), TaskStatus::Reported);
+        let report = match state
+            .tasks
+            .get("a")
+            .and_then(|task| task.latest_attempt())
+            .and_then(|attempt| attempt.report.as_ref())
+        {
+            Some(report) => report,
+            None => panic!("the hand-in must be stored"),
+        };
+        let gates: Vec<&str> = report
+            .checks
+            .iter()
+            .map(|check| check.gate.as_str())
+            .collect();
+        assert_eq!(gates, vec!["format", "tests"]);
+    }
+
+    /// A hand-in recorded before checks were required still folds: history is
+    /// read, not re-judged.
+    #[test]
+    fn a_hand_in_recorded_before_checks_still_folds() {
+        let mut old = reported(4, "a", 1, &["src/a"]);
+        if let EventKind::Reported { checks, .. } = &mut old.kind {
+            checks.clear();
+        }
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            old,
+        ]);
+        assert_eq!(status(&state, "a"), TaskStatus::Reported);
+    }
+
+    /// A status line is a progress note: it folds onto the task without moving
+    /// its status, and an empty, overlong or out-of-range one is refused.
+    #[test]
+    fn a_task_status_line_folds_without_moving_the_task() {
+        let status_event = |seq: u64, message: &str, progress: Option<u8>| {
+            ev(
+                seq,
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: message.to_string(),
+                    progress,
+                },
+            )
+        };
+        let log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            status_event(4, "reading the log", Some(25)),
+        ];
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Working);
+        let recorded = match state
+            .tasks
+            .get("a")
+            .and_then(|task| task.last_status.as_ref())
+        {
+            Some(recorded) => recorded,
+            None => panic!("the status line must fold"),
+        };
+        assert_eq!(recorded.message, "reading the log");
+        assert_eq!(recorded.progress, Some(25));
+
+        let before = folded(&log);
+        let message_too_long = "x".repeat(TASK_STATUS_MAX_CHARS + 1);
+        for (kind, expected) in [
+            (
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: "   ".to_string(),
+                    progress: None,
+                },
+                "empty",
+            ),
+            (
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: message_too_long,
+                    progress: None,
+                },
+                "long",
+            ),
+            (
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: "running the gates".to_string(),
+                    progress: Some(101),
+                },
+                "progress",
+            ),
+        ] {
+            let error = match before.check(&kind, 5_000) {
+                Ok(()) => panic!("a bad status line ({expected}) was accepted"),
+                Err(err) => err,
+            };
+            match (expected, error) {
+                ("empty", RuleError::EmptyStatusMessage { .. }) => {}
+                ("long", RuleError::StatusMessageTooLong { found, max, .. }) => {
+                    assert_eq!(found, TASK_STATUS_MAX_CHARS + 1);
+                    assert_eq!(max, TASK_STATUS_MAX_CHARS);
+                }
+                ("progress", RuleError::ProgressOutOfRange { progress: 101, .. }) => {}
+                (label, other) => panic!("{label} was refused with {other:?}"),
+            }
+        }
+    }
+
+    /// A status line for a task a human dropped is refused: the worker posting
+    /// it was left behind by the drop.
+    #[test]
+    fn a_dropped_task_takes_no_status_line() {
+        let mut log = reported_run();
+        log.push(dropped(5, "not needed"));
+        let state = folded(&log);
+        let kind = EventKind::TaskStatus {
+            task: "a".to_string(),
+            message: "still going".to_string(),
+            progress: None,
+        };
+        assert!(matches!(
+            state.check_as(
+                &Actor::Agent {
+                    id: "agent-1".to_string()
+                },
+                &kind,
+                7_000
+            ),
+            Err(RuleError::TaskIsDropped { .. })
         ));
     }
 
@@ -3096,6 +3673,7 @@ mod tests {
                 status: ReportStatus::Completed,
                 summary: "still here".to_string(),
                 tests: strings(&[]),
+                checks: vec![check("tests", Some(0))],
                 changed_paths: strings(&["src/a/x.rs"]),
                 commit: Some("abc123".to_string()),
                 skills_used: Vec::new(),
@@ -3193,6 +3771,191 @@ mod tests {
             },
         ));
         assert_eq!(status(&folded(&log), "a"), TaskStatus::Dropped);
+    }
+
+    /// The task `a`, reported and reviewed, with `review` as its newest gate.
+    fn ready_log(review: Event) -> Vec<Event> {
+        let mut log = reviewable();
+        log.push(review);
+        log
+    }
+
+    /// A passed review gate with provenance for the request `reviewable` made.
+    fn answering_verdict(seq: u64) -> Event {
+        ev(seq, review_gate(true, Some(provenance_for("codex/m1", 5))))
+    }
+
+    #[test]
+    fn a_handed_in_task_with_a_cross_vendor_review_is_ready_to_land() {
+        let state = folded(&ready_log(answering_verdict(6)));
+        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        ready_to_land(task).unwrap_or_else(|err| panic!("it is ready to land: {err}"));
+    }
+
+    #[test]
+    fn a_task_without_a_passing_hand_in_is_not_ready_to_land() {
+        // A report recorded before checks were required: it folds, because
+        // history is read, but it cannot pass for a tested hand-in now.
+        let mut log = reviewable();
+        if let EventKind::Reported { checks, .. } = &mut log[3].kind {
+            checks.clear();
+        }
+        log.push(answering_verdict(6));
+        let state = folded(&log);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::HandInWithoutChecks { .. })
+        ));
+    }
+
+    #[test]
+    fn a_task_whose_hand_in_named_a_failing_check_is_not_ready_to_land() {
+        let mut log = reviewable();
+        if let EventKind::Reported { checks, .. } = &mut log[3].kind {
+            *checks = vec![check("format", Some(0)), check("tests", Some(101))];
+        }
+        log.push(answering_verdict(6));
+        let state = folded(&log);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::HandInCheckFailed {
+                exit: Some(101),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_task_only_a_same_vendor_reviewer_looked_at_is_not_ready_to_land() {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            review_requested(5, "a", 1, "agent-1", true),
+        ];
+        log.push(ev(6, review_gate(true, Some(provenance_for("agent-1", 5)))));
+        let state = folded(&log);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::ReviewNotIndependent { reviewer, .. }) if reviewer == "agent-1"
+        ));
+    }
+
+    #[test]
+    fn a_task_that_was_never_reviewed_is_not_ready_to_land() {
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            gated(5, "a", 1, "lint", true),
+        ]);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::NoReviewRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn a_review_verdict_nothing_proves_is_not_ready_to_land() {
+        // A passed review gate recorded before provenance existed folds, but
+        // it does not prove a reviewer wrote anything.
+        let state = folded(&ready_log(ev(6, review_gate(true, None))));
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::UnprovenVerdict { .. })
+        ));
+    }
+
+    #[test]
+    fn a_verdict_answering_a_superseded_request_is_not_ready_to_land() {
+        // Two requests for one attempt, and a verdict that answers the first:
+        // the current review never read the work, so nothing proves it.
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+            reported(4, "a", 1, &["src/a/x.rs"]),
+            review_requested(5, "a", 1, "codex/m1", false),
+            review_requested(6, "a", 1, "codex/m1", false),
+        ];
+        log.push(ev(
+            7,
+            review_gate(true, Some(provenance_for("codex/m1", 5))),
+        ));
+        let state = folded(&log);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::UnprovenVerdict { .. })
+        ));
+    }
+
+    #[test]
+    fn a_task_whose_latest_review_failed_is_not_ready_to_land() {
+        // The failed review is settled by a later passing lint gate, so the
+        // task is Passed: readiness has to look at the review itself.
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        log.push(gated(7, "a", 1, "lint", true));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Passed);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::ReviewNotPassed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_task_still_in_flight_is_not_ready_to_land() {
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            spawned(3, "a", 1, "agent-1"),
+        ]);
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        assert!(matches!(
+            ready_to_land(task),
+            Err(RuleError::NotPassed { .. })
+        ));
     }
 
     #[test]

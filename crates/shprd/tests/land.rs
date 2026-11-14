@@ -308,6 +308,8 @@ impl Fixture {
         self.ok(&[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             id,
             "--attempt",
@@ -529,6 +531,8 @@ impl Fixture {
         self.ok(&[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             id,
             "--attempt",
@@ -1385,7 +1389,7 @@ fn a_task_without_an_independent_review_is_refused_and_asks_no_forge() {
     fixture.script_forge("{}");
     let message = fixture.refused(&["land", "T1"]);
     assert!(message.contains("may not land yet"), "{message}");
-    assert!(message.contains("degraded"), "{message}");
+    assert!(message.contains("not independent"), "{message}");
     assert!(
         fixture.forge_calls().is_empty(),
         "a refusal asks the forge nothing: {:?}",

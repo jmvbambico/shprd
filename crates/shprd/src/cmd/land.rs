@@ -22,6 +22,7 @@ use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};
 use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind};
 use shprd_core::gate::REVIEW_GATE;
+use shprd_core::rules;
 use shprd_core::state::{RunState, Task, TaskStatus};
 use shprd_git::forge::{FakeForge, Forge, GhForge};
 use shprd_git::git::Git;
@@ -153,7 +154,11 @@ fn land_task(
         }
         return Ok(());
     }
-    if let Some(refusal) = land::landing_refusal(task) {
+    // The hand-in and the review are the engine's to judge, and the rule that
+    // judges them is the one every landing verb asks: M8.4's own gates, so a
+    // task whose hand-in names no checks, or whose checks failed, cannot reach
+    // a pull request through this path.
+    if let Err(refusal) = rules::ready_to_land(task) {
         return Err(CliError::Invalid(anyhow!(
             "task {task_id:?} may not land yet: {refusal}"
         )));
@@ -830,6 +835,10 @@ mod tests {
                     status: ReportStatus::Completed,
                     summary: "done".to_string(),
                     tests: Vec::new(),
+                    checks: vec![shprd_core::event::CheckReport::passed(
+                        "tests",
+                        "cargo test",
+                    )],
                     changed_paths: vec!["a.txt".to_string()],
                     commit: Some("abc123".to_string()),
                     skills_used: Vec::new(),

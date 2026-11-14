@@ -148,6 +148,8 @@ fn reported(scratch: &Scratch, agent: &str) {
         &[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             "T1",
             "--attempt",

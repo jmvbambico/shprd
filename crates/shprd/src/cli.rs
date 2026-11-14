@@ -61,6 +61,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: AgentCommand,
     },
+    /// Agent-callable task verbs: record where a task stands.
+    Task {
+        /// Which task verb.
+        #[command(subcommand)]
+        cmd: TaskVerb,
+    },
     /// Print the folded run state.
     State,
     /// Print the rehydration brief: what an agent needs to resume.
@@ -384,6 +390,32 @@ pub enum AgentCommand {
 pub enum TaskCommand {
     /// Add a task to the run plan.
     Add(TaskAddArgs),
+    /// Hand the attempt in: what it did, and the checks it ran.
+    ///
+    /// The same verb as `shprd agent report`; this is the spelling a worker's
+    /// brief uses.
+    Report(ReportArgs),
+}
+
+/// Agent-callable task verbs.
+#[derive(Debug, Subcommand)]
+pub enum TaskVerb {
+    /// Record a short progress line for a task.
+    Status(TaskStatusArgs),
+}
+
+/// Arguments for `task status`.
+#[derive(Debug, Args)]
+pub struct TaskStatusArgs {
+    /// The task.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+    /// One short line saying where the work stands; capped at 40 characters.
+    #[arg(long, value_name = "TEXT")]
+    pub msg: String,
+    /// How far along the task is, from 0 to 100.
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub progress: Option<u8>,
 }
 
 /// Arguments for `agent task add`.
@@ -512,6 +544,21 @@ pub struct ReportArgs {
     /// What the agent says it did.
     #[arg(long, value_name = "TEXT")]
     pub summary: String,
+    /// A gate the worker ran, as `GATE|COMMAND|EXIT[|OUTPUT]`; repeatable.
+    ///
+    /// `EXIT` is the exit code, or `none` when a timeout killed the command.
+    /// `OUTPUT` is the tail of what it printed; the last 20 lines are kept.
+    /// A command containing `|` cannot be written this way; such a check can
+    /// be given as a JSON object instead, e.g.
+    /// `{"gate":"tests","command":"cargo test | tail -20","exit_code":0}`.
+    /// A completed hand-in needs at least one, and every one must have exited
+    /// 0, or the hand-in is refused.
+    #[arg(
+        long = "check",
+        value_name = "GATE|COMMAND|EXIT[|OUTPUT]",
+        action = clap::ArgAction::Append
+    )]
+    pub checks: Vec<String>,
     /// Test command and its result; repeatable.
     #[arg(long = "test", value_name = "CMD")]
     pub tests: Vec<String>,

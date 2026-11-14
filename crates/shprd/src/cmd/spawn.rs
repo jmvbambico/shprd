@@ -1332,9 +1332,14 @@ pub fn render_brief(input: &BriefInput<'_>) -> String {
     ));
     out.push_str("- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n");
     out.push_str(&format!(
+        "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
+        t = input.task.id
+    ));
+    out.push_str(&format!(
         "- report when you are done: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
-         plus `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit \
-         and `--skill-used <name>` for each skill above you actually used\n",
+         plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused \
+         without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each \
+         path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used\n",
         t = input.task.id,
         a = input.attempt
     ));
@@ -2011,6 +2016,10 @@ project_dirs = []
             status: ReportStatus::Completed,
             summary: "done".to_string(),
             tests: vec!["cargo test".to_string()],
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: vec!["crates/shprd/src/cmd/spawn.rs".to_string()],
             commit: None,
             skills_used: Vec::new(),
@@ -2862,6 +2871,7 @@ mod tests {
             overrides: Vec::new(),
             dropped_reason: None,
             pr: None,
+            last_status: None,
         }
     }
 
@@ -2953,7 +2963,9 @@ mod tests {
             "## Skills to load first",
             "- tdd",
             "never push",
+            "shprd task status M4.4 --msg",
             "shprd agent report --task M4.4 --attempt 2",
+            "--check",
             "--test",
             "--changed",
             "--commit",

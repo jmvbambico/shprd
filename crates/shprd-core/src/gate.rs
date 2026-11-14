@@ -140,6 +140,7 @@ mod tests {
             overrides: Vec::new(),
             dropped_reason: None,
             pr: None,
+            last_status: None,
         }
     }
 
