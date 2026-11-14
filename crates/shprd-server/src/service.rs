@@ -47,6 +47,34 @@ pub struct ServiceRecord {
     pub version: String,
 }
 
+/// A step the binary runs after an action appended an event.
+///
+/// The CLI's write path projects `<root>/.dagr/run.json` after every write. The
+/// projection is the binary's, not the service's, so `shprd serve` passes that
+/// same step in here rather than the server crate growing a second copy of it.
+/// A failure is the step's own business: it must not turn a recorded write into
+/// an error the client sees.
+#[derive(Clone)]
+pub struct AfterWrite(std::sync::Arc<dyn Fn(&Path) + Send + Sync>);
+
+impl AfterWrite {
+    /// Wraps `step`, which receives the repository the action wrote to.
+    pub fn new(step: impl Fn(&Path) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(step))
+    }
+
+    /// Runs the step for `repo`.
+    pub fn call(&self, repo: &Path) {
+        (self.0)(repo);
+    }
+}
+
+impl std::fmt::Debug for AfterWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AfterWrite")
+    }
+}
+
 /// The discovery files in one state directory.
 #[derive(Debug, Clone)]
 pub struct ServiceFiles {
@@ -250,6 +278,8 @@ pub struct Config {
     pub port: u16,
     /// Who the service's actions act as.
     pub actor: shprd_core::event::Actor,
+    /// A step to run after every action that appended an event.
+    pub after_write: Option<AfterWrite>,
 }
 
 impl Config {
@@ -260,6 +290,7 @@ impl Config {
             state_dir: state_dir.into(),
             port: 0,
             actor: shprd_core::event::Actor::Human,
+            after_write: None,
         }
     }
 }
@@ -286,7 +317,13 @@ impl Service {
             .local_addr()
             .map_err(ServerError::NoAddress)?
             .port();
-        let app = App::prepare(&config.repo, port, &config.actor, &config.state_dir)?;
+        let app = App::prepare(
+            &config.repo,
+            port,
+            &config.actor,
+            &config.state_dir,
+            config.after_write.clone(),
+        )?;
         let info = app.info();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");
         Ok(Self {

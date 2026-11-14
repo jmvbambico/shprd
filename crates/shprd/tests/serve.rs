@@ -223,6 +223,39 @@ fn serve_answers_the_api_and_leaves_no_record_behind() {
     assert_eq!(change["seq"], Value::from(2));
     assert_eq!(change["events"][0]["kind"], Value::from("task_added"));
 
+    // The service's writes leave the dagr document behind, as the CLI's do:
+    // the document `run start` wrote is removed, then a write brings it back.
+    let dagr = repo.path().join(".dagr").join("run.json");
+    fs::remove_dir_all(repo.path().join(".dagr")).expect("the document is removed");
+    assert!(!dagr.exists());
+
+    // `task.status` is the CLI's progress verb: it appends and records the line.
+    let progress = serde_json::json!({
+        "kind": "task.status",
+        "task": "T1",
+        "msg": "halfway there",
+        "progress": 50,
+    });
+    assert_eq!(
+        post_action(&format!("{base}/api/action"), &token, true, &progress),
+        Ok(200)
+    );
+    let (_, body) = get(&format!("{base}/api/state"), Some(&token)).expect("state answers");
+    let snapshot: Value = serde_json::from_str(&body).expect("state is JSON");
+    assert_eq!(snapshot["seq"], Value::from(3));
+    assert_eq!(
+        snapshot["tasks"][0]["last_status"]["message"],
+        Value::from("halfway there")
+    );
+    assert_eq!(
+        snapshot["tasks"][0]["last_status"]["progress"],
+        Value::from(50)
+    );
+    assert!(
+        dagr.exists(),
+        "a write through the service rewrites the dagr document"
+    );
+
     // A clean stop takes service.json with it.
     service.stop();
     assert!(

@@ -148,7 +148,10 @@ fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
 }
 
 /// Rewrites the dagr document, warning on stderr when that fails.
-fn sync_dagr(ctx: &Ctx) {
+///
+/// Shared with `shprd serve`: a write made through the API is a write the same
+/// way a CLI write is, so it leaves the same document behind.
+pub(crate) fn sync_dagr(ctx: &Ctx) {
     if ctx.no_dagr {
         return;
     }

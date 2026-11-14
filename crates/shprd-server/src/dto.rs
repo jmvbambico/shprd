@@ -138,8 +138,30 @@ pub struct TaskDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub dropped_reason: Option<String>,
+    /// The last progress line an agent recorded, with how far it said it had
+    /// got.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_status: Option<TaskProgressDto>,
     /// Attempts made so far, in order.
     pub attempts: Vec<AttemptDto>,
+}
+
+/// The last progress line an agent recorded for a task.
+///
+/// It is what a board row shows under the task's name — "halfway, 50%" — and it
+/// never moves the task's derived status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskProgressDto.ts")]
+pub struct TaskProgressDto {
+    /// The short line the agent reported, trimmed and capped.
+    pub message: String,
+    /// How far along it said the task was, from 0 to 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub progress: Option<u8>,
+    /// The log sequence that recorded it.
+    pub seq: u64,
 }
 
 /// One attempt at a task.
@@ -379,15 +401,23 @@ pub enum Action {
         #[serde(default)]
         deps: Vec<String>,
     },
-    /// Read one task's status and attempts out of the fold.
+    /// Record a short progress line for a task, as `shprd task status` does.
     ///
-    /// It is a query wearing the action envelope, because a Herdr mod can only
-    /// fetch: a panel that draws one task asks for one task, not the whole log.
-    /// It appends nothing. Spelled `task.status`, with `task_status` accepted.
+    /// It appends a `TaskStatus` event under the log's lock — several workers
+    /// may record one at a time — and the line is trimmed and capped by the
+    /// writer, so a pasted agent message never becomes an event. Spelled
+    /// `task.status`, with `task_status` accepted.
     #[serde(rename = "task.status")]
     TaskStatus {
-        /// The task to read.
+        /// The task.
         task: String,
+        /// One short line saying where the work stands; capped at 40
+        /// characters.
+        msg: String,
+        /// How far along the task is, from 0 to 100.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        progress: Option<u8>,
     },
 }
 
@@ -544,6 +574,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<SeverityDto>()?,
         one::<RunDto>()?,
         one::<TaskDto>()?,
+        one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,
         one::<ReportDto>()?,
         one::<GateDto>()?,
@@ -600,13 +631,40 @@ mod tests {
     #[test]
     fn every_action_kind_is_listed() {
         assert!(Action::KINDS.contains(&task_add().kind()));
-        assert!(
-            Action::KINDS.contains(
-                &Action::TaskStatus {
-                    task: "T1".to_string()
-                }
-                .kind()
-            )
+        let status = Action::TaskStatus {
+            task: "T1".to_string(),
+            msg: "halfway".to_string(),
+            progress: Some(50),
+        };
+        assert!(Action::KINDS.contains(&status.kind()));
+        assert_eq!(status.kind(), "task.status");
+    }
+
+    #[test]
+    fn a_task_status_parses_with_and_without_progress() {
+        let with = Action::from_value(serde_json::json!({
+            "kind": "task_status", "task": "T1", "msg": "halfway", "progress": 50,
+        }))
+        .expect("a status with progress");
+        assert_eq!(
+            with,
+            Action::TaskStatus {
+                task: "T1".to_string(),
+                msg: "halfway".to_string(),
+                progress: Some(50),
+            }
+        );
+        let without = Action::from_value(serde_json::json!({
+            "kind": "task.status", "task": "T1", "msg": "halfway",
+        }))
+        .expect("a status without progress");
+        assert_eq!(
+            without,
+            Action::TaskStatus {
+                task: "T1".to_string(),
+                msg: "halfway".to_string(),
+                progress: None,
+            }
         );
     }
 

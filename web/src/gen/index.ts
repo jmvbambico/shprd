@@ -20,5 +20,6 @@ export * from "./RunDto";
 export * from "./SeverityDto";
 export * from "./SnapshotDto";
 export * from "./TaskDto";
+export * from "./TaskProgressDto";
 export * from "./TaskStatusDto";
 export * from "./WsMessage";

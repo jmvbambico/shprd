@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use anyhow::anyhow;
-use shprd_server::{Config, Service, shutdown_signal, state_dir};
+use shprd_server::{AfterWrite, Config, Service, shutdown_signal, state_dir};
 
 use crate::cli::ServeArgs;
 use crate::ctx::{CliError, Ctx, resolve_home};
@@ -20,6 +20,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     let mut config = Config::new(ctx.root.clone(), state_dir(&home));
     config.port = args.port;
     config.actor = ctx.actor.clone();
+    config.after_write = Some(after_write(ctx));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -36,6 +37,23 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             .run(shutdown_signal())
             .await
             .map_err(|err| CliError::other(anyhow!(err).context("serving the run")))
+    })
+}
+
+/// The CLI's own post-write step, for the service's writes.
+///
+/// It is `shprd`'s dagr projection, not a second copy of it: a task added or a
+/// progress line recorded through the API leaves `<root>/.dagr/run.json` fresh,
+/// exactly as the same write through the CLI does.
+fn after_write(ctx: &Ctx) -> AfterWrite {
+    let actor = ctx.actor.clone();
+    let no_dagr = ctx.no_dagr;
+    AfterWrite::new(move |repo| {
+        if no_dagr {
+            return;
+        }
+        let write_ctx = Ctx::new(repo.to_path_buf(), actor.clone(), false, false);
+        crate::cmd::agent::sync_dagr(&write_ctx);
     })
 }
 

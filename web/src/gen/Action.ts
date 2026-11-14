@@ -38,6 +38,15 @@ skills: Array<string>,
  */
 deps: Array<string>, } | { "kind": "task.status", 
 /**
- * The task to read.
+ * The task.
  */
-task: string, };
+task: string, 
+/**
+ * One short line saying where the work stands; capped at 40
+ * characters.
+ */
+msg: string, 
+/**
+ * How far along the task is, from 0 to 100.
+ */
+progress?: number, };

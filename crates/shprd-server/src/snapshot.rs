@@ -8,7 +8,7 @@ use shprd_core::state::RunState;
 
 use crate::dto::{
     AgentDto, AttemptDto, FindingDto, GateDto, NeedDto, ReportDto, ReviewDto, RunDto, SnapshotDto,
-    TaskDto,
+    TaskDto, TaskProgressDto,
 };
 
 /// Folds a run into the snapshot a client draws.
@@ -58,6 +58,11 @@ pub(crate) fn task(task: &shprd_core::state::Task) -> TaskDto {
         skills: task.skills.clone(),
         deps: task.deps.clone(),
         dropped_reason: task.dropped_reason.clone(),
+        last_status: task.last_status.as_ref().map(|status| TaskProgressDto {
+            message: status.message.clone(),
+            progress: status.progress,
+            seq: status.seq,
+        }),
         attempts: task.attempts.iter().map(attempt).collect(),
     }
 }

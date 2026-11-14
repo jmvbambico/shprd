@@ -34,6 +34,6 @@ pub(crate) mod ledger;
 pub use api::App;
 pub use error::{ApiReject, ServerError};
 pub use service::{
-    Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, VERSION, serve, shutdown_signal,
-    state_dir,
+    AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, VERSION, serve,
+    shutdown_signal, state_dir,
 };

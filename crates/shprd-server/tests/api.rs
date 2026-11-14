@@ -41,7 +41,8 @@ impl Fixture {
         let state = tempfile::tempdir().expect("state dir");
         let repo = tempfile::tempdir().expect("repo dir");
         start_run(repo.path());
-        let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path()).expect("prepare");
+        let app =
+            App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None).expect("prepare");
         let info = app.info();
         // Read the token the way a client does: from the state directory.
         let token = std::fs::read_to_string(&info.token_path).expect("the token file");
@@ -366,29 +367,177 @@ async fn an_action_round_trips() {
     assert_eq!(body["task"]["id"], json!("T1"));
     assert_eq!(body["task"]["status"], json!("queued"));
 
-    // Both spellings of the kind are the same action.
+    // `task.status` is the CLI's write verb: it appends a progress event, and
+    // the reply carries the line it recorded.
     let status = fixture
         .send(
-            Call::post("/api/action", json!({"kind": "task.status", "task": "T1"}))
-                .with_token(&fixture.token)
-                .with_write_header(),
+            Call::post(
+                "/api/action",
+                json!({"kind": "task.status", "task": "T1", "msg": "halfway there", "progress": 50}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
         )
         .await;
     assert_eq!(status.status, StatusCode::OK);
     assert_eq!(status.json()["task"]["id"], json!("T1"));
-    assert_eq!(status.json()["task"]["status"], json!("queued"));
-    assert_eq!(status.json()["seq"], json!(2), "a query writes nothing");
+    assert_eq!(
+        status.json()["task"]["status"],
+        json!("queued"),
+        "a progress line moves no status"
+    );
+    assert_eq!(
+        status.json()["seq"],
+        json!(3),
+        "the write appended a second event"
+    );
+    assert_eq!(
+        status.json()["task"]["last_status"]["message"],
+        json!("halfway there")
+    );
+    assert_eq!(status.json()["task"]["last_status"]["progress"], json!(50));
+    assert_eq!(status.json()["task"]["last_status"]["seq"], json!(3));
 
-    // The snake_case spelling is the same action.
+    // The snake_case spelling is the same action, and progress is optional.
     let snake = fixture
         .send(
-            Call::post("/api/action", json!({"kind": "task_status", "task": "T1"}))
-                .with_token(&fixture.token)
-                .with_write_header(),
+            Call::post(
+                "/api/action",
+                json!({"kind": "task_status", "task": "T1", "msg": "another line"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
         )
         .await;
     assert_eq!(snake.status, StatusCode::OK);
     assert_eq!(snake.json()["task"]["id"], json!("T1"));
+    assert_eq!(
+        snake.json()["task"]["last_status"]["message"],
+        json!("another line")
+    );
+    assert_eq!(snake.json()["task"]["last_status"]["progress"], Value::Null);
+    assert_eq!(snake.json()["seq"], json!(4));
+}
+
+#[tokio::test]
+async fn a_progress_line_is_capped_and_reaches_the_snapshot_and_the_poll() {
+    let fixture = Fixture::new();
+    fixture.add_task("T1").await;
+    let long = "a pasted agent message that goes on and on and on for far too long";
+    let written = fixture
+        .send(
+            Call::post(
+                "/api/action",
+                json!({"kind": "task.status", "task": "T1", "msg": long, "progress": 12}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(written.status, StatusCode::OK);
+    let message = written.json()["task"]["last_status"]["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.chars().count() <= shprd_core::event::TASK_STATUS_MAX_CHARS,
+        "the line is capped, not stored whole: {message:?}"
+    );
+    assert!(message.ends_with('\u{2026}'), "{message:?}");
+
+    let snapshot = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    let task = &snapshot.json()["tasks"][0];
+    assert_eq!(task["last_status"]["progress"], json!(12));
+    assert_eq!(task["last_status"]["message"], Value::from(message.clone()));
+
+    let change = fixture
+        .send(Call::get("/api/changes?since=2&timeout=0").with_token(&fixture.token))
+        .await;
+    assert_eq!(change.status, StatusCode::OK);
+    assert_eq!(change.json()["events"][0]["kind"], json!("task_status"));
+    assert_eq!(change.json()["events"][0]["task"], json!("T1"));
+}
+
+#[tokio::test]
+async fn a_status_line_with_no_msg_or_a_bad_percentage_is_refused() {
+    let fixture = Fixture::new();
+    fixture.add_task("T1").await;
+    for body in [
+        json!({"kind": "task.status", "task": "T1"}),
+        json!({"kind": "task.status", "task": "T1", "msg": "   "}),
+        json!({"kind": "task.status", "task": "T1", "msg": "ok", "progress": 101}),
+    ] {
+        let reply = fixture
+            .send(
+                Call::post("/api/action", body.clone())
+                    .with_token(&fixture.token)
+                    .with_write_header(),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(reply.code(), "bad_request", "{body}");
+    }
+    let snapshot = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    assert_eq!(snapshot.json()["seq"], json!(2), "nothing was appended");
+}
+
+#[tokio::test]
+async fn an_action_runs_the_binarys_after_write_step() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let state = tempfile::tempdir().expect("state dir");
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let app = App::prepare(
+        repo.path(),
+        PORT,
+        &Actor::Human,
+        state.path(),
+        Some(shprd_server::AfterWrite::new(move |_repo| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })),
+    )
+    .expect("prepare");
+    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+    let token = token.trim().to_string();
+
+    let call = Call::post(
+        "/api/action",
+        json!({
+            "kind": "task.add", "task": "T1", "title": "t",
+            "scope": ["crates/a"], "acceptance": ["works"],
+        }),
+    )
+    .with_token(&token)
+    .with_write_header();
+    let response = app.router().oneshot(call.request()).await.expect("answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the step ran once, after the write"
+    );
+
+    // A refused write does not run it.
+    let call = Call::post(
+        "/api/action",
+        json!({
+            "kind": "task.add", "task": "T1", "title": "t",
+            "scope": ["crates/a"], "acceptance": ["works"],
+        }),
+    )
+    .with_token(&token)
+    .with_write_header();
+    let response = app.router().oneshot(call.request()).await.expect("answers");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -447,20 +596,27 @@ async fn a_refused_action_writes_nothing() {
 }
 
 #[tokio::test]
-async fn reading_a_task_that_does_not_exist_is_a_typed_404() {
+async fn recording_status_for_an_unknown_task_is_a_typed_refusal() {
     let fixture = Fixture::new();
     let reply = fixture
         .send(
             Call::post(
                 "/api/action",
-                json!({"kind": "task_status", "task": "nope"}),
+                json!({"kind": "task.status", "task": "nope", "msg": "here"}),
             )
             .with_token(&fixture.token)
             .with_write_header(),
         )
         .await;
-    assert_eq!(reply.status, StatusCode::NOT_FOUND);
-    assert_eq!(reply.code(), "unknown_task");
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.code(), "refused");
+    assert!(
+        reply.json()["message"]
+            .as_str()
+            .expect("a message")
+            .contains("nope"),
+        "the refusal names the task"
+    );
 }
 
 #[tokio::test]
@@ -484,7 +640,7 @@ async fn the_socket_says_hello_and_pushes_a_change() {
     let state = tempfile::tempdir().expect("state dir");
     let repo = tempfile::tempdir().expect("repo dir");
     start_run(repo.path());
-    let app = App::prepare(repo.path(), port, &Actor::Human, state.path()).expect("prepare");
+    let app = App::prepare(repo.path(), port, &Actor::Human, state.path(), None).expect("prepare");
     let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
     let token = token.trim().to_string();
     let server_router = app.router();

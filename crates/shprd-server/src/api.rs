@@ -29,7 +29,7 @@ use crate::dto::{
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
-use crate::service::{ServiceFiles, ServiceInfo, VERSION};
+use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -59,6 +59,8 @@ pub(crate) struct AppState {
     pub(crate) actor: Actor,
     /// The change counter and its wake-up.
     pub(crate) hub: Hub,
+    /// The binary's own step after a write, if it supplied one.
+    pub(crate) after_write: Option<AfterWrite>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -75,11 +77,15 @@ pub struct App {
 
 impl App {
     /// Writes the discovery files for `port` and builds the router.
+    ///
+    /// `after_write` is the binary's own step after a write (its dagr
+    /// projection); a test passes `None`.
     pub fn prepare(
         repo: &Path,
         port: u16,
         actor: &Actor,
         state_dir: &Path,
+        after_write: Option<AfterWrite>,
     ) -> Result<Self, ServerError> {
         let files = ServiceFiles::prepare(state_dir)?;
         files.write_record(port)?;
@@ -91,6 +97,7 @@ impl App {
             version: VERSION.to_string(),
             actor: actor.clone(),
             hub: Hub::new(),
+            after_write,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -246,8 +253,12 @@ async fn action(
     let action: Action = Action::from_value(value)
         .map_err(|err| ApiReject::bad_request(format!("a {kind:?} action is malformed: {err}")))?;
 
-    let (repo, actor, hub) = (state.repo.clone(), state.actor.clone(), state.hub.clone());
-    let reply = blocking(move || actions::run(&repo, &actor, &hub, action)).await?;
+    let repo = state.repo.clone();
+    let actor = state.actor.clone();
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let reply =
+        blocking(move || actions::run(&repo, &actor, &hub, after_write.as_ref(), action)).await?;
     Ok(Json(reply?))
 }
 
