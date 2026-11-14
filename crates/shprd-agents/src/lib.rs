@@ -10,6 +10,7 @@ pub mod families;
 pub mod harness;
 pub mod models;
 pub mod quota;
+pub mod roles;
 #[cfg(test)]
 mod scripted;
 pub mod skills;

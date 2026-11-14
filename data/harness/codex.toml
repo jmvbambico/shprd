@@ -71,8 +71,8 @@ verified = false
 # The default is the conservative one. Shepherdr's Codex default is `auto`
 # (M7c 2.2); shprd starts a role that names no mode read-only, so it can never
 # act unprompted until a role says otherwise.
-# unverified: that a role with no mode should start at `read-only` rather than
-# Shepherdr's `auto` — M9.3 decides.
+# Decided in M9.3: a role that names no `perm` runs this `default`; the settings
+# model never substitutes a mode of its own (see `crates/shprd-core/src/settings`).
 default = "read-only"
 full = "full"
 readonly = "read-only"

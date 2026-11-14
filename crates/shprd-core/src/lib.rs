@@ -8,6 +8,7 @@ pub mod hash;
 pub mod log;
 pub mod rules;
 pub mod scope;
+pub mod settings;
 pub mod spawn;
 pub mod state;
 pub mod tick;
