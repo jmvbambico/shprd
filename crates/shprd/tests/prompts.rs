@@ -165,6 +165,30 @@ fn an_edit_survives_and_reset_puts_the_shipped_words_back() {
 }
 
 #[test]
+fn a_file_that_cannot_be_read_is_listed_as_unreadable() {
+    let fixture = Fixture::new();
+    fixture.ok(&["list"]);
+    fs::write(fixture.file("broken"), [0xff, 0xfe, 0x00]).expect("a broken file");
+    let text = fixture.ok(&["list"]);
+    assert!(text.contains("unreadable"), "{text}");
+    assert!(text.contains("broken"), "{text}");
+    let listed = fixture.json(&["list", "--json"]);
+    let broken = listed["prompts"]
+        .as_array()
+        .expect("a list of prompts")
+        .iter()
+        .find(|prompt| prompt["id"] == "broken")
+        .expect("the broken file is listed");
+    assert_eq!(broken["state"], "unreadable");
+    assert!(
+        broken["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not UTF-8 text")),
+        "{broken}"
+    );
+}
+
+#[test]
 fn a_prompt_of_your_own_is_read_and_a_missing_one_is_a_refusal() {
     let fixture = Fixture::new();
     fixture.ok(&["list"]);

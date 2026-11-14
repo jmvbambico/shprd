@@ -748,8 +748,6 @@ pub enum PromptStateDto {
     /// The file holds the person's own words, or an older build's untracked
     /// default.
     Edited,
-    /// There is no file and nothing to write for this id.
-    Missing,
 }
 
 /// One prompt write: the words to store over the file.

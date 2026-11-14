@@ -64,7 +64,6 @@ fn document(installed: Installed) -> PromptDto {
         state: match installed.state {
             prompts::State::Default => PromptStateDto::Default,
             prompts::State::Edited => PromptStateDto::Edited,
-            prompts::State::Missing => PromptStateDto::Missing,
         },
     }
 }

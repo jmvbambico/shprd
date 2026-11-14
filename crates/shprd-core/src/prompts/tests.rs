@@ -118,20 +118,54 @@ fn a_custom_prompt_is_read_and_a_missing_one_is_refused() {
     assert_eq!(installed.state, State::Edited, "{installed:?}");
 }
 
+/// The prompts a listing holds, dropping their prose.
+fn listed_ids(dir: &Path) -> Vec<String> {
+    list(dir)
+        .expect("list")
+        .into_iter()
+        .map(|listed| match listed {
+            Listed::Prompt(installed) => installed.id,
+            Listed::Unreadable { id, .. } => id,
+        })
+        .collect()
+}
+
 #[test]
 fn list_writes_every_shipped_prompt_and_finds_the_persons_own() {
     let temp = dir();
     write(temp.path(), "docs", "write the docs\n").expect("the person's prompt");
-    let prompts = list(temp.path()).expect("list");
-    let ids: Vec<&str> = prompts.iter().map(|prompt| prompt.id.as_str()).collect();
+    let ids = listed_ids(temp.path());
     assert_eq!(ids, ["assistant", "worker", "reviewer", "backup", "docs"]);
-    for prompt in &prompts {
+    for id in &ids {
         assert!(
-            temp.path().join(format!("{}.md", prompt.id)).exists(),
-            "{} was written on first use",
-            prompt.id
+            temp.path().join(format!("{id}.md")).exists(),
+            "{id} was written on first use"
         );
     }
+}
+
+#[test]
+fn an_unreadable_prompt_is_listed_with_its_reason() {
+    let temp = dir();
+    std::fs::write(temp.path().join("broken.md"), [0xff, 0xfe, 0x00]).expect("a broken file");
+    let listed = list(temp.path()).expect("list");
+    let broken = listed
+        .iter()
+        .find_map(|entry| match entry {
+            Listed::Unreadable { id, path, reason } => Some((id, path, reason)),
+            _ => None,
+        })
+        .expect("a file that cannot be read is still listed");
+    assert_eq!(broken.0, "broken");
+    assert_eq!(broken.1, &temp.path().join("broken.md"));
+    assert!(broken.2.contains("not UTF-8 text"), "{}", broken.2);
+    assert!(
+        listed.iter().any(|entry| matches!(
+            entry,
+            Listed::Prompt(installed) if installed.id == "worker"
+        )),
+        "the readable prompts are listed as usual"
+    );
 }
 
 #[test]
@@ -195,6 +229,25 @@ fn a_reference_reads_an_id_or_a_path() {
         PromptRef::parse("  "),
         Err(PromptError::BadRef { .. })
     ));
+}
+
+#[test]
+fn a_read_failure_names_the_file_once_and_keeps_its_cause() {
+    let temp = dir();
+    let home = TempDir::new().expect("a temp home");
+    let missing = temp.path().join("gone.md");
+    let reference = PromptRef::parse(missing.to_str().expect("a utf-8 path")).expect("a path");
+    let error = reference
+        .read(temp.path(), home.path())
+        .expect_err("the file is not there");
+    assert_eq!(
+        error.to_string(),
+        format!("cannot read {}", missing.display())
+    );
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the OS error stays in the chain, so a caller can still see why"
+    );
 }
 
 #[test]

@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use anyhow::anyhow;
-use shprd_core::prompts::{self, Installed, PromptError};
+use shprd_core::prompts::{self, Installed, Listed, PromptError};
 
 use crate::cli::{PromptIdArgs, PromptsCommand};
 use crate::ctx::{CliError, resolve_home};
@@ -37,7 +37,15 @@ fn list(dir: &Path, json: bool) -> Result<(), CliError> {
     if json {
         let prompt: Vec<serde_json::Value> = prompts
             .iter()
-            .map(|prompt| document(prompt, false))
+            .map(|listed| match listed {
+                Listed::Prompt(installed) => document(installed, false),
+                Listed::Unreadable { id, path, reason } => serde_json::json!({
+                    "id": id,
+                    "path": path.display().to_string(),
+                    "state": "unreadable",
+                    "reason": reason,
+                }),
+            })
             .collect();
         let value = serde_json::json!({
             "dir": dir.display().to_string(),
@@ -45,8 +53,13 @@ fn list(dir: &Path, json: bool) -> Result<(), CliError> {
         });
         println!("{value}");
     } else {
-        for prompt in &prompts {
-            println!("{}", prompt.line());
+        for listed in &prompts {
+            match listed {
+                Listed::Prompt(installed) => println!("{}", installed.line()),
+                Listed::Unreadable { id, path, reason } => {
+                    println!("{id:<10} {:<8} {} — {reason}", "unreadable", path.display())
+                }
+            }
         }
     }
     Ok(())

@@ -3,4 +3,4 @@
 /**
  * Whether one prompt file is the shipped default or the person's own.
  */
-export type PromptStateDto = "default" | "edited" | "missing";
+export type PromptStateDto = "default" | "edited";

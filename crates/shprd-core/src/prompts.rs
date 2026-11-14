@@ -167,8 +167,6 @@ pub enum State {
     /// The file holds the person's own words, or an older build's untracked
     /// default, and is left alone.
     Edited,
-    /// There is no file, and nothing to write for this id.
-    Missing,
 }
 
 impl State {
@@ -177,7 +175,6 @@ impl State {
         match self {
             Self::Default => "default",
             Self::Edited => "edited",
-            Self::Missing => "missing",
         }
     }
 }
@@ -197,8 +194,6 @@ pub enum Change {
     Unchanged,
     /// The shipped words were put back over an edit.
     Reset,
-    /// There is no file and nothing to write for this id.
-    Missing,
 }
 
 impl Change {
@@ -211,7 +206,6 @@ impl Change {
             Self::Written => "written",
             Self::Unchanged => "unchanged",
             Self::Reset => "reset",
-            Self::Missing => "missing",
         }
     }
 }
@@ -223,7 +217,7 @@ pub struct Installed {
     pub id: String,
     /// The file.
     pub path: PathBuf,
-    /// The words, empty when [`State::Missing`].
+    /// The words.
     pub text: String,
     /// Whether the file is the shipped default or the person's own.
     pub state: State,
@@ -382,12 +376,34 @@ pub fn write(dir: &Path, id: &str, text: &str) -> Result<Installed, PromptError>
     })
 }
 
+/// One prompt [`list`] found: the words, or the file it could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listed {
+    /// A prompt, as [`ensure`] reads it.
+    Prompt(Installed),
+    /// A file in the prompts directory that cannot be used, with the reason: a
+    /// person's file is never dropped from the list without a word about why.
+    Unreadable {
+        /// The id its file name names.
+        id: String,
+        /// The file.
+        path: PathBuf,
+        /// Why it cannot be read, in one line.
+        reason: String,
+    },
+}
+
 /// Read every prompt this machine has: the shipped ones, written on first use,
 /// then any `.md` file of the person's own, by id.
-pub fn list(dir: &Path) -> Result<Vec<Installed>, PromptError> {
+///
+/// A shipped prompt that cannot be installed is an error, because there is
+/// nothing to show for it. A file of the person's own that cannot be read is
+/// listed as [`Listed::Unreadable`] with its reason, so a broken file is visible
+/// in the list rather than silently missing.
+pub fn list(dir: &Path) -> Result<Vec<Listed>, PromptError> {
     let mut prompts = Vec::new();
     for prompt in shipped() {
-        prompts.push(ensure(dir, prompt.id)?);
+        prompts.push(Listed::Prompt(ensure(dir, prompt.id)?));
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(prompts);
@@ -420,9 +436,14 @@ pub fn list(dir: &Path) -> Result<Vec<Installed>, PromptError> {
         else {
             continue;
         };
-        if let Ok(found) = ensure(dir, id) {
-            prompts.push(found);
-        }
+        prompts.push(match ensure(dir, id) {
+            Ok(installed) => Listed::Prompt(installed),
+            Err(error) => Listed::Unreadable {
+                id: id.to_owned(),
+                path,
+                reason: error.to_string(),
+            },
+        });
     }
     Ok(prompts)
 }
@@ -594,7 +615,7 @@ pub enum PromptError {
         path: PathBuf,
     },
     /// A prompt file could not be read.
-    #[error("cannot read {path}: {source}")]
+    #[error("cannot read {path}")]
     Read {
         /// The file that failed.
         path: PathBuf,
@@ -602,7 +623,7 @@ pub enum PromptError {
         source: std::io::Error,
     },
     /// A prompt file could not be written.
-    #[error("cannot write {path}: {source}")]
+    #[error("cannot write {path}")]
     Write {
         /// The file that failed.
         path: PathBuf,
