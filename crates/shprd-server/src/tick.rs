@@ -8,7 +8,8 @@
 //!    each pull request, and which tasks have an agent running now;
 //! 3. plans ([`shprd_core::tick::plan`]);
 //! 4. runs each [`Step`] through the verbs the CLI already has — a start goes
-//!    through the binary's spawn path, a landing through `shprd_git::land`;
+//!    through the binary's spawn path, a review through its `agent review`, a
+//!    landing through `shprd_git::land`;
 //! 5. appends one ledger event per step that changed something and publishes it
 //!    on the service's [`Hub`], so the web app and a Herdr mod see it;
 //! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
@@ -255,6 +256,13 @@ impl TickReport {
 /// did.
 pub type Starter = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
+/// What the tick needs to start the reviewer on a task that handed in.
+///
+/// It is the binary's `agent review`, passed in the way [`Starter`] is, so the
+/// engine and a person start a review through exactly one code path. The
+/// closure returns one line about the reviewer it opened.
+pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
+
 /// Everything one pass runs against.
 pub struct Worker {
     /// The repository whose run log is advanced.
@@ -275,6 +283,12 @@ pub struct Worker {
     pub forge: SharedForge,
     /// Starts an agent on a task.
     pub start: Starter,
+    /// Starts the engine's reviewer on a hand-in.
+    ///
+    /// `None` when the caller has no review path (a record-only pass): the
+    /// planner then plans no `review` step. Whether a reviewer is configured is
+    /// asked of the settings on every pass, not fixed here.
+    pub review: Option<Reviewer>,
     /// Who the pass's writes act as. The engine, always: the tick is shprd's
     /// own automation rather than a human's or an agent's action.
     pub actor: Actor,
@@ -311,6 +325,7 @@ impl Worker {
             phases: &phases,
             facts: &facts,
             config: &self.config,
+            review: self.review.is_some() && self.reviews_hand_ins(),
         });
         let mut report = TickReport::default();
         for step in steps {
@@ -326,6 +341,27 @@ impl Worker {
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
         Ok(report)
+    }
+
+    /// Whether the settings name a reviewer the engine may start.
+    ///
+    /// It is read every pass, like the worker fallback list, so setting a
+    /// reviewer while the service runs takes effect on the next pass. The answer
+    /// is a `reviewer` role that may review and names a program to run; the
+    /// pre-M9 `[roster] reviewer` reaches the same answer through the settings'
+    /// legacy layer. A settings file that cannot be read falls back to the
+    /// config's own roster entry, so a broken file cannot switch review off.
+    fn reviews_hand_ins(&self) -> bool {
+        match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
+            Ok(loaded) => loaded.resolve(None).role("reviewer").is_some_and(|role| {
+                role.may_review()
+                    && role
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| !agent.value.trim().is_empty())
+            }),
+            Err(_) => self.config.roster.reviewer.is_some(),
+        }
     }
 
     /// The programs a cut worker is handed to, in order: the worker role's own
@@ -676,6 +712,7 @@ impl Worker {
     fn run_step(&self, state: &RunState, step: &Step) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
+            Step::Review { task } => self.review_task(state, task),
             Step::Land { task, policy: _ } => self.land_task(state, task),
             Step::MarkLanded {
                 task,
@@ -706,6 +743,106 @@ impl Worker {
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
         Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Starts the reviewer on a task that handed in, through the caller's
+    /// review path.
+    ///
+    /// It is `shprd agent review` with the same arguments the verb uses, so the
+    /// cross-vendor rule, the packet, the brief and the kickoff are one code
+    /// path, and the request it records is what stops the next pass repeating
+    /// the step.
+    ///
+    /// A review that does not start is escalated once, in the task's own name:
+    /// the request may already be in the log, which stops the next pass planning
+    /// the step again, so without the escalation the task would sit at Reported
+    /// for ever with nothing in the ledger saying why. The escalation names the
+    /// failure and the one verb that recovers it.
+    fn review_task(&self, state: &RunState, task: &str) -> Result<StepReport, String> {
+        let review = self
+            .review
+            .as_ref()
+            .ok_or_else(|| String::from("no reviewer is configured"))?;
+        let detail = match review(&self.repo, task) {
+            Ok(detail) => detail,
+            Err(reason) => {
+                let escalated = self.escalate_review_failure(state, task, &reason);
+                return match escalated {
+                    Ok(()) => Err(reason),
+                    Err(escalation) => Err(format!(
+                        "{reason}; the escalation could not be recorded either: {escalation}"
+                    )),
+                };
+            }
+        };
+        let step = Step::Review {
+            task: task.to_string(),
+        };
+        let seq = self.last_seq();
+        self.notify(seq);
+        after_write(&self.after_write, &self.repo);
+        Ok(StepReport::done(&step, detail, seq))
+    }
+
+    /// Records once that the engine's review of `task` did not start.
+    ///
+    /// The body begins with [`review_failure_prefix`], so a second failed pass
+    /// finds the first escalation and says nothing again. The default action is
+    /// the way forward for the state the failure left: a request may already be
+    /// in the log (which stops the next pass planning the step, so only
+    /// `--again` recovers it), or none is (so the engine retries on the next
+    /// pass once the cause is fixed).
+    fn escalate_review_failure(
+        &self,
+        state: &RunState,
+        task: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        let marker = review_failure_prefix(task);
+        let already = state.escalations.iter().any(|escalation| {
+            escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)
+        });
+        if already {
+            return Ok(());
+        }
+        let default_action = if self.review_requested(task) {
+            format!(
+                "fix what the escalation names, then run `shprd agent review --task {task} \
+                 --again`: it closes the reviewer tab and starts a new review"
+            )
+        } else {
+            format!(
+                "fix what the escalation names; the engine retries the review on its next \
+                 pass, or run `shprd agent review --task {task}` by hand"
+            )
+        };
+        let seq = self.commit(EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: format!("{marker}{reason}"),
+            default_action,
+        })?;
+        self.notify(Some(seq));
+        Ok(())
+    }
+
+    /// Whether the log, as the failed review left it, holds a request for the
+    /// task's newest attempt.
+    ///
+    /// The state a pass was planned from is older than the failed review, so it
+    /// cannot answer this: the review records its request before the step that
+    /// fails. A log that cannot be read answers `false`, which only makes the
+    /// escalation suggest a plain review.
+    fn review_requested(&self, task: &str) -> bool {
+        ledger::load(&self.repo)
+            .ok()
+            .and_then(|(latest, _)| {
+                latest
+                    .tasks
+                    .get(task)
+                    .and_then(|task| task.latest_attempt())
+                    .map(|attempt| !attempt.reviews.is_empty())
+            })
+            .unwrap_or(false)
     }
 
     /// Lands a task through its own pull request, as `shprd land` does.
@@ -953,6 +1090,15 @@ fn ladder_state(state: &RunState) -> LadderState {
         }
     }
     ladder
+}
+
+/// What every escalation body for a review the engine could not start begins
+/// with.
+///
+/// It is the marker a later pass compares, so one failed review is one
+/// escalation rather than one per pass.
+fn review_failure_prefix(task: &str) -> String {
+    format!("{task}: the engine's review did not start: ")
 }
 
 /// The log's spelling of a provider class.

@@ -306,21 +306,54 @@ fn the_old_config_keys_still_load() {
     );
     assert_eq!(
         fixture.ok(&["get", "tasks.max_running"]).trim(),
-        "tasks.max_running = 2  (you)"
+        "tasks.max_running = 2  (your old config file)"
     );
     assert_eq!(
         fixture.ok(&["get", "tasks.archive_after"]).trim(),
-        "tasks.archive_after = 30  (you)"
+        "tasks.archive_after = 30  (your old config file)"
     );
     assert_eq!(
         fixture.ok(&["get", "tasks.merge"]).trim(),
-        "tasks.merge = \"checks\"  (you)"
+        "tasks.merge = \"checks\"  (your old config file)"
     );
     // The old names are accepted as keys, and reported under their new name.
     assert_eq!(
         fixture.ok(&["get", "tick.max_running"]).trim(),
-        "tasks.max_running = 2  (you)"
+        "tasks.max_running = 2  (your old config file)"
     );
+    let document = json(&fixture.ok(&["show", "--json"]));
+    assert_eq!(row(&document, "tasks.merge")["source"], "legacy");
+}
+
+#[test]
+fn the_old_roster_reviewer_shows_as_the_legacy_layer() {
+    // The pre-M9 way of naming a reviewer still resolves, and `settings show`
+    // says where it came from instead of pretending the person set it here.
+    let fixture = Fixture::new();
+    Fixture::write(
+        &fixture.config(),
+        "[roster]\nreviewer = \"codex/gpt-5-codex\"\n\n[roster.effort]\n\"codex/gpt-5-codex\" = \"high\"\n",
+    );
+    assert_eq!(
+        fixture.ok(&["get", "roles.reviewer.agent"]).trim(),
+        "roles.reviewer.agent = \"codex\"  (your old config file)"
+    );
+    assert_eq!(
+        fixture.ok(&["get", "roles.reviewer.model"]).trim(),
+        "roles.reviewer.model = \"gpt-5-codex\"  (your old config file)"
+    );
+    assert_eq!(
+        fixture.ok(&["get", "roles.reviewer.effort"]).trim(),
+        "roles.reviewer.effort = \"high\"  (your old config file)"
+    );
+    let document = json(&fixture.ok(&["show", "--json"]));
+    assert_eq!(row(&document, "roles.reviewer.agent")["source"], "legacy");
+
+    // A value set the new way wins and reads as the person's own.
+    fixture.ok(&["set", "roles.reviewer.model", "gpt-6"]);
+    let document = json(&fixture.ok(&["show", "--json"]));
+    assert_eq!(row(&document, "roles.reviewer.agent")["source"], "legacy");
+    assert_eq!(row(&document, "roles.reviewer.model")["source"], "you");
 }
 
 #[test]
