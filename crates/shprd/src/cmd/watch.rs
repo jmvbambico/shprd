@@ -870,16 +870,10 @@ pub(crate) fn settled_mtime(path: &Path) -> Option<SystemTime> {
 
 /// The attempt of `task` a review is still owed for, if there is one.
 ///
-/// A review was asked for, and no review gate result is recorded yet: the task
-/// sits in `Reported` until that result arrives, however long the reviewer
-/// takes.
+/// It is [`shprd_core::tick::awaiting_verdict`], because the service's own pass
+/// decides a review too: the two must ask the same question of the same state.
 fn awaiting_review(task: &Task) -> Option<u32> {
-    if task.status != TaskStatus::Reported {
-        return None;
-    }
-    let attempt = task.attempts.last()?;
-    let decided = attempt.gates.iter().any(|gate| gate.gate == REVIEW_GATE);
-    (!attempt.reviews.is_empty() && !decided).then_some(attempt.n)
+    shprd_core::tick::awaiting_verdict(task)
 }
 
 /// The pane `tab` holds, or `None` when the host no longer has it.

@@ -186,7 +186,8 @@ pub trait FallbackSource: Send + Sync {
 /// What running one plan step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepReport {
-    /// The action's name: `start`, `land`, `mark_landed` or `needs_you`.
+    /// The action's name: `start`, `review`, `verdict`, `land`, `mark_landed`,
+    /// `needs_you`, `nudge`, `backup` or `give_up`.
     pub action: String,
     /// The task it was about.
     pub task: String,
@@ -448,7 +449,7 @@ impl Worker {
             .tasks
             .values()
             .filter(|task| {
-                let Some(attempt) = awaiting_verdict(task) else {
+                let Some(attempt) = tick::awaiting_verdict(task) else {
                     return false;
                 };
                 let path =
@@ -910,7 +911,7 @@ impl Worker {
             .tasks
             .get(task)
             .ok_or_else(|| format!("no task {task:?} in this run"))?;
-        let attempt = awaiting_verdict(found)
+        let attempt = tick::awaiting_verdict(found)
             .ok_or_else(|| format!("task {task:?} has no review waiting on a verdict"))?;
         let run = state
             .run
@@ -1454,24 +1455,6 @@ fn ladder_state(state: &RunState) -> LadderState {
 /// escalation rather than one per pass.
 fn review_failure_prefix(task: &str) -> String {
     format!("{task}: the engine's review did not start: ")
-}
-
-/// The attempt of `task` a review is still owed for, if there is one.
-///
-/// A review was asked for and no review gate result is recorded yet, so the task
-/// sits in `Reported` until the reviewer's file is decided, however long the
-/// reviewer takes. That is the test the planner reads too, so one review is
-/// never decided twice.
-fn awaiting_verdict(task: &Task) -> Option<u32> {
-    if task.status != shprd_core::state::TaskStatus::Reported {
-        return None;
-    }
-    let attempt = task.attempts.last()?;
-    let decided = attempt
-        .gates
-        .iter()
-        .any(|gate| gate.gate == shprd_core::gate::REVIEW_GATE);
-    (!attempt.reviews.is_empty() && !decided).then_some(attempt.n)
 }
 
 /// The log's spelling of a provider class.

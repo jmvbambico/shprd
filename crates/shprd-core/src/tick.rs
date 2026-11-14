@@ -317,7 +317,7 @@ fn step_for(
     // a gate result by the engine, and a settled file nobody decided yet is that
     // work. The recorded gate is what stops the next pass deciding it again, and
     // a file already escalated as unreadable is a person's to look at.
-    if awaiting_verdict(task)
+    if awaiting_verdict(task).is_some()
         && facts.settled_findings.contains(&task.id)
         && !invalid_findings_escalated(state, task)
     {
@@ -432,24 +432,23 @@ fn awaiting_review(task: &Task) -> bool {
         && report.checks.iter().all(|check| check.exit_code == Some(0))
 }
 
-/// Whether a task has a review out for its newest attempt and no verdict yet.
+/// The attempt of `task` a review is still owed for, if there is one.
 ///
 /// A review was asked for and no review gate result is recorded, so the task
 /// sits in `Reported` until the reviewer's file is decided, however long the
-/// reviewer takes. That is the same test the watchdog asks before it records a
-/// verdict, so the two can never decide one review between them.
-fn awaiting_verdict(task: &Task) -> bool {
+/// reviewer takes. Every actor that decides a review asks this before it does —
+/// the planner, the service's verdict step and the watchdog — so one review is
+/// never decided twice, whichever of them notices the file first.
+pub fn awaiting_verdict(task: &Task) -> Option<u32> {
     if task.status != TaskStatus::Reported {
-        return false;
+        return None;
     }
-    let Some(attempt) = task.latest_attempt() else {
-        return false;
-    };
+    let attempt = task.latest_attempt()?;
     let decided = attempt
         .gates
         .iter()
         .any(|gate| gate.gate == crate::gate::REVIEW_GATE);
-    !attempt.reviews.is_empty() && !decided
+    (!attempt.reviews.is_empty() && !decided).then_some(attempt.n)
 }
 
 /// Whether an unreadable findings file for this task was already escalated.
