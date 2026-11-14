@@ -934,10 +934,13 @@ fn start_in_tab(
     );
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
-        body: "review brief not delivered".to_string(),
+        // The ledger says which turn was lost, the way the warning does: a
+        // kickoff that never arrived and a brief that never arrived are fixed
+        // the same way but are different causes to read.
+        body: format!("{what} not delivered"),
         default_action: format!(
             "run `shprd agent review --task {task} --again`, which closes the reviewer \
-             tab and delivers the brief again; never type into the reviewer's tab"
+             tab and delivers the {what} again; never type into the reviewer's tab"
         ),
     };
     if let Err(err) = env.spawn.ctx.commit(escalation) {
@@ -1019,6 +1022,14 @@ fn reviewer_argv(
 /// A role that names no mode keeps [`LaunchSpec::reviewer_args`], which is the
 /// program's own answer to "how does a reviewer stay out of the worktree and
 /// still write its findings": codex's workspace-write sandbox is that answer.
+///
+/// A role marked read-only is not handed the program's read-only *tool set*
+/// when it names no mode: for codex and pi those modes (`-s read-only`,
+/// `--tools read,grep,find,ls`) cannot write the packet's `findings.json`, so
+/// the review would never produce a verdict. The program's reviewer confinement
+/// is what keeps such a reviewer out of the worktree instead. A role that names
+/// a read-only mode explicitly still gets it, as does one that names any other
+/// mode the program offers.
 fn review_confinement(spec: &HarnessSpec, perm: Option<&str>) -> Vec<String> {
     if let Some(mode) = perm.and_then(|id| spec.permissions.mode(id))
         && spec.permissions.full.as_deref() != Some(mode.id.as_str())
@@ -2062,7 +2073,17 @@ project_dirs = []
 
         let escalations = escalations(&ctx);
         assert_eq!(escalations.len(), 1, "{escalations:?}");
-        assert_eq!(escalations[0].1, "review brief not delivered");
+        assert_eq!(
+            escalations[0].1, "review kickoff not delivered",
+            "the ledger says which turn was lost"
+        );
+        assert!(
+            escalations[0]
+                .2
+                .contains("delivers the review kickoff again"),
+            "the default action names the same turn: {:?}",
+            escalations[0].2
+        );
         assert!(prompts(&mux).is_empty(), "nothing may be typed in");
     }
 
@@ -2161,7 +2182,7 @@ project_dirs = []
         assert_eq!(
             default_action,
             "run `shprd agent review --task T1 --again`, which closes the reviewer tab and \
-             delivers the brief again; never type into the reviewer's tab"
+             delivers the review brief again; never type into the reviewer's tab"
         );
         assert_eq!(
             detection_polls(&mux),
