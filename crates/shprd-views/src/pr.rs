@@ -1,3 +1,8 @@
+// The per-task pull-request body is adapted from shepherdr (MIT),
+// mods/tasks/bin/herdr_task/github.py (pr_body), commit a3f327a.
+// Copyright (c) 2026 Elias Stravik
+// https://github.com/eliasstravik/shepherdr
+//
 //! The pull-request body: the log, rendered as Markdown.
 //!
 //! Two shapes. [`pr_body`] is the run's own pull request, the one the

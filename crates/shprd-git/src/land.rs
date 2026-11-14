@@ -1,3 +1,8 @@
+// Per-task landing adapted from shepherdr (MIT), mods/tasks/bin/herdr_task/github.py,
+// commit a3f327a.
+// Copyright (c) 2026 Elias Stravik
+// https://github.com/eliasstravik/shepherdr
+//
 //! Landing one task: its own branch, its own pull request, merged by policy.
 //!
 //! This is the per-task workflow Shepherdr runs (M8.3). A task's attempt

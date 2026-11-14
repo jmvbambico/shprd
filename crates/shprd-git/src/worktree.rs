@@ -1,3 +1,8 @@
+// The fresh start a new worktree branches from is adapted from shepherdr (MIT),
+// mods/tasks/bin/herdr_task/launch.py (fresh_start), commit a3f327a.
+// Copyright (c) 2026 Elias Stravik
+// https://github.com/eliasstravik/shepherdr
+//
 //! Per-attempt git worktrees, and the only removal path shprd may take.
 //!
 //! A worktree is created on a branch inside the layout's namespace and removed
