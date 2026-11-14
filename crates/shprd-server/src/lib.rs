@@ -37,10 +37,12 @@ pub(crate) mod actions;
 pub(crate) mod auth;
 pub mod hub;
 pub(crate) mod ledger;
+pub mod news;
 pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
 pub use error::{ApiReject, ServerError};
+pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use service::{
     AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig, VERSION,
     serve, shutdown_signal, state_dir,

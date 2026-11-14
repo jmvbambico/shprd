@@ -817,6 +817,41 @@ pub enum EventKind {
     },
 }
 
+impl EventKind {
+    /// The task this event is about, when it is about one.
+    ///
+    /// The log is how a reader follows one task: which events name it is the
+    /// same question every reader asks, so it is answered once here rather
+    /// than matched again in each view. Run-wide events (`RunStarted`,
+    /// `FullGate`, `BaseSynced`, the two launcher events) name none, and
+    /// `Escalated` names one only when it is not run-wide.
+    pub fn task(&self) -> Option<&str> {
+        match self {
+            Self::TaskAdded { task, .. }
+            | Self::Spawned { task, .. }
+            | Self::Reported { task, .. }
+            | Self::TaskStatus { task, .. }
+            | Self::AskRaised { task, .. }
+            | Self::AskAnswered { task, .. }
+            | Self::GatePassed { task, .. }
+            | Self::GateFailed { task, .. }
+            | Self::Integrated { task, .. }
+            | Self::TaskDropped { task, .. }
+            | Self::ReviewRequested { task, .. }
+            | Self::HandedOff { task, .. }
+            | Self::Override { task, .. }
+            | Self::TaskPrOpened { task, .. }
+            | Self::TaskApproved { task, .. }
+            | Self::TaskLanded { task, .. }
+            | Self::Nudged { task, .. }
+            | Self::Backup { task, .. }
+            | Self::ProviderGaveUp { task, .. } => Some(task),
+            Self::Escalated { task, .. } => task.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,6 +1103,38 @@ mod tests {
             }
             other => panic!("expected a passed gate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_event_names_the_task_it_is_about() {
+        let spawned = EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt".to_string(),
+            branch: "b".to_string(),
+        };
+        assert_eq!(spawned.task(), Some("T1"));
+        let escalated = EventKind::Escalated {
+            task: Some("T2".to_string()),
+            body: "check it".to_string(),
+            default_action: "stop".to_string(),
+        };
+        assert_eq!(escalated.task(), Some("T2"));
+        let run_wide = EventKind::Escalated {
+            task: None,
+            body: "check it".to_string(),
+            default_action: "stop".to_string(),
+        };
+        assert_eq!(run_wide.task(), None);
+        let start = EventKind::RunStarted {
+            run_id: "r1".to_string(),
+            repo: "/repo".to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "integration/m1".to_string(),
+        };
+        assert_eq!(start.task(), None, "a run-wide event is about no task");
     }
 
     #[test]

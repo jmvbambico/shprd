@@ -435,10 +435,12 @@ pub enum TaskKey {
     FinishNotes,
     /// Seconds between two passes of the service's tick.
     TickSecs,
+    /// Seconds a change must hold before the coordinator is told about it.
+    NewsSettleSecs,
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 13] = [
+pub const TASK_KEYS: [TaskKey; 14] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -452,6 +454,7 @@ pub const TASK_KEYS: [TaskKey; 13] = [
     TaskKey::StartNotes,
     TaskKey::FinishNotes,
     TaskKey::TickSecs,
+    TaskKey::NewsSettleSecs,
 ];
 
 impl TaskKey {
@@ -471,6 +474,7 @@ impl TaskKey {
             Self::StartNotes => "start_notes",
             Self::FinishNotes => "finish_notes",
             Self::TickSecs => "tick_secs",
+            Self::NewsSettleSecs => "news_settle_secs",
         }
     }
 
@@ -495,6 +499,7 @@ impl TaskKey {
             Self::MaxRunning => Some((1, 10)),
             Self::ArchiveAfter => Some((0, 3650)),
             Self::TickSecs => Some((1, 3600)),
+            Self::NewsSettleSecs => Some((0, 3600)),
             _ => None,
         }
     }
@@ -597,7 +602,8 @@ impl Key {
                 TaskKey::ReviewRounds
                 | TaskKey::MaxRunning
                 | TaskKey::ArchiveAfter
-                | TaskKey::TickSecs => Kind::Number,
+                | TaskKey::TickSecs
+                | TaskKey::NewsSettleSecs => Kind::Number,
                 _ => Kind::Text,
             },
             Self::CrossVendor => Kind::Switch,
@@ -1320,6 +1326,10 @@ pub fn builtin() -> Layer {
         Key::Task(TaskKey::TickSecs),
         Value::Number(i64::try_from(config.tick.interval_secs).unwrap_or(15)),
     );
+    layer.set(
+        Key::Task(TaskKey::NewsSettleSecs),
+        Value::Number(i64::try_from(NEWS_SETTLE_SECS).unwrap_or(5)),
+    );
     layer.set(Key::CrossVendor, Value::Switch(true));
     layer.set(
         Key::RolesOrder,
@@ -1343,6 +1353,11 @@ pub fn builtin() -> Layer {
 
 /// The branch pattern new tasks are named after, when nobody set one.
 pub const DEFAULT_BRANCH: &str = "task/{n}-{slug}";
+
+/// How long a change must hold before a space's coordinator is told about it,
+/// in seconds: Shepherdr's settle window (`news.py`'s `NEWS_SETTLE_MS`), used
+/// when nobody sets `tasks.news_settle_secs`.
+pub const NEWS_SETTLE_SECS: u64 = 5;
 
 /// The identity of the four roles this build ships.
 ///
@@ -1650,6 +1665,9 @@ pub struct Tasks {
     pub finish_notes: String,
     /// Seconds between two passes of the service's tick.
     pub tick_secs: u64,
+    /// Seconds a change must hold before a space's coordinator is told about
+    /// it; `0` tells it at once.
+    pub news_settle_secs: u64,
 }
 
 /// One line of `settings show`: a key, its value and the layer it came from.
@@ -1803,6 +1821,10 @@ impl Resolved {
             tick_secs: u64::from(self.count(
                 TaskKey::TickSecs,
                 u32::try_from(defaults.tick.interval_secs).unwrap_or(15),
+            )),
+            news_settle_secs: u64::from(self.count(
+                TaskKey::NewsSettleSecs,
+                u32::try_from(NEWS_SETTLE_SECS).unwrap_or(5),
             )),
         }
     }
