@@ -71,6 +71,12 @@ pub enum ServerError {
     /// A TypeScript binding could not be generated.
     #[error("could not generate TypeScript bindings: {0}")]
     Bindings(#[from] ts_rs::ExportError),
+    /// A tick pass could not read or fold the run log.
+    ///
+    /// Only the read fails the pass: a step that goes wrong is reported in the
+    /// pass's own report and the other steps still run.
+    #[error("a tick pass could not read the run: {0}")]
+    Tick(String),
 }
 
 impl ServerError {

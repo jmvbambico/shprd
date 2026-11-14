@@ -130,6 +130,23 @@ impl App {
         state_dir: &Path,
         after_write: Option<AfterWrite>,
     ) -> Result<Self, ServerError> {
+        Self::prepare_with_hub(repo, port, actor, state_dir, after_write, Hub::new())
+    }
+
+    /// [`App::prepare`], publishing writes on `hub`.
+    ///
+    /// The service's tick writes the same log the API does, so the two must
+    /// share one change counter: a task the tick started has to wake the long
+    /// polls and sockets an open page is waiting on, exactly as a write through
+    /// `POST /api/action` does.
+    pub fn prepare_with_hub(
+        repo: &Path,
+        port: u16,
+        actor: &Actor,
+        state_dir: &Path,
+        after_write: Option<AfterWrite>,
+        hub: Hub,
+    ) -> Result<Self, ServerError> {
         let files = ServiceFiles::prepare(state_dir)?;
         files.write_record(port)?;
         let state = AppState {
@@ -139,7 +156,7 @@ impl App {
             id: files.id().to_string(),
             version: VERSION.to_string(),
             actor: actor.clone(),
-            hub: Hub::new(),
+            hub,
             after_write,
             ws: WsLimits::default(),
         };
@@ -154,6 +171,11 @@ impl App {
     /// The router, ready to be served or driven by `tower::ServiceExt`.
     pub fn router(&self) -> Router {
         self.router.clone()
+    }
+
+    /// The change counter this service publishes on.
+    pub fn hub(&self) -> Hub {
+        self.state.hub.clone()
     }
 
     /// What the service tells a client about itself.

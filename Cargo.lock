@@ -1194,6 +1194,8 @@ dependencies = [
  "serde",
  "serde_json",
  "shprd-core",
+ "shprd-git",
+ "shprd-views",
  "tempfile",
  "thiserror",
  "tokio",
