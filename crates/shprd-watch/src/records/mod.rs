@@ -248,7 +248,6 @@ const OVERLOADED: &[&str] = &[
     "upstream",
     "server error",
     "try again later",
-    "5xx",
 ];
 
 /// Classify an error from its code and text.
@@ -269,11 +268,21 @@ pub fn classify(text: &str) -> ErrorKind {
         ErrorKind::Quota
     } else if hit(RATE_LIMIT) {
         ErrorKind::RateLimit
-    } else if hit(OVERLOADED) {
+    } else if hit(OVERLOADED) || has_5xx(&normalised) {
         ErrorKind::Overloaded
     } else {
         ErrorKind::Other
     }
+}
+
+/// Whether `text` carries an HTTP 5xx status as its own number.
+///
+/// The words cover the common bodies; a bare "API error 500" has none of them,
+/// and treating it as "other" would give up on a provider that is simply down.
+fn has_5xx(text: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_digit()).any(|token| {
+        token.len() == 3 && token.starts_with('5') && token[1..].chars().all(|c| c.is_ascii_digit())
+    })
 }
 
 /// Whether `text` names an exhausted allowance rather than a passing rate
@@ -535,6 +544,8 @@ mod tests {
         assert_eq!(classify("Overloaded"), ErrorKind::Overloaded);
         assert_eq!(classify("Request timed out."), ErrorKind::Overloaded);
         assert_eq!(classify("connection reset by peer"), ErrorKind::Overloaded);
+        assert_eq!(classify("API error 500"), ErrorKind::Overloaded);
+        assert_eq!(classify("status 503"), ErrorKind::Overloaded);
         assert_eq!(classify("invalid_request"), ErrorKind::Other);
     }
 
