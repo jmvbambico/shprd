@@ -222,15 +222,25 @@ impl Watcher {
             let Some(modified) = settled_mtime(&path) else {
                 continue;
             };
-            if verdict::read_findings(&path).is_err() {
+            if let Err(err) = verdict::read_findings(&path) {
+                // One bad file is one escalation, whichever pass noticed it: the
+                // body begins with the marker the service's own pass compares, so
+                // `watch` and `serve` cannot each escalate the same file.
+                let marker = shprd_core::review::invalid_findings_prefix(&task.id);
+                if state.escalations.iter().any(|escalation| {
+                    escalation.task.as_deref() == Some(task.id.as_str())
+                        && escalation.body.starts_with(&marker)
+                }) {
+                    continue;
+                }
                 if self.rejected.get(&path) == Some(&modified) {
                     continue;
                 }
                 self.rejected.insert(path, modified);
                 env.ctx.commit(EventKind::Escalated {
                     task: Some(task.id.clone()),
-                    body: format!("reviewer wrote an invalid findings.json for {}", task.id),
-                    default_action: INVALID_FINDINGS_ACTION.to_string(),
+                    body: format!("{marker}{err}"),
+                    default_action: String::from(shprd_core::review::INVALID_FINDINGS_ACTION),
                 })?;
                 lines.push(format!("escalated {}: invalid findings.json", task.id));
                 continue;
@@ -847,9 +857,6 @@ fn home_of<'a>(env: &'a SpawnEnv<'_>) -> Option<&'a Path> {
 fn reviews_dir(env: &SpawnEnv<'_>) -> Option<PathBuf> {
     Some(home_of(env)?.join(".shprd").join("reviews"))
 }
-
-/// What a human is asked to do about a reviewer's invalid findings file.
-const INVALID_FINDINGS_ACTION: &str = "read the packet and decide the review by hand";
 
 /// The mtime of `path`, when the file is old enough for the watchdog to read.
 ///
@@ -2932,6 +2939,10 @@ project_dirs = []
     }
 
     /// An unreadable file is one escalation, not one per tick.
+    ///
+    /// The body begins with [`shprd_core::review::invalid_findings_prefix`], which
+    /// is also what the service's own pass compares, so `watch` and `serve`
+    /// cannot each escalate the same file.
     #[test]
     fn an_invalid_findings_file_is_escalated_once() {
         let scratch = Scratch::new();
@@ -2947,7 +2958,7 @@ project_dirs = []
                 kind,
                 EventKind::Escalated { task, body, .. }
                     if task.as_deref() == Some("T1")
-                        && body.contains("invalid findings.json for T1")
+                        && body.contains(shprd_core::review::invalid_findings_prefix("T1").as_str())
             )),
             "an invalid file was not escalated: {first:?}"
         );
