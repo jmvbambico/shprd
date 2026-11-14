@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use shprd_core::event::{Actor, Event, EventKind};
-use shprd_core::log::{Clock, EventLog, LogError, SystemClock};
+use shprd_core::log::{AppendError, Clock, EventLog, LogError, SystemClock};
 use shprd_core::rules::RuleError;
 use shprd_core::state::RunState;
 
@@ -124,15 +124,33 @@ pub fn notices(events: &[Event]) -> Result<Vec<EventNoticeDto>, serde_json::Erro
         .collect()
 }
 
-/// Checks `kind` against the folded state, then appends it.
+/// Checks `kind` against the folded state, then appends it, all under the
+/// log's lock.
 ///
-/// This is the sequence every writing verb in the CLI runs — the check against
-/// the rules first, the append under the log's own lock second — so a refused
-/// event is never written, whichever door it came through.
+/// The check and the write used to be separate, so two writers that both saw
+/// the same state could both append an event only one of which the rules allow
+/// (two `ask_raised` for one ask, for instance), leaving a log that no reader
+/// can fold. [`EventLog::append_checked`] holds the lock across both, so the
+/// second writer sees the first's event and is refused. Every writing verb in
+/// the CLI goes through the same sequence.
 pub fn commit(repo: &Path, actor: &Actor, kind: EventKind) -> Result<Event, CommitError> {
-    let state = load(repo)?.0;
+    // Check once against the log as it stands, so a refused write leaves no
+    // log file behind, and again under the log's lock below, so two writers
+    // cannot both pass a check against the same state.
     let clock = SystemClock;
+    let state = load(repo)?.0;
     state.check_as(actor, &kind, clock.now_ms())?;
     let mut log = EventLog::open(&log_path(repo))?;
-    Ok(log.append(actor.clone(), kind, &clock)?)
+    let checked = kind.clone();
+    let check_actor = actor.clone();
+    let event = log
+        .append_checked(actor.clone(), kind, &clock, move |events| {
+            let state = RunState::fold(events)?;
+            state.check_as(&check_actor, &checked, SystemClock.now_ms())
+        })
+        .map_err(|err| match err {
+            AppendError::Refused(refused) => CommitError::Refused(refused),
+            AppendError::Log(err) => CommitError::Log(err),
+        })?;
+    Ok(event)
 }
