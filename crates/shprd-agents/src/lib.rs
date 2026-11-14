@@ -2,9 +2,11 @@
 //! probes, skills discovery. M9 grows this into the agent adapters, one per
 //! program, still driven by `data/harness/*.toml`.
 
+pub mod asks;
 pub mod detect;
 pub mod env;
 pub mod families;
+pub mod harness;
 pub mod models;
 pub mod quota;
 #[cfg(test)]

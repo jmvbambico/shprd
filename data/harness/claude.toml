@@ -1,6 +1,10 @@
 # Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
 # Copyright (c) 2026 Elias Stravik
 # https://github.com/eliasstravik/herdr-projects
+# Permission modes, their cross-program map and the ask-hook facts are adapted
+# from Shepherdr (MIT), core/agents.js (`MODES`, `PERM_ACROSS`, `argvFor`) and
+# bin/shepherdr (`HOOKS`), tag v3.1.34, commit a3f327a.
+# https://github.com/eliasstravik/shepherdr
 #
 # Record, error and quota facts are from shprd's docs/agents.md (verified
 # 2026-10-27). Launch flags were re-checked with `claude --help` (2.1.311) but
@@ -41,8 +45,83 @@ system_prompt_args = ["--append-system-prompt-file", "{prompt_file}"]
 resume_args = ["--resume", "{session}"]
 verified = false
 
+[permissions]
+# Shepherdr's Claude modes (M7c 2.2), each as the arguments that select it.
+# `manual` is sent as `--permission-mode default` and `bypassPermissions` as
+# `--dangerously-skip-permissions`, exactly as Shepherdr's argvFor does.
+# `claude --help` (2.1.311) also offers `dontAsk`; Shepherdr has no such mode
+# and no role maps onto it, so it is not offered.
+#
+# The default is conservative: Shepherdr reads the person's own
+# `permissions.defaultMode` from ~/.claude/settings.json, which a data table
+# cannot, so shprd starts a role that names no mode at Ask (manual).
+# unverified: that a role with no mode should start at `manual` rather than at
+# whatever the person's settings already say — M9.3 decides.
+default = "manual"
+full = "bypassPermissions"
+readonly = "plan"
+modes = [
+  { id = "manual", label = "Ask", args = ["--permission-mode", "default"] },
+  { id = "auto", label = "Auto", args = ["--permission-mode", "auto"] },
+  { id = "acceptEdits", label = "Accept edits", args = ["--permission-mode", "acceptEdits"] },
+  { id = "plan", label = "Plan", args = ["--permission-mode", "plan"] },
+  { id = "bypassPermissions", label = "Full access", args = ["--dangerously-skip-permissions"] },
+]
+
+[permissions.across]
+# Shepherdr's PERM_ACROSS, read as "this program's nearest mode to <theirs>",
+# so a role that moves from Codex to Claude keeps acting as it did.
+"codex:read-only" = "plan"
+"codex:auto" = "auto"
+"codex:full" = "bypassPermissions"
+
 [models]
-# Claude Code has no model-list command; names live in herdr-projects' table.
+# Claude Code has no model-list command, so its models are a static list in
+# data/models/. The spec's own `[models]` block says nothing else: no command,
+# no parser.
+static_list = "claude.toml"
+
+[models.efforts]
+# `claude --help` lists the levels next to its flag:
+# `--effort <level> ... (low, medium, high, xhigh, max)`.
+source = "static"
+levels = ["low", "medium", "high", "xhigh", "max"]
+
+[brief]
+# `--append-system-prompt-file` takes a path, so a long brief is never one argv
+# argument; see launch.system_prompt_args for the flag itself.
+delivery = "system-prompt-file"
+file = "path"
+
+[status]
+# The agent's own OSC 7501 report first, then a hook it runs for us, then the
+# bottom of its pane. Verified on this machine: herdr installs SessionStart,
+# PreToolUse, PostToolUse and UserPromptSubmit hooks into ~/.claude/settings.json
+# (the same file the ask hook goes into below).
+sources = ["osc7501", "hook", "screen"]
+
+[asks]
+# Claude Code fires one `PermissionRequest` hook for a permission, a question
+# (`AskUserQuestion`) and a plan (`ExitPlanMode`); the payload says which. Same
+# config file and entry shape as Shepherdr's HOOKS table (v3.1.34), which waits
+# up to 1800 s for a person's answer.
+supported = true
+config = "~/.claude/settings.json"
+format = "claude_settings"
+command = "sh '{hook}'"
+timeout_seconds = 1800
+
+[[asks.events]]
+kind = "permission"
+event = "PermissionRequest"
+
+[[asks.events]]
+kind = "question"
+event = "PermissionRequest"
+
+[[asks.events]]
+kind = "plan"
+event = "PermissionRequest"
 
 [records]
 kind = "jsonl"

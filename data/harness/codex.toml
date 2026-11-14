@@ -1,6 +1,10 @@
 # Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
 # Copyright (c) 2026 Elias Stravik
 # https://github.com/eliasstravik/herdr-projects
+# Permission modes, their cross-program map and the ask-hook facts are adapted
+# from Shepherdr (MIT), core/agents.js (`MODES`, `PERM_ACROSS`, `argvFor`) and
+# bin/shepherdr (`HOOKS`), tag v3.1.34, commit a3f327a.
+# https://github.com/eliasstravik/shepherdr
 #
 # Record, error and quota facts are from shprd's docs/agents.md (verified
 # 2026-10-27). Launch flags were re-checked with `codex --help` (0.164.0) but
@@ -51,8 +55,76 @@ reviewer_args = ["--sandbox", "workspace-write"]
 resume_args = ["resume", "{session}"]
 verified = false
 
+[permissions]
+# Shepherdr's Codex modes (M7c 2.2), each as the arguments that select it.
+# `read-only` and `auto` are the sandbox plus the approval policy; `full` is the
+# one flag that skips both. `codex --help` (0.167.0, a newer build than the
+# 0.164.0 this file was checked against) still takes `-s read-only`,
+# `-s workspace-write`, `-a on-request` and `--dangerously-bypass-approvals-and-sandbox`.
+# Shepherdr sends `-a on-request` with read-only too; shprd sends `never`, so a
+# reviewer nobody sits beside never waits on an approval it cannot get.
+#
+# The default is the conservative one. Shepherdr's Codex default is `auto`
+# (M7c 2.2); shprd starts a role that names no mode read-only, so it can never
+# act unprompted until a role says otherwise.
+# unverified: that a role with no mode should start at `read-only` rather than
+# Shepherdr's `auto` — M9.3 decides.
+default = "read-only"
+full = "full"
+readonly = "read-only"
+modes = [
+  { id = "read-only", label = "Read only", args = ["-s", "read-only", "-a", "never"] },
+  { id = "auto", label = "Auto", args = ["-s", "workspace-write", "-a", "on-request"] },
+  { id = "full", label = "Full access", args = ["--dangerously-bypass-approvals-and-sandbox"] },
+]
+
+[permissions.across]
+# Shepherdr's PERM_ACROSS, read as "this program's nearest mode to <theirs>".
+# A mode it does not name (Claude's `manual`) falls back to [permissions].default.
+"claude:plan" = "read-only"
+"claude:auto" = "auto"
+"claude:acceptEdits" = "auto"
+"claude:bypassPermissions" = "full"
+
 [models]
+# `codex debug models` renders the model catalog as JSON, per signed-in account.
 list_command = ["codex", "debug", "models"]
+parser = "codex_catalog"
+
+[models.efforts]
+# The levels come with each model in that catalog
+# (`supported_reasoning_levels[].effort`); the list below is the fallback for a
+# catalog that cannot be read, taken from `codex debug models --bundled`
+# (0.167.0).
+source = "catalog"
+levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
+
+[brief]
+# Codex takes the brief as its first turn: `-c developer_instructions=` has no
+# file form and an argument may not hold a newline.
+delivery = "first-message"
+
+[status]
+# The agent's own OSC 7501 report first, then a hook it runs for us, then the
+# bottom of its pane. Verified on this machine: herdr installs a SessionStart
+# hook into ~/.codex/hooks.json, the same file the ask hook goes into below.
+sources = ["osc7501", "hook", "screen"]
+
+[asks]
+# Codex fires `PermissionRequest` for an approval. Shepherdr (v3.1.34) installs
+# the same hook into ~/.codex/hooks.json and waits up to 1800 s for an answer.
+supported = true
+config = "~/.codex/hooks.json"
+format = "codex_hooks"
+command = "sh '{hook}'"
+timeout_seconds = 1800
+
+[[asks.events]]
+kind = "permission"
+event = "PermissionRequest"
+
+# unverified: whether Codex 0.167 fires anything for a question or a plan. Its
+# `--help` names no such hook event, so only the permission card is claimed.
 
 [records]
 kind = "jsonl"

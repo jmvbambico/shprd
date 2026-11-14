@@ -40,8 +40,49 @@ auto_approve = ["--auto"]
 resume_args = ["--session", "{session}"]
 verified = false
 
+[permissions]
+# opencode has one approval switch, `--auto` ("auto-approve permissions that are
+# not explicitly denied", `opencode --help`), and no permission mode, so there
+# are two modes: the program's own prompts, and auto-approval.
+# unverified: whether a role that wants "ask before acting" is served by the
+# program's own prompt — M9.2 checks it on a live launch.
+default = "ask"
+full = "auto"
+modes = [
+  { id = "ask", label = "Ask", args = [] },
+  { id = "auto", label = "Auto", args = ["--auto"] },
+]
+# No read-only mode: `opencode --help` has no sandbox or tool allowlist, and
+# M7c's reviewer for this program is the one-shot `opencode run`, not a launch
+# flag, so no mode here is a reviewer's (M9.2 decides how it reviews).
+
+[permissions.across]
+# No cross-program map: Shepherdr maps only Claude and Codex. A role that moves to
+# opencode starts at [permissions].default.
+
 [models]
 list_command = ["opencode", "models"]
+
+[models.efforts]
+# `opencode --help` has no effort or thinking flag, so the program takes none.
+
+[brief]
+# No system-prompt flag: the brief is the program's first turn.
+delivery = "first-message"
+
+[status]
+# The agent's own OSC 7501 report first, then the plugin it runs for us, then the
+# bottom of its pane. Verified on this machine: herdr installs
+# ~/.config/opencode/plugins/herdr-agent-state.js, a plugin that reports
+# opencode's state.
+sources = ["osc7501", "hook", "screen"]
+
+[asks]
+# opencode has a plugin API and herdr's plugin sees `permission.asked` and
+# `question.asked`; shprd has no installer for one yet, so no card is claimed.
+# unverified: that a opencode plugin can hold an ask until a person answers it —
+# M9.5 checks.
+supported = false
 
 [records]
 kind = "sqlite"

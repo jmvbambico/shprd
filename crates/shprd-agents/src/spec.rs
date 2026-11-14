@@ -1,8 +1,15 @@
 //! Harness table: the typed schema for the per-CLI TOML specs in `data/harness/`.
 //!
-//! Each spec records what shprd needs to detect, launch and watch one agent CLI.
-//! Locations and formats live in data so supporting a new CLI version is a
-//! table change rather than a code change (see `docs/agents.md`).
+//! Each spec records what shprd needs to detect, launch and watch one agent CLI,
+//! and — since M9 — what the per-program adapter needs on top: the access modes
+//! a role may pick, where the model catalog and its effort levels come from, how
+//! a brief reaches the program, where its status is read, and whether it takes a
+//! hook for its asks. Locations and formats live in data so supporting a new CLI
+//! version is a table change rather than a code change (see `docs/agents.md`).
+//!
+//! Every M9 section is optional and has a typed default, so a harness written
+//! before M9 still loads: no modes, a first-message brief, the agent's own
+//! report and then its screen, and no ask hook.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -10,10 +17,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One supported agent CLI, as loaded from a TOML file in `data/harness/`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSpec {
     /// Short CLI id, e.g. `claude`.
@@ -47,6 +54,27 @@ pub struct HarnessSpec {
     pub quota: QuotaSpec,
     /// Skill directories the CLI reads.
     pub skills: SkillsSpec,
+    /// The access modes the program offers, and which one is the default.
+    ///
+    /// Absent means the harness names no modes, and a role may not pick one.
+    #[serde(default)]
+    pub permissions: PermissionsSpec,
+    /// How a brief reaches the program.
+    ///
+    /// Absent means the brief is the program's first message, which every
+    /// supported program accepts.
+    #[serde(default)]
+    pub brief: BriefSpec,
+    /// Where the program's status can be read, most trusted source first.
+    ///
+    /// Absent means the agent's own OSC 7501 report and then its screen.
+    #[serde(default)]
+    pub status: StatusSpec,
+    /// Whether and how the program accepts a hook for its asks.
+    ///
+    /// Absent means the program takes no ask hook.
+    #[serde(default)]
+    pub asks: AskHookSpec,
     /// Case-insensitive screen substrings that mean rate limited or out of quota.
     ///
     /// A fallback, for CLIs that print an error without recording it. The
@@ -68,7 +96,7 @@ pub struct HarnessSpec {
 ///
 /// Claude Code asks whether a folder is trusted the first time it starts in
 /// it; shprd cannot answer that, so it only reports that the agent is waiting.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockingPrompt {
     /// Short human-readable name, e.g. `folder trust`.
@@ -78,13 +106,17 @@ pub struct BlockingPrompt {
 }
 
 impl HarnessSpec {
-    /// Check the rules the type system cannot express: the record location
-    /// pattern and the skill directory roots.
+    /// Check the rules the type system cannot express.
     ///
     /// A spec that passes this has a [`RecordsSpec::location`] that only uses
     /// the documented placeholders, `home_dirs` entries that are home-relative
     /// (each starting with `~/`) and `project_dirs` entries that are relative
-    /// to the repository root.
+    /// to the repository root, launch templates that use the placeholders their
+    /// field allows, blocking prompts with a name and a pattern, permission
+    /// modes with unique ids and one of them the default, one model catalog
+    /// source, effort levels a source uses, a brief delivery that matches the
+    /// flags present, at least one status source, and ask-hook facts that say
+    /// how a hook is installed or say the program takes none.
     pub fn validate(&self) -> Result<(), SpecError> {
         validate_location(&self.records.location)?;
 
@@ -131,12 +163,17 @@ impl HarnessSpec {
         )?;
         check_optional_template("launch.resume_args", &launch.resume_args, &["session"])?;
         check_optional_template("detect.signin_args", &self.detect.signin_args, &["model"])?;
+        self.permissions.validate()?;
+        self.models.validate()?;
+        self.brief.validate(launch)?;
+        self.status.validate()?;
+        self.asks.validate()?;
         Ok(())
     }
 }
 
 /// The vendor that ships an agent CLI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Vendor {
     /// Anthropic (Claude Code).
@@ -152,7 +189,7 @@ pub enum Vendor {
 }
 
 /// CLI detection and sign-in probes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DetectSpec {
     /// The binary to look for on `PATH`.
@@ -176,7 +213,7 @@ pub struct DetectSpec {
 /// may contain at most one placeholder from [`Values`], e.g.
 /// `model_reasoning_effort={effort}` or `{prompt_file}`. Use [`render_args`] to
 /// fill a template in.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchSpec {
     /// The base interactive command.
@@ -222,18 +259,138 @@ pub struct Values {
 }
 
 /// How to list the CLI's models.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// The catalog has one source: asked of the program with [`Self::list_command`],
+/// or read from a static list in `data/models/` named by [`Self::static_list`].
+/// A spec that names neither has no catalog, and a model name it is given is
+/// passed to the program as written.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelsSpec {
     /// The command that lists available models, if the CLI has one.
+    #[serde(default)]
     pub list_command: Option<Vec<String>>,
+    /// How to read that command's output.
+    #[serde(default)]
+    pub parser: CatalogParser,
+    /// A static catalog in `data/models/`, as a bare file name, e.g. `claude.toml`.
+    ///
+    /// For a program with no list command (Claude Code), or one whose list the
+    /// person cannot read at that moment.
+    #[serde(default)]
+    pub static_list: Option<String>,
     /// Whether a model name must also name its provider, as `pi` requires.
     #[serde(default)]
     pub provider_qualified: bool,
+    /// Where the program's effort levels come from.
+    #[serde(default)]
+    pub efforts: EffortSpec,
+}
+
+impl ModelsSpec {
+    /// What the catalog is read from.
+    pub fn catalog_source(&self) -> CatalogSource {
+        if self.list_command.is_some() {
+            CatalogSource::Command
+        } else if self.static_list.is_some() {
+            CatalogSource::Static
+        } else {
+            CatalogSource::None
+        }
+    }
+
+    /// Check the catalog: one source only, a list command for a parser that
+    /// reads one, and a static list that is a bare file name in `data/models/`.
+    fn validate(&self) -> Result<(), SpecError> {
+        if self.list_command.is_some() && self.static_list.is_some() {
+            return Err(SpecError::TwoCatalogSources);
+        }
+        if self.parser != CatalogParser::FirstToken && self.list_command.is_none() {
+            return Err(SpecError::ParserWithoutListCommand {
+                parser: self.parser,
+            });
+        }
+        if let Some(name) = &self.static_list {
+            let bare = !name.is_empty()
+                && name.ends_with(".toml")
+                && !name.contains('/')
+                && !name.contains('\\')
+                && !name.starts_with('~');
+            if !bare {
+                return Err(SpecError::InvalidStaticList { name: name.clone() });
+            }
+        }
+        if self.efforts.source == EffortSource::None && !self.efforts.levels.is_empty() {
+            return Err(SpecError::EffortsWithoutSource);
+        }
+        for level in &self.efforts.levels {
+            if level.is_empty() || level.trim() != level {
+                return Err(SpecError::InvalidEffortLevel {
+                    level: level.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a model catalog is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogSource {
+    /// Asked of the program with a list command.
+    Command,
+    /// Read from a static list in `data/models/`.
+    Static,
+    /// The program has no catalog.
+    None,
+}
+
+/// How a program's model list command prints its models.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogParser {
+    /// One model per line, its name as the line's first word.
+    #[default]
+    FirstToken,
+    /// Codex's catalog: JSON with a `models` array whose rows hold `slug`,
+    /// `display_name`, `default_reasoning_level`, `supported_reasoning_levels`
+    /// and `visibility`.
+    CodexCatalog,
+}
+
+/// Where a program's effort levels come from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffortSpec {
+    /// The source of the levels.
+    #[serde(default)]
+    pub source: EffortSource,
+    /// The levels this program takes, when the source is `static`, and the
+    /// fallback when a catalog cannot be read.
+    ///
+    /// An empty list with [`EffortSource::Static`] means the program takes no
+    /// effort level at all, which the settings UI must not offer.
+    #[serde(default)]
+    pub levels: Vec<String>,
+}
+
+/// Where the effort levels a program accepts are listed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortSource {
+    /// The program takes no effort level.
+    #[default]
+    None,
+    /// The model catalog itself carries them, per model, as Codex's does.
+    Catalog,
+    /// The program's `--help` lists them, next to its effort flag.
+    Help,
+    /// [`EffortSpec::levels`] is the list.
+    Static,
 }
 
 /// Where the CLI writes its conversation record and provider errors.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordsSpec {
     /// The record's on-disk format.
@@ -315,7 +472,7 @@ pub fn validate_location(location: &str) -> Result<(), SpecError> {
 }
 
 /// The on-disk format of a CLI's conversation record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RecordKind {
     /// Newline-delimited JSON.
@@ -325,7 +482,7 @@ pub enum RecordKind {
 }
 
 /// Where the CLI exposes quota information.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuotaSpec {
     /// The quota source for this CLI.
@@ -335,7 +492,7 @@ pub struct QuotaSpec {
 }
 
 /// The quota source for an agent CLI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuotaSource {
     /// Anthropic's OAuth usage endpoint.
@@ -349,13 +506,435 @@ pub enum QuotaSource {
 }
 
 /// Skill directories the CLI reads.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsSpec {
     /// Directories under the user's home, each written with a leading `~/`.
     pub home_dirs: Vec<String>,
     /// Directories relative to the repository root.
     pub project_dirs: Vec<String>,
+}
+
+/// The access modes a program offers, and which one a role gets.
+///
+/// The ids are the program's own words for the modes, mapped from Shepherdr's
+/// `perm` values (M7c 2.2): `manual`, `auto`, `acceptEdits`, `plan` and
+/// `bypassPermissions` for Claude Code, `read-only`, `auto` and `full` for
+/// Codex. Keeping each program's own id lets the settings UI show the words a
+/// person already knows, and [`Self::across`] carries a choice over when a role
+/// switches program.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsSpec {
+    /// The mode a role gets when it names none; one of [`Self::modes`].
+    #[serde(default)]
+    pub default: Option<String>,
+    /// The modes, in the order the settings UI lists them.
+    #[serde(default)]
+    pub modes: Vec<PermissionMode>,
+    /// The mode that counts as full access, for the cross-program carry.
+    #[serde(default)]
+    pub full: Option<String>,
+    /// The mode a reviewer runs in: nothing is approved on its own.
+    #[serde(default)]
+    pub readonly: Option<String>,
+    /// This program's nearest mode to one of another program's.
+    ///
+    /// Each key is `<program>:<mode>`, e.g. `claude:bypassPermissions`, and each
+    /// value is one of this program's own [`Self::modes`] ids. It is what keeps
+    /// a role on "auto" when it moves from Claude Code to Codex, instead of
+    /// silently dropping to ask (Shepherdr's `PERM_ACROSS`).
+    #[serde(default)]
+    pub across: BTreeMap<String, String>,
+}
+
+impl PermissionsSpec {
+    /// The mode called `id`, if this program has one.
+    pub fn mode(&self, id: &str) -> Option<&PermissionMode> {
+        self.modes.iter().find(|mode| mode.id == id)
+    }
+
+    /// The mode a role gets when it names none.
+    pub fn default_mode(&self) -> Option<&PermissionMode> {
+        self.default.as_deref().and_then(|id| self.mode(id))
+    }
+
+    /// The mode that counts as full access.
+    pub fn full_mode(&self) -> Option<&PermissionMode> {
+        self.full.as_deref().and_then(|id| self.mode(id))
+    }
+
+    /// The mode a reviewer runs in.
+    pub fn readonly_mode(&self) -> Option<&PermissionMode> {
+        self.readonly.as_deref().and_then(|id| self.mode(id))
+    }
+
+    /// This program's mode for `<program>:<mode>`, if it names one.
+    pub fn across_mode(&self, from: &str) -> Option<&PermissionMode> {
+        self.across.get(from).and_then(|id| self.mode(id))
+    }
+
+    /// Check the modes, and every field that names one.
+    fn validate(&self) -> Result<(), SpecError> {
+        for (index, mode) in self.modes.iter().enumerate() {
+            if mode.id.trim().is_empty() {
+                return Err(SpecError::EmptyPermissionId);
+            }
+            if mode.label.trim().is_empty() {
+                return Err(SpecError::EmptyPermissionLabel {
+                    id: mode.id.clone(),
+                });
+            }
+            check_template("permissions.modes.args", &mode.args, &[], None)?;
+            if self.modes[..index]
+                .iter()
+                .any(|earlier| earlier.id == mode.id)
+            {
+                return Err(SpecError::DuplicatePermissionMode {
+                    id: mode.id.clone(),
+                });
+            }
+        }
+        for (field, value) in [
+            ("permissions.default", &self.default),
+            ("permissions.full", &self.full),
+            ("permissions.readonly", &self.readonly),
+        ] {
+            if let Some(id) = value
+                && self.mode(id).is_none()
+            {
+                return Err(SpecError::UnknownPermissionMode {
+                    field,
+                    id: id.clone(),
+                });
+            }
+        }
+        if !self.modes.is_empty() && self.default.is_none() {
+            return Err(SpecError::PermissionDefaultMissing);
+        }
+        for (from, id) in &self.across {
+            if from.starts_with(':') || from.ends_with(':') || !from.contains(':') {
+                return Err(SpecError::InvalidAcrossKey { key: from.clone() });
+            }
+            if self.mode(id).is_none() {
+                return Err(SpecError::UnknownPermissionMode {
+                    field: "permissions.across",
+                    id: id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One access mode a program offers, with the arguments that select it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionMode {
+    /// The program's own word for the mode, e.g. `auto` or `read-only`.
+    pub id: String,
+    /// The words a person sees, e.g. `Auto` or `Read only`.
+    pub label: String,
+    /// The argv tokens that select the mode, e.g. `["--sandbox", "read-only"]`.
+    ///
+    /// Tokens are appended to the launch argv as they are: no placeholder.
+    pub args: Vec<String>,
+}
+
+/// How a brief reaches the program.
+///
+/// Every supported program takes the brief as its first turn; a program with a
+/// system-prompt file flag takes it there instead, so a long brief is never one
+/// argv argument that a terminal has to hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BriefSpec {
+    /// Which of the two ways this program takes its brief.
+    #[serde(default)]
+    pub delivery: BriefDelivery,
+    /// The flag that carries the brief, when it is a system-prompt file.
+    ///
+    /// Defaults to [`LaunchSpec::system_prompt_args`], which is where the flag
+    /// has always lived; set this only when the brief flag is not that one. One
+    /// token must hold `{prompt_file}`.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Whether the flag takes the file's path or its contents.
+    #[serde(default)]
+    pub file: BriefFileMode,
+}
+
+/// How a brief reaches the program: first message or system-prompt file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BriefDelivery {
+    /// The brief is the program's first turn, appended to the launch argv.
+    ///
+    /// Every program that takes a prompt does; this is the default.
+    #[default]
+    FirstMessage,
+    /// The brief is written to a file the program is pointed at.
+    SystemPromptFile,
+}
+
+/// How a brief's file reaches the program's argument.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefFileMode {
+    /// The argument is the file's path, which the program reads itself.
+    #[default]
+    Path,
+    /// The argument is the file's own contents, which the adapter reads in.
+    Contents,
+}
+
+impl BriefSpec {
+    /// The template that carries this program's brief, if it carries a file.
+    ///
+    /// [`Self::args`] wins when it is set; otherwise the flag is
+    /// [`LaunchSpec::system_prompt_args`], where it has always lived.
+    pub fn args<'a>(&'a self, launch: &'a LaunchSpec) -> Option<&'a [String]> {
+        self.args
+            .as_deref()
+            .or(launch.system_prompt_args.as_deref())
+    }
+
+    /// Check that the delivery and the flags agree: a first-message brief has
+    /// no flag, and a system-prompt file has exactly one `{prompt_file}`.
+    fn validate(&self, launch: &LaunchSpec) -> Result<(), SpecError> {
+        match self.delivery {
+            BriefDelivery::FirstMessage => {
+                let stray = if self.args.is_some() {
+                    Some("brief.args")
+                } else if launch.system_prompt_args.is_some() {
+                    Some("launch.system_prompt_args")
+                } else {
+                    None
+                };
+                match stray {
+                    Some(field) => Err(SpecError::BriefFlagWithoutFile { field }),
+                    None => Ok(()),
+                }
+            }
+            BriefDelivery::SystemPromptFile => {
+                let Some(template) = self.args(launch) else {
+                    return Err(SpecError::BriefFileWithoutFlag);
+                };
+                check_template(
+                    "brief.args",
+                    template,
+                    &["prompt_file"],
+                    Some("prompt_file"),
+                )
+            }
+        }
+    }
+}
+
+/// Where a program's status can be read, most trusted source first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusSpec {
+    /// The sources, in order: the first one that answers wins.
+    ///
+    /// The default is the agent's own report and then its screen, which every
+    /// program has; `hook` is for a program whose hook reports its state.
+    #[serde(default = "default_status_sources")]
+    pub sources: Vec<StatusSource>,
+}
+
+impl Default for StatusSpec {
+    fn default() -> Self {
+        Self {
+            sources: default_status_sources(),
+        }
+    }
+}
+
+/// The status sources a program that says nothing about it is read from.
+fn default_status_sources() -> Vec<StatusSource> {
+    vec![StatusSource::Osc7501, StatusSource::Screen]
+}
+
+impl StatusSpec {
+    /// Check that there is at least one source and no source twice.
+    fn validate(&self) -> Result<(), SpecError> {
+        if self.sources.is_empty() {
+            return Err(SpecError::EmptyStatusSources);
+        }
+        for (index, source) in self.sources.iter().enumerate() {
+            if self.sources[..index].contains(source) {
+                return Err(SpecError::DuplicateStatusSource {
+                    name: source.as_str().to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One place a program's status can be read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusSource {
+    /// The status the agent reports itself, as OSC 7501 on its terminal.
+    Osc7501,
+    /// A hook or plugin the program runs for shprd.
+    Hook,
+    /// The bottom lines of the agent's pane.
+    Screen,
+}
+
+impl StatusSource {
+    /// The source's name, as a harness file writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusSource::Osc7501 => "osc7501",
+            StatusSource::Hook => "hook",
+            StatusSource::Screen => "screen",
+        }
+    }
+}
+
+/// Whether and how a program accepts a hook for its asks.
+///
+/// An ask is a question, a permission or a plan the program waits on: while it
+/// waits the agent reads no brief and answers nothing, so the person has to be
+/// shown it (M9.5). Only the schema lives here; the installers are adapters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskHookSpec {
+    /// Whether the program has a hook that can surface an ask at all.
+    #[serde(default)]
+    pub supported: bool,
+    /// The config file the adapter writes the hook into, home-relative (`~/...`).
+    #[serde(default)]
+    pub config: Option<String>,
+    /// The file's shape, which picks the installer.
+    #[serde(default)]
+    pub format: AskHookConfig,
+    /// The hook command, with `{hook}` where the hook executable's path goes.
+    ///
+    /// The adapter answers the rest of the command, e.g. `sh {hook}` or
+    /// `bash '{hook}' perm`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// The program's events that fire an ask, one per [`AskKind`].
+    #[serde(default)]
+    pub events: Vec<AskEvent>,
+    /// How long the program lets the hook wait for an answer, if it says.
+    #[serde(default)]
+    pub timeout_seconds: Option<u32>,
+}
+
+impl AskHookSpec {
+    /// The program's event for `kind`, if it fires one.
+    pub fn event_for(&self, kind: AskKind) -> Option<&AskEvent> {
+        self.events.iter().find(|event| event.kind == kind)
+    }
+
+    /// Check the installer facts: a supported program says where its hook goes
+    /// and how it is written there; an unsupported one says nothing else.
+    fn validate(&self) -> Result<(), SpecError> {
+        if !self.supported {
+            let stray = if self.config.is_some() {
+                Some("config")
+            } else if self.format != AskHookConfig::Unsupported {
+                Some("format")
+            } else if self.command.is_some() {
+                Some("command")
+            } else if !self.events.is_empty() {
+                Some("events")
+            } else if self.timeout_seconds.is_some() {
+                Some("timeout_seconds")
+            } else {
+                None
+            };
+            return match stray {
+                Some(field) => Err(SpecError::AskHookWithoutSupport { field }),
+                None => Ok(()),
+            };
+        }
+
+        let Some(config) = &self.config else {
+            return Err(SpecError::IncompleteAskHook { missing: "config" });
+        };
+        match config.strip_prefix("~/") {
+            Some(rest) if !rest.is_empty() => {}
+            _ => {
+                return Err(SpecError::InvalidAskConfig {
+                    config: config.clone(),
+                });
+            }
+        }
+        if self.format == AskHookConfig::Unsupported {
+            return Err(SpecError::IncompleteAskHook { missing: "format" });
+        }
+        let Some(command) = &self.command else {
+            return Err(SpecError::IncompleteAskHook { missing: "command" });
+        };
+        if command.matches("{hook}").count() != 1 {
+            return Err(SpecError::InvalidAskCommand {
+                command: command.clone(),
+            });
+        }
+        if self.events.is_empty() {
+            return Err(SpecError::IncompleteAskHook { missing: "events" });
+        }
+        for (index, event) in self.events.iter().enumerate() {
+            if event.event.trim().is_empty() {
+                return Err(SpecError::EmptyAskEvent { kind: event.kind });
+            }
+            if self.events[..index]
+                .iter()
+                .any(|earlier| earlier.kind == event.kind)
+            {
+                return Err(SpecError::DuplicateAskKind { kind: event.kind });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The shape of the config file an ask hook is installed into.
+///
+/// The adapter owns the exact JSON (or TOML) it writes; the harness only says
+/// which program's file and layout to use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskHookConfig {
+    /// The program takes no ask hook.
+    #[default]
+    Unsupported,
+    /// Claude Code's `~/.claude/settings.json`: `hooks.<Event>[].hooks[]`.
+    ClaudeSettings,
+    /// Codex's `~/.codex/hooks.json`: the same shape in its own file.
+    CodexHooks,
+}
+
+/// One ask a program's hook fires for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskEvent {
+    /// The ask this event fires for.
+    pub kind: AskKind,
+    /// The program's own event name, e.g. `PermissionRequest`.
+    pub event: String,
+    /// The matcher the program applies to the event, if it takes one.
+    #[serde(default)]
+    pub matcher: Option<String>,
+}
+
+/// The asks shprd shows a person, each as its own card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskKind {
+    /// The agent asks a question and waits for an answer.
+    Question,
+    /// The agent asks permission to run a tool.
+    Permission,
+    /// The agent offers a plan and waits for approval.
+    Plan,
 }
 
 /// An error while loading or checking harness specs.
@@ -476,6 +1055,120 @@ pub enum SpecError {
     EmptyBlockingPromptPattern {
         /// The prompt whose pattern is empty.
         name: String,
+    },
+    /// A permission mode has an empty id.
+    #[error("permission mode id is empty")]
+    EmptyPermissionId,
+    /// A permission mode has an empty label.
+    #[error("permission mode {id} has an empty label")]
+    EmptyPermissionLabel {
+        /// The mode whose label is empty.
+        id: String,
+    },
+    /// The same permission mode id is declared twice.
+    #[error("duplicate permission mode {id}")]
+    DuplicatePermissionMode {
+        /// The repeated id.
+        id: String,
+    },
+    /// A permission field names a mode the program does not declare.
+    #[error("{field} names permission mode {id}, which the harness does not declare")]
+    UnknownPermissionMode {
+        /// The field that names the mode, e.g. `permissions.default`.
+        field: &'static str,
+        /// The mode id that was named.
+        id: String,
+    },
+    /// A harness declares modes but does not say which one is the default.
+    #[error("permissions.modes is set but permissions.default is not")]
+    PermissionDefaultMissing,
+    /// A cross-program permission key is not `<program>:<mode>`.
+    #[error("permissions.across key {key} is not `<program>:<mode>`")]
+    InvalidAcrossKey {
+        /// The key that is shaped wrong.
+        key: String,
+    },
+    /// A harness names both a list command and a static model catalog.
+    #[error("models names both a list command and a static list: pick one source")]
+    TwoCatalogSources,
+    /// A catalog parser is set without a list command to parse.
+    #[error("models.parser {parser:?} needs models.list_command")]
+    ParserWithoutListCommand {
+        /// The parser that was set.
+        parser: CatalogParser,
+    },
+    /// A static model catalog is not a bare file name in `data/models/`.
+    #[error(
+        "invalid static model list {name}: use a bare file name in data/models/, e.g. `claude.toml`"
+    )]
+    InvalidStaticList {
+        /// The name that was written.
+        name: String,
+    },
+    /// Effort levels are listed without a source that uses them.
+    #[error("models.efforts.levels is set but models.efforts.source is `none`")]
+    EffortsWithoutSource,
+    /// An effort level is empty or padded with whitespace.
+    #[error("invalid effort level `{level}`")]
+    InvalidEffortLevel {
+        /// The level that was written.
+        level: String,
+    },
+    /// A program takes its brief as its first message but names a brief flag.
+    #[error("brief.delivery is first-message but {field} names a system-prompt flag")]
+    BriefFlagWithoutFile {
+        /// The field that holds the stray flag.
+        field: &'static str,
+    },
+    /// A program takes its brief as a system-prompt file but names no flag.
+    #[error(
+        "brief.delivery is system-prompt-file but neither brief.args nor launch.system_prompt_args names the flag"
+    )]
+    BriefFileWithoutFlag,
+    /// A harness names no status source at all.
+    #[error("status.sources is empty: name at least one source")]
+    EmptyStatusSources,
+    /// The same status source is listed twice.
+    #[error("duplicate status source {name}")]
+    DuplicateStatusSource {
+        /// The repeated source, by its serde name.
+        name: String,
+    },
+    /// An unsupported ask hook carries installer details anyway.
+    #[error("asks.supported is false but asks.{field} is set")]
+    AskHookWithoutSupport {
+        /// The field a supported program would need.
+        field: &'static str,
+    },
+    /// A supported ask hook leaves out a fact its installer needs.
+    #[error("asks.supported is true but asks.{missing} is missing")]
+    IncompleteAskHook {
+        /// The field that is missing.
+        missing: &'static str,
+    },
+    /// The ask hook's config file is not home-relative.
+    #[error("invalid ask hook config {config}: use a leading `~/` path")]
+    InvalidAskConfig {
+        /// The path that was written.
+        config: String,
+    },
+    /// The ask hook command does not hold exactly one `{hook}`.
+    #[error("invalid ask hook command {command}: it must hold `{{hook}}` exactly once")]
+    InvalidAskCommand {
+        /// The command that was written.
+        command: String,
+    },
+    /// An ask event has an empty program event name.
+    #[error("the {kind:?} ask event has an empty event name")]
+    EmptyAskEvent {
+        /// The ask kind whose event is empty.
+        kind: AskKind,
+    },
+    /// The same ask kind is declared twice.
+    #[error("the {kind:?} ask kind is declared twice")]
+    DuplicateAskKind {
+        /// The repeated kind.
+        kind: AskKind,
     },
 }
 
@@ -683,7 +1376,11 @@ fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HarnessSpec, SpecError, Values, load_dir, render_args, validate_location};
+    use super::{
+        AskHookSpec, AskKind, BriefDelivery, BriefFileMode, CatalogSource, EffortSource,
+        HarnessSpec, PermissionsSpec, SpecError, StatusSource, Values, load_dir, render_args,
+        validate_location,
+    };
     use std::path::Path;
 
     fn harness_dir() -> std::path::PathBuf {
@@ -858,6 +1555,369 @@ project_dirs = []
             Ok(spec) => spec,
             Err(error) => panic!("fixture should parse: {error}"),
         }
+    }
+
+    /// `MINIMAL_SPEC` plus each of the sections M9 adds, filled in.
+    fn full_spec_text() -> String {
+        format!(
+            "{MINIMAL_SPEC}
+[permissions]
+default = \"auto\"
+full = \"full\"
+readonly = \"read-only\"
+modes = [
+  {{ id = \"read-only\", label = \"Read only\", args = [\"-s\", \"read-only\"] }},
+  {{ id = \"auto\", label = \"Auto\", args = [\"-s\", \"workspace-write\"] }},
+  {{ id = \"full\", label = \"Full access\", args = [\"--yolo\"] }},
+]
+
+[permissions.across]
+\"claude:bypassPermissions\" = \"full\"
+\"claude:plan\" = \"read-only\"
+
+[brief]
+delivery = \"system-prompt-file\"
+args = [\"--sys\", \"{{prompt_file}}\"]
+file = \"contents\"
+
+[status]
+sources = [\"hook\", \"osc7501\", \"screen\"]
+
+[asks]
+supported = true
+config = \"~/.fake/hooks.json\"
+format = \"codex_hooks\"
+command = \"sh '{{hook}}'\"
+timeout_seconds = 60
+
+[[asks.events]]
+kind = \"permission\"
+event = \"PermissionRequest\"
+
+[[asks.events]]
+kind = \"plan\"
+event = \"PlanRequest\"
+matcher = \"^plan$\"
+
+[models.efforts]
+source = \"static\"
+levels = [\"low\", \"high\"]
+"
+        )
+    }
+
+    fn full_spec_error(fixture: &str) -> SpecError {
+        let spec = parse_fixture(fixture);
+        match spec.validate() {
+            Ok(()) => panic!("the spec should be refused"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn the_new_sections_default_when_the_file_leaves_them_out() {
+        let spec = parse_fixture(MINIMAL_SPEC);
+        assert!(spec.validate().is_ok(), "the defaults should validate");
+        assert_eq!(spec.permissions, PermissionsSpec::default());
+        assert!(spec.permissions.modes.is_empty());
+        assert_eq!(spec.permissions.default_mode(), None);
+        assert_eq!(spec.brief.delivery, BriefDelivery::FirstMessage);
+        assert_eq!(spec.brief.file, BriefFileMode::Path);
+        assert_eq!(spec.brief.args(&spec.launch), None);
+        assert_eq!(
+            spec.status.sources,
+            [StatusSource::Osc7501, StatusSource::Screen]
+        );
+        assert_eq!(spec.asks, AskHookSpec::default());
+        assert!(!spec.asks.supported);
+        assert_eq!(spec.models.catalog_source(), CatalogSource::None);
+        assert_eq!(spec.models.efforts.source, EffortSource::None);
+    }
+
+    #[test]
+    fn every_new_section_refuses_an_unknown_key_by_name() {
+        for section in ["permissions", "brief", "status", "asks"] {
+            let fixture = MINIMAL_SPEC.replacen(
+                "[models]",
+                &format!("[{section}]\nmystery = true\n\n[models]"),
+                1,
+            );
+            let error = match toml::from_str::<HarnessSpec>(&fixture) {
+                Ok(_) => panic!("an unknown {section} key should be refused"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("mystery"),
+                "{section}: the error should name the key: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_new_section_round_trips() {
+        let spec = parse_fixture(&full_spec_text());
+        assert!(spec.validate().is_ok(), "the full fixture should validate");
+        let text = match toml::to_string(&spec) {
+            Ok(text) => text,
+            Err(error) => panic!("the spec should serialize: {error}"),
+        };
+        let again = parse_fixture(&text);
+        assert_eq!(again, spec, "re-parsing the written spec should match");
+        assert_eq!(again.permissions.modes.len(), 3);
+        assert_eq!(
+            again
+                .permissions
+                .across_mode("claude:plan")
+                .map(|mode| &mode.id),
+            Some(&"read-only".to_owned())
+        );
+        assert_eq!(again.brief.delivery, BriefDelivery::SystemPromptFile);
+        assert_eq!(again.brief.file, BriefFileMode::Contents);
+        assert_eq!(
+            again.status.sources,
+            [
+                StatusSource::Hook,
+                StatusSource::Osc7501,
+                StatusSource::Screen
+            ]
+        );
+        assert_eq!(again.asks.events.len(), 2);
+        assert_eq!(
+            again
+                .asks
+                .event_for(AskKind::Plan)
+                .map(|event| &event.matcher),
+            Some(&Some("^plan$".to_owned()))
+        );
+        assert_eq!(again.models.efforts.levels, ["low", "high"]);
+    }
+
+    #[test]
+    fn a_permission_field_must_name_a_declared_mode() {
+        let fixture = full_spec_text().replace("default = \"auto\"", "default = \"ask\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::UnknownPermissionMode {
+                field: "permissions.default",
+                ..
+            }
+        ));
+
+        let fixture = full_spec_text().replace("full = \"full\"", "full = \"everything\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::UnknownPermissionMode {
+                field: "permissions.full",
+                ..
+            }
+        ));
+
+        let fixture = full_spec_text().replace(
+            "\"claude:plan\" = \"read-only\"",
+            "\"claude:plan\" = \"nope\"",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::UnknownPermissionMode {
+                field: "permissions.across",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn permissions_without_a_default_are_refused() {
+        let fixture = full_spec_text().replace("default = \"auto\"\n", "");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::PermissionDefaultMissing
+        ));
+    }
+
+    #[test]
+    fn duplicate_permission_modes_are_refused() {
+        let fixture = full_spec_text().replacen(
+            "  { id = \"auto\", label = \"Auto\"",
+            "  { id = \"read-only\", label = \"Auto\"",
+            1,
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::DuplicatePermissionMode { .. }
+        ));
+    }
+
+    #[test]
+    fn a_permission_mode_takes_no_placeholder() {
+        let fixture = full_spec_text().replace(
+            "args = [\"-s\", \"workspace-write\"]",
+            "args = [\"--model\", \"{model}\"]",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidTemplate {
+                field: "permissions.modes.args",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_cross_program_permission_key_is_program_colon_mode() {
+        let fixture = full_spec_text().replace("\"claude:plan\"", "\"claudeplan\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidAcrossKey { .. }
+        ));
+    }
+
+    #[test]
+    fn a_first_message_brief_may_not_name_a_flag() {
+        let fixture = full_spec_text().replace(
+            "delivery = \"system-prompt-file\"",
+            "delivery = \"first-message\"",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::BriefFlagWithoutFile { .. }
+        ));
+    }
+
+    #[test]
+    fn a_system_prompt_file_brief_needs_a_flag() {
+        let fixture = full_spec_text()
+            .replace("args = [\"--sys\", \"{prompt_file}\"]\n", "")
+            .replace("file = \"contents\"", "file = \"path\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::BriefFileWithoutFlag
+        ));
+    }
+
+    #[test]
+    fn a_brief_flag_must_carry_the_prompt_file() {
+        let fixture =
+            full_spec_text().replace("\"--sys\", \"{prompt_file}\"", "\"--sys\", \"brief.md\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidTemplate {
+                field: "brief.args",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_models_section_has_one_catalog_source() {
+        let fixture = full_spec_text().replace(
+            "[models]",
+            "[models]\nlist_command = [\"codex\", \"debug\", \"models\"]\nstatic_list = \"claude.toml\"",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::TwoCatalogSources
+        ));
+    }
+
+    #[test]
+    fn a_static_list_is_a_bare_file_name() {
+        for name in ["data/models/claude.toml", "~/claude.toml", "claude.json"] {
+            let fixture = full_spec_text()
+                .replace("[models]", &format!("[models]\nstatic_list = \"{name}\"\n"));
+            assert!(
+                matches!(
+                    full_spec_error(&fixture),
+                    SpecError::InvalidStaticList { .. }
+                ),
+                "{name} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_catalog_parser_needs_a_list_command() {
+        let fixture = full_spec_text().replace("[models]", "[models]\nparser = \"codex_catalog\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::ParserWithoutListCommand { .. }
+        ));
+    }
+
+    #[test]
+    fn effort_levels_need_a_source() {
+        let fixture = full_spec_text().replace(
+            "[models.efforts]\nsource = \"static\"",
+            "[models.efforts]\nsource = \"none\"",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::EffortsWithoutSource
+        ));
+    }
+
+    #[test]
+    fn a_status_source_list_is_not_empty_and_holds_no_source_twice() {
+        let fixture = full_spec_text().replace(
+            "sources = [\"hook\", \"osc7501\", \"screen\"]",
+            "sources = []",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::EmptyStatusSources
+        ));
+
+        let fixture = full_spec_text().replace(
+            "sources = [\"hook\", \"osc7501\", \"screen\"]",
+            "sources = [\"hook\", \"hook\"]",
+        );
+        let error = full_spec_error(&fixture);
+        assert!(matches!(error, SpecError::DuplicateStatusSource { .. }));
+        assert!(error.to_string().contains("hook"), "{error}");
+    }
+
+    #[test]
+    fn a_supported_ask_hook_names_its_installer_facts() {
+        let fixture = full_spec_text().replace("config = \"~/.fake/hooks.json\"\n", "");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::IncompleteAskHook { missing: "config" }
+        ));
+
+        let fixture = full_spec_text().replace(
+            "config = \"~/.fake/hooks.json\"",
+            "config = \"/etc/hooks.json\"",
+        );
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidAskConfig { .. }
+        ));
+
+        let fixture =
+            full_spec_text().replace("command = \"sh '{hook}'\"", "command = \"sh hook.sh\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidAskCommand { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unsupported_ask_hook_carries_no_installer_facts() {
+        let fixture = full_spec_text().replace("supported = true", "supported = false");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::AskHookWithoutSupport { field: "config" }
+        ));
+    }
+
+    #[test]
+    fn an_ask_kind_is_declared_once() {
+        let fixture = full_spec_text().replace("kind = \"plan\"", "kind = \"permission\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::DuplicateAskKind {
+                kind: AskKind::Permission
+            }
+        ));
     }
 
     #[test]
