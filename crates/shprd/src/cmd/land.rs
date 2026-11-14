@@ -7,8 +7,8 @@
 //! writes nothing and exits 2.
 //!
 //! With `--merge` the same verb applies `[land] merge`: a human's approval is
-//! always enough, and the `allow` policy merges an unapproved pull request only
-//! when its base branch is not protected.
+//! always enough, and the automatic policies (`checks`, `auto`) merge an
+//! unapproved pull request only when its base branch is not protected.
 
 use std::path::{Path, PathBuf};
 
@@ -422,13 +422,14 @@ fn merge(
             "the pull request's checks have not passed on {head}: wait for CI and try again"
         )));
     }
-    let protected = config.land.protected.contains(&base);
+    let policy = config.land.policy_for(&base);
     // An approval recorded in shprd counts exactly like the forge's, as long as
     // it names this head: what a human said about older commits says nothing
     // about the ones pushed since.
     let approved_here = pr.approved_head.as_deref() == Some(head);
-    let allowed =
-        status.approved || approved_here || (config.land.merge == MergePolicy::Allow && !protected);
+    let allowed = status.approved
+        || approved_here
+        || matches!(policy, MergePolicy::Checks | MergePolicy::Auto);
     if !allowed {
         return Err(CliError::Invalid(anyhow!(
             "waiting for your approval: run `shprd approve`, or approve {url} on GitHub"

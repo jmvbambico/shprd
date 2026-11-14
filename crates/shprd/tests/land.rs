@@ -809,15 +809,15 @@ fn a_stale_head_is_refused() {
 }
 
 #[test]
-fn allow_never_merges_into_a_protected_base() {
+fn auto_never_merges_into_a_protected_base() {
     let fixture = landed();
-    fixture.write_config("allow", None);
+    fixture.write_config("auto", None);
     let head = fixture.integration_head();
     fixture.script_forge(&status_script(&head, false, Some(true)));
     let message = fixture.refused(&["land", "--merge"]);
     assert!(
         message.contains("waiting for your approval: run `shprd approve`"),
-        "main is protected, so allow still waits: {message}"
+        "main is protected, so auto still waits: {message}"
     );
     assert!(!fixture.recorded_merge(1));
 }
