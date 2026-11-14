@@ -125,6 +125,119 @@ impl std::fmt::Display for Problems {
 
 impl std::error::Error for Problems {}
 
+/// A loaded harness table, or the reason this machine has none.
+///
+/// The reason is carried rather than swallowed: a caller that cannot check the
+/// roles must say so, and must never store a role nothing looked at. A machine
+/// without a data directory can still read and write the workflow keys, so
+/// building a checker never fails — only the checks do.
+#[derive(Debug, Clone)]
+pub struct Checker {
+    table: Result<Table, String>,
+}
+
+impl Default for Checker {
+    /// A checker with no table: every check reports that it was skipped.
+    fn default() -> Self {
+        Checker::load(None)
+    }
+}
+
+impl Checker {
+    /// Load `data`'s harness table and model families, keeping the reason when
+    /// there is nothing to load.
+    ///
+    /// `data` is [`crate::harness::data_dir`]'s answer for this machine and
+    /// repository.
+    pub fn load(data: Option<&Path>) -> Checker {
+        let Some(dir) = data else {
+            return Checker {
+                table: Err(format!(
+                    "no harness data directory: set {} to a directory holding `harness/` and \
+                     `models/`, or run `shprd doctor`",
+                    crate::harness::DATA_ENV
+                )),
+            };
+        };
+        Checker {
+            table: Table::load(dir).map_err(|error| format!("reading {}: {error}", dir.display())),
+        }
+    }
+
+    /// A checker over a table the caller already holds.
+    pub fn with(table: Table) -> Checker {
+        Checker { table: Ok(table) }
+    }
+
+    /// Whether the roles can be checked at all on this machine.
+    pub fn is_available(&self) -> bool {
+        self.table.is_ok()
+    }
+
+    /// Why the roles cannot be checked, when they cannot.
+    pub fn reason(&self) -> Option<&str> {
+        self.table.as_ref().err().map(String::as_str)
+    }
+
+    /// The refusals these settings have, or why they could not be checked.
+    pub fn check(&self, resolved: &Resolved, review: Review<'_>) -> Checked {
+        match &self.table {
+            Err(reason) => Checked {
+                problems: Problems::default(),
+                skipped: Some(reason.clone()),
+            },
+            Ok(table) => match check(resolved, review, table) {
+                Ok(()) => Checked::default(),
+                Err(problems) => Checked {
+                    problems,
+                    skipped: None,
+                },
+            },
+        }
+    }
+}
+
+/// What checking one set of settings produced.
+///
+/// A clean answer and an unchecked one must not look alike, so the reason the
+/// table is missing travels with the (empty) refusals.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checked {
+    /// The refusals the resolved roles have.
+    problems: Problems,
+    /// Why the roles could not be checked at all, when they could not.
+    skipped: Option<String>,
+}
+
+impl Checked {
+    /// The refusals, one line each.
+    pub fn messages(&self) -> &[String] {
+        self.problems.messages()
+    }
+
+    /// Whether nothing is wrong.
+    pub fn is_empty(&self) -> bool {
+        self.problems.is_empty()
+    }
+
+    /// Why the roles could not be checked, when they could not.
+    pub fn skipped(&self) -> Option<&str> {
+        self.skipped.as_deref()
+    }
+
+    /// The refusals `self` has that `before` did not.
+    ///
+    /// A file someone else left broken is not this change's to answer, so a
+    /// write only answers for what it introduces.
+    pub fn introduced(&self, before: &Checked) -> Vec<&str> {
+        self.messages()
+            .iter()
+            .map(String::as_str)
+            .filter(|message| !before.messages().iter().any(|seen| seen == message))
+            .collect()
+    }
+}
+
 /// Check every resolved role against the harness table, then the review pair.
 ///
 /// The roles are checked first, so a refusal about a program comes before one
@@ -335,7 +448,7 @@ mod tests {
 
     use shprd_core::settings::{File, Request, Resolved, resolve};
 
-    use super::{Review, Table, check};
+    use super::{Checker, Review, Table, check};
 
     /// The shipped `data/` directory, which the harness and family tables load
     /// from: the roles are checked against exactly the table shprd ships.
@@ -616,6 +729,60 @@ mod tests {
         assert!(
             message.contains("the reviewer `audit` and the worker `docs`"),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn a_machine_without_a_table_says_so_instead_of_passing() {
+        let settings = resolved(
+            r#"
+            [roles.worker]
+            agent = "claude"
+
+            [roles.reviewer]
+            agent = "claude"
+            "#,
+        );
+        let checker = Checker::load(None);
+        assert!(!checker.is_available());
+        let reason = checker.reason().unwrap_or_default();
+        assert!(reason.contains("SHPRD_DATA_DIR"), "{reason}");
+        let checked = checker.check(&settings, Review::default());
+        assert!(
+            checked.is_empty(),
+            "nothing was found, because nothing was asked"
+        );
+        assert_eq!(checked.skipped(), Some(reason));
+    }
+
+    #[test]
+    fn only_the_refusals_a_change_introduces_are_new() {
+        let broken = resolved(
+            r#"
+            [roles.worker]
+            agent = "claude"
+
+            [roles.reviewer]
+            agent = "claude"
+            "#,
+        );
+        let clean = resolved("[roles.worker]\nagent = \"claude\"\n");
+        let checker = Checker::with(table());
+        let before = checker.check(&broken, Review::default());
+        let after = checker.check(&broken, Review::default());
+        assert!(
+            after.introduced(&before).is_empty(),
+            "a refusal already in the file is not a new one"
+        );
+        let fixed = checker.check(&clean, Review::default());
+        assert!(
+            fixed.introduced(&before).is_empty(),
+            "clearing a refusal introduces nothing"
+        );
+        assert_eq!(
+            before.introduced(&fixed).len(),
+            1,
+            "the pair is the one refusal"
         );
     }
 

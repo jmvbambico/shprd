@@ -19,4 +19,13 @@ values: Array<SettingsValueDto>,
  * Reading never refuses: a pair of settings that would not work is
  * reported here so the page can show it. A write of one is refused.
  */
-problems: Array<string>, };
+problems: Array<string>, 
+/**
+ * Why the roles could not be checked at all, when they could not.
+ *
+ * An empty `problems` list and an unchecked one must not look alike: a
+ * service with no harness data directory cannot tell whether a reviewer is
+ * another vendor, so it says so here rather than showing a clean bill of
+ * health.
+ */
+not_checked?: string, };

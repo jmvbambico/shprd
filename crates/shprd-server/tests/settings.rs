@@ -34,14 +34,22 @@ struct Fixture {
 impl Fixture {
     /// A service over a temp repository, with a temp home and the shipped table.
     fn new() -> Fixture {
+        Fixture::with_table(true)
+    }
+
+    /// A service that has (or has not) been given a harness table.
+    fn with_table(table: bool) -> Fixture {
         let state = TempDir::new().expect("state dir");
         let repo = TempDir::new().expect("repo dir");
         let home = TempDir::new().expect("home dir");
         fs::create_dir_all(repo.path().join(".shprd")).expect("the repo's .shprd");
         let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
             .expect("prepare")
-            .with_home(home.path().to_path_buf())
-            .with_data(data_dir());
+            .with_home(home.path().to_path_buf());
+        let app = match table {
+            true => app.with_data(data_dir()),
+            false => app.without_data(),
+        };
         let info = app.info();
         let token = fs::read_to_string(&info.token_path)
             .expect("the token file")
@@ -326,4 +334,90 @@ async fn a_broken_settings_file_is_reported_not_hidden() {
     let message = reply["message"].as_str().unwrap_or_default();
     assert!(message.contains("tasks.merge"), "{reply}");
     assert!(message.contains("ask, checks, auto"), "{reply}");
+}
+
+#[tokio::test]
+async fn a_role_is_never_stored_unchecked() {
+    let fixture = Fixture::with_table(false);
+    let (status, reply) = fixture
+        .put(json!({"key": "roles.worker.agent", "value": "claude"}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+    let message = reply["message"].as_str().unwrap_or_default();
+    assert!(message.contains("cannot be stored"), "{reply}");
+    assert!(message.contains("SHPRD_DATA_DIR"), "{reply}");
+    assert!(fixture.settings_text().is_empty(), "nothing was written");
+
+    // A workflow key needs no harness table.
+    let (status, reply) = fixture
+        .put(json!({"key": "tasks.max_running", "value": 2}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["outcome"], "stored");
+}
+
+#[tokio::test]
+async fn a_read_says_when_the_roles_could_not_be_checked() {
+    let fixture = Fixture::with_table(false);
+    let path = fixture.settings_file();
+    fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    fs::write(
+        &path,
+        "[roles.worker]\nagent = \"claude\"\n\n[roles.reviewer]\nagent = \"claude\"\n",
+    )
+    .expect("the file");
+
+    let document = fixture.settings().await;
+    assert_eq!(document["problems"], json!([]), "{document}");
+    let reason = document["not_checked"].as_str().unwrap_or_default();
+    assert!(reason.contains("SHPRD_DATA_DIR"), "{document}");
+
+    // With a table, the same file is checked and the pair is named.
+    let checked = Fixture::with_table(true);
+    let path = checked.settings_file();
+    fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    fs::write(
+        &path,
+        "[roles.worker]\nagent = \"claude\"\n\n[roles.reviewer]\nagent = \"claude\"\n",
+    )
+    .expect("the file");
+    let document = checked.settings().await;
+    assert!(
+        document["problems"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("both anthropic"),
+        "{document}"
+    );
+    assert!(document["not_checked"].is_null(), "{document}");
+}
+
+#[tokio::test]
+async fn a_broken_pair_someone_left_does_not_block_other_keys() {
+    let fixture = Fixture::new();
+    let path = fixture.settings_file();
+    fs::create_dir_all(path.parent().expect("the config dir")).expect("the dir");
+    fs::write(
+        &path,
+        "[roles.worker]\nagent = \"claude\"\n\n[roles.reviewer]\nagent = \"claude\"\n",
+    )
+    .expect("the file");
+
+    let (status, reply) = fixture
+        .put(json!({"key": "tasks.review_rounds", "value": 3}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["outcome"], "stored");
+
+    let (status, reply) = fixture
+        .put(json!({"key": "roles.docs.agent", "value": "gemini"}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+    assert!(
+        reply["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no harness defines"),
+        "{reply}"
+    );
 }

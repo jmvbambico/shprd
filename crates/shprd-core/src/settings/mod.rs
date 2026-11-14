@@ -604,6 +604,15 @@ impl Key {
         }
     }
 
+    /// Whether this key decides who may review, and so whether a reviewer is
+    /// another vendor: a role's field, or the cross-vendor switch itself.
+    ///
+    /// Such a key is only stored once the harness table has been asked: storing
+    /// one unchecked would let a same-vendor reviewer in with no warning.
+    pub fn decides_a_review(&self) -> bool {
+        matches!(self, Self::Role { .. } | Self::CrossVendor)
+    }
+
     /// Whether a key resolves inside a repository's committed file.
     pub fn is_repo_allowed(&self) -> bool {
         match self {
@@ -789,6 +798,11 @@ pub enum SettingsError {
 }
 
 /// Whether a role id is one a key may name.
+///
+/// Any id a dotted key can hold is a role: letters of either case, digits, `-`
+/// and `_`. `Docs`, `doc-writer` and `QA_2` are all ids; `order` is not, because
+/// `roles.order` is the list of ids, and a `.` is not, because it is the
+/// separator a key is split on.
 fn check_role_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("names no role id".to_owned());
@@ -798,10 +812,10 @@ fn check_role_id(id: &str) -> Result<(), String> {
     }
     if !id
         .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(format!(
-            "names the role {id:?} in an id a key cannot hold: ids are lowercase letters, digits, `-` and `_`"
+            "names the role {id:?} in an id a key cannot hold: an id is letters, digits, `-` or `_`, with no dots, spaces or other punctuation"
         ));
     }
     Ok(())
@@ -1854,6 +1868,14 @@ impl Resolved {
             value: sourced.map(|sourced| sourced.value.clone()),
             source: sourced.map(|sourced| sourced.source),
         });
+    }
+
+    /// Whether any resolved role names a program, so a harness table has
+    /// something to check.
+    pub fn names_a_pick(&self) -> bool {
+        self.roles()
+            .iter()
+            .any(|role| role.agent.is_some() || !role.fallback.value.is_empty())
     }
 
     /// Whether any layer sets one key, with the layer that wins.

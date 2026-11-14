@@ -54,6 +54,23 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
 
+    /// Runs `shprd settings <args>` with no data directory anywhere: the
+    /// environment's is removed and the temp home holds none, so the role
+    /// checks have nothing to read.
+    fn run_without_data(&self, args: &[&str]) -> Output {
+        Command::new(BIN)
+            .arg("settings")
+            .args(args)
+            .arg("--repo")
+            .arg(&self.repo)
+            .env_remove("SHPRD_DATA_DIR")
+            .env_remove("XDG_DATA_HOME")
+            .env("SHPRD_HOME", self.home.path())
+            .env("HOME", self.home.path())
+            .output()
+            .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
+    }
+
     /// Runs any shprd verb in this fixture's repository.
     fn shprd(&self, args: &[&str]) -> Output {
         Command::new(BIN)
@@ -380,8 +397,8 @@ fn a_bad_value_is_refused_before_anything_is_written() {
     assert!(refused.contains("takes 1 to 10"), "{refused}");
     let refused = fixture.refused(&["set", "tasks.merge", "sometimes"]);
     assert!(refused.contains("ask, checks, auto"), "{refused}");
-    let refused = fixture.refused(&["set", "roles.Worker.agent", "claude"]);
-    assert!(refused.contains("roles.Worker.agent"), "{refused}");
+    let refused = fixture.refused(&["set", "roles.docs.bogus", "x"]);
+    assert!(refused.contains("roles.docs.bogus"), "{refused}");
     assert!(!fixture.settings().exists(), "nothing was written");
 }
 
@@ -509,4 +526,100 @@ fn a_task_is_the_nearest_layer_and_setting_one_is_refused() {
     );
     let refused = fixture.refused(&["get", "tasks.merge", "--task", "NOPE"]);
     assert!(refused.contains("no task `NOPE`"), "{refused}");
+}
+
+#[test]
+fn a_role_is_never_stored_unchecked() {
+    let fixture = Fixture::new();
+    // No data directory: the harness table cannot be read, so a role write must
+    // not be accepted with no warning at all.
+    let refused = fixture.run_without_data(&["set", "roles.worker.agent", "claude"]);
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("cannot be stored"),
+        "the refusal says the role was not stored: {stderr}"
+    );
+    assert!(stderr.contains("SHPRD_DATA_DIR"), "{stderr}");
+    assert!(
+        !fixture.settings().exists(),
+        "nothing was written without a check"
+    );
+
+    // A workflow key needs no harness table, so it is still storable.
+    let stored = fixture.run_without_data(&["set", "tasks.max_running", "2"]);
+    assert_eq!(
+        stored.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+}
+
+#[test]
+fn a_read_says_when_the_roles_could_not_be_checked() {
+    let fixture = Fixture::new();
+    Fixture::write(
+        &fixture.settings(),
+        "[roles.worker]\nagent = \"claude\"\n\n[roles.reviewer]\nagent = \"claude\"\n",
+    );
+    let output = fixture.run_without_data(&["show"]);
+    assert!(output.status.success(), "reading never refuses");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("the roles were not checked"),
+        "an unchecked read must say so: {stderr}"
+    );
+    let document = serde_json::from_str::<Value>(&String::from_utf8_lossy(
+        &fixture.run_without_data(&["show", "--json"]).stdout,
+    ))
+    .expect("JSON");
+    assert!(
+        document["not_checked"].as_str().unwrap_or_default() != "",
+        "the JSON says why the roles were not checked: {document}"
+    );
+    assert_eq!(document["problems"], serde_json::json!([]));
+
+    // A checkout with no pick at all has nothing to check, so nothing is said.
+    let quiet = Fixture::new();
+    let output = quiet.run_without_data(&["show"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!stderr.contains("not checked"), "{stderr}");
+}
+
+#[test]
+fn a_broken_pair_someone_left_does_not_block_other_keys() {
+    let fixture = Fixture::new();
+    Fixture::write(
+        &fixture.settings(),
+        "[roles.worker]\nagent = \"claude\"\n\n[roles.reviewer]\nagent = \"claude\"\n",
+    );
+    // The pair is already refused, so a write that introduces no new refusal
+    // goes through: a broken file is not a lock on every other key.
+    let printed = fixture.ok(&["set", "tasks.review_rounds", "3"]);
+    assert!(
+        printed.contains("ok tasks.review_rounds stored"),
+        "{printed}"
+    );
+    // A write that introduces a refusal is still refused.
+    let refused = fixture.refused(&["set", "roles.docs.agent", "gemini"]);
+    assert!(refused.contains("no harness defines"), "{refused}");
+    // And the pair itself is still reported on read.
+    let output = fixture.run(&["show"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.contains("both anthropic"), "{stderr}");
+}
+
+#[test]
+fn a_custom_role_id_may_be_any_id_and_case() {
+    let fixture = Fixture::new();
+    let printed = fixture.ok(&["set", "roles.Docs.kind", "worker"]);
+    assert!(printed.contains("roles.Docs.kind"), "{printed}");
+    let printed = fixture.ok(&["set", "roles.QA_2.agent", "codex"]);
+    assert!(printed.contains("roles.QA_2.agent"), "{printed}");
+    let document = json(&fixture.ok(&["show", "--json"]));
+    assert_eq!(row(&document, "roles.Docs.kind")["value"], "worker");
+    assert_eq!(row(&document, "roles.QA_2.agent")["value"], "codex");
+    let refused = fixture.refused(&["set", "roles.my role.kind", "worker"]);
+    assert!(refused.contains("no dots, spaces"), "{refused}");
 }

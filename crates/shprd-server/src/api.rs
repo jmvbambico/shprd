@@ -230,11 +230,21 @@ impl App {
 
     /// Check the settings' roles against the harness table in `data`.
     ///
-    /// Without it the roles are still resolved and written, just not checked
-    /// against what the programs offer: a machine with no data directory can
-    /// still read and write the workflow keys.
+    /// A service without a data directory still resolves and writes the workflow
+    /// keys; it refuses a role, because a role nothing looked at must not be
+    /// stored.
     pub fn with_data(mut self, data: PathBuf) -> Self {
         self.state.data = Some(data);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Serve with no harness table at all, whatever the environment would find.
+    ///
+    /// A test uses it to prove what a machine without a data directory does,
+    /// without depending on whether the developer happens to have one installed.
+    pub fn without_data(mut self) -> Self {
+        self.state.data = None;
         self.router = router(self.state.clone());
         self
     }

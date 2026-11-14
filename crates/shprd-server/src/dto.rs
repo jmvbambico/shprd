@@ -609,6 +609,15 @@ pub struct SettingsDto {
     /// Reading never refuses: a pair of settings that would not work is
     /// reported here so the page can show it. A write of one is refused.
     pub problems: Vec<String>,
+    /// Why the roles could not be checked at all, when they could not.
+    ///
+    /// An empty `problems` list and an unchecked one must not look alike: a
+    /// service with no harness data directory cannot tell whether a reviewer is
+    /// another vendor, so it says so here rather than showing a clean bill of
+    /// health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub not_checked: Option<String>,
 }
 
 /// One write to the settings.
@@ -686,6 +695,7 @@ impl SettingsDto {
         resolved: &shprd_core::settings::Resolved,
         repo: Option<&str>,
         problems: Vec<String>,
+        not_checked: Option<String>,
     ) -> Self {
         Self {
             repo: repo.map(str::to_owned),
@@ -699,6 +709,7 @@ impl SettingsDto {
                 })
                 .collect(),
             problems,
+            not_checked,
         }
     }
 }

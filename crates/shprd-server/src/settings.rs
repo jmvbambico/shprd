@@ -9,12 +9,17 @@
 //!
 //! A write is checked exactly as `shprd settings set` checks it: the value is
 //! checked against its key, the roles against the harness table, and a refused
-//! write leaves the file alone. Reading never refuses: a hand-written pair that
-//! would not work comes back in `problems`, because the page has to be able to
-//! show the broken line.
+//! write leaves the file alone. Only the refusals a write *introduces* count, so
+//! a file someone else left broken does not block every other key. Reading never
+//! refuses: a hand-written pair that would not work comes back in `problems`,
+//! because the page has to be able to show the broken line.
+//!
+//! A role is never stored unchecked: without a harness table, `PUT` of a role
+//! key is refused rather than accepted silently, and a read says in
+//! `not_checked` that this service could not check the roles at all.
 
 use axum::body::Bytes;
-use shprd_agents::roles::{Problems, Review, Table};
+use shprd_agents::roles::{Checked, Checker, Review};
 use shprd_core::settings::{Key, Loaded, Resolved, Scope, Value};
 
 use crate::api::AppState;
@@ -88,14 +93,32 @@ pub(crate) fn write(state: &AppState, body: &Bytes) -> Result<SettingsWriteDto, 
         })?),
         false => Scope::You,
     };
-    // Check the settings the write would leave behind before it leaves
-    // anything: a refused write never reaches the disk.
-    let candidate = loaded.preview(&scope, &key, value.as_ref(), None);
-    let problems = check(state, &candidate);
-    if !problems.is_empty() {
+    let checker = checker(state);
+    // A role is only stored once the harness table has been asked: storing an
+    // unchecked one would let a same-vendor reviewer in with no warning at all.
+    if key.decides_a_review()
+        && let Some(reason) = checker.reason()
+    {
         return Err(ApiReject::refused(format!(
-            "`{}` would be refused: {problems}",
+            "`{}` cannot be stored: {reason}. Nothing was written",
             key.name()
+        )));
+    }
+    // Check the settings the write would leave behind before it leaves
+    // anything: a refused write never reaches the disk. A refusal that is
+    // already in the file is not this write's to answer, so only the new ones
+    // count.
+    let before = check(&loaded.resolve(None), &checker);
+    let after = check(
+        &loaded.preview(&scope, &key, value.as_ref(), None),
+        &checker,
+    );
+    let introduced = after.introduced(&before);
+    if !introduced.is_empty() {
+        return Err(ApiReject::refused(format!(
+            "`{}` would be refused: {}",
+            key.name(),
+            introduced.join("; ")
         )));
     }
     let written = loaded
@@ -109,27 +132,27 @@ pub(crate) fn write(state: &AppState, body: &Bytes) -> Result<SettingsWriteDto, 
 
 /// The DTO one resolution becomes.
 fn document(state: &AppState, loaded: &Loaded, resolved: Resolved) -> SettingsDto {
-    let problems = check(state, &resolved);
+    let checked = check(&resolved, &checker(state));
+    let not_checked = checked
+        .skipped()
+        .filter(|_| resolved.names_a_pick())
+        .map(str::to_owned);
     SettingsDto::from_resolved(
         &resolved,
         loaded.repo.as_deref(),
-        problems.messages().to_vec(),
+        checked.messages().to_vec(),
+        not_checked,
     )
 }
 
+/// The harness table this service was given, or why it has none.
+fn checker(state: &AppState) -> Checker {
+    Checker::load(state.data.as_deref())
+}
+
 /// The refusals the harness table has for these settings.
-///
-/// Empty when the settings check out, or when this service was not given a data
-/// directory: a machine without a harness table can still read and write the
-/// workflow keys.
-fn check(state: &AppState, resolved: &Resolved) -> Problems {
-    let Some(table) = state.data.as_deref().and_then(|dir| Table::load(dir).ok()) else {
-        return Problems::default();
-    };
-    match shprd_agents::roles::check(resolved, Review::default(), &table) {
-        Ok(()) => Problems::default(),
-        Err(problems) => problems,
-    }
+fn check(resolved: &Resolved, checker: &Checker) -> Checked {
+    checker.check(resolved, Review::default())
 }
 
 /// The refusal a broken settings file produces.

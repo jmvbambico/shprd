@@ -10,9 +10,16 @@
 //! the file is parsed; the roles are checked against the harness table
 //! (`shprd_agents::roles`), which is what refuses a reviewer that is not another
 //! vendor and a role that names a program, mode or effort the program does not
-//! have. A refusal exits 2 and writes nothing. Reading never refuses: a set of
-//! settings that would not work is printed, with its refusals as warnings, because
-//! the person has to see the broken line to fix it.
+//! have. A refusal exits 2 and writes nothing, and a write that *introduces* a
+//! refusal is the one refused: a file someone else left broken does not block
+//! every other key. Reading never refuses: a set of settings that would not work
+//! is printed, with its refusals as warnings, because the person has to see the
+//! broken line to fix it.
+//!
+//! The role checks need the harness table, and a machine without one cannot be
+//! checked at all — so a role is never stored unchecked. Writing a role key
+//! without the table is refused, naming the directory to set, and reading says
+//! the checks were skipped instead of printing a clean bill of health.
 //!
 //! `--task` resolves for one task of the run: the agent its own newest attempt
 //! ran is the nearest layer, which is the only per-task fact the log holds. A
@@ -21,7 +28,7 @@
 use std::path::Path;
 
 use anyhow::anyhow;
-use shprd_agents::roles::{self, Problems, Review, Table};
+use shprd_agents::roles::{Checked, Checker, Review};
 use shprd_core::event::Actor;
 use shprd_core::settings::{self, Key, Layer, Loaded, Resolved, RoleField, Scope, Source, Value};
 
@@ -43,28 +50,20 @@ pub fn run(
 ) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     let loaded = load(&home, root)?;
-    let table = harness_table(root);
+    let checker = Checker::load(shprd_agents::harness::data_dir(root).as_deref());
     match command {
-        SettingsCommand::Show(args) => show(&loaded, root, args, json, table.as_ref()),
-        SettingsCommand::Get(args) => get(&loaded, root, args, json, table.as_ref()),
-        SettingsCommand::Set(args) => set(&loaded, &home, args, json, table.as_ref()),
-        SettingsCommand::Unset(args) => unset(&loaded, &home, args, json, table.as_ref()),
+        SettingsCommand::Show(args) => show(&loaded, root, args, json, &checker),
+        SettingsCommand::Get(args) => get(&loaded, root, args, json, &checker),
+        SettingsCommand::Set(args) => set(&loaded, &home, args, json, &checker),
+        // Unsetting is the way out of a file that will not check, so it is
+        // never held back by a check.
+        SettingsCommand::Unset(args) => unset(&loaded, &home, args, json),
     }
 }
 
 /// Read the settings files, turning a refusal into the verb's invalid exit.
 fn load(home: &Path, root: Option<&Path>) -> Result<Loaded, CliError> {
     Loaded::read(home, root).map_err(invalid)
-}
-
-/// The harness table and the model families, when this machine has them.
-///
-/// A machine without a data directory can still read and write the workflow
-/// keys; only the role checks need the table, and [`check`] says when it could
-/// not run.
-fn harness_table(root: Option<&Path>) -> Option<Table> {
-    let dir = shprd_agents::harness::data_dir(root)?;
-    roles::Table::load(&dir).ok()
 }
 
 /// The layer one repository's files add, as the resolution wants it.
@@ -130,11 +129,12 @@ fn show(
     root: Option<&Path>,
     args: &SettingsShowArgs,
     json: bool,
-    table: Option<&Table>,
+    checker: &Checker,
 ) -> Result<(), CliError> {
     let task = task_layer(root, args.task.as_deref())?;
     let resolved = loaded.resolve(task.as_ref());
-    let problems = check(&resolved, table);
+    let checked = check(&resolved, checker);
+    let skipped = skipped_note(&checked, &resolved);
     if json {
         let values: Vec<serde_json::Value> = resolved
             .rows()
@@ -144,7 +144,8 @@ fn show(
         let document = serde_json::json!({
             "repo": loaded.repo,
             "values": values,
-            "problems": problems.messages(),
+            "problems": checked.messages(),
+            "not_checked": skipped,
         });
         print_json(&document)?;
         return Ok(());
@@ -152,8 +153,11 @@ fn show(
     for row in resolved.rows() {
         println!("{}", line(&row));
     }
-    for problem in problems.messages() {
+    for problem in checked.messages() {
         eprintln!("warning: {problem}");
+    }
+    if let Some(note) = skipped {
+        eprintln!("warning: {note}");
     }
     Ok(())
 }
@@ -164,20 +168,26 @@ fn get(
     root: Option<&Path>,
     args: &SettingsGetArgs,
     json: bool,
-    table: Option<&Table>,
+    checker: &Checker,
 ) -> Result<(), CliError> {
     let key = Key::parse(&args.key).map_err(invalid)?;
     let task = task_layer(root, args.task.as_deref())?;
     let resolved = loaded.resolve(task.as_ref());
     let row = row_of(&resolved, &key);
+    let checked = check(&resolved, checker);
+    let skipped = skipped_note(&checked, &resolved);
     if json {
-        print_json(&row_json(&row))?;
+        let mut document = row_json(&row);
+        document["not_checked"] = serde_json::json!(skipped);
+        print_json(&document)?;
         return Ok(());
     }
     println!("{}", line(&row));
-    let problems = check(&resolved, table);
-    for problem in problems.messages() {
+    for problem in checked.messages() {
         eprintln!("warning: {problem}");
+    }
+    if let Some(note) = skipped {
+        eprintln!("warning: {note}");
     }
     Ok(())
 }
@@ -188,20 +198,35 @@ fn set(
     home: &Path,
     args: &SettingsSetArgs,
     json: bool,
-    table: Option<&Table>,
+    checker: &Checker,
 ) -> Result<(), CliError> {
     refuse_a_task_write(args.task.as_deref())?;
     let key = Key::parse(&args.key).map_err(invalid)?;
     let value = key.value_from_text(&args.value).map_err(invalid)?;
     let scope = scope(loaded, args.for_repo)?;
-    // Check the settings the write would leave behind, before it leaves
-    // anything: a refused change never reaches the disk.
-    let candidate = loaded.preview(&scope, &key, Some(&value), None);
-    let problems = check(&candidate, table);
-    if !problems.is_empty() {
+    // A role is only stored once the harness table has been asked: storing an
+    // unchecked one would let a same-vendor reviewer in with no warning at all.
+    if key.decides_a_review()
+        && let Some(reason) = checker.reason()
+    {
         return Err(invalid(anyhow!(
-            "{} would be refused: {problems}",
+            "{} cannot be stored: {reason}. Nothing was written",
             key.name()
+        )));
+    }
+    // Check the settings the write would leave behind, before it leaves
+    // anything: a refused change never reaches the disk. A refusal that is
+    // already in the file is not this write's to answer, so only the new ones
+    // count — otherwise a broken pair someone left would block every other key.
+    let before = check(&loaded.resolve(None), checker);
+    let candidate = loaded.preview(&scope, &key, Some(&value), None);
+    let after = check(&candidate, checker);
+    let introduced = after.introduced(&before);
+    if !introduced.is_empty() {
+        return Err(invalid(anyhow!(
+            "{} would be refused: {}",
+            key.name(),
+            introduced.join("; ")
         )));
     }
     let written = loaded
@@ -228,7 +253,6 @@ fn unset(
     home: &Path,
     args: &SettingsUnsetArgs,
     json: bool,
-    _table: Option<&Table>,
 ) -> Result<(), CliError> {
     refuse_a_task_write(args.task.as_deref())?;
     let key = Key::parse(&args.key).map_err(invalid)?;
@@ -263,19 +287,21 @@ fn refuse_a_task_write(task: Option<&str>) -> Result<(), CliError> {
     }
 }
 
-/// The refusals the harness table has for these settings.
+/// The warning a read prints when the roles could not be checked at all.
 ///
-/// Empty when the settings check out, or when this machine has no harness table
-/// to check them against: a missing data directory is `shprd doctor`'s to report,
-/// not a reason to refuse every write.
-fn check(resolved: &Resolved, table: Option<&Table>) -> Problems {
-    let Some(table) = table else {
-        return Problems::default();
-    };
-    match roles::check(resolved, Review::default(), table) {
-        Ok(()) => Problems::default(),
-        Err(problems) => problems,
-    }
+/// Nothing is said when there is nothing to check: a person who has picked no
+/// program yet should not be warned about a table they do not need.
+fn skipped_note(checked: &Checked, resolved: &Resolved) -> Option<String> {
+    let reason = checked.skipped()?;
+    resolved
+        .names_a_pick()
+        .then(|| format!("the roles were not checked: {reason}"))
+}
+
+/// The refusals these settings have, or the fact that they could not be
+/// checked.
+fn check(resolved: &Resolved, checker: &Checker) -> Checked {
+    checker.check(resolved, Review::default())
 }
 
 /// One key's line as the verb prints it.

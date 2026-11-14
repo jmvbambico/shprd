@@ -592,6 +592,9 @@ fn keys_parse_from_their_names_and_their_old_names() {
         ("roles.order", "roles.order"),
         ("roles.worker.agent", "roles.worker.agent"),
         ("roles.docs_writer.fallback", "roles.docs_writer.fallback"),
+        // Any id a key can hold is a role, either case included.
+        ("roles.Docs.agent", "roles.Docs.agent"),
+        ("roles.QA_2.kind", "roles.QA_2.kind"),
     ];
     for (written, canonical) in cases {
         let key = Key::parse(written).unwrap_or_else(|err| panic!("`{written}`: {err}"));
@@ -603,7 +606,8 @@ fn keys_parse_from_their_names_and_their_old_names() {
         "roles",
         "roles.order.x",
         "roles.worker.nope",
-        "roles.Worker.agent",
+        "roles.my role.agent",
+        "roles.docs/1.agent",
         "review",
         "agents.reactions",
     ] {
@@ -613,9 +617,17 @@ fn keys_parse_from_their_names_and_their_old_names() {
 
 #[test]
 fn a_role_id_may_not_be_order_or_a_key_path() {
-    for refused in ["roles.order.agent", "roles.a.b.c", "roles.Upper.agent"] {
+    for refused in ["roles.order.agent", "roles.a.b.c", "roles.not an id.agent"] {
         assert!(Key::parse(refused).is_err(), "`{refused}` must be refused");
     }
+    // An id a dotted key can hold is a role, whatever its case.
+    let key = Key::parse("roles.Upper.agent").expect("an uppercase id is a role");
+    assert_eq!(key.name(), "roles.Upper.agent");
+    let file = you("[roles.Docs]\nkind = \"worker\"\n");
+    let resolved = resolve(&file, &Request::default());
+    let docs = resolved.role("Docs").expect("the Docs role");
+    assert_eq!(docs.kind.value, RoleKind::Worker);
+    assert_eq!(docs.label(), "Docs");
     match Key::parse("roles.order.agent") {
         Err(SettingsError::BadValue { reason, .. }) => {
             assert!(reason.contains("roles.order"), "{reason}")
