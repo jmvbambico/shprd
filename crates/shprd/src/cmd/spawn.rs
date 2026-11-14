@@ -512,9 +512,9 @@ pub(crate) fn close_task_tabs(
 ///
 /// Run end has no task in hand, so it sweeps the lot: every `.tab` record under
 /// the run's briefs names a tab shprd opened, and nothing shprd did not open has
-/// a record there — which is why the chat and orchestrator tabs are never in
-/// reach. A refusal is not fatal: the tabs are cleanup, not the point, so each
-/// one the host keeps comes back as a [`Leftover`].
+/// a record there — which is why a tab a human opened is never in reach. A
+/// refusal is not fatal: the tabs are cleanup, not the point, so each one the
+/// host keeps comes back as a [`Leftover`].
 pub(crate) fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Vec<Leftover> {
     let Ok(home) = crate::ctx::resolve_home(home) else {
         return Vec::new();

@@ -365,8 +365,8 @@ pub enum RuleError {
     /// A run was finished by something that may not finish one.
     ///
     /// A human ends a run, and so does the orchestrator, whose brief ends it
-    /// with `shprd down` after the merge. An agent or the engine ending a run
-    /// would close tabs nobody asked it to close.
+    /// with `shprd run finish` after the merge. An agent or the engine ending a
+    /// run would close tabs nobody asked it to close.
     #[error("{actor:?} cannot finish a run: only a human or the orchestrator can")]
     FinishNotAllowed {
         /// Who tried.
@@ -1225,8 +1225,8 @@ fn check_handed_off(
 /// (passed or failed) and Failed are all work in flight or work stuck, which
 /// ending the run would strand on a branch nobody watches.
 ///
-/// `shprd down` names these in its refusal, and the rule refuses a finish or an
-/// abandon that disagrees with them, so both read one definition.
+/// `shprd run finish` names these in its refusal, and the rule refuses a finish
+/// or an abandon that disagrees with them, so both read one definition.
 pub fn unfinished_tasks(state: &RunState) -> Vec<TaskId> {
     state
         .tasks
@@ -1280,10 +1280,10 @@ pub fn abandonable_tasks(state: &RunState) -> Vec<TaskId> {
 /// an agent that could record one would walk away from whatever it had not
 /// done, and the engine has no reason to end a run a human did not ask it to
 /// end. A human may finish a run, and so may the orchestrator: its brief ends
-/// the run with `shprd down` once the milestone merged. Both need the run's
-/// work to be over — nothing unfinished, and the pull request merged — for the
-/// same reason `shprd down` refuses, because a finish that strands integrated
-/// work is the same loss as one that strands a working task.
+/// the run with `shprd run finish` once the milestone merged. Both need the
+/// run's work to be over — nothing unfinished, and the pull request merged —
+/// because a finish that strands integrated work is the same loss as one that
+/// strands a working task.
 ///
 /// A human's `--abandon` is the one way past that, and the event's list is what
 /// records it. The list must be exactly [`abandonable_tasks`]: the unfinished
@@ -2532,8 +2532,8 @@ mod tests {
 
     #[test]
     fn only_a_human_or_the_orchestrator_finishes_a_run() {
-        // The orchestrator's brief ends the run with `shprd down` after the
-        // merge, so it may finish one; an agent and the engine never do.
+        // The orchestrator's brief ends the run with `shprd run finish` after
+        // the merge, so it may finish one; an agent and the engine never do.
         let state = folded(&landed());
         for actor in [Actor::Human, Actor::Orchestrator] {
             state
