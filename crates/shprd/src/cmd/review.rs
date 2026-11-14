@@ -16,7 +16,7 @@ use shprd_core::event::{EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::state::{Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
-use shprd_mux::{Mux, naming};
+use shprd_mux::Mux;
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::families::{Families, agent_vendor};
 use shprd_roster::models::AgentRef;
@@ -667,14 +667,7 @@ fn open_reviewer(
     brief_path: &Path,
 ) -> Result<(shprd_mux::TabId, String), CliError> {
     let workspace = spawn::workspace_of(mux, &env.spawn)?;
-    let wanted = naming::tab_title(naming::Role::Reviewer, &reviewer.agent, task, false);
-    let existing = mux
-        .list_tabs(&workspace.id)
-        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?
-        .into_iter()
-        .map(|tab| tab.title)
-        .collect::<Vec<String>>();
-    let title = naming::disambiguate(&existing, &wanted, task);
+    let title = reviewer_title(&reviewer.agent, task);
     let tab = mux
         .create_tab(&workspace.id, &title, dir)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the reviewer tab")))?;
@@ -689,6 +682,17 @@ fn open_reviewer(
             Err(err)
         }
     }
+}
+
+/// The title of a reviewer's tab: `<agent>·<task>·review`.
+///
+/// The `review` suffix is what keeps a reviewer's tab from reading as the
+/// worker's, now that the role glyphs are gone.
+///
+/// // M10.2: a task's space holds both its worker and its reviewer, told apart
+/// by role there.
+fn reviewer_title(agent: &str, task: &str) -> String {
+    format!("{agent}·{task}·review")
 }
 
 /// Starts the reviewer's CLI in `tab` and hands it the brief.
@@ -967,7 +971,6 @@ mod tests {
     use shprd_core::event::{Actor, ReviewSource};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
-    use shprd_mux::naming;
     use shprd_mux::{AgentState, PaneId};
     use tempfile::TempDir;
 
@@ -1207,7 +1210,7 @@ project_dirs = []
 
         /// Records this repository's workspace in `mux`, as a launcher would.
         fn with_workspace(&self, mux: FakeMux) -> FakeMux {
-            mux.create_workspace(&naming::workspace_name(&self.repo_name()), self.root())
+            mux.create_workspace(&spawn::workspace_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
             mux
         }
@@ -1510,12 +1513,9 @@ project_dirs = []
             std::path::PathBuf::from("/tmp/wt/T1"),
             "the tab must never start in the worktree"
         );
-        // A reviewer is prefixed with its own glyph, so it never reads as a worker.
-        assert_eq!(
-            title,
-            naming::tab_title(naming::Role::Reviewer, "codex", "T1", false)
-        );
-        assert!(title.starts_with('\u{25c7}'), "{title}");
+        // A reviewer's title says so, so it never reads as the worker's.
+        assert_eq!(title, reviewer_title("codex", "T1"));
+        assert_ne!(title, spawn::worker_title("codex", "T1"), "{title}");
 
         let pairs = calls
             .iter()

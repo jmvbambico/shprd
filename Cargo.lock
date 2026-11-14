@@ -791,7 +791,6 @@ dependencies = [
  "shprd-mux",
  "tempfile",
  "thiserror",
- "toml",
 ]
 
 [[package]]

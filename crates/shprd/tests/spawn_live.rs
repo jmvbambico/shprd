@@ -217,7 +217,7 @@ project_dirs = []
         "--acceptance",
         "spawn opens a tab",
     ]);
-    // The workspace `shprd up` would have made, created by hand here.
+    // The workspace shprd looks for, created by hand here.
     let name = format!(
         "shprd \u{b7} {}",
         repo.file_name().unwrap().to_string_lossy()
@@ -245,7 +245,7 @@ project_dirs = []
     // only prompts a pane it has detected as an agent. Nobody detected this
     // shell, so the spawn says so and stays successful.
     assert!(
-        warning.contains("brief not delivered to \u{25cf} sh\u{b7}M4.4"),
+        warning.contains("brief not delivered to sh·M4.4"),
         "no warning in {warning}"
     );
     assert!(warning.contains("brief not delivered"), "{warning}");
@@ -259,10 +259,7 @@ project_dirs = []
     assert!(tabs.contains("M4.4"), "{tabs}");
     let snapshot =
         String::from_utf8_lossy(&server.herdr(&["api", "snapshot"]).unwrap().stdout).to_string();
-    assert!(
-        snapshot.contains("\u{25cf} sh\u{b7}M4.4"),
-        "no worker tab in {snapshot}"
-    );
+    assert!(snapshot.contains("sh·M4.4"), "no worker tab in {snapshot}");
     assert!(
         snapshot.contains(".shprd/wt"),
         "the tab's pane is not in a worktree: {snapshot}"

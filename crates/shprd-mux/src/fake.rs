@@ -582,7 +582,7 @@ mod tests {
     fn fixture() -> (FakeMux, WorkspaceId, crate::types::Tab) {
         let mux = FakeMux::default();
         let ws = ok(mux.create_workspace("shprd · repo", Path::new("/tmp/repo")));
-        let tab = ok(mux.create_tab(&ws.id, "● claude·w1", Path::new("/tmp/repo")));
+        let tab = ok(mux.create_tab(&ws.id, "claude·w1", Path::new("/tmp/repo")));
         (mux, ws.id, tab)
     }
 
@@ -596,7 +596,7 @@ mod tests {
             calls,
             vec![
                 Call::CreateWorkspace("shprd · repo".to_string(), "/tmp/repo".into()),
-                Call::CreateTab(ws, "● claude·w1".to_string(), "/tmp/repo".into()),
+                Call::CreateTab(ws, "claude·w1".to_string(), "/tmp/repo".into()),
                 Call::FocusTab(tab.id.clone()),
                 Call::Split(tab.root_pane.clone(), Direction::Right, 0.5, "/tmp".into()),
             ]

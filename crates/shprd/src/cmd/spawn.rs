@@ -22,7 +22,7 @@ use shprd_core::state::{GateResult, ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
-use shprd_mux::{Mux, naming};
+use shprd_mux::Mux;
 use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_roster::models::AgentRef;
 use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
@@ -237,12 +237,34 @@ pub fn spawn(
     })
 }
 
+/// The name of the workspace that hosts a repository's tabs.
+///
+/// One repository, one workspace: a human reads the name on their host's bar
+/// and knows which checkout the tabs belong to.
+///
+/// // M10.2: the space-per-task host model gives each task its own space, so
+/// this one-workspace-per-repository name is temporary.
+pub(crate) fn workspace_name(repo_name: &str) -> String {
+    format!("shprd · {repo_name}")
+}
+
+/// The title of a task's agent tab: `<agent>·<task>`.
+///
+/// The role glyphs the old naming module prefixed are gone with the
+/// tab-per-agent launcher. The host's ids are what shprd follows, so a title
+/// is only what a human reads.
+///
+/// // M10.2: a task gets a space of its own, titled after the task.
+pub(crate) fn worker_title(agent: &str, task: &str) -> String {
+    format!("{agent}·{task}")
+}
+
 /// The repository's workspace, or an error telling the human to create it.
 pub(crate) fn workspace_of(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
 ) -> Result<shprd_mux::Workspace, CliError> {
-    let name = naming::workspace_name(&env.repo_name);
+    let name = workspace_name(&env.repo_name);
     mux.find_workspace(&name)
         .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
         .ok_or_else(|| {
@@ -287,14 +309,7 @@ pub(crate) fn open_agent(
         brief_path,
         worktree,
     } = *launching;
-    let wanted = naming::tab_title(naming::Role::Worker, &pick.agent, task, false);
-    let existing = mux
-        .list_tabs(&workspace.id)
-        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?
-        .into_iter()
-        .map(|tab| tab.title)
-        .collect::<Vec<String>>();
-    let title = naming::disambiguate(&existing, &wanted, task);
+    let title = worker_title(&pick.agent, task);
     let tab = mux
         .create_tab(&workspace.id, &title, &worktree.path)
         .map_err(|err| CliError::other(anyhow!(err).context("creating the agent tab")))?;
@@ -1422,7 +1437,7 @@ fn prompt_in(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))?;
-    let name = naming::workspace_name(&repo_name);
+    let name = workspace_name(&repo_name);
     let workspace = mux
         .find_workspace(&name)
         .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
@@ -1861,17 +1876,14 @@ project_dirs = []
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
-            .create_workspace(
-                &naming::workspace_name(&scratch.repo_name()),
-                scratch.root(),
-            )
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
 
         assert_eq!(report.attempt, 1);
         assert_eq!(report.agent, "sh");
-        assert_eq!(report.tab, "\u{25cf} sh\u{b7}T1");
+        assert_eq!(report.tab, "sh·T1");
         assert!(
             report.worktree.is_dir(),
             "no worktree at {:?}",
@@ -1883,7 +1895,7 @@ project_dirs = []
         assert!(brief.contains("Make spawn real"), "{brief}");
         assert!(brief.contains("crates/shprd"), "{brief}");
         // The tab id is recorded beside the brief, so a later prompt reaches
-        // this exact tab even when another task shares its 16-char label.
+        // this exact tab even when another tab carries the same title.
         let recorded = tab_path(
             &scratch.home.path().join(".shprd").join("briefs"),
             "t1",
@@ -1925,7 +1937,7 @@ project_dirs = []
             })
             .unwrap_or_else(|| panic!("no tab was created: {calls:?}"));
         assert_eq!(tab.0, workspace.id);
-        assert_eq!(tab.1, "\u{25cf} sh\u{b7}T1");
+        assert_eq!(tab.1, "sh·T1");
         assert_eq!(tab.2, report.worktree);
         let (argv, pairs) = calls
             .iter()
@@ -1986,11 +1998,8 @@ project_dirs = []
     /// A host with the repository's workspace open, the way a launcher leaves it.
     fn host(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
 
@@ -2269,11 +2278,8 @@ project_dirs = []
         env.programs[0].spec.launch.system_prompt_args =
             system_prompt_args.map(|args| args.into_iter().map(str::to_string).collect());
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
         spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
         mux.calls()
     }
@@ -2416,11 +2422,8 @@ project_dirs = []
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
         let mux = NoTabs(FakeMux::default().with_ready_agent());
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
 
         let failure = spawn(&mux, &env, &request());
         assert!(failure.is_err(), "spawn should have failed");
@@ -2448,10 +2451,7 @@ project_dirs = []
         env.ready_wait = Duration::from_secs(5);
         let mux = FakeMux::default();
         let workspace = mux
-            .create_workspace(
-                &naming::workspace_name(&scratch.repo_name()),
-                scratch.root(),
-            )
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let pane = shprd_mux::PaneId::new("pane-1");
         mux.set_state_after(&pane, 2, shprd_mux::AgentState::Idle);
@@ -2493,11 +2493,8 @@ project_dirs = []
         // No ready agent and no wait: the plain `sh` this fake hosts is never
         // detected, which is the real OpenCode and Kilo case.
         let mux = FakeMux::default();
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
 
         let report = match spawn(&mux, &env, &request()) {
             Ok(report) => report,
@@ -2529,10 +2526,7 @@ project_dirs = []
             .with_ready_agent()
             .failing_run("the host refused");
         let workspace = mux
-            .create_workspace(
-                &naming::workspace_name(&scratch.repo_name()),
-                scratch.root(),
-            )
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let failure = spawn(&mux, &env, &request());
@@ -2596,32 +2590,17 @@ project_dirs = []
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
-            .create_workspace(
-                &naming::workspace_name(&scratch.repo_name()),
-                scratch.root(),
-            )
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
-        // These two labels truncate to the same 16 characters, so the title
-        // alone would send the second task's prompt to the first task's tab.
-        let first = "task-identical-label-one";
-        let second = "task-identical-label-two";
-        assert_eq!(
-            naming::truncate_label(first),
-            naming::truncate_label(second)
-        );
+        // Both tabs are titled after their own task; which one a prompt
+        // reaches is decided by the record beside the brief, not the title.
+        let first = "task-one";
+        let second = "task-two";
         let other = mux
-            .create_tab(
-                &workspace.id,
-                &format!("\u{25cf} sh\u{b7}{}", naming::truncate_label(first)),
-                scratch.root(),
-            )
+            .create_tab(&workspace.id, &worker_title("sh", first), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let mine = mux
-            .create_tab(
-                &workspace.id,
-                &format!("\u{25cf} sh\u{b7}{}", naming::truncate_label(second)),
-                scratch.root(),
-            )
+            .create_tab(&workspace.id, &worker_title("sh", second), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         record_tab(&scratch, "t1", first, 1, &other.id);
         record_tab(&scratch, "t1", second, 1, &mine.id);
@@ -2683,10 +2662,7 @@ project_dirs = []
         .unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
-            .create_workspace(
-                &naming::workspace_name(&scratch.repo_name()),
-                scratch.root(),
-            )
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let stale = mux
             .create_tab(&workspace.id, "stale", scratch.root())
@@ -2743,10 +2719,7 @@ project_dirs = []
         .unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
-            .create_workspace(
-                &naming::workspace_name(&scratch.repo_name()),
-                scratch.root(),
-            )
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let tab = mux
             .create_tab(&workspace.id, "api", scratch.root())
