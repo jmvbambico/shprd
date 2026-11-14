@@ -40,10 +40,11 @@ SOFTWARE.
   `mods/tasks/bin/herdr_task/queues.py` (`queue_reason()`),
   `mods/tasks/bin/herdr_task/when.py` (`starts_words()`),
   `mods/tasks/bin/herdr_task/github.py` (`pr_body()` and the merge path),
-  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`),
+  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`, `CLEAN_ENV`),
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
-  `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`,
-  `settings_layers()`, `settings_for()`, `task_settings()`),
+  `argvFor` and its fast-mode values),
+  `mods/tasks/bin/herdr_task/settings.py` (`argv_for`, `settings_layers()`,
+  `settings_for()`, `task_settings()`),
   `core/settings.js` (`ROLES`, the role pick and level resolution,
   `otherCli()`), `mods/shepherdr-settings/main.js` (the per-scope level switch
   and the rule that a value equal to the inherited one is deleted),
@@ -59,18 +60,20 @@ SOFTWARE.
   pull-request path, and the per-task pull-request body — in
   `crates/shprd-git/src/{land,worktree}.rs` and `crates/shprd-views/src/pr.rs`,
   and the agent-adapter facts — the Claude and Codex permission modes and the
-  cross-program map between them, and where an ask hook is installed and how
-  long it waits — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`; also
-  the settings model — the layered resolution and the layer each value comes
-  from, the reserved built-in roles and the keyed role table, the
-  per-repository entry and the "a value equal to the inherited one is stored
-  nowhere" write rule — in `crates/shprd-core/src/settings/`; and the provider
-  fallback ladder — the error classes, the carry-on message and
-  its waits, the record-tail reading of a cut, the one backup handover and its
-  chat-tail brief — in `crates/shprd-watch/src/records/{mod,claude,codex,pi,
-  sqlite}.rs`, `crates/shprd-watch/src/fallback.rs` and the events that record
-  it in `crates/shprd-core/src/{event,state,rules}.rs`
+  cross-program map between them, where an ask hook is installed and how
+  long it waits, the launch argument order and the two fast-mode values, and
+  the environment strip that keeps an agent from inheriting a parent Claude
+  Code session — in `data/harness/{claude,codex}.toml`,
+  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`; also the settings model
+  — the layered resolution and the layer each value comes from, the reserved
+  built-in roles and the keyed role table, the per-repository entry and the
+  "a value equal to the inherited one is stored nowhere" write rule — in
+  `crates/shprd-core/src/settings/`; and the provider fallback ladder — the
+  error classes, the carry-on message and its waits, the record-tail reading of
+  a cut, the one backup handover and its chat-tail brief — in
+  `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
+  `crates/shprd-watch/src/fallback.rs` and the events that record it in
+  `crates/shprd-core/src/{event,state,rules}.rs`
 - License: MIT
 
 MIT License

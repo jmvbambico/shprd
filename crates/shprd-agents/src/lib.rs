@@ -1,7 +1,8 @@
 //! Agent CLIs as data: the harness table, CLI detection, sign-in, models, quota
-//! probes, skills discovery. M9 grows this into the agent adapters, one per
-//! program, still driven by `data/harness/*.toml`.
+//! probes, skills discovery, and — since M9 — the per-program adapters that turn
+//! a role's pick into a launch, still driven by `data/harness/*.toml`.
 
+pub mod adapter;
 pub mod asks;
 pub mod detect;
 pub mod env;
