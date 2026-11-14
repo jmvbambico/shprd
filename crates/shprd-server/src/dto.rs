@@ -1,0 +1,629 @@
+//! The data-transfer objects the API answers with, and the TypeScript they
+//! generate.
+//!
+//! Everything a client reads or writes goes through one of these types. They
+//! are plain JSON both ways, derived from the fold by [`crate::snapshot`], and
+//! every one of them is exported to `web/src/gen/` as a TypeScript type (see
+//! [`crate::bindings`]) so the web app and a Herdr mod never hand-write the
+//! shapes.
+
+use serde::{Deserialize, Serialize};
+use shprd_core::state::{RunState, TaskStatus};
+use ts_rs::TS;
+
+use crate::snapshot;
+
+/// Where a task sits in the run, as the web reads it.
+///
+/// It is the fold's [`TaskStatus`] with `Serialize` and a TypeScript type on
+/// it; nothing derives it here, so the board and the CLI never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "TaskStatusDto.ts")]
+pub enum TaskStatusDto {
+    /// Added to the plan, no agent has run it.
+    Queued,
+    /// An agent is working on it.
+    Working,
+    /// The agent reported a completed outcome for the current attempt.
+    Reported,
+    /// Its gates passed.
+    Passed,
+    /// It failed, or an attempt reported blocked or failed.
+    Failed,
+    /// Its work landed on the integration branch.
+    Integrated,
+    /// A human decided the task will not be done.
+    Dropped,
+}
+
+impl From<TaskStatus> for TaskStatusDto {
+    fn from(status: TaskStatus) -> Self {
+        match status {
+            TaskStatus::Queued => Self::Queued,
+            TaskStatus::Working => Self::Working,
+            TaskStatus::Reported => Self::Reported,
+            TaskStatus::Passed => Self::Passed,
+            TaskStatus::Failed => Self::Failed,
+            TaskStatus::Integrated => Self::Integrated,
+            TaskStatus::Dropped => Self::Dropped,
+        }
+    }
+}
+
+/// What an agent reported about an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "ReportStatusDto.ts")]
+pub enum ReportStatusDto {
+    /// The attempt finished its scope and is ready to integrate.
+    Completed,
+    /// The attempt stopped on something it could not resolve.
+    Blocked,
+    /// The attempt failed.
+    Failed,
+}
+
+impl From<shprd_core::event::ReportStatus> for ReportStatusDto {
+    fn from(status: shprd_core::event::ReportStatus) -> Self {
+        match status {
+            shprd_core::event::ReportStatus::Completed => Self::Completed,
+            shprd_core::event::ReportStatus::Blocked => Self::Blocked,
+            shprd_core::event::ReportStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+/// How bad a gate finding is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "SeverityDto.ts")]
+pub enum SeverityDto {
+    /// Must be fixed before integration.
+    Critical,
+    /// Should be fixed before integration.
+    Major,
+    /// Worth fixing, not blocking.
+    Minor,
+    /// Cosmetic.
+    Trivial,
+}
+
+impl From<shprd_core::event::Severity> for SeverityDto {
+    fn from(severity: shprd_core::event::Severity) -> Self {
+        match severity {
+            shprd_core::event::Severity::Critical => Self::Critical,
+            shprd_core::event::Severity::Major => Self::Major,
+            shprd_core::event::Severity::Minor => Self::Minor,
+            shprd_core::event::Severity::Trivial => Self::Trivial,
+        }
+    }
+}
+
+/// The run's identity, as the header of a board shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "RunDto.ts")]
+pub struct RunDto {
+    /// Run identifier.
+    pub id: String,
+    /// Repository the run works on.
+    pub repo: String,
+    /// Branch the run was cut from.
+    pub base_branch: String,
+    /// Branch landed work is integrated on.
+    pub integration_branch: String,
+}
+
+/// One task of the run plan, with its progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskDto.ts")]
+pub struct TaskDto {
+    /// Task id.
+    pub id: String,
+    /// Human-readable title.
+    pub title: String,
+    /// Where the task is in its lifecycle.
+    pub status: TaskStatusDto,
+    /// Repo-relative paths the task may change.
+    pub scope: Vec<String>,
+    /// What must be true when the task is done.
+    pub acceptance: Vec<String>,
+    /// Free-form tags.
+    pub tags: Vec<String>,
+    /// Skills the agent is told to load.
+    pub skills: Vec<String>,
+    /// Tasks that must be integrated first.
+    pub deps: Vec<String>,
+    /// Why a human dropped it, once one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dropped_reason: Option<String>,
+    /// Attempts made so far, in order.
+    pub attempts: Vec<AttemptDto>,
+}
+
+/// One attempt at a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AttemptDto.ts")]
+pub struct AttemptDto {
+    /// Attempt number, starting at 1.
+    pub n: u32,
+    /// The agent that ran it.
+    pub agent: String,
+    /// Model the agent ran on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// Worktree the agent worked in.
+    pub worktree: String,
+    /// Branch the agent committed on.
+    pub branch: String,
+    /// The agent's report, once it has reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub report: Option<ReportDto>,
+    /// Gates run against this attempt, in order.
+    pub gates: Vec<GateDto>,
+    /// Reviews dispatched for this attempt, in order.
+    pub reviews: Vec<ReviewDto>,
+}
+
+/// What an agent reported about an attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ReportDto.ts")]
+pub struct ReportDto {
+    /// Outcome of the attempt.
+    pub status: ReportStatusDto,
+    /// What the agent says it did.
+    pub summary: String,
+    /// Test commands the agent ran, with their result.
+    pub tests: Vec<String>,
+    /// Normalized paths the agent changed.
+    pub changed_paths: Vec<String>,
+    /// Commit the agent made, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub commit: Option<String>,
+    /// Skills the agent used.
+    pub skills_used: Vec<String>,
+}
+
+/// The outcome of one gate against one attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "GateDto.ts")]
+pub struct GateDto {
+    /// Gate name.
+    pub gate: String,
+    /// Whether it passed.
+    pub passed: bool,
+    /// What it found.
+    pub findings: Vec<FindingDto>,
+    /// True when the gate carried a reviewer's provenance.
+    ///
+    /// A review gate without it was recorded by something other than the
+    /// reviewer's packet, which is not an independent review.
+    pub proven: bool,
+}
+
+/// One finding a gate reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "FindingDto.ts")]
+pub struct FindingDto {
+    /// How bad it is.
+    pub severity: SeverityDto,
+    /// One-line title.
+    pub title: String,
+    /// Where it is, e.g. `crates/shprd-core/src/log.rs:42`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub location: Option<String>,
+    /// The full detail, including what to do about it.
+    pub detail: String,
+}
+
+/// A review handed to a reviewer for an attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ReviewDto.ts")]
+pub struct ReviewDto {
+    /// The agent string the review was handed to.
+    pub reviewer: String,
+    /// True when the reviewer shares the author's vendor.
+    pub degraded: bool,
+}
+
+/// What the run knows about one agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AgentDto.ts")]
+pub struct AgentDto {
+    /// The agent's id.
+    pub id: String,
+    /// Whether the agent is on cooldown.
+    pub dry: bool,
+    /// Why it is dry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dry_reason: Option<String>,
+    /// When it is expected back, ms since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dry_until_ms: Option<u64>,
+}
+
+/// Something waiting on a human.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "NeedDto.ts")]
+pub struct NeedDto {
+    /// The task it concerns, when it is not run-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task: Option<String>,
+    /// What needs deciding.
+    pub body: String,
+    /// The action taken if nobody answers.
+    pub default_action: String,
+    /// The log sequence that raised it.
+    pub seq: u64,
+}
+
+/// The whole board: one snapshot, rebuilt from the fold on every request.
+///
+/// It is the small part of the run a UI draws — the run's identity, every task
+/// with its attempts, the agents' dry marks, and what is waiting on a human. A
+/// client that needs the whole log asks [`ChangeDto`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SnapshotDto.ts")]
+pub struct SnapshotDto {
+    /// The log sequence this snapshot was folded up to.
+    pub seq: u64,
+    /// The run's identity, once it has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run: Option<RunDto>,
+    /// Every task, in id order.
+    pub tasks: Vec<TaskDto>,
+    /// Every agent the run has seen.
+    pub agents: Vec<AgentDto>,
+    /// Everything waiting on a human, oldest first.
+    pub needs: Vec<NeedDto>,
+    /// Whether the run has finished.
+    pub finished: bool,
+}
+
+impl SnapshotDto {
+    /// Folds `state` into the snapshot a board draws.
+    pub fn from_state(state: &RunState) -> Self {
+        snapshot::snapshot(state)
+    }
+}
+
+/// What a client learns from `GET /api/health`, before it authenticates.
+///
+/// `id` is the handshake: a client that read `service.json`'s `port` checks it
+/// here before it sends the token, so it never sends a secret to whatever else
+/// happens to hold that port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "HealthDto.ts")]
+pub struct HealthDto {
+    /// Always true; a failing service does not answer at all.
+    pub ok: bool,
+    /// The service's identity, as `service.json` records it.
+    pub id: String,
+    /// The service's version.
+    pub version: String,
+}
+
+/// One event's footprint, as change notifications carry it.
+///
+/// The change channel carries only what tells a client whether it must refetch
+/// the snapshot: the position, the kind, and the task if the event named one.
+/// A client that needs the payload reads the snapshot or the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "EventNoticeDto.ts")]
+pub struct EventNoticeDto {
+    /// The event's position in the log.
+    pub seq: u64,
+    /// When it was appended, ms since the Unix epoch.
+    pub at_ms: u64,
+    /// The event's kind, e.g. `task_added`.
+    pub kind: String,
+    /// The task it named, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task: Option<String>,
+}
+
+/// What `GET /api/changes` and the WebSocket answer with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChangeDto.ts")]
+pub struct ChangeDto {
+    /// The log's last sequence after the change.
+    pub seq: u64,
+    /// Every event after the sequence the client asked from.
+    pub events: Vec<EventNoticeDto>,
+}
+
+/// One action a client may post to `POST /api/action`.
+///
+/// It is one closed union: a kind the service does not know is refused, so a
+/// client can never reach past the verbs the CLI already has. The handler does
+/// not implement any of them itself — [`crate::actions`] does, against the same
+/// fold and log the CLI writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export_to = "Action.ts")]
+pub enum Action {
+    /// Add a task to the run plan, as `shprd agent task add` does.
+    ///
+    /// Spelled `task.add`; [`Action::from_value`] accepts `task_add` too,
+    /// because a JSON client and the Rust type would otherwise disagree about
+    /// one separator.
+    #[serde(rename = "task.add")]
+    TaskAdd {
+        /// Task id, e.g. `M1.6`.
+        task: String,
+        /// One-line title.
+        title: String,
+        /// Repo-relative path the task may change.
+        #[serde(default)]
+        scope: Vec<String>,
+        /// What must be true when the task is done.
+        #[serde(default)]
+        acceptance: Vec<String>,
+        /// Free-form tag.
+        #[serde(default)]
+        tags: Vec<String>,
+        /// Skill the agent must load.
+        #[serde(default)]
+        skills: Vec<String>,
+        /// Task that must land first.
+        #[serde(default)]
+        deps: Vec<String>,
+    },
+    /// Read one task's status and attempts out of the fold.
+    ///
+    /// It is a query wearing the action envelope, because a Herdr mod can only
+    /// fetch: a panel that draws one task asks for one task, not the whole log.
+    /// It appends nothing. Spelled `task.status`, with `task_status` accepted.
+    #[serde(rename = "task.status")]
+    TaskStatus {
+        /// The task to read.
+        task: String,
+    },
+}
+
+impl Action {
+    /// Every kind this envelope accepts, so a client that names another one is
+    /// told which ones exist instead of getting a parse error.
+    ///
+    /// Keep it beside the enum: `every_action_kind_is_listed` fails when a
+    /// variant is added without its kind.
+    pub const KINDS: &'static [&'static str] =
+        &["task.add", "task_add", "task.status", "task_status"];
+
+    /// The action's kind, as the envelope spells it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::TaskAdd { .. } => "task.add",
+            Self::TaskStatus { .. } => "task.status",
+        }
+    }
+
+    /// Parses one envelope, accepting the snake_case spelling of its kind too.
+    ///
+    /// The brief spells the actions `task.add` and `task.status`; a Rust client
+    /// shaped by the type's variants writes `task_add`. Both are the same
+    /// action, and serde has no alias that its own derive and ts-rs both read
+    /// without warning, so the one substitution lives here.
+    pub fn from_value(mut value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) {
+            let canonical = match kind {
+                "task_add" => Some("task.add"),
+                "task_status" => Some("task.status"),
+                _ => None,
+            };
+            if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {
+                object.insert(
+                    "kind".to_string(),
+                    serde_json::Value::String(canonical.to_string()),
+                );
+            }
+        }
+        serde_json::from_value(value)
+    }
+}
+
+/// What a successful action answers with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ActionReply.ts")]
+pub struct ActionReply {
+    /// True; a refused action answers with [`ErrorBody`] and a failure status.
+    pub ok: bool,
+    /// The log's sequence after the action.
+    pub seq: u64,
+    /// The task the action was about, folded as it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task: Option<TaskDto>,
+}
+
+/// Why a request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "ErrorCode.ts")]
+pub enum ErrorCode {
+    /// The token was missing or wrong.
+    Unauthorized,
+    /// The request came from another origin.
+    CrossOrigin,
+    /// A write did not carry `x-shprd: 1`.
+    MissingHeader,
+    /// The body was not a well-formed request.
+    BadRequest,
+    /// The action's kind is not one this service knows.
+    UnknownAction,
+    /// The task the request named does not exist.
+    UnknownTask,
+    /// The path is not one this service serves.
+    NotFound,
+    /// A transition rule refused the action; nothing was written.
+    Refused,
+    /// The event log could not be read or written.
+    Ledger,
+    /// Anything else.
+    Internal,
+}
+
+/// The body of every refusal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ErrorBody.ts")]
+pub struct ErrorBody {
+    /// Why the request was refused.
+    pub code: ErrorCode,
+    /// One line a human can act on.
+    pub message: String,
+}
+
+/// One message the WebSocket pushes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "WsMessage.ts")]
+pub enum WsMessage {
+    /// The first message on every socket: who this is, and where the log is.
+    Hello {
+        /// The service's identity.
+        id: String,
+        /// The service's version.
+        version: String,
+        /// The log's last sequence at connect time.
+        seq: u64,
+    },
+    /// New events were appended since the last message.
+    Change {
+        /// The change itself, the same shape `GET /api/changes` answers with.
+        change: ChangeDto,
+    },
+    /// An answer to a client's `{"type":"ping"}`.
+    Pong {
+        /// The value the ping carried, echoed back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        at: Option<i64>,
+    },
+}
+
+/// One message a client may send on the WebSocket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "ClientMessage.ts")]
+pub enum ClientMessage {
+    /// Ask for a [`WsMessage::Pong`]; also a liveness check.
+    Ping {
+        /// A value to echo back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        at: Option<i64>,
+    },
+}
+
+/// Every type the API exports, as `(file name, file contents)`.
+///
+/// Order does not matter: the generator writes one file per type and takes each
+/// type's own imports from its declaration.
+pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
+    fn one<T: TS + 'static>() -> Result<(String, String), ts_rs::ExportError> {
+        let cfg = crate::bindings::config();
+        let name = match T::output_path().and_then(|path| path.to_str().map(str::to_owned)) {
+            Some(name) => name,
+            None => format!("{}.ts", T::ident(&cfg)),
+        };
+        Ok((name, T::export_to_string(&cfg)?))
+    }
+    Ok(vec![
+        one::<TaskStatusDto>()?,
+        one::<ReportStatusDto>()?,
+        one::<SeverityDto>()?,
+        one::<RunDto>()?,
+        one::<TaskDto>()?,
+        one::<AttemptDto>()?,
+        one::<ReportDto>()?,
+        one::<GateDto>()?,
+        one::<FindingDto>()?,
+        one::<ReviewDto>()?,
+        one::<AgentDto>()?,
+        one::<NeedDto>()?,
+        one::<SnapshotDto>()?,
+        one::<HealthDto>()?,
+        one::<EventNoticeDto>()?,
+        one::<ChangeDto>()?,
+        one::<Action>()?,
+        one::<ActionReply>()?,
+        one::<ErrorCode>()?,
+        one::<ErrorBody>()?,
+        one::<WsMessage>()?,
+        one::<ClientMessage>()?,
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn task_add() -> Action {
+        Action::TaskAdd {
+            task: "T1".to_string(),
+            title: "t".to_string(),
+            scope: vec!["crates/a".to_string()],
+            acceptance: vec!["works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn both_spellings_of_a_kind_are_the_same_action() {
+        let dotted = serde_json::json!({
+            "kind": "task.add", "task": "T1", "title": "t",
+            "scope": ["crates/a"], "acceptance": ["works"],
+        });
+        let snake = serde_json::json!({
+            "kind": "task_add", "task": "T1", "title": "t",
+            "scope": ["crates/a"], "acceptance": ["works"],
+        });
+        assert_eq!(Action::from_value(dotted).expect("dotted"), task_add());
+        assert_eq!(Action::from_value(snake).expect("snake"), task_add());
+        assert_eq!(task_add().kind(), "task.add");
+    }
+
+    #[test]
+    fn every_action_kind_is_listed() {
+        assert!(Action::KINDS.contains(&task_add().kind()));
+        assert!(
+            Action::KINDS.contains(
+                &Action::TaskStatus {
+                    task: "T1".to_string()
+                }
+                .kind()
+            )
+        );
+    }
+
+    #[test]
+    fn an_empty_scope_and_acceptance_default_to_nothing() {
+        let action = Action::from_value(serde_json::json!({
+            "kind": "task.add", "task": "T1", "title": "t",
+        }))
+        .expect("the optional lists default");
+        match action {
+            Action::TaskAdd {
+                scope, acceptance, ..
+            } => {
+                assert!(scope.is_empty());
+                assert!(acceptance.is_empty());
+            }
+            other => panic!("expected a task.add, got {other:?}"),
+        }
+    }
+}
