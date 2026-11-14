@@ -598,6 +598,8 @@ pub struct ReviewBrief<'a> {
     pub dir: &'a str,
     /// Whether the review is degraded, and so must say so.
     pub degraded: bool,
+    /// The reviewer role's standing words, when its prompt can be read.
+    pub prompt: Option<&'a str>,
 }
 
 /// Renders the brief a reviewer reads before its first turn.
@@ -608,6 +610,10 @@ pub struct ReviewBrief<'a> {
 /// is outside the repository and the engine records the verdict instead.
 pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     let mut out = String::new();
+    if let Some(prompt) = input.prompt {
+        out.push_str(prompt.trim_end());
+        out.push_str("\n\n");
+    }
     out.push_str(&format!(
         "# REVIEW {} {}\n\n",
         input.task.id, input.task.title
@@ -877,6 +883,9 @@ pub fn review(
     if let Some(note) = &reviewer.note {
         eprintln!("{note}");
     }
+    // The reviewer's standing words are read before any effect: a prompt that
+    // cannot be read must leave no packet, tab or event behind.
+    let prompt = spawn::role_prompt(&env.spawn, "reviewer")?;
     // A restart replaces the review it restarts: the old reviewer's tab is
     // closed and any findings it half-wrote are removed before the packet is
     // rebuilt, so nothing reads a stale verdict as this review's.
@@ -903,6 +912,7 @@ pub fn review(
         model: reviewer.model.as_deref(),
         dir: &dir.display().to_string(),
         degraded: reviewer.degraded,
+        prompt: Some(&prompt),
     };
     spawn::write_brief(&brief_path, &render_review_brief(&brief))?;
     // Who reviews, and whether the review can be independent, is a recorded
@@ -1180,6 +1190,8 @@ project_dirs = []
                     ctx,
                     layout: Layout::default_for_home(self.home.path()),
                     briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                    home: self.home.path().to_path_buf(),
+                    settings: shprd_core::settings::Loaded::default(),
                     run: "t1".to_string(),
                     base_branch: "integration/m4".to_string(),
                     repo_name: self.repo_name(),
@@ -1320,6 +1332,13 @@ project_dirs = []
         );
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        // The reviewer's own words lead the brief: the shipped reviewer prompt
+        // is installed on first use and read in.
+        assert!(brief.starts_with("<!--"), "{brief}");
+        assert!(
+            brief.contains("You review one finished attempt's work"),
+            "{brief}"
+        );
         // The reviewer writes and stops: no shprd verb is asked of it, because
         // its folder is outside the repository and the engine records the
         // verdict.

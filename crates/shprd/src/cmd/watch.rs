@@ -1371,6 +1371,8 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                home: self.home.path().to_path_buf(),
+                settings: shprd_core::settings::Loaded::default(),
                 run: "t1".to_string(),
                 base_branch: "integration/m5".to_string(),
                 repo_name: self.repo_name(),

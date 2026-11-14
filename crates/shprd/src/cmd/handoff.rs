@@ -390,10 +390,13 @@ pub fn handoff(
     let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
     let brief_path = handoff_brief_path(&env.briefs_dir, &env.run, &task.id, attempt.n, handoff_no);
     let checkpoint = checkpoint(&worktree, &from)?;
+    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
+    // The newcomer's words are read before the workspace and the pane are
+    // touched: a prompt that cannot be read must cost nothing.
+    let context = spawn::brief_context(env, &to, None)?;
     let workspace = spawn::workspace_of(mux, env)?;
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
-    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let start = BriefInput {
         task,
         run: &env.run,
@@ -405,6 +408,9 @@ pub fn handoff(
         skills: &skills,
         // A handoff is the same attempt, so nothing was archived for it.
         archive: None,
+        prompt: Some(&context.prompt),
+        settings: Some(&context.settings),
+        role: context.role.as_ref(),
     };
     let base = base_brief(env, &task.id, attempt.n, &start);
     let brief = match &req.opening {
@@ -747,6 +753,8 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                home: self.home.path().to_path_buf(),
+                settings: shprd_core::settings::Loaded::default(),
                 run: "t1".to_string(),
                 base_branch: "integration/m5".to_string(),
                 repo_name: self.repo_name(),

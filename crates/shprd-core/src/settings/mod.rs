@@ -1885,7 +1885,11 @@ impl Resolved {
 }
 
 /// Everything one resolution reads from disk: the person's file and the repo's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// [`Loaded::default`] is "no files at all": nothing sets anything, so every
+/// key resolves to the built-in value and every role to its shipped identity. A
+/// test that does not care about settings starts there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Loaded {
     /// The person's file.
     pub file: File,

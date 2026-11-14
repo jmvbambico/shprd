@@ -21,8 +21,10 @@ use shprd_agents::models::AgentRef;
 use shprd_agents::skills::{CompatEntry, Role as SkillRole, Verdict};
 use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 use shprd_core::config::Skills;
-use shprd_core::event::{Actor, EventKind, Finding, ResourceAction, ResourceKind, Severity};
-use shprd_core::state::{GateResult, ResourceStatus, RunState, Task, TaskStatus};
+use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
+use shprd_core::prompts::{self, PromptRef};
+use shprd_core::settings::{Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Value};
+use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
@@ -52,6 +54,11 @@ pub struct SpawnEnv<'a> {
     pub layout: Layout,
     /// The directory brief files are written under, `<home>/.shprd/briefs`.
     pub briefs_dir: PathBuf,
+    /// The person's home directory, which holds their prompts and settings.
+    pub home: PathBuf,
+    /// The settings as they resolve for this repository, before a task's own
+    /// layer is added: the brief's Settings block is rendered from them.
+    pub settings: Loaded,
     /// The run this task belongs to.
     pub run: String,
     /// The branch a worktree is cut from: the run's integration branch.
@@ -163,6 +170,9 @@ pub fn spawn(
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
+    // The role's words and the Settings block are read before anything is
+    // touched: an agent whose prompt cannot be read must cost nothing.
+    let context = brief_context(env, &pick, req.effort.as_deref())?;
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
@@ -184,6 +194,9 @@ pub fn spawn(
         worktree: &worktree.display().to_string(),
         skills: &skills,
         archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
+        prompt: Some(&context.prompt),
+        settings: Some(&context.settings),
+        role: context.role.as_ref(),
     });
     write_brief(&brief_path, &brief)?;
     // The workspace must exist before a worktree does, so a repo the human has
@@ -1194,157 +1207,93 @@ pub(crate) fn write_brief(path: &Path, text: &str) -> Result<(), CliError> {
         .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
-/// What a brief says, as data, so the rendering is testable on its own.
-pub struct BriefInput<'a> {
-    /// The task the attempt works on.
-    pub task: &'a Task,
-    /// The run id.
-    pub run: &'a str,
-    /// The attempt number.
-    pub attempt: u32,
-    /// The program the attempt runs.
-    pub agent: &'a str,
-    /// The model it runs, when one was chosen.
-    pub model: Option<&'a str>,
-    /// The branch the agent commits on.
-    pub branch: &'a str,
-    /// The worktree the agent works in.
-    pub worktree: &'a str,
-    /// The skills the attempt must load first.
-    pub skills: &'a [String],
-    /// The archive ref the previous attempt's commits are held under, when
-    /// this attempt replaced one.
-    pub archive: Option<&'a str>,
-}
-
-/// The gate that sent the previous attempt back, when its latest gate failed.
+/// The role's words and the settings that shape one attempt, for a brief.
 ///
-/// A new attempt starts from the same task, so the brief repeats what the
-/// review or the gates rejected instead of making the agent rediscover it.
-fn previous_failure(task: &Task, attempt: u32) -> Option<&GateResult> {
-    let earlier = task
-        .attempts
-        .iter()
-        .filter(|earlier| earlier.n < attempt)
-        .max_by_key(|earlier| earlier.n)?;
-    let gate = earlier.gates.last()?;
-    (!gate.passed).then_some(gate)
+/// The Settings block has to name the layer that set each value, and the values
+/// a spawn decides itself are the task's own: the program it launches, the model
+/// and the effort it chose. Those are put into a task layer, but only where the
+/// role names nothing, so a program the person set still reads as theirs.
+pub(crate) struct BriefContext {
+    /// The role's standing instructions, read now.
+    pub(crate) prompt: String,
+    /// The settings as this task resolves them.
+    pub(crate) settings: Resolved,
+    /// The role the block describes.
+    pub(crate) role: Option<ResolvedRole>,
 }
 
-/// The word the brief prints for a finding's severity.
-fn severity_word(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Critical => "critical",
-        Severity::Major => "major",
-        Severity::Minor => "minor",
-        Severity::Trivial => "trivial",
-    }
-}
+/// The role a worker's brief is written for.
+pub(crate) const BRIEF_ROLE: &str = "worker";
 
-/// The longest detail the brief keeps from a previous attempt's finding, so one
-/// verbose finding cannot push the rest of the brief out of view.
-const DETAIL_LIMIT: usize = 300;
-
-/// One finding as the brief lists it: `- <severity>: <title> (<where>) — <why>`.
-fn finding_line(finding: &Finding) -> String {
-    let detail: String = finding.detail.chars().take(DETAIL_LIMIT).collect();
-    let detail = if detail.len() < finding.detail.len() {
-        format!("{detail}…")
-    } else {
-        detail
-    };
-    let title = if finding.title.trim().is_empty() {
-        finding
-            .location
-            .as_deref()
-            .unwrap_or(finding.detail.as_str())
-    } else {
-        finding.title.as_str()
-    };
-    let where_ = match &finding.location {
-        Some(location) => format!(" ({location})"),
-        None => String::new(),
-    };
-    format!(
-        "- {}: {title}{where_} — {detail}\n",
-        severity_word(finding.severity)
-    )
-}
-
-/// Renders the brief an agent reads before its first turn.
+/// Reads the role's prompt and resolves the settings for one attempt.
 ///
-/// It states only what the agent cannot look up faster itself: where it works,
-/// what "done" means, what it may touch, which skills to load, and how to report.
-pub fn render_brief(input: &BriefInput<'_>) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# {} {}\n\n", input.task.id, input.task.title));
-    out.push_str(&format!(
-        "run `{}`, attempt {}, agent `{}`{}\n",
-        input.run,
-        input.attempt,
-        input.agent,
-        match input.model {
-            Some(model) => format!(" ({model})"),
-            None => String::new(),
+/// A prompt that cannot be read is refused before the worktree, the tab and the
+/// event: an agent started without its words would do the wrong work quickly.
+pub(crate) fn brief_context(
+    env: &SpawnEnv<'_>,
+    pick: &Pick,
+    effort: Option<&str>,
+) -> Result<BriefContext, CliError> {
+    let base = env.settings.resolve(None);
+    let mut task = Layer::new();
+    if let Some(role) = base.role(BRIEF_ROLE) {
+        let key = |field: RoleField| Key::Role {
+            id: BRIEF_ROLE.to_owned(),
+            field,
+        };
+        if role.agent.is_none() {
+            task.set(key(RoleField::Agent), Value::Text(pick.agent.clone()));
         }
-    ));
-    out.push_str(&format!(
-        "branch `{}` in worktree `{}`\n\n",
-        input.branch, input.worktree
-    ));
-    if let Some(ref_name) = input.archive {
-        out.push_str(&format!(
-            "the attempt before this one was archived at `{ref_name}`: \
-             `git cherry-pick {ref_name}` brings over whatever of its work you still need\n\n"
-        ));
-    }
-    if let Some(gate) = previous_failure(input.task, input.attempt) {
-        out.push_str("## Why the previous attempt was sent back\n\n");
-        out.push_str(&format!("gate `{}` failed:\n\n", gate.gate));
-        for finding in &gate.findings {
-            out.push_str(&finding_line(finding));
+        if role.model.is_none()
+            && let Some(model) = &pick.model
+        {
+            task.set(key(RoleField::Model), Value::Text(model.clone()));
         }
-        out.push_str("Fix these first; keep what already works.\n");
+        if role.effort.is_none()
+            && let Some(effort) = effort
+        {
+            task.set(key(RoleField::Effort), Value::Text(effort.to_owned()));
+        }
     }
-    out.push_str("\n## Acceptance criteria\n\n");
-    for item in &input.task.acceptance {
-        out.push_str(&format!("- {item}\n"));
-    }
-    out.push_str("\n## Scope — change only these paths\n\n");
-    for path in &input.task.scope {
-        out.push_str(&format!("- {path}\n"));
-    }
-    out.push_str("\n## Skills to load first\n\n");
-    if input.skills.is_empty() {
-        out.push_str("- none\n");
-    }
-    for skill in input.skills {
-        out.push_str(&format!("- {skill}\n"));
-    }
-    out.push_str("\n## Rules\n\n");
-    out.push_str(&format!(
-        "- work only in `{}`; change nothing outside the scope above\n",
-        input.worktree
-    ));
-    out.push_str(&format!(
-        "- commit on your branch `{}`; never push, never open a pull request\n",
-        input.branch
-    ));
-    out.push_str("- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n");
-    out.push_str(&format!(
-        "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
-        t = input.task.id
-    ));
-    out.push_str(&format!(
-        "- report when you are done: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
-         plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused \
-         without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each \
-         path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used\n",
-        t = input.task.id,
-        a = input.attempt
-    ));
-    out
+    let settings = env.settings.resolve(Some(&task));
+    let role = settings.role(BRIEF_ROLE);
+    let prompt = role_prompt(env, BRIEF_ROLE)?;
+    Ok(BriefContext {
+        prompt,
+        settings,
+        role,
+    })
 }
+
+/// The standing words of `role_id`: the file its `prompt` names, read.
+///
+/// A role that names no prompt has no words to give, so the built-in prompt of
+/// its own id is used; a custom role's `prompt:<id>` or path is read as it
+/// says. A prompt that cannot be read is refused before anything is started.
+pub(crate) fn role_prompt(env: &SpawnEnv<'_>, role_id: &str) -> Result<String, CliError> {
+    let resolved = env.settings.resolve(None);
+    let reference = resolved
+        .role(role_id)
+        .map(|role| role.prompt.value)
+        .unwrap_or_else(|| format!("{}{role_id}", PromptRef::PREFIX));
+    let reference = PromptRef::parse(&reference).map_err(invalid)?;
+    reference
+        .read(&prompts::prompts_dir(&env.home), &env.home)
+        .map_err(invalid)
+}
+
+/// A prompt that cannot be read is the person's to fix, so it is a refusal.
+fn invalid(error: shprd_core::prompts::PromptError) -> CliError {
+    CliError::Invalid(anyhow!(error))
+}
+
+/// The brief a task's agent reads: the role's words, the task, the Settings
+/// block.
+///
+/// The rendering lives in [`shprd_views::brief`] with the run's other views, so
+/// the whole document can be snapshot-tested without a worktree; the name
+/// `render_brief` stays here because that is what this module's callers use.
+pub use shprd_views::brief::{BriefInput, task_brief as render_brief};
 
 /// Builds the environment a spawn runs in from the process environment, the
 /// config and the run log.
@@ -1370,6 +1319,8 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
     let config = shprd_core::config::load(Some(&global), Some(&repo_config))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
     let compat = read_compat(&data.join("skills").join("compat.toml"))?;
+    let settings = Loaded::read(&home, Some(&ctx.root))
+        .map_err(|err| CliError::other(anyhow!(err).context("loading the settings")))?;
     let state = ctx.state()?;
     let run = state
         .run
@@ -1385,6 +1336,8 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         ctx,
         layout: Layout::default_for_home(&home),
         briefs_dir: home.join(".shprd").join("briefs"),
+        home,
+        settings,
         run: run.run_id.clone(),
         base_branch: run.integration_branch.clone(),
         repo_name,
@@ -1684,7 +1637,7 @@ mod flow_tests {
     use super::*;
     use std::process::Command;
 
-    use shprd_core::event::{Actor, ReportStatus, ReviewSource};
+    use shprd_core::event::{Actor, Finding, ReportStatus, ReviewSource, Severity};
     use shprd_core::state::{ResourceRecord, ResourceStatus, TaskStatus};
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
@@ -1816,6 +1769,8 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                home: self.home.path().to_path_buf(),
+                settings: Loaded::default(),
                 run: "t1".to_string(),
                 base_branch: "integration/m4".to_string(),
                 repo_name: self.repo_name(),
@@ -2018,8 +1973,20 @@ project_dirs = []
         assert_eq!(report.branch, "shprd/t1/T1");
         assert_eq!(report.skills, vec!["tdd"]);
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        // The role's own words come first: the shipped worker prompt is
+        // installed on first use and read into the brief.
+        assert!(
+            brief.starts_with("<!--"),
+            "the shipped worker prompt leads the brief: {brief}"
+        );
+        assert!(brief.contains("You work on one shprd task"), "{brief}");
         assert!(brief.contains("Make spawn real"), "{brief}");
         assert!(brief.contains("crates/shprd"), "{brief}");
+        // And the Settings block names the program this spawn chose as the
+        // task's own, with the inherited values below it.
+        assert!(brief.contains("## Your settings"), "{brief}");
+        assert!(brief.contains("- Program: sh (this task)"), "{brief}");
+        assert!(brief.contains("- Merge: ask (built in)"), "{brief}");
         // The tab id is recorded beside the brief, so a later prompt reaches
         // this exact tab even when another tab carries the same title.
         let recorded = tab_path(
@@ -2875,7 +2842,8 @@ project_dirs = []
 mod tests {
     use super::*;
     use shprd_agents::skills::Role as SkillRole;
-    use shprd_core::state::TaskStatus;
+    use shprd_core::event::{Finding, Severity};
+    use shprd_core::state::{GateResult, TaskStatus};
 
     #[test]
     fn a_task_tab_record_is_matched_by_its_whole_name() {
@@ -3074,6 +3042,9 @@ mod tests {
             worktree: "/wt/m4/M4.4",
             skills: &skills,
             archive: None,
+            prompt: None,
+            settings: None,
+            role: None,
         });
         for needle in [
             "# M4.4 Make spawn real",
@@ -3119,6 +3090,9 @@ mod tests {
             worktree: "/wt/m4/M4.4",
             skills: &skills,
             archive: None,
+            prompt: None,
+            settings: None,
+            role: None,
         });
         for needle in [
             "## Why the previous attempt was sent back",
@@ -3150,6 +3124,9 @@ mod tests {
                 worktree: "/wt/m4/M4.4",
                 skills: &skills,
                 archive: None,
+                prompt: None,
+                settings: None,
+                role: None,
             })
         };
         assert!(!brief_for(1).contains("sent back"));
