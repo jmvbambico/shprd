@@ -8,8 +8,10 @@
 //! [`crate::spec::ModelsSpec::provider_qualified`].
 //!
 //! A program lists its models one of two ways, as
-//! [`crate::spec::CatalogSource`] says: asked of the program, or read from a
-//! static list in `data/models/` ([`StaticCatalog`]).
+//! [`crate::spec::CatalogSource`] says: asked of the program (its output read by
+//! the spec's [`crate::spec::CatalogParser`]) or read from a static list in
+//! `data/models/` ([`StaticCatalog`]). Both become a [`Catalog`]: the models,
+//! the effort levels each one takes, and the program's levels overall.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -20,7 +22,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::detect::{self, DetectError};
-use crate::spec::{HarnessSpec, ModelsSpec};
+use crate::spec::{CatalogParser, EffortSource, HarnessSpec, ModelsSpec};
 
 /// Why an agent string, an effort level or a model listing was rejected.
 #[derive(Debug, Error)]
@@ -81,6 +83,16 @@ pub enum ModelError {
         /// The underlying TOML error.
         #[source]
         source: toml::de::Error,
+    },
+    /// A catalog's output is not in the shape its parser reads.
+    #[error("`{program}` lists its models in a shape {parser:?} cannot read: {reason}")]
+    CatalogFormat {
+        /// The program whose catalog could not be read.
+        program: String,
+        /// The parser that was asked to read it.
+        parser: CatalogParser,
+        /// What was wrong, in a few words.
+        reason: String,
     },
 }
 
@@ -181,9 +193,9 @@ pub fn parse_effort(s: &str) -> Result<String, ModelError> {
 
 /// List the models a harness offers, or [`None`] when its spec has no command.
 ///
-/// The command runs from the `:`-separated `path_env` with `timeout`. Each
-/// non-empty output line contributes its first whitespace token: CLIs decorate
-/// the name (`* fast`) and the first token is the name. Duplicates are dropped
+/// The command runs from the `:`-separated `path_env` with `timeout`, and its
+/// output is read by the spec's [`CatalogParser`] (see [`parse_catalog`]), so a
+/// JSON catalog yields model names, not a line of JSON. Duplicates are dropped
 /// and the CLI's order is kept. The output itself is never printed here, so a
 /// caller decides whether a model it does not find is worth a warning.
 pub fn list_models(
@@ -207,7 +219,289 @@ pub fn list_models(
     let args: Vec<String> = parts.cloned().collect();
     let output = detect::run_with_timeout(&binary, &args, &[], timeout)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(Some(model_names(&stdout)))
+    let catalog = parse_catalog(spec, &stdout)?;
+    Ok(Some(
+        catalog.models.into_iter().map(|model| model.id).collect(),
+    ))
+}
+
+/// One model a program offers, as its catalog describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogModel {
+    /// The name the program's model flag takes, e.g. `Command Code/deepseek/x`.
+    pub id: String,
+    /// The words a person sees; the id when the catalog names no other.
+    pub name: String,
+    /// The effort levels this model takes, lowest first.
+    ///
+    /// Empty when the program takes none, or when the catalog does not say.
+    pub efforts: Vec<String>,
+    /// The level the model starts at when a role names none, if the catalog says.
+    pub default_effort: Option<String>,
+    /// Whether the model has a speed tier of its own, so a role may ask for fast.
+    pub fast: bool,
+}
+
+/// A program's models and effort levels, as its catalog describes them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Catalog {
+    /// The models, in the order the catalog returned them.
+    pub models: Vec<CatalogModel>,
+    /// The levels the program takes overall, lowest first.
+    ///
+    /// The picker offers a model's own levels where the catalog carries them
+    /// and these where it does not.
+    pub efforts: Vec<String>,
+}
+
+impl Catalog {
+    /// The model called `id`, if the catalog names one.
+    pub fn model(&self, id: &str) -> Option<&CatalogModel> {
+        self.models.iter().find(|model| model.id == id)
+    }
+
+    /// The model names, in the catalog's order.
+    pub fn names(&self) -> Vec<&str> {
+        self.models.iter().map(|model| model.id.as_str()).collect()
+    }
+
+    /// The levels `model` takes, empty when it takes none; a model the catalog
+    /// does not name falls back to the program's own levels.
+    pub fn efforts_for(&self, model: &str) -> &[String] {
+        match self.model(model) {
+            Some(found) => &found.efforts,
+            None => &self.efforts,
+        }
+    }
+
+    /// Build a catalog from a program's static list, with `levels` as the
+    /// program's own effort levels (they are not part of the file).
+    pub fn from_static(list: &StaticCatalog, levels: &[String]) -> Catalog {
+        let models = list
+            .model
+            .iter()
+            .map(|model| CatalogModel {
+                id: model.id.clone(),
+                name: model.name.clone().unwrap_or_else(|| model.id.clone()),
+                efforts: if model.efforts.is_empty() {
+                    levels.to_vec()
+                } else {
+                    model.efforts.clone()
+                },
+                default_effort: model.default_effort.clone(),
+                fast: false,
+            })
+            .collect();
+        Catalog {
+            models,
+            efforts: levels.to_vec(),
+        }
+    }
+}
+
+/// Read one catalog command's output into models and effort levels.
+///
+/// Which shape the output is in comes from the spec's
+/// [`CatalogParser`](crate::spec::CatalogParser); the levels each model takes
+/// come from the output where the program carries them (Codex does) and from
+/// [`crate::spec::EffortSpec::levels`] otherwise. A spec with no parser and no
+/// list command yields an empty catalog.
+pub fn parse_catalog(spec: &HarnessSpec, text: &str) -> Result<Catalog, ModelError> {
+    let levels = program_levels(spec);
+    let models = match spec.models.parser {
+        CatalogParser::FirstToken => first_token_models(text, &levels),
+        CatalogParser::PiTable => pi_table_models(spec, text)?,
+        CatalogParser::CodexCatalog => codex_catalog_models(spec, text)?,
+    };
+    Ok(Catalog {
+        models,
+        efforts: levels,
+    })
+}
+
+/// The static catalog a harness names, read from `models_dir`.
+///
+/// [`None`] when the spec names no static list; an error when it names one that
+/// cannot be read or parsed.
+pub fn static_catalog(
+    spec: &HarnessSpec,
+    models_dir: &Path,
+) -> Result<Option<Catalog>, ModelError> {
+    let Some(path) = spec.models.static_list_path(models_dir) else {
+        return Ok(None);
+    };
+    let list = StaticCatalog::load(&path)?;
+    Ok(Some(Catalog::from_static(&list, &program_levels(spec))))
+}
+
+/// The program's own effort levels, from the spec.
+///
+/// A program that takes no level, or gets them only from its catalog, still
+/// carries the fallback list here; an empty list means "none at all".
+fn program_levels(spec: &HarnessSpec) -> Vec<String> {
+    if spec.models.efforts.source == EffortSource::None {
+        Vec::new()
+    } else {
+        spec.models.efforts.levels.clone()
+    }
+}
+
+/// Models from a listing that puts one name per line, as its first word.
+fn first_token_models(text: &str, levels: &[String]) -> Vec<CatalogModel> {
+    model_names(text)
+        .into_iter()
+        .map(|id| CatalogModel {
+            name: id.clone(),
+            efforts: levels.to_vec(),
+            default_effort: None,
+            fast: false,
+            id,
+        })
+        .collect()
+}
+
+/// The columns of pi's `--list-models` table, by where each one starts.
+struct PiColumns {
+    provider: usize,
+    model: usize,
+    context: usize,
+    thinking: usize,
+    images: usize,
+}
+
+impl PiColumns {
+    /// Read the header line, or say which column is missing.
+    fn parse(spec: &HarnessSpec, header: &str) -> Result<PiColumns, ModelError> {
+        let column = |name: &str| {
+            header.find(name).ok_or_else(|| ModelError::CatalogFormat {
+                program: spec.id.clone(),
+                parser: CatalogParser::PiTable,
+                reason: format!("the header has no `{name}` column: {header:?}"),
+            })
+        };
+        Ok(PiColumns {
+            provider: column("provider")?,
+            model: column("model")?,
+            context: column("context")?,
+            thinking: column("thinking")?,
+            images: column("images")?,
+        })
+    }
+
+    /// One column of one row, trimmed; empty when the row is too short.
+    fn slice(line: &str, start: usize, end: usize) -> String {
+        line.get(start..end).unwrap_or_default().trim().to_owned()
+    }
+}
+
+/// Models from pi's `--list-models` table.
+///
+/// Each row is `provider  model  context  max-out  thinking  images`. The
+/// provider may hold a space (`Command Code`), so the columns are read by the
+/// header's offsets rather than by splitting on whitespace, and the model the
+/// flag takes is `provider/model`, the reference pi's own resolver accepts
+/// (`dist/core/model-resolver.js`, v1.4.0).
+fn pi_table_models(spec: &HarnessSpec, text: &str) -> Result<Vec<CatalogModel>, ModelError> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Err(ModelError::CatalogFormat {
+            program: spec.id.clone(),
+            parser: CatalogParser::PiTable,
+            reason: "the listing is empty".to_owned(),
+        });
+    };
+    let columns = PiColumns::parse(spec, header)?;
+    let levels = program_levels(spec);
+    let mut models = Vec::new();
+    let mut seen = BTreeSet::new();
+    for line in lines {
+        let provider = PiColumns::slice(line, columns.provider, columns.model);
+        let model = PiColumns::slice(line, columns.model, columns.context);
+        let thinking = PiColumns::slice(line, columns.thinking, columns.images);
+        if provider.is_empty() || model.is_empty() {
+            continue;
+        }
+        let id = format!("{provider}/{model}");
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        models.push(CatalogModel {
+            name: id.clone(),
+            efforts: if thinking == "yes" {
+                levels.clone()
+            } else {
+                Vec::new()
+            },
+            default_effort: None,
+            fast: false,
+            id,
+        });
+    }
+    Ok(models)
+}
+
+/// Codex's catalog, as `codex debug models` and `~/.codex/models_cache.json`
+/// both write it: a `models` array, one row per model.
+#[derive(Debug, Deserialize)]
+struct CodexCatalogFile {
+    #[serde(default)]
+    models: Vec<CodexModel>,
+}
+
+/// One row of Codex's catalog; the fields the picker needs, and no others.
+#[derive(Debug, Deserialize)]
+struct CodexModel {
+    slug: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexLevel>,
+    #[serde(default)]
+    service_tiers: Vec<serde_json::Value>,
+}
+
+/// One reasoning level in a Codex model row.
+#[derive(Debug, Deserialize)]
+struct CodexLevel {
+    effort: String,
+}
+
+/// Models from Codex's JSON catalog, hidden rows left out.
+fn codex_catalog_models(spec: &HarnessSpec, text: &str) -> Result<Vec<CatalogModel>, ModelError> {
+    let file: CodexCatalogFile =
+        serde_json::from_str(text).map_err(|error| ModelError::CatalogFormat {
+            program: spec.id.clone(),
+            parser: CatalogParser::CodexCatalog,
+            reason: error.to_string(),
+        })?;
+    let fallback = program_levels(spec);
+    Ok(file
+        .models
+        .into_iter()
+        .filter(|model| model.visibility.as_deref() != Some("hide"))
+        .map(|model| {
+            let efforts: Vec<String> = model
+                .supported_reasoning_levels
+                .into_iter()
+                .map(|level| level.effort)
+                .collect();
+            CatalogModel {
+                name: model.display_name.unwrap_or_else(|| model.slug.clone()),
+                efforts: if efforts.is_empty() {
+                    fallback.clone()
+                } else {
+                    efforts
+                },
+                default_effort: model.default_reasoning_level,
+                fast: !model.service_tiers.is_empty(),
+                id: model.slug,
+            }
+        })
+        .collect())
 }
 
 impl ModelsSpec {
@@ -316,6 +610,11 @@ mod tests {
         } else {
             format!("list_command = {list_command}\nprovider_qualified = {provider_qualified}")
         };
+        harness_spec(id, &models)
+    }
+
+    /// One spec whose whole `[models]` section is `models`, as written.
+    fn harness_spec(id: &str, models: &str) -> HarnessSpec {
         let text = format!(
             r#"
 id = "{id}"
@@ -356,6 +655,231 @@ project_dirs = []
             Ok(spec) => spec,
             Err(error) => panic!("fixture should parse: {error}"),
         }
+    }
+
+    /// A captured command output the catalog tests read.
+    fn fixture(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => panic!("{} should be readable: {error}", path.display()),
+        }
+    }
+
+    /// The model `id` in `catalog`, panicking when it is not listed.
+    fn named<'a>(catalog: &'a Catalog, id: &str) -> &'a CatalogModel {
+        match catalog.model(id) {
+            Some(model) => model,
+            None => panic!("{id} should be listed: {:?}", catalog.names()),
+        }
+    }
+
+    /// The catalog of `spec`, from a captured command output.
+    fn catalog(spec: &HarnessSpec, name: &str) -> Catalog {
+        match parse_catalog(spec, &fixture(name)) {
+            Ok(catalog) => catalog,
+            Err(error) => panic!("the catalog should parse: {error}"),
+        }
+    }
+
+    #[test]
+    fn parses_a_first_token_listing() {
+        let spec = spec("opencode", r#"["opencode", "models"]"#, false);
+        let catalog = catalog(&spec, "opencode-models.txt");
+        assert_eq!(
+            catalog.names(),
+            [
+                "opencode/beam-free",
+                "opencode/big-pickle",
+                "opencode/claude-fable-5",
+                "opencode/claude-fable-5-1",
+                "opencode/claude-fable-5-2",
+                "opencode/claude-haiku-4-5",
+                "opencode/claude-haiku-5-5",
+                "opencode/claude-opus-4-5",
+                "opencode/claude-opus-4-6",
+                "opencode/claude-opus-4-7",
+                "opencode/claude-opus-4-8",
+                "opencode/claude-opus-5",
+            ]
+        );
+        assert!(catalog.efforts.is_empty(), "opencode takes no effort");
+        let model = named(&catalog, "opencode/claude-opus-5");
+        assert!(model.efforts.is_empty());
+        assert!(!model.fast);
+    }
+
+    #[test]
+    fn parses_pis_table_where_the_provider_holds_a_space() {
+        let spec = harness_spec(
+            "pi",
+            r#"list_command = ["pi", "--list-models"]
+parser = "pi_table"
+provider_qualified = true
+
+[models.efforts]
+source = "static"
+levels = ["off", "low", "high"]"#,
+        );
+        let catalog = catalog(&spec, "pi-models.txt");
+        assert_eq!(
+            catalog.names(),
+            [
+                "Command Code/deepseek/deepseek-v4.1-flash",
+                "commandcode/deepseek/deepseek-v4.1-flash",
+                "commandcode/z-ai/glm-5.3-flash",
+            ]
+        );
+        assert_eq!(catalog.efforts, ["off", "low", "high"]);
+        let model = named(&catalog, "Command Code/deepseek/deepseek-v4.1-flash");
+        assert!(model.efforts.is_empty(), "this row says thinking: no");
+    }
+
+    #[test]
+    fn a_pi_model_that_thinks_takes_the_programs_levels() {
+        let spec = harness_spec(
+            "pi",
+            r#"list_command = ["pi", "--list-models"]
+parser = "pi_table"
+
+[models.efforts]
+source = "static"
+levels = ["off", "low", "high"]"#,
+        );
+        // The same padded columns pi prints, so the offsets are the ones a
+        // captured listing has.
+        let row = |provider: &str,
+                   model: &str,
+                   context: &str,
+                   max_out: &str,
+                   thinking: &str,
+                   images: &str| {
+            format!("{provider:<12}{model:<20}{context:<9}{max_out:<9}{thinking:<10}{images}")
+        };
+        let table = format!(
+            "{}\n{}\n{}\n",
+            row(
+                "provider", "model", "context", "max-out", "thinking", "images"
+            ),
+            row(
+                "anthropic",
+                "claude-opus-4-8",
+                "1.0M",
+                "32.0K",
+                "yes",
+                "yes"
+            ),
+            row("local", "tiny", "8.0K", "1.0K", "no", "no"),
+        );
+        let catalog = match parse_catalog(&spec, &table) {
+            Ok(catalog) => catalog,
+            Err(error) => panic!("the table should parse: {error}"),
+        };
+        assert_eq!(catalog.names(), ["anthropic/claude-opus-4-8", "local/tiny"]);
+        assert_eq!(
+            catalog.efforts_for("anthropic/claude-opus-4-8"),
+            ["off", "low", "high"]
+        );
+        assert!(catalog.efforts_for("local/tiny").is_empty());
+    }
+
+    #[test]
+    fn parses_the_codex_catalog_and_leaves_hidden_models_out() {
+        let spec = harness_spec(
+            "codex",
+            r#"list_command = ["codex", "debug", "models"]
+parser = "codex_catalog"
+
+[models.efforts]
+source = "catalog"
+levels = ["low", "medium", "high", "xhigh", "max", "ultra"]"#,
+        );
+        let catalog = catalog(&spec, "codex-models.json");
+        assert_eq!(
+            catalog.names(),
+            ["gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"],
+            "the hidden rows are not offered"
+        );
+        let terra = named(&catalog, "gpt-5.6-terra");
+        assert_eq!(terra.name, "GPT-5.6-Terra");
+        assert_eq!(
+            terra.efforts,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(terra.default_effort.as_deref(), Some("medium"));
+        assert!(!terra.fast, "no model on this account has a service tier");
+    }
+
+    #[test]
+    fn a_codex_row_with_a_service_tier_may_ask_for_fast() {
+        let spec = harness_spec(
+            "codex",
+            r#"list_command = ["codex", "debug", "models"]
+parser = "codex_catalog""#,
+        );
+        let text = r#"{"models":[{"slug":"m","display_name":"M","visibility":"list",
+            "default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}],
+            "service_tiers":[{"id":"priority"}]}]}"#;
+        let catalog = match parse_catalog(&spec, text) {
+            Ok(catalog) => catalog,
+            Err(error) => panic!("the catalog should parse: {error}"),
+        };
+        let model = named(&catalog, "m");
+        assert!(model.fast);
+        assert_eq!(model.default_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_listing_in_the_wrong_shape_is_an_error_naming_the_parser() {
+        let spec = harness_spec(
+            "codex",
+            r#"list_command = ["codex", "debug", "models"]
+parser = "codex_catalog""#,
+        );
+        let error = match parse_catalog(&spec, "not json") {
+            Ok(catalog) => panic!("bad JSON should be refused, got {catalog:?}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ModelError::CatalogFormat { .. }), "{error}");
+        assert!(error.to_string().contains("CodexCatalog"), "{error}");
+
+        let pi = harness_spec(
+            "pi",
+            r#"parser = "pi_table"
+list_command = ["pi", "--list-models"]"#,
+        );
+        let error = match parse_catalog(&pi, "nothing here\n") {
+            Ok(catalog) => panic!("a headerless table should be refused, got {catalog:?}"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("provider"), "{error}");
+    }
+
+    #[test]
+    fn a_listing_listed_through_the_command_is_parsed_by_the_parser() {
+        let dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-models.json");
+        write_script(dir.path(), "codex", &format!("cat '{}'", fixture.display()));
+        let spec = harness_spec(
+            "codex",
+            r#"list_command = ["codex", "debug", "models"]
+parser = "codex_catalog""#,
+        );
+        let path_env = dir.path().display().to_string();
+        assert_eq!(
+            listed(&spec, &path_env),
+            Some(vec![
+                "gpt-6-luna".to_owned(),
+                "gpt-5.6-terra".to_owned(),
+                "gpt-5.6-luna".to_owned(),
+            ])
+        );
     }
 
     /// The ref `s` parses to, panicking with the error when it is refused.
@@ -542,6 +1066,38 @@ project_dirs = []
             spec.models.static_list_path(&models_dir()),
             Some(models_dir().join("claude.toml"))
         );
+    }
+
+    #[test]
+    fn the_shipped_claude_spec_reads_its_static_catalog() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness/claude.toml");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => panic!("{} should be readable: {error}", path.display()),
+        };
+        let spec = match toml::from_str::<HarnessSpec>(&text) {
+            Ok(spec) => spec,
+            Err(error) => panic!("the shipped claude spec should parse: {error}"),
+        };
+        let catalog = match static_catalog(&spec, &models_dir()) {
+            Ok(Some(catalog)) => catalog,
+            Ok(None) => panic!("the claude spec should name a static catalog"),
+            Err(error) => panic!("the claude catalog should load: {error}"),
+        };
+        assert!(catalog.names().contains(&"opus"), "{:?}", catalog.names());
+        assert_eq!(catalog.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        let opus = named(&catalog, "opus");
+        assert_eq!(opus.name, "Opus");
+        assert_eq!(opus.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
+    fn a_spec_with_no_static_list_has_no_static_catalog() {
+        let spec = spec("opencode", r#"["opencode", "models"]"#, false);
+        match static_catalog(&spec, &models_dir()) {
+            Ok(None) => {}
+            other => panic!("a spec with no static list should have no catalog: {other:?}"),
+        }
     }
 
     #[test]

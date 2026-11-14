@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::asks::{AskHookInstaller, NoAskHook};
 use crate::spec::{
-    AskHookSpec, BriefSpec, CatalogSource, EffortSpec, HarnessSpec, ModelsSpec, PermissionMode,
-    PermissionsSpec, SpecError, StatusSource, Vendor,
+    AskHookSpec, BriefSpec, CatalogSource, EffortSpec, FastSpec, HarnessSpec, ModelsSpec,
+    PermissionMode, PermissionsSpec, SpecError, StatusSource, Vendor,
 };
 
 /// One program's harness: its spec, checked, and the file it came from.
@@ -113,6 +113,11 @@ impl Harness {
     /// Where this program's effort levels come from.
     pub fn efforts(&self) -> &EffortSpec {
         &self.spec.models.efforts
+    }
+
+    /// The arguments that switch this program's fast mode, if it has one.
+    pub fn fast(&self) -> &FastSpec {
+        &self.spec.fast
     }
 
     /// How a brief reaches this program.
@@ -271,6 +276,23 @@ mod tests {
                 harness.readonly_permission().is_some(),
                 "{id} should name the mode a reviewer runs in"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_program_with_a_fast_switch_takes_one() {
+        let claude = load("claude");
+        assert!(claude.fast().available());
+        assert_eq!(
+            claude.fast().args(true),
+            ["--settings", "{\"fastMode\":true}"].map(str::to_owned)
+        );
+        assert_eq!(
+            claude.fast().args(false),
+            ["--settings", "{\"fastMode\":false}"].map(str::to_owned)
+        );
+        for id in ["codex", "kilo", "opencode", "pi"] {
+            assert!(!load(id).fast().available(), "{id} takes no fast switch");
         }
     }
 

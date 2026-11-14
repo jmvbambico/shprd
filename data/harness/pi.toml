@@ -3,8 +3,10 @@
 # https://github.com/eliasstravik/herdr-projects
 #
 # Record, error and quota facts are from shprd's docs/agents.md (verified
-# 2026-10-27). Launch flags were re-checked with `pi --help` (1.4.0) but are not
-# stated in docs/agents.md, so launch.verified is false.
+# 2026-10-27). M9.2 re-checked every launch, catalog and brief fact against pi
+# 1.4.0 on this machine: `pi --help`, `pi --list-models`, `pi auth check --help`
+# and the 1.4.0 source under
+# /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist.
 
 id = "pi"
 name = "Pi"
@@ -20,27 +22,33 @@ verified_version = "1.4.0"
 # error types; the plain English lines are conservative guesses at the CLI's
 # own wording, not wording taken from a CLI's docs.
 dry_patterns = [
-    "429 Too Many Requests",
-    "rate limit exceeded",
-    "rate limit reached",
-    "insufficient credits",
-    "credit balance is too low",
-    "usage limit reached",
+  "429 Too Many Requests",
+  "rate limit exceeded",
+  "rate limit reached",
+  "insufficient credits",
+  "credit balance is too low",
+  "usage limit reached",
 ]
 
 [detect]
 binary = "pi"
 version_args = ["--version"]
 signin_hint = "run `pi` and sign in to a provider, then `pi auth check --provider <provider>`"
+# `pi auth check` takes `--model`, `--json` and `--no-refresh` (1.4.0) and exits
+# 0 only when the provider behind that model has credentials.
 signin_args = ["auth", "check", "--model", "{model}", "--no-refresh", "--json"]
 
 [launch]
 # pi cannot ask for approval, so there is no auto-approve flag.
 interactive = ["pi"]
+# `--model` takes a model id, `provider/id`, or `provider/id:<thinking>`.
 model_args = ["--model", "{model}"]
+# `--thinking <level>`: off, minimal, low, medium, high, xhigh, max (1.4.0).
 effort_args = ["--thinking", "{effort}"]
-# herdr refuses an argument containing a newline, so the brief travels as a
-# path: `--append-system-prompt` reads a path as well as literal text.
+# The brief travels as a path: `--append-system-prompt` reads the file when the
+# value names one and appends it as text otherwise (1.4.0's
+# `resolvePromptInput`, dist/core/resource-loader.js). The adapter writes the
+# file first, so it is always the file that is read.
 system_prompt_args = ["--append-system-prompt", "{prompt_file}"]
 resume_args = ["--session-id", "{session}"]
 verified = false
@@ -63,23 +71,27 @@ modes = [
 # its own. A role that moves to pi starts at [permissions].default.
 
 [models]
+# `pi --list-models` prints a table: provider, model, context, max-out,
+# thinking, images. The provider may hold a space (`Command Code`), so the
+# parser reads the columns by their header offsets and joins provider and model
+# as `provider/model`, the reference pi's resolver accepts (1.4.0's
+# `splitProviderPrefix` lower-cases the provider before matching it).
 list_command = ["pi", "--list-models"]
-# `pi auth check --model <name>` wants the provider too, e.g.
-# `Command Code/deepseek/deepseek-v4.1-flash`; a bare model is ambiguous.
+parser = "pi_table"
+# `pi auth check --model <name>` wants the provider too, and a bare model is
+# ambiguous between providers; a model id without one is refused.
 provider_qualified = true
 
 [models.efforts]
-# `pi --help` (1.4.0): `--thinking <level> ... off, minimal, low, medium, high,
-# xhigh, max`.
+# `pi --help` (1.4.0): `--thinking <level>` takes off, minimal, low, medium,
+# high, xhigh, max. The listing's `thinking` column says whether a model reasons
+# at all, so a model with `thinking: no` offers no level.
 source = "static"
 levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 [brief]
-# `--append-system-prompt` carries the brief as a path, like the launch flag
-# above. pi's own help says "text or file contents"; the M7 study reads it as a
-# path too (herdr-projects' table).
-# unverified: that pi reads a path given to `--append-system-prompt` rather than
-# appending the path itself as text — confirm on the first live launch (M9.2).
+# `--append-system-prompt` carries the brief as a path (1.4.0 reads an existing
+# path's contents; see launch.system_prompt_args).
 delivery = "system-prompt-file"
 file = "path"
 
@@ -93,7 +105,8 @@ sources = ["osc7501", "hook", "screen"]
 # pi has extensions but shprd has no installer for an ask hook of its own, so no
 # card is claimed.
 # unverified: whether a pi extension can hold a permission, question or plan
-# ask until a person answers it — M9.5 checks.
+# ask until a person answers it — M9.5 checks. To check: load an extension on
+# `tool_call` in a scratch session and see whether pi waits for its answer.
 supported = false
 
 [records]

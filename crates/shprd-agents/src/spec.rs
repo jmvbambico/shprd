@@ -2,14 +2,15 @@
 //!
 //! Each spec records what shprd needs to detect, launch and watch one agent CLI,
 //! and — since M9 — what the per-program adapter needs on top: the access modes
-//! a role may pick, where the model catalog and its effort levels come from, how
-//! a brief reaches the program, where its status is read, and whether it takes a
-//! hook for its asks. Locations and formats live in data so supporting a new CLI
-//! version is a table change rather than a code change (see `docs/agents.md`).
+//! a role may pick, the fast switch, where the model catalog and its effort
+//! levels come from, how a brief reaches the program, where its status is read,
+//! and whether it takes a hook for its asks. Locations and formats live in data
+//! so supporting a new CLI version is a table change rather than a code change
+//! (see `docs/agents.md`).
 //!
 //! Every M9 section is optional and has a typed default, so a harness written
-//! before M9 still loads: no modes, a first-message brief, the agent's own
-//! report and then its screen, and no ask hook.
+//! before M9 still loads: no modes, no fast switch, a first-message brief, the
+//! agent's own report and then its screen, and no ask hook.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -65,6 +66,12 @@ pub struct HarnessSpec {
     /// supported program accepts.
     #[serde(default)]
     pub brief: BriefSpec,
+    /// The arguments that switch the program's fast (higher-priority) mode.
+    ///
+    /// Absent means the program has no such switch, and a role may not ask for
+    /// fast on it.
+    #[serde(default)]
+    pub fast: FastSpec,
     /// Where the program's status can be read, most trusted source first.
     ///
     /// Absent means the agent's own OSC 7501 report and then its screen.
@@ -153,7 +160,9 @@ impl HarnessSpec {
             &["model"],
             Some("model"),
         )?;
-        check_optional_template("launch.effort_args", &launch.effort_args, &["effort"])?;
+        if let Some(tokens) = &launch.effort_args {
+            check_template("launch.effort_args", tokens, &["effort"], Some("effort"))?;
+        }
         check_optional_template("launch.auto_approve", &launch.auto_approve, &[])?;
         check_optional_template("launch.reviewer_args", &launch.reviewer_args, &[])?;
         check_optional_template(
@@ -165,7 +174,13 @@ impl HarnessSpec {
         check_optional_template("detect.signin_args", &self.detect.signin_args, &["model"])?;
         self.permissions.validate()?;
         self.models.validate()?;
+        // A level the launch cannot send is a level a role may pick and never
+        // get, so the two facts have to agree: levels need a flag to carry them.
+        if launch.effort_args.is_none() && !self.models.efforts.levels.is_empty() {
+            return Err(SpecError::EffortsWithoutFlag);
+        }
         self.brief.validate(launch)?;
+        self.fast.validate()?;
         self.status.validate()?;
         self.asks.validate()?;
         Ok(())
@@ -356,6 +371,10 @@ pub enum CatalogParser {
     /// `display_name`, `default_reasoning_level`, `supported_reasoning_levels`
     /// and `visibility`.
     CodexCatalog,
+    /// pi's catalog: a table whose first line names the columns (`provider`,
+    /// `model`, `context`, `max-out`, `thinking`, `images`) and whose rows are
+    /// padded to those columns, so a provider name may hold a space.
+    PiTable,
 }
 
 /// Where a program's effort levels come from.
@@ -668,9 +687,11 @@ pub struct BriefSpec {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BriefDelivery {
-    /// The brief is the program's first turn, appended to the launch argv.
+    /// The brief is the program's first turn, typed into its pane.
     ///
-    /// Every program that takes a prompt does; this is the default.
+    /// Every program that takes a prompt does; this is the default. It is not an
+    /// argv argument, because a brief is multi-line and a terminal run cannot
+    /// carry a newline in one argument.
     #[default]
     FirstMessage,
     /// The brief is written to a file the program is pointed at.
@@ -700,7 +721,9 @@ impl BriefSpec {
     }
 
     /// Check that the delivery and the flags agree: a first-message brief has
-    /// no flag, and a system-prompt file has exactly one `{prompt_file}`.
+    /// no flag, and a system-prompt brief names exactly one placeholder, the one
+    /// its [`Self::file`] mode carries (`{prompt_file}` for a path, `{prompt}`
+    /// for the contents).
     fn validate(&self, launch: &LaunchSpec) -> Result<(), SpecError> {
         match self.delivery {
             BriefDelivery::FirstMessage => {
@@ -720,14 +743,65 @@ impl BriefSpec {
                 let Some(template) = self.args(launch) else {
                     return Err(SpecError::BriefFileWithoutFlag);
                 };
+                let required = match self.file {
+                    BriefFileMode::Path => "prompt_file",
+                    BriefFileMode::Contents => "prompt",
+                };
                 check_template(
                     "brief.args",
                     template,
-                    &["prompt_file"],
-                    Some("prompt_file"),
+                    &["prompt", "prompt_file"],
+                    Some(required),
                 )
             }
         }
+    }
+}
+
+/// The arguments that switch a program's fast (higher-priority) mode.
+///
+/// Fast is a property of the service tier a program asks its provider for, not
+/// of the model or the effort, so each program that has one says how to turn it
+/// on and how to turn it off again: a role that names `fast = false` must be
+/// able to win over a person's own config that leaves it on (Shepherdr's
+/// `argvFor` always writes both, M7c 2.2). A program that has no such switch
+/// leaves the section out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FastSpec {
+    /// The arguments that turn fast mode on.
+    #[serde(default)]
+    pub on: Vec<String>,
+    /// The arguments that turn it off again, when the program has to be told.
+    #[serde(default)]
+    pub off: Vec<String>,
+}
+
+impl FastSpec {
+    /// Whether the program has a fast switch at all.
+    pub fn available(&self) -> bool {
+        !self.on.is_empty()
+    }
+
+    /// The arguments for a role that asked for `fast` (or did not).
+    ///
+    /// A program that is never told to turn fast off has no `off` arguments and
+    /// gets none, so turning fast on is the only thing it ever hears about.
+    pub fn args(&self, fast: bool) -> &[String] {
+        if fast { &self.on } else { &self.off }
+    }
+
+    /// Check that a program that can be told to turn fast off can be told to
+    /// turn it on too.
+    ///
+    /// The arguments are literal tokens, not templates: no placeholder is
+    /// filled into them, because what a program wants is a whole value of its
+    /// own (`{"fastMode":true}` for Claude Code), braces and all.
+    fn validate(&self) -> Result<(), SpecError> {
+        if self.on.is_empty() && !self.off.is_empty() {
+            return Err(SpecError::FastOffWithoutOn);
+        }
+        Ok(())
     }
 }
 
@@ -1114,6 +1188,12 @@ pub enum SpecError {
         /// The level that was written.
         level: String,
     },
+    /// A program is told how to turn fast off but not how to turn it on.
+    #[error("fast.off is set but fast.on is empty")]
+    FastOffWithoutOn,
+    /// A program lists effort levels but has no flag that sends one.
+    #[error("models.efforts lists levels but launch.effort_args is not set")]
+    EffortsWithoutFlag,
     /// A program takes its brief as its first message but names a brief flag.
     #[error("brief.delivery is first-message but {field} names a system-prompt flag")]
     BriefFlagWithoutFile {
@@ -1378,7 +1458,7 @@ pub(crate) fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AskHookSpec, AskKind, BriefDelivery, BriefFileMode, CatalogSource, EffortSource,
+        AskHookSpec, AskKind, BriefDelivery, BriefFileMode, CatalogSource, EffortSource, FastSpec,
         HarnessSpec, PermissionsSpec, SpecError, StatusSource, Values, load_dir, render_args,
         validate_location,
     };
@@ -1407,6 +1487,7 @@ signin_hint = "claude auth login"
 [launch]
 interactive = ["claude"]
 model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
 verified = false
 
 [models]
@@ -1579,10 +1660,14 @@ modes = [
 [brief]
 delivery = \"system-prompt-file\"
 args = [\"--sys\", \"{{prompt_file}}\"]
-file = \"contents\"
+file = \"path\"
 
 [status]
 sources = [\"hook\", \"osc7501\", \"screen\"]
+
+[fast]
+on = [\"--fast\"]
+off = [\"--no-fast\"]
 
 [asks]
 supported = true
@@ -1631,13 +1716,17 @@ levels = [\"low\", \"high\"]
         );
         assert_eq!(spec.asks, AskHookSpec::default());
         assert!(!spec.asks.supported);
+        assert_eq!(spec.fast, FastSpec::default());
+        assert!(!spec.fast.available());
+        assert!(spec.fast.args(true).is_empty());
+        assert!(spec.fast.args(false).is_empty());
         assert_eq!(spec.models.catalog_source(), CatalogSource::None);
         assert_eq!(spec.models.efforts.source, EffortSource::None);
     }
 
     #[test]
     fn every_new_section_refuses_an_unknown_key_by_name() {
-        for section in ["permissions", "brief", "status", "asks"] {
+        for section in ["permissions", "brief", "status", "asks", "fast"] {
             let fixture = MINIMAL_SPEC.replacen(
                 "[models]",
                 &format!("[{section}]\nmystery = true\n\n[models]"),
@@ -1673,7 +1762,7 @@ levels = [\"low\", \"high\"]
             Some(&"read-only".to_owned())
         );
         assert_eq!(again.brief.delivery, BriefDelivery::SystemPromptFile);
-        assert_eq!(again.brief.file, BriefFileMode::Contents);
+        assert_eq!(again.brief.file, BriefFileMode::Path);
         assert_eq!(
             again.status.sources,
             [
@@ -1691,6 +1780,24 @@ levels = [\"low\", \"high\"]
             Some(&Some("^plan$".to_owned()))
         );
         assert_eq!(again.models.efforts.levels, ["low", "high"]);
+        assert_eq!(
+            again.fast,
+            FastSpec {
+                on: tokens(&["--fast"]),
+                off: tokens(&["--no-fast"]),
+            }
+        );
+        assert_eq!(again.fast.args(true), tokens(&["--fast"]));
+        assert_eq!(again.fast.args(false), tokens(&["--no-fast"]));
+    }
+
+    #[test]
+    fn fast_off_args_need_fast_on_args() {
+        let fixture = full_spec_text().replace("on = [\"--fast\"]\n", "");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::FastOffWithoutOn
+        ));
     }
 
     #[test]
@@ -1788,10 +1895,34 @@ levels = [\"low\", \"high\"]
     fn a_system_prompt_file_brief_needs_a_flag() {
         let fixture = full_spec_text()
             .replace("args = [\"--sys\", \"{prompt_file}\"]\n", "")
-            .replace("file = \"contents\"", "file = \"path\"");
+            .replace("file = \"path\"", "file = \"contents\"");
         assert!(matches!(
             full_spec_error(&fixture),
             SpecError::BriefFileWithoutFlag
+        ));
+    }
+
+    #[test]
+    fn a_path_brief_cannot_pass_the_words_themselves() {
+        let fixture = full_spec_text().replace("\"{prompt_file}\"", "\"{prompt}\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidTemplate {
+                field: "brief.args",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_contents_brief_cannot_pass_a_path() {
+        let fixture = full_spec_text().replace("file = \"path\"", "file = \"contents\"");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::InvalidTemplate {
+                field: "brief.args",
+                ..
+            }
         ));
     }
 
@@ -2119,13 +2250,38 @@ levels = [\"low\", \"high\"]
     #[test]
     fn rejects_effort_args_using_model_placeholder() {
         let fixture = MINIMAL_SPEC.replacen(
-            r#"model_args = ["--model", "{model}"]"#,
-            "model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{model}\"]",
+            r#"effort_args = ["--effort", "{effort}"]"#,
+            r#"effort_args = ["--effort", "{model}"]"#,
             1,
         );
         assert!(matches!(
             template_error(&fixture),
             SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn an_effort_flag_must_carry_the_level() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"effort_args = ["--effort", "{effort}"]"#,
+            r#"effort_args = ["--effort", "high"]"#,
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate {
+                field: "launch.effort_args",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn levels_without_a_flag_are_refused() {
+        let fixture = full_spec_text().replace("effort_args = [\"--effort\", \"{effort}\"]\n", "");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::EffortsWithoutFlag
         ));
     }
 
