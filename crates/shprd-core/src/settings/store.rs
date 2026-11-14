@@ -100,10 +100,17 @@ fn segments_of(scope: &Scope, key: &Key) -> Vec<String> {
 }
 
 /// The table under `name`, created when it is missing.
+///
+/// A table this edit creates is implicit, so writing `roles.docs.agent` leaves
+/// `[roles.docs]` behind rather than an empty `[roles]` header above it.
 fn child<'a>(table: &'a mut Table, name: &str) -> Result<&'a mut Table, SettingsError> {
     table
         .entry(name)
-        .or_insert_with(|| Item::Table(Table::new()))
+        .or_insert_with(|| {
+            let mut created = Table::new();
+            created.set_implicit(true);
+            Item::Table(created)
+        })
         .as_table_mut()
         .ok_or_else(|| SettingsError::BadValue {
             key: name.to_owned(),

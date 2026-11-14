@@ -1382,6 +1382,8 @@ impl RoleDefaults {
             RoleField::About => Some(Value::Text(self.about.clone())),
             RoleField::Kind => Some(Value::Text(self.kind.name().to_owned())),
             RoleField::Readonly => Some(Value::Switch(self.readonly)),
+            RoleField::Fast => Some(Value::Switch(false)),
+            RoleField::Fallback => Some(Value::List(Vec::new())),
             RoleField::Prompt => Some(Value::Text(self.prompt.clone())),
             _ => None,
         }
@@ -1985,6 +1987,16 @@ pub enum WriteOutcome {
 }
 
 impl WriteOutcome {
+    /// The name the API and the JSON output use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stored => "stored",
+            Self::EqualToInherited => "equal_to_inherited",
+            Self::Removed => "removed",
+            Self::WasUnset => "was_unset",
+        }
+    }
+
     /// A line saying what happened, for the verb's output.
     pub fn message(self, key: &Key) -> String {
         match self {

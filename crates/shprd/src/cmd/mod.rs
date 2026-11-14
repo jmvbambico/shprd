@@ -20,6 +20,7 @@ pub mod run;
 pub mod run_lock;
 pub mod serve;
 pub mod set;
+pub mod settings;
 pub mod spawn;
 pub mod sync;
 pub mod tick;
@@ -42,6 +43,17 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // `set` writes a config file, not a log, so it too needs no repository.
     if let Some(Command::Set(args)) = &cli.command {
         return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
+    }
+    // `settings` reads files, not a log, so it answers outside a repository
+    // too: the person's own file applies everywhere.
+    if let Some(Command::Settings { cmd }) = &cli.command {
+        let root = settings_root(cli.global.repo.as_deref());
+        return settings::run(
+            cmd,
+            cli.global.json,
+            cli.global.home.as_deref(),
+            root.as_deref(),
+        );
     }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
@@ -79,6 +91,11 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.home.as_deref(),
             cli.global.repo.as_deref(),
         ),
+        // Unreachable in practice: `settings` returns above.
+        Some(Command::Settings { cmd }) => {
+            let root = settings_root(cli.global.repo.as_deref());
+            settings::run(&cmd, ctx.json, cli.global.home.as_deref(), root.as_deref())
+        }
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
@@ -174,5 +191,16 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
         EventKind::RunFinished { .. } => "run_finished",
+    }
+}
+
+/// The repository the settings are for: `--repo`, else this checkout, else none.
+///
+/// Settings work outside a repository, so a checkout that cannot be found is
+/// not an error: only the person's own file applies then.
+fn settings_root(explicit: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    match explicit {
+        Some(repo) => Some(repo.to_path_buf()),
+        None => resolve_root(None).ok(),
     }
 }
