@@ -871,8 +871,6 @@ fn retry_line(cut: &ProviderCut, now_ms: u64) -> String {
     }
 }
 
-/// A scheduled task's reason: "Starts 09:00 UTC", or "Starts now" once due.
-///
 /// The few words a row shows for an open ask.
 fn ask_reason(ask: &AskFacts) -> String {
     match ask.kind {
@@ -888,6 +886,8 @@ fn ask_reason(ask: &AskFacts) -> String {
     }
 }
 
+/// A scheduled task's reason: "Starts 09:00 UTC", or "Starts now" once due.
+///
 /// Shepherdr says it in the reader's local days ("Starts Fri 9:00 (in 6h)",
 /// `when.py:164-168`); shprd's clock is UTC and has no calendar yet, so the
 /// hour stands in for the day words.

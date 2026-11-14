@@ -24,9 +24,10 @@ use anyhow::anyhow;
 use serde_json::{Map, Value, json};
 use shprd_agents::asks::{AskHookInstall, AskHookInstaller, AskHookPaths};
 use shprd_agents::harness::Harness;
-use shprd_core::ask::{Ask, AskKind, AskQueue};
+use shprd_core::ask::{Ask, AskError, AskKind, AskQueue};
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{Clock, SystemClock};
+use shprd_core::rules::RuleError;
 
 use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg};
 use crate::ctx::{CliError, Ctx, resolve_root};
@@ -238,12 +239,29 @@ pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
         return Ok(());
     }
     let queue = AskQueue::for_repo(&ctx.root);
-    if queue.raise(&ask).is_err() {
-        return Ok(());
-    }
-    if ctx.commit(raised).is_err() {
-        let _ = queue.remove(&task, &id);
-        return Ok(());
+    // The raise is create-new, so only the hook whose write lands first owns the
+    // ask. A hook that loses the race must not touch the queue file: deleting it
+    // would leave the ledger's `ask_raised` with no file to answer and strand
+    // every waiting hook until their timeouts.
+    let raised_here = match queue.raise(&ask) {
+        Ok(()) => true,
+        Err(AskError::AlreadyRaised { .. }) => false,
+        Err(_) => return Ok(()),
+    };
+    match ctx.commit(raised) {
+        Ok(_) => {}
+        // The log already holds this ask: another hook won the race, or a
+        // crashed hook left its file behind. Keep the queue file so the ask
+        // stays answerable, and wait for the answer like its owner would.
+        Err(CliError::Refused(RuleError::AskAlreadyRaised { .. })) => {}
+        Err(_) => {
+            // We made the file and the log refused the ask, so this hook's
+            // write is the one to undo; a file it did not make is left alone.
+            if raised_here {
+                let _ = queue.remove(&task, &id);
+            }
+            return Ok(());
+        }
     }
     wait_and_print(&queue, &task, &id, made, &payload, timeout_secs)
 }

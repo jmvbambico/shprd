@@ -241,24 +241,22 @@ impl AskQueue {
     /// Raises `ask`, writing it atomically and refusing a duplicate id.
     pub fn raise(&self, ask: &Ask) -> Result<(), AskError> {
         let path = self.ask_path(&ask.task, &ask.id)?;
-        if path.exists() {
-            return Err(AskError::AlreadyRaised {
-                task: ask.task.clone(),
-                ask: ask.id.clone(),
-            });
-        }
-        let dir = path.parent().unwrap_or(&self.root);
-        fs::create_dir_all(dir).map_err(|source| AskError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
         let mut on_disk = ask.clone();
         on_disk.answer = None;
         let bytes = serde_json::to_vec_pretty(&on_disk).map_err(|source| AskError::Parse {
             path: path.clone(),
             source,
         })?;
-        write_atomic(&path, &bytes)
+        // Create-new, so two hooks raising the same id cannot both win: the
+        // loser is told the ask is already raised instead of its write
+        // replacing the winner's file (which a plain rename would do).
+        if !write_new(&path, &bytes)? {
+            return Err(AskError::AlreadyRaised {
+                task: ask.task.clone(),
+                ask: ask.id.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Answers one ask, exactly once.
@@ -286,7 +284,12 @@ impl AskQueue {
             path: path.clone(),
             source,
         })?;
-        write_no_replace(&path, &bytes)?;
+        if !write_new(&path, &bytes)? {
+            return Err(AskError::AlreadyAnswered {
+                task: task.to_string(),
+                ask: ask.to_string(),
+            });
+        }
         raised.answer = Some(answer);
         Ok(raised)
     }
@@ -437,38 +440,15 @@ fn check_name<'a>(field: &'static str, value: &'a str) -> Result<&'a str, AskErr
     Ok(value)
 }
 
-/// Writes `bytes` to `path` through a temporary file in the same directory,
-/// then renames it into place.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AskError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir).map_err(|source| AskError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    let temporary = temporary_path(path);
-    let wrote = (|| -> io::Result<()> {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if let Err(source) = wrote {
-        let _ = fs::remove_file(&temporary);
-        return Err(AskError::Io {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
-}
-
 /// Writes `bytes` to `path` only if it does not exist, atomically.
 ///
 /// The temporary file is complete and fsynced before a hard link makes it
 /// visible under the final name. A link fails when the name is taken, which is
-/// exactly the "answered once" rule: no reader ever sees a half-written answer,
-/// and a second writer is told the answer already exists.
-fn write_no_replace(path: &Path, bytes: &[u8]) -> Result<(), AskError> {
+/// exactly the "raised once, answered once" rule: no reader ever sees a
+/// half-written file, and a second writer is told the name is already taken.
+/// Returns `Ok(false)` when the name is taken, so each caller can name the
+/// refusal it means (an ask already raised, or already answered).
+fn write_new(path: &Path, bytes: &[u8]) -> Result<bool, AskError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(|source| AskError::Io {
         path: dir.to_path_buf(),
@@ -483,13 +463,8 @@ fn write_no_replace(path: &Path, bytes: &[u8]) -> Result<(), AskError> {
     })();
     let _ = fs::remove_file(&temporary);
     match wrote {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-            Err(AskError::AlreadyAnswered {
-                task: task_of(path).unwrap_or_default(),
-                ask: ask_of(path).unwrap_or_default(),
-            })
-        }
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => Ok(false),
         Err(source) => Err(AskError::Io {
             path: path.to_path_buf(),
             source,
@@ -506,22 +481,6 @@ fn temporary_path(path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("ask");
     path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()))
-}
-
-/// The task a queue file belongs to, from its directory.
-fn task_of(path: &Path) -> Option<String> {
-    path.parent()?
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
-}
-
-/// The ask id a queue file names, from its file name.
-fn ask_of(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    name.strip_suffix(".answer.json")
-        .or_else(|| name.strip_suffix(".json"))
-        .map(str::to_string)
 }
 
 /// A count of asks by kind, for a board's badges.
@@ -613,6 +572,27 @@ mod tests {
             Err(AskError::AlreadyRaised { .. }) => {}
             other => panic!("expected AlreadyRaised, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_second_raise_never_overwrites_the_first() {
+        let (_dir, queue) = queue();
+        queue
+            .raise(&Ask::new("a1", "T1", AskKind::Permission, "first", 1_000))
+            .expect("raise");
+        // A plain temp + rename would replace the file; the create-new write
+        // must leave the first raise's words in place.
+        assert!(matches!(
+            queue.raise(&Ask::new("a1", "T1", AskKind::Permission, "second", 1_001)),
+            Err(AskError::AlreadyRaised { .. })
+        ));
+        let text =
+            std::fs::read_to_string(queue.ask_path("T1", "a1").expect("path")).expect("read");
+        assert!(
+            text.contains("first"),
+            "the loser overwrote the winner: {text}"
+        );
+        assert!(!text.contains("second"), "{text}");
     }
 
     #[test]

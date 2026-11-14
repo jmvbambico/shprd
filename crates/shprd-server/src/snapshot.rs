@@ -1,8 +1,9 @@
 //! The snapshot projector: the fold in, the board's view out.
 //!
-//! It is a pure function of [`RunState`] — no I/O, no clock — so it is tested
-//! with a folded log and nothing else. `GET /api/state` folds the log with the
-//! same [`RunState::fold`] the CLI uses and hands the result here.
+//! It is a pure function of [`RunState`] and the moment it is read — no I/O, no
+//! clock read of its own — so it is tested with a folded log and a timestamp and
+//! nothing else. `GET /api/state` folds the log with the same [`RunState::fold`]
+//! the CLI uses and hands the result here.
 
 use shprd_core::state::RunState;
 
@@ -11,8 +12,8 @@ use crate::dto::{
     SnapshotDto, TaskDto, TaskProgressDto,
 };
 
-/// Folds a run into the snapshot a client draws.
-pub fn snapshot(state: &RunState) -> SnapshotDto {
+/// Folds a run into the snapshot a client draws, as of `now_ms`.
+pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
     SnapshotDto {
         seq: state.last_seq,
         run: state.run.as_ref().map(|run| RunDto {
@@ -42,17 +43,21 @@ pub fn snapshot(state: &RunState) -> SnapshotDto {
                 seq: escalation.seq,
             })
             .collect(),
-        asks: open_asks(state),
+        asks: open_asks(state, now_ms),
         finished: state.finished,
     }
 }
 
-/// Every ask the fold has not seen an answer for, oldest first.
-fn open_asks(state: &RunState) -> Vec<AskDto> {
+/// Every ask still open at `now_ms`, oldest first.
+///
+/// A hook that timed out leaves its ask behind; it is no longer open, so it must
+/// not appear here, or the two endpoints would disagree and a card would offer an
+/// ask that answers with `Expired`.
+fn open_asks(state: &RunState, now_ms: u64) -> Vec<AskDto> {
     let mut asks: Vec<&shprd_core::state::AskRecord> = state
         .asks
         .values()
-        .filter(|ask| ask.answer.is_none())
+        .filter(|ask| ask.is_open_at(now_ms))
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms
@@ -144,5 +149,55 @@ fn report(report: &shprd_core::state::Report) -> ReportDto {
         changed_paths: report.changed_paths.clone(),
         commit: report.commit.clone(),
         skills_used: report.skills_used.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{RunState, snapshot};
+    use shprd_core::ask::AskKind;
+    use shprd_core::state::{AskAnswerRecord, AskRecord};
+
+    fn record(id: &str, expires_at_ms: Option<u64>, answer: Option<&str>) -> AskRecord {
+        AskRecord {
+            id: id.to_string(),
+            task: "T1".to_string(),
+            kind: AskKind::Permission,
+            text: "Run: cargo test".to_string(),
+            options: Vec::new(),
+            created_at_ms: 1_000,
+            expires_at_ms,
+            raised_seq: 1,
+            answer: answer.map(|text| AskAnswerRecord {
+                text: text.to_string(),
+                seq: 2,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_timed_out_ask_is_not_in_the_snapshot() {
+        // The endpoint lists what is still open at the moment it is read, so a
+        // hook that timed out must drop out here just as it does from
+        // `GET /api/asks` — otherwise a card would offer an ask that answers
+        // with `Expired`.
+        let mut state = RunState::default();
+        state.asks.insert(
+            ("T1".to_string(), "open".to_string()),
+            record("open", None, None),
+        );
+        state.asks.insert(
+            ("T1".to_string(), "expired".to_string()),
+            record("expired", Some(5_000), None),
+        );
+        state.asks.insert(
+            ("T1".to_string(), "answered".to_string()),
+            record("answered", None, Some("allow")),
+        );
+        let snap = snapshot(&state, 6_000);
+        let ids: Vec<&str> = snap.asks.iter().map(|ask| ask.id.as_str()).collect();
+        assert_eq!(ids, vec!["open"]);
     }
 }

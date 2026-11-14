@@ -302,6 +302,14 @@ fn events(repo: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// How many `ask_raised` events the log holds.
+fn raised_count(repo: &Path) -> usize {
+    events(repo)
+        .iter()
+        .filter(|event| event["kind"] == "ask_raised")
+        .count()
+}
+
 #[test]
 fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
     let (repo, state, home) = repo_with_a_task();
@@ -414,6 +422,88 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
         listed["asks"].as_array().map(Vec::len),
         Some(0),
         "the answered ask is gone: {body}"
+    );
+
+    service.stop();
+}
+
+#[test]
+fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
+    let (repo, state, home) = repo_with_a_task();
+    let service = Service::start(repo.path(), state.path(), home.path());
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(record_path(state.path())).expect("the record is there"),
+    )
+    .expect("the record is JSON");
+    let port = record["port"].as_u64().expect("a port");
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+
+    // Two hooks, the same explicit id. The queue's create-new raise lets only
+    // one own the ask; the other must not delete the winner's file.
+    let hook_args = [
+        "ask",
+        "hook",
+        "--program",
+        "claude",
+        "--task",
+        "T1",
+        "--kind",
+        "permission",
+        "--text",
+        "A",
+        "--id",
+        "dup-1",
+        "--timeout-secs",
+        "30",
+    ];
+    let first = spawn_env(repo.path(), &hook_args, &[]);
+    let second = spawn_env(repo.path(), &hook_args, &[]);
+
+    let ask_path = repo.path().join(".shprd/asks/T1/dup-1.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(ask_path.exists() && raised_count(repo.path()) == 1) {
+        sleep(Duration::from_millis(50));
+    }
+    // Let a losing hook finish its attempt to clean up, then prove it left the
+    // winner's file alone.
+    sleep(Duration::from_millis(500));
+    assert_eq!(raised_count(repo.path()), 1, "exactly one ask_raised");
+    assert!(
+        ask_path.exists(),
+        "the racing hooks left no queue file, so the ask can never be answered"
+    );
+
+    // The ask is answerable, not stranded as a 404.
+    let answer = serde_json::json!({"task": "T1", "ask": "dup-1", "answer": "allow"});
+    let (status, body) =
+        post_answer(&format!("{base}/api/asks/answer"), &token, &answer).expect("the answer lands");
+    assert_eq!(status, 200, "{body}");
+
+    // Both hooks exit cleanly once the answer is there; at least one printed the
+    // program's decision.
+    let mut printed = 0;
+    for child in [first, second] {
+        let output = wait_for_child(child);
+        assert!(
+            output.status.success(),
+            "a hook failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.stdout.is_empty() {
+            let value: Value = serde_json::from_slice(&output.stdout).expect("a JSON decision");
+            assert_eq!(value["hookSpecificOutput"]["decision"]["behavior"], "allow");
+            printed += 1;
+        }
+    }
+    assert!(printed >= 1, "no hook printed the answer");
+    assert_eq!(
+        events(repo.path())
+            .iter()
+            .filter(|event| event["kind"] == "ask_answered")
+            .count(),
+        1,
+        "the ask is answered once"
     );
 
     service.stop();

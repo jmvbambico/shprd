@@ -245,7 +245,7 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let repo = state.repo.clone();
     let loaded = blocking(move || ledger::load(&repo)).await?;
     let (folded, _) = loaded.map_err(|err| ApiReject::internal(err.to_string()))?;
-    Ok(Json(SnapshotDto::from_state(&folded)))
+    Ok(Json(SnapshotDto::from_state(&folded, SystemClock.now_ms())))
 }
 
 /// `GET /api/asks`: every ask still waiting for the person.

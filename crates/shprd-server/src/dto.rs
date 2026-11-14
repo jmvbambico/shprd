@@ -391,9 +391,9 @@ pub struct SnapshotDto {
 }
 
 impl SnapshotDto {
-    /// Folds `state` into the snapshot a board draws.
-    pub fn from_state(state: &RunState) -> Self {
-        snapshot::snapshot(state)
+    /// Folds `state` into the snapshot a board draws, as of `now_ms`.
+    pub fn from_state(state: &RunState, now_ms: u64) -> Self {
+        snapshot::snapshot(state, now_ms)
     }
 }
 
