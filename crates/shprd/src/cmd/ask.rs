@@ -1,14 +1,20 @@
-//! `shprd ask hook`: what a program's ask hook runs.
+//! `shprd ask hook` and `shprd ask raise`: how a card reaches the person.
 //!
 //! A Claude Code or Codex `PermissionRequest` hook hands the program's payload
-//! on stdin; this verb turns it into an [`Ask`](shprd_core::ask::Ask) in the
-//! run's queue, records it in the ledger, and waits for the person's answer.
-//! The answer is printed in the shape the program's hook expects, and only then
-//! does the agent carry on.
+//! on stdin to [`hook`]; this verb turns it into an
+//! [`Ask`](shprd_core::ask::Ask) in the run's queue, records it in the ledger,
+//! and waits for the person's answer. The answer is printed in the shape the
+//! program's hook expects, and only then does the agent carry on.
 //!
-//! It never decides by itself: a timeout, a payload it cannot read, a task the
-//! run does not know or an error writing the queue all print nothing, so the
-//! program's own prompt stays and the person can still answer there.
+//! A program whose CLI has no ask hook cannot reach a card at all, so its
+//! worker raises one itself with [`raise`]: the same queue file, the same
+//! ledger event and the same wait, and the answer is printed in the person's own
+//! words. The worker's brief picks between the two from the program's harness
+//! (`[asks] supported`), never from a list of program names.
+//!
+//! Neither verb decides by itself: a timeout, a payload it cannot read or a
+//! task the run does not know leaves the program's own prompt in place, so the
+//! person can still answer there.
 //!
 //! The flow follows Shepherdr's ask hook (MIT, `mods/chat/ask-hook.sh`,
 //! `service/asks.ts`, tag `v3.1.34`, commit `a3f327a`): the hook waits, the
@@ -23,12 +29,12 @@ use anyhow::anyhow;
 use serde_json::{Map, Value, json};
 use shprd_agents::asks::{AskHookInstall, AskHookInstaller, AskHookPaths};
 use shprd_agents::harness::Harness;
-use shprd_core::ask::{Ask, AskError, AskKind, AskQueue};
+use shprd_core::ask::{Ask, AskAnswer, AskError, AskKind, AskQueue};
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
 
-use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg};
+use crate::cli::{AskHookArgs, AskInstallArgs, AskKindArg, AskRaiseArgs};
 use crate::ctx::{CliError, Ctx, resolve_checkout, resolve_root};
 
 /// The environment variable a worker's launch sets with its task id.
@@ -170,11 +176,7 @@ fn strip_recommended(label: &str) -> String {
 
 /// Runs `ask hook`.
 pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
-    let Some(task) = args.task.clone().or_else(|| {
-        std::env::var(TASK_ENV)
-            .ok()
-            .filter(|value| !value.is_empty())
-    }) else {
+    let Some(task) = args.task.clone().or_else(task_of_env) else {
         // Without a task there is nowhere to put the card; the program's own
         // prompt is the only way left to answer.
         return Ok(());
@@ -187,11 +189,7 @@ pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
         // A test, or a program whose payload shprd cannot read, may spell the
         // ask out directly.
         (Some(kind), text) => {
-            let kind = match kind {
-                AskKindArg::Question => AskKind::Question,
-                AskKindArg::Permission => AskKind::Permission,
-                AskKindArg::Plan => AskKind::Plan,
-            };
+            let kind = ask_kind(*kind);
             let text = text
                 .clone()
                 .unwrap_or_else(|| default_text(kind).to_string());
@@ -207,64 +205,207 @@ pub fn hook(args: &AskHookArgs, repo: Option<&Path>) -> Result<(), CliError> {
     let Some(made) = made else {
         return Ok(());
     };
-    let now_ms = SystemClock.now_ms();
     let timeout_secs = args
         .timeout_secs
         .or_else(|| harness_timeout(&args.program))
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let id = args.id.clone().unwrap_or_else(|| ask_id(now_ms));
+    let id = args
+        .id
+        .clone()
+        .unwrap_or_else(|| ask_id(SystemClock.now_ms()));
+    let actor = Actor::Agent {
+        id: args.program.clone(),
+    };
+    // Refused or unreadable: the hook says nothing and lets the program ask.
+    if raise_card(&root, actor, &task, &made, &id, timeout_secs).is_err() {
+        return Ok(());
+    }
+    let queue = AskQueue::for_repo(&root);
+    let Some(answer) = wait_for_answer(&queue, &task, &id, timeout_secs) else {
+        return Ok(());
+    };
+    let value = decision(
+        made.kind,
+        made.question.as_deref(),
+        &payload.input,
+        &answer.text,
+    );
+    let text = serde_json::to_string(&value)
+        .map_err(|err| CliError::other(anyhow!(err).context("serializing the decision")))?;
+    println!("{text}");
+    Ok(())
+}
+
+/// Runs `ask raise`: the agent's own way to raise a needs-you card.
+///
+/// A program whose CLI has no ask hook cannot turn its own question into a
+/// card, so its worker's brief tells it to run this instead. The card is raised
+/// exactly as a hook raises it (same queue file, same ledger event, same
+/// blocking wait); only the printed answer differs: this verb prints the
+/// person's answer in their own words, because no program's hook shape is
+/// waiting for it.
+pub fn raise(args: &AskRaiseArgs, ctx: &Ctx) -> Result<(), CliError> {
+    let task = match args.task.clone().or_else(task_of_env) {
+        Some(task) => task,
+        None => {
+            // A coordinator has no task (`$SHPRD_TASK` is set only for a task),
+            // so this points it at the run-wide verb rather than leaving it
+            // with a refusal it cannot act on.
+            return Err(CliError::other(anyhow!(
+                "no task for this ask: run it in the task's worktree (where `$SHPRD_TASK` is set) \
+                 or name one with `--task`; a run-wide question has no task, so raise it with \
+                 `shprd agent escalate --body <question> --default <what happens if nobody answers>`"
+            )));
+        }
+    };
+    let text = args.text.trim().to_string();
+    if text.is_empty() {
+        return Err(CliError::other(anyhow!(
+            "`--text` is empty: say what the person is asked, in one sentence"
+        )));
+    }
+    let kind = ask_kind(args.kind);
+    let options = match (kind, args.options.is_empty()) {
+        (AskKind::Question, _) => args.options.clone(),
+        // A permission or a plan is a yes or a no, and a card with no choices
+        // would make the person type one.
+        (_, true) => vec!["Allow".to_string(), "Deny".to_string()],
+        (_, false) => args.options.clone(),
+    };
+    let made = Words {
+        kind,
+        question: (kind == AskKind::Question).then(|| text.clone()),
+        text,
+        options,
+    };
+    let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let id = args
+        .id
+        .clone()
+        .unwrap_or_else(|| ask_id(SystemClock.now_ms()));
+    raise_card(
+        &ctx.root,
+        ctx.actor.clone(),
+        &task,
+        &made,
+        &id,
+        timeout_secs,
+    )?;
+    let queue = AskQueue::for_repo(&ctx.root);
+    let Some(answer) = wait_for_answer(&queue, &task, &id, timeout_secs) else {
+        return Err(CliError::other(anyhow!(
+            "no answer within {timeout_secs}s: card {id:?} is still open, so raise it again if the \
+             decision still blocks you, or hand in as blocked with the question in your summary"
+        )));
+    };
+    if ctx.json {
+        let ask = queue
+            .read(&task, &id)
+            .map_err(|err| CliError::other(anyhow!(err).context("reading the answered ask")))?;
+        let text = serde_json::to_string_pretty(&ask)
+            .map_err(|err| CliError::other(anyhow!(err).context("serializing the answered ask")))?;
+        println!("{text}");
+    } else {
+        println!("{}", answer.text);
+    }
+    Ok(())
+}
+
+/// The task a worker's verbs read from the environment, when one is set.
+fn task_of_env() -> Option<String> {
+    std::env::var(TASK_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+/// One kind arg as the ask's kind.
+fn ask_kind(kind: AskKindArg) -> AskKind {
+    match kind {
+        AskKindArg::Question => AskKind::Question,
+        AskKindArg::Permission => AskKind::Permission,
+        AskKindArg::Plan => AskKind::Plan,
+    }
+}
+
+/// Raises one card in the run's queue and ledger, or says why it could not.
+///
+/// Every caller that raises a card goes through here, so the hook and
+/// `ask raise` cannot raise two different things. The raise is create-new: only
+/// the process whose write lands first owns the ask. A process that loses the
+/// race must not touch the queue file — deleting it would leave the ledger's
+/// `ask_raised` with no file to answer and strand every waiting caller until
+/// their timeouts — so it waits like the owner does and says nothing about it.
+fn raise_card(
+    root: &Path,
+    actor: Actor,
+    task: &str,
+    made: &Words,
+    id: &str,
+    timeout_secs: u64,
+) -> Result<(), CliError> {
+    let now_ms = SystemClock.now_ms();
     let ask = Ask::new(
-        id.clone(),
-        task.clone(),
+        id.to_string(),
+        task.to_string(),
         made.kind,
         made.text.clone(),
         now_ms,
     )
     .with_options(made.options.clone())
     .expires_at(now_ms.saturating_add(timeout_secs.saturating_mul(1_000)));
-    let actor = Actor::Agent {
-        id: args.program.clone(),
-    };
-    let ctx = Ctx::new(root, actor, false, true);
+    let ctx = Ctx::new(root.to_path_buf(), actor, false, true);
     let raised = EventKind::AskRaised {
-        task: task.clone(),
-        ask: id.clone(),
+        task: task.to_string(),
+        ask: id.to_string(),
         ask_kind: made.kind,
         text: made.text.clone(),
         options: made.options.clone(),
         created_at_ms: now_ms,
         expires_at_ms: ask.expires_at_ms,
     };
-    // Refused or unreadable: the hook says nothing and lets the program ask.
-    if ctx.check(&raised).is_err() {
-        return Ok(());
-    }
+    ctx.check(&raised)?;
     let queue = AskQueue::for_repo(&ctx.root);
-    // The raise is create-new, so only the hook whose write lands first owns the
-    // ask. A hook that loses the race must not touch the queue file: deleting it
-    // would leave the ledger's `ask_raised` with no file to answer and strand
-    // every waiting hook until their timeouts.
     let raised_here = match queue.raise(&ask) {
         Ok(()) => true,
         Err(AskError::AlreadyRaised { .. }) => false,
-        Err(_) => return Ok(()),
+        Err(err) => {
+            return Err(CliError::other(anyhow!(err).context("writing the ask")));
+        }
     };
     match ctx.commit(raised) {
-        Ok(_) => {}
-        // The log already holds this ask: another hook won the race, or a
-        // crashed hook left its file behind. Keep the queue file so the ask
+        Ok(_) => Ok(()),
+        // The log already holds this ask: another caller won the race, or a
+        // crashed one left its file behind. Keep the queue file so the ask
         // stays answerable, and wait for the answer like its owner would.
-        Err(CliError::Refused(RuleError::AskAlreadyRaised { .. })) => {}
-        Err(_) => {
-            // We made the file and the log refused the ask, so this hook's
+        Err(CliError::Refused(RuleError::AskAlreadyRaised { .. })) => Ok(()),
+        Err(err) => {
+            // We made the file and the log refused the ask, so this process's
             // write is the one to undo; a file it did not make is left alone.
             if raised_here {
-                let _ = queue.remove(&task, &id);
+                let _ = queue.remove(task, id);
             }
-            return Ok(());
+            Err(err)
         }
     }
-    wait_and_print(&queue, &task, &id, made, &payload, timeout_secs)
+}
+
+/// Waits for the answer to `task`'s ask `id`, or `None` when the wait runs out.
+///
+/// A broken answer file is not a decision, so it keeps the caller waiting
+/// rather than answering on the program's behalf.
+fn wait_for_answer(queue: &AskQueue, task: &str, id: &str, timeout_secs: u64) -> Option<AskAnswer> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        // Still open, or a broken answer file: neither is a decision, so keep
+        // waiting until the deadline.
+        if let Ok(Some(answer)) = queue.answer_of(task, id) {
+            return Some(answer);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(POLL);
+    }
 }
 
 /// The ask timeout the program's own harness names, in seconds.
@@ -402,44 +543,7 @@ fn is_denial(answer: &str) -> bool {
     )
 }
 
-/// Waits for the answer, prints the decision, and returns.
-fn wait_and_print(
-    queue: &AskQueue,
-    task: &str,
-    id: &str,
-    made: Words,
-    payload: &Payload,
-    timeout_secs: u64,
-) -> Result<(), CliError> {
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        match queue.answer_of(task, id) {
-            Ok(Some(answer)) => {
-                let value = decision(
-                    made.kind,
-                    made.question.as_deref(),
-                    &payload.input,
-                    &answer.text,
-                );
-                let text = serde_json::to_string(&value).map_err(|err| {
-                    CliError::other(anyhow!(err).context("serializing the decision"))
-                })?;
-                println!("{text}");
-                return Ok(());
-            }
-            Ok(None) => {}
-            // A broken answer file is not a decision; keep waiting until the
-            // deadline rather than answering on the program's behalf.
-            Err(_) => {}
-        }
-        if Instant::now() >= deadline {
-            return Ok(());
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
-/// An ask id: the time, the process and a counter, so two hooks in one
+/// An ask id: the time, the process and a counter, so two callers in one
 /// millisecond still differ.
 fn ask_id(now_ms: u64) -> String {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);

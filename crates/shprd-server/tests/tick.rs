@@ -1183,3 +1183,91 @@ fn a_cut_with_no_backup_asks_the_person_once() {
         "a give-up is recorded once: {report:?}"
     );
 }
+
+/// A task worktree an older build made has no `info/exclude` entries, so the
+/// worker's brief would claim a protection that is not there. The pass repairs
+/// every live worktree it finds, before it plans anything.
+#[test]
+fn a_pass_excludes_shprds_state_in_a_worktree_made_before_the_change() {
+    use shprd_core::event::ResourceKind;
+
+    // A real repository, because the repair drives git.
+    let temp = TempDir::new().expect("temp dir");
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&repo).expect("mkdir the repo");
+    std::fs::create_dir_all(&home).expect("mkdir the home");
+    let git = |args: &[&str], dir: &Path| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["config", "user.name", "shprd tests"], &repo);
+    git(&["config", "user.email", "tests@example.invalid"], &repo);
+    std::fs::write(repo.join("a.txt"), "one\n").expect("a seed file");
+    git(&["add", "."], &repo);
+    git(&["commit", "-q", "-m", "seed"], &repo);
+
+    // A worktree as git makes one, with no exclusions: what an older shprd left.
+    let worktree = home.join(".shprd/wt/repo/r1/T1");
+    std::fs::create_dir_all(worktree.parent().expect("a parent")).expect("mkdir the wt root");
+    let text = worktree.display().to_string();
+    git(
+        &["worktree", "add", "-q", "-b", "shprd/r1/T1", &text, "main"],
+        &repo,
+    );
+    let exclude = repo.join(".git/info/exclude");
+    std::fs::write(&exclude, "").expect("an empty exclude file");
+
+    // The log names the worktree as live, the way a spawn records one.
+    let events = vec![
+        started(),
+        added(2, "T1"),
+        ev(
+            3,
+            EventKind::Resource {
+                action: shprd_core::event::ResourceAction::Created,
+                kind: ResourceKind::Worktree,
+                name: text.clone(),
+                task: Some(String::from("T1")),
+            },
+        ),
+    ];
+    let fixture = Fixture {
+        _temp: temp,
+        repo: repo.clone(),
+        home: home.clone(),
+    };
+    let mut log = EventLog::open(&fixture.repo.join(".shprd/events.jsonl")).expect("open the log");
+    let clock = SystemClock;
+    for event in events {
+        log.append(event.actor, event.kind, &clock)
+            .expect("append the fixture");
+    }
+    let forge: SharedForge = Arc::new(NoForge);
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        forge,
+        Config::default(),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    worker.tick().expect("the pass ran");
+
+    let text = std::fs::read_to_string(&exclude).expect("the exclude file");
+    for pattern in ["/.shprd/", "/.dagr/"] {
+        assert!(
+            text.lines().any(|line| line.trim() == pattern),
+            "{pattern} was not repaired into:\n{text}"
+        );
+    }
+    assert!(
+        shprd_git::git::Git::new(&worktree)
+            .is_clean()
+            .expect("git status"),
+        "the repaired worktree still reports shprd's state"
+    );
+}

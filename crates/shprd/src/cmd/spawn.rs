@@ -228,11 +228,15 @@ pub fn spawn(
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     // What the launch applies is decided before the brief is written, because
     // the Settings block names it.
+    let program = program_of(env.programs.as_slice(), &pick.agent)?;
     let chosen = applied(
-        &program_of(env.programs.as_slice(), &pick.agent)?.spec,
+        &program.spec,
         named(role.as_ref().and_then(|role| role.perm.as_ref())),
         role.as_ref().is_some_and(|role| role.fast.value),
     );
+    // How this program raises a needs-you card is the harness's fact alone
+    // (`[asks] supported`), so the brief never has to know a program's name.
+    let ask = AskRoute::of_harness(program.spec.asks.supported);
     // The role's words and the Settings block are read before anything is
     // touched: an agent whose prompt cannot be read must cost nothing.
     let context = brief_context(env, BRIEF_ROLE, &pick, effort.as_deref(), &chosen)?;
@@ -259,6 +263,7 @@ pub fn spawn(
         gates: &env.gates,
         archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
         prompt: Some(&context.prompt),
+        ask,
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &warnings,
@@ -1494,7 +1499,7 @@ fn invalid(error: shprd_core::prompts::PromptError) -> CliError {
 /// The rendering lives in [`shprd_views::brief`] with the run's other views, so
 /// the whole document can be snapshot-tested without a worktree; the name
 /// `render_brief` stays here because that is what this module's callers use.
-pub use shprd_views::brief::{BriefInput, task_brief as render_brief};
+pub use shprd_views::brief::{AskRoute, BriefInput, task_brief as render_brief};
 
 /// Builds the environment a spawn runs in from the process environment, the
 /// config and the run log.
@@ -3645,6 +3650,7 @@ off = ["--no-fast"]
             gates: &["cargo test --workspace".to_string()],
             archive: None,
             prompt: None,
+            ask: AskRoute::Hook,
             settings: None,
             role: None,
             warnings: &[],
@@ -3695,6 +3701,7 @@ off = ["--no-fast"]
             gates: &[],
             archive: None,
             prompt: None,
+            ask: AskRoute::Hook,
             settings: None,
             role: None,
             warnings: &[],
@@ -3731,6 +3738,7 @@ off = ["--no-fast"]
                 gates: &[],
                 archive: None,
                 prompt: None,
+                ask: AskRoute::Hook,
                 settings: None,
                 role: None,
                 warnings: &[],

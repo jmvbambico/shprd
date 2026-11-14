@@ -29,6 +29,28 @@ const TEXT_CHARS: usize = 80;
 /// Largest number of escalations shown, most recent last.
 const ESCALATIONS_SHOWN: usize = 3;
 
+/// How the program a task's agent runs can raise a needs-you card.
+///
+/// It is read from the program's harness — `[asks] supported` in
+/// `data/harness/<program>.toml` — and never from a list of program names, so a
+/// program that gains or loses an ask hook changes its brief by changing its
+/// harness file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskRoute {
+    /// The harness names an ask hook: the agent asks with the program's own
+    /// question tool, and the hook turns it into a card.
+    Hook,
+    /// The harness names no ask hook: the agent runs `shprd ask raise` itself.
+    Command,
+}
+
+impl AskRoute {
+    /// The route a program's harness says it takes.
+    pub fn of_harness(supported: bool) -> Self {
+        if supported { Self::Hook } else { Self::Command }
+    }
+}
+
 /// The rehydration block for `state`.
 ///
 /// The event log is accepted for symmetry with the other projectors, but every
@@ -296,6 +318,8 @@ pub struct BriefInput<'a> {
     pub archive: Option<&'a str>,
     /// The role's standing instructions, when the role has a prompt.
     pub prompt: Option<&'a str>,
+    /// How this program raises a needs-you card, from its harness.
+    pub ask: AskRoute,
     /// The settings as this task resolves them, for the Settings block.
     pub settings: Option<&'a Resolved>,
     /// The role whose values the Settings block describes.
@@ -392,6 +416,11 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         "- commit on your branch `{}`; never push, never open a pull request\n",
         input.branch
     ));
+    out.push_str(
+        "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and \
+         the worktree's git already ignores them. Never commit them, never add them to the \
+         repository's `.gitignore`, and leave them out of your changes\n",
+    );
     out.push_str(&gate_rule(input.gates));
     out.push_str(&format!(
         "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
@@ -405,7 +434,50 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         t = input.task.id,
         a = input.attempt
     ));
+    out.push_str(&asking_section(input.ask));
     out
+}
+
+/// The "Asking the person" section: how this program raises a needs-you card.
+///
+/// A program whose harness has an ask hook raises the card with its own
+/// question tool, and the hook does the rest. A program whose harness has none
+/// cannot: its question tool reaches nobody, so the brief names the verb the
+/// worker runs itself, with its flags and what it prints, so a blocked worker
+/// never ends its turn on a question no person will see.
+fn asking_section(route: AskRoute) -> String {
+    match route {
+        AskRoute::Hook => "\n## Asking the person\n\n\
+            This program's CLI has an ask hook: ask with your CLI's own question tool (Claude Code: \
+            `AskUserQuestion`, with 2-4 clear options and your recommendation first) and the hook \
+            turns it into a needs-you card the person answers, from the board or their phone. The \
+            tool waits until they do, so your next turn carries their answer.\n"
+            .to_string(),
+        AskRoute::Command => {
+            let mut out = String::from(
+                "\n## Asking the person\n\n\
+                 This program's CLI has no ask hook, so a question with its own question tool reaches \
+                 nobody: nothing turns it into a card and the person never sees it. Raise the card \
+                 yourself, from your worktree, and wait for the answer:\n\n",
+            );
+            out.push_str("```\n");
+            out.push_str("shprd ask raise --kind question \\\n");
+            out.push_str("    --text \"Can I take the window for 30s to screenshot the menu?\" \\\n");
+            out.push_str(
+                "    --option \"Take it, 30s\" --option \"Wait for my go-ahead\" --option \"Skip the screenshot\"\n",
+            );
+            out.push_str("```\n\n");
+            out.push_str(
+                "It blocks until the person answers, prints their answer on stdout and exits 0: carry \
+                 on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a \
+                 plan; both offer Allow and Deny unless you name your own options. If it exits non-zero, \
+                 nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the \
+                 card stays open, so raise it again if the decision still blocks you, or hand in as \
+                 `blocked` with the question in your summary.\n",
+            );
+            out
+        }
+    }
 }
 
 /// The Rules line that tells the agent which gates to run.
@@ -771,6 +843,7 @@ mod tests {
             gates,
             archive: None,
             prompt: None,
+            ask: AskRoute::Hook,
             settings: None,
             role: None,
             warnings: &[],
@@ -894,6 +967,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             gates: &gates,
             archive: None,
             prompt: Some("You work on one shprd task.\nStay within scope.\n"),
+            ask: AskRoute::Hook,
             settings: Some(&resolved),
             role: Some(&role),
             warnings: &[],
@@ -923,9 +997,14 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 
 - work only in `/home/me/.shprd/worktrees/shprd/m9/M9.4`; change nothing outside the scope above
 - commit on your branch `task/30-m9-4`; never push, never open a pull request
+- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes
 - run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
 - say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
 - report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used
+
+## Asking the person
+
+This program's CLI has an ask hook: ask with your CLI's own question tool (Claude Code: `AskUserQuestion`, with 2-4 clear options and your recommendation first) and the hook turns it into a needs-you card the person answers, from the board or their phone. The tool waits until they do, so your next turn carries their answer.
 
 ## Your settings
 
@@ -966,6 +1045,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             gates: &[],
             archive: None,
             prompt: None,
+            ask: AskRoute::Hook,
             settings: None,
             role: None,
             warnings: &[],
@@ -996,6 +1076,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             gates: &[],
             archive: None,
             prompt: None,
+            ask: AskRoute::Hook,
             settings: None,
             role: None,
             warnings: &warnings,
@@ -1023,11 +1104,86 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             gates: &[],
             archive: None,
             prompt: None,
+            ask: AskRoute::Hook,
             settings: None,
             role: None,
             warnings: &[],
         });
         assert!(!text.contains("## Warnings"), "{text}");
+    }
+
+    /// The plainest brief, with `ask` naming how its program asks.
+    fn plain_brief(ask: AskRoute) -> String {
+        let plan = brief_task();
+        task_brief(&BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt: 1,
+            agent: "claude",
+            model: None,
+            branch: "task/30-m9-4",
+            worktree: "/wt/M9.4",
+            skills: &[],
+            gates: &[],
+            archive: None,
+            prompt: None,
+            ask,
+            settings: None,
+            role: None,
+            warnings: &[],
+        })
+    }
+
+    /// A program whose harness says it has an ask hook keeps the old wording:
+    /// its own question tool raises the card through the hook, so the brief
+    /// must not send it to a verb the hook already runs for it.
+    #[test]
+    fn a_program_with_an_ask_hook_is_told_to_use_its_own_question_tool() {
+        let text = plain_brief(AskRoute::Hook);
+        assert!(
+            text.ends_with(
+                "\n## Asking the person\n\nThis program's CLI has an ask hook: ask with your CLI's own question tool (Claude Code: `AskUserQuestion`, with 2-4 clear options and your recommendation first) and the hook turns it into a needs-you card the person answers, from the board or their phone. The tool waits until they do, so your next turn carries their answer.\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("shprd ask raise"), "{text}");
+    }
+
+    /// A program with no ask hook is told the verb it runs itself, exactly:
+    /// the command, the flags, what it prints and what a non-zero exit means.
+    /// The wording is the whole fix, so it is pinned here.
+    #[test]
+    fn a_program_without_an_ask_hook_is_told_the_raise_verb_and_how_it_waits() {
+        let text = plain_brief(AskRoute::Command);
+        let expected = "\n## Asking the person\n\nThis program's CLI has no ask hook, so a question with its own question tool reaches nobody: nothing turns it into a card and the person never sees it. Raise the card yourself, from your worktree, and wait for the answer:\n\n```\nshprd ask raise --kind question \\\n    --text \"Can I take the window for 30s to screenshot the menu?\" \\\n    --option \"Take it, 30s\" --option \"Wait for my go-ahead\" --option \"Skip the screenshot\"\n```\n\nIt blocks until the person answers, prints their answer on stdout and exits 0: carry on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a plan; both offer Allow and Deny unless you name your own options. If it exits non-zero, nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the card stays open, so raise it again if the decision still blocks you, or hand in as `blocked` with the question in your summary.\n";
+        let Some(start) = text.find("\n## Asking the person") else {
+            panic!("the brief has an Asking section: {text}");
+        };
+        assert_eq!(&text[start..], expected, "{text}");
+        assert!(
+            !text.contains("ask with your CLI's own question tool"),
+            "a program with no hook must not be told to use its own tool: {text}"
+        );
+    }
+
+    /// shprd's own state in the worktree is never the worker's to commit, and
+    /// the ignoring is git's, not a change to the repository's `.gitignore`.
+    #[test]
+    fn the_rules_say_shprds_state_directories_are_not_the_workers() {
+        let text = plain_brief(AskRoute::Hook);
+        assert!(
+            text.contains(
+                "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// The route is the harness's fact, not a list of program names.
+    #[test]
+    fn the_ask_route_comes_from_the_harness() {
+        assert_eq!(AskRoute::of_harness(true), AskRoute::Hook);
+        assert_eq!(AskRoute::of_harness(false), AskRoute::Command);
     }
 
     #[test]
