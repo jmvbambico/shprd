@@ -456,7 +456,7 @@ pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> Strin
                 role.fallback.source.label()
             )
         })
-        .unwrap_or_else(|| "none: the other installed program (built in)".to_owned());
+        .unwrap_or_else(|| "none: the configured workers (built in)".to_owned());
     out.push_str(&format!("- Fallback: {fallback}\n"));
     for (name, key, absent) in [
         ("Merge", TaskKey::Merge, "ask"),
@@ -713,7 +713,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Effort: high (this repo)
 - Fast mode: off (built in)
 - Permissions: the program's own default (built in)
-- Fallback: none: the other installed program (built in)
+- Fallback: none: the configured workers (built in)
 - Merge: checks (this repo)
 - Review rounds: 2 (you)
 - Must fix: major (built in)
@@ -796,7 +796,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Effort: high (this repo)
 - Fast mode: off (built in)
 - Permissions: the program's own default (built in)
-- Fallback: none: the other installed program (built in)
+- Fallback: none: the configured workers (built in)
 - Merge: checks (this repo)
 - Review rounds: 2 (you)
 - Must fix: major (built in)

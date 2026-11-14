@@ -23,7 +23,9 @@ use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render
 use shprd_core::config::Skills;
 use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
 use shprd_core::prompts::{self, PromptRef};
-use shprd_core::settings::{Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Sourced, Value};
+use shprd_core::settings::{
+    Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Source, Sourced, Value,
+};
 use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
@@ -193,9 +195,16 @@ pub fn spawn(
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
+    // What the launch applies is decided before the brief is written, because
+    // the Settings block names it.
+    let chosen = applied(
+        &program_of(env.programs.as_slice(), &pick.agent)?.spec,
+        named(role.as_ref().and_then(|role| role.perm.as_ref())),
+        role.as_ref().is_some_and(|role| role.fast.value),
+    );
     // The role's words and the Settings block are read before anything is
     // touched: an agent whose prompt cannot be read must cost nothing.
-    let context = brief_context(env, BRIEF_ROLE, &pick, effort.as_deref())?;
+    let context = brief_context(env, BRIEF_ROLE, &pick, effort.as_deref(), &chosen)?;
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
@@ -234,6 +243,7 @@ pub fn spawn(
         &workspace,
         &Launching {
             pick: &pick,
+            applied: &chosen,
             task: &task.id,
             effort: effort.as_deref(),
             brief: &brief,
@@ -319,6 +329,8 @@ pub(crate) fn workspace_of(
 pub(crate) struct Launching<'a> {
     /// The agent that was picked.
     pub(crate) pick: &'a Pick,
+    /// The access mode and fast switch this launch applies.
+    pub(crate) applied: &'a Applied,
     /// The task it works on.
     pub(crate) task: &'a str,
     /// The effort it runs at, when one was asked for.
@@ -339,6 +351,7 @@ pub(crate) fn open_agent(
 ) -> Result<(shprd_mux::TabId, String), CliError> {
     let Launching {
         pick,
+        applied,
         task,
         effort,
         brief,
@@ -352,7 +365,7 @@ pub(crate) fn open_agent(
     // The tab exists from here on, so every failure closes it again: a tab left
     // open points at a worktree the failing spawn is about to remove.
     match start_in_tab(
-        mux, env, pick, effort, brief, brief_path, worktree, task, &title, &tab,
+        mux, env, pick, applied, effort, brief, brief_path, worktree, task, &title, &tab,
     ) {
         Ok(()) => Ok((tab.id, title)),
         Err(err) => {
@@ -371,6 +384,7 @@ fn start_in_tab(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
     pick: &Pick,
+    applied: &Applied,
     effort: Option<&str>,
     brief: &str,
     brief_path: &Path,
@@ -379,8 +393,11 @@ fn start_in_tab(
     title: &str,
     tab: &shprd_mux::Tab,
 ) -> Result<(), CliError> {
+    let program = program_of(env.programs.as_slice(), &pick.agent)?;
     let (argv, brief_in_args) = launch_argv(
         &pick.launch,
+        &program.spec,
+        applied,
         pick.model.as_deref(),
         effort,
         brief,
@@ -1255,12 +1272,41 @@ pub(crate) fn write_brief(path: &Path, text: &str) -> Result<(), CliError> {
         .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
+/// What a launch puts on the command line beyond the program's base command:
+/// the access mode and the fast switch.
+///
+/// A launch applies one access mode. The role names it when the program declares
+/// that mode; otherwise it is the program's full-access mode, which is the
+/// auto-approval shprd has always started unattended agents with. Fast is on
+/// only when the role asks for it and the program has the switch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Applied {
+    /// The access mode id on the command line, when the program declares one.
+    pub(crate) perm: Option<String>,
+    /// Whether the program's fast switch is on.
+    pub(crate) fast: bool,
+}
+
+/// Decides what a launch applies from the role's choice and the program's spec.
+pub(crate) fn applied(spec: &HarnessSpec, perm: Option<&str>, fast: bool) -> Applied {
+    let perm = perm
+        .filter(|id| spec.permissions.mode(id).is_some())
+        .map(str::to_owned)
+        .or_else(|| spec.permissions.full_mode().map(|mode| mode.id.clone()));
+    Applied {
+        fast: fast && spec.fast.available(),
+        perm,
+    }
+}
+
 /// The role's words and the settings that shape one attempt, for a brief.
 ///
 /// The Settings block has to name the layer that set each value, and the values
 /// a spawn decides itself are the task's own: the program it launches, the model
 /// and the effort it chose. Those are put into a task layer, but only where the
-/// role names nothing, so a program the person set still reads as theirs.
+/// role names nothing, so a program the person set still reads as theirs. The
+/// access mode and the fast switch are replaced by what the launch applies, so a
+/// line never claims a mode or a tier the command line does not carry.
 pub(crate) struct BriefContext {
     /// The role's standing instructions, read now.
     pub(crate) prompt: String,
@@ -1282,6 +1328,7 @@ pub(crate) fn brief_context(
     role_id: &str,
     pick: &Pick,
     effort: Option<&str>,
+    applied: &Applied,
 ) -> Result<BriefContext, CliError> {
     let base = env.settings.resolve(None);
     let mut task = Layer::new();
@@ -1307,7 +1354,21 @@ pub(crate) fn brief_context(
         }
     }
     let settings = env.settings.resolve(Some(&task));
-    let role = settings.role(role_id);
+    let mut role = settings.role(role_id);
+    if let Some(role) = role.as_mut() {
+        // What the launch applies, not what the settings wanted: a mode the
+        // program does not declare is the program's full-access one, and a role
+        // that asks for fast on a program without the switch runs without it.
+        let kept = role.perm.clone();
+        role.perm = match (applied.perm.as_deref(), named(kept.as_ref())) {
+            (Some(id), Some(named)) if id == named => kept,
+            (Some(id), _) => Some(Sourced::new(id.to_owned(), Source::BuiltIn)),
+            (None, _) => None,
+        };
+        if role.fast.value != applied.fast {
+            role.fast = Sourced::new(applied.fast, Source::BuiltIn);
+        }
+    }
     let prompt = role_prompt(env, role_id)?;
     Ok(BriefContext {
         prompt,
@@ -1630,14 +1691,28 @@ pub(crate) fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<
 /// argument, which is also what says whether it has to be typed in instead.
 fn launch_argv(
     launch: &LaunchSpec,
+    spec: &HarnessSpec,
+    applied: &Applied,
     model: Option<&str>,
     effort: Option<&str>,
     brief: &str,
     brief_path: &Path,
 ) -> Result<(Vec<String>, bool), CliError> {
     let mut argv = launch.interactive.clone();
-    if let Some(auto) = &launch.auto_approve {
-        argv.extend(auto.iter().cloned());
+    // One access mode: the one the role named when the program declares it,
+    // else the program's full-access mode. A program whose spec declares no
+    // modes keeps the auto-approval flags it has always been started with.
+    match applied
+        .perm
+        .as_deref()
+        .and_then(|id| spec.permissions.mode(id))
+    {
+        Some(mode) => argv.extend(mode.args.iter().cloned()),
+        None => {
+            if let Some(auto) = &launch.auto_approve {
+                argv.extend(auto.iter().cloned());
+            }
+        }
     }
     let values = Values {
         model: model.map(str::to_string),
@@ -1653,6 +1728,12 @@ fn launch_argv(
     )?);
     if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
         argv.extend(render(launch, effort_args, &values)?);
+    }
+    // Fast is said out loud in both directions, as Shepherdr's `argvFor` does:
+    // a program that can be told to turn fast off is, so a person's own setting
+    // cannot quietly win over the role's.
+    if spec.fast.available() {
+        argv.extend(spec.fast.args(applied.fast).iter().cloned());
     }
     let mut brief_in_args = false;
     if let Some(system_prompt_args) = &launch.system_prompt_args {
@@ -2047,6 +2128,100 @@ project_dirs = []
         assert!(brief.contains("- Program: pi (you)"), "{brief}");
         assert!(brief.contains("- Model: sonnet (you)"), "{brief}");
         assert!(brief.contains("- Effort: high (you)"), "{brief}");
+    }
+
+    /// The shipped Claude Code spec, so a test uses the access modes and fast
+    /// switch a real role can set.
+    fn claude_spec() -> HarnessSpec {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
+        shprd_agents::spec::load_dir(&dir)
+            .unwrap_or_else(|err| panic!("the shipped harness table: {err}"))
+            .into_iter()
+            .find(|spec| spec.id == "claude")
+            .unwrap_or_else(|| panic!("the shipped table has no claude spec"))
+    }
+
+    /// A spawn's argv, from what the fake host was asked to run.
+    fn spawn_argv(calls: &[Call]) -> Vec<String> {
+        calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"))
+    }
+
+    /// The role's access mode and fast switch are on the command line and in
+    /// the brief: a line the agent reads never claims something not in force.
+    #[test]
+    fn the_roles_access_mode_and_fast_switch_reach_the_launch_and_the_brief() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"claude\"\nperm = \"plan\"\nfast = true\n",
+        );
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = spawn_argv(&mux.calls());
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--permission-mode", "plan"]),
+            "the role's mode is on the command line: {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--settings", "{\"fastMode\":true}"]),
+            "the role's fast switch is on the command line: {argv:?}"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("- Permissions: plan (you)"), "{brief}");
+        assert!(brief.contains("- Fast mode: on (you)"), "{brief}");
+    }
+
+    /// A mode the program does not declare is not claimed: the launch falls back
+    /// to the program's full-access mode, and the brief says that instead.
+    #[test]
+    fn a_mode_the_program_lacks_is_not_claimed_in_the_brief() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"claude\"\nperm = \"read-only\"\n",
+        );
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = spawn_argv(&mux.calls());
+        assert!(
+            argv.contains(&"--dangerously-skip-permissions".to_string()),
+            "the full-access mode is what runs: {argv:?}"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(
+            brief.contains("- Permissions: bypassPermissions (built in)"),
+            "the block names the mode in force, not the one that was set: {brief}"
+        );
+        assert!(
+            !brief.contains("- Permissions: read-only"),
+            "the block does not claim a mode the program lacks: {brief}"
+        );
     }
 
     #[test]
@@ -3020,11 +3195,110 @@ mod tests {
         }
     }
 
+    /// A harness spec with no access modes and no fast switch: the argv tests
+    /// about the model and the brief must not carry flags they do not use.
+    fn bare_spec() -> HarnessSpec {
+        let text = r#"
+id = "claude"
+name = "Fake"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "claude"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["claude"]
+model_args = ["--model", "{model}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{session}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+"#;
+        toml::from_str(text).unwrap_or_else(|err| panic!("the test spec is invalid: {err}"))
+    }
+
+    /// A harness spec with two access modes and a fast switch.
+    fn modes_spec() -> HarnessSpec {
+        let text = r#"
+id = "claude"
+name = "Fake"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "claude"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["claude"]
+model_args = ["--model", "{model}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{session}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+
+[permissions]
+default = "plan"
+full = "yolo"
+modes = [
+  { id = "plan", label = "Plan", args = ["--permission-mode", "plan"] },
+  { id = "yolo", label = "Full", args = ["--yes"] },
+]
+
+[fast]
+on = ["--fast"]
+off = ["--no-fast"]
+"#;
+        toml::from_str(text).unwrap_or_else(|err| panic!("the test spec is invalid: {err}"))
+    }
+
     #[test]
     fn a_task_without_a_model_gets_no_model_flags() {
         let brief = Path::new("/tmp/brief.md");
-        let (argv, in_args) = launch_argv(&launch(), None, None, "brief", brief)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let (argv, in_args) = launch_argv(
+            &launch(),
+            &bare_spec(),
+            &Applied::default(),
+            None,
+            None,
+            "brief",
+            brief,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(argv, ["claude".to_string()]);
         assert!(!in_args);
     }
@@ -3032,8 +3306,16 @@ mod tests {
     #[test]
     fn a_task_with_a_model_gets_its_flags() {
         let brief = Path::new("/tmp/brief.md");
-        let (argv, _) = launch_argv(&launch(), Some("opus"), None, "brief", brief)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let (argv, _) = launch_argv(
+            &launch(),
+            &bare_spec(),
+            &Applied::default(),
+            Some("opus"),
+            None,
+            "brief",
+            brief,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(
             argv,
             [
@@ -3041,6 +3323,61 @@ mod tests {
                 "--model".to_string(),
                 "opus".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn a_launch_carries_the_access_mode_and_fast_switch_it_applied() {
+        let brief = Path::new("/tmp/brief.md");
+        let spec = modes_spec();
+        let chosen = applied(&spec, Some("plan"), true);
+        assert_eq!(chosen.perm.as_deref(), Some("plan"));
+        assert!(chosen.fast);
+        let (argv, _) = launch_argv(&launch(), &spec, &chosen, None, None, "brief", brief)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(argv.contains(&"--permission-mode".to_string()), "{argv:?}");
+        assert!(argv.contains(&"plan".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--fast".to_string()), "{argv:?}");
+        assert!(
+            !argv.contains(&"--no-fast".to_string()),
+            "fast on is said once: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn a_role_that_names_no_mode_gets_full_access() {
+        let spec = modes_spec();
+        let chosen = applied(&spec, None, false);
+        assert_eq!(
+            chosen.perm.as_deref(),
+            Some("yolo"),
+            "the full-access mode is the pre-M9 auto-approval"
+        );
+        assert!(!chosen.fast);
+        let brief = Path::new("/tmp/brief.md");
+        let (argv, _) = launch_argv(&launch(), &spec, &chosen, None, None, "brief", brief)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(argv.contains(&"--yes".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--no-fast".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn a_mode_the_program_does_not_declare_falls_back_to_full_access() {
+        let spec = modes_spec();
+        let chosen = applied(&spec, Some("read-only"), true);
+        assert_eq!(
+            chosen.perm.as_deref(),
+            Some("yolo"),
+            "a mode the program has no flags for is not claimed"
+        );
+    }
+
+    #[test]
+    fn fast_is_applied_only_where_the_program_has_the_switch() {
+        let chosen = applied(&bare_spec(), None, true);
+        assert!(
+            !chosen.fast,
+            "a program with no fast switch is not told to go fast"
         );
     }
 

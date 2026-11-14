@@ -399,9 +399,18 @@ pub fn handoff(
     let checkpoint = checkpoint(&worktree, &from)?;
     let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
+    let settings_role = env.settings.resolve(None).role(role_id);
+    let chosen = spawn::applied(
+        &spawn::program_of(env.programs.as_slice(), &to.agent)?.spec,
+        settings_role
+            .as_ref()
+            .and_then(|role| role.perm.as_ref())
+            .map(|perm| perm.value.as_str()),
+        settings_role.as_ref().is_some_and(|role| role.fast.value),
+    );
     // The newcomer's words are read before the workspace and the pane are
     // touched: a prompt that cannot be read must cost nothing.
-    let context = spawn::brief_context(env, role_id, &to, None)?;
+    let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
     let workspace = spawn::workspace_of(mux, env)?;
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
@@ -476,6 +485,7 @@ pub fn handoff(
         &workspace,
         &Launching {
             pick: &to,
+            applied: &chosen,
             task: &task.id,
             effort: None,
             brief: &brief,
