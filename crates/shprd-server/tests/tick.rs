@@ -59,6 +59,13 @@ impl Fixture {
         }
     }
 
+    /// Writes the person's settings file: a named reviewer, as M9.3 stores it.
+    fn settings(&self, text: &str) {
+        let dir = self.home.join(".config").join("shprd");
+        std::fs::create_dir_all(&dir).expect("mkdir the settings dir");
+        std::fs::write(dir.join("settings.toml"), text).expect("write the settings");
+    }
+
     /// Every event in the log, oldest first.
     fn events(&self) -> Vec<Event> {
         let path = self.repo.join(".shprd").join("events.jsonl");
@@ -518,6 +525,9 @@ fn a_hand_in_starts_the_engine_reviewer() {
     let mut log = vec![started(), added(2, "A")];
     log.extend(handed_in(3));
     let fixture = Fixture::new(log);
+    // A reviewer is configured the M9.3 way: a role that names a program.
+    fixture
+        .settings("version = 1\n\n[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-5-codex\"\n");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&calls);
     let review: shprd_server::Reviewer = Arc::new(move |_repo: &Path, task: &str| {
@@ -553,15 +563,27 @@ fn a_hand_in_starts_the_engine_reviewer() {
 
 #[test]
 fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
+    // The review path is wired, but the settings name no reviewer, so there is
+    // nothing to start and the pass plans no review step.
     let mut log = vec![started(), added(2, "A")];
     log.extend(handed_in(3));
     let fixture = Fixture::new(log);
-    let worker = fixture.worker(
-        Arc::new(Scripted::default()),
-        Arc::new(NoForge),
-        config(shprd_core::config::MergePolicy::Auto),
-        recording_start(Arc::new(Mutex::new(Vec::new()))),
-    );
+    let review: shprd_server::Reviewer =
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}")));
+    let worker = Worker {
+        repo: fixture.repo.clone(),
+        home: fixture.home.clone(),
+        config: config(shprd_core::config::MergePolicy::Auto),
+        facts: Arc::new(Scripted::default()),
+        fallback: None,
+        forge: Arc::new(NoForge),
+        start: recording_start(Arc::new(Mutex::new(Vec::new()))),
+        review: Some(review),
+        actor: Actor::Engine,
+        after_write: None,
+        hub: Hub::new(),
+        news: None,
+    };
 
     let report = worker.tick().expect("the pass ran");
 

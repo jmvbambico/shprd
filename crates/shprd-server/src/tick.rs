@@ -8,7 +8,8 @@
 //!    each pull request, and which tasks have an agent running now;
 //! 3. plans ([`shprd_core::tick::plan`]);
 //! 4. runs each [`Step`] through the verbs the CLI already has — a start goes
-//!    through the binary's spawn path, a landing through `shprd_git::land`;
+//!    through the binary's spawn path, a review through its `agent review`, a
+//!    landing through `shprd_git::land`;
 //! 5. appends one ledger event per step that changed something and publishes it
 //!    on the service's [`Hub`], so the web app and a Herdr mod see it;
 //! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
@@ -323,7 +324,7 @@ impl Worker {
             phases: &phases,
             facts: &facts,
             config: &self.config,
-            review: self.review.is_some(),
+            review: self.review.is_some() && self.reviews_hand_ins(),
         });
         let mut report = TickReport::default();
         for step in steps {
@@ -339,6 +340,27 @@ impl Worker {
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
         Ok(report)
+    }
+
+    /// Whether the settings name a reviewer the engine may start.
+    ///
+    /// It is read every pass, like the worker fallback list, so setting a
+    /// reviewer while the service runs takes effect on the next pass. The answer
+    /// is a `reviewer` role that may review and names a program to run; the
+    /// pre-M9 `[roster] reviewer` reaches the same answer through the settings'
+    /// legacy layer. A settings file that cannot be read falls back to the
+    /// config's own roster entry, so a broken file cannot switch review off.
+    fn reviews_hand_ins(&self) -> bool {
+        match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
+            Ok(loaded) => loaded.resolve(None).role("reviewer").is_some_and(|role| {
+                role.may_review()
+                    && role
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| !agent.value.trim().is_empty())
+            }),
+            Err(_) => self.config.roster.reviewer.is_some(),
+        }
     }
 
     /// The programs a cut worker is handed to, in order: the worker role's own

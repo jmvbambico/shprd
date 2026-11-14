@@ -116,12 +116,11 @@ pub(crate) fn worker_with_hub(
     // The engine starts the reviewer on a hand-in, as `shprd agent review` does:
     // the closure is that verb's own `review()`, so the cross-vendor rule, the
     // packet, the brief and the kickoff cannot drift between the two callers. A
-    // machine whose settings name no reviewer, and a record-only pass, plan no
-    // review step at all.
-    let review_enabled = !record_only() && reviews_hand_ins(home, &repo, &config);
+    // pass plans a review step only when the settings name a reviewer (the
+    // service asks on every pass) and the caller is not record-only.
     let review_home = home.to_path_buf();
     let review_actor = actor.clone();
-    let review: Option<shprd_server::Reviewer> = review_enabled.then(|| {
+    let review: Option<shprd_server::Reviewer> = (!record_only()).then(|| {
         std::sync::Arc::new(move |repo: &Path, task: &str| {
             let review_ctx = Ctx::new(repo.to_path_buf(), review_actor.clone(), false, true);
             crate::cmd::review::review_for_tick(&review_ctx, &review_home, task)
@@ -173,29 +172,6 @@ pub(crate) fn worker_with_hub(
         hub,
         news,
     })
-}
-
-/// Whether the engine starts a reviewer when a task hands in.
-///
-/// The answer is the settings': a `reviewer` role that may review and names a
-/// program to run. The pre-M9 `[roster] reviewer` in `config.toml` reaches the
-/// same answer through the settings' legacy layer active below the person's own
-/// defaults. A settings file that cannot be read falls back to the config's own
-/// roster entry, so a broken file cannot silently switch review off.
-fn reviews_hand_ins(home: &Path, repo: &Path, config: &config::Config) -> bool {
-    match shprd_core::settings::Loaded::read(home, Some(repo)) {
-        Ok(loaded) => {
-            let resolved = loaded.resolve(None);
-            resolved.role("reviewer").is_some_and(|role| {
-                role.may_review()
-                    && role
-                        .agent
-                        .as_ref()
-                        .is_some_and(|agent| !agent.value.trim().is_empty())
-            })
-        }
-        Err(_) => config.roster.reviewer.is_some(),
-    }
 }
 
 /// How long a change must hold before the coordinator is told, ms.
