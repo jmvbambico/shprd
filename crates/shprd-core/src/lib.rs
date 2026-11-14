@@ -8,6 +8,7 @@ pub mod gate;
 pub mod hash;
 pub mod log;
 pub mod prompts;
+pub mod review;
 pub mod rules;
 pub mod scope;
 pub mod settings;

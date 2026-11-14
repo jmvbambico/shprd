@@ -2,24 +2,22 @@
 //!
 //! The reviewer only describes findings. This verb applies the configured
 //! policy in [`shprd_core::gate`] — so the pass/fail call always comes from
-//! code — and records either the pass, or the failure plus its consequence.
+//! code — and records either the pass, or the failure plus its consequence. The
+//! decision itself is [`gate::decide`], which the service's tick calls too, so a
+//! review is decided the same way whoever notices the file.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::config::{self, Review};
-use shprd_core::event::{Actor, EventKind, Finding, ReviewSource};
-use shprd_core::gate::{self, Next, REVIEW_GATE};
-use shprd_core::hash;
+use shprd_core::event::{Actor, EventKind, Finding};
+use shprd_core::gate;
 use shprd_core::rules::RuleError;
 use shprd_mux::Mux;
 
 use crate::cli::ReviewVerdictArgs;
 use crate::cmd::{review, spawn};
 use crate::ctx::{CliError, Ctx};
-
-/// What a human is asked to decide when a review escalates.
-const ESCALATION_DEFAULT: &str = "decide whether to accept, re-scope or drop";
 
 /// What a submitted verdict decided, so a caller can say so its own way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,48 +82,35 @@ pub fn submit_verdict(
         .with_context(|| format!("reading findings from {}", findings_path.display()))
         .map_err(CliError::Invalid)?;
     let findings = parse_findings(&bytes, &findings_path)?;
-    let source = provenance(ctx, task, attempt, &bytes)?;
-    let decided = gate::verdict(&findings, policy.must_fix);
-    if decided.passed {
-        // A pass keeps every finding it was given: minor advice is still worth
-        // printing in the pull request, so an empty list would lose it.
-        let kind = EventKind::GatePassed {
-            task: task.to_string(),
-            attempt,
-            gate: REVIEW_GATE.to_string(),
-            findings,
-            source: Some(source),
-        };
+    let reviewed = reviewed_task(ctx, task)?;
+    let source = gate::provenance(&reviewed, attempt, &bytes).ok_or_else(|| {
+        CliError::Invalid(anyhow!(
+            "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
+        ))
+    })?;
+    let decided = gate::decide(&reviewed, attempt, findings, source, policy);
+    let escalated = decided
+        .events
+        .iter()
+        .any(|kind| matches!(kind, EventKind::Escalated { .. }));
+    for kind in decided.events {
         record(ctx, kind)?;
-        close_reviewer(mux, ctx, &home, task, attempt);
+    }
+    // The verdict is the review's last word, so the reviewer's tab is done. It
+    // is closed before the caller prints anything, so the tab's life is tied to
+    // the review and never to what the failure costs.
+    close_reviewer(mux, ctx, &home, task, attempt);
+    if decided.passed {
         return Ok(Outcome::Passed);
     }
-    let blocking = decided.blocking.len();
-    let kind = EventKind::GateFailed {
-        task: task.to_string(),
-        attempt,
-        gate: REVIEW_GATE.to_string(),
-        findings,
-        source: Some(source),
-    };
-    record(ctx, kind)?;
-    // The verdict is the review's last word, so the reviewer's tab is done:
-    // closing it before the consequence is recorded keeps the tab's life tied
-    // to the review, never to what the failure costs.
-    close_reviewer(mux, ctx, &home, task, attempt);
-    let reviewed = reviewed_task(ctx, task)?;
-    match gate::after_failure(&reviewed, policy.rounds) {
-        Next::SendBack => Ok(Outcome::SentBack { blocking }),
-        Next::Escalate => {
-            let rounds = gate::failed_review_rounds(&reviewed);
-            let kind = EventKind::Escalated {
-                task: Some(task.to_string()),
-                body: format!("review failed {rounds} times"),
-                default_action: ESCALATION_DEFAULT.to_string(),
-            };
-            record(ctx, kind)?;
-            Ok(Outcome::Escalated { blocking })
-        }
+    if escalated {
+        Ok(Outcome::Escalated {
+            blocking: decided.blocking,
+        })
+    } else {
+        Ok(Outcome::SentBack {
+            blocking: decided.blocking,
+        })
     }
 }
 
@@ -142,37 +127,6 @@ fn require_engine(ctx: &Ctx, task: &str) -> Result<(), CliError> {
     Err(CliError::Refused(RuleError::VerdictNotFromReviewer {
         task: task.to_string(),
     }))
-}
-
-/// The provenance a review verdict carries: who reviewed, and what it read.
-///
-/// The reviewer is the one the review dispatch recorded, never the actor that
-/// ran the verb: the engine decides, but the finding's author is the reviewer.
-/// The hash pins the exact bytes folded into the gate result, so a reader can
-/// tell whether the packet still says what the verdict decided.
-fn provenance(ctx: &Ctx, task: &str, attempt: u32, bytes: &[u8]) -> Result<ReviewSource, CliError> {
-    let state = ctx.state()?;
-    let found = state
-        .tasks
-        .get(task)
-        .ok_or_else(|| CliError::Invalid(anyhow!("no such task: {task}")))?;
-    let current = found
-        .attempts
-        .last()
-        .filter(|current| current.n == attempt)
-        .ok_or_else(|| CliError::Invalid(anyhow!("task {task} has no attempt {attempt}")))?;
-    let request = current.reviews.last().ok_or_else(|| {
-        CliError::Invalid(anyhow!(
-            "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
-        ))
-    })?;
-    Ok(ReviewSource {
-        // The request's own seq travels with the verdict, so a request recorded
-        // after this read supersedes it instead of being answered by it.
-        request_seq: request.seq,
-        reviewer: request.reviewer.clone(),
-        findings_sha256: hash::sha256_hex(bytes),
-    })
 }
 
 /// The findings file the reviewer for one attempt wrote.
@@ -226,10 +180,8 @@ fn review_policy(ctx: &Ctx, home: Option<&Path>) -> Result<Review, CliError> {
 /// Unreadable or invalid findings are the caller's mistake, so they exit 2 as
 /// a rule refusal does, naming the file.
 pub(crate) fn read_findings(path: &Path) -> Result<Vec<Finding>, CliError> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading findings from {}", path.display()))
-        .map_err(CliError::Invalid)?;
-    parse_findings(&bytes, path)
+    shprd_core::review::read_findings(path)
+        .map_err(|err| CliError::Invalid(anyhow!(err).context("reading the findings")))
 }
 
 /// Parses the JSON array of findings the reviewer reported.

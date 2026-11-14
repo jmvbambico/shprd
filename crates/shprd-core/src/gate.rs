@@ -5,11 +5,16 @@
 //! functions over the finding list and the folded [`Task`]. Nothing here reads
 //! the log, the clock or the environment, so a verdict is reproducible.
 
-use crate::event::{Finding, Severity};
-use crate::state::Task;
+use crate::config::Review;
+use crate::event::{EventKind, Finding, ReviewSource, Severity};
+use crate::hash;
+use crate::state::{GateResult, Task};
 
 /// The gate name review results are recorded under.
 pub const REVIEW_GATE: &str = "review";
+
+/// What a human is asked to decide when a review escalates.
+pub const ESCALATION_ACTION: &str = "decide whether to accept, re-scope or drop";
 
 /// What one review's findings mean for an attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,10 +89,117 @@ pub fn after_failure(task: &Task, rounds: u32) -> Next {
     }
 }
 
+/// The provenance a review verdict carries: who reviewed, and what it read.
+///
+/// The reviewer is the one the review dispatch recorded, never the actor that
+/// decided the review: the engine decides, but the finding's author is the
+/// reviewer. The hash pins the exact bytes folded into the gate result, so a
+/// reader can tell whether the packet still says what the verdict decided.
+///
+/// `None` means the attempt has no review request to answer — a verdict that
+/// names no reviewer is not a review's.
+pub fn provenance(task: &Task, attempt: u32, bytes: &[u8]) -> Option<ReviewSource> {
+    let current = task.attempts.iter().find(|current| current.n == attempt)?;
+    let request = current.reviews.last()?;
+    Some(ReviewSource {
+        // The request's own seq travels with the verdict, so a request recorded
+        // after this read supersedes it instead of being answered by it.
+        request_seq: request.seq,
+        reviewer: request.reviewer.clone(),
+        findings_sha256: hash::sha256_hex(bytes),
+    })
+}
+
+/// What recording a review's verdict comes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    /// True when no finding blocked integration.
+    pub passed: bool,
+    /// How many findings blocked, in the order the reviewer reported them.
+    pub blocking: usize,
+    /// The events to record, in the order they must be appended: the gate
+    /// result, then — when the failed round was the last one allowed — the ask
+    /// for a human.
+    pub events: Vec<EventKind>,
+}
+
+/// Turns a review's findings into the events the run records for them.
+///
+/// This is the review's whole decision, so every actor that decides one — the
+/// `agent review-verdict` verb, the watchdog and the service's tick — records
+/// the same events for the same file. `task` is the attempt's task as the caller
+/// read it, before any of these events were appended.
+pub fn decide(
+    task: &Task,
+    attempt: u32,
+    findings: Vec<Finding>,
+    source: ReviewSource,
+    policy: Review,
+) -> Decision {
+    let decided = verdict(&findings, policy.must_fix);
+    if decided.passed {
+        // A pass keeps every finding it was given: minor advice is still worth
+        // printing in the pull request, so an empty list would lose it.
+        return Decision {
+            passed: true,
+            blocking: 0,
+            events: vec![EventKind::GatePassed {
+                task: task.id.clone(),
+                attempt,
+                gate: REVIEW_GATE.to_string(),
+                findings,
+                source: Some(source),
+            }],
+        };
+    }
+    let blocking = decided.blocking.len();
+    let mut events = vec![EventKind::GateFailed {
+        task: task.id.clone(),
+        attempt,
+        gate: REVIEW_GATE.to_string(),
+        findings: findings.clone(),
+        source: Some(source.clone()),
+    }];
+    // What happens next is read off the task as this failure leaves it, which is
+    // why the failed gate is folded in here rather than left to the caller.
+    let mut after = task.clone();
+    if let Some(current) = after
+        .attempts
+        .iter_mut()
+        .find(|current| current.n == attempt)
+    {
+        current.gates.push(GateResult {
+            gate: REVIEW_GATE.to_string(),
+            passed: false,
+            findings,
+            source: Some(source),
+            seq: 0,
+        });
+    }
+    if after_failure(&after, policy.rounds) == Next::Escalate {
+        events.push(EventKind::Escalated {
+            task: Some(task.id.clone()),
+            body: format!("review failed {} times", failed_review_rounds(&after)),
+            default_action: ESCALATION_ACTION.to_string(),
+        });
+    }
+    Decision {
+        passed: false,
+        blocking,
+        events,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Next, REVIEW_GATE, after_failure, failed_review_rounds, verdict};
-    use crate::event::{Finding, Severity};
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{
+        ESCALATION_ACTION, Next, REVIEW_GATE, after_failure, decide, failed_review_rounds,
+        provenance, verdict,
+    };
+    use crate::config::Review;
+    use crate::event::{EventKind, Finding, ReviewSource, Severity};
     use crate::state::{Attempt, GateResult, Task, TaskStatus};
 
     /// A finding of a given severity with placeholder text.
@@ -227,5 +339,121 @@ mod tests {
         let none = task(Vec::new());
         assert_eq!(after_failure(&none, 1), Next::SendBack);
         assert_eq!(after_failure(&none, 0), Next::Escalate);
+    }
+
+    /// A review source naming `request_seq` and the bytes it decided.
+    fn source(request_seq: u64, bytes: &[u8]) -> ReviewSource {
+        ReviewSource {
+            reviewer: String::from("reviewer"),
+            findings_sha256: crate::hash::sha256_hex(bytes),
+            request_seq,
+        }
+    }
+
+    /// A task whose one attempt was reported and reviewed, waiting on a verdict.
+    fn reviewed_task() -> Task {
+        let mut attempt = attempt(1, Vec::new());
+        attempt.reviews.push(crate::state::ReviewRequest {
+            reviewer: String::from("reviewer"),
+            degraded: false,
+            seq: 7,
+        });
+        let mut reviewed = task(vec![attempt]);
+        reviewed.status = TaskStatus::Reported;
+        reviewed
+    }
+
+    /// The policy the tests decide under: a major finding blocks, two rounds.
+    fn policy() -> Review {
+        Review {
+            must_fix: Severity::Major,
+            rounds: 2,
+        }
+    }
+
+    #[test]
+    fn a_clean_review_decides_one_passing_gate() {
+        let reviewed = reviewed_task();
+        let decided = decide(&reviewed, 1, Vec::new(), source(7, b"[]"), policy());
+        assert!(decided.passed);
+        assert_eq!(decided.blocking, 0);
+        assert_eq!(decided.events.len(), 1, "{:?}", decided.events);
+        match &decided.events[0] {
+            EventKind::GatePassed {
+                task,
+                attempt,
+                gate,
+                findings,
+                source,
+            } => {
+                assert_eq!(task, "T1");
+                assert_eq!(*attempt, 1);
+                assert_eq!(gate, REVIEW_GATE);
+                assert!(findings.is_empty());
+                assert_eq!(source.as_ref().map(|source| source.request_seq), Some(7));
+            }
+            other => panic!("a pass is a passed gate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_blocking_review_fails_and_sends_the_task_back() {
+        let reviewed = reviewed_task();
+        let decided = decide(
+            &reviewed,
+            1,
+            vec![finding(Severity::Critical)],
+            source(7, b"[{}]"),
+            policy(),
+        );
+        assert!(!decided.passed);
+        assert_eq!(decided.blocking, 1);
+        assert_eq!(decided.events.len(), 1, "one round is still a send-back");
+        assert!(matches!(decided.events[0], EventKind::GateFailed { .. }));
+    }
+
+    #[test]
+    fn the_last_allowed_round_asks_a_human_too() {
+        // An attempt that already spent one of the two rounds: this failure is
+        // the second, so a person is asked in the same decision.
+        let mut reviewed = reviewed_task();
+        reviewed
+            .attempts
+            .insert(0, attempt(1, vec![gate(REVIEW_GATE, false)]));
+        reviewed.attempts.last_mut().expect("an attempt").n = 2;
+        let decided = decide(
+            &reviewed,
+            2,
+            vec![finding(Severity::Critical)],
+            source(7, b"[{}]"),
+            policy(),
+        );
+        assert!(!decided.passed);
+        assert_eq!(decided.events.len(), 2, "{:?}", decided.events);
+        match &decided.events[1] {
+            EventKind::Escalated {
+                task,
+                body,
+                default_action,
+            } => {
+                assert_eq!(task.as_deref(), Some("T1"));
+                assert_eq!(body, "review failed 2 times");
+                assert_eq!(default_action, ESCALATION_ACTION);
+            }
+            other => panic!("the last round asks for a human, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provenance_pins_the_review_the_verdict_answers() {
+        let reviewed = reviewed_task();
+        let pinned = provenance(&reviewed, 1, b"[]").expect("the request is there");
+        assert_eq!(pinned.request_seq, 7);
+        assert_eq!(pinned.reviewer, "reviewer");
+        assert_eq!(pinned.findings_sha256, crate::hash::sha256_hex(b"[]"));
+        assert!(
+            provenance(&reviewed, 2, b"[]").is_none(),
+            "an attempt nobody reviewed has no provenance"
+        );
     }
 }
