@@ -1526,11 +1526,6 @@ pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(
         .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
-/// The tab record of a task's latest attempt in one run.
-///
-/// Only `run`'s directory is read: a task id reused in a later run must not
-/// resolve to the older run's tab. The attempt number is part of the file name,
-/// so the highest one names the tab a prompt should reach.
 /// The tasks that have an agent running right now, as the host reports it.
 ///
 /// A task counts as live when the tab its newest attempt opened still exists and
@@ -1594,6 +1589,11 @@ pub fn live_tasks(
     live
 }
 
+/// The tab record of a task's latest attempt in one run.
+///
+/// Only `run`'s directory is read: a task id reused in a later run must not
+/// resolve to the older run's tab. The attempt number is part of the file name,
+/// so the highest one names the tab a prompt should reach.
 fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
     let prefix = format!("{task}-a");
     let mut best: Option<(u32, PathBuf)> = None;
@@ -2993,6 +2993,7 @@ mod tests {
             dropped_reason: None,
             pr: None,
             last_status: None,
+            nothing_to_merge: None,
         }
     }
 

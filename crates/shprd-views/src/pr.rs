@@ -98,22 +98,21 @@ pub fn pr_body(state: &RunState, events: &[Event]) -> String {
     out.join("\n")
 }
 
-/// The Markdown body of one task's own pull request.
-///
-/// Adapted from Shepherdr's per-task body (MIT): the task's ref, what its
-/// hand-in said, and the facts a reviewer checks it against. Shepherdr's
 /// The line a task's pull-request body ends with when its review was
 /// independent.
+///
+/// It is the same marker the run-level body uses, so a reader of either pull
+/// request reads one claim about the review.
 pub const REVIEW_PASSED: &str = "cross-vendor-review: passed";
 
 /// The attribution line every generated pull request ends with.
 pub const ATTRIBUTION: &str = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 
-/// One task's pull-request body as it is pushed: the task's facts, the review
-/// line, the attribution.
+/// The Markdown body of one task's own pull request, as it is pushed: the
+/// task's facts, the review line, the attribution.
 ///
 /// The review marker is a claim the log already proves: every landing verb asks
-/// `shprd_core::rules::ready_to_land` before it builds a body, and that rule
+/// [`shprd_core::rules::ready_to_land`] before it builds a body, and that rule
 /// refuses a task whose review was not independent and engine-recorded.
 ///
 /// It lives here rather than in the binary so the service's tick and the CLI's
@@ -133,6 +132,10 @@ pub fn task_pr_body_marked(task: &Task) -> String {
     body
 }
 
+/// The Markdown body of one task's own pull request.
+///
+/// Adapted from Shepherdr's per-task body (MIT): the task's ref, what its
+/// hand-in said, and the facts a reviewer checks it against. Shepherdr's
 /// `## Details` and `## Proof` have no shprd equivalent yet, so the sections
 /// are the task's acceptance and scope, the tests it reported, and its gates.
 /// The brief is left out on purpose, as Shepherdr leaves it out: it stays with
