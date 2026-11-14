@@ -471,6 +471,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::TaskAdded { .. } => "task_added",
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
+        EventKind::TaskStatus { .. } => "task_status",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
@@ -500,6 +501,7 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         EventKind::TaskAdded { task, .. }
         | EventKind::Spawned { task, .. }
         | EventKind::Reported { task, .. }
+        | EventKind::TaskStatus { task, .. }
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
@@ -786,6 +788,7 @@ mod tests {
             status,
             summary: "done".to_string(),
             tests: Vec::new(),
+            checks: Vec::new(),
             changed_paths: vec![path.to_string()],
             commit: None,
             skills_used: Vec::new(),

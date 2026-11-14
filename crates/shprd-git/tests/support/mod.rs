@@ -211,6 +211,7 @@ pub fn integrated_run(
             status: ReportStatus::Completed,
             summary: "done".to_string(),
             tests: Vec::new(),
+            checks: Vec::new(),
             changed_paths: vec!["crates/x/a.rs".to_string()],
             commit: None,
             skills_used: Vec::new(),
