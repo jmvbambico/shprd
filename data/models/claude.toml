@@ -4,29 +4,38 @@
 # model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name", and has no
 # verb that lists models, so this static list is what the picker shows.
 #
-# unverified: the exact aliases a 2.1.311 build accepts. The three below are the
-# ones its help text names; nothing on this machine lists the rest, so `haiku`
-# and the full model names are not claimed until a live check (M9.2). A name
-# typed by id is always passed through, so a missing entry only costs a menu row.
+# The aliases below are the ones 2.1.311's help names (M9.2 re-checked it on
+# this machine). The full names Claude Code reports for them in a session
+# record are `claude-opus-5` and `claude-opus-5-5` (`model` in
+# ~/.claude/projects/*/*.jsonl, read 2026-11-14); a name typed by id is passed
+# through as written, so a missing entry only costs a menu row.
+#
+# unverified: the aliases this build accepts beyond the three its help names
+# (`haiku` and the other full names are not claimed). To check: start one role
+# with `--model haiku` and see whether Claude Code accepts it.
 #
 # Efforts: one list for every model, from `claude --help`:
 # `--effort <level> ... (low, medium, high, xhigh, max)`.
 #
-# unverified: which level a model starts at when a role names none, so no
-# `default_effort` is claimed here; M9.2 reads it off a launch.
+# The level a model starts at when a role names none is `medium`: every session
+# record on this machine that names an effort says `"effort":"medium"`, and
+# shprd passes no effort to those sessions.
 schema = 1
 
 [[model]]
 id = "fable"
 name = "Fable"
 efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
 
 [[model]]
 id = "opus"
 name = "Opus"
 efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"
 
 [[model]]
 id = "sonnet"
 name = "Sonnet"
 efforts = ["low", "medium", "high", "xhigh", "max"]
+default_effort = "medium"

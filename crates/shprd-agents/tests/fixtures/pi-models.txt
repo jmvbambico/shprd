@@ -1,0 +1,4 @@
+provider      model                         context  max-out  thinking  images
+Command Code  deepseek/deepseek-v4.1-flash  1.0M     32.8K    no        yes   
+commandcode   deepseek/deepseek-v4.1-flash  1.0M     32.8K    no        yes   
+commandcode   z-ai/glm-5.3-flash            1.0M     32.8K    no        no    

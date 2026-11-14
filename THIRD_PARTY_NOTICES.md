@@ -40,9 +40,10 @@ SOFTWARE.
   `mods/tasks/bin/herdr_task/queues.py` (`queue_reason()`),
   `mods/tasks/bin/herdr_task/when.py` (`starts_words()`),
   `mods/tasks/bin/herdr_task/github.py` (`pr_body()` and the merge path),
-  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`),
+  `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`, `CLEAN_ENV`),
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
-  `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
+  `argvFor` and its fast-mode values),
+  `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
   `mods/tasks/bin/herdr_task/provider.py` (`PROVIDER_WAITS`, `NUDGE`,
   `provider_cut`, `provider_error`),
   `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
@@ -56,14 +57,16 @@ SOFTWARE.
   pull-request path, and the per-task pull-request body — in
   `crates/shprd-git/src/{land,worktree}.rs` and `crates/shprd-views/src/pr.rs`,
   and the agent-adapter facts — the Claude and Codex permission modes and the
-  cross-program map between them, and where an ask hook is installed and how
-  long it waits — in `data/harness/{claude,codex}.toml`,
-  `crates/shprd-agents/src/spec.rs` and `crates/shprd-agents/src/asks.rs`; the
-  ask file queue and waiting hook — one request file, one answer, never a
-  decision by the hook itself — in `crates/shprd-core/src/ask.rs` and
-  `crates/shprd/src/cmd/ask.rs`; and the provider fallback ladder — the error
-  classes, the carry-on message and its waits, the record-tail reading of a
-  cut, the one backup handover and its chat-tail brief — in
+  cross-program map between them, where an ask hook is installed and how
+  long it waits, the launch argument order and the two fast-mode values, and
+  the environment strip that keeps an agent from inheriting a parent Claude
+  Code session — in `data/harness/{claude,codex}.toml`,
+  `crates/shprd-agents/src/{spec,asks,adapter,env}.rs`; the ask file queue and
+  waiting hook — one request file, one answer, never a decision by the hook
+  itself — in `crates/shprd-core/src/ask.rs` and `crates/shprd/src/cmd/ask.rs`;
+  and the provider fallback ladder — the error classes, the carry-on message
+  and its waits, the record-tail reading of a cut, the one backup handover and
+  its chat-tail brief — in
   `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
   `crates/shprd-watch/src/fallback.rs` and the events that record it in
   `crates/shprd-core/src/{event,state,rules}.rs`

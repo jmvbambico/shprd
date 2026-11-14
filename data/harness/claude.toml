@@ -7,8 +7,9 @@
 # https://github.com/eliasstravik/shepherdr
 #
 # Record, error and quota facts are from shprd's docs/agents.md (verified
-# 2026-10-27). Launch flags were re-checked with `claude --help` (2.1.311) but
-# are not stated in docs/agents.md, so launch.verified is false.
+# 2026-10-27). M9.2 re-checked every launch, catalog and ask fact against Claude
+# Code 2.1.311 on this machine: `claude --help`, the strings in the 2.1.311
+# binary, `~/.claude/settings.json` and data/models/claude.toml.
 
 id = "claude"
 name = "Claude Code"
@@ -34,23 +35,35 @@ dry_patterns = [
 binary = "claude"
 version_args = ["--version"]
 signin_hint = "claude auth login"
+# `claude auth status` prints JSON and exits 0 when signed in (2.1.311). Its
+# output names the account, so it is never shown.
 signin_args = ["auth", "status"]
 
 [launch]
 interactive = ["claude"]
+# `claude --help` (2.1.311): `--model <model>` takes an alias or a full name.
 model_args = ["--model", "{model}"]
+# `--effort <level> ... (low, medium, high, xhigh, max)`; an unknown level is a
+# warning, not an error, so the adapter checks the level before it gets here.
 effort_args = ["--effort", "{effort}"]
 auto_approve = ["--dangerously-skip-permissions"]
+# The brief travels as a file so a long one is never one argv argument.
+# `--append-system-prompt-file` is not a line of its own in `--help`, but
+# 2.1.311 knows it (its `--bare` help names `--append-system-prompt[-file]`, and
+# the binary carries the flag) and reads the path itself.
 system_prompt_args = ["--append-system-prompt-file", "{prompt_file}"]
 resume_args = ["--resume", "{session}"]
 verified = false
 
 [permissions]
 # Shepherdr's Claude modes (M7c 2.2), each as the arguments that select it.
-# `manual` is sent as `--permission-mode default` and `bypassPermissions` as
-# `--dangerously-skip-permissions`, exactly as Shepherdr's argvFor does.
-# `claude --help` (2.1.311) also offers `dontAsk`; Shepherdr has no such mode
-# and no role maps onto it, so it is not offered.
+# `claude --help` (2.1.311) lists the choices the CLI takes:
+# acceptEdits, auto, bypassPermissions, manual, dontAsk, plan. Shepherdr sends
+# `manual` as `--permission-mode default`; 2.1.311 still accepts `default` as an
+# alias but no longer lists it, so the mode's own word is sent instead.
+#
+# `dontAsk` is offered by the CLI and has no Shepherdr mode or role behind it, so
+# it is not offered here.
 #
 # The default is conservative: Shepherdr reads the person's own
 # `permissions.defaultMode` from ~/.claude/settings.json, which a data table
@@ -61,7 +74,7 @@ default = "manual"
 full = "bypassPermissions"
 readonly = "plan"
 modes = [
-  { id = "manual", label = "Ask", args = ["--permission-mode", "default"] },
+  { id = "manual", label = "Ask", args = ["--permission-mode", "manual"] },
   { id = "auto", label = "Auto", args = ["--permission-mode", "auto"] },
   { id = "acceptEdits", label = "Accept edits", args = ["--permission-mode", "acceptEdits"] },
   { id = "plan", label = "Plan", args = ["--permission-mode", "plan"] },
@@ -74,6 +87,14 @@ modes = [
 "codex:read-only" = "plan"
 "codex:auto" = "auto"
 "codex:full" = "bypassPermissions"
+
+[fast]
+# Claude Code's fast mode is a settings key, not a flag: Shepherdr's `argvFor`
+# (core/agents.js) always passes `--settings {"fastMode": <bool>}`, which wins
+# over `fastMode` in the person's own settings. The 2.1.311 binary carries the
+# key (`fastMode`, `fastModeChanged`, `fastModePerSessionOptIn`).
+on = ["--settings", "{\"fastMode\":true}"]
+off = ["--settings", "{\"fastMode\":false}"]
 
 [models]
 # Claude Code has no model-list command, so its models are a static list in
@@ -96,8 +117,8 @@ file = "path"
 [status]
 # The agent's own OSC 7501 report first, then a hook it runs for us, then the
 # bottom of its pane. Verified on this machine: herdr installs SessionStart,
-# PreToolUse, PostToolUse and UserPromptSubmit hooks into ~/.claude/settings.json
-# (status hooks are the person's own; the ask hook below is worktree-local).
+# PreToolUse and PostToolUse hooks into ~/.claude/settings.json (status hooks
+# are the person's own; the ask hook below is worktree-local).
 sources = ["osc7501", "hook", "screen"]
 
 [asks]
