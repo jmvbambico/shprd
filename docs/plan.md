@@ -274,40 +274,72 @@ installed; then M7.8.
 **Gate:** the four specs and three spike results exist, and the M8–M10 task
 lists are approved.
 
+**Done 2026-11-14** (board tasks SHP-11..16, all passed review). Results that
+shaped M8–M10: the mod runtime has `fetch` but no streaming (no WebSocket, SSE
+or stream reader), so mods use long-poll plus a watched file; `hc` is
+JSON-RPC 2.0 with an event stream and the window's layout in the `herdr-app`
+document; one plugin folder serves herdr TUI and tuios, with commands only in
+`herdr-plugin.toml` and `tuios-plugin.toml` holding `schema = 1`, id, grants
+and `[herdr] manifest`; on tuios, creating panes needs the `admin` grant, no
+`worktree.created` event fires, and `worktree.create` refuses `path`.
+
 ---
 
 ## M8 · Clean-up and service core
 
-Deletes and reworks from "Workspace changes", the open fixes from the M0–M6
-assessment (a run lock on `approve`, the watchdog treating idle as healthy, the
-canary faking success, the opencode test writing real user state, socket path
-length in live tests), and `shprd-server`: the API over the existing engine,
-live updates over WebSocket, local-token login, generated TypeScript types.
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M8.1 | Retire tab-per-agent: delete `cmd/{up,launch,keys}.rs`, `shprd-mux/naming.rs`, `shprd-mux-herdr/keys.rs`, the `shprd-mux-tuios` crate and `shprd-tui`'s stub; fix every caller and test | `crates/shprd`, `shprd-mux`, `shprd-mux-herdr`, `Cargo.toml` | M |
+| M8.2 | Fixes from the M0–M6 assessment: run lock on `approve`, watchdog treats idle as unhealthy only with evidence, canary reports real success, opencode test uses a scratch HOME, live tests use short socket paths | `shprd/src/cmd/{approve,run_lock}.rs`, `shprd-watch`, `shprd-roster` tests | M |
+| M8.3 | Per-task landing: one PR per task from its branch, `MergePolicy{Ask, Checks, Auto}`, already-merged and squash-merged detection, nothing-to-merge, branch from the fresh remote base | `shprd-git/{land,forge,worktree}.rs`, `shprd-core/config.rs` | L |
+| M8.4 | Agent-callable verbs that append under the ledger lock (`shprd task status / ready / …`); `ready` refuses without the worker's checks report (which gates ran, their result) and an engine-recorded cross-vendor review | `shprd-core/{event,rules}.rs`, `shprd/src/cmd/` | M |
+| M8.5 | Derived status: port Shepherdr's ordered status rules (8 statuses from stored state + live agent state) as a pure function with fixtures (MIT header + notice) | `shprd-views/status.rs` | M |
+| M8.6 | `shprd-server` + `shprd serve`: axum on 127.0.0.1, `service.json {port, id}` + token file + `/api/health` handshake, `GET /api/state`, long-poll `/api/changes?since=<seq>`, `POST /api/action`, WebSocket for the web app, ts-rs types into `web/src/gen/` | new crate, workspace deps | L |
+| M8.7 | The tick: an idempotent "advance the world" pass in the service (queue starts, `--after` waits, merge-policy checks) | `shprd-server`, `shprd-core` | M |
 
-**Gate:** the existing gates pass after the clean-up, and a task can be added,
-delegated, reviewed and approved through the API with a fake host.
+Lanes: M8.1 alone first; then M8.2 ∥ M8.3 ∥ M8.4 ∥ M8.5 ∥ M8.6; then M8.7.
+
+**Gate:** the existing gates pass after the clean-up, and with the fake host a
+task is added, delegated, handed in with its checks, reviewed and landed as its
+own PR through the API.
 
 ---
 
 ## M9 · Agents
 
-`shprd-agents`: Shepherdr's roles (coordinator, worker, reviewer) plus custom
-roles, each with program, model, effort, fallback and system prompt; one
-adapter per CLI (Claude, Codex, Pi, OpenCode first) giving launch command,
-model and effort flags, prompt injection, permission modes, model discovery and
-status detection; the cross-vendor rule for reviewers.
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M9.1 | `shprd-roster` → `shprd-agents`; harness schema gains permission modes (Shepherdr's set), model catalog source, brief delivery (first message or system-prompt file), status source (OSC 7501, hook, screen), ask-hook installer | `crates/shprd-agents`, `data/harness/` | M |
+| M9.2 | Adapters with verified harness files for Claude, Codex, Pi, OpenCode (one real launch each, `#[ignore]` tests) | `shprd-agents`, `data/harness/` | M |
+| M9.3 | Settings model: roles as a keyed table (coordinator, worker, reviewer, backup) plus custom roles, each `{program, model, effort, fast, perm, fallback, template}`; layers everywhere > repo > task; reviewer vendor must differ from the worker's | `shprd-agents`, `shprd-core/config.rs` | M |
+| M9.4 | Role templates as editable files (Shepherdr's structure, credited) and a brief with a Settings block that says where each value came from | `shprd-views/brief.rs`, `data/templates/` | M |
+| M9.5 | Needs-you cards: question / permission / plan asks in a file queue, per-CLI hooks (Claude and Codex first, Pi and OpenCode where they allow), answer API in the service | `shprd-core`, `shprd-agents`, `shprd-server` | L |
+| M9.6 | Fallback ladder: provider-error classes, nudges at 1/2/4/8 min, one backup-agent handover per task with the chat tail | `shprd-watch` | M |
+| M9.7 | News to the coordinator: derived-status diffs, a settle window, one message per space, re-checked before sending | `shprd-server`, `shprd-views` | M |
+
+Lanes: M9.1 first; then M9.2 ∥ M9.3 ∥ M9.5 ∥ M9.6; then M9.4 ∥ M9.7.
 
 **Gate:** one real task runs end to end with Pi as the worker and a reviewer
-from another vendor.
+from another vendor, including one needs-you card answered through the API.
 
 ---
 
 ## M10 · Herdr desktop
 
-`shprd-mux-hc`; the layout and the mods (tasks, approve card, settings,
-coordinator, notifications), shaped like Shepherdr's and backed by the service;
-the task graph (dagr in a terminal block, refreshed on every ledger write;
-a native mod later if it earns its place); agent status via OSC 7501.
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M10.1 | `shprd-mux-hc`: framed JSON-RPC over `hc connect`, version gate, reconnect, event fold with `missed`/reset re-reads, placement by `herdr.space`/`herdr.tab` labels, OSC 7501 parsing (fixture for the `:` grammar) | new crate | L |
+| M10.2 | Host trait reshaped around spawn / write / keys / read / wait / kill / subscribe / doc / exec and a space per task; fake host updated; `shprd-mux-herdr` maps tuios's `forbidden` | `shprd-mux`, `shprd-mux-herdr` | M |
+| M10.3 | `host/herdr-desktop/`: `layouts/shprd.json` on Shepherdr's skeleton, a shared UI-token module, mod-to-service client (long-poll + watched change file), `shprd install herdr-desktop` that owns only its files and merges keys | `host/herdr-desktop/`, `shprd/src/cmd/` | M |
+| M10.4 | Mods A: spaces sidebar, tab strip, status bar, toasts | `host/herdr-desktop/mods/` | L |
+| M10.5 | Mods B: tasks panel, accept card (changes, checks, review), task PR | `host/herdr-desktop/mods/` | L |
+| M10.6 | Mods C: settings (agents, roles, custom roles, templates), coordinator, needs-you cards | `host/herdr-desktop/mods/` | L |
+| M10.7 | Graph: dagr in a terminal block, refreshed on every ledger write | `shprd-views`, layout | S |
+| M10.8 | Coordinator chat: transcript readers for Claude, Codex, Pi, OpenCode and the chat mod | `shprd-agents`, `host/herdr-desktop/mods/` | L |
+
+Lanes: M10.1 ∥ M10.2 ∥ M10.3; then M10.4 ∥ M10.5 ∥ M10.6 ∥ M10.7 ∥ M10.8.
+Every mod passes `herdr-app check` and is screenshotted in a private window
+(`HC_SESSION` + `HERDR_APP_HOME`) before review.
 
 **Gate:** on Herdr desktop, shprd works the way Shepherdr does, and also runs
 Pi and OpenCode agents.
