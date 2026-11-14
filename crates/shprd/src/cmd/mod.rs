@@ -14,6 +14,7 @@ pub mod integrate;
 pub mod janitor;
 pub mod land;
 pub mod live_fallback;
+pub mod live_news;
 pub mod override_rule;
 pub mod readmit;
 pub mod review;

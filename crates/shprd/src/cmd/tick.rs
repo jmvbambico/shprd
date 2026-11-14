@@ -22,17 +22,25 @@
 //! }
 //! ```
 //!
-//! Without it, one line per action. A pass whose steps all worked exits 0; one
-//! that could not read the run exits 1. A step that failed is printed and stays
-//! in the report — it never stops the other steps, so it is not the verb's own
-//! failure.
+//! A pass that told the coordinator something carries it too, one entry per
+//! space, with the lines that were typed into its pane:
+//!
+//! ```json
+//! { "steps": [], "news": [{ "space": "shprd", "lines": ["<shprd-news …>…"] }] }
+//! ```
+//!
+//! Without JSON, one line per action and one per told line. A pass whose steps
+//! all worked exits 0; one that could not read the run exits 1. A step that
+//! failed is printed and stays in the report — it never stops the other steps,
+//! so it is not the verb's own failure.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use shprd_core::config;
 use shprd_git::forge::{Forge, GhForge};
-use shprd_server::{Starter, TickReport, Worker};
+use shprd_server::{NewsDesk, Starter, TickReport, Worker};
 
 use crate::cli::TickArgs;
 use crate::ctx::{CliError, Ctx, resolve_home};
@@ -124,6 +132,19 @@ pub(crate) fn worker_with_hub(
                 )) as shprd_server::FallbackSourceArc
             })
     };
+    // The news' delivery: the coordinator's pane, through the host adapter. A
+    // record-only pass has no tabs to type into, so it is not wired there.
+    let news = if record_only() {
+        None
+    } else {
+        Some(NewsDesk {
+            coordinator: Arc::new(crate::cmd::live_news::LiveNews::new(Box::new(
+                crate::cmd::spawn::real_mux(),
+            ))),
+            settle_ms: settle_ms(home, &repo),
+            clock: Arc::new(shprd_core::log::SystemClock),
+        })
+    };
     Ok(Worker {
         repo,
         home: home.to_path_buf(),
@@ -135,7 +156,20 @@ pub(crate) fn worker_with_hub(
         actor,
         after_write: None,
         hub,
+        news,
     })
+}
+
+/// How long a change must hold before the coordinator is told, ms.
+///
+/// It is the settings model's `tasks.news_settle_secs`, whose built-in value is
+/// Shepherdr's five seconds. A settings file that cannot be read is not a reason
+/// to lose the news, so the built-in applies then.
+fn settle_ms(home: &Path, repo: &Path) -> u64 {
+    let seconds = shprd_core::settings::Loaded::read(home, Some(repo))
+        .map(|loaded| loaded.resolve(None).tasks().news_settle_secs)
+        .unwrap_or(shprd_core::settings::NEWS_SETTLE_SECS);
+    seconds.saturating_mul(1_000)
 }
 
 /// True when the environment asks for a record-only start, in a debug build.
@@ -254,9 +288,14 @@ fn print_report(ctx: &Ctx, args: &TickArgs, report: &TickReport) {
         }
         return;
     }
-    if report.steps.is_empty() {
+    if report.steps.is_empty() && report.news.is_empty() {
         println!("ok nothing to advance");
         return;
+    }
+    for sent in &report.news {
+        for line in &sent.lines {
+            println!("ok news {}: {line}", sent.space);
+        }
     }
     for step in &report.steps {
         let mark = if step.ok { "ok" } else { "failed" };

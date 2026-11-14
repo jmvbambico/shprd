@@ -383,9 +383,18 @@ impl News {
             if prev.status != reading.status
                 && let Some(event) = event_of(prev, reading)
             {
+                // A review's own words are the finding, not the row's short
+                // second line.
+                let words = match event {
+                    NewsEvent::ReviewFailed => reading
+                        .review_failed
+                        .as_ref()
+                        .map(|failed| failed.words.as_str()),
+                    _ => None,
+                };
                 lines.push((
                     event,
-                    line(task, reading, event, None),
+                    line(task, reading, event, words),
                     Holds::Status(reading.status),
                 ));
             }
@@ -510,6 +519,9 @@ fn event_of(prev: &Seen, now: &Reading) -> Option<NewsEvent> {
             }
             _ => None,
         },
+        // A review that found something is told as the review, not as a
+        // failure of the agent: the finding is the news.
+        DerivedStatus::NeedsYou if now.review_failed.is_some() => Some(NewsEvent::ReviewFailed),
         DerivedStatus::NeedsYou => {
             // An agent that stopped, could not start, or whose provider kept
             // failing is a failure rather than a question (`news.py:141-144`).
@@ -591,6 +603,8 @@ fn attribute(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     /// The moment every case starts at.
@@ -958,6 +972,35 @@ mod tests {
                 "the same quiet spell was told again"
             );
         }
+    }
+
+    /// A review that fails and leaves the task needing the person is one line,
+    /// told as the review's finding.
+    #[test]
+    fn a_review_failure_that_needs_the_person_is_the_reviews_line() {
+        let mut failed = reading("repo", DerivedStatus::NeedsYou);
+        failed.need = Some(Need::Attention);
+        failed.failed = Some(String::from("the tests stub the clock"));
+        failed.review_failed = Some(Mark {
+            id: String::from("42"),
+            words: String::from("the tests stub the clock"),
+        });
+        let mut news = after_first_look(snapshot(vec![(
+            "T1",
+            reading("repo", DerivedStatus::Working),
+        )]));
+        news.observe(NOW + 1_000, &snapshot(vec![("T1", failed.clone())]));
+        let batches = settled_at(&mut news, NOW + 20_000, &snapshot(vec![("T1", failed)]));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 1, "one line, not two");
+        assert_eq!(batches[0].items[0].event, NewsEvent::ReviewFailed);
+        assert!(
+            batches[0]
+                .text()
+                .contains("T1 review failed: the tests stub the clock"),
+            "the finding is the news: {}",
+            batches[0].text()
+        );
     }
 
     /// A review that fails and then passes inside the window tells nothing.
