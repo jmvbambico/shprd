@@ -382,13 +382,41 @@ impl ConfigLayer {
     /// to exactly the values their config file asked for; the settings file
     /// sits above this layer and wins where both set the same key.
     ///
-    /// What is not projected is what has no settings key: `[roster]`,
-    /// `[skills]`, `[workspace]`, `[gates]`, `mux` and `[land] protected` are
-    /// still read by the verbs that need them, straight from this file.
+    /// `[roster] reviewer = "<program>/<model>"` is the same for the reviewer
+    /// role: it supplies `roles.reviewer.agent` and `roles.reviewer.model`, and
+    /// the reviewer's own `[roster.effort]` entry supplies
+    /// `roles.reviewer.effort`. A review reads its reviewer through the settings
+    /// resolution, so this is the lower fallback layer a person who set the
+    /// reviewer the old way keeps.
+    ///
+    /// What is not projected is what has no settings key: the rest of
+    /// `[roster]` (the coordinator, the worker list and the auto-approve
+    /// switch), `[skills]`, `[workspace]`, `[gates]`, `mux` and `[land]
+    /// protected` are still read by the verbs that need them, straight from
+    /// this file.
     pub fn settings_projection(&self) -> crate::settings::Layer {
-        use crate::settings::{Key, Layer, TaskKey, Value, merge_name, severity_name};
+        use crate::settings::{Key, Layer, RoleField, TaskKey, Value, merge_name, severity_name};
 
         let mut layer = Layer::new();
+        if let Some(roster) = &self.roster {
+            if let Some(written) = roster.reviewer.as_deref() {
+                let (program, model) = split_agent(written);
+                if let Some(program) = program {
+                    layer.set(reviewer_key(RoleField::Agent), Value::Text(program));
+                }
+                if let Some(model) = model {
+                    layer.set(reviewer_key(RoleField::Model), Value::Text(model));
+                }
+                let effort = roster
+                    .effort
+                    .as_ref()
+                    .and_then(|effort| effort.get(written))
+                    .filter(|effort| !effort.trim().is_empty());
+                if let Some(effort) = effort {
+                    layer.set(reviewer_key(RoleField::Effort), Value::Text(effort.clone()));
+                }
+            }
+        }
         if let Some(merge) = self.land.as_ref().and_then(|land| land.merge) {
             layer.set(
                 Key::Task(TaskKey::Merge),
@@ -438,6 +466,34 @@ impl ConfigLayer {
             }
         }
         layer
+    }
+}
+
+/// The settings key for one field of the reviewer role.
+fn reviewer_key(field: crate::settings::RoleField) -> crate::settings::Key {
+    crate::settings::Key::Role {
+        id: "reviewer".to_owned(),
+        field,
+    }
+}
+
+/// Splits an old `program/model` agent string into its two halves.
+///
+/// The model may itself hold `/` (`pi/deepseek/deepseek-v4.1-flash`), which is
+/// why only the first separator splits. An empty program or an empty model is
+/// treated as absent, so a malformed line projects nothing rather than an empty
+/// setting.
+fn split_agent(written: &str) -> (Option<String>, Option<String>) {
+    let trimmed = written.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    match trimmed.split_once('/') {
+        Some((program, model)) => (
+            Some(program.trim().to_owned()).filter(|program| !program.is_empty()),
+            Some(model.trim().to_owned()).filter(|model| !model.is_empty()),
+        ),
+        None => (Some(trimmed.to_owned()), None),
     }
 }
 
@@ -756,6 +812,49 @@ mod tests {
             projected.len(),
             7,
             "the projection sets exactly the keys the file names"
+        );
+
+        // The old reviewer line and its effort become the reviewer role's pick.
+        let reviewer = layer(
+            r#"
+            [roster]
+            reviewer = "pi/deepseek/deepseek-v4.1-flash"
+
+            [roster.effort]
+            "pi/deepseek/deepseek-v4.1-flash" = "low"
+            "#,
+        )
+        .settings_projection();
+        let role = |field| {
+            Key::Role {
+                id: "reviewer".to_owned(),
+                field,
+            }
+        };
+        assert_eq!(
+            reviewer.get(&role(crate::settings::RoleField::Agent)),
+            Some(&Value::Text("pi".to_owned()))
+        );
+        assert_eq!(
+            reviewer.get(&role(crate::settings::RoleField::Model)),
+            Some(&Value::Text("deepseek/deepseek-v4.1-flash".to_owned())),
+            "the model keeps every `/` after the program's"
+        );
+        assert_eq!(
+            reviewer.get(&role(crate::settings::RoleField::Effort)),
+            Some(&Value::Text("low".to_owned()))
+        );
+        // A reviewer named without a model projects the program alone.
+        let program_only = layer("[roster]\nreviewer = \"codex\"\n").settings_projection();
+        assert_eq!(
+            program_only.get(&role(crate::settings::RoleField::Agent)),
+            Some(&Value::Text("codex".to_owned()))
+        );
+        assert!(
+            program_only
+                .get(&role(crate::settings::RoleField::Model))
+                .is_none(),
+            "no model was named"
         );
 
         // A file that names none of them projects to nothing, so the settings

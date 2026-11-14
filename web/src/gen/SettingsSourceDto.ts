@@ -4,6 +4,6 @@
  * The layer one settings value came from, nearest first.
  *
  * The same names `shprd settings show` prints: `task`, `repo_entry`, `you`,
- * `repo_file` and `built_in`.
+ * `legacy`, `repo_file` and `built_in`.
  */
-export type SettingsSourceDto = "task" | "repo_entry" | "you" | "repo_file" | "built_in";
+export type SettingsSourceDto = "task" | "repo_entry" | "you" | "legacy" | "repo_file" | "built_in";
