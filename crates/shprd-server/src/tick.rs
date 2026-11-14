@@ -10,7 +10,9 @@
 //! 4. runs each [`Step`] through the verbs the CLI already has — a start goes
 //!    through the binary's spawn path, a landing through `shprd_git::land`;
 //! 5. appends one ledger event per step that changed something and publishes it
-//!    on the service's [`Hub`], so the web app and a Herdr mod see it.
+//!    on the service's [`Hub`], so the web app and a Herdr mod see it;
+//! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
+//!    a nudge, one backup handover, or a give-up — and records what it did.
 //!
 //! A step that fails is recorded and logged and the pass carries on: one broken
 //! landing must not stop a task from starting, and one bad pass must not stop
@@ -30,7 +32,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use shprd_core::config::Config;
-use shprd_core::event::{Actor, EventKind, LandOutcome};
+use shprd_core::event::{Actor, EventKind, FallbackAction, LandOutcome, ProviderClass};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
@@ -39,6 +41,11 @@ use shprd_git::git::Git;
 use shprd_git::land::{self, LandError, Landing};
 use shprd_views::derived::{self, DerivedStatus, LiveAgents};
 use shprd_views::pr;
+use shprd_watch::fallback::{
+    self, Action as LadderAction, AgentFacts, BackupDone, Config as LadderConfig, Role,
+    State as LadderState,
+};
+use shprd_watch::records::ErrorKind as CutKind;
 
 use crate::error::ServerError;
 use crate::hub::Hub;
@@ -129,6 +136,42 @@ impl FactsSource for LiveFacts {
     }
 }
 
+/// A fallback host, shared with the pass that runs it.
+pub type FallbackSourceArc = Arc<dyn FallbackSource>;
+
+/// Where the fallback ladder's facts and effects come from.
+///
+/// The ladder itself is pure ([`shprd_watch::fallback::plan`]); this is the
+/// only part that reads a transcript, probes a CLI or writes to a terminal, so
+/// a test drives the whole ladder with a scripted host and no agent process.
+pub trait FallbackSource: Send + Sync {
+    /// Every live agent and what its own record says about it.
+    ///
+    /// A reviewer is included with [`shprd_watch::fallback::Role::Reviewer`] so
+    /// the planner can leave it alone; an agent whose record cannot be read is
+    /// simply absent, because an unreadable transcript is not a cut.
+    fn agents(&self, state: &RunState) -> Vec<AgentFacts>;
+
+    /// The programs installed on this machine.
+    fn installed(&self) -> BTreeSet<String>;
+
+    /// The programs signed in on this machine.
+    fn signed_in(&self) -> BTreeSet<String>;
+
+    /// Send `text` to the agent working on `task`.
+    fn nudge(&self, task: &str, agent: &str, text: &str) -> Result<String, String>;
+
+    /// Start `to` in `task`'s attempt's own worktree and branch, with `brief`.
+    fn backup(
+        &self,
+        task: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+        brief: &str,
+    ) -> Result<String, String>;
+}
+
 /// What running one plan step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepReport {
@@ -148,20 +191,30 @@ pub struct StepReport {
 impl StepReport {
     /// A step that worked.
     fn done(step: &Step, detail: impl Into<String>, seq: Option<u64>) -> Self {
+        Self::ok(step.action(), step.task(), detail, seq)
+    }
+
+    /// A step that failed; the pass goes on with the next one.
+    fn failed(step: &Step, detail: impl Into<String>) -> Self {
+        Self::err(step.action(), step.task(), detail)
+    }
+
+    /// A ladder action that worked.
+    fn ok(action: &str, task: &str, detail: impl Into<String>, seq: Option<u64>) -> Self {
         Self {
-            action: step.action().to_string(),
-            task: step.task().to_string(),
+            action: action.to_string(),
+            task: task.to_string(),
             ok: true,
             detail: detail.into(),
             seq,
         }
     }
 
-    /// A step that failed; the pass goes on with the next one.
-    fn failed(step: &Step, detail: impl Into<String>) -> Self {
+    /// A ladder action that failed.
+    fn err(action: &str, task: &str, detail: impl Into<String>) -> Self {
         Self {
-            action: step.action().to_string(),
-            task: step.task().to_string(),
+            action: action.to_string(),
+            task: task.to_string(),
             ok: false,
             detail: detail.into(),
             seq: None,
@@ -206,6 +259,11 @@ pub struct Worker {
     pub config: Config,
     /// The facts outside the log.
     pub facts: Arc<dyn FactsSource>,
+    /// The fallback ladder's transcript facts and effects.
+    ///
+    /// `None` when the caller has no watchdog wired: a pass then advances tasks
+    /// as before and never nudges or backs anything up.
+    pub fallback: Option<Arc<dyn FallbackSource>>,
     /// The forge a landing drives. It is the same one the facts come from, so a
     /// pass reads and writes one forge's story rather than two.
     pub forge: SharedForge,
@@ -232,7 +290,10 @@ impl Worker {
             prs: self.state_prs(&state),
             live: self.facts.live(&state),
         };
-        let phases = self.phases(&state, &facts);
+        // The ladder's facts are read before the phases because a provider cut
+        // is what makes a task read "Needs you" rather than "Working".
+        let ladder = self.ladder_plan(&state);
+        let phases = self.phases(&state, &facts, &ladder.retries);
         let steps = tick::plan(&Input {
             state: &state,
             phases: &phases,
@@ -244,7 +305,64 @@ impl Worker {
             let result = self.run_step(&state, &step);
             report.steps.push(result);
         }
+        // The ladder runs after the advance steps so a task this pass just
+        // started is looked at on the next one, with its record already open.
+        for action in &ladder.actions {
+            report.steps.push(self.run_ladder(&state, action));
+        }
         Ok(report)
+    }
+
+    /// Reads the ladder's facts and plans its actions.
+    ///
+    /// The fallback list is read from the existing roster until M9.3's resolved
+    /// role settings land; that is the seam: the same `worker` key will carry a
+    /// role's own `fallback` list when it exists.
+    fn ladder_plan(&self, state: &RunState) -> LadderPass {
+        let Some(source) = &self.fallback else {
+            return LadderPass::default();
+        };
+        let agents = source.agents(state);
+        // Nothing was cut off, so the ladder has nothing to do. The sign-in
+        // probe behind `installed`/`signed_in` launches every CLI, so it is
+        // only paid for when a backup could actually be chosen.
+        if !agents.iter().any(|agent| agent.cut.is_some()) {
+            return LadderPass::default();
+        }
+        let config = LadderConfig {
+            waits_ms: Vec::new(),
+            fallbacks: BTreeMap::from([(
+                String::from("worker"),
+                self.config.roster.workers.clone(),
+            )]),
+            installed: source.installed(),
+            signed_in: source.signed_in(),
+        };
+        let actions = fallback::plan(&ladder_state(state), &agents, SystemClock.now_ms(), &config);
+        let waits = config.waits().to_vec();
+        let mut retries = BTreeMap::new();
+        for agent in &agents {
+            // A reviewer is never retried, so its cut is not the task's status.
+            if agent.role == Role::Reviewer {
+                continue;
+            }
+            let Some(cut) = &agent.cut else {
+                continue;
+            };
+            let reading = fallback::retry(cut, &waits);
+            retries.insert(
+                agent.task.clone(),
+                derived::ProviderCut {
+                    // The live overlay `phases` builds names each task by its
+                    // id, so that is the address the status rule compares.
+                    agent: agent.task.clone(),
+                    reason: reading.reason,
+                    over: reading.over,
+                    due_ms: reading.due_ms,
+                },
+            );
+        }
+        LadderPass { actions, retries }
     }
 
     /// The forge's word on every task with a branch, by task id.
@@ -261,19 +379,28 @@ impl Worker {
         prs
     }
 
-    /// Every task's derived status, from the fold and the live overlay.
+    /// Every task's derived status, from the fold, the live overlay and the
+    /// provider cut waiting to be retried.
     ///
     /// The overlay is built from [`Facts::live`]: a task whose agent is running
     /// is reported at work, which is what keeps the planner from landing a
-    /// commit an agent is still writing.
-    fn phases(&self, state: &RunState, facts: &Facts) -> BTreeMap<String, Phase> {
+    /// commit an agent is still writing. A provider cut keeps the task Working
+    /// while the ladder waits, and reads Needs you once the tries run out
+    /// (`agents.py:127-131`).
+    fn phases(
+        &self,
+        state: &RunState,
+        facts: &Facts,
+        retries: &BTreeMap<String, derived::ProviderCut>,
+    ) -> BTreeMap<String, Phase> {
         let now_ms = SystemClock.now_ms();
         state
             .tasks
             .keys()
             .map(|id| {
-                let signal =
+                let mut signal =
                     shprd_views::derived::TaskSignal::from_state(state, id).unwrap_or_default();
+                signal.provider_cut = retries.get(id).cloned();
                 let live = if facts.is_live(id) {
                     LiveAgents::new(vec![shprd_views::derived::LiveAgent {
                         address: id.clone(),
@@ -287,6 +414,169 @@ impl Worker {
                 (id.clone(), phase_of(derived.status))
             })
             .collect()
+    }
+
+    /// Runs one ladder action, recording its event and publishing it.
+    fn run_ladder(&self, state: &RunState, action: &LadderAction) -> StepReport {
+        let result = match action {
+            LadderAction::Nudge {
+                task,
+                attempt,
+                agent,
+                text,
+                cut,
+                kind,
+                reason,
+                tries,
+            } => self.nudge_ladder(task, *attempt, agent, text, cut, *kind, reason, *tries),
+            LadderAction::Backup {
+                task,
+                attempt,
+                from,
+                to,
+                cut,
+                kind,
+                reason,
+                handover,
+            } => self.start_backup(
+                state, task, *attempt, from, to, cut, *kind, reason, handover,
+            ),
+            LadderAction::GiveUp {
+                task,
+                attempt,
+                agent,
+                cut,
+                kind,
+                reason,
+                tries,
+            } => self.give_up(task, *attempt, agent, cut, *kind, reason, *tries),
+        };
+        match result {
+            Ok(report) => report,
+            Err(reason) => {
+                tracing::warn!(action = action.name(), task = action.task(), %reason, "ladder action failed");
+                StepReport::err(action.name(), action.task(), reason)
+            }
+        }
+    }
+
+    /// Sends a carry-on message and records that it was sent.
+    #[expect(clippy::too_many_arguments, reason = "one nudge's whole input")]
+    fn nudge_ladder(
+        &self,
+        task: &str,
+        attempt: u32,
+        agent: &str,
+        text: &str,
+        cut: &str,
+        kind: CutKind,
+        reason: &str,
+        tries: u32,
+    ) -> Result<StepReport, String> {
+        let source = self
+            .fallback
+            .as_ref()
+            .ok_or_else(|| String::from("no fallback source is wired"))?;
+        let detail = source.nudge(task, agent, text)?;
+        let seq = self.commit(EventKind::Nudged {
+            task: task.to_string(),
+            attempt,
+            agent: agent.to_string(),
+            cut: cut.to_string(),
+            class: provider_class(kind),
+            reason: reason.to_string(),
+            tries,
+        })?;
+        self.notify(Some(seq));
+        Ok(StepReport::ok("nudge", task, detail, Some(seq)))
+    }
+
+    /// Starts the backup handover and records it, once per task.
+    #[expect(clippy::too_many_arguments, reason = "one handover's whole input")]
+    fn start_backup(
+        &self,
+        state: &RunState,
+        task: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+        cut: &str,
+        kind: CutKind,
+        reason: &str,
+        handover: &fallback::Handover,
+    ) -> Result<StepReport, String> {
+        let source = self
+            .fallback
+            .as_ref()
+            .ok_or_else(|| String::from("no fallback source is wired"))?;
+        let attempt_record = state
+            .tasks
+            .get(task)
+            .and_then(|task| task.latest_attempt())
+            .ok_or_else(|| format!("task {task:?} has no attempt to continue"))?;
+        let brief = fallback::handover_brief(task, from, to, reason, handover);
+        let started = source.backup(task, attempt, from, to, &brief);
+        let (started, detail) = match started {
+            Ok(detail) => (true, detail),
+            Err(err) => (false, err),
+        };
+        let seq = self.commit(EventKind::Backup {
+            task: task.to_string(),
+            attempt,
+            from_agent: from.to_string(),
+            to_agent: to.to_string(),
+            cut: cut.to_string(),
+            class: provider_class(kind),
+            reason: reason.to_string(),
+            worktree: attempt_record.worktree.clone(),
+            branch: attempt_record.branch.clone(),
+            started,
+        })?;
+        self.notify(Some(seq));
+        if started {
+            return Ok(StepReport::ok("backup", task, detail, Some(seq)));
+        }
+        // A failed handover is still the task's one try, and the person is told
+        // why rather than the next pass trying the same thing again.
+        let body = format!("{task}: backup didn't start: {detail}");
+        self.commit(EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: body.clone(),
+            default_action: String::from("pick the task up by hand"),
+        })?;
+        Err(body)
+    }
+
+    /// Records that the ladder ended and a person is needed.
+    #[expect(clippy::too_many_arguments, reason = "one give-up's whole input")]
+    fn give_up(
+        &self,
+        task: &str,
+        attempt: u32,
+        agent: &str,
+        cut: &str,
+        kind: CutKind,
+        reason: &str,
+        tries: u32,
+    ) -> Result<StepReport, String> {
+        let seq = self.commit(EventKind::ProviderGaveUp {
+            task: task.to_string(),
+            attempt,
+            agent: agent.to_string(),
+            cut: cut.to_string(),
+            class: provider_class(kind),
+            reason: reason.to_string(),
+            tries,
+        })?;
+        self.notify(Some(seq));
+        let body = format!("{task}: {reason}");
+        let escalated = self.commit(EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: body.clone(),
+            default_action: String::from("pick the task up by hand"),
+        })?;
+        self.notify(Some(escalated));
+        Ok(StepReport::ok("give_up", task, body, Some(seq)))
     }
 
     /// Runs one step, mapping a failure to a reported one.
@@ -525,6 +815,61 @@ impl Worker {
     /// The log's last sequence now, for a step whose write happened elsewhere.
     fn last_seq(&self) -> Option<u64> {
         ledger::last_seq(&self.repo).ok()
+    }
+}
+
+/// What one pass's fallback ladder read and planned.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LadderPass {
+    /// The actions to take, in task then agent order.
+    actions: Vec<LadderAction>,
+    /// Every task's provider cut, as the status rules read it.
+    retries: BTreeMap<String, derived::ProviderCut>,
+}
+
+/// The ledger's memory of the ladder, rebuilt from the folded task records.
+fn ladder_state(state: &RunState) -> LadderState {
+    let mut ladder = LadderState::default();
+    for (id, task) in &state.tasks {
+        let entry = ladder.tasks.entry(id.clone()).or_default();
+        for record in &task.fallbacks {
+            match record.action {
+                FallbackAction::Nudged => {
+                    entry
+                        .agents
+                        .entry(record.agent.clone())
+                        .or_default()
+                        .nudged
+                        .insert(record.cut.clone());
+                }
+                FallbackAction::GaveUp => {
+                    entry
+                        .agents
+                        .entry(record.agent.clone())
+                        .or_default()
+                        .gave_up
+                        .insert(record.cut.clone());
+                }
+                FallbackAction::Backup => {
+                    entry.backup = Some(BackupDone {
+                        from: record.agent.clone(),
+                        to: record.to_agent.clone().unwrap_or_default(),
+                    });
+                }
+            }
+        }
+    }
+    ladder
+}
+
+/// The log's spelling of a provider class.
+fn provider_class(kind: CutKind) -> ProviderClass {
+    match kind {
+        CutKind::RateLimit => ProviderClass::RateLimit,
+        CutKind::Quota => ProviderClass::Quota,
+        CutKind::Auth => ProviderClass::Auth,
+        CutKind::Overloaded => ProviderClass::Overloaded,
+        CutKind::Other => ProviderClass::Other,
     }
 }
 
