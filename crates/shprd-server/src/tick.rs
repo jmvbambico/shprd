@@ -344,14 +344,16 @@ impl Worker {
                 return Vec::new();
             }
         };
+        let now_ms = desk.clock.now_ms();
+        let live = self.facts.live(&state);
         let rows = self.rows(
             &state,
-            &self.facts.live(&state),
+            &live,
             retries,
             Some(&news::started_at(&events)),
-            desk.clock.now_ms(),
+            now_ms,
         );
-        let snapshot = news::readings(&state, &self.repo, &rows, &events);
+        let snapshot = news::readings(&state, &self.repo, &rows, &events, &live, now_ms);
         news::tell(desk, &self.repo, &state, &snapshot)
     }
 

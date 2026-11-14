@@ -33,10 +33,16 @@
 //!   was dropped.
 //! - A failed review round is its own line here: a review can fail while the
 //!   task's word stays the same (the worker is told and carries on), and the
-//!   person wants the finding itself.
+//!   person wants the finding itself. Like a backup's line it stands apart: the
+//!   status change it caused (and the "working again" when the worker takes the
+//!   finding up) must not replace it, or a fix that starts within one pass would
+//!   silently cancel the news that the review failed at all.
 //! - The "far past its own time left" half of Shepherdr's stall rule has no
 //!   facts in shprd's fold — it stores neither the time a status line claimed
-//!   nor when it was set — so only the quiet half is derived here.
+//!   nor when it was set — so only the quiet half is derived here, and the
+//!   caller's [`Reading::last_activity_ms`] has to carry what Shepherdr's
+//!   `activity()` gathers: its own activity *and* its agent's. An agent that is
+//!   at work is something happening, so a task with one is never quiet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -156,6 +162,13 @@ pub struct Reading {
     pub backup: Option<Mark>,
     /// When anything last happened to it, ms since the epoch: what the quiet
     /// half of the stall rule counts from. `0` when nothing is known.
+    ///
+    /// The caller fills it with everything it knows is happening — the newest
+    /// thing the log says about the task, its own status line, its agent's
+    /// state right now — as Shepherdr's `activity()` reads the task's record,
+    /// its live agents' status timestamps and its session log's mtime
+    /// (`news.py:41-53`). An agent at work must count: a worker running a long
+    /// quiet build is ordinary, and not news.
     pub last_activity_ms: u64,
 }
 
@@ -188,6 +201,11 @@ pub type Snapshot = BTreeMap<String, Reading>;
 /// Shepherdr's quiet half (`news.py:52-67`): a task at work with nothing
 /// happening for [`QUIET_MS`]. Its other half — far past the time its own status
 /// line claimed — needs facts shprd's fold does not keep.
+///
+/// "Nothing happening" is the caller's [`Reading::last_activity_ms`], so an
+/// agent that is at work now is never quiet: the rule only fires when the
+/// caller counted no activity at all, which is the reading shprd's tick builds
+/// for a task whose agent the host no longer reports.
 pub fn stall_of(reading: &Reading, now_ms: u64) -> Option<Mark> {
     if reading.status != DerivedStatus::Working || reading.last_activity_ms == 0 {
         return None;
@@ -322,12 +340,30 @@ impl Batch {
     }
 }
 
+/// What a memory was last about: the run, and how far its log had got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStamp {
+    /// The run whose tasks every remembered line is about.
+    pub run: String,
+    /// The run log's last sequence when the memory was last written.
+    pub seq: u64,
+}
+
 /// What the news has said so far, and what nobody has been told yet.
 ///
 /// It is the whole state of the news: a caller keeps it (Shepherdr keeps
 /// `.news.json`) so a change is told once, across passes and across restarts.
+/// It belongs to one run ([`News::note_run`]): a new run's tasks may reuse the
+/// last run's ids, and what the old run said must not suppress their first real
+/// change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct News {
+    /// The run this memory is about, once a caller has said.
+    ///
+    /// `None` for a memory written before this field existed: it is kept as it
+    /// is, and stamped on the first pass that notes a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<RunStamp>,
     /// What each task last said, by id.
     #[serde(default)]
     seen: BTreeMap<String, Seen>,
@@ -343,6 +379,31 @@ impl News {
     /// News that has said nothing yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Notes the run and the log position this memory is about, starting over
+    /// when it is about another run — or about this run's log before it was
+    /// replaced.
+    ///
+    /// shprd keeps one log per repository and one run per log, so a reused task
+    /// id in a new run would otherwise be read as "still says what the old run
+    /// left it at", and its first real change would be suppressed. A position
+    /// that moved backwards is a log replaced under the memory, which is the
+    /// same reason to start over. Returns true when it started over, so the
+    /// caller writes the new stamp down even if there is nothing else to say.
+    pub fn note_run(&mut self, run: &str, seq: u64) -> bool {
+        let stale = match &self.run {
+            None => false,
+            Some(stamp) => stamp.run != run || seq < stamp.seq,
+        };
+        if stale {
+            *self = Self::default();
+        }
+        self.run = Some(RunStamp {
+            run: run.to_owned(),
+            seq,
+        });
+        stale
     }
 
     /// Notes how every task reads now, and queues a line for each change worth
@@ -383,18 +444,9 @@ impl News {
             if prev.status != reading.status
                 && let Some(event) = event_of(prev, reading)
             {
-                // A review's own words are the finding, not the row's short
-                // second line.
-                let words = match event {
-                    NewsEvent::ReviewFailed => reading
-                        .review_failed
-                        .as_ref()
-                        .map(|failed| failed.words.as_str()),
-                    _ => None,
-                };
                 lines.push((
                     event,
-                    line(task, reading, event, words),
+                    line(task, reading, event, None),
                     Holds::Status(reading.status),
                 ));
             }
@@ -433,12 +485,13 @@ impl News {
         holds: Holds,
     ) {
         // A newer word on the same task replaces one not sent yet, and a stall
-        // replaces only another stall. A backup's line neither replaces nor is
-        // replaced.
+        // replaces only another stall. A backup's line and a failed review's
+        // neither replace nor are replaced: both are told for their own sake,
+        // and the state around them moving on does not make them untrue.
         self.outbox.retain(|queued| {
             !(queued.task == task
-                && queued.event != NewsEvent::Backup
-                && event != NewsEvent::Backup
+                && !stands_apart(queued.event)
+                && !stands_apart(event)
                 && (queued.event == event || event != NewsEvent::Stalled))
         });
         let id = self.next;
@@ -500,6 +553,17 @@ impl News {
     }
 }
 
+/// Whether a line is told for its own sake, whatever else the task says.
+///
+/// Shepherdr's outbox rule is that a newer word replaces an unsent one, except
+/// a backup's line (`news.py:166-170`). A failed review's line is shprd's own
+/// kind and gets the same treatment for the same reason: the finding happened,
+/// nobody was told it yet, and the worker taking it up in the same moment does
+/// not make it untrue.
+fn stands_apart(event: NewsEvent) -> bool {
+    matches!(event, NewsEvent::Backup | NewsEvent::ReviewFailed)
+}
+
 /// Which line a status change is, if any (Shepherdr's `news_state()` and the
 /// rules of `news_pass()`).
 fn event_of(prev: &Seen, now: &Reading) -> Option<NewsEvent> {
@@ -519,9 +583,11 @@ fn event_of(prev: &Seen, now: &Reading) -> Option<NewsEvent> {
             }
             _ => None,
         },
-        // A review that found something is told as the review, not as a
-        // failure of the agent: the finding is the news.
-        DerivedStatus::NeedsYou if now.review_failed.is_some() => Some(NewsEvent::ReviewFailed),
+        // A review that found something already has its own line, held by the
+        // verdict's own mark (see `observe()`): the status change it caused is
+        // not a second line, and must not replace that one with a hold on a
+        // status the worker is about to leave.
+        DerivedStatus::NeedsYou if now.review_failed.is_some() => None,
         DerivedStatus::NeedsYou => {
             // An agent that stopped, could not start, or whose provider kept
             // failing is a failure rather than a question (`news.py:141-144`).
@@ -1001,6 +1067,83 @@ mod tests {
             "the finding is the news: {}",
             batches[0].text()
         );
+    }
+
+    /// A review that failed is told even when the worker takes it up before the
+    /// line's window is over: the finding happened, and nobody has heard it.
+    #[test]
+    fn a_failed_review_survives_the_worker_taking_it_up() {
+        let review = Mark {
+            id: String::from("42"),
+            words: String::from("the tests stub the clock"),
+        };
+        let mut failed = reading("repo", DerivedStatus::NeedsYou);
+        failed.need = Some(Need::Attention);
+        failed.failed = Some(review.words.clone());
+        failed.review_failed = Some(review.clone());
+        let mut working = reading("repo", DerivedStatus::Working);
+        working.review_failed = Some(review);
+        // The review has not failed yet at the first look.
+        let mut before = working.clone();
+        before.review_failed = None;
+        let mut news = after_first_look(snapshot(vec![("T1", before)]));
+        news.observe(NOW + 1_000, &snapshot(vec![("T1", failed)]));
+        // The worker picks the finding up before the window is over.
+        let current = snapshot(vec![("T1", working)]);
+        news.observe(NOW + 2_000, &current);
+        let batches = settled_at(&mut news, NOW + 20_000, &current);
+        assert_eq!(batches.len(), 1);
+        let events: Vec<NewsEvent> = batches[0].items.iter().map(|item| item.event).collect();
+        assert_eq!(
+            events,
+            vec![NewsEvent::ReviewFailed, NewsEvent::WorkingAgain],
+            "the finding is still told, and so is the worker taking it up"
+        );
+        assert!(
+            batches[0]
+                .text()
+                .contains("review failed: the tests stub the clock"),
+            "{}",
+            batches[0].text()
+        );
+    }
+
+    /// A memory from another run says nothing about this run's tasks, which may
+    /// reuse the ids.
+    #[test]
+    fn a_memory_of_another_run_starts_over() {
+        let working = snapshot(vec![("T1", reading("repo", DerivedStatus::Working))]);
+        let mut news =
+            after_first_look(snapshot(vec![("T1", reading("repo", DerivedStatus::ToDo))]));
+        news.observe(NOW + 1_000, &working);
+        assert!(!news.note_run("r1", 10), "the same run keeps its memory");
+        assert_eq!(news.waiting().len(), 1, "the queued line is still there");
+
+        // A new run reuses the id and lands on the same word the old one was
+        // left at: without the run in the key that would read as "nothing new".
+        assert!(news.note_run("r2", 1), "another run starts the memory over");
+        assert!(
+            news.waiting().is_empty(),
+            "and drops what the old run queued"
+        );
+        news.observe(NOW + 2_000, &working);
+        assert!(
+            settled_at(&mut news, NOW + 20_000, &working).is_empty(),
+            "the new run's first look is not news"
+        );
+        let ready = snapshot(vec![("T1", reading("repo", DerivedStatus::Ready))]);
+        news.observe(NOW + 3_000, &ready);
+        let batches = settled_at(&mut news, NOW + 20_000, &ready);
+        assert_eq!(batches.len(), 1, "the new run's first real change is told");
+        assert_eq!(batches[0].items[0].event, NewsEvent::HandedIn);
+    }
+
+    /// A log that went backwards was replaced under the memory: start over too.
+    #[test]
+    fn a_log_that_went_backwards_starts_over() {
+        let mut news = News::new();
+        assert!(!news.note_run("r1", 200), "the first note stamps it");
+        assert!(news.note_run("r1", 3), "a shorter log was replaced");
     }
 
     /// A review that fails and then passes inside the window tells nothing.

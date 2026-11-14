@@ -21,7 +21,7 @@
 //! run recorded when it launched its coordinator: shprd only types into panes it
 //! started itself, so a person's own tab is never written into.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -88,10 +88,28 @@ pub fn memory_path(repo: &Path) -> PathBuf {
 /// for its coordinator. A run that never launched one has nobody to tell, so
 /// the lines stay queued (and are dropped after six hours, as Shepherdr drops
 /// them) rather than going into a pane shprd did not start.
+///
+/// The memory is held under its own file lock for the whole pass, as Shepherdr
+/// runs its news inside the tick lock: two processes on one repository — a
+/// `shprd serve` and a hand-run `shprd tick` — must not both read it, tell the
+/// same batch, and write back their own view of it.
 pub fn tell(desk: &NewsDesk, repo: &Path, state: &RunState, snapshot: &Snapshot) -> Vec<NewsSent> {
     let now_ms = desk.clock.now_ms();
     let path = memory_path(repo);
+    let _lock = match lock_memory(&path) {
+        Ok(lock) => Some(lock),
+        // A memory that cannot be locked is not a reason to keep the news from
+        // its coordinator: the pass carries on, unlocked, and says so.
+        Err(err) => {
+            tracing::warn!(%err, "the news' memory could not be locked");
+            None
+        }
+    };
     let mut news = read(&path);
+    // What a previous run said about a reused task id says nothing about this
+    // run's tasks.
+    let run = state.run.as_ref().map(|run| run.run_id.as_str());
+    let started_over = news.note_run(run.unwrap_or_default(), state.last_seq);
     let before = news.clone();
     news.observe(now_ms, snapshot);
     let batches = news.settled(now_ms, desk.settle_ms, snapshot);
@@ -121,7 +139,7 @@ pub fn tell(desk: &NewsDesk, repo: &Path, state: &RunState, snapshot: &Snapshot)
     }
     // Written even when nothing could be told: what was seen must not come back
     // as new, and a line still waiting must still be there next pass.
-    if news != before
+    if (started_over || news != before)
         && let Err(err) = write(&path, &news)
     {
         tracing::warn!(%err, "could not keep the news' memory");
@@ -129,16 +147,48 @@ pub fn tell(desk: &NewsDesk, repo: &Path, state: &RunState, snapshot: &Snapshot)
     sent
 }
 
+/// Takes the news memory's exclusive lock, creating its lock file.
+///
+/// It is an advisory `flock` beside the memory, so the OS drops it when the
+/// process exits, however it exits (`shprd`'s run lock takes its own the same
+/// way).
+fn lock_memory(path: &Path) -> Result<std::fs::File, String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", path.display()))?;
+    std::fs::create_dir_all(dir).map_err(|err| format!("creating {}: {err}", dir.display()))?;
+    let lock = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock)
+        .map_err(|err| format!("opening {}: {err}", lock.display()))?;
+    file.lock()
+        .map_err(|err| format!("locking {}: {err}", lock.display()))?;
+    Ok(file)
+}
+
 /// How every task reads as news, from the fold and the facts it keeps.
 ///
 /// `rows` is what the status rules derived for each task, with the facts they
-/// derived it from; `events` is the run's log, which is where the last activity
-/// of a task comes from.
+/// derived it from; `events` is the run's log; `live` names the tasks whose
+/// agent the host reports running right now, and `now_ms` is the pass's clock.
+///
+/// An agent that is at work is something happening, so a task with one is never
+/// quiet: a worker running a long build or test command appends no event for
+/// half an hour and is not stalled. Shepherdr's `activity()` counts the agent's
+/// own status timestamp and its session log's mtime for the same reason
+/// (`news.py:41-53`); the tick has the host's word, which is that the agent is
+/// still there.
 pub fn readings(
     state: &RunState,
     repo: &Path,
     rows: &BTreeMap<String, (Derived, TaskSignal)>,
     events: &[Event],
+    live: &BTreeSet<String>,
+    now_ms: u64,
 ) -> Snapshot {
     let space = space_of(state, repo);
     let activity = activity(events);
@@ -147,16 +197,11 @@ pub fn readings(
         let Some((row, signal)) = rows.get(id) else {
             continue;
         };
-        snapshot.insert(
-            id.clone(),
-            reading(
-                &space,
-                task,
-                row,
-                signal,
-                activity.get(id).copied().unwrap_or(0),
-            ),
-        );
+        let mut last = activity.get(id).copied().unwrap_or(0);
+        if live.contains(id) {
+            last = last.max(now_ms);
+        }
+        snapshot.insert(id.clone(), reading(&space, task, row, signal, last));
     }
     snapshot
 }
@@ -215,12 +260,13 @@ pub fn started_at(events: &[Event]) -> BTreeMap<String, u64> {
     at
 }
 
-/// When anything last happened to each task, ms, from the log.
+/// When the log last said anything about each task, ms.
 ///
 /// Shepherdr reads a task's agent status, its own status line and its session
 /// log's mtime; shprd's fold keeps none of those (and the service does not read
-/// transcripts), so the newest event that names the task is what counts as
-/// something happening.
+/// transcripts), so the newest event that names the task is the log's half of
+/// "something happened". [`readings`] adds the other half the pass already
+/// knows: an agent the host reports running is at work now.
 pub fn activity(events: &[Event]) -> BTreeMap<String, u64> {
     let mut at: BTreeMap<String, u64> = BTreeMap::new();
     for event in events {
@@ -346,6 +392,7 @@ mod tests {
     };
     use shprd_core::log::SystemClock;
     use shprd_core::state::RunState;
+    use shprd_views::news::QUIET_MS;
 
     /// The moment the fixtures start at.
     const NOW: u64 = 1_700_000_000_000;
@@ -614,6 +661,72 @@ mod tests {
         let backup = backup(task).expect("its backup took over");
         assert_eq!(backup.words, "pi took over from claude: out of allowance");
         assert_eq!(backup.id, "4", "the mark is the backup's own log line");
+    }
+
+    #[test]
+    fn an_agent_at_work_is_something_happening() {
+        let kinds = {
+            let mut kinds = run();
+            kinds.extend([added(), spawned(1)]);
+            kinds
+        };
+        let events = kinds_events(kinds);
+        let state = RunState::fold(&events).expect("the fixture log folds");
+        let task = state.tasks.get("A").expect("task A folded");
+        let rows = BTreeMap::from([(
+            String::from("A"),
+            (
+                Derived {
+                    status: shprd_views::derived::DerivedStatus::Working,
+                    needs: None,
+                    reason: None,
+                },
+                TaskSignal::from_state(&state, "A").expect("task A's signal"),
+            ),
+        )]);
+        // Half an hour after the last event: a worker running a long build.
+        let now = NOW + QUIET_MS + 600_000;
+        let space = Path::new("/repo/shprd");
+
+        // The host reports its agent running, so nothing is quiet.
+        let live = BTreeSet::from([String::from("A")]);
+        let snapshot = readings(&state, space, &rows, &events, &live, now);
+        assert_eq!(snapshot["A"].last_activity_ms, now);
+        assert_eq!(shprd_views::news::stall_of(&snapshot["A"], now), None);
+        assert_eq!(space_of(&state, space), "shprd");
+        assert_eq!(task.title, "task A");
+
+        // With no agent on it, the quiet rule still applies.
+        let snapshot = readings(&state, space, &rows, &events, &BTreeSet::new(), now);
+        assert_eq!(snapshot["A"].last_activity_ms, NOW + 2_000);
+        assert!(
+            shprd_views::news::stall_of(&snapshot["A"], now).is_some(),
+            "a working task with nothing at all happening has stalled"
+        );
+    }
+
+    #[test]
+    fn two_passes_cannot_hold_the_memory_at_once() {
+        let temp = tempfile::TempDir::new().expect("a temp dir");
+        let path = temp.path().join("news.json");
+        let held = lock_memory(&path).expect("the first pass takes the lock");
+        assert!(path.with_extension("json.lock").exists(), "the lock file");
+        let second = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path.with_extension("json.lock"))
+            .expect("the lock file opens");
+        assert!(
+            second.try_lock().is_err(),
+            "a second process's pass waits rather than racing"
+        );
+        drop(held);
+        assert!(
+            second.try_lock().is_ok(),
+            "and takes it once the first is done"
+        );
     }
 
     #[test]

@@ -58,12 +58,24 @@ impl Fixture {
             .expect("append the fixture")
     }
 
-    /// Starts the run and adds the given tasks, ready to be started.
+    /// Starts run `r1` and adds the given tasks, ready to be started.
     fn plan(&self, tasks: &[&str]) {
-        self.append(run_started());
+        self.start_run("r1", tasks);
+    }
+
+    /// Starts a run with the given id and tasks, as the first events of a log.
+    fn start_run(&self, run_id: &str, tasks: &[&str]) {
+        self.append(run_started(run_id));
         for task in tasks {
             self.append(task_added(task));
         }
+    }
+
+    /// Throws the log away and starts `run_id` in its place, as a repository
+    /// reset for a new run does.
+    fn reset_log(&self, run_id: &str, tasks: &[&str]) {
+        let _ = std::fs::remove_file(self.repo.join(".shprd").join("events.jsonl"));
+        self.start_run(run_id, tasks);
     }
 
     /// Records that the coordinator runs in `pane`, as `up` does.
@@ -72,6 +84,22 @@ impl Fixture {
             title: String::from("orchestrator"),
             pane: pane.to_string(),
             process_group: 1,
+        });
+    }
+
+    /// Records that a backup took over `task`, as the fallback ladder does.
+    fn backup(&self, task: &str) {
+        self.append(EventKind::Backup {
+            task: task.to_string(),
+            attempt: 1,
+            from_agent: String::from("claude"),
+            to_agent: String::from("pi"),
+            cut: String::from("cut-1"),
+            class: shprd_core::event::ProviderClass::Quota,
+            reason: String::from("out of allowance"),
+            worktree: format!("/wt/{task}"),
+            branch: format!("shprd/r1/{task}"),
+            started: true,
         });
     }
 
@@ -252,10 +280,10 @@ fn desk(host: Arc<FakeHost>, clock: Arc<HandClock>, settle_ms: u64) -> NewsDesk 
     }
 }
 
-/// The run's first event.
-fn run_started() -> EventKind {
+/// A run's first event.
+fn run_started(run_id: &str) -> EventKind {
     EventKind::RunStarted {
-        run_id: String::from("r1"),
+        run_id: run_id.to_string(),
         repo: String::from("/repo/shprd"),
         base_branch: String::from("main"),
         integration_branch: String::from("integration/m9"),
@@ -465,6 +493,82 @@ fn a_task_just_spawned_is_not_told_as_failed_before_the_host_sees_it() {
         told[0].1.contains("A started"),
         "a just-started task is news as started: {:?}",
         told[0].1
+    );
+}
+
+/// A worker that has appended no event for half an hour is not stalled: its
+/// agent is at work, and the host says so.
+#[test]
+fn a_live_agent_with_nothing_in_the_log_is_not_told_as_stalled() {
+    let fixture = Fixture::new();
+    fixture.plan(&["A"]);
+    fixture.coordinator("pane-1");
+    let host = FakeHost::new();
+    // The clock is half an hour past the log, as if the task had been working
+    // through a long build since its spawn.
+    let clock = HandClock::at(SystemClock.now_ms() + shprd_views::news::QUIET_MS + 600_000);
+    let worker = fixture.worker(&["A"], Some(desk(host.clone(), clock.clone(), 0)));
+
+    fixture.pass(&worker);
+    fixture.spawn("A");
+    worker.tick().expect("the pass half an hour later ran");
+    let told = host.told();
+    assert_eq!(told.len(), 1, "one message: {told:?}");
+    let lines: Vec<&str> = told[0].1.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the start is the only news, not a stall: {lines:?}"
+    );
+    assert!(lines[0].contains("A started"), "{:?}", lines[0]);
+    assert!(
+        !told[0].1.contains("went quiet"),
+        "a working agent is not stalled: {:?}",
+        told[0].1
+    );
+}
+
+/// A memory left by another run does not suppress this run's news: the ids and
+/// the log's sequence numbers are reused.
+#[test]
+fn a_memory_of_another_run_does_not_suppress_the_new_ones_news() {
+    let fixture = Fixture::new();
+    fixture.plan(&["A"]);
+    fixture.coordinator("pane-1");
+    let host = FakeHost::new();
+    let clock = HandClock::at(NOW);
+    let worker = fixture.worker(&["A"], Some(desk(host.clone(), clock.clone(), 0)));
+
+    // The first run: A starts and a backup takes over, both told.
+    fixture.pass(&worker);
+    fixture.spawn("A");
+    fixture.backup("A");
+    clock.set(NOW + 1_000);
+    worker.tick().expect("the first run's pass ran");
+    assert_eq!(host.told().len(), 1, "the first run's message");
+    assert!(host.told()[0].1.contains("A backup"));
+
+    // The repository is reset and run `r2` takes over the same log file, with
+    // the same sequence numbers.
+    fixture.reset_log("r2", &["A"]);
+    fixture.coordinator("pane-1");
+    clock.set(NOW + 20_000);
+    worker.tick().expect("the new run's first pass ran");
+    assert_eq!(host.told().len(), 1, "the new run's first look is not news");
+    fixture.spawn("A");
+    fixture.backup("A");
+    clock.set(NOW + 40_000);
+    worker.tick().expect("the new run's pass ran");
+    let told = host.told();
+    assert_eq!(
+        told.len(),
+        2,
+        "the new run's backup is news again: {told:?}"
+    );
+    assert!(
+        told[1].1.contains("A backup"),
+        "the same sequence number in another run is another backup: {:?}",
+        told[1].1
     );
 }
 
