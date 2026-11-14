@@ -1,5 +1,10 @@
 //! The `watch` verb: poll every working agent and apply the dry/hand-off state
 //! machine to what its pane and its transcript say.
+//!
+//! A working agent the host calls idle is watched as closely as one that is
+//! quiet: past the machine's idle ceiling, and with no report or gate result
+//! since it stopped, the attempt is escalated with "idle, no report". A pane
+//! parked at its own prompt is the one stall the silence rule can never see.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -258,6 +263,7 @@ impl Watcher {
             serve: None,
             screen: None,
             process_exited: false,
+            report_or_gate_ms: None,
         };
         let mut finished: Vec<String> = Vec::new();
         for (agent, watch) in self.cooldowns.iter_mut() {
@@ -673,6 +679,7 @@ fn tick_task(
         serve: None,
         screen,
         process_exited,
+        report_or_gate_ms: reported_or_gated_ms(events, &task.id, attempt.n, now_ms),
     };
     let mut queue = watch.step(&inputs, &watcher.policy);
     let mut handed_off: Option<(String, bool)> = None;
@@ -880,6 +887,35 @@ fn observe(
     }
 }
 
+/// When the attempt last reported or recorded a gate result, if it ever did.
+///
+/// The idle ceiling is about *no news*, so this is the newest thing the attempt
+/// itself said. A timestamp the log places after `now_ms` is left out: the two
+/// clocks disagree, which proves nothing about when it happened.
+fn reported_or_gated_ms(events: &[Event], task: &str, attempt: u32, now_ms: u64) -> Option<u64> {
+    events.iter().rev().find_map(|event| {
+        let mine = match &event.kind {
+            EventKind::Reported {
+                task: id,
+                attempt: n,
+                ..
+            }
+            | EventKind::GatePassed {
+                task: id,
+                attempt: n,
+                ..
+            }
+            | EventKind::GateFailed {
+                task: id,
+                attempt: n,
+                ..
+            } => id == task && *n == attempt,
+            _ => false,
+        };
+        (mine && event.at_ms <= now_ms).then_some(event.at_ms)
+    })
+}
+
 /// When the attempt's current worker started: its spawn, or the hand-off that
 /// replaced it, whichever is newer. Zero when the log says neither, which only
 /// errs towards believing the first observation.
@@ -1082,6 +1118,7 @@ mod tests {
 
     use crate::cmd::spawn::SpawnRequest;
     use crate::cmd::spawn::fault::{Fault, FlakyMux};
+    use shprd_watch::machine::IDLE_REPORT_FACTOR;
 
     use super::*;
 
@@ -1583,6 +1620,95 @@ project_dirs = []
             dry_after_ms,
             Some(300_000),
             "the agent must go dry 120s after it is merely suspect"
+        );
+    }
+
+    /// A worker the host calls idle is the one stall the silence rule cannot
+    /// see: nothing moves, no record errors, and no screen pattern matches.
+    /// Past the idle ceiling the attempt is escalated once, naming the task and
+    /// the fact, and the notice the orchestrator gets says the same.
+    #[test]
+    fn an_idle_worker_that_never_reports_is_escalated() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let pane = pane_of_tab(&mux, &scratch, &tab_id(&env));
+        mux.set_screen(&pane, "> ");
+        mux.set_state(&pane, AgentState::Idle);
+
+        let policy = Policy::default();
+        let limit = policy.suspect_after_ms * IDLE_REPORT_FACTOR;
+        let mut watcher = Watcher::new(policy);
+        let t0 = 1_700_000_000_000u64;
+        let mut escalated_at = None;
+        for step in 0..=(limit / 10_000 + 5) {
+            let now = t0 + 10_000 * step;
+            let before = events(&ctx).len();
+            let lines = watcher
+                .tick(&mux, &env, now)
+                .unwrap_or_else(|err| panic!("{err}"));
+            let log = events(&ctx);
+            let fresh = &log[before..];
+            if !appended(fresh, is_escalation) {
+                continue;
+            }
+            escalated_at = Some(now);
+            let bodies: Vec<&String> = fresh
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::Escalated { task, body, .. } => {
+                        assert_eq!(task.as_deref(), Some("T1"), "the escalation names T1");
+                        Some(body)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                bodies.len(),
+                1,
+                "one escalation, not one per tick: {fresh:?}"
+            );
+            assert!(
+                bodies[0].contains("idle, no report"),
+                "the reason says what was seen: {}",
+                bodies[0]
+            );
+            // The orchestrator is told the same thing, not left to guess.
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("ask the human") && line.contains("idle, no report")),
+                "the notice must name the idle worker: {lines:?}"
+            );
+            break;
+        }
+        assert_eq!(
+            escalated_at,
+            Some(t0 + limit + 10_000),
+            "the escalation lands one tick past two suspect windows"
+        );
+        assert_eq!(
+            count(&events(&ctx), is_escalation),
+            1,
+            "the attempt is escalated exactly once"
+        );
+        assert_eq!(
+            count(&events(&ctx), |kind| matches!(kind, EventKind::Dry { .. })),
+            0,
+            "a stopped agent is not a dry program"
+        );
+
+        // Further ticks change nothing: the task is a human's now.
+        let before = events(&ctx).len();
+        watcher
+            .tick(&mux, &env, t0 + limit + 20_000)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            events(&ctx).len(),
+            before,
+            "an escalated attempt is not escalated again"
         );
     }
 
