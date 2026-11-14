@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    Actor, AgentId, Event, EventKind, Finding, ReportStatus, ResourceAction, ResourceKind,
-    ReviewSource, TaskId,
+    Actor, AgentId, CheckReport, Event, EventKind, Finding, ReportStatus, ResourceAction,
+    ResourceKind, ReviewSource, TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -169,6 +169,23 @@ pub struct Task {
     /// view that draws a task reads the folded state: the pull request's
     /// `## Dropped` section is the reason a reader is looking for.
     pub dropped_reason: Option<String>,
+    /// The last progress line an agent recorded, with how far it said it had
+    /// got.
+    ///
+    /// Only the newest one is kept: the full history is the log's job, and a
+    /// progress line is about where the work is now.
+    pub last_status: Option<TaskProgress>,
+}
+
+/// The last progress line an agent recorded for a task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProgress {
+    /// The short line the agent reported.
+    pub message: String,
+    /// How far along it said the task was, from 0 to 100.
+    pub progress: Option<u8>,
+    /// Sequence number of the event that recorded it.
+    pub seq: u64,
 }
 
 /// Where a task sits in its lifecycle.
@@ -244,6 +261,12 @@ pub struct Report {
     pub summary: String,
     /// Test commands the agent ran, with their result.
     pub tests: Vec<String>,
+    /// The gates the agent ran for the hand-in, with their result.
+    ///
+    /// Empty for a report recorded before hand-ins carried checks. A completed
+    /// hand-in recorded now always names at least one, and every one of them
+    /// passed.
+    pub checks: Vec<CheckReport>,
     /// Normalized paths the agent changed.
     pub changed_paths: Vec<String>,
     /// Commit the agent made, if any.
@@ -415,6 +438,7 @@ impl RunState {
                         attempts: Vec::new(),
                         overrides: Vec::new(),
                         dropped_reason: None,
+                        last_status: None,
                     },
                 );
             }
@@ -446,6 +470,7 @@ impl RunState {
                 status,
                 summary,
                 tests,
+                checks,
                 changed_paths,
                 commit,
                 skills_used,
@@ -466,6 +491,7 @@ impl RunState {
                             status: *status,
                             summary: summary.clone(),
                             tests: tests.clone(),
+                            checks: checks.clone(),
                             changed_paths: changed_paths
                                 .iter()
                                 .filter_map(|path| scope::normalize(path).ok())
@@ -474,6 +500,21 @@ impl RunState {
                             skills_used: skills_used.clone(),
                         });
                     }
+                }
+            }
+            EventKind::TaskStatus {
+                task,
+                message,
+                progress,
+            } => {
+                // A progress line never moves the task's status: the report
+                // and the gates decide that.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.last_status = Some(TaskProgress {
+                        message: message.clone(),
+                        progress: *progress,
+                        seq: event.seq,
+                    });
                 }
             }
             EventKind::GatePassed {
@@ -1162,6 +1203,47 @@ mod tests {
             state.check(&kind, 4_000),
             Err(RuleError::UnknownPullRequest { number: 8 })
         ));
+    }
+
+    #[test]
+    fn a_task_status_folds_into_the_task_it_names() {
+        let state = match fold_extra(vec![
+            ev(
+                3,
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: "halfway through".to_string(),
+                    progress: Some(50),
+                },
+            ),
+            ev(
+                4,
+                EventKind::TaskStatus {
+                    task: "a".to_string(),
+                    message: "nearly there".to_string(),
+                    progress: None,
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("status lines must fold: {err}"),
+        };
+        let task = match state.tasks.get("a") {
+            Some(task) => task,
+            None => panic!("task a must exist"),
+        };
+        let status = match &task.last_status {
+            Some(status) => status,
+            None => panic!("the status line must be kept: {task:?}"),
+        };
+        assert_eq!(status.message, "nearly there", "the newest one wins");
+        assert_eq!(status.progress, None);
+        assert_eq!(status.seq, 4);
+        assert_eq!(
+            task.status,
+            TaskStatus::Queued,
+            "a progress line must not move the task's status"
+        );
     }
 
     #[test]

@@ -211,6 +211,8 @@ impl Fixture {
         self.ok(&[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             id,
             "--attempt",

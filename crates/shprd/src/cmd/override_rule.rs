@@ -188,6 +188,10 @@ mod tests {
                     status: shprd_core::event::ReportStatus::Completed,
                     summary: "done".to_string(),
                     tests: Vec::new(),
+                    checks: vec![shprd_core::event::CheckReport::passed(
+                        "tests",
+                        "cargo test",
+                    )],
                     changed_paths: vec!["crates/janitor/x.rs".to_string()],
                     commit: Some("abc123".to_string()),
                     skills_used: Vec::new(),

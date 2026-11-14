@@ -188,6 +188,8 @@ fn happy_path_reaches_integrated() {
         &[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             "T1",
             "--attempt",
@@ -278,6 +280,8 @@ fn changed_path_outside_scope_is_refused() {
         &[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             "T1",
             "--attempt",
@@ -417,6 +421,8 @@ fn a_scripted_run_writes_the_document_and_the_views() {
         &[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             "T1",
             "--attempt",
@@ -823,6 +829,8 @@ fn integrated_task(root: &Path, branch: &str) {
         &[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             "T1",
             "--attempt",
@@ -1342,6 +1350,8 @@ fn run_that_needs_an_override(root: &Path) {
         &[
             "agent",
             "report",
+            "--check",
+            "tests|cargo test|0",
             "--task",
             "T1",
             "--attempt",

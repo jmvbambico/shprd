@@ -1529,6 +1529,10 @@ project_dirs = []
             status: ReportStatus::Completed,
             summary: "did it".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
@@ -2205,6 +2209,10 @@ project_dirs = []
             status: ReportStatus::Failed,
             summary: "died four times".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
@@ -2976,6 +2984,10 @@ project_dirs = []
             status: ReportStatus::Completed,
             summary: "did it".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
@@ -3141,6 +3153,10 @@ project_dirs = []
                 status: ReportStatus::Completed,
                 summary: "did it".to_string(),
                 tests: Vec::new(),
+                checks: vec![shprd_core::event::CheckReport::passed(
+                    "tests",
+                    "cargo test",
+                )],
                 changed_paths: Vec::new(),
                 commit: None,
                 skills_used: Vec::new(),
