@@ -177,6 +177,35 @@ pub struct ReviewSource {
     pub request_seq: u64,
 }
 
+/// How landing one task ended.
+///
+/// A task lands through its own pull request, and the outcome says what the
+/// branch and its base had left to do. Every outcome is recorded once, so a
+/// second landing reads what already happened instead of merging twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandOutcome {
+    /// Its pull request was merged by this landing.
+    Merged,
+    /// Its pull request was already merged when this landing looked.
+    AlreadyMerged,
+    /// Its own work is in the base branch as different commits: a squash merge,
+    /// or a merge made by hand.
+    SquashMerged,
+    /// Its branch held no work of its own beyond the base branch.
+    NothingToMerge,
+}
+
+impl LandOutcome {
+    /// True when this outcome means the task's work is in its base branch.
+    ///
+    /// `NothingToMerge` is the one that is not: the branch had nothing to add,
+    /// so nothing of it landed.
+    pub fn is_landed(self) -> bool {
+        !matches!(self, LandOutcome::NothingToMerge)
+    }
+}
+
 /// What happened. Serialized with a `kind` tag alongside the [`Event`] fields.
 ///
 /// Unknown-field rejection is not enabled here: `deny_unknown_fields` cannot
@@ -422,6 +451,52 @@ pub enum EventKind {
         number: u64,
         /// The integration head the human approved.
         head_sha: String,
+    },
+    /// A task's own pull request was opened from its branch, or its body
+    /// refreshed.
+    ///
+    /// The per-task workflow gives every task its own pull request into the
+    /// run's base branch, so the task's log holds what the run's pull request
+    /// used to: the forge's number, its URL and the head it proposes.
+    TaskPrOpened {
+        /// The task.
+        task: TaskId,
+        /// The forge's number for the pull request.
+        number: u64,
+        /// The URL a human opens to read, approve or merge it.
+        url: String,
+        /// The branch the pull request proposes to merge.
+        head: String,
+    },
+    /// A human approved a task's pull request in shprd itself.
+    ///
+    /// Like [`EventKind::Approved`], for the task's own pull request: the
+    /// approval names the head it was given for, and the `ask` policy honours
+    /// it only while that is still the branch's tip.
+    TaskApproved {
+        /// The task.
+        task: TaskId,
+        /// The forge's number for the pull request.
+        number: u64,
+        /// The commit the human approved.
+        head_sha: String,
+    },
+    /// Landing one task ended: its work is in its base branch, or it had
+    /// nothing to add.
+    ///
+    /// Recorded once per outcome, so a re-run of `shprd land` reads the fact
+    /// instead of opening a second pull request or merging again.
+    TaskLanded {
+        /// The task.
+        task: TaskId,
+        /// The base branch its work went into, or would have gone into.
+        base: String,
+        /// The branch tip the landing looked at.
+        head: String,
+        /// The pull request that carried it, when one did.
+        number: Option<u64>,
+        /// What happened to it.
+        outcome: LandOutcome,
     },
     /// shprd started the orchestrator in a pane.
     ///
