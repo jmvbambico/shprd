@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{EventLog, SystemClock};
-use shprd_server::App;
+use shprd_server::{App, WsLimits};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -629,56 +629,121 @@ async fn an_unknown_route_answers_a_typed_404() {
     assert_eq!(reply.code(), "not_found");
 }
 
+/// A service on a real loopback socket, with its router and its token.
+struct Live {
+    app: App,
+    token: String,
+    port: u16,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    server: tokio::task::JoinHandle<()>,
+    _state: TempDir,
+    _repo: TempDir,
+}
+
+impl Live {
+    /// Starts a service on a free port, over a repository whose run has started.
+    ///
+    /// The listener is bound here, before the server task starts, so a client
+    /// that connects at once finds a socket rather than a race.
+    fn start(limits: Option<WsLimits>) -> Self {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
+        listener
+            .set_nonblocking(true)
+            .expect("the listener goes non-blocking");
+        let port = listener.local_addr().expect("the bound address").port();
+        let state = tempfile::tempdir().expect("state dir");
+        let repo = tempfile::tempdir().expect("repo dir");
+        start_run(repo.path());
+        let mut app =
+            App::prepare(repo.path(), port, &Actor::Human, state.path(), None).expect("prepare");
+        if let Some(limits) = limits {
+            app = app.with_ws_limits(limits);
+        }
+        let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+        let token = token.trim().to_string();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server_router = app.router();
+        let server = tokio::spawn(async move {
+            let listener =
+                tokio::net::TcpListener::from_std(listener).expect("the bound listener is usable");
+            axum::serve(listener, server_router)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .expect("the test server runs");
+        });
+        Self {
+            app,
+            token,
+            port,
+            stop: Some(stop),
+            server,
+            _state: state,
+            _repo: repo,
+        }
+    }
+
+    /// The socket URL, with the token a browser cannot send as a header.
+    fn url(&self) -> String {
+        format!("ws://127.0.0.1:{}/api/ws?token={}", self.port, self.token)
+    }
+
+    /// Connects and reads the hello.
+    async fn connect(
+        &self,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Value,
+    ) {
+        let (mut socket, _) = tokio_tungstenite::connect_async(self.url())
+            .await
+            .expect("the socket connects");
+        let hello = next_json(&mut socket).await;
+        (socket, hello)
+    }
+
+    /// Adds a task through the router, so the socket has a change to push.
+    async fn add_task(&self, id: &str) {
+        let call = Call::post("/api/action", task_add(id))
+            .with_token(&self.token)
+            .with_write_header();
+        let response = self
+            .app
+            .router()
+            .oneshot(call.request())
+            .await
+            .expect("answers");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.server.abort();
+    }
+}
+
 #[tokio::test]
 async fn the_socket_says_hello_and_pushes_a_change() {
     use tokio_tungstenite::tungstenite::Message;
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("a loopback port");
-    let port = listener.local_addr().expect("the bound address").port();
-    let state = tempfile::tempdir().expect("state dir");
-    let repo = tempfile::tempdir().expect("repo dir");
-    start_run(repo.path());
-    let app = App::prepare(repo.path(), port, &Actor::Human, state.path(), None).expect("prepare");
-    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
-    let token = token.trim().to_string();
-    let server_router = app.router();
-    let client_router = app.router();
-
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, server_router)
-            .with_graceful_shutdown(async {
-                let _ = stopped.await;
-            })
-            .await
-    });
-
-    let url = format!("ws://127.0.0.1:{port}/api/ws?token={token}");
-    let (mut socket, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .expect("the socket connects");
-
-    let hello = next_json(&mut socket).await;
+    let live = Live::start(None);
+    let (mut socket, hello) = live.connect().await;
     assert_eq!(hello["type"], json!("hello"));
     assert_eq!(
         hello["seq"],
         json!(1),
         "the hello names the log's last event"
     );
-    assert_eq!(hello["id"], json!(app.info().id));
+    assert_eq!(hello["id"], json!(live.app.info().id));
 
-    let request = Call::post("/api/action", task_add("T1"))
-        .with_token(&token)
-        .with_write_header()
-        .request();
-    let response = client_router
-        .oneshot(request)
-        .await
-        .expect("the action answers");
-    assert_eq!(response.status(), StatusCode::OK);
-
+    live.add_task("T1").await;
     let change = next_json(&mut socket).await;
     assert_eq!(change["type"], json!("change"));
     assert_eq!(change["change"]["seq"], json!(2));
@@ -695,8 +760,100 @@ async fn the_socket_says_hello_and_pushes_a_change() {
     assert_eq!(pong["type"], json!("pong"));
     assert_eq!(pong["at"], json!(7));
 
-    let _ = stop.send(());
-    let _ = server.await;
+    let _ = socket.close(None).await;
+}
+
+#[tokio::test]
+async fn a_socket_a_client_abandoned_is_closed_rather_than_held_open() {
+    let live = Live::start(Some(WsLimits {
+        ping: Duration::from_millis(50),
+        idle: Duration::from_millis(150),
+        session: Duration::from_secs(30),
+    }));
+    let (mut socket, _) = live.connect().await;
+
+    // The server pings on its own, then gives up on the silence with a clean
+    // `1001 going away`, so a probe or a page that vanished cannot hold a
+    // connection open for ever.
+    let started = Instant::now();
+    let closed = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("the server closes the socket")
+            .expect("the socket is open")
+            .expect("the frame is a message");
+        match frame {
+            tokio_tungstenite::tungstenite::Message::Ping(_) => continue,
+            tokio_tungstenite::tungstenite::Message::Close(frame) => break frame,
+            other => panic!("unexpected frame {other:?}"),
+        }
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the idle bound, not the session bound, is what closed it"
+    );
+    let frame = closed.expect("the close carries a code");
+    assert_eq!(
+        u16::from(frame.code),
+        1001,
+        "going away, so the client reconnects"
+    );
+    assert!(frame.reason.contains("idle"), "{}", frame.reason);
+}
+
+#[tokio::test]
+async fn a_client_that_keeps_talking_is_closed_at_the_session_limit() {
+    let live = Live::start(Some(WsLimits {
+        ping: Duration::from_millis(20),
+        idle: Duration::from_secs(30),
+        session: Duration::from_millis(250),
+    }));
+    let (mut socket, _) = live.connect().await;
+
+    // Answering every ping is not enough to keep the socket: the session bound
+    // is a backstop, not a silence timer.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the server closes the socket")
+            .expect("the socket is open")
+            .expect("the frame is a message");
+        match frame {
+            tokio_tungstenite::tungstenite::Message::Ping(payload) => {
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Pong(payload))
+                    .await
+                    .expect("the pong goes out");
+            }
+            tokio_tungstenite::tungstenite::Message::Close(frame) => {
+                let frame = frame.expect("the close carries a code");
+                assert_eq!(u16::from(frame.code), 1001);
+                assert!(frame.reason.contains("session"), "{}", frame.reason);
+                return;
+            }
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_request_that_is_not_an_upgrade_is_a_typed_refusal() {
+    let fixture = Fixture::new();
+    let reply = fixture
+        .send(Call::get("/api/ws").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.code(), "bad_request");
+    let message = reply.json()["message"].as_str().expect("a message");
+    assert!(
+        message.contains("/api/changes"),
+        "the refusal points at the poll: {message}"
+    );
+    assert!(
+        message.contains("upgrade") || message.contains("Upgrade"),
+        "the refusal says what was missing: {message}"
+    );
 }
 
 /// Reads the next text frame as JSON, failing after three seconds.

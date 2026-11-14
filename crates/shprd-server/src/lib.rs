@@ -31,7 +31,7 @@ pub(crate) mod auth;
 pub(crate) mod hub;
 pub(crate) mod ledger;
 
-pub use api::App;
+pub use api::{App, WsLimits};
 pub use error::{ApiReject, ServerError};
 pub use service::{
     AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, VERSION, serve,

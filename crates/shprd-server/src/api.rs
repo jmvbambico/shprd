@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -42,6 +43,45 @@ const MAX_WAIT: Duration = Duration::from_secs(30);
 /// missed or another process appended.
 const TICK: Duration = Duration::from_millis(200);
 
+/// How long a socket may live, and how often the server pings it.
+///
+/// A socket is long-lived by design, so it is bounded instead: a page that goes
+/// away without a close (a phone losing signal) must not hold a task for hours,
+/// and a probe run against the route by hand must end rather than wait for
+/// ever. Every frame the client sends — a text message, a ping, the pong to our
+/// own ping — counts as activity, so a live page never trips [`WsLimits::idle`];
+/// the session bound is the backstop for a client that keeps answering.
+///
+/// The defaults are a bounded version of the researched design's ([Shepherdr's
+/// `idleTimeout: 600`][sh]): a client that has not answered the last two pings
+/// is gone, so a quiet connection is closed after sixty seconds of silence, no
+/// socket lives past five minutes, and the server pings every twenty seconds so
+/// a middlebox notices a dead one. A browser answers pings itself, and the web
+/// app reconnects, so a reconnect every five minutes is invisible to it — while
+/// an HTTP client that opened the socket by mistake, or a page that went away
+/// without closing, holds nothing for long.
+///
+/// [sh]: https://github.com/eliasstravik/shepherdr/blob/a3f327a52354cd2880cdacc29716dd07bcd11efb/service/main.ts#L930
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsLimits {
+    /// How often the server sends a ping on a quiet socket.
+    pub ping: Duration,
+    /// How long a socket may go without a client frame before it is closed.
+    pub idle: Duration,
+    /// How long a socket may live at all.
+    pub session: Duration,
+}
+
+impl Default for WsLimits {
+    fn default() -> Self {
+        Self {
+            ping: Duration::from_secs(20),
+            idle: Duration::from_secs(60),
+            session: Duration::from_secs(300),
+        }
+    }
+}
+
 /// What every handler sees.
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
@@ -61,6 +101,8 @@ pub(crate) struct AppState {
     pub(crate) hub: Hub,
     /// The binary's own step after a write, if it supplied one.
     pub(crate) after_write: Option<AfterWrite>,
+    /// The bounds a socket lives under.
+    pub(crate) ws: WsLimits,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -98,6 +140,7 @@ impl App {
             actor: actor.clone(),
             hub: Hub::new(),
             after_write,
+            ws: WsLimits::default(),
         };
         let router = router(state.clone());
         Ok(Self {
@@ -127,6 +170,16 @@ impl App {
     /// Removes `service.json`, on a clean shutdown.
     pub fn remove_record(&self) -> Result<(), ServerError> {
         self.files.remove_record()
+    }
+
+    /// Serves sockets under `limits` instead of the defaults.
+    ///
+    /// The defaults are what a UI gets; a test uses short ones so a bound is
+    /// observable without waiting minutes for it.
+    pub fn with_ws_limits(mut self, limits: WsLimits) -> Self {
+        self.state.ws = limits;
+        self.router = router(self.state.clone());
+        self
     }
 }
 
@@ -263,8 +316,27 @@ async fn action(
 }
 
 /// `GET /api/ws`: the same change notices, pushed.
-async fn socket(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| pump(socket, state))
+///
+/// A request that is not a WebSocket upgrade is refused with the typed body
+/// every other refusal has, and pointed at the long poll, so a plain `GET` (or
+/// a probe that forgot its upgrade headers) gets an answer instead of a stream
+/// it cannot read.
+async fn socket(
+    State(state): State<AppState>,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    match upgrade {
+        Ok(upgrade) => upgrade.on_upgrade(move |socket| pump(socket, state)),
+        Err(rejection) => ApiReject::new(
+            rejection.status(),
+            ErrorCode::BadRequest,
+            format!(
+                "{}: this route is a WebSocket and stays open; poll GET /api/changes for changes instead",
+                rejection.body_text()
+            ),
+        )
+        .into_response(),
+    }
 }
 
 /// Pushes a hello, then one change per batch of new events, until the client
@@ -273,6 +345,7 @@ async fn socket(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Res
 /// The loop's tick is what makes a missed wake-up harmless: the log is the truth
 /// and it is re-read regardless.
 async fn pump(mut socket: WebSocket, state: AppState) {
+    let limits = state.ws;
     let seq = {
         let repo = state.repo.clone();
         match blocking(move || ledger::last_seq(&repo)).await {
@@ -294,22 +367,52 @@ async fn pump(mut socket: WebSocket, state: AppState) {
     // Anything published between reading the log and the hello above is still
     // delivered: the socket starts from the furthest of the two watermarks.
     let mut since = seq.max(state.hub.last());
+    let opened = Instant::now();
+    let mut heard = opened;
+    let mut ping_at = opened + limits.ping;
     loop {
         let tick = tokio::time::sleep(TICK);
         tokio::select! {
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
+                    heard = Instant::now();
                     if let Ok(ClientMessage::Ping { at }) = serde_json::from_str(&text)
                         && send(&mut socket, &WsMessage::Pong { at }).await.is_err()
                     {
                         return;
                     }
                 }
+                // The library answers a ping on its own; the frame still
+                // counts as the client being there.
+                Some(Ok(Message::Ping(_))) => heard = Instant::now(),
+                Some(Ok(Message::Pong(_) | Message::Binary(_))) => heard = Instant::now(),
                 Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-                Some(Ok(_)) => {}
             },
             _ = state.hub.wait() => {}
             _ = tick => {}
+        }
+
+        // A socket is bounded: the client's silence closes it, and no socket
+        // outlives the session limit. Both answers are a clean `1001`, so a
+        // client sees a close and reconnects rather than a dead connection.
+        let now = Instant::now();
+        if now.duration_since(opened) >= limits.session {
+            close(&mut socket, "the session limit was reached; reconnect").await;
+            return;
+        }
+        if now.duration_since(heard) >= limits.idle {
+            close(
+                &mut socket,
+                "idle; reconnect when there is something to see",
+            )
+            .await;
+            return;
+        }
+        if now >= ping_at {
+            if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                return;
+            }
+            ping_at = now + limits.ping;
         }
 
         let repo = state.repo.clone();
@@ -337,6 +440,18 @@ async fn pump(mut socket: WebSocket, state: AppState) {
         }
         since = seq;
     }
+}
+
+/// Closes the socket with `1001 going away` and `reason`.
+///
+/// The code is the protocol's own "going away" rather than an error: the client
+/// should reconnect, and every WebSocket client treats `1001` as that.
+async fn close(socket: &mut WebSocket, reason: &'static str) {
+    let frame = CloseFrame {
+        code: close_code::AWAY,
+        reason: reason.into(),
+    };
+    let _ = socket.send(Message::Close(Some(frame))).await;
 }
 
 /// Sends one message as JSON text.
