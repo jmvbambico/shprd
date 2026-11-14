@@ -353,6 +353,37 @@ fn recording_start(calls: Arc<Mutex<Vec<String>>>) -> shprd_server::Starter {
 }
 
 #[test]
+fn a_forge_that_cannot_be_asked_yields_no_action_that_depends_on_it() {
+    // The forge fails every call, as one that is down would. A readiness
+    // decision that needs its word must not be made.
+    let mut log = vec![started()];
+    log.extend(ready(2, "abc123"));
+    let fixture = Fixture::new(log);
+    let forge: SharedForge = Arc::new(NoForge);
+    let facts: Arc<dyn FactsSource> = Arc::new(shprd_server::LiveFacts {
+        forge: Arc::clone(&forge),
+        live: Arc::new(|_state| BTreeSet::new()),
+    });
+    let worker = fixture.worker(
+        facts,
+        forge,
+        config(shprd_core::config::MergePolicy::Checks),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let report = worker.tick().expect("the pass ran");
+    assert!(
+        report.steps.is_empty(),
+        "nothing may depend on a forge that said nothing: {:?}",
+        report.steps
+    );
+    assert_eq!(
+        fixture.state().tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Passed),
+        "the task was left exactly as it was"
+    );
+}
+
+#[test]
 fn a_pass_publishes_its_writes_on_the_service_hub() {
     // The service's tick and its API share one change counter, so a task the
     // tick started wakes a long poll exactly as one added through the API does.

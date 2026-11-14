@@ -940,6 +940,47 @@ mod tests {
     }
 
     #[test]
+    fn the_state_after_a_start_plans_no_second_start() {
+        let before = folded(&run_with(&["A"]));
+        let first = plan_for(&before, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert_eq!(
+            first,
+            vec![Step::Start {
+                task: "A".to_string()
+            }]
+        );
+        // What recording that start leaves behind: the attempt is in the log, so
+        // the task is Working rather than Queued.
+        let mut log = run_with(&["A"]);
+        log.push(spawned(3, "A", 1));
+        let after = folded(&log);
+        let steps = plan_for(&after, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "A is already started: {steps:?}");
+    }
+
+    #[test]
+    fn the_state_after_a_landing_plans_no_second_landing() {
+        let before = folded(&ready_log("A"));
+        let first = plan_for(&before, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(matches!(first.as_slice(), [Step::Land { .. }]), "{first:?}");
+        // What recording that landing leaves behind.
+        let mut log = ready_log("A");
+        log.push(ev(
+            7,
+            EventKind::TaskLanded {
+                task: "A".to_string(),
+                base: "main".to_string(),
+                head: "A-commit".to_string(),
+                number: Some(7),
+                outcome: LandOutcome::Merged,
+            },
+        ));
+        let after = folded(&log);
+        let steps = plan_for(&after, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "A has landed: {steps:?}");
+    }
+
+    #[test]
     fn the_same_input_plans_the_same_actions() {
         let state = folded(&run_with(&["A", "B", "C"]));
         let facts = Facts::default();
