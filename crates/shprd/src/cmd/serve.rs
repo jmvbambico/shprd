@@ -9,7 +9,9 @@
 use std::path::Path;
 
 use anyhow::anyhow;
-use shprd_server::{AfterWrite, Config, Service, shutdown_signal, state_dir};
+use shprd_server::{AfterWrite, Config, Service, WsLimits, shutdown_signal, state_dir};
+
+use shprd_server::ServerError::AlreadyRunning;
 
 use crate::cli::ServeArgs;
 use crate::ctx::{CliError, Ctx, resolve_home};
@@ -28,9 +30,13 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         .map_err(|err| CliError::other(anyhow!(err).context("starting the async runtime")))?;
 
     runtime.block_on(async move {
-        let service = Service::start(config)
-            .await
-            .map_err(|err| CliError::other(anyhow!(err).context("starting the service")))?;
+        // A second service for the same state directory would take the record
+        // over and leave the running one undiscoverable, so it is refused with
+        // the exit code a refused verb uses rather than an error's.
+        let service = Service::start(config).await.map_err(|err| match err {
+            AlreadyRunning { .. } => CliError::Invalid(anyhow!(err)),
+            other => CliError::other(anyhow!(other).context("starting the service")),
+        })?;
         let info = service.info().clone();
         announce(ctx, &info);
         service
@@ -62,6 +68,7 @@ fn after_write(ctx: &Ctx) -> AfterWrite {
 /// The token itself is never printed — only the file it is in, which is `0600`
 /// in the state directory.
 fn announce(ctx: &Ctx, info: &shprd_server::ServiceInfo) {
+    let limits = WsLimits::default();
     if ctx.json {
         let value = serde_json::json!({
             "serving": ctx.root.display().to_string(),
@@ -72,6 +79,11 @@ fn announce(ctx: &Ctx, info: &shprd_server::ServiceInfo) {
             "pid": info.pid,
             "token": info.token_path.display().to_string(),
             "service_json": info.service_json.display().to_string(),
+            "ws": {
+                "ping_secs": limits.ping.as_secs(),
+                "idle_secs": limits.idle.as_secs(),
+                "session_secs": limits.session.as_secs(),
+            },
         });
         println!("{value}");
         return;
@@ -85,5 +97,11 @@ fn announce(ctx: &Ctx, info: &shprd_server::ServiceInfo) {
     );
     println!("   token:        {}", info.token_path.display());
     println!("   service.json: {}", info.service_json.display());
+    println!(
+        "   sockets:      ping every {}s, closed after {}s of silence, {}m at most",
+        limits.ping.as_secs(),
+        limits.idle.as_secs(),
+        limits.session.as_secs() / 60
+    );
     println!("   stop with Ctrl-C or SIGTERM");
 }

@@ -27,6 +27,25 @@ pub enum ServerError {
         /// Why the source of randomness failed.
         reason: String,
     },
+    /// Another service already holds this state directory.
+    ///
+    /// Two services cannot share one `service.json`: the second would take the
+    /// record over and stopping either one would leave the other running with no
+    /// way to find it.
+    #[error(
+        "a shprd service is already running for {} (port {}, pid {}); stop it, or use another state directory",
+        dir.display(),
+        port.map(|port| port.to_string()).unwrap_or_else(|| "?".to_string()),
+        pid.map(|pid| pid.to_string()).unwrap_or_else(|| "?".to_string()),
+    )]
+    AlreadyRunning {
+        /// The state directory the running service holds.
+        dir: PathBuf,
+        /// The port it serves, when its record could be read.
+        port: Option<u16>,
+        /// Its process, when its record could be read.
+        pid: Option<u32>,
+    },
     /// The socket could not be bound.
     #[error("could not listen on {address}: {source}")]
     Bind {

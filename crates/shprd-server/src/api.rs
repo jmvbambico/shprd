@@ -53,13 +53,14 @@ const TICK: Duration = Duration::from_millis(200);
 /// the session bound is the backstop for a client that keeps answering.
 ///
 /// The defaults are a bounded version of the researched design's ([Shepherdr's
-/// `idleTimeout: 600`][sh]): a client that has not answered the last two pings
-/// is gone, so a quiet connection is closed after sixty seconds of silence, no
-/// socket lives past five minutes, and the server pings every twenty seconds so
-/// a middlebox notices a dead one. A browser answers pings itself, and the web
-/// app reconnects, so a reconnect every five minutes is invisible to it — while
-/// an HTTP client that opened the socket by mistake, or a page that went away
-/// without closing, holds nothing for long.
+/// `idleTimeout: 600`][sh]). A browser answers a ping itself, within
+/// milliseconds, so a page that is open is heard from constantly and never
+/// trips [`WsLimits::idle`]; a client that is *not* a WebSocket — a probe with
+/// hand-made upgrade headers, a page that went away without closing — never
+/// answers, and is gone after thirty seconds of silence rather than holding a
+/// connection for ever. No socket lives past five minutes either, so a
+/// connection is never permanent; a client that reconnects (the web app does)
+/// sees nothing but a short gap.
 ///
 /// [sh]: https://github.com/eliasstravik/shepherdr/blob/a3f327a52354cd2880cdacc29716dd07bcd11efb/service/main.ts#L930
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,8 +76,8 @@ pub struct WsLimits {
 impl Default for WsLimits {
     fn default() -> Self {
         Self {
-            ping: Duration::from_secs(20),
-            idle: Duration::from_secs(60),
+            ping: Duration::from_secs(10),
+            idle: Duration::from_secs(30),
             session: Duration::from_secs(300),
         }
     }

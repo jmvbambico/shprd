@@ -170,6 +170,55 @@ fn post_action(url: &str, token: &str, write_header: bool, body: &Value) -> Resu
 }
 
 #[test]
+fn a_second_serve_for_the_same_state_directory_is_refused() {
+    let (repo, state, home) = repo_with_a_run();
+    let first = Service::start(repo.path(), state.path(), home.path());
+    let record = read_record(state.path());
+
+    // A second service would take the record over and leave the first one
+    // running with no way to find it, so it is refused — and the refusal names
+    // the service that already holds the directory.
+    let second = Command::new(BIN)
+        .args([
+            "--repo",
+            &repo.path().display().to_string(),
+            "--home",
+            &home.path().display().to_string(),
+            "serve",
+            "--port",
+            "0",
+            "--json",
+        ])
+        .env("XDG_STATE_HOME", state.path())
+        .output()
+        .expect("the second serve runs");
+    assert_eq!(
+        second.status.code(),
+        Some(2),
+        "a refused verb exits 2, as the rest of the CLI does"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already running"),
+        "the refusal says what is running: {stderr}"
+    );
+    assert_eq!(
+        read_record(state.path()),
+        record,
+        "the running service's record is untouched by the refusal"
+    );
+
+    // The first service is still there, and still discoverable.
+    let port = record["port"].as_u64().expect("a port");
+    let (status, _) = get(&format!("http://127.0.0.1:{port}/api/health"), None)
+        .expect("the first service still answers");
+    assert_eq!(status, 200);
+
+    first.stop();
+    assert!(!record_path(state.path()).exists());
+}
+
+#[test]
 fn serve_answers_the_api_and_leaves_no_record_behind() {
     let (repo, state, home) = repo_with_a_run();
     let service = Service::start(repo.path(), state.path(), home.path());

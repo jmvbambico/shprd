@@ -76,22 +76,36 @@ impl std::fmt::Debug for AfterWrite {
 }
 
 /// The discovery files in one state directory.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServiceFiles {
     dir: PathBuf,
     token: String,
     id: String,
+    /// The lock this service holds for its state directory, for its whole life.
+    ///
+    /// Only one service can be found through one `service.json`, so only one is
+    /// allowed to serve one state directory at a time. The lock is what makes
+    /// that true rather than hoped for: without it a second start would take the
+    /// record over, and stopping either one would leave the other running and
+    /// undiscoverable.
+    _lock: fs::File,
 }
 
 impl ServiceFiles {
-    /// Opens (or creates) the discovery files in `dir`.
+    /// Opens (or creates) the discovery files in `dir`, taking its lock.
     ///
     /// The directory is made private (`0700`), the token is reused when a
     /// previous start made one, and a new token is written `0600`. The identity
     /// is new on every start, because it is what a client uses to tell this
     /// process from whatever held the port before it.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::AlreadyRunning`] when a service already holds this state
+    /// directory: a second one could only fight over its `service.json`.
     pub fn prepare(dir: &Path) -> Result<Self, ServerError> {
         create_private_dir(dir)?;
+        let lock = take_lock(dir)?;
         let token_path = dir.join("token");
         let token = match read_token(&token_path)? {
             Some(token) => token,
@@ -105,6 +119,7 @@ impl ServiceFiles {
             dir: dir.to_path_buf(),
             token,
             id: random_hex(16)?,
+            _lock: lock,
         })
     }
 
@@ -152,17 +167,84 @@ impl ServiceFiles {
         Ok(record)
     }
 
-    /// Removes `service.json`, on a clean shutdown.
+    /// Removes `service.json`, if this process is still the one it names.
     ///
-    /// A missing file is not a failure: it is the state a shutdown in the middle
-    /// of another one leaves behind.
+    /// A second service started against the same state directory overwrites the
+    /// record with its own; when the first one then stops, removing the file
+    /// blindly would make the service that is still running undiscoverable, so
+    /// the file is read first and only removed when its `id` is this start's.
+    /// A missing or unreadable file is not a failure: it is the state a
+    /// shutdown in the middle of another one leaves behind.
     pub fn remove_record(&self) -> Result<(), ServerError> {
         let path = self.service_json_path();
+        let ours = match fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str::<ServiceRecord>(&text)
+                .map(|record| record.id == self.id)
+                // A record that will not parse is not proof of ownership, but
+                // nothing else can find a service through it either: leave it
+                // for the next start to overwrite.
+                .unwrap_or(false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(ServerError::io(path, err)),
+        };
+        if !ours {
+            return Ok(());
+        }
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(ServerError::io(path, err)),
         }
+    }
+
+    /// Whether `service.json` currently names this process.
+    pub fn owns_record(&self) -> bool {
+        match fs::read_to_string(self.service_json_path()) {
+            Ok(text) => serde_json::from_str::<ServiceRecord>(&text)
+                .map(|record| record.id == self.id)
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Takes this state directory's exclusive lock, or says who holds it.
+///
+/// The lock lives as long as the [`File`] does — for the service's whole
+/// lifetime — and the kernel drops it when the process ends, however it ends,
+/// so a crashed service never leaves the directory locked against its successor.
+fn take_lock(dir: &Path) -> Result<fs::File, ServerError> {
+    let path = dir.join("service.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|err| ServerError::io(&path, err))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => {
+            let running = fs::read_to_string(dir.join("service.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<ServiceRecord>(&text).ok());
+            Err(match running {
+                Some(record) => ServerError::AlreadyRunning {
+                    dir: dir.to_path_buf(),
+                    port: Some(record.port),
+                    pid: Some(record.pid),
+                },
+                None => ServerError::AlreadyRunning {
+                    dir: dir.to_path_buf(),
+                    port: None,
+                    pid: None,
+                },
+            })
+        }
+        Err(fs::TryLockError::Error(err)) => Err(ServerError::io(&path, err)),
     }
 }
 
@@ -408,14 +490,19 @@ mod tests {
     fn a_token_is_made_once_and_kept_private() {
         let dir = tempfile::tempdir().expect("temp dir");
         let first = ServiceFiles::prepare(dir.path()).expect("prepare");
+        let token = first.token().to_string();
+        let id = first.id().to_string();
+        // A restart is the next start after this one stopped: it keeps the
+        // token, and takes a new identity.
+        drop(first);
         let second = ServiceFiles::prepare(dir.path()).expect("prepare again");
-        assert_eq!(first.token(), second.token(), "the token is reused");
-        assert_eq!(first.token().len(), 64);
-        assert_ne!(first.id(), second.id(), "the identity is per start");
+        assert_eq!(token, second.token(), "the token is reused");
+        assert_eq!(second.token().len(), 64);
+        assert_ne!(id, second.id(), "the identity is per start");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(first.token_path())
+            let mode = fs::metadata(second.token_path())
                 .expect("token metadata")
                 .permissions()
                 .mode()
@@ -438,6 +525,53 @@ mod tests {
         files.remove_record().expect("remove");
         assert!(!files.service_json_path().exists());
         files.remove_record().expect("removing twice is fine");
+    }
+
+    #[test]
+    fn a_second_service_cannot_share_a_state_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first = ServiceFiles::prepare(dir.path()).expect("the first start takes the lock");
+        match ServiceFiles::prepare(dir.path()) {
+            Err(ServerError::AlreadyRunning { dir: reported, .. }) => {
+                assert_eq!(reported, dir.path());
+            }
+            Err(other) => panic!("expected AlreadyRunning, got {other}"),
+            Ok(_) => panic!("a second service must not take a held state directory"),
+        }
+        // The first one still owns it, and dropping it frees it for the next.
+        assert!(first.owns_record() || !first.service_json_path().exists());
+        drop(first);
+        ServiceFiles::prepare(dir.path()).expect("the lock is released when the service ends");
+    }
+
+    #[test]
+    fn a_stop_only_removes_a_record_that_names_this_start() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let files = ServiceFiles::prepare(dir.path()).expect("prepare");
+        files.write_record(1234).expect("write");
+        // Another start takes the record over, as a second service would.
+        let other = ServiceFiles::prepare(dir.path()).expect_err("the lock is held");
+        assert!(matches!(other, ServerError::AlreadyRunning { .. }));
+
+        // A record another process wrote is left alone.
+        let text = serde_json::json!({
+            "port": 9999, "id": "not-this-start", "pid": 1, "version": VERSION,
+        });
+        fs::write(files.service_json_path(), text.to_string()).expect("overwrite");
+        assert!(!files.owns_record());
+        files
+            .remove_record()
+            .expect("a foreign record is not a failure");
+        assert!(
+            files.service_json_path().exists(),
+            "another service's record must survive this one's stop"
+        );
+
+        // Its own record goes.
+        files.write_record(1234).expect("write again");
+        assert!(files.owns_record());
+        files.remove_record().expect("remove");
+        assert!(!files.service_json_path().exists());
     }
 
     #[test]

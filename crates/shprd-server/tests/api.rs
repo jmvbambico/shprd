@@ -837,6 +837,51 @@ async fn a_client_that_keeps_talking_is_closed_at_the_session_limit() {
     }
 }
 
+#[test]
+fn a_second_service_for_one_state_directory_is_refused() {
+    let state = tempfile::tempdir().expect("state dir");
+    let repo = tempfile::tempdir().expect("repo dir");
+    let first = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("the first service takes the directory");
+    let record = std::fs::read_to_string(first.info().service_json).expect("the record");
+
+    match App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None) {
+        Err(shprd_server::ServerError::AlreadyRunning { port, .. }) => {
+            assert_eq!(port, Some(PORT), "the refusal names the running service");
+        }
+        Err(other) => panic!("expected AlreadyRunning, got {other}"),
+        Ok(_) => panic!("a second service must not share a state directory"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(first.info().service_json).expect("the record"),
+        record,
+        "the running service's record is untouched"
+    );
+
+    // Stopping the first frees the directory for the next start.
+    first.remove_record().expect("remove");
+    drop(first);
+    App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("a stopped service leaves the directory free");
+}
+
+#[test]
+fn stopping_a_service_keeps_a_record_another_one_owns() {
+    let state = tempfile::tempdir().expect("state dir");
+    let repo = tempfile::tempdir().expect("repo dir");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None).expect("prepare");
+    let path = app.info().service_json;
+    let foreign = serde_json::json!({
+        "port": 1, "id": "another-service", "pid": 1, "version": shprd_server::VERSION,
+    });
+    std::fs::write(&path, foreign.to_string()).expect("overwrite the record");
+    app.remove_record().expect("a clean stop");
+    assert!(
+        path.exists(),
+        "a record another service owns must survive this one's stop"
+    );
+}
+
 #[tokio::test]
 async fn a_request_that_is_not_an_upgrade_is_a_typed_refusal() {
     let fixture = Fixture::new();
