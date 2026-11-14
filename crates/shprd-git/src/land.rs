@@ -348,7 +348,7 @@ fn already_landed(
 /// the local branch is used, and the comparison is as good as the checkout is.
 /// It is a name git may fail to resolve, which the callers then read as "not
 /// comparable".
-pub fn base_revision(git: &Git, base: &str) -> String {
+fn base_revision(git: &Git, base: &str) -> String {
     let tracking = format!("refs/remotes/{REMOTE}/{base}");
     let fetch = git.run(&[
         "fetch",

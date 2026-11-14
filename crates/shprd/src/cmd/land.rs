@@ -128,11 +128,21 @@ fn land_task(
     })?;
     let run_id = run.run_id.clone();
     let base = run.base_branch.clone();
+    if state.finished {
+        return Err(CliError::Invalid(anyhow!(
+            "the run {run_id} has finished: there is nothing left to land"
+        )));
+    }
     let task = state.tasks.get(task_id).ok_or_else(|| {
         CliError::Invalid(anyhow!(
             "no task {task_id:?} in this run: `shprd status` lists the ones it holds"
         ))
     })?;
+    if task.status == TaskStatus::Dropped {
+        return Err(CliError::Invalid(anyhow!(
+            "task {task_id:?} was dropped: there is nothing to land"
+        )));
+    }
     if let Some(pr) = &task.pr
         && pr.merged
     {
@@ -191,12 +201,24 @@ fn land_task(
     };
     let forge = forge(&worktree)?;
     let policy = config.land.policy_for(&base);
-    let landed = land::land(forge.as_ref(), &git, &landing, policy, approved).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!(
-            "landing task {task_id:?} from {}",
-            worktree.display()
-        )))
-    })?;
+    let landed = match land::land(forge.as_ref(), &git, &landing, policy, approved) {
+        Ok(landed) => landed,
+        // These three leave the pull request where a human can look at it, and
+        // the next landing can act: they are refusals (exit 2), not failures.
+        Err(
+            err @ (land::LandError::ChecksFailed { .. }
+            | land::LandError::HeadMoved { .. }
+            | land::LandError::NotMerged { .. }),
+        ) => {
+            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+        }
+        Err(err) => {
+            return Err(CliError::other(anyhow!(err).context(format!(
+                "landing task {task_id:?} from {}",
+                worktree.display()
+            ))));
+        }
+    };
     record_landing(ctx, &events, task_id, &base, &landed)?;
     if !ctx.json {
         println!("{}", landing_line(task_id, &base, &landed));

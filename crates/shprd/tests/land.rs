@@ -1403,3 +1403,59 @@ fn a_task_landing_refuses_the_run_level_merge_flag() {
         "{message}"
     );
 }
+
+#[test]
+fn a_dropped_task_has_nothing_to_land() {
+    let (fixture, head) = landing_task_fixture("auto");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    fixture.ok(&[
+        "drop",
+        "T1",
+        "--reason",
+        "the human changed their mind",
+        "--yes",
+    ]);
+    let message = fixture.refused(&["land", "T1"]);
+    assert!(message.contains("was dropped"), "{message}");
+    assert!(
+        fixture.forge_calls().is_empty(),
+        "nothing reaches the forge: {:?}",
+        fixture.forge_calls()
+    );
+}
+
+#[test]
+fn a_task_whose_checks_failed_is_refused_until_they_pass() {
+    let (fixture, head) = landing_task_fixture("checks");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(false), false));
+    let message = fixture.refused(&["land", "T1"]);
+    assert!(message.contains("checks failed"), "{message}");
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge").is_empty(),
+        "{:?}",
+        fixture.forge_calls()
+    );
+    assert!(
+        fixture.landed_outcomes("T1").is_empty(),
+        "a refused landing records no outcome"
+    );
+}
+
+#[test]
+fn a_protected_base_waits_for_a_human_even_under_auto() {
+    let fixture = Fixture::new();
+    fixture.write_land_config("auto", &["main"]);
+    fixture.start();
+    let (_, head) = fixture.landable_task("T1", "shprd/r1/T1");
+    fixture.script_forge(&task_script("shprd/r1/T1", &head, Some(true), false));
+    let printed = fixture.ok(&["land", "T1"]);
+    assert!(
+        printed.contains("waiting for your approval: run `shprd approve T1`"),
+        "{printed}"
+    );
+    assert!(
+        calls_with(&fixture.forge_calls(), "merge").is_empty(),
+        "a protected base is never merged without the human: {:?}",
+        fixture.forge_calls()
+    );
+}
