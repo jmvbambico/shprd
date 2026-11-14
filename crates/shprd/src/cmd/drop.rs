@@ -226,6 +226,10 @@ mod tests {
                 status: ReportStatus::Completed,
                 summary: "done".to_string(),
                 tests: Vec::new(),
+                checks: vec![shprd_core::event::CheckReport::passed(
+                    "tests",
+                    "cargo test",
+                )],
                 changed_paths: vec!["a.txt".to_string()],
                 commit: Some("abc1234".to_string()),
                 skills_used: Vec::new(),
