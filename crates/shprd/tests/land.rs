@@ -4,7 +4,8 @@
 //! `gh` through `SHPRD_FAKE_FORGE`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use shprd_core::event::{Actor, Event, EventKind};
 use tempfile::TempDir;
@@ -443,6 +444,56 @@ impl Fixture {
         None
     }
 
+    /// The run's integration lock file, `<home>/.shprd/locks/repo-r1-int.lock`.
+    ///
+    /// The path is the one `lock_run` names; a unit test in `cmd/run_lock.rs`
+    /// keeps that name honest, and a verb that stopped taking the lock would
+    /// fail the waiting test below rather than pass it.
+    fn lock_path(&self) -> PathBuf {
+        self.home
+            .join(".shprd")
+            .join("locks")
+            .join("repo-r1-int.lock")
+    }
+
+    /// Takes the run's integration lock, as a verb writing the worktree would.
+    fn hold_lock(&self) -> std::fs::File {
+        let path = self.lock_path();
+        if let Some(dir) = path.parent() {
+            mkdir(dir);
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) => panic!("open {}: {err}", path.display()),
+        };
+        if let Err(err) = file.lock() {
+            panic!("lock {}: {err}", path.display());
+        }
+        file
+    }
+
+    /// Starts the binary without waiting for it, so a test can watch it block.
+    fn spawn(&self, args: &[&str]) -> Child {
+        if !self.forge_script().exists() {
+            self.script_forge("{}");
+        }
+        match self
+            .command(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) => panic!("spawning {BIN} {args:?}: {err}"),
+        }
+    }
+
     /// The head the log's last approval named, if any.
     fn approved_head(&self) -> Option<String> {
         for event in self.events().into_iter().rev() {
@@ -665,6 +716,34 @@ fn landed() -> Fixture {
     fixture
 }
 
+/// True when `child` is still running, so the caller knows the verb blocked.
+fn still_running(child: &mut Child) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Ok(Some(_)) => return false,
+            Err(err) => panic!("waiting for the child: {err}"),
+        }
+    }
+    true
+}
+
+/// Collects the child's output, failing the test after `secs` instead of
+/// hanging: a verb that never gets the lock must fail here, not wedge CI.
+fn finish(child: Child, secs: u64) -> Output {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    match rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => panic!("collecting the child's output: {err}"),
+        Err(err) => panic!("the verb did not finish within {secs}s: {err}"),
+    }
+}
+
 #[test]
 fn merge_without_an_opened_pull_request_is_refused() {
     let fixture = Fixture::new();
@@ -711,6 +790,37 @@ fn approve_records_the_human_approval_at_the_integration_head() {
         "{printed}"
     );
     assert_eq!(fixture.approved_head(), Some(head));
+}
+
+/// The approval is pinned to the head the human is shown, so the verb takes the
+/// run's integration lock before it reads that head: a sync or a cherry-pick
+/// landing meanwhile would otherwise stamp an approval on a moved head.
+#[test]
+fn approve_waits_for_the_runs_integration_lock() {
+    let fixture = landed();
+    let head = fixture.integration_head();
+
+    // Another verb is moving the integration head, so the approval must wait.
+    let held = fixture.hold_lock();
+    let mut child = fixture.spawn(&["approve", "--yes"]);
+    assert!(
+        still_running(&mut child),
+        "approve approved while another verb held the integration lock"
+    );
+    if let Err(err) = held.unlock() {
+        panic!("unlock {}: {err}", fixture.lock_path().display());
+    }
+    let output = finish(child, 30);
+    assert!(
+        output.status.success(),
+        "approve after the lock was released failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fixture.approved_head(),
+        Some(head),
+        "the approval names the head it was shown, once it had the lock"
+    );
 }
 
 #[test]
