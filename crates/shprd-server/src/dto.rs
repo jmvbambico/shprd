@@ -368,8 +368,8 @@ pub struct ChangeDto {
 ///
 /// It is one closed union: a kind the service does not know is refused, so a
 /// client can never reach past the verbs the CLI already has. The handler does
-/// not implement any of them itself — [`crate::actions`] does, against the same
-/// fold and log the CLI writes.
+/// not implement any of them itself — `actions` does, against the same fold and
+/// log the CLI writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(export_to = "Action.ts")]

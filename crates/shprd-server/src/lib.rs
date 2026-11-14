@@ -16,8 +16,12 @@
 //! (no streaming, no WebSocket), which is why the change channel is a long poll
 //! first and a socket second.
 //!
-//! Starting one is [`serve`](service::serve); a test that wants no socket builds
-//! an [`App`](api::App) and drives its router.
+//! Every socket is bounded and a request that is not an upgrade is refused with
+//! a typed body, so no client — a page, a probe, or a connection nobody closed —
+//! holds one open for ever; see [`WsLimits`].
+//!
+//! Starting one is [`serve`]; a test that wants no socket builds
+//! an [`App`] and drives its router.
 
 pub mod api;
 pub mod bindings;

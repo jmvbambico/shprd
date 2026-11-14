@@ -1,9 +1,9 @@
 //! The HTTP surface: five routes, one of them a socket.
 //!
 //! `GET /api/health` is the only unauthenticated one — it is the handshake, not
-//! a secret. Everything else is behind [`crate::auth`]. Reads answer from the
+//! a secret. Everything else is behind the gate in `auth`. Reads answer from the
 //! fold (a snapshot or a change notice); the only write is `POST /api/action`,
-//! which hands one [`Action`] to [`crate::actions`] and adds nothing of its own.
+//! which hands one [`Action`] to `actions` and adds nothing of its own.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
