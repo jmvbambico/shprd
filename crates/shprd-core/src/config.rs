@@ -398,23 +398,23 @@ impl ConfigLayer {
         use crate::settings::{Key, Layer, RoleField, TaskKey, Value, merge_name, severity_name};
 
         let mut layer = Layer::new();
-        if let Some(roster) = &self.roster {
-            if let Some(written) = roster.reviewer.as_deref() {
-                let (program, model) = split_agent(written);
-                if let Some(program) = program {
-                    layer.set(reviewer_key(RoleField::Agent), Value::Text(program));
-                }
-                if let Some(model) = model {
-                    layer.set(reviewer_key(RoleField::Model), Value::Text(model));
-                }
-                let effort = roster
-                    .effort
-                    .as_ref()
-                    .and_then(|effort| effort.get(written))
-                    .filter(|effort| !effort.trim().is_empty());
-                if let Some(effort) = effort {
-                    layer.set(reviewer_key(RoleField::Effort), Value::Text(effort.clone()));
-                }
+        if let Some(roster) = &self.roster
+            && let Some(written) = roster.reviewer.as_deref()
+        {
+            let (program, model) = split_agent(written);
+            if let Some(program) = program {
+                layer.set(reviewer_key(RoleField::Agent), Value::Text(program));
+            }
+            if let Some(model) = model {
+                layer.set(reviewer_key(RoleField::Model), Value::Text(model));
+            }
+            let effort = roster
+                .effort
+                .as_ref()
+                .and_then(|effort| effort.get(written))
+                .filter(|effort| !effort.trim().is_empty());
+            if let Some(effort) = effort {
+                layer.set(reviewer_key(RoleField::Effort), Value::Text(effort.clone()));
             }
         }
         if let Some(merge) = self.land.as_ref().and_then(|land| land.merge) {
