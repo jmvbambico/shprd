@@ -42,7 +42,11 @@ SOFTWARE.
   `mods/tasks/bin/herdr_task/github.py` (`pr_body()` and the merge path),
   `mods/tasks/bin/herdr_task/launch.py` (`fresh_start()`),
   `core/agents.js` (`NAMES`, the permission mode tables, `PERM_ACROSS`,
-  `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`),
+  `argvFor`), `mods/tasks/bin/herdr_task/settings.py` (`argv_for`,
+  `settings_layers()`, `settings_for()`, `task_settings()`),
+  `core/settings.js` (`ROLES`, the role pick and level resolution,
+  `otherCli()`), `mods/shepherdr-settings/main.js` (the per-scope level switch
+  and the rule that a value equal to the inherited one is deleted),
   `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in

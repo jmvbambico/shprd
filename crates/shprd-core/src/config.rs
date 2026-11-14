@@ -370,6 +370,77 @@ pub struct ConfigLayer {
     pub tick: Option<TickLayer>,
 }
 
+impl ConfigLayer {
+    /// Project the keys this layer holds under their pre-M9 names onto the
+    /// settings model.
+    ///
+    /// `[land] merge`, `[tick] max_running`, `[tick] interval_secs`,
+    /// `[janitor] archive_days`, `[janitor] namespace`, `[review] must_fix` and
+    /// `[review] rounds` predate `settings.toml`. They are folded into the same
+    /// `tasks.*` keys
+    /// ([`crate::settings::TaskKey`]) so a person who has not migrated resolves
+    /// to exactly the values their config file asked for; the settings file
+    /// sits above this layer and wins where both set the same key.
+    ///
+    /// What is not projected is what has no settings key: `[roster]`,
+    /// `[skills]`, `[workspace]`, `[gates]`, `mux` and `[land] protected` are
+    /// still read by the verbs that need them, straight from this file.
+    pub fn settings_projection(&self) -> crate::settings::Layer {
+        use crate::settings::{Key, Layer, TaskKey, Value, merge_name, severity_name};
+
+        let mut layer = Layer::new();
+        if let Some(merge) = self.land.as_ref().and_then(|land| land.merge) {
+            layer.set(
+                Key::Task(TaskKey::Merge),
+                Value::Text(merge_name(merge).to_owned()),
+            );
+        }
+        if let Some(tick) = &self.tick {
+            if let Some(max_running) = tick.max_running {
+                layer.set(
+                    Key::Task(TaskKey::MaxRunning),
+                    Value::Number(i64::from(max_running)),
+                );
+            }
+            if let Some(interval_secs) = tick.interval_secs {
+                layer.set(
+                    Key::Task(TaskKey::TickSecs),
+                    Value::Number(i64::try_from(interval_secs).unwrap_or(i64::MAX)),
+                );
+            }
+        }
+        if let Some(janitor) = &self.janitor {
+            if let Some(archive_days) = janitor.archive_days {
+                layer.set(
+                    Key::Task(TaskKey::ArchiveAfter),
+                    Value::Number(i64::from(archive_days)),
+                );
+            }
+            if let Some(namespace) = &janitor.namespace {
+                layer.set(
+                    Key::Task(TaskKey::ArchiveNamespace),
+                    Value::Text(namespace.clone()),
+                );
+            }
+        }
+        if let Some(review) = &self.review {
+            if let Some(must_fix) = review.must_fix {
+                layer.set(
+                    Key::Task(TaskKey::MustFix),
+                    Value::Text(severity_name(must_fix).to_owned()),
+                );
+            }
+            if let Some(rounds) = review.rounds {
+                layer.set(
+                    Key::Task(TaskKey::ReviewRounds),
+                    Value::Number(i64::from(rounds)),
+                );
+            }
+        }
+        layer
+    }
+}
+
 /// The `[roster]` section of a config file.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -640,6 +711,63 @@ mod tests {
         must_fix = "minor"
         rounds = 3
     "#;
+
+    #[test]
+    fn the_old_keys_project_onto_the_settings_model() {
+        use crate::settings::{Key, TaskKey, Value};
+
+        let global = layer(
+            r#"
+            [land]
+            merge = "checks"
+
+            [tick]
+            max_running = 2
+            interval_secs = 30
+
+            [janitor]
+            archive_days = 30
+            namespace = "old/"
+
+            [review]
+            must_fix = "minor"
+            rounds = 3
+            "#,
+        );
+        let projected = global.settings_projection();
+        let cases = [
+            (TaskKey::Merge, Value::Text("checks".to_owned())),
+            (TaskKey::MaxRunning, Value::Number(2)),
+            (TaskKey::TickSecs, Value::Number(30)),
+            (TaskKey::ArchiveAfter, Value::Number(30)),
+            (TaskKey::ArchiveNamespace, Value::Text("old/".to_owned())),
+            (TaskKey::MustFix, Value::Text("minor".to_owned())),
+            (TaskKey::ReviewRounds, Value::Number(3)),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                projected.get(&Key::Task(key)),
+                Some(&expected),
+                "{} should project",
+                key.name()
+            );
+        }
+        assert_eq!(
+            projected.len(),
+            7,
+            "the projection sets exactly the keys the file names"
+        );
+
+        // A file that names none of them projects to nothing, so the settings
+        // model's built-in values stand.
+        assert!(ConfigLayer::default().settings_projection().is_empty());
+        // `allow` was the old word for `auto` and projects as the same request.
+        let allow = layer("[land]\nmerge = \"allow\"\n");
+        assert_eq!(
+            allow.settings_projection().get(&Key::Task(TaskKey::Merge)),
+            Some(&Value::Text("auto".to_owned()))
+        );
+    }
 
     #[test]
     fn no_files_yields_defaults() {
