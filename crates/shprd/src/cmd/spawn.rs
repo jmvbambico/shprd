@@ -23,7 +23,7 @@ use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render
 use shprd_core::config::Skills;
 use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
 use shprd_core::prompts::{self, PromptRef};
-use shprd_core::settings::{Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Value};
+use shprd_core::settings::{Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Sourced, Value};
 use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
@@ -165,14 +165,37 @@ pub fn spawn(
 ) -> Result<SpawnReport, CliError> {
     let state = env.ctx.state()?;
     let task = task_of(&state, &req.task)?;
-    let pick = choose_agent(req.agent.as_deref(), &env.workers, &env.programs)?;
+    let role = env.settings.resolve(None).role(BRIEF_ROLE);
+    // The worker role's choice comes first, then the configured workers: a
+    // person who set `roles.worker.agent` gets that program, and `--agent`
+    // still wins over both.
+    let candidates = role_candidates(role.as_ref(), &env.workers);
+    let mut pick = choose_agent(req.agent.as_deref(), &candidates, &env.programs)?;
+    if req.agent.is_none()
+        && let Some(model) = role
+            .as_ref()
+            .and_then(|role| role.model.as_ref())
+            .filter(|model| !model.value.trim().is_empty())
+    {
+        pick.model = Some(model.value.clone());
+    }
+    let effort = req
+        .effort
+        .clone()
+        .or_else(|| {
+            role.as_ref()
+                .and_then(|role| role.effort.as_ref())
+                .map(|effort| effort.value.clone())
+                .filter(|effort| !effort.trim().is_empty())
+        })
+        .filter(|effort| !effort.trim().is_empty());
     let attempt = task.attempts.len() as u32 + 1;
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     // The role's words and the Settings block are read before anything is
     // touched: an agent whose prompt cannot be read must cost nothing.
-    let context = brief_context(env, BRIEF_ROLE, &pick, req.effort.as_deref())?;
+    let context = brief_context(env, BRIEF_ROLE, &pick, effort.as_deref())?;
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
@@ -212,7 +235,7 @@ pub fn spawn(
         &Launching {
             pick: &pick,
             task: &task.id,
-            effort: req.effort.as_deref(),
+            effort: effort.as_deref(),
             brief: &brief,
             brief_path: &brief_path,
             worktree: &created,
@@ -1100,6 +1123,31 @@ pub(crate) fn program_of<'a>(
         })
 }
 
+/// The agent strings a spawn tries, in order: the worker role's program and
+/// model when it names a program, then the configured workers.
+///
+/// A role's program that is not installed falls through to the configured
+/// workers, exactly as an uninstalled worker does, so a machine without it
+/// still starts the task.
+fn role_candidates(role: Option<&ResolvedRole>, workers: &[String]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(role) = role
+        && let Some(agent) = &role.agent
+    {
+        let model = role
+            .model
+            .as_ref()
+            .map(|model| model.value.as_str())
+            .filter(|model| !model.is_empty());
+        candidates.push(match model {
+            Some(model) => format!("{}/{model}", agent.value),
+            None => agent.value.clone(),
+        });
+    }
+    candidates.extend(workers.iter().cloned());
+    candidates
+}
+
 /// Picks the agent for an attempt.
 ///
 /// An explicit `--agent` wins even when its CLI is not installed, because the
@@ -1242,15 +1290,17 @@ pub(crate) fn brief_context(
             id: role_id.to_owned(),
             field,
         };
-        if role.agent.is_none() {
+        // The block must name what actually runs: a value the role left unset,
+        // or set to a program this machine does not have, is the task's own.
+        if named(role.agent.as_ref()) != Some(pick.agent.as_str()) {
             task.set(key(RoleField::Agent), Value::Text(pick.agent.clone()));
         }
-        if role.model.is_none()
+        if named(role.model.as_ref()) != pick.model.as_deref()
             && let Some(model) = &pick.model
         {
             task.set(key(RoleField::Model), Value::Text(model.clone()));
         }
-        if role.effort.is_none()
+        if named(role.effort.as_ref()) != effort
             && let Some(effort) = effort
         {
             task.set(key(RoleField::Effort), Value::Text(effort.to_owned()));
@@ -1264,6 +1314,11 @@ pub(crate) fn brief_context(
         settings,
         role,
     })
+}
+
+/// One resolved role field's text, for comparing it with what a launch chose.
+fn named(field: Option<&Sourced<String>>) -> Option<&str> {
+    field.map(|field| field.value.as_str())
 }
 
 /// The standing words of `role_id`: the file its `prompt` names, read.
@@ -1791,6 +1846,20 @@ project_dirs = []
                 ready_wait: Duration::ZERO,
             }
         }
+
+        /// [`Scratch::spawn_env`], with the person's settings read from `text`.
+        ///
+        /// It writes `~/.config/shprd/settings.toml` in the temp home, so a role's
+        /// pick reaches a spawn the way it does on a real machine.
+        fn spawn_env_with<'a>(&self, ctx: &'a Ctx, text: &str) -> SpawnEnv<'a> {
+            let dir = self.home.path().join(".config").join("shprd");
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
+            std::fs::write(dir.join("settings.toml"), text).unwrap_or_else(|err| panic!("{err}"));
+            let mut env = self.spawn_env(ctx);
+            env.settings =
+                Loaded::read(self.home.path(), None).unwrap_or_else(|err| panic!("{err}"));
+            env
+        }
     }
 
     /// The harness table two of the agent-string cases parse against: a plain
@@ -1949,6 +2018,35 @@ project_dirs = []
             &state,
         );
         assert!(live.is_empty());
+    }
+
+    /// A person who set the worker role's pick gets that program and model,
+    /// even though another worker is configured, and the brief says so as
+    /// theirs rather than as the program's own default.
+    #[test]
+    fn the_worker_roles_pick_beats_the_configured_workers() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"pi\"\nmodel = \"sonnet\"\neffort = \"high\"\n",
+        );
+        env.programs.push(Program {
+            spec: fake_spec("pi"),
+            installed: true,
+        });
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.agent, "pi");
+        assert_eq!(report.model.as_deref(), Some("sonnet"));
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("- Program: pi (you)"), "{brief}");
+        assert!(brief.contains("- Model: sonnet (you)"), "{brief}");
+        assert!(brief.contains("- Effort: high (you)"), "{brief}");
     }
 
     #[test]
