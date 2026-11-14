@@ -43,6 +43,7 @@ fn an_empty_file_resolves_to_the_built_in_values() {
     assert_eq!(shown(&resolved, "tasks.archive_after"), "14");
     assert_eq!(shown(&resolved, "tasks.archive_namespace"), "\"shprd/\"");
     assert_eq!(shown(&resolved, "tasks.tick_secs"), "15");
+    assert_eq!(shown(&resolved, "tasks.news_settle_secs"), "5");
     assert_eq!(shown(&resolved, "tasks.proof"), "true");
     assert_eq!(shown(&resolved, "tasks.worktrees"), "true");
     assert_eq!(shown(&resolved, "tasks.base"), "\"\"");
