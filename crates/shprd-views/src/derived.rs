@@ -85,7 +85,8 @@ pub const DROPPED: &str = "Dropped";
 
 /// The eight words a task row can show (Shepherdr `STATUSES`,
 /// `agents.py:104-105`; `core/tasks.js:STATUS`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DerivedStatus {
     /// Added, nothing started on it (`todo`).
     ToDo,
@@ -145,7 +146,8 @@ impl DerivedStatus {
 }
 
 /// What kind of Needs you a task is (`agents.py:106-170`, the `needs` field).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Need {
     /// Something shprd found that only the person can settle: failing checks,
     /// a conflict, a failed attempt.

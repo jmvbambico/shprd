@@ -89,6 +89,7 @@ impl Fixture {
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),
+            news: None,
         }
     }
 }
@@ -417,6 +418,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         actor: Actor::Engine,
         after_write: None,
         hub: hub.clone(),
+        news: None,
     };
     let report = worker.tick().expect("the pass ran");
     let seq = report.last_seq().expect("the pass wrote something");

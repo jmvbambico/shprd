@@ -39,7 +39,9 @@ use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::{Forge, ForgeError};
 use shprd_git::git::Git;
 use shprd_git::land::{self, LandError, Landing};
-use shprd_views::derived::{self, DerivedStatus, LiveAgents};
+use shprd_views::derived::{
+    self, Activity, Derived, DerivedStatus, LiveAgent, LiveAgents, TaskSignal,
+};
 use shprd_views::pr;
 use shprd_watch::fallback::{
     self, Action as LadderAction, AgentFacts, BackupDone, Config as LadderConfig, Role,
@@ -50,6 +52,7 @@ use shprd_watch::records::ErrorKind as CutKind;
 use crate::error::ServerError;
 use crate::hub::Hub;
 use crate::ledger;
+use crate::news::{self, NewsDesk, NewsSent};
 use crate::service::AfterWrite;
 
 /// Where the facts a pass needs come from.
@@ -227,6 +230,9 @@ impl StepReport {
 pub struct TickReport {
     /// Every step the pass ran, in plan order.
     pub steps: Vec<StepReport>,
+    /// What the pass told each space's coordinator, when a news desk is wired.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub news: Vec<NewsSent>,
 }
 
 impl TickReport {
@@ -276,6 +282,12 @@ pub struct Worker {
     pub after_write: Option<AfterWrite>,
     /// The service's change counter, so a write wakes the UIs.
     pub hub: Hub,
+    /// Where a pass's news goes.
+    ///
+    /// `None` when the caller wired nobody to tell: a pass then advances tasks
+    /// as before and keeps no news. A wired desk still tells nobody when the run
+    /// has no coordinator pane recorded, and keeps the lines for a later pass.
+    pub news: Option<NewsDesk>,
 }
 
 impl Worker {
@@ -310,6 +322,9 @@ impl Worker {
         for action in &ladder.actions {
             report.steps.push(self.run_ladder(&state, action));
         }
+        // And the news last, from the log as the steps left it, so a task this
+        // pass started is news on this pass rather than the next one.
+        report.news = self.news_pass(&ladder.retries);
         Ok(report)
     }
 
@@ -338,6 +353,35 @@ impl Worker {
             }
         }
         programs
+    }
+
+    /// Tells the coordinator what changed, when a news desk is wired.
+    ///
+    /// The state is folded again so the pass's own writes are news on this pass.
+    /// A fold that fails here is logged and not raised: the advance steps have
+    /// already been recorded, and the next pass reads the log it can.
+    fn news_pass(&self, retries: &BTreeMap<String, derived::ProviderCut>) -> Vec<NewsSent> {
+        let Some(desk) = &self.news else {
+            return Vec::new();
+        };
+        let (state, events) = match ledger::load(&self.repo) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                tracing::warn!(%err, "the news pass could not read the run");
+                return Vec::new();
+            }
+        };
+        let now_ms = desk.clock.now_ms();
+        let live = self.facts.live(&state);
+        let rows = self.rows(
+            &state,
+            &live,
+            retries,
+            Some(&news::started_at(&events)),
+            now_ms,
+        );
+        let snapshot = news::readings(&state, &self.repo, &rows, &events, &live, now_ms);
+        news::tell(desk, &self.repo, &state, &snapshot)
     }
 
     /// Reads the ladder's facts and plans its actions.
@@ -403,39 +447,64 @@ impl Worker {
         prs
     }
 
-    /// Every task's derived status, from the fold, the live overlay and the
-    /// provider cut waiting to be retried.
-    ///
-    /// The overlay is built from [`Facts::live`]: a task whose agent is running
-    /// is reported at work, which is what keeps the planner from landing a
-    /// commit an agent is still writing. A provider cut keeps the task Working
-    /// while the ladder waits, and reads Needs you once the tries run out
-    /// (`agents.py:127-131`).
+    /// Every task's phase, from the fold, the live overlay and the provider cut
+    /// waiting to be retried.
     fn phases(
         &self,
         state: &RunState,
         facts: &Facts,
         retries: &BTreeMap<String, derived::ProviderCut>,
     ) -> BTreeMap<String, Phase> {
-        let now_ms = SystemClock.now_ms();
+        self.rows(state, &facts.live, retries, None, SystemClock.now_ms())
+            .into_iter()
+            .map(|(id, (row, _))| (id, phase_of(row.status)))
+            .collect()
+    }
+
+    /// Every task's derived status, from the fold, the live overlay and the
+    /// provider cut waiting to be retried, with the signal each was derived
+    /// from.
+    ///
+    /// The overlay is built from the live set: a task whose agent is running is
+    /// reported at work, which is what keeps the planner from landing a commit
+    /// an agent is still writing. A provider cut keeps the task Working while
+    /// the ladder waits, and reads Needs you once the tries run out
+    /// (`agents.py:127-131`).
+    ///
+    /// The derived status and its signal are returned together because the news
+    /// needs both: the row a person sees, and the facts behind it (why an
+    /// attempt failed, which reviews it had).
+    ///
+    /// `started` is when each task's newest attempt was spawned, when the caller
+    /// has the log at hand: the status rules then hold a just-started task as
+    /// at work for a moment, even before the host reports its agent. A caller
+    /// without the log passes `None` and gets the rules without that grace.
+    fn rows(
+        &self,
+        state: &RunState,
+        live: &BTreeSet<String>,
+        retries: &BTreeMap<String, derived::ProviderCut>,
+        started: Option<&BTreeMap<String, u64>>,
+        now_ms: u64,
+    ) -> BTreeMap<String, (Derived, TaskSignal)> {
         state
             .tasks
             .keys()
             .map(|id| {
-                let mut signal =
-                    shprd_views::derived::TaskSignal::from_state(state, id).unwrap_or_default();
+                let mut signal = TaskSignal::from_state(state, id).unwrap_or_default();
                 signal.provider_cut = retries.get(id).cloned();
-                let live = if facts.is_live(id) {
-                    LiveAgents::new(vec![shprd_views::derived::LiveAgent {
+                signal.started_ms = started.and_then(|at| at.get(id).copied());
+                let agents = if live.contains(id) {
+                    LiveAgents::new(vec![LiveAgent {
                         address: id.clone(),
-                        activity: Some(shprd_views::derived::Activity::Working),
-                        ..shprd_views::derived::LiveAgent::default()
+                        activity: Some(Activity::Working),
+                        ..LiveAgent::default()
                     }])
                 } else {
                     LiveAgents::default()
                 };
-                let derived = derived::derive_status(&signal, &live, now_ms);
-                (id.clone(), phase_of(derived.status))
+                let row = derived::derive_status(&signal, &agents, now_ms);
+                (id.clone(), (row, signal))
             })
             .collect()
     }

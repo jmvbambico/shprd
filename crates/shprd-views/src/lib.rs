@@ -9,6 +9,7 @@ pub mod brief;
 mod clock;
 pub mod dagr;
 pub mod derived;
+pub mod news;
 pub mod pr;
 pub mod status;
 
