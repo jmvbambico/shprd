@@ -39,9 +39,10 @@ use crate::spec::{BriefDelivery, CatalogSource, EffortSource, SpecError, Values,
 
 /// One role's choice of program settings: `{program, model, effort, fast, perm}`.
 ///
-/// Every field is what a settings row or a task override may say; a field left
-/// out means "whatever the program does by itself", except `perm`, which falls
-/// back to the program's own default mode.
+/// Every field is what a settings row or a task override may say. A model or
+/// effort left out means whatever the program does by itself, `fast` is off
+/// unless a role asks for it, and `perm` falls back to the program's own
+/// default mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pick {
     /// The harness id, e.g. `claude`.
