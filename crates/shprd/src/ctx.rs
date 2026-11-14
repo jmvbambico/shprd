@@ -162,7 +162,20 @@ impl Ctx {
 ///
 /// The env var exists because a command run outside the repository still has to
 /// name it: asking git only works when the working directory is inside one.
+/// Whatever names the root — the flag, the variable or the working directory —
+/// a linked git worktree resolves to the repository it was cut from, because
+/// that is where the run's log, config and worktrees live; see [`run_repo`].
 pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
+    Ok(run_repo(&resolve_checkout(explicit)?))
+}
+
+/// Resolves the checkout the caller works in, without leaving a worktree.
+///
+/// `--repo`, then `$SHPRD_REPO`, then the git top level of the working
+/// directory. A verb that writes into the checkout it was pointed at —
+/// `ask install` writes a program's hook there — needs the worktree itself, so
+/// it takes this rather than [`resolve_root`].
+pub fn resolve_checkout(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
     let named = explicit.map(|path| path.to_path_buf()).or_else(|| {
         std::env::var_os(REPO_ENV)
             .filter(|value| !value.is_empty())
@@ -172,6 +185,76 @@ pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
         Some(path) => Ok(path),
         None => git_top_level(),
     }
+}
+
+/// The repository a checkout belongs to, with a linked worktree's main worktree
+/// in place of the worktree itself.
+///
+/// A worker is launched with `$SHPRD_REPO` naming its own worktree, and its
+/// working directory is that worktree too, so both resolve there. The run's log
+/// is not there: it lives in the repository the worktree was cut from, whose
+/// `.git` the worktree's `.git` file points at. `git rev-parse
+/// --git-common-dir` names that `.git` and one parent step is the repository, so
+/// a `shprd` run from a worktree reads and writes the same run the service does.
+///
+/// Anything that is not a linked worktree — a main worktree, a plain directory,
+/// a path git refuses — is returned as it came.
+fn run_repo(checkout: &Path) -> PathBuf {
+    // A main worktree holds its own `.git` directory and a plain directory holds
+    // none; only a linked worktree (or a submodule, which git answers for below)
+    // holds the `.git` file this has to follow.
+    let git = checkout.join(".git");
+    if !git.is_file() {
+        return checkout.to_path_buf();
+    }
+    let Ok(common) = git_common_dir(checkout) else {
+        return checkout.to_path_buf();
+    };
+    // A linked worktree's common directory is `<repo>/.git`; a submodule's is
+    // `<repo>/.git/modules/<name>`, which names no repository of its own.
+    match common.file_name().and_then(|name| name.to_str()) {
+        Some(".git") => common
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| checkout.to_path_buf()),
+        _ => checkout.to_path_buf(),
+    }
+}
+
+/// Asks git for the directory a checkout's common git data lives in.
+///
+/// The answer is relative to the directory git ran in, which is `checkout`.
+fn git_common_dir(checkout: &Path) -> Result<PathBuf, CliError> {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(checkout)
+        .args(["rev-parse", "--git-common-dir"]);
+    let output = shprd_core::spawn::output(&mut command)
+        .context("running `git rev-parse --git-common-dir`")
+        .map_err(CliError::other)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::other(anyhow!(
+            "{} is not in a git repository: {}",
+            checkout.display(),
+            stderr.trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::other(anyhow!(
+            "git reported no common directory for {}",
+            checkout.display()
+        )));
+    }
+    let common = PathBuf::from(trimmed);
+    Ok(if common.is_absolute() {
+        common
+    } else {
+        checkout.join(common)
+    })
 }
 
 /// Asks git for the top level of the current working directory.
@@ -249,5 +332,103 @@ pub fn parse_actor(raw: &str) -> Result<Actor, CliError> {
                 "unknown actor {other:?}: expected engine, orchestrator, human or agent:<ID>"
             ))),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::run_repo;
+
+    /// Runs git in `dir`, asserting it succeeded, and returns its stdout.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Whether git is on this machine; without it these tests have nothing to
+    /// ask, and a skip is honest.
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    /// A repository with one commit, and the temp directory that keeps it.
+    fn repo() -> Option<(TempDir, PathBuf)> {
+        if !git_available() {
+            eprintln!("skipped: git is not on PATH");
+            return None;
+        }
+        let temp = TempDir::new().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.name", "shprd tests"]);
+        git(&root, &["config", "user.email", "tests@example.invalid"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "one\n").expect("write");
+        git(&root, &["add", "--", "a.txt"]);
+        git(&root, &["commit", "-m", "seed"]);
+        Some((temp, root))
+    }
+
+    #[test]
+    fn a_worktree_resolves_to_the_repository_it_was_cut_from() {
+        let Some((temp, root)) = repo() else {
+            return;
+        };
+        let worktree = temp.path().join("wt").join("T1");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                &worktree.display().to_string(),
+                "-b",
+                "shprd/r1/T1",
+            ],
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "a linked worktree's .git is a file"
+        );
+
+        // git answers with the canonical path, so a `$TMPDIR` that is a symlink
+        // (`/var` on macOS) comes back resolved.
+        let expected = std::fs::canonicalize(&root).expect("canonicalize the repo");
+        assert_eq!(run_repo(&worktree), expected);
+    }
+
+    #[test]
+    fn a_main_worktree_resolves_to_itself() {
+        let Some((_temp, root)) = repo() else {
+            return;
+        };
+        assert_eq!(run_repo(&root), root);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_worktree_resolves_to_itself() {
+        let temp = TempDir::new().expect("tempdir");
+        assert_eq!(run_repo(temp.path()), temp.path());
     }
 }

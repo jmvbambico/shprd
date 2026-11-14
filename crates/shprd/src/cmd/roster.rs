@@ -52,8 +52,12 @@ fn models(specs: &[HarnessSpec]) -> BTreeMap<String, String> {
 
 /// The data directory: `$SHPRD_DATA_DIR`, else `<git root>/data`, else the
 /// `../share/shprd/data` a packaged install puts next to the binary.
+///
+/// The checkout the caller is in, not the run's repository: a linked worktree of
+/// shprd itself carries its own branch's `data/harness`, while a worker's task
+/// worktree is told the engine's table with `SHPRD_DATA_DIR`.
 pub(crate) fn resolve_data_dir() -> Result<PathBuf, CliError> {
-    let root = crate::ctx::resolve_root(None).ok();
+    let root = crate::ctx::resolve_checkout(None).ok();
     shprd_agents::harness::data_dir(root.as_deref()).ok_or_else(|| {
         CliError::other(anyhow!(
             "no harness data directory: set {} to a directory holding `harness/`",
