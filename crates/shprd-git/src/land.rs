@@ -31,9 +31,11 @@ use shprd_core::state::Task;
 
 use crate::forge::{Forge, ForgeError, Pr};
 use crate::git::{Git, GitError};
+use crate::worktree::remote_of;
 
-/// The remote a run pushes to and compares its base branch with.
-const REMOTE: &str = "origin";
+/// The remote named when a repository has none to pick from: every failure
+/// then says which remote git could not reach.
+const DEFAULT_REMOTE: &str = "origin";
 
 /// One task's landing: what to push, what to propose it into, and how the pull
 /// request reads.
@@ -349,12 +351,13 @@ fn already_landed(
 /// It is a name git may fail to resolve, which the callers then read as "not
 /// comparable".
 fn base_revision(git: &Git, base: &str) -> String {
-    let tracking = format!("refs/remotes/{REMOTE}/{base}");
+    let remote = remote_of(git).unwrap_or_else(|| DEFAULT_REMOTE.to_string());
+    let tracking = format!("refs/remotes/{remote}/{base}");
     let fetch = git.run(&[
         "fetch",
         "--quiet",
         "--no-tags",
-        REMOTE,
+        &remote,
         &format!("+refs/heads/{base}:{tracking}"),
     ]);
     if fetch.is_ok() && git.rev_parse(&tracking).is_ok() {
@@ -375,8 +378,9 @@ fn base_revision(git: &Git, base: &str) -> String {
 /// overwritten silently.
 fn push(git: &Git, branch: &str) -> Result<(), GitError> {
     let head = git.head_sha()?;
+    let remote = remote_of(git).unwrap_or_else(|| DEFAULT_REMOTE.to_string());
     let there = git
-        .run(&["ls-remote", REMOTE, &format!("refs/heads/{branch}")])
+        .run(&["ls-remote", &remote, &format!("refs/heads/{branch}")])
         .ok()
         .and_then(|out| {
             out.split_whitespace()
@@ -391,7 +395,7 @@ fn push(git: &Git, branch: &str) -> Result<(), GitError> {
         "push",
         "--force-with-lease",
         "--set-upstream",
-        REMOTE,
+        &remote,
         branch,
     ])
     .map(|_| ())

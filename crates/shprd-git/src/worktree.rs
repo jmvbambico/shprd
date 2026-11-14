@@ -169,12 +169,12 @@ pub fn create(
     })
 }
 
-/// The remote a new worktree starts from: `origin` when the repository has it,
-/// else the only remote it has, else `None`.
+/// The remote a landing fetches from and pushes to: `origin` when the
+/// repository has it, else the only remote it has, else `None`.
 ///
 /// Shepherdr reads the remotes the same way, and a repository with no remote at
 /// all simply branches from its local base.
-fn remote_of(git: &Git) -> Option<String> {
+pub(crate) fn remote_of(git: &Git) -> Option<String> {
     let remotes = git.run(&["remote"]).ok()?;
     let names: Vec<&str> = remotes
         .lines()
