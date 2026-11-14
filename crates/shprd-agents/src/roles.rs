@@ -31,13 +31,14 @@
 //! cross-vendor; shprd's rule is its own (`docs/roles.md`), reusing Shepherdr's
 //! mechanism for naming the pair.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use shprd_core::settings::{Resolved, ResolvedRole};
 use thiserror::Error;
 
 use crate::families::{Families, FamilyError, agent_vendor};
-use crate::models::AgentRef;
+use crate::models::{AgentRef, Catalog};
 use crate::spec::{HarnessSpec, SpecError, load_dir};
 
 /// Which two roles a review compares.
@@ -134,6 +135,13 @@ impl std::error::Error for Problems {}
 #[derive(Debug, Clone)]
 pub struct Checker {
     table: Result<Table, String>,
+    /// The catalogs the checks may consult, by program id.
+    ///
+    /// Only the effort check needs them: a program's own levels are in the
+    /// harness table, but whether a *model* can think is in its catalog. An
+    /// empty map means nothing is known, and the check says nothing rather than
+    /// guessing.
+    catalogs: BTreeMap<String, Catalog>,
 }
 
 impl Default for Checker {
@@ -157,16 +165,36 @@ impl Checker {
                      `models/`, or run `shprd doctor`",
                     crate::harness::DATA_ENV
                 )),
+                catalogs: BTreeMap::new(),
             };
         };
         Checker {
             table: Table::load(dir).map_err(|error| format!("reading {}: {error}", dir.display())),
+            catalogs: BTreeMap::new(),
         }
     }
 
     /// A checker over a table the caller already holds.
     pub fn with(table: Table) -> Checker {
-        Checker { table: Ok(table) }
+        Checker {
+            table: Ok(table),
+            catalogs: BTreeMap::new(),
+        }
+    }
+
+    /// The same checker, with the model catalogs its effort check may consult.
+    ///
+    /// A caller that has read a program's catalog (a static list, or its own
+    /// listing) hands it in here, so a model that cannot think is told apart
+    /// from one that can. Catalogs are hints: absent is not an error.
+    pub fn with_catalogs(mut self, catalogs: BTreeMap<String, Catalog>) -> Checker {
+        self.catalogs = catalogs;
+        self
+    }
+
+    /// The harness specs, when this machine has a table.
+    pub fn specs(&self) -> Option<&[HarnessSpec]> {
+        self.table.as_ref().ok().map(|table| table.specs.as_slice())
     }
 
     /// Whether the roles can be checked at all on this machine.
@@ -185,14 +213,23 @@ impl Checker {
             Err(reason) => Checked {
                 problems: Problems::default(),
                 skipped: Some(reason.clone()),
+                warnings: Vec::new(),
             },
-            Ok(table) => match check(resolved, review, table) {
-                Ok(()) => Checked::default(),
-                Err(problems) => Checked {
-                    problems,
-                    skipped: None,
-                },
-            },
+            Ok(table) => {
+                let mut warnings = Vec::new();
+                check_effort_notes(resolved, &self.catalogs, &mut warnings);
+                match check(resolved, review, table) {
+                    Ok(()) => Checked {
+                        warnings,
+                        ..Checked::default()
+                    },
+                    Err(problems) => Checked {
+                        problems,
+                        skipped: None,
+                        warnings,
+                    },
+                }
+            }
         }
     }
 }
@@ -207,12 +244,20 @@ pub struct Checked {
     problems: Problems,
     /// Why the roles could not be checked at all, when they could not.
     skipped: Option<String>,
+    /// The settings that work but do not do what they look like: an effort
+    /// level on a model whose catalog says it cannot think, for one.
+    warnings: Vec<String>,
 }
 
 impl Checked {
     /// The refusals, one line each.
     pub fn messages(&self) -> &[String] {
         self.problems.messages()
+    }
+
+    /// The warnings, one line each: nothing here blocks a write.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Whether nothing is wrong.
@@ -284,6 +329,32 @@ fn check_role(role: &ResolvedRole, table: &Table, problems: &mut Problems) {
                 "role `{}` falls back to `{fallback}`, which no harness defines: known programs are {known}",
                 role.id
             ));
+        }
+    }
+}
+
+/// Check one role's effort level against the model catalog, when the caller has
+/// read it.
+///
+/// A program's own levels say what the CLI accepts; its catalog says which of
+/// them a *model* can use. The difference matters for `pi`, whose listing marks
+/// some models `thinking: no`: the level is accepted by the program and does
+/// nothing for that model, so it is a warning rather than a refusal.
+fn check_effort_notes(
+    resolved: &Resolved,
+    catalogs: &BTreeMap<String, Catalog>,
+    warnings: &mut Vec<String>,
+) {
+    for role in resolved.roles() {
+        let (Some(program), Some(effort)) = (&role.agent, &role.effort) else {
+            continue;
+        };
+        let Some(catalog) = catalogs.get(&program.value) else {
+            continue;
+        };
+        let model = role.model.as_ref().map(|model| model.value.as_str());
+        if let Some(note) = catalog.effort_warning(&program.value, model, &effort.value) {
+            warnings.push(format!("role `{}`: {note}", role.id));
         }
     }
 }
@@ -467,6 +538,70 @@ mod tests {
             Err(error) => panic!("the test settings must parse: {error}"),
         };
         resolve(&file, &Request::default())
+    }
+
+    /// A captured pi listing read with the shipped pi spec, as the settings
+    /// check sees it. No CLI runs: the table is the fixture.
+    fn pi_catalog() -> crate::models::Catalog {
+        let text = match std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi-models-thinking.txt"),
+        ) {
+            Ok(text) => text,
+            Err(error) => panic!("the pi fixture should be readable: {error}"),
+        };
+        let spec = match table().specs.iter().find(|spec| spec.id == "pi") {
+            Some(spec) => spec.clone(),
+            None => panic!("the shipped table defines pi"),
+        };
+        match crate::models::parse_catalog(&spec, &text) {
+            Ok(catalog) => catalog,
+            Err(error) => panic!("the pi fixture should read: {error}"),
+        }
+    }
+
+    #[test]
+    fn an_effort_a_model_cannot_use_is_a_warning_not_a_refusal() {
+        let catalogs = std::collections::BTreeMap::from([("pi".to_owned(), pi_catalog())]);
+        let flat = resolved(
+            r#"
+            [roles.worker]
+            agent = "pi"
+            model = "Command Code/deepseek/deepseek-v4.1-flash"
+            effort = "low"
+            "#,
+        );
+        let checked = Checker::with(table())
+            .with_catalogs(catalogs.clone())
+            .check(&flat, Review::default());
+        assert!(
+            checked.is_empty(),
+            "the level is one pi accepts, so nothing is refused: {:?}",
+            checked.messages()
+        );
+        assert_eq!(checked.warnings().len(), 1, "{:?}", checked.warnings());
+        assert!(
+            checked.warnings()[0].contains("role `worker`")
+                && checked.warnings()[0].contains("not thinking"),
+            "{:?}",
+            checked.warnings()
+        );
+
+        let thinking = resolved(
+            r#"
+            [roles.worker]
+            agent = "pi"
+            model = "anthropic/claude-opus-4-8"
+            effort = "high"
+            "#,
+        );
+        let checked = Checker::with(table())
+            .with_catalogs(catalogs)
+            .check(&thinking, Review::default());
+        assert!(
+            checked.warnings().is_empty(),
+            "a model that thinks keeps its level: {:?}",
+            checked.warnings()
+        );
     }
 
     /// The refusal a check produced, or a panic when it passed.
