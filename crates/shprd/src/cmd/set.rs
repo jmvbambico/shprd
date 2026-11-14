@@ -471,17 +471,26 @@ mod tests {
 
         /// Writes an executable `name` into the private `PATH` that prints
         /// `listing` as its model listing.
+        ///
+        /// The script is written beside its final path and renamed into place, so
+        /// the path that gets executed is never open for writing: a sibling test
+        /// thread's child cannot inherit a write descriptor on it and make the
+        /// exec fail with `ETXTBSY` on Linux.
         fn script_harness(&self, name: &str, listing: &str) {
             use std::os::unix::fs::PermissionsExt;
 
             let path = self.path.path().join(name);
+            let temp = self.path.path().join(format!("{name}.tmp"));
             let script =
                 format!("#!/bin/sh\n# a scripted harness for the unit tests\necho \"{listing}\"\n");
-            if let Err(error) = fs::write(&path, script) {
-                panic!("writing {}: {error}", path.display());
+            if let Err(error) = fs::write(&temp, script) {
+                panic!("writing {}: {error}", temp.display());
             }
-            if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o755)) {
-                panic!("chmod {}: {error}", path.display());
+            if let Err(error) = fs::set_permissions(&temp, fs::Permissions::from_mode(0o755)) {
+                panic!("chmod {}: {error}", temp.display());
+            }
+            if let Err(error) = fs::rename(&temp, &path) {
+                panic!("renaming {} into place: {error}", path.display());
             }
         }
 

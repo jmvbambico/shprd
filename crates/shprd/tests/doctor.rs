@@ -38,17 +38,25 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// A shell script standing in for a real agent CLI.
+///
+/// Written beside its final path and renamed into place, so the path the test
+/// then executes is never open for writing: a sibling thread's child cannot
+/// inherit a write descriptor on it and make the exec fail with `ETXTBSY`.
 fn write_script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    if let Err(error) = fs::write(&path, format!("#!/bin/sh\n{body}\n")) {
+    let temp = dir.join(format!("{name}.tmp"));
+    if let Err(error) = fs::write(&temp, format!("#!/bin/sh\n{body}\n")) {
         panic!("writing {name} failed: {error}");
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o755)) {
+        if let Err(error) = fs::set_permissions(&temp, fs::Permissions::from_mode(0o755)) {
             panic!("chmod {name} failed: {error}");
         }
+    }
+    if let Err(error) = fs::rename(&temp, &path) {
+        panic!("renaming {name} into place failed: {error}");
     }
 }
 
