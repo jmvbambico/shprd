@@ -13,13 +13,19 @@
 //! broken brief flag, model flag or effort flag fails the test instead of looking
 //! fine in a dry run.
 //!
-//! The launch is the program's non-interactive one — `claude -p`, `codex exec`,
-//! `pi -p`, `opencode run`, `kilo run` — because a terminal UI cannot be driven
-//! from a test and a brand-new directory shows Claude Code's folder-trust dialog
-//! before any turn. Everything else is what [`shprd_agents::adapter::launch`]
-//! builds: the harness's model, effort and brief arguments. The access mode's
-//! arguments are left out: a one-shot prompt approves nothing, and `codex exec`
-//! does not take `-a` at all.
+//! The launch is the program's non-interactive one — `claude -p`,
+//! `codex exec --skip-git-repo-check`, `pi -p`, `opencode run`, `kilo run` —
+//! because a terminal UI cannot be driven from a test and a brand-new directory
+//! shows Claude Code's folder-trust dialog before any turn. `codex exec` also
+//! refuses a directory that is not a git repository unless it is told to skip
+//! that check, which is how the program's own one-shot form is started.
+//! Everything else is what [`shprd_agents::adapter::launch`] builds: the
+//! harness's model, effort and brief arguments. The access mode's arguments are
+//! left out: a one-shot prompt approves nothing, and `codex exec` does not take
+//! `-a` at all.
+//!
+//! An account that is out of usage fails its test with the program's own
+//! usage-limit message; that is the account, not the harness.
 //!
 //! Each CLI must be installed and signed in; a program that is not installed
 //! fails its test with that reason. Nothing is written outside the temp
@@ -60,7 +66,9 @@ fn harness(id: &str) -> Harness {
 fn one_shot_base(id: &str) -> Vec<String> {
     let words: &[&str] = match id {
         "claude" => &["claude", "-p"],
-        "codex" => &["codex", "exec"],
+        // The temp dir is not a git repository, and codex exec refuses to run in
+        // one unless it is told to skip that check.
+        "codex" => &["codex", "exec", "--skip-git-repo-check"],
         "pi" => &["pi", "-p"],
         "opencode" => &["opencode", "run"],
         "kilo" => &["kilo", "run"],

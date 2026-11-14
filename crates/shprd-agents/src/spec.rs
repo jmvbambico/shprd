@@ -160,7 +160,9 @@ impl HarnessSpec {
             &["model"],
             Some("model"),
         )?;
-        check_optional_template("launch.effort_args", &launch.effort_args, &["effort"])?;
+        if let Some(tokens) = &launch.effort_args {
+            check_template("launch.effort_args", tokens, &["effort"], Some("effort"))?;
+        }
         check_optional_template("launch.auto_approve", &launch.auto_approve, &[])?;
         check_optional_template("launch.reviewer_args", &launch.reviewer_args, &[])?;
         check_optional_template(
@@ -172,6 +174,11 @@ impl HarnessSpec {
         check_optional_template("detect.signin_args", &self.detect.signin_args, &["model"])?;
         self.permissions.validate()?;
         self.models.validate()?;
+        // A level the launch cannot send is a level a role may pick and never
+        // get, so the two facts have to agree: levels need a flag to carry them.
+        if launch.effort_args.is_none() && !self.models.efforts.levels.is_empty() {
+            return Err(SpecError::EffortsWithoutFlag);
+        }
         self.brief.validate(launch)?;
         self.fast.validate()?;
         self.status.validate()?;
@@ -1184,6 +1191,9 @@ pub enum SpecError {
     /// A program is told how to turn fast off but not how to turn it on.
     #[error("fast.off is set but fast.on is empty")]
     FastOffWithoutOn,
+    /// A program lists effort levels but has no flag that sends one.
+    #[error("models.efforts lists levels but launch.effort_args is not set")]
+    EffortsWithoutFlag,
     /// A program takes its brief as its first message but names a brief flag.
     #[error("brief.delivery is first-message but {field} names a system-prompt flag")]
     BriefFlagWithoutFile {
@@ -1477,6 +1487,7 @@ signin_hint = "claude auth login"
 [launch]
 interactive = ["claude"]
 model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
 verified = false
 
 [models]
@@ -2239,13 +2250,38 @@ levels = [\"low\", \"high\"]
     #[test]
     fn rejects_effort_args_using_model_placeholder() {
         let fixture = MINIMAL_SPEC.replacen(
-            r#"model_args = ["--model", "{model}"]"#,
-            "model_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{model}\"]",
+            r#"effort_args = ["--effort", "{effort}"]"#,
+            r#"effort_args = ["--effort", "{model}"]"#,
             1,
         );
         assert!(matches!(
             template_error(&fixture),
             SpecError::InvalidTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn an_effort_flag_must_carry_the_level() {
+        let fixture = MINIMAL_SPEC.replacen(
+            r#"effort_args = ["--effort", "{effort}"]"#,
+            r#"effort_args = ["--effort", "high"]"#,
+            1,
+        );
+        assert!(matches!(
+            template_error(&fixture),
+            SpecError::InvalidTemplate {
+                field: "launch.effort_args",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn levels_without_a_flag_are_refused() {
+        let fixture = full_spec_text().replace("effort_args = [\"--effort\", \"{effort}\"]\n", "");
+        assert!(matches!(
+            full_spec_error(&fixture),
+            SpecError::EffortsWithoutFlag
         ));
     }
 
