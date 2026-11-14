@@ -40,14 +40,17 @@ use crate::ctx::{CliError, Ctx, resolve_home, resolve_layout};
 /// call goes to the script named here instead of the network.
 pub const FAKE_FORGE_ENV: &str = "SHPRD_FAKE_FORGE";
 
-/// The line a body ends with, as the run's policy requires.
-const REVIEW_PASSED: &str = "cross-vendor-review: passed";
+/// The line a task's body ends with when its review was independent.
+///
+/// The composition itself lives in `shprd_views::pr::task_pr_body_marked`, so
+/// the service's tick pushes the same bytes this verb does.
+const REVIEW_PASSED: &str = shprd_views::pr::REVIEW_PASSED;
 
 /// The line a body ends with when no independent review could be had.
 const REVIEW_DEGRADED: &str = "degraded-review";
 
 /// The attribution line every generated pull request ends with.
-const ATTRIBUTION: &str = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+const ATTRIBUTION: &str = shprd_views::pr::ATTRIBUTION;
 
 /// How much of a sha a human line shows.
 const SHORT_SHA: usize = 7;
@@ -313,17 +316,7 @@ fn record_landing(
 /// Landing refuses a task without an engine-recorded cross-vendor review, so
 /// the marker is a claim the log already proves by the time this runs.
 fn render_task_body(task: &Task) -> String {
-    let mut body = shprd_views::pr::task_pr_body(task);
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push('\n');
-    body.push_str(REVIEW_PASSED);
-    body.push('\n');
-    body.push('\n');
-    body.push_str(ATTRIBUTION);
-    body.push('\n');
-    body
+    shprd_views::pr::task_pr_body_marked(task)
 }
 
 /// Writes one task's pull request body under shprd's own home.
