@@ -34,6 +34,14 @@ pub enum Outcome {
         /// How many findings blocked.
         blocking: usize,
     },
+    /// Another decider recorded this attempt's verdict first.
+    ///
+    /// The service's own pass and a `shprd watch` can both see a settled
+    /// `findings.json` and both decide it; the log under its lock is what tells
+    /// the second of them that the review is already decided. That is not a
+    /// failure — the run is in exactly the state the caller asked for — so the
+    /// caller says so instead of recording the same verdict twice.
+    AlreadyDecided,
 }
 
 /// Decides the review for one attempt and records the outcome.
@@ -53,6 +61,7 @@ pub fn verdict_verb(
         Outcome::Escalated { blocking } => {
             println!("review failed: {blocking} blocking (escalated)");
         }
+        Outcome::AlreadyDecided => println!("review already decided"),
     }
     Ok(())
 }
@@ -93,8 +102,19 @@ pub fn submit_verdict(
         .events
         .iter()
         .any(|kind| matches!(kind, EventKind::Escalated { .. }));
+    let mut recorded = 0;
     for kind in decided.events {
-        record(ctx, kind)?;
+        match record(ctx, kind) {
+            Ok(()) => recorded += 1,
+            // Another decider got there first: the service's pass, a second
+            // watch, or a person. The log is the truth and the review is
+            // decided, so this caller has nothing left to record.
+            Err(CliError::Refused(RuleError::ReviewAlreadyDecided { .. })) if recorded == 0 => {
+                close_reviewer(mux, ctx, &home, task, attempt);
+                return Ok(Outcome::AlreadyDecided);
+            }
+            Err(err) => return Err(err),
+        }
     }
     // The verdict is the review's last word, so the reviewer's tab is done. It
     // is closed before the caller prints anything, so the tab's life is tied to

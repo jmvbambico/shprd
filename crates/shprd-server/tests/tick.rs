@@ -1433,3 +1433,100 @@ fn the_concurrency_cap_is_read_from_the_settings_on_every_pass() {
     let second = worker.tick().expect("the second pass ran");
     assert_eq!(second.steps.len(), 2, "{second:?}");
 }
+
+/// A facts source that lets another decider win the race for the verdict.
+///
+/// `live` is asked once per pass, after the log was folded and before the plan
+/// is made — exactly the window a `shprd watch` runs in. This one records the
+/// review's verdict itself, so the pass plans a verdict step from a state that
+/// is already stale.
+struct Racing {
+    /// The repository whose log the competing verdict is appended to.
+    repo: PathBuf,
+    /// Every call `live` made, so a test can assert the race really happened.
+    raced: Arc<Mutex<usize>>,
+}
+
+impl FactsSource for Racing {
+    fn pr(&self, _task: &shprd_core::state::Task, _state: &RunState) -> Option<PrFacts> {
+        None
+    }
+
+    fn live(&self, state: &RunState) -> BTreeSet<String> {
+        let task = state.tasks.get("A").expect("the fixture's task");
+        let request = task
+            .attempts
+            .last()
+            .and_then(|attempt| attempt.reviews.last())
+            .expect("the fixture requested a review");
+        let path = self.repo.join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).expect("open the log");
+        log.append(
+            Actor::Engine,
+            EventKind::GatePassed {
+                task: String::from("A"),
+                attempt: 1,
+                gate: String::from("review"),
+                findings: Vec::new(),
+                source: Some(ReviewSource {
+                    reviewer: request.reviewer.clone(),
+                    findings_sha256: shprd_core::hash::sha256_hex(b"[]"),
+                    request_seq: request.seq,
+                }),
+            },
+            &SystemClock,
+        )
+        .expect("the competing verdict is recorded");
+        *self.raced.lock().expect("the race counter") += 1;
+        BTreeSet::new()
+    }
+}
+
+#[test]
+fn a_verdict_another_decider_already_recorded_is_not_recorded_twice() {
+    // Bug found by the M9 gate's reviewer: a `shprd watch` racing the service
+    // could fold one reviewer's packet into two gate results, because both plan
+    // from a state that says the review is owed and a second `gate_passed`
+    // answering the same request used to be accepted. The log refuses it now,
+    // and the pass that loses says the review is already decided.
+    let fixture = handed_in_and_reviewed();
+    write_findings(&fixture, "A", "[]");
+    let raced = Arc::new(Mutex::new(0));
+    let facts: Arc<dyn FactsSource> = Arc::new(Racing {
+        repo: fixture.repo.clone(),
+        raced: Arc::clone(&raced),
+    });
+    let mut worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+    worker.facts = facts;
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert_eq!(*raced.lock().expect("the race counter"), 1, "the race ran");
+    assert_eq!(report.steps.len(), 1, "{:?}", report.steps);
+    assert_eq!(report.steps[0].action, "verdict");
+    assert!(
+        report.steps[0].ok,
+        "losing the race is not a failure: {:?}",
+        report.steps
+    );
+    assert!(
+        report.steps[0].detail.contains("already decided"),
+        "{:?}",
+        report.steps
+    );
+    let verdicts = fixture
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::GatePassed { task, gate, .. } | EventKind::GateFailed { task, gate, .. }
+                    if task == "A" && gate == "review"
+            )
+        })
+        .count();
+    assert_eq!(verdicts, 1, "one review, one verdict");
+}

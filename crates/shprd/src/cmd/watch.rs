@@ -249,6 +249,9 @@ impl Watcher {
             let word = match outcome {
                 verdict::Outcome::Passed => "passed",
                 verdict::Outcome::SentBack { .. } | verdict::Outcome::Escalated { .. } => "failed",
+                // The service's own pass decided it while this one was reading
+                // the packet: one review, one verdict, and nothing to say.
+                verdict::Outcome::AlreadyDecided => continue,
             };
             lines.push(format!("\u{25c7} {} review {word}", task.id));
         }
@@ -2903,6 +2906,66 @@ project_dirs = []
             ),
             "the verdict carried no provenance: {:?}",
             verdict.kind
+        );
+    }
+
+    /// A review another decider already recorded is not recorded again.
+    ///
+    /// The race the M9 gate's reviewer found: the service's own pass and a
+    /// `shprd watch` both fold the log while a review is owed, and only the log
+    /// under its lock can tell the second of them that the first recorded the
+    /// verdict. The state handed in here is the one a watchdog already read, so
+    /// the competing verdict lands in exactly that window.
+    #[test]
+    fn a_review_the_service_already_decided_is_left_alone() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["codex"]);
+        awaiting_review_task(&ctx);
+        write_findings(&env, &scratch, "[]", Duration::from_secs(10));
+        // What this pass planned from: the review is still owed.
+        let planned = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let request = planned
+            .tasks
+            .get("T1")
+            .and_then(|task| task.attempts.last())
+            .and_then(|attempt| attempt.reviews.last())
+            .map(|request| (request.reviewer.clone(), request.seq))
+            .unwrap_or_else(|| panic!("the fixture requested no review"));
+        // What the service's pass recorded in the meantime, reading the same
+        // settled packet from its own state.
+        ctx.as_actor(Actor::Engine)
+            .commit(EventKind::GatePassed {
+                task: "T1".to_string(),
+                attempt: 1,
+                gate: REVIEW_GATE.to_string(),
+                findings: Vec::new(),
+                source: Some(shprd_core::event::ReviewSource {
+                    reviewer: request.0,
+                    findings_sha256: shprd_core::hash::sha256_hex(b"[]"),
+                    request_seq: request.1,
+                }),
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        let before = events(&ctx).len();
+
+        let mut watcher = Watcher::new(Policy::default());
+        let mut lines = Vec::new();
+        watcher
+            .tick_reviews(&FakeMux::default(), &env, &planned, &mut lines)
+            .unwrap_or_else(|err| panic!("losing the race is not a failure: {err}"));
+
+        let fresh = &events(&ctx)[before..];
+        assert!(
+            !appended(fresh, |kind| matches!(
+                kind,
+                EventKind::GatePassed { .. } | EventKind::GateFailed { .. }
+            )),
+            "the decision was recorded twice: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("review p")),
+            "a review this pass did not decide is not reported as its own: {lines:?}"
         );
     }
 

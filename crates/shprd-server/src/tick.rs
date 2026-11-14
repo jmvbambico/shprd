@@ -40,6 +40,7 @@ use shprd_core::event::{
 };
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
+use shprd_core::rules::RuleError;
 use shprd_core::state::{RunState, Task};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::{Forge, ForgeError};
@@ -940,18 +941,28 @@ impl Worker {
         let decided = gate::decide(found, attempt, findings, source, config.review);
         let mut last = None;
         for kind in decided.events {
-            let seq = self.commit(kind)?;
-            last = Some(seq);
-            self.notify(Some(seq));
+            match self.commit_verdict(kind) {
+                Ok(Some(seq)) => {
+                    last = Some(seq);
+                    self.notify(Some(seq));
+                }
+                // A `shprd watch`, or another process, decided this attempt's
+                // review between this pass reading the log and appending the
+                // verdict. The rules refuse a second verdict for one attempt, so
+                // the loop stops here; closing the tab is still right, and the
+                // run is in the state this step wanted.
+                Ok(None) => {
+                    self.close_reviewer_task(task, attempt);
+                    return Ok(StepReport::done(
+                        &step,
+                        format!("{task}'s review was already decided"),
+                        self.last_seq(),
+                    ));
+                }
+                Err(reason) => return Err(reason),
+            }
         }
-        // The verdict is the review's last word, so the reviewer's tab is done.
-        // A close that fails is logged, never fatal: the gate result is already
-        // recorded, and failing here would report the review as undecided.
-        if let Some(close) = &self.close_reviewer
-            && let Err(err) = close(&self.repo, task, attempt)
-        {
-            tracing::warn!(task, %err, "the reviewer's tab did not close after its verdict");
-        }
+        self.close_reviewer_task(task, attempt);
         let detail = if decided.passed {
             format!("{task}'s review passed")
         } else {
@@ -961,6 +972,34 @@ impl Worker {
             )
         };
         Ok(StepReport::done(&step, detail, last))
+    }
+
+    /// Appends one verdict event, folding "already decided" into `Ok(None)`.
+    ///
+    /// The log refuses a second review verdict for one attempt, and that refusal
+    /// is news about the run rather than a failure of this pass: another decider
+    /// got there first.
+    fn commit_verdict(&self, kind: EventKind) -> Result<Option<u64>, String> {
+        match ledger::commit(&self.repo, &self.actor, kind) {
+            Ok(event) => {
+                after_write(&self.after_write, &self.repo);
+                Ok(Some(event.seq))
+            }
+            Err(ledger::CommitError::Refused(RuleError::ReviewAlreadyDecided { .. })) => Ok(None),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Closes the reviewer's tab after a verdict, logging a host that refuses.
+    ///
+    /// A close that fails is never fatal: the gate result is already recorded,
+    /// and failing the step would report the review as undecided.
+    fn close_reviewer_task(&self, task: &str, attempt: u32) {
+        if let Some(close) = &self.close_reviewer
+            && let Err(err) = close(&self.repo, task, attempt)
+        {
+            tracing::warn!(task, %err, "the reviewer's tab did not close after its verdict");
+        }
     }
 
     /// Records once that a reviewer's findings file could not be read.
