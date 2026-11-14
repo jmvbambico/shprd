@@ -52,7 +52,9 @@ SOFTWARE.
   `provider_cut`, `provider_error`),
   `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
   `takes_over`, `head`), `mods/tasks/bin/herdr_task/tick.py` (`retry_one`,
-  `retry_pass`), `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`,
+  `retry_pass`), `mods/tasks/bin/herdr_task/news.py` (`activity()`,
+  `stall_of()`, `news_line()`, `news_state()`, `news_pass()`),
+  `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`,
   `service/asks.ts`, `core/asks.js`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
@@ -77,7 +79,10 @@ SOFTWARE.
   — in
   `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
   `crates/shprd-watch/src/fallback.rs` and the events that record it in
-  `crates/shprd-core/src/{event,state,rules}.rs`
+  `crates/shprd-core/src/{event,state,rules}.rs`; and the news a space's
+  coordinator is told — the settle window, one line per change, one message per
+  space and the re-check before sending — in `crates/shprd-views/src/news.rs`
+  and `crates/shprd-server/src/news.rs`
 - License: MIT
 
 MIT License
