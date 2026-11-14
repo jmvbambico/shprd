@@ -111,6 +111,8 @@ pub enum Command {
     /// its branch is kept. It asks on the terminal, which an agent's shell tool
     /// never has.
     Drop(DropArgs),
+    /// Serve this run over a loopback HTTP API, for every UI that calls it.
+    Serve(ServeArgs),
 }
 
 /// Arguments for `gate`, the run-wide gate. The per-attempt gate is
@@ -173,6 +175,17 @@ pub struct DropArgs {
     /// still has to be unset or `human`.
     #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
+}
+
+/// Arguments for `serve`.
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Port to listen on, on 127.0.0.1 only. `0` picks a free one.
+    ///
+    /// The port a service really bound is written to `service.json` in the
+    /// state directory, so a client reads it there rather than guessing.
+    #[arg(long, value_name = "PORT", default_value_t = 0)]
+    pub port: u16,
 }
 
 /// Arguments for `readmit`.
