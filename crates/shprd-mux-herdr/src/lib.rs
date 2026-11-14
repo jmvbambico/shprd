@@ -21,7 +21,6 @@
 mod adapter;
 mod cli;
 mod events;
-pub mod keys;
 mod panes;
 mod shell;
 mod tabs;

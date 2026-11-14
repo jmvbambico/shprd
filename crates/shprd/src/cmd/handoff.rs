@@ -611,7 +611,6 @@ mod tests {
     use shprd_core::state::TaskStatus;
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
-    use shprd_mux::naming;
     use shprd_roster::spec::HarnessSpec;
     use tempfile::TempDir;
 
@@ -764,11 +763,8 @@ project_dirs = []
     /// A fake multiplexer holding the repo's workspace.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&spawn::workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
 
@@ -854,14 +850,14 @@ project_dirs = []
         assert_eq!(task.attempts[0].agent, "pi");
         assert_eq!(task.status, TaskStatus::Working);
         let workspace = mux
-            .find_workspace(&naming::workspace_name(&scratch.repo_name()))
+            .find_workspace(&spawn::workspace_name(&scratch.repo_name()))
             .unwrap_or_else(|err| panic!("{err}"))
             .unwrap_or_else(|| panic!("no workspace"));
         let tabs = mux
             .list_tabs(&workspace.id)
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(tabs.len(), 1, "the old tab should be closed: {tabs:?}");
-        assert_eq!(tabs[0].title, "\u{25cf} pi\u{b7}T1");
+        assert_eq!(tabs[0].title, "pi·T1");
         assert!(
             mux.calls()
                 .contains(&Call::CloseTab(TabId::new(old_tab.clone()))),
@@ -883,7 +879,7 @@ project_dirs = []
             })
             .unwrap_or_else(|| panic!("no tab was created by the hand-off"));
         assert_eq!(created, worktree, "the newcomer sits elsewhere");
-        assert_eq!(report.tab, "\u{25cf} pi\u{b7}T1");
+        assert_eq!(report.tab, "pi·T1");
     }
 
     #[test]
@@ -1425,7 +1421,7 @@ project_dirs = []
             Some("hand-off to pi could not be recorded")
         );
         let workspace = mux
-            .find_workspace(&naming::workspace_name(&scratch.repo_name()))
+            .find_workspace(&spawn::workspace_name(&scratch.repo_name()))
             .unwrap_or_else(|err| panic!("{err}"))
             .unwrap_or_else(|| panic!("no workspace"));
         let tabs = mux

@@ -8,9 +8,10 @@ use crate::clock;
 
 /// One line per task, then one line per agent that is dry at `now_ms`.
 ///
-/// A directory with no run says `no run here · start one with shprd up`, and a
-/// run whose plan is still empty says `run <id> · no tasks yet · talk to the ★
-/// orchestrator tab`: an empty screen would otherwise look like a broken run.
+/// A directory with no run says `no run here · start one with shprd run start`,
+/// and a run whose plan is still empty says `run <id> · no tasks yet · add one
+/// with shprd agent task add`: an empty screen would otherwise look like a
+/// broken run.
 ///
 /// Each task line starts with a symbol: `○` queued, `●` working, `◇` reported
 /// and awaiting review, `✓` for a passed task (`✓ <task> passed <title>`) or
@@ -21,9 +22,9 @@ use crate::clock;
 pub fn status(state: &RunState, now_ms: u64) -> String {
     let mut lines: Vec<String> = Vec::new();
     match &state.run {
-        None => lines.push("no run here · start one with shprd up".to_string()),
+        None => lines.push("no run here · start one with shprd run start".to_string()),
         Some(run) if state.tasks.is_empty() => lines.push(format!(
-            "run {} · no tasks yet · talk to the ★ orchestrator tab",
+            "run {} · no tasks yet · add one with shprd agent task add",
             run.run_id
         )),
         Some(_) => {
@@ -122,15 +123,15 @@ mod tests {
     fn a_directory_with_no_run_says_how_to_start_one() {
         assert_eq!(
             status(&RunState::default(), fixture::NOW),
-            "no run here · start one with shprd up"
+            "no run here · start one with shprd run start"
         );
     }
 
     #[test]
-    fn a_run_with_no_tasks_points_at_the_orchestrator() {
+    fn a_run_with_no_tasks_says_how_to_add_one() {
         assert_eq!(
             status(&empty_run("r1"), fixture::NOW),
-            "run r1 · no tasks yet · talk to the ★ orchestrator tab"
+            "run r1 · no tasks yet · add one with shprd agent task add"
         );
     }
 

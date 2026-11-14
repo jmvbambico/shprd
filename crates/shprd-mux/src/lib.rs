@@ -2,16 +2,17 @@
 //!
 //! Everything shprd does to a terminal multiplexer goes through [`Mux`]: open a
 //! workspace per repository, a tab per agent, a pane per process, and read back
-//! what the agent is doing. `shprd-mux-herdr` implements it for herdr today;
-//! `shprd-mux-tuios` will implement the same trait later, and
+//! what the agent is doing. `shprd-mux-herdr` implements it for herdr, and
 //! [`fake::FakeMux`] implements it for tests in other crates.
+//!
+//! // M10.2: the trait still speaks tabs because it models a terminal host;
+//! the space-per-task model shprd moves to is designed there, not here.
 //!
 //! The trait is deliberately process-shaped rather than shell-shaped: programs
 //! start from an argv, never from a string, so a branch name or a title can
 //! never turn into a command.
 
 pub mod fake;
-pub mod naming;
 pub mod types;
 
 use std::path::Path;

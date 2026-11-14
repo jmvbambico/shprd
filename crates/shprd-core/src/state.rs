@@ -41,7 +41,7 @@ pub struct RunState {
     pub finished: bool,
     /// The tasks the finished run ended with unfinished, in log order.
     ///
-    /// Non-empty only when a human ended the run anyway (`shprd down
+    /// Non-empty only when a human ended the run anyway (`shprd run finish
     /// --abandon`): it names the work that was left behind, and the branches
     /// that keep it alive after the run is archived.
     pub abandoned: Vec<TaskId>,

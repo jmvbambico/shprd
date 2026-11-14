@@ -8,8 +8,6 @@ members = [
     "crates/shprd-watch",
     "crates/shprd-mux",
     "crates/shprd-mux-herdr",
-    "crates/shprd-mux-tuios",
-    "crates/shprd-tui",
     "crates/shprd",
 ]
 

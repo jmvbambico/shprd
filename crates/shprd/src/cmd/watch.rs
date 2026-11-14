@@ -9,7 +9,7 @@ use shprd_core::event::{Actor, Event, EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{RunState, Task, TaskStatus};
-use shprd_mux::{AgentState, Mux, MuxError, PaneId, naming};
+use shprd_mux::{AgentState, Mux, MuxError, PaneId};
 use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
@@ -20,7 +20,7 @@ use shprd_watch::screen::{Sampler, ScreenSignal, sample};
 use crate::cli::WatchArgs;
 use crate::cmd::handoff::{HandoffRequest, handoff};
 use crate::cmd::spawn::{self, Program, SpawnEnv};
-use crate::cmd::{launch, review, verdict};
+use crate::cmd::{deliver, review, verdict};
 use crate::ctx::{CliError, Ctx};
 
 /// The newest `*.jsonl` file in `dir`, if the directory holds one.
@@ -411,9 +411,9 @@ fn blocked_on_a_prompt(mux: &dyn Mux, env: &SpawnEnv<'_>, pane: &PaneId) -> bool
     if matches!(mux.agent_state(pane), Ok(AgentState::Blocked)) {
         return true;
     }
-    env.programs
-        .iter()
-        .any(|program| launch::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_some())
+    env.programs.iter().any(|program| {
+        deliver::blocking_prompt(mux, pane, &program.spec.blocking_prompts).is_some()
+    })
 }
 
 /// One thing the orchestrator has to act on, and the event that says so.
@@ -842,7 +842,7 @@ fn awaiting_review(task: &Task) -> Option<u32> {
 /// transient failure would otherwise mark a working agent dry and hand its task
 /// to somebody else.
 fn pane_for(mux: &dyn Mux, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
-    let name = naming::workspace_name(&env.repo_name);
+    let name = spawn::workspace_name(&env.repo_name);
     let Some(workspace) = mux.find_workspace(&name)? else {
         return Ok(None);
     };
@@ -996,11 +996,11 @@ fn lock_path(log_path: &Path) -> PathBuf {
 /// Claims the run's watchdog slot, holding it until the process exits.
 ///
 /// One watchdog per run is what makes the verdicts and the hand-offs add up,
-/// and `up` cannot promise it alone: when a host refuses to close both the
-/// stale pane and its replacement, two `shprd watch` processes are left in one
-/// run. The kernel's lock settles that without one polling the other: the OS
-/// drops it when the process dies, so a crashed watchdog never leaves a claim
-/// behind, and a duplicate gets `Ok(None)` and steps aside.
+/// and nothing that starts one can promise it alone: when a host refuses to
+/// close both the stale pane and its replacement, two `shprd watch` processes
+/// are left in one run. The kernel's lock settles that without one polling the
+/// other: the OS drops it when the process dies, so a crashed watchdog never
+/// leaves a claim behind, and a duplicate gets `Ok(None)` and steps aside.
 ///
 /// `Ok(None)` is not an error: the duplicate is harmless once it exits.
 fn claim_run(log_path: &Path) -> Result<Option<std::fs::File>, CliError> {
@@ -1366,11 +1366,8 @@ project_dirs = []
     /// A fake multiplexer holding the repo's workspace.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(
-            &naming::workspace_name(&scratch.repo_name()),
-            scratch.root(),
-        )
-        .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace(&spawn::workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
 
@@ -1400,7 +1397,7 @@ project_dirs = []
 
     /// The pane the tab `tab` holds.
     fn pane_of_tab(mux: &FakeMux, scratch: &Scratch, tab: &str) -> PaneId {
-        let name = naming::workspace_name(&scratch.repo_name());
+        let name = spawn::workspace_name(&scratch.repo_name());
         let workspace = mux
             .find_workspace(&name)
             .unwrap_or_else(|err| panic!("{err}"))
@@ -2784,12 +2781,12 @@ project_dirs = []
         );
     }
 
-    /// The orchestrator `up` started, recorded in `mux` and the log.
+    /// The orchestrator a launcher started, recorded in `mux` and the log.
     ///
     /// The pane is a real tab in the fake host, because a prompt to a pane the
     /// host has never heard of fails.
     fn record_orchestrator(mux: &FakeMux, ctx: &Ctx, scratch: &Scratch) -> PaneId {
-        let name = naming::workspace_name(&scratch.repo_name());
+        let name = spawn::workspace_name(&scratch.repo_name());
         let workspace = mux
             .find_workspace(&name)
             .unwrap_or_else(|err| panic!("{err}"))

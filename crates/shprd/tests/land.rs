@@ -1003,7 +1003,7 @@ fn a_dropped_task_stops_blocking_landing_and_is_listed_in_the_pull_request() {
 }
 
 #[test]
-fn down_finishes_a_run_whose_remaining_task_was_dropped() {
+fn finish_ends_a_run_whose_remaining_task_was_dropped() {
     // The work landed and merged; the other task was dropped. Nothing is
     // stranded, so this is a normal finish: no `--abandon`, no question.
     let fixture = landed();
@@ -1013,7 +1013,7 @@ fn down_finishes_a_run_whose_remaining_task_was_dropped() {
     fixture.working_task("T2");
     fixture.ok(&["drop", "T2", "--reason", "not needed", "--yes"]);
 
-    fixture.ok(&["down"]);
+    fixture.ok(&["run", "finish"]);
     let finished = fixture.events().into_iter().rev().find_map(|event| {
         if let EventKind::RunFinished { abandoned } = event.kind {
             Some(abandoned)
