@@ -323,9 +323,17 @@ pub fn chat_tail(program: &str, home: &Path, cwd: &Path) -> Option<String> {
             })
             .ok()?;
         }
+        "opencode" | "kilo" => return sqlite::chat_tail_sqlite(&record, cwd).ok(),
         _ => return None,
     }
-    // The brief is the first thing a person (or the engine) wrote.
+    Some(tail_lines(said))
+}
+
+/// Renders conversation entries as the handover's chat tail.
+///
+/// The first person's message is the brief the agent started with, so it is
+/// dropped: a backup gets its own brief instead of the outgoing agent's.
+pub(crate) fn tail_lines(mut said: Vec<(bool, String)>) -> String {
     if let Some(first) = said.iter().position(|(person, _)| *person) {
         said.remove(first);
     }
@@ -350,7 +358,7 @@ pub fn chat_tail(program: &str, home: &Path, cwd: &Path) -> Option<String> {
             }
         }
     }
-    Some(text)
+    text
 }
 
 /// Whether a record line is a person speaking, and its words, for the CLI

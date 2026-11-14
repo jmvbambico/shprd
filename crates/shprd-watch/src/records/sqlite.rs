@@ -138,6 +138,47 @@ pub fn cut_sqlite(db: &Path, session_dir: &Path) -> Result<Option<Cut>, ReadErro
     Ok(cut)
 }
 
+/// The conversation of one session, latest last, as a handover carries it.
+///
+/// The message row names who spoke and the `part` rows hold the words; a
+/// database without the part table has no text to read, which is `None` rather
+/// than an empty chat that would claim the agent said nothing.
+pub fn chat_tail_sqlite(db: &Path, session_dir: &Path) -> Result<String, ReadError> {
+    let connection = open_read_only(db)?;
+    let directory = session_dir.to_string_lossy().to_string();
+    let mut messages = connection
+        .prepare(
+            "SELECT m.id, m.data FROM message m \
+             JOIN session s ON m.session_id = s.id \
+             WHERE s.directory = ?1 ORDER BY m.time_created, m.id",
+        )
+        .map_err(|e| ReadError::storage(db, e))?;
+    let rows = messages
+        .query_map((&directory,), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| ReadError::storage(db, e))?;
+    let mut said = Vec::new();
+    let mut any = false;
+    for row in rows {
+        let (id, data) = row.map_err(|e| ReadError::storage(db, e))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+            continue;
+        };
+        let person = match value.get("role").and_then(|v| v.as_str()) {
+            Some("assistant") => false,
+            Some("user") => true,
+            _ => continue,
+        };
+        any = true;
+        said.push((person, part_text(&connection, &id)));
+    }
+    if !any {
+        return Err(ReadError::storage(db, "no message rows to read"));
+    }
+    Ok(super::tail_lines(said))
+}
+
 /// The words of one message's parts, or empty when the table or row is absent.
 fn part_text(connection: &Connection, message_id: &str) -> String {
     let Ok(mut parts) =
@@ -467,6 +508,39 @@ mod tests {
         add_words(&path, 1, &nudge_words);
         add_words(&path, 3, "try again");
         assert_eq!(cut_sqlite(&path, worktree).unwrap().unwrap().tries, 1);
+    }
+
+    #[test]
+    fn a_chat_tail_skips_the_brief_and_keeps_the_conversation() {
+        let worktree = Path::new("/tmp/worktree");
+        let (_dir, path) = fixture(
+            "opencode.db",
+            &[
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_600_000,
+                    &user(1_793_073_600_000),
+                ),
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_700_000,
+                    &assistant(1_793_073_700_000, None),
+                ),
+                (
+                    "s1",
+                    "/tmp/worktree",
+                    1_793_073_800_000,
+                    &user(1_793_073_800_000),
+                ),
+            ],
+        );
+        add_words(&path, 0, "the brief");
+        add_words(&path, 2, "carry on");
+        let tail = chat_tail_sqlite(&path, worktree).unwrap();
+        assert!(!tail.contains("the brief"), "{tail}");
+        assert!(tail.contains("person: carry on"), "{tail}");
     }
 
     #[test]
