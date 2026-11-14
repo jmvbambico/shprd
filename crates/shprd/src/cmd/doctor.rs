@@ -344,6 +344,8 @@ fn worker_env(facts: &Facts) -> LaunchEnv {
         task: None,
         run: None,
         repo: std::env::current_dir().unwrap_or_default(),
+        home: facts.home.clone(),
+        data: facts.data.clone(),
     };
     env::launch_env(&facts.current, Role::Worker, &ctx)
 }
