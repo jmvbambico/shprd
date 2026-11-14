@@ -578,6 +578,15 @@ pub enum AskCommand {
     /// a `PermissionRequest` hook. Nothing is printed on timeout or on any
     /// error: the hook never decides by itself.
     Hook(AskHookArgs),
+    /// Raise one ask yourself, for a program whose CLI has no ask hook.
+    ///
+    /// This is the agent-facing form: it writes the card into the run's queue,
+    /// records it in the ledger and blocks until the person answers, then
+    /// prints the answer on stdout for the agent to carry on with. A timeout
+    /// prints nothing, leaves the card open and exits non-zero, because nobody
+    /// answered. A worker's brief names this verb only for a program whose
+    /// harness says it has no ask hook (`[asks] supported = false`).
+    Raise(AskRaiseArgs),
     /// Write a program's ask hook into a task's worktree-local config file.
     ///
     /// The target is the program's own project file — Claude Code's
@@ -586,6 +595,34 @@ pub enum AskCommand {
     /// no hook of its own (pi, opencode) is left untouched, and the board falls
     /// back to reading its screen.
     Install(AskInstallArgs),
+}
+
+/// Arguments for `ask raise`.
+#[derive(Debug, Args)]
+pub struct AskRaiseArgs {
+    /// What kind of ask this is: a question, a permission or a plan.
+    #[arg(long, value_enum, value_name = "KIND", default_value = "question")]
+    pub kind: AskKindArg,
+    /// What the person is asked, in one sentence naming what you need and why.
+    #[arg(long, value_name = "TEXT")]
+    pub text: String,
+    /// A choice the card offers. Repeat for two to four, your recommendation
+    /// first. A permission or plan with no choices offers Allow and Deny.
+    #[arg(long = "option", value_name = "LABEL")]
+    pub options: Vec<String>,
+    /// How long to wait for an answer, in seconds.
+    ///
+    /// Defaults to 1800 seconds. A timeout prints nothing on stdout, leaves the
+    /// card open and exits non-zero: nothing is decided on the person's behalf.
+    #[arg(long = "timeout-secs", value_name = "SECS")]
+    pub timeout_secs: Option<u64>,
+    /// The task the ask belongs to; normally `$SHPRD_TASK` inside a worker's
+    /// worktree.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+    /// The ask's id; one is made when it is omitted.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
 }
 
 /// Arguments for `ask install`.

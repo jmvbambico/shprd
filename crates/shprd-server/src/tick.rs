@@ -36,12 +36,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use shprd_core::config::{Config, MergePolicy};
 use shprd_core::event::{
-    Actor, EventKind, FallbackAction, Finding, LandOutcome, ProviderClass, Severity,
+    Actor, EventKind, FallbackAction, Finding, LandOutcome, ProviderClass, ResourceKind, Severity,
 };
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
-use shprd_core::state::{RunState, Task};
+use shprd_core::state::{ResourceStatus, RunState, Task};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
 use shprd_git::forge::{Forge, ForgeError};
 use shprd_git::git::Git;
@@ -338,6 +338,11 @@ impl Worker {
     pub fn tick(&self) -> Result<TickReport, ServerError> {
         let (state, _) =
             ledger::load(&self.repo).map_err(|err| ServerError::Tick(err.to_string()))?;
+        // A worktree an older build made has no `info/exclude` entries, so its
+        // worker would see shprd's own state as an untracked change. The repair
+        // is one file read per live worktree and writes nothing when the entries
+        // are already there, so every pass makes it.
+        self.repair_worktree_excludes(&state);
         // The settings are read on every pass, never kept from startup: a person
         // who changes the merge policy or the concurrency cap while the service
         // runs gets it on the next pass, exactly as the roles and the fallbacks
@@ -374,6 +379,28 @@ impl Worker {
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
         Ok(report)
+    }
+
+    /// Makes sure every live task worktree excludes shprd's own state.
+    ///
+    /// [`shprd_git::worktree::create`] writes the exclusions when it makes a
+    /// worktree, but a run that predates that (or a worktree a human restored)
+    /// has none, and its brief promises the worker that `.shprd/` and `.dagr/`
+    /// are already ignored. A failure is a warning, never a failed pass: the
+    /// work in the task matters more than a tidy `git status`.
+    fn repair_worktree_excludes(&self, state: &RunState) {
+        for ((kind, name), record) in &state.resources {
+            if *kind != ResourceKind::Worktree || record.status != ResourceStatus::Live {
+                continue;
+            }
+            let path = Path::new(name);
+            if !path.is_dir() {
+                continue;
+            }
+            if let Err(err) = shprd_git::worktree::ensure_state_excluded(path) {
+                tracing::warn!(%err, worktree = %path.display(), "could not exclude shprd's state in the worktree");
+            }
+        }
     }
 
     /// Whether the settings name a reviewer the engine may start.

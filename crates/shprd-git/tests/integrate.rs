@@ -280,3 +280,43 @@ fn open_integration_refuses_a_half_state() {
         Err(other) => panic!("expected BadState, got {other:?}"),
     }
 }
+
+/// An integration worktree an older build made excludes nothing; opening it
+/// again repairs that, so a landing that reuses it does not see shprd's own
+/// state as untracked work.
+#[test]
+fn reopening_an_integration_worktree_repairs_its_state_exclusions() {
+    let repo = Repo::new();
+    let layout = repo.layout();
+    let int = open(&repo, &layout);
+
+    // What an older build left behind.
+    let exclude = repo.path.join(".git/info/exclude");
+    if let Err(err) = std::fs::write(&exclude, "# exclude\n") {
+        panic!("write {}: {err}", exclude.display());
+    }
+    if let Err(err) = std::fs::create_dir_all(int.path.join(".shprd")) {
+        panic!("mkdir the state dir: {err}");
+    }
+    if let Err(err) = std::fs::write(int.path.join(".shprd/events.jsonl"), "{}\n") {
+        panic!("write the state file: {err}");
+    }
+
+    let again = open(&repo, &layout);
+    assert!(!again.created, "the second open reuses the worktree");
+    let text = match std::fs::read_to_string(&exclude) {
+        Ok(text) => text,
+        Err(err) => panic!("read {}: {err}", exclude.display()),
+    };
+    for pattern in ["/.shprd/", "/.dagr/"] {
+        assert!(
+            text.lines().any(|line| line.trim() == pattern),
+            "{pattern} was not repaired into:\n{text}"
+        );
+    }
+    let status = git_in(&int.path, &["status", "--porcelain"]);
+    assert!(
+        status.is_empty(),
+        "shprd's own state still shows as a change: {status}"
+    );
+}

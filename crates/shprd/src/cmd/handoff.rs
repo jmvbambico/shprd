@@ -400,18 +400,30 @@ pub fn handoff(
     let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
     let settings_role = env.settings.resolve(None).role(role_id);
+    let program = spawn::program_of(env.programs.as_slice(), &to.agent)?;
     let chosen = spawn::applied(
-        &spawn::program_of(env.programs.as_slice(), &to.agent)?.spec,
+        &program.spec,
         settings_role
             .as_ref()
             .and_then(|role| role.perm.as_ref())
             .map(|perm| perm.value.as_str()),
         settings_role.as_ref().is_some_and(|role| role.fast.value),
     );
+    // The newcomer's program decides how it raises a needs-you card.
+    let ask = spawn::AskRoute::of_harness(program.spec.asks.supported);
     // The newcomer's words are read before the workspace and the pane are
     // touched: a prompt that cannot be read must cost nothing.
     let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
     let workspace = spawn::workspace_of(mux, env)?;
+    // The newcomer keeps the worktree the attempt already has, which an older
+    // build may have made without shprd's state excluded. A warning, not a
+    // failure: the hand-off is about the work, not a tidy `git status`.
+    if let Err(err) = shprd_git::worktree::ensure_state_excluded(&worktree) {
+        eprintln!(
+            "warning: could not exclude shprd's state in {}: {err}",
+            worktree.display()
+        );
+    }
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
     let start = BriefInput {
@@ -427,6 +439,7 @@ pub fn handoff(
         // A handoff is the same attempt, so nothing was archived for it.
         archive: None,
         prompt: Some(&context.prompt),
+        ask,
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &[],
