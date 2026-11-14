@@ -8,6 +8,7 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use shprd_core::state::{RunState, TaskStatus};
 use ts_rs::TS;
 
@@ -555,6 +556,153 @@ pub enum ClientMessage {
     },
 }
 
+/// The layer one settings value came from, nearest first.
+///
+/// The same names `shprd settings show` prints: `task`, `repo_entry`, `you`,
+/// `repo_file` and `built_in`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "SettingsSourceDto.ts")]
+pub enum SettingsSourceDto {
+    /// The task's own record.
+    Task,
+    /// The person's entry for this repository.
+    RepoEntry,
+    /// The person's own defaults.
+    You,
+    /// The repository's committed `.shprd/settings.toml`.
+    RepoFile,
+    /// The values shprd ships.
+    BuiltIn,
+}
+
+/// One settings key, its value and the layer it came from.
+///
+/// `value` is a string, a number, a boolean or a list of strings, as the key
+/// takes; both it and `source` are `null` when nothing sets the key, because a
+/// settings page has to draw an unset field too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsValueDto.ts")]
+pub struct SettingsValueDto {
+    /// The key's canonical dotted name, e.g. `roles.worker.agent`.
+    pub key: String,
+    /// The value, or `null` when nothing sets it.
+    #[ts(type = "string | number | boolean | Array<string> | null")]
+    pub value: Option<Value>,
+    /// The layer that set it, or `null`.
+    #[ts(type = "SettingsSourceDto | null")]
+    pub source: Option<SettingsSourceDto>,
+}
+
+/// Every setting the service resolved, with where each value came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsDto.ts")]
+pub struct SettingsDto {
+    /// The name this repository's entry is keyed by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
+    /// Every key, in the order a settings page draws them.
+    pub values: Vec<SettingsValueDto>,
+    /// What is wrong with the resolved roles, if anything.
+    ///
+    /// Reading never refuses: a pair of settings that would not work is
+    /// reported here so the page can show it. A write of one is refused.
+    pub problems: Vec<String>,
+}
+
+/// One write to the settings.
+///
+/// A body without `value` removes the key, so it inherits again. `for_repo`
+/// writes this repository's entry instead of the person's own defaults. A
+/// repository's committed file is never written through the API: changing it is
+/// a commit in that repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsPutDto.ts")]
+pub struct SettingsPutDto {
+    /// The key to write, e.g. `tasks.merge`.
+    pub key: String,
+    /// The value to store, or absent to remove the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "string | number | boolean | Array<string>")]
+    pub value: Option<Value>,
+    /// Write this repository's entry instead of the person's own defaults.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_repo: bool,
+}
+
+/// What one write did, and the settings as they now resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsWriteDto.ts")]
+pub struct SettingsWriteDto {
+    /// What happened to the key.
+    pub outcome: SettingsOutcomeDto,
+    /// The settings, resolved after the write.
+    pub settings: SettingsDto,
+}
+
+/// What one write did to the key it named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "SettingsOutcomeDto.ts")]
+pub enum SettingsOutcomeDto {
+    /// The value is now in the scope's layer.
+    Stored,
+    /// The value equals what the scope would inherit, so nothing was stored.
+    EqualToInherited,
+    /// The key was removed from the scope's layer.
+    Removed,
+    /// The key was not in the scope's layer, so there was nothing to remove.
+    WasUnset,
+}
+
+impl From<shprd_core::settings::Source> for SettingsSourceDto {
+    fn from(source: shprd_core::settings::Source) -> Self {
+        match source {
+            shprd_core::settings::Source::Task => Self::Task,
+            shprd_core::settings::Source::RepoEntry => Self::RepoEntry,
+            shprd_core::settings::Source::You => Self::You,
+            shprd_core::settings::Source::RepoFile => Self::RepoFile,
+            shprd_core::settings::Source::BuiltIn => Self::BuiltIn,
+        }
+    }
+}
+
+impl From<shprd_core::settings::WriteOutcome> for SettingsOutcomeDto {
+    fn from(outcome: shprd_core::settings::WriteOutcome) -> Self {
+        match outcome {
+            shprd_core::settings::WriteOutcome::Stored => Self::Stored,
+            shprd_core::settings::WriteOutcome::EqualToInherited => Self::EqualToInherited,
+            shprd_core::settings::WriteOutcome::Removed => Self::Removed,
+            shprd_core::settings::WriteOutcome::WasUnset => Self::WasUnset,
+        }
+    }
+}
+
+impl SettingsDto {
+    /// Project resolved settings for the API.
+    pub fn from_resolved(
+        resolved: &shprd_core::settings::Resolved,
+        repo: Option<&str>,
+        problems: Vec<String>,
+    ) -> Self {
+        Self {
+            repo: repo.map(str::to_owned),
+            values: resolved
+                .rows()
+                .into_iter()
+                .map(|row| SettingsValueDto {
+                    key: row.key,
+                    value: row.value.as_ref().map(shprd_core::settings::Value::to_json),
+                    source: row.source.map(SettingsSourceDto::from),
+                })
+                .collect(),
+            problems,
+        }
+    }
+}
+
 /// Every type the API exports, as `(file name, file contents)`.
 ///
 /// Order does not matter: the generator writes one file per type and takes each
@@ -592,6 +740,12 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ErrorBody>()?,
         one::<WsMessage>()?,
         one::<ClientMessage>()?,
+        one::<SettingsSourceDto>()?,
+        one::<SettingsValueDto>()?,
+        one::<SettingsDto>()?,
+        one::<SettingsPutDto>()?,
+        one::<SettingsWriteDto>()?,
+        one::<SettingsOutcomeDto>()?,
     ])
 }
 

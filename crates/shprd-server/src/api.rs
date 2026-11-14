@@ -1,9 +1,11 @@
-//! The HTTP surface: five routes, one of them a socket.
+//! The HTTP surface: six routes, one of them a socket.
 //!
 //! `GET /api/health` is the only unauthenticated one — it is the handshake, not
 //! a secret. Everything else is behind the gate in `auth`. Reads answer from the
-//! fold (a snapshot or a change notice); the only write is `POST /api/action`,
-//! which hands one [`Action`] to `actions` and adds nothing of its own.
+//! fold (a snapshot or a change notice), except `GET /api/settings`, which
+//! answers the settings files as they resolve (`crate::settings`). The writes
+//! are `POST /api/action`, which hands one [`Action`] to `actions`, and
+//! `PUT /api/settings`, which writes one settings key.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -25,12 +27,14 @@ use tower_http::trace::TraceLayer;
 use crate::actions;
 use crate::auth;
 use crate::dto::{
-    Action, ActionReply, ChangeDto, ClientMessage, ErrorCode, HealthDto, SnapshotDto, WsMessage,
+    Action, ActionReply, ChangeDto, ClientMessage, ErrorCode, HealthDto, SettingsDto,
+    SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
+use crate::settings as settings_api;
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -104,6 +108,11 @@ pub(crate) struct AppState {
     pub(crate) after_write: Option<AfterWrite>,
     /// The bounds a socket lives under.
     pub(crate) ws: WsLimits,
+    /// The home directory the settings files live in, when there is one.
+    pub(crate) home: Option<PathBuf>,
+    /// The `data/` directory the harness table is read from, when this service
+    /// was given one. Only the settings checks need it.
+    pub(crate) data: Option<PathBuf>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -159,6 +168,8 @@ impl App {
             hub,
             after_write,
             ws: WsLimits::default(),
+            home: environment_home(),
+            data: shprd_agents::harness::data_dir(Some(repo)),
         };
         let router = router(state.clone());
         Ok(Self {
@@ -206,12 +217,45 @@ impl App {
     }
 }
 
+impl App {
+    /// Read and write the settings in `home` instead of the environment's home.
+    ///
+    /// A test that drives the settings routes passes its own home, so it can
+    /// never read or write the developer's own settings file.
+    pub fn with_home(mut self, home: PathBuf) -> Self {
+        self.state.home = Some(home);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Check the settings' roles against the harness table in `data`.
+    ///
+    /// Without it the roles are still resolved and written, just not checked
+    /// against what the programs offer: a machine with no data directory can
+    /// still read and write the workflow keys.
+    pub fn with_data(mut self, data: PathBuf) -> Self {
+        self.state.data = Some(data);
+        self.router = router(self.state.clone());
+        self
+    }
+}
+
+/// The home directory the settings files live in: `$SHPRD_HOME`, else `$HOME`.
+fn environment_home() -> Option<PathBuf> {
+    ["SHPRD_HOME", "HOME"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The whole API, with the gate in front of everything but health.
 pub(crate) fn router(state: AppState) -> Router {
     let guarded = Router::new()
         .route("/api/state", get(snapshot_handler))
         .route("/api/changes", get(changes))
         .route("/api/action", post(action))
+        .route("/api/settings", get(settings).put(put_settings))
         .route("/api/ws", get(socket))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
@@ -336,6 +380,21 @@ async fn action(
     let reply =
         blocking(move || actions::run(&repo, &actor, &hub, after_write.as_ref(), action)).await?;
     Ok(Json(reply?))
+}
+
+/// `GET /api/settings`: every key, its value and the layer it came from.
+async fn settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiReject> {
+    let answer = blocking(move || settings_api::read(&state)).await?;
+    answer.map(Json)
+}
+
+/// `PUT /api/settings`: write one key, and answer the settings as they now are.
+async fn put_settings(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<SettingsWriteDto>, ApiReject> {
+    let answer = blocking(move || settings_api::write(&state, &body)).await?;
+    answer.map(Json)
 }
 
 /// `GET /api/ws`: the same change notices, pushed.
