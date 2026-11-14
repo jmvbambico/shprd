@@ -679,6 +679,32 @@ fn a_value_is_checked_against_the_key_that_takes_it() {
 }
 
 #[test]
+fn a_roles_prompt_is_an_id_or_a_path_and_nothing_else() {
+    let key = Key::parse("roles.docs.prompt").expect("the key parses");
+    for good in [
+        "prompt:docs",
+        "prompt:worker",
+        "~/prompts/docs.md",
+        "/etc/shprd/docs.md",
+        "./docs.md",
+    ] {
+        assert!(
+            key.check(&Value::Text(good.to_owned())).is_ok(),
+            "{good} names a prompt"
+        );
+    }
+    for bad in ["prompt:", "", "   "] {
+        let refused = key
+            .check(&Value::Text(bad.to_owned()))
+            .expect_err("a prompt nothing can be read from is refused");
+        assert!(
+            refused.contains("prompt:<id>") || refused.contains("neither"),
+            "{bad}: {refused}"
+        );
+    }
+}
+
+#[test]
 fn a_value_typed_on_the_command_line_parses_by_its_kind() {
     let key = Key::parse("tasks.max_running").expect("the key parses");
     assert_eq!(

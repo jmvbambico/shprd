@@ -669,9 +669,11 @@ impl Key {
             ..
         } = self
             && let Some(text) = value.text()
-            && text.trim().is_empty()
         {
-            return Err("takes `prompt:<id>` or a path, not nothing".to_owned());
+            // A prompt is `prompt:<id>` or a path: the same rule the role is
+            // read with, checked when it is set so a broken reference is a
+            // refusal now rather than a spawn that cannot read its words.
+            crate::prompts::PromptRef::parse(text).map_err(|err| err.to_string())?;
         }
         Ok(())
     }
@@ -1907,7 +1909,11 @@ impl Resolved {
 }
 
 /// Everything one resolution reads from disk: the person's file and the repo's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// [`Loaded::default`] is "no files at all": nothing sets anything, so every
+/// key resolves to the built-in value and every role to its shipped identity. A
+/// test that does not care about settings starts there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Loaded {
     /// The person's file.
     pub file: File,

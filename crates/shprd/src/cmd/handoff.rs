@@ -31,6 +31,13 @@ pub struct HandoffRequest {
     /// The agent taking it over, as `<program>/<model>`; `None` picks the next
     /// configured worker after the outgoing one.
     pub to: Option<String>,
+    /// The role whose words the newcomer starts with; the worker's when none
+    /// is named.
+    ///
+    /// A backup handover (a provider cut the worker's turn off) names `backup`,
+    /// so the newcomer reads what a takeover means and then the task, instead of
+    /// the brief written for the program that stopped.
+    pub role: Option<String>,
     /// True when a fresh process of the outgoing agent is a valid replacement.
     ///
     /// A worker whose process died is gone; the program is not. With this set
@@ -390,10 +397,23 @@ pub fn handoff(
     let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
     let brief_path = handoff_brief_path(&env.briefs_dir, &env.run, &task.id, attempt.n, handoff_no);
     let checkpoint = checkpoint(&worktree, &from)?;
+    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
+    let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
+    let settings_role = env.settings.resolve(None).role(role_id);
+    let chosen = spawn::applied(
+        &spawn::program_of(env.programs.as_slice(), &to.agent)?.spec,
+        settings_role
+            .as_ref()
+            .and_then(|role| role.perm.as_ref())
+            .map(|perm| perm.value.as_str()),
+        settings_role.as_ref().is_some_and(|role| role.fast.value),
+    );
+    // The newcomer's words are read before the workspace and the pane are
+    // touched: a prompt that cannot be read must cost nothing.
+    let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
     let workspace = spawn::workspace_of(mux, env)?;
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
-    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let start = BriefInput {
         task,
         run: &env.run,
@@ -405,8 +425,17 @@ pub fn handoff(
         skills: &skills,
         // A handoff is the same attempt, so nothing was archived for it.
         archive: None,
+        prompt: Some(&context.prompt),
+        settings: Some(&context.settings),
+        role: context.role.as_ref(),
     };
-    let base = base_brief(env, &task.id, attempt.n, &start);
+    // A worker continuing an attempt reads the brief it was launched with; a
+    // different role reads its own words, because that brief was written for
+    // the program that stopped.
+    let base = match role_id == spawn::BRIEF_ROLE {
+        true => base_brief(env, &task.id, attempt.n, &start),
+        false => spawn::render_brief(&start),
+    };
     let brief = match &req.opening {
         Some(opening) => format!("{opening}\n\n{base}"),
         None => handoff_brief(
@@ -456,6 +485,7 @@ pub fn handoff(
         &workspace,
         &Launching {
             pick: &to,
+            applied: &chosen,
             task: &task.id,
             effort: None,
             brief: &brief,
@@ -585,6 +615,7 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
         task: args.task.clone(),
         reason: args.reason.clone(),
         to: args.to.clone(),
+        role: None,
         same_worker: false,
         opening: None,
     };
@@ -747,6 +778,8 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                home: self.home.path().to_path_buf(),
+                settings: shprd_core::settings::Loaded::default(),
                 run: "t1".to_string(),
                 base_branch: "integration/m5".to_string(),
                 repo_name: self.repo_name(),
@@ -796,6 +829,7 @@ project_dirs = []
             task: "T1".to_string(),
             reason: "the agent hit its limit".to_string(),
             to: to.map(str::to_string),
+            role: None,
             same_worker: false,
             opening: None,
         }
@@ -834,6 +868,39 @@ project_dirs = []
             report.brief.to_string_lossy().ends_with("T1-a1-h1.md"),
             "{:?}",
             report.brief
+        );
+    }
+
+    #[test]
+    fn a_backup_hand_off_uses_the_backup_roles_words() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let request = HandoffRequest {
+            task: "T1".to_string(),
+            reason: "the provider cut sh's turn off".to_string(),
+            to: Some("pi".to_string()),
+            role: Some("backup".to_string()),
+            same_worker: false,
+            opening: Some("<shprd-backup>context</shprd-backup>".to_string()),
+        };
+        let report = handoff(&mux, &env, &request).unwrap_or_else(|err| panic!("{err}"));
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        // The backup role's shipped words and a freshly rendered task, not the
+        // brief the stopped worker was launched with, with the ladder's
+        // takeover context before both.
+        assert!(
+            brief.contains("You are taking over one shprd task"),
+            "the backup role's prompt is in the brief: {brief}"
+        );
+        assert!(brief.contains("<shprd-backup>"), "{brief}");
+        assert!(brief.contains("# T1 Hand a task over"), "{brief}");
+        assert!(brief.contains("## Your settings"), "{brief}");
+        assert!(
+            brief.contains("- Program: pi (this task)"),
+            "the block names the program that took over: {brief}"
         );
     }
 

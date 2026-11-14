@@ -16,6 +16,7 @@ pub mod land;
 pub mod live_fallback;
 pub mod live_news;
 pub mod override_rule;
+pub mod prompts;
 pub mod readmit;
 pub mod review;
 pub mod roster;
@@ -57,6 +58,11 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.home.as_deref(),
             root.as_deref(),
         );
+    }
+    // `prompts` reads and writes files, not a log, so it answers outside a
+    // repository too.
+    if let Some(Command::Prompts { cmd }) = &cli.command {
+        return prompts::run(cmd, cli.global.json, cli.global.home.as_deref());
     }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
@@ -103,6 +109,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             let root = settings_root(cli.global.repo.as_deref());
             settings::run(&cmd, ctx.json, cli.global.home.as_deref(), root.as_deref())
         }
+        // Unreachable in practice: `prompts` returns above.
+        Some(Command::Prompts { cmd }) => prompts::run(&cmd, ctx.json, None),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),

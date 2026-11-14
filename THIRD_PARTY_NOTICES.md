@@ -55,7 +55,10 @@ SOFTWARE.
   `retry_pass`), `mods/tasks/bin/herdr_task/news.py` (`activity()`,
   `stall_of()`, `news_line()`, `news_state()`, `news_pass()`),
   `bin/shepherdr` (`HOOKS`), `mods/chat/ask-hook.sh`,
-  `service/asks.ts`, `core/asks.js`
+  `service/asks.ts`, `core/asks.js`,
+  `mods/tasks/bin/herdr_task/templates.py` (`instructions()`, `OLD_WORKERS`,
+  the first-use write and the upgrade of an untouched default),
+  `templates/assistant.md`, `templates/worker.md`, `templates/reviewer.md`
 - Commit: a3f327a (tag v3.1.34)
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
@@ -79,10 +82,14 @@ SOFTWARE.
   — in
   `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
   `crates/shprd-watch/src/fallback.rs` and the events that record it in
-  `crates/shprd-core/src/{event,state,rules}.rs`; and the news a space's
-  coordinator is told — the settle window, one line per change, one message per
-  space and the re-check before sending — in `crates/shprd-views/src/news.rs`
-  and `crates/shprd-server/src/news.rs`
+  `crates/shprd-core/src/{event,state,rules}.rs`; and the role prompts — the
+  shipped words per built-in role, the first-use write to
+  `~/.config/shprd/prompts/`, the auto-upgrade of a file byte-identical to a
+  retired default, an edit that is never overwritten, and the backup's
+  takeover brief — in `data/templates/` and `crates/shprd-core/src/prompts.rs`;
+  and the news a space's coordinator is told — the settle window, one line per
+  change, one message per space and the re-check before sending — in
+  `crates/shprd-views/src/news.rs` and `crates/shprd-server/src/news.rs`
 - License: MIT
 
 MIT License

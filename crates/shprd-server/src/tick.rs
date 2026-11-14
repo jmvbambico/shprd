@@ -328,6 +328,33 @@ impl Worker {
         Ok(report)
     }
 
+    /// The programs a cut worker is handed to, in order: the worker role's own
+    /// fallback list, then the configured workers.
+    ///
+    /// The role's list is what the brief's Settings block prints, so the ladder
+    /// and the block agree. A settings file that cannot be read (or a role that
+    /// names nobody) leaves the configured workers, which is the order a run had
+    /// before the role settings existed. A `program/model` entry counts as its
+    /// program, because a backup is chosen by program.
+    fn worker_fallbacks(&self) -> Vec<String> {
+        let mut programs: Vec<String> =
+            match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
+                Ok(loaded) => loaded
+                    .resolve(None)
+                    .role("worker")
+                    .map(|role| role.fallback.value)
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+        for worker in &self.config.roster.workers {
+            let program = worker.split('/').next().unwrap_or(worker).trim();
+            if !program.is_empty() && !programs.iter().any(|kept| kept == program) {
+                programs.push(program.to_owned());
+            }
+        }
+        programs
+    }
+
     /// Tells the coordinator what changed, when a news desk is wired.
     ///
     /// The state is folded again so the pass's own writes are news on this pass.
@@ -359,9 +386,9 @@ impl Worker {
 
     /// Reads the ladder's facts and plans its actions.
     ///
-    /// The fallback list is read from the existing roster until M9.3's resolved
-    /// role settings land; that is the seam: the same `worker` key will carry a
-    /// role's own `fallback` list when it exists.
+    /// The fallback list is the worker role's own (`roles.worker.fallback`),
+    /// which is the list the brief's Settings block prints, then the configured
+    /// workers, so a setting nobody made keeps the roster's order.
     fn ladder_plan(&self, state: &RunState) -> LadderPass {
         let Some(source) = &self.fallback else {
             return LadderPass::default();
@@ -375,10 +402,7 @@ impl Worker {
         }
         let config = LadderConfig {
             waits_ms: Vec::new(),
-            fallbacks: BTreeMap::from([(
-                String::from("worker"),
-                self.config.roster.workers.clone(),
-            )]),
+            fallbacks: BTreeMap::from([(String::from("worker"), self.worker_fallbacks())]),
             installed: source.installed(),
             signed_in: source.signed_in(),
         };

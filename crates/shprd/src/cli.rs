@@ -107,6 +107,18 @@ pub enum Command {
         #[command(subcommand)]
         cmd: SettingsCommand,
     },
+    /// Read and write the prompts the roles start with.
+    ///
+    /// The shipped words are written to `~/.config/shprd/prompts/<id>.md`
+    /// (`$XDG_CONFIG_HOME` wins) on first use. An installed file is replaced
+    /// with today's words only when it is byte-identical to a retired default,
+    /// so an unedited default never goes stale and an edit is never lost;
+    /// `reset` is the explicit way back to the shipped words.
+    Prompts {
+        /// Which prompts verb.
+        #[command(subcommand)]
+        cmd: PromptsCommand,
+    },
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
     /// Watch every working agent and hand work over when one goes dry.
@@ -431,6 +443,28 @@ pub struct SettingsUnsetArgs {
     /// Refused: a task's own settings come from its attempts in the run log.
     #[arg(long, value_name = "TASK")]
     pub task: Option<String>,
+}
+
+/// Prompts verbs.
+#[derive(Debug, Subcommand)]
+pub enum PromptsCommand {
+    /// Print every prompt, its state and the file it is stored in.
+    List,
+    /// Print one prompt's words.
+    Show(PromptIdArgs),
+    /// Print the file one prompt is stored in, writing it first on first use.
+    Path(PromptIdArgs),
+    /// Put the shipped words back over whatever the file holds.
+    Reset(PromptIdArgs),
+}
+
+/// Arguments naming one prompt.
+#[derive(Debug, Args)]
+pub struct PromptIdArgs {
+    /// The prompt: `assistant` (the coordinator's, also `coordinator`),
+    /// `worker`, `reviewer`, `backup`, or the id of a prompt of your own.
+    #[arg(value_name = "ID")]
+    pub id: String,
 }
 
 /// Arguments for `doctor`.

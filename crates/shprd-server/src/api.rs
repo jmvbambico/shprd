@@ -1,4 +1,4 @@
-//! The HTTP surface: six routes, one of them a socket.
+//! The HTTP surface: one route per read, write and notice, one of them a socket.
 //!
 //! `GET /api/health` is the only unauthenticated one — it is the handshake, not
 //! a secret. Everything else is behind the gate in `auth`. Reads answer from the
@@ -14,7 +14,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
-use axum::extract::{Query, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -29,11 +29,12 @@ use crate::actions;
 use crate::auth;
 use crate::dto::{
     Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ClientMessage, ErrorCode,
-    HealthDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    HealthDto, PromptDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
+use crate::prompts as prompts_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
 
@@ -114,6 +115,10 @@ pub(crate) struct AppState {
     /// The `data/` directory the harness table is read from, when this service
     /// was given one. Only the settings checks need it.
     pub(crate) data: Option<PathBuf>,
+    /// The prompts directory, when the caller set one. A service that does not
+    /// resolve it from its home directory; a test always sets it, so it can
+    /// never touch the developer's own prompts.
+    pub(crate) prompts_dir: Option<PathBuf>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -171,6 +176,7 @@ impl App {
             ws: WsLimits::default(),
             home: environment_home(),
             data: shprd_agents::harness::data_dir(Some(repo)),
+            prompts_dir: None,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -245,6 +251,16 @@ impl App {
         self
     }
 
+    /// Read and write the prompts in `dir` instead of under the home directory.
+    ///
+    /// A test passes its own directory, so it can never read or write the
+    /// developer's own prompt files.
+    pub fn with_prompts_dir(mut self, dir: PathBuf) -> Self {
+        self.state.prompts_dir = Some(dir);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Serve with no harness table at all, whatever the environment would find.
     ///
     /// A test uses it to prove what a machine without a data directory does,
@@ -274,6 +290,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks/answer", post(answer))
         .route("/api/action", post(action))
         .route("/api/settings", get(settings).put(put_settings))
+        .route("/api/prompts/{id}", get(read_prompt).put(put_prompt))
         .route("/api/ws", get(socket))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
@@ -443,6 +460,25 @@ async fn put_settings(
     body: Bytes,
 ) -> Result<Json<SettingsWriteDto>, ApiReject> {
     let answer = blocking(move || settings_api::write(&state, &body)).await?;
+    answer.map(Json)
+}
+
+/// `GET /api/prompts/:id`: one prompt's words, its file and its state.
+async fn read_prompt(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<PromptDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::read(&state, &id)).await?;
+    answer.map(Json)
+}
+
+/// `PUT /api/prompts/:id`: store the person's words over the file.
+async fn put_prompt(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    body: Bytes,
+) -> Result<Json<PromptDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::write(&state, &id, &body)).await?;
     answer.map(Json)
 }
 
