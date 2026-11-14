@@ -53,6 +53,84 @@ impl From<TaskStatus> for TaskStatusDto {
     }
 }
 
+/// The eight words a board row can show, from M8.5's status rules.
+///
+/// It is [`shprd_views::derived::DerivedStatus`] with a TypeScript type on it:
+/// the service derives it from the fold and hands it to the client beside the
+/// stored [`TaskStatusDto`], so a card and the CLI's `status` never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "DerivedStatusDto.ts")]
+pub enum DerivedStatusDto {
+    /// Added, nothing started on it.
+    ToDo,
+    /// Starts by itself at a time.
+    Scheduled,
+    /// Waits for something before it may start.
+    Queued,
+    /// An agent is on it, or the engine is finishing its work.
+    Working,
+    /// Nothing moves without the person.
+    NeedsYou,
+    /// Its agent is at rest and said ready; what is left is the person's.
+    Ready,
+    /// Its merge is under way, and nothing about it is the person's.
+    Merging,
+    /// Finished, or it never will be.
+    Done,
+}
+
+impl From<shprd_views::derived::DerivedStatus> for DerivedStatusDto {
+    fn from(status: shprd_views::derived::DerivedStatus) -> Self {
+        use shprd_views::derived::DerivedStatus;
+        match status {
+            DerivedStatus::ToDo => Self::ToDo,
+            DerivedStatus::Scheduled => Self::Scheduled,
+            DerivedStatus::Queued => Self::Queued,
+            DerivedStatus::Working => Self::Working,
+            DerivedStatus::NeedsYou => Self::NeedsYou,
+            DerivedStatus::Ready => Self::Ready,
+            DerivedStatus::Merging => Self::Merging,
+            DerivedStatus::Done => Self::Done,
+        }
+    }
+}
+
+/// Why a task reads Needs you.
+///
+/// It is [`shprd_views::derived::Need`] with a TypeScript type on it: an ask,
+/// something shprd found, an agent that went quiet, no agent left, or a
+/// provider cut whose retries are used up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "NeedKindDto.ts")]
+pub enum NeedKindDto {
+    /// Something shprd found that only the person can settle.
+    Attention,
+    /// The agent asks something: a question, a permission, a plan, a folder to
+    /// trust.
+    Asks,
+    /// The agent went quiet without saying ready.
+    Reply,
+    /// No agent is left on it.
+    Stopped,
+    /// Its provider cut it off and the retries are used up.
+    Provider,
+}
+
+impl From<shprd_views::derived::Need> for NeedKindDto {
+    fn from(need: shprd_views::derived::Need) -> Self {
+        use shprd_views::derived::Need;
+        match need {
+            Need::Attention => Self::Attention,
+            Need::Asks => Self::Asks,
+            Need::Reply => Self::Reply,
+            Need::Stopped => Self::Stopped,
+            Need::Provider => Self::Provider,
+        }
+    }
+}
+
 /// What an agent reported about an attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -124,8 +202,11 @@ pub struct TaskDto {
     pub id: String,
     /// Human-readable title.
     pub title: String,
-    /// Where the task is in its lifecycle.
+    /// Where the task is in its lifecycle, as the log stores it.
     pub status: TaskStatusDto,
+    /// The word a person sees for it, from M8.5's status rules, with why it
+    /// needs them when it does.
+    pub derived: TaskDerivedDto,
     /// Repo-relative paths the task may change.
     pub scope: Vec<String>,
     /// What must be true when the task is done.
@@ -147,6 +228,28 @@ pub struct TaskDto {
     pub last_status: Option<TaskProgressDto>,
     /// Attempts made so far, in order.
     pub attempts: Vec<AttemptDto>,
+}
+
+/// One task as a person sees it: its derived word, and why it needs them.
+///
+/// The service derives it from the fold (M8.5's [`shprd_views::derived`]
+/// rules), an open ask included, so a card shows **Needs you** while an agent
+/// waits. It reads the log alone: a task whose agent went quiet without saying
+/// ready reads as Working here rather than claiming an agent stopped, since the
+/// snapshot handler has no terminal to look at (the service's own tick does).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskDerivedDto.ts")]
+pub struct TaskDerivedDto {
+    /// The eight-word status a row shows.
+    pub status: DerivedStatusDto,
+    /// Why it needs the person, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub need: Option<NeedKindDto>,
+    /// The row's second line, at most 40 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
 }
 
 /// The last progress line an agent recorded for a task.
@@ -846,6 +949,9 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
     }
     Ok(vec![
         one::<TaskStatusDto>()?,
+        one::<DerivedStatusDto>()?,
+        one::<NeedKindDto>()?,
+        one::<TaskDerivedDto>()?,
         one::<ReportStatusDto>()?,
         one::<SeverityDto>()?,
         one::<RunDto>()?,
