@@ -309,16 +309,9 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_kilo(dir: &std::path::Path, stdout: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("kilo");
         let script = format!("#!/bin/sh\necho '{stdout}'\n");
-        if let Err(error) = std::fs::write(&path, script) {
-            panic!("should write fake kilo: {error}");
-        }
-        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        {
-            panic!("should make fake kilo executable: {error}");
-        }
+        crate::scripted::write_executable(&path, &script);
         path
     }
 
@@ -351,17 +344,7 @@ mod tests {
     /// A hanging shell script standing in for a wedged `kilo` binary.
     fn write_hanging_script(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        if let Err(error) = std::fs::write(&path, "#!/bin/sh\nsleep 30\n") {
-            panic!("writing {name} failed: {error}");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::Permissions::from_mode(0o755);
-            if let Err(error) = std::fs::set_permissions(&path, mode) {
-                panic!("chmod {name} failed: {error}");
-            }
-        }
+        crate::scripted::write_executable(&path, "#!/bin/sh\nsleep 30\n");
         path
     }
 
