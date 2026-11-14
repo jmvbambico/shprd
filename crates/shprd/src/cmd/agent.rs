@@ -129,9 +129,13 @@ fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
             "tab": report.tab,
             "brief": report.brief.display().to_string(),
             "skills": report.skills,
+            "warnings": report.warnings,
         });
         println!("{value}");
         return;
+    }
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
     }
     if let Some(replaced) = &report.replaced {
         let line = replaced.line(&report.task);
@@ -196,8 +200,12 @@ pub(crate) fn start_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<Strin
         effort: None,
     };
     let report = spawn::spawn(&mux, &env, &request).map_err(|err| err.to_string())?;
+    let warnings = match report.warnings.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", report.warnings.join("; ")),
+    };
     Ok(format!(
-        "started {} attempt {} with {} in {} (tab {:?})",
+        "started {} attempt {} with {} in {} (tab {:?}){warnings}",
         report.task,
         report.attempt,
         report.agent,

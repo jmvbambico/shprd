@@ -203,13 +203,29 @@ pub fn list_models(
     path_env: &str,
     timeout: Duration,
 ) -> Result<Option<Vec<String>>, ModelError> {
+    Ok(load_catalog(spec, path_env, timeout)?
+        .map(|catalog| catalog.models.into_iter().map(|model| model.id).collect()))
+}
+
+/// Read a harness's whole catalog by asking its list command, or [`None`] when
+/// its spec has no command.
+///
+/// Unlike [`list_models`], this keeps each model's effort levels, which is what
+/// makes a model that cannot think (`pi`'s `thinking: no`) tellable apart from
+/// one that can. A listing that cannot be read is [`ModelError`] rather than an
+/// empty catalog, so a caller can decide whether to warn or stay silent.
+pub fn load_catalog(
+    spec: &HarnessSpec,
+    path_env: &str,
+    timeout: Duration,
+) -> Result<Option<Catalog>, ModelError> {
     let models: &ModelsSpec = &spec.models;
     let Some(command) = &models.list_command else {
         return Ok(None);
     };
     let mut parts = command.iter();
     let Some(program) = parts.next() else {
-        return Ok(Some(Vec::new()));
+        return Ok(Some(Catalog::default()));
     };
     let Some(binary) = detect::find_binary(program, path_env) else {
         return Err(ModelError::MissingBinary {
@@ -219,10 +235,7 @@ pub fn list_models(
     let args: Vec<String> = parts.cloned().collect();
     let output = detect::run_with_timeout(&binary, &args, &[], timeout)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let catalog = parse_catalog(spec, &stdout)?;
-    Ok(Some(
-        catalog.models.into_iter().map(|model| model.id).collect(),
-    ))
+    parse_catalog(spec, &stdout).map(Some)
 }
 
 /// One model a program offers, as its catalog describes it.
@@ -254,6 +267,23 @@ pub struct Catalog {
     pub efforts: Vec<String>,
 }
 
+/// Whether an effort level can reach a model, as its catalog says.
+///
+/// Used to keep a level off a model that cannot use it: `pi --list-models` says
+/// `thinking: no` for some models, and passing `--thinking low` to those looks
+/// as if the setting applied when it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffortFit {
+    /// The catalog names no model, or has not heard of this one: nothing is known.
+    Unknown,
+    /// The model takes the level.
+    Applies,
+    /// The model takes no effort at all.
+    TakesNone,
+    /// The model takes effort, but not this level; the levels it takes.
+    Lacks(Vec<String>),
+}
+
 impl Catalog {
     /// The model called `id`, if the catalog names one.
     pub fn model(&self, id: &str) -> Option<&CatalogModel> {
@@ -271,6 +301,55 @@ impl Catalog {
         match self.model(model) {
             Some(found) => &found.efforts,
             None => &self.efforts,
+        }
+    }
+
+    /// Whether `effort` can reach `model`, as far as this catalog knows.
+    ///
+    /// [`EffortFit::Unknown`] is the honest answer when the catalog names no
+    /// model or has not heard of this one: a stale listing must not take a
+    /// working level away.
+    pub fn effort_fit(&self, model: Option<&str>, effort: &str) -> EffortFit {
+        let Some(model) = model else {
+            return EffortFit::Unknown;
+        };
+        let Some(found) = self.model(model) else {
+            return EffortFit::Unknown;
+        };
+        if found.efforts.is_empty() {
+            return EffortFit::TakesNone;
+        }
+        if found.efforts.iter().any(|level| level == effort) {
+            EffortFit::Applies
+        } else {
+            EffortFit::Lacks(found.efforts.clone())
+        }
+    }
+
+    /// The warning an effort level earns when it cannot reach `model`, if it
+    /// cannot: `None` when the level applies or the catalog does not know.
+    ///
+    /// The words are the same wherever the check runs — settings validation,
+    /// `shprd settings show` and the launch — so a person reads one sentence
+    /// about one value, not three variants of it.
+    pub fn effort_warning(
+        &self,
+        program: &str,
+        model: Option<&str>,
+        effort: &str,
+    ) -> Option<String> {
+        let model = model?;
+        match self.effort_fit(Some(model), effort) {
+            EffortFit::TakesNone => Some(format!(
+                "`{program}` lists `{model}` as not thinking, so the effort `{effort}` has no \
+                 effect: the flag is dropped"
+            )),
+            EffortFit::Lacks(levels) => Some(format!(
+                "`{program}` does not list `{effort}` for `{model}` (it takes {}), so the flag is \
+                 dropped",
+                levels.join(", ")
+            )),
+            EffortFit::Applies | EffortFit::Unknown => None,
         }
     }
 
@@ -783,6 +862,49 @@ levels = ["off", "low", "high"]"#,
             ["off", "low", "high"]
         );
         assert!(catalog.efforts_for("local/tiny").is_empty());
+    }
+
+    #[test]
+    fn a_no_thinking_model_has_no_effort_to_give() {
+        let spec = harness_spec(
+            "pi",
+            r#"list_command = ["pi", "--list-models"]
+parser = "pi_table"
+
+[models.efforts]
+source = "static"
+levels = ["off", "low", "high"]"#,
+        );
+        let catalog = catalog(&spec, "pi-models-thinking.txt");
+        let flat = "Command Code/deepseek/deepseek-v4.1-flash";
+        let thinking = "anthropic/claude-opus-4-8";
+
+        assert_eq!(catalog.effort_fit(Some(flat), "high"), EffortFit::TakesNone);
+        let warning = match catalog.effort_warning("pi", Some(flat), "high") {
+            Some(warning) => warning,
+            None => panic!("a model that cannot think earns a warning"),
+        };
+        assert!(warning.contains("not thinking"), "{warning}");
+        assert!(warning.contains("dropped"), "{warning}");
+
+        assert_eq!(
+            catalog.effort_fit(Some(thinking), "high"),
+            EffortFit::Applies
+        );
+        assert_eq!(catalog.effort_warning("pi", Some(thinking), "high"), None);
+
+        // A level the model does not take, a model the catalog never saw, and
+        // a role that names no model are all told apart from these two.
+        assert_eq!(
+            catalog.effort_fit(Some(thinking), "max"),
+            EffortFit::Lacks(vec!["off".to_owned(), "low".to_owned(), "high".to_owned()])
+        );
+        assert_eq!(
+            catalog.effort_fit(Some("nobody/nothing"), "high"),
+            EffortFit::Unknown
+        );
+        assert_eq!(catalog.effort_fit(None, "high"), EffortFit::Unknown);
+        assert_eq!(catalog.effort_warning("pi", None, "high"), None);
     }
 
     #[test]
