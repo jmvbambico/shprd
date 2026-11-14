@@ -423,11 +423,13 @@ pub fn handoff(
         branch: &attempt.branch,
         worktree: &attempt.worktree,
         skills: &skills,
+        gates: &env.gates,
         // A handoff is the same attempt, so nothing was archived for it.
         archive: None,
         prompt: Some(&context.prompt),
         settings: Some(&context.settings),
         role: context.role.as_ref(),
+        warnings: &[],
     };
     // A worker continuing an attempt reads the brief it was launched with; a
     // different role reads its own words, because that brief was written for
@@ -795,6 +797,9 @@ project_dirs = []
                     workers: vec!["tdd".to_string()],
                     ..Skills::default()
                 },
+                gates: vec!["cargo test --workspace".to_string()],
+                catalogs: std::collections::BTreeMap::new(),
+                data_dir: self.home.path().to_path_buf(),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
