@@ -41,6 +41,7 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
         needs: state
             .escalations
             .iter()
+            .filter(|escalation| still_needs_a_person(state, escalation))
             .map(|escalation| NeedDto {
                 task: escalation.task.clone(),
                 body: escalation.body.clone(),
@@ -51,6 +52,24 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
         asks: open_asks(state, now_ms),
         finished: state.finished,
     }
+}
+
+/// Whether an escalation is still the board's to show.
+///
+/// A task that landed or was dropped has nobody left to ask: the escalation that
+/// held it back is history, and a card that kept it would ask a person to
+/// approve work that is already in. An escalation about no single task (a run's
+/// own) is always kept: the fold has nothing to resolve it against.
+fn still_needs_a_person(state: &RunState, escalation: &shprd_core::state::Escalation) -> bool {
+    let Some(task) = escalation.task.as_deref() else {
+        return true;
+    };
+    state.tasks.get(task).is_none_or(|task| {
+        !matches!(
+            task.status,
+            shprd_core::state::TaskStatus::Integrated | shprd_core::state::TaskStatus::Dropped
+        )
+    })
 }
 
 /// Every ask still open at `now_ms`, oldest first.
@@ -229,6 +248,46 @@ mod tests {
             },
         ];
         RunState::fold(&events).expect("the fixture log folds")
+    }
+
+    #[test]
+    fn a_landed_task_keeps_no_needs_you_card() {
+        // The M9 gate found `/api/state` still listing the escalation that held a
+        // task back after the task had landed: a board reading `needs` would ask
+        // a person to approve work that is already in.
+        let mut state = run_with_a_task();
+        state.escalations.push(shprd_core::state::Escalation {
+            task: Some("T1".to_string()),
+            body: "T1 is ready to land: run `shprd approve T1`".to_string(),
+            default_action: "wait for a human to approve T1".to_string(),
+            seq: 3,
+        });
+        let open = snapshot(&state, NOW);
+        assert_eq!(open.needs.len(), 1, "the task still waits on a person");
+
+        // Landing the task resolves it: nothing is left to decide.
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .status = shprd_core::state::TaskStatus::Integrated;
+        let landed = snapshot(&state, NOW);
+        assert!(
+            landed.needs.is_empty(),
+            "a landed task needs nobody: {:?}",
+            landed.needs
+        );
+
+        // A run-wide escalation is not a task's, so it stays.
+        state.escalations.push(shprd_core::state::Escalation {
+            task: None,
+            body: "the orchestrator is waiting on its own prompt".to_string(),
+            default_action: "answer it in its tab".to_string(),
+            seq: 4,
+        });
+        let run_wide = snapshot(&state, NOW);
+        assert_eq!(run_wide.needs.len(), 1, "{:?}", run_wide.needs);
+        assert!(run_wide.needs[0].task.is_none());
     }
 
     #[test]
