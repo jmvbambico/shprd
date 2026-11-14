@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
+use shprd_core::spawn;
 use thiserror::Error;
 
 /// A pull request, as the forge numbers and links it.
@@ -168,14 +169,14 @@ impl GhForge {
 
     /// Runs the program and returns its raw output, whatever its exit status.
     fn exec(&self, args: &[String]) -> Result<Output, ForgeError> {
-        Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(args)
             .current_dir(&self.dir)
             .env("GH_PROMPT_DISABLED", "1")
             .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|source| ForgeError::Spawn { source })
+            .stdin(Stdio::null());
+        spawn::output(&mut command).map_err(|source| ForgeError::Spawn { source })
     }
 
     /// Runs the program and returns its trimmed stdout, or why it failed.
@@ -665,14 +666,7 @@ mod tests {
                   edit|merge) exit 0 ;;\n\
                   *) echo 'unknown verb' >&2; exit 3 ;;\n\
                 esac\n";
-            let path = forge.dir.join("gh");
-            if let Err(err) = std::fs::write(&path, body) {
-                panic!("write the fake gh: {err}");
-            }
-            let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
-            if let Err(err) = std::fs::set_permissions(&path, mode) {
-                panic!("chmod the fake gh: {err}");
-            }
+            forge.write_script("gh", body);
             forge
         }
 
@@ -681,6 +675,23 @@ mod tests {
             let path = self.dir.join(name);
             if let Err(err) = std::fs::write(&path, body) {
                 panic!("write {}: {err}", path.display());
+            }
+        }
+
+        /// Writes an executable stand-in through a temporary name beside it and
+        /// a rename, so the path a test runs is never open for writing.
+        fn write_script(&self, name: &str, body: &str) {
+            let path = self.dir.join(name);
+            let temp = self.dir.join(format!("{name}.tmp"));
+            if let Err(err) = std::fs::write(&temp, body) {
+                panic!("write {}: {err}", temp.display());
+            }
+            let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+            if let Err(err) = std::fs::set_permissions(&temp, mode) {
+                panic!("chmod {}: {err}", temp.display());
+            }
+            if let Err(err) = std::fs::rename(&temp, &path) {
+                panic!("rename {} into place: {err}", path.display());
             }
         }
 
@@ -831,7 +842,7 @@ mod tests {
     #[test]
     fn a_failing_forge_reports_its_exit_code_and_stderr() {
         let script = Script::new("0");
-        script.write("gh", "#!/bin/sh\necho 'boom' >&2\nexit 3\n");
+        script.write_script("gh", "#!/bin/sh\necho 'boom' >&2\nexit 3\n");
         let err = match script.forge().and_then(|forge| forge.find_open("a")) {
             Ok(found) => panic!("a failing gh must not answer: {found:?}"),
             Err(err) => err,

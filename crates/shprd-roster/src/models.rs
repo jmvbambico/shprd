@@ -202,7 +202,6 @@ fn model_names(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -277,18 +276,7 @@ project_dirs = []
 
     /// A script interactive shell can run, standing in for a real agent CLI.
     fn write_script(dir: &Path, name: &str, body: &str) {
-        let path = dir.join(name);
-        if let Err(error) = fs::write(&path, format!("#!/bin/sh\n{body}\n")) {
-            panic!("writing {name} failed: {error}");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::Permissions::from_mode(0o755);
-            if let Err(error) = fs::set_permissions(&path, mode) {
-                panic!("chmod {name} failed: {error}");
-            }
-        }
+        crate::scripted::write_executable(&dir.join(name), &format!("#!/bin/sh\n{body}\n"));
     }
 
     #[test]

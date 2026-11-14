@@ -8,12 +8,79 @@
 
 use serde_json::Value;
 use shprd_mux::{MuxError, Result};
+use std::io;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use crate::HerdrMux;
 
 /// The longest detail string this adapter will ever put in a [`MuxError`].
 const DETAIL_LIMIT: usize = 200;
+
+/// How long to wait before each retry of a spawn the kernel refused with
+/// `ETXTBSY`, one delay per retry after the first attempt.
+///
+/// This mirrors the delays in `shprd_core::spawn`, which this crate cannot
+/// share: the adapter sits below `shprd-core` in the dependency graph and must
+/// not know about runs, events or config.
+const BUSY_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+];
+
+/// `ETXTBSY`, as the kernel reports it in [`io::Error::raw_os_error`].
+#[cfg(unix)]
+const ETXTBSY: i32 = 26;
+
+/// Runs `attempt` until it no longer fails with `ETXTBSY`.
+///
+/// `execve` fails with `ETXTBSY` ("Text file busy") while any process holds a
+/// descriptor open for writing on the file being executed — a `herdr` binary
+/// that was just installed, or the child another thread forked between its
+/// `fork` and its `execve`. Only that error is retried, so a missing or broken
+/// binary still fails on the first try; so does a `herdr` that stays busy after
+/// the last retry, with the error the kernel reported.
+fn retry_busy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut backoffs = BUSY_RETRY_DELAYS.iter();
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if !is_text_file_busy(&error) {
+                    return Err(error);
+                }
+                match backoffs.next() {
+                    Some(backoff) => thread::sleep(*backoff),
+                    None => return Err(error),
+                }
+            }
+        }
+    }
+}
+
+/// [`Command::output`], retrying the spawn while the kernel reports `ETXTBSY`.
+fn output_retrying_busy(command: &mut Command) -> io::Result<std::process::Output> {
+    retry_busy(|| command.output())
+}
+
+/// Whether `error` is the kernel refusing to execute a file that is open for
+/// writing.
+fn is_text_file_busy(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::ExecutableFileBusy {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
 
 /// A herdr error, as the CLI reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +204,7 @@ impl HerdrMux {
         if let Some(home) = &self.home {
             command.env("HOME", home);
         }
-        let output = command.output().map_err(|error| {
+        let output = output_retrying_busy(&mut command).map_err(|error| {
             Failure::new(format!("could not start {}: {error}", self.bin.display()))
         })?;
         Ok(Answer {
@@ -211,6 +278,43 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_busy_spawn_is_retried_until_it_succeeds() {
+        let mut attempts = 0;
+        let outcome = retry_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from_raw_os_error(26))
+            } else {
+                Ok("ran")
+            }
+        });
+        assert_eq!(outcome.unwrap(), "ran");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn a_spawn_that_stays_busy_returns_the_last_busy_error() {
+        let mut attempts = 0;
+        let outcome: io::Result<()> = retry_busy(|| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(26))
+        });
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(attempts, BUSY_RETRY_DELAYS.len() + 1);
+    }
+
+    #[test]
+    fn another_error_is_not_retried() {
+        let mut attempts = 0;
+        let outcome: io::Result<()> = retry_busy(|| {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        });
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(attempts, 1);
+    }
 
     const WORKSPACE_LIST: &str = include_str!("../tests/fixtures/workspace_list.json");
     const PANE_NOT_FOUND: &str = include_str!("../tests/fixtures/pane_read_not_found.json");

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use shprd_core::spawn;
 use thiserror::Error;
 
 /// Why a git invocation did not produce usable output.
@@ -51,14 +52,14 @@ impl Git {
     /// Runs `git` with `args` and returns its stdout, less one trailing
     /// newline.
     pub fn run(&self, args: &[&str]) -> Result<String, GitError> {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args(args)
             .current_dir(&self.dir)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|source| GitError::Spawn { source })?;
+            .stdin(Stdio::null());
+        let output = spawn::output(&mut command).map_err(|source| GitError::Spawn { source })?;
         if !output.status.success() {
             return Err(GitError::Failed {
                 args: args.iter().map(|arg| (*arg).to_string()).collect(),
