@@ -331,6 +331,7 @@ mod tests {
                 status: ReportStatus::Completed,
                 summary: "did it".to_string(),
                 tests: vec![],
+                checks: Vec::new(),
                 changed_paths: vec!["crates/shprd-views/src/pr.rs".to_string()],
                 commit: None,
                 skills_used: vec![],

@@ -490,6 +490,7 @@ fn retried_events(worktree: &Path, dropped: bool) -> Vec<Event> {
         status,
         summary: "as reported".to_string(),
         tests: Vec::new(),
+        checks: Vec::new(),
         changed_paths: Vec::new(),
         commit: None,
         skills_used: Vec::new(),

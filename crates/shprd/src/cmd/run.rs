@@ -455,6 +455,10 @@ mod tests {
             status: ReportStatus::Completed,
             summary: "done".to_string(),
             tests: Vec::new(),
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
