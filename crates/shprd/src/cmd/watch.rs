@@ -91,6 +91,14 @@ fn record_error(
     scan.ok()?.last_error
 }
 
+/// The reason an [`EventKind::Available`] event carries.
+///
+/// A canary that spends quota is not wired yet: the watchdog re-admits a dry
+/// agent when its cooldown elapses, and nothing probed the agent at all. The
+/// record says so rather than claiming a reset the provider never gave, so a
+/// reader of the log is not told about a check that never happened.
+const CANARY_REASON: &str = "cooldown elapsed, unprobed";
+
 /// How long the orchestrator may sit on a prompt of its own before the
 /// watchdog says so.
 ///
@@ -264,9 +272,10 @@ impl Watcher {
             if !probe_due {
                 continue;
             }
-            // No quota call is wired yet, so a probe that is due always reads
-            // as recovered: the dry mark existed to make the agent wait, and
-            // the wait is over.
+            // No quota call is wired yet, so a probe that is due reads as
+            // recovered because the cooldown is over, not because anything
+            // asked the agent: the dry mark existed to make it wait, and the
+            // wait is over. The recorded reason says exactly that.
             let follow = watch.canary_result(true, now_ms, &policy);
             if !follow
                 .iter()
@@ -281,7 +290,7 @@ impl Watcher {
                 .as_actor(Actor::Engine)
                 .commit(EventKind::Available {
                     agent: agent.clone(),
-                    reason: String::from("reset time passed"),
+                    reason: String::from(CANARY_REASON),
                 })?;
             lines.push(format!("available again: {agent}"));
             finished.push(agent.clone());
@@ -717,9 +726,9 @@ fn tick_task(
                 })?;
                 lines.push(format!("escalated {}: {reason}", task.id));
             }
-            // No quota call is wired yet, so a probe that is due always reads
-            // as recovered: the dry mark existed to make the agent wait, and
-            // the wait is over.
+            // No quota call is wired yet, so a probe that is due reads as
+            // recovered because the cooldown is over, not because anything
+            // asked the agent. The recorded reason says exactly that.
             Action::Canary => {
                 let due = matches!(
                     &watch.health,
@@ -734,7 +743,7 @@ fn tick_task(
             Action::MarkAvailable => {
                 env.ctx.commit(EventKind::Available {
                     agent: agent.clone(),
-                    reason: String::from("reset time passed"),
+                    reason: String::from(CANARY_REASON),
                 })?;
                 lines.push(format!("available again: {agent}"));
             }
@@ -2661,14 +2670,23 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         let log = events(&ctx);
         let fresh = &log[before..];
-        assert!(
-            appended(fresh, |kind| matches!(
-                kind,
-                EventKind::Available { agent, .. } if agent == "sh"
-            )),
+        let available: Vec<&EventKind> = fresh
+            .iter()
+            .map(|event| &event.kind)
+            .filter(|kind| matches!(kind, EventKind::Available { .. }))
+            .collect();
+        assert_eq!(
+            available,
+            vec![&EventKind::Available {
+                agent: "sh".to_string(),
+                reason: CANARY_REASON.to_string(),
+            }],
             "the handed-off agent stayed dry: {} events",
             fresh.len()
         );
+        // Nothing probed the agent, so the record must not claim a reset the
+        // provider never gave.
+        assert!(!format!("{available:?}").contains("reset time passed"));
     }
     /// The reviewer writes findings and stops: the tick that sees them records
     /// the pass, and a file still being written is left alone.
