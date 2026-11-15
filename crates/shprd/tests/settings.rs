@@ -494,6 +494,46 @@ fn a_bad_value_is_refused_before_anything_is_written() {
 }
 
 #[test]
+fn the_host_is_a_setting_like_any_other() {
+    let fixture = Fixture::new();
+    // Unset it resolves to `auto`: the machine decides.
+    let shown = fixture.ok(&["get", "host"]);
+    assert_eq!(shown.trim(), "host = \"auto\"  (built in)");
+
+    let printed = fixture.ok(&["set", "host", "herdr-desktop"]);
+    assert!(printed.contains("ok host stored"), "{printed}");
+    let text = Fixture::text(&fixture.settings());
+    assert!(text.contains("host = \"herdr-desktop\""), "{text}");
+    assert_eq!(
+        fixture.ok(&["get", "host"]).trim(),
+        "host = \"herdr-desktop\"  (you)"
+    );
+
+    // A word that names no host is refused, with the words that do, and nothing
+    // is written.
+    let refused = fixture.refused(&["set", "host", "hologram"]);
+    assert!(
+        refused.contains("auto, herdr-desktop, herdr, tuios"),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.ok(&["get", "host"]).trim(),
+        "host = \"herdr-desktop\"  (you)",
+        "the refused write left the value alone"
+    );
+
+    // A person's own entry for one repository may set it …
+    let printed = fixture.ok(&["set", "host", "tuios", "--for-repo"]);
+    assert!(printed.contains("(this repo)"), "{printed}");
+    // … but a repository's committed file may not: which multiplexer a person
+    // works in is a fact about their screen, not the repository's business.
+    Fixture::write(&fixture.committed(), "version = 1\nhost = \"herdr\"\n");
+    let refused = fixture.refused(&["get", "tasks.base"]);
+    assert!(refused.contains("`host`"), "{refused}");
+    assert!(refused.contains("may only set `tasks.base`"), "{refused}");
+}
+
+#[test]
 fn a_write_aimed_at_a_task_is_refused_with_the_reason() {
     let fixture = Fixture::new();
     let refused = fixture.refused(&["set", "tasks.merge", "checks", "--task", "M9.3"]);

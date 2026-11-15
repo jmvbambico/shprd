@@ -138,6 +138,17 @@ impl Setup {
         setup
     }
 
+    /// Writes the person's `settings.toml` into this fixture's home.
+    fn settings(&self, text: &str) {
+        let config = self.tmp.path().join("home").join(".config").join("shprd");
+        if let Err(error) = fs::create_dir_all(&config) {
+            panic!("creating {} failed: {error}", config.display());
+        }
+        if let Err(error) = fs::write(config.join("settings.toml"), text) {
+            panic!("writing the settings failed: {error}");
+        }
+    }
+
     /// Runs `shprd doctor --no-quota` and returns what it printed.
     fn run(&self, env: &[(&str, &str)]) -> Output {
         let mut command = self.command();
@@ -440,6 +451,66 @@ fn falls_back_to_the_legacy_roster_when_the_settings_name_no_role() {
     assert!(
         text.contains("✓ reviewer pi/openrouter/anthropic/claude-opus-5-5 (your old config file)"),
         "the roster layer answers when the settings do not: {text}"
+    );
+}
+
+#[test]
+fn names_the_host_a_run_would_drive_and_why() {
+    // No window, no `hc` and no `herdr` on this fixture's PATH: `auto` asks the
+    // machine, finds neither, and says so — which is the line a person needs
+    // when their terminals do not appear.
+    let setup = Setup::new("orchestrator = \"claude/opus\"\nworkers = [\"claude/opus\"]");
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "the section must not fail: {text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains("host:"))
+        .unwrap_or_else(|| panic!("no host line in {text}"));
+    assert!(
+        line.contains("host: herdr"),
+        "the chosen host is named: {line}"
+    );
+    assert!(
+        line.contains("auto picked herdr"),
+        "and that auto chose it: {line}"
+    );
+    assert!(
+        line.contains("no Herdr window is attached"),
+        "and why not the desktop: {line}"
+    );
+    // Every binary behind the choice is named, so a missing one is visible.
+    for binary in ["hc", "herdr-app"] {
+        assert!(
+            text.lines()
+                .any(|line| line.contains(binary) && line.contains("not on PATH")),
+            "{binary} should be reported as missing: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_desktop_the_machine_cannot_give_warns_and_falls_back() {
+    let setup = Setup::new("orchestrator = \"claude/opus\"\nworkers = [\"claude/opus\"]");
+    setup.settings("host = \"herdr-desktop\"\n");
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "a fallback is a warning: {text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains("host: herdr"))
+        .unwrap_or_else(|| panic!("no host line in {text}"));
+    assert!(
+        line.trim_start().starts_with('!'),
+        "a named host the machine cannot give is a warning: {line}"
+    );
+    assert!(
+        line.contains("host = herdr-desktop, but"),
+        "the setting is named: {line}"
+    );
+    assert!(
+        line.contains("using herdr instead"),
+        "the fallback is named: {line}"
     );
 }
 
