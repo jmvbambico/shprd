@@ -242,6 +242,29 @@ fn record_attempt_only(ctx: &Ctx, home: &Path, task: &str) -> Result<String, Str
     // spawn cuts it: a test has to commit in it to make a landing possible, and
     // a landing reads the branch's head there.
     let layout = shprd_git::worktree::Layout::default_for_home(home);
+    // A retry takes the same path and the same branch as the attempt it
+    // replaces, so the failed one is archived and removed first, exactly as a
+    // real spawn does it (`spawn::replace_previous`). This is what lets a test
+    // of a send-back record the second attempt at all.
+    if let Some(previous) = found.latest_attempt() {
+        let path = layout.path(
+            &ctx.root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            &run.run_id,
+            task,
+        );
+        let archive = shprd_git::archive::archive_ref_for_attempt(&run.run_id, task, previous.n);
+        if shprd_git::git::Git::new(&ctx.root)
+            .branch_exists(&previous.branch)
+            .unwrap_or(false)
+        {
+            let _ = shprd_git::archive::archive_to(&ctx.root, &previous.branch, &archive);
+        }
+        let _ = shprd_git::worktree::remove_worktree_only(&ctx.root, &layout, &path, true);
+        let _ = shprd_git::worktree::delete_branch(&ctx.root, &layout, &previous.branch);
+    }
     let created = shprd_git::worktree::create(
         &ctx.root,
         &layout,

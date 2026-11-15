@@ -251,6 +251,11 @@ impl Fixture {
     /// The verb opens a reviewer tab in a multiplexer, which no test here has,
     /// so the fact it would record is written directly — as `tests/land.rs` does.
     fn review_requested(&self, id: &str, reviewer: &str) {
+        self.review_requested_attempt(id, 1, reviewer);
+    }
+
+    /// [`review_requested`] for one named attempt.
+    fn review_requested_attempt(&self, id: &str, attempt: u32, reviewer: &str) {
         let path = self.root.join(".shprd").join("events.jsonl");
         let text = std::fs::read_to_string(&path).expect("read the log");
         let seq = text.lines().count() as u64 + 1;
@@ -260,7 +265,7 @@ impl Fixture {
             actor: Actor::Human,
             kind: EventKind::ReviewRequested {
                 task: id.to_string(),
-                attempt: 1,
+                attempt,
                 reviewer: reviewer.to_string(),
                 degraded: false,
             },
@@ -318,11 +323,24 @@ impl Fixture {
     /// Drives `id` from started to ready to land: a commit, a hand-in with a
     /// passing check, an independent review and a passing review gate.
     fn hand_in(&self, id: &str) -> String {
+        self.hand_in_round(id, 1, "[]")
+    }
+
+    /// One attempt of `id` handing in, reviewed with `findings`.
+    ///
+    /// A blocking finding fails the review and leaves the task `Failed`; `[]`
+    /// passes it.
+    fn hand_in_round(&self, id: &str, attempt: u32, findings: &str) -> String {
         let (worktree, _branch) = self.attempt_of(id);
         // A file name of its own: `a.txt` and `A.txt` are one file on a
-        // case-insensitive disk, which would make the commit below empty.
+        // case-insensitive disk, which would make the commit below empty. The
+        // attempt is in the content, so a round after another commits afresh.
         let name = format!("task-{id}.txt");
-        std::fs::write(worktree.join(&name), "the task's work\n").expect("write the task's file");
+        std::fs::write(
+            worktree.join(&name),
+            format!("the task's work, round {attempt}\n"),
+        )
+        .expect("write the task's file");
         self.git_in(&worktree, &["add", "--", &name]);
         self.git_in(&worktree, &["commit", "-m", "the task's work"]);
         let head = self.git_in(&worktree, &["rev-parse", "HEAD"]);
@@ -334,7 +352,7 @@ impl Fixture {
             "--task",
             id,
             "--attempt",
-            "1",
+            &attempt.to_string(),
             "--status",
             "completed",
             "--summary",
@@ -344,15 +362,15 @@ impl Fixture {
             "--commit",
             &head,
         ]);
-        self.review_requested(id, "c1");
+        self.review_requested_attempt(id, attempt, "c1");
         let packet = self
             .home
             .join(".shprd")
             .join("reviews")
             .join("r1")
-            .join(format!("{id}-a1"));
+            .join(format!("{id}-a{attempt}"));
         std::fs::create_dir_all(&packet).expect("mkdir the packet");
-        std::fs::write(packet.join("findings.json"), "[]").expect("write the findings");
+        std::fs::write(packet.join("findings.json"), findings).expect("write the findings");
         self.ok(&[
             "--as",
             "engine",
@@ -361,7 +379,7 @@ impl Fixture {
             "--task",
             id,
             "--attempt",
-            "1",
+            &attempt.to_string(),
         ]);
         head
     }
@@ -462,6 +480,80 @@ fn the_tick_starts_a_task_lands_it_and_then_starts_the_next() {
     // Pass 4: nothing is left to do, and a pass that found nothing says so.
     let steps = fixture.tick();
     assert!(steps.is_empty(), "the run is as far as it goes: {steps:?}");
+}
+
+#[test]
+fn a_failed_review_is_sent_back_by_the_pass_and_the_next_round_lands() {
+    // Bug 2 of the M9 gate, through the real binary: a review that failed with
+    // a round left sends the task back by itself, and the attempt after it lands
+    // under `auto` with no hand work at all.
+    let fixture = Fixture::new("auto");
+    fixture.start();
+    fixture.add_task("A", "task-A.txt", None);
+
+    // Pass 1: A starts.
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["start:A".to_string()], "{steps:?}");
+
+    // Attempt 1 hands in, and its review blocks.
+    fixture.hand_in_round(
+        "A",
+        1,
+        r#"[{"severity":"major","title":"the retry loses the batch","detail":"do not"}]"#,
+    );
+    let state = shprd_core::state::RunState::fold(&fixture.events()).expect("the log folds");
+    assert_eq!(
+        state.tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Failed),
+        "a blocking review fails the attempt"
+    );
+
+    // Pass 2: the pass sends it back by itself, with no `agent spawn` by hand.
+    let steps = fixture.tick();
+    assert_eq!(
+        actions(&steps),
+        vec!["send_back:A".to_string()],
+        "{steps:?}"
+    );
+    assert!(
+        steps[0]["ok"].as_bool().unwrap_or(false),
+        "the send-back worked: {steps:?}"
+    );
+    let state = shprd_core::state::RunState::fold(&fixture.events()).expect("the log folds");
+    let task = state.tasks.get("A").expect("the task");
+    assert_eq!(
+        task.attempts.last().map(|attempt| attempt.n),
+        Some(2),
+        "the pass started the second attempt"
+    );
+
+    // The next round fixes it; its review passes and it lands under `auto`.
+    let head = fixture.hand_in_round("A", 2, "[]");
+    fixture.script_forge(&forge_at("A", &head));
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:A".to_string()], "{steps:?}");
+    assert!(
+        steps[0]["ok"].as_bool().unwrap_or(false),
+        "the landing worked: {steps:?}"
+    );
+    let state = shprd_core::state::RunState::fold(&fixture.events()).expect("the log folds");
+    assert_eq!(
+        state.tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Integrated),
+        "the loop closed"
+    );
+    assert!(
+        fixture
+            .forge_calls()
+            .iter()
+            .any(|call| call.starts_with("merge 1 ")),
+        "the forge was asked to merge: {:?}",
+        fixture.forge_calls()
+    );
+
+    // And it is quiet: nothing is left to plan.
+    let steps = fixture.tick();
+    assert!(steps.is_empty(), "{steps:?}");
 }
 
 #[test]
