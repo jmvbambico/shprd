@@ -6,10 +6,13 @@ This folder is shprd's set of them.
 
 ```
 layouts/shprd.json      the window: sidebar, coordinator area, tab bar, pane, board
+mods/shprd-spaces/      the sidebar: the coordinator's space, then one row a task
+                        space, with its word, its colour and what needs you
 mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
 mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons
-mods/shprd-tabs/        the tab bar and the side panel's buttons
+mods/shprd-tabs/        the tab bar (each tab's agent, role and state) and the
+                        side panel's buttons
 mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
 mods/shprd-accept/      the Accept card            (M10.5)
 mods/shprd-task-pr/     the task's pull request    (M10.5)
@@ -19,14 +22,17 @@ mods/shprd-graph/       dagr in a terminal block   (M10.7)
 mods/shprd-coordinator/ the coordinator's chat     (M10.8)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
 mods/lib/               the shared modules: tokens, panel parts, the board's
-                        reading, the service client, the change watcher, and
-                        sync-shared's source. Every mod carries a copy in its
-                        own `lib/` because a mod may only import files inside
-                        its own folder.
+                        reading (`board.js`), the sidebar's (`spaces.js`), the
+                        tab bar's (`tabstrip.js`), the toasts' (`toasts.js`), the
+                        service client, the change watcher, and sync-shared's
+                        source. Every mod carries a copy in its own `lib/`
+                        because a mod may only import files inside its own
+                        folder.
 keys.json               the keys the layout expects, merged by the installer
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
 bin/check               all of it: the copies, the unit tests, `herdr-app check`
-test/                   the client's unit tests (node or bun, see below)
+test/                   the unit tests (node or bun, see below); `fixtures/` holds
+                        a real service's answers and a real window's list
 ```
 
 Install it with `shprd install herdr-desktop` (and `--dry-run` to see the plan,
@@ -54,9 +60,14 @@ node --import ./test/boot.mjs --test test/
 bun test --preload ./test/boot-bun.mjs test/
 ```
 
-Both run the same files, `test/lib.test.mjs` and `test/chrome.test.mjs`;
-`test/stub-herdr.js` stands in for the app's `herdr` module and `test/stub-gpui.js`
-for its element builders (`gpui-kit`, `gpui-base`).
+Both run the same files, `test/lib.test.mjs`, `test/chrome.test.mjs` and
+`test/mods.test.mjs`; `test/stub-herdr.js` stands in for the app's `herdr` module
+and `test/stub-gpui.js` for its element builders (`gpui-kit`, `gpui-base`).
+`test/mods.test.mjs` drives the four view models with fixtures captured from a
+real `shprd serve` (`test/fixtures/state.json`, `changes.json`) and a real
+`herdr-app ls` of the window that showed it (`spaces.json`): the sidebar's rows,
+the tab bar's pills, the toasts' news and the status bar's counts are all pure
+functions of those, so what a screenshot shows is what a test asserts.
 
 ## Starting the service
 
