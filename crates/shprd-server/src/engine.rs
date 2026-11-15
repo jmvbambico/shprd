@@ -1,0 +1,119 @@
+//! What the person's task verbs need from the binary: a spawn and a close.
+//!
+//! Two of the actions on `POST /api/action` are not an event the log can hold:
+//! starting an attempt (which writes a brief, makes a worktree and opens a tab)
+//! and stopping an agent (which closes the space it runs in). Both belong to the
+//! binary, exactly as the tick's own steps do, so the service calls the same
+//! functions `shprd agent spawn` and a landing's close call, passed in here the
+//! way [`crate::service::AfterWrite`] is.
+//!
+//! A service prepared without one — every test that drives the router, and any
+//! caller that only wants to read the log — refuses those actions rather than
+//! pretending it did something: an agent that was never started is a lie a
+//! person would find later, in a tab that does not exist.
+//!
+//! Nothing here reaches a host or a model by itself: a test wires closures that
+//! record what they were asked for.
+
+use std::path::Path;
+
+use crate::tick::{Starter, WorkerCloser};
+
+/// The binary's spawn path, and its way of closing a task's space.
+#[derive(Clone)]
+pub struct Engine {
+    /// Starts an attempt on a task; returns one line about what it did.
+    start: Starter,
+    /// Closes the space a task's agent runs in, when the caller has a host.
+    ///
+    /// It is the same closure a landing uses to close a task's space, so a
+    /// person's stop and the engine's own close cannot disagree about what a
+    /// task's space is.
+    stop: Option<WorkerCloser>,
+}
+
+impl Engine {
+    /// An engine whose only verb is a spawn.
+    ///
+    /// It is what a caller without a host passes: a start works and a stop is
+    /// refused, because there is no tab to close.
+    pub fn new(start: Starter) -> Self {
+        Self { start, stop: None }
+    }
+
+    /// The same engine, also able to close a task's space.
+    pub fn with_stop(mut self, stop: WorkerCloser) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// Starts an attempt at `task` in `repo`, as `shprd agent spawn --task` does.
+    ///
+    /// The failure is the spawn's own words: it is what a person reads when a
+    /// start is refused, so it is passed through rather than wrapped.
+    pub fn start(&self, repo: &Path, task: &str) -> Result<String, String> {
+        (self.start)(repo, task)
+    }
+
+    /// Stops whatever is running on `task`, by closing its space.
+    ///
+    /// A failure means the host refused the close, and is the host's words.
+    pub fn stop(&self, repo: &Path, task: &str) -> Result<(), String> {
+        let stop = self.stop.as_ref().ok_or_else(|| {
+            "this service was started without a host, so it cannot close a task's space".to_string()
+        })?;
+        stop(repo, task)
+    }
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("stop", &self.stop.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn an_engine_without_a_host_refuses_a_stop_and_says_why() {
+        let started: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&started);
+        let engine = Engine::new(Arc::new(move |_repo: &Path, task: &str| {
+            seen.lock().expect("the lock").push(task.to_string());
+            Ok(format!("started {task}"))
+        }));
+        assert_eq!(
+            engine.start(Path::new("/repo"), "T1").expect("a start"),
+            "started T1"
+        );
+        assert_eq!(
+            started.lock().expect("the lock").as_slice(),
+            ["T1".to_string()]
+        );
+        let refused = engine
+            .stop(Path::new("/repo"), "T1")
+            .expect_err("a refusal");
+        assert!(refused.contains("without a host"), "{refused}");
+    }
+
+    #[test]
+    fn a_wired_stop_is_called_and_its_failure_passes_through() {
+        let engine = Engine::new(Arc::new(|_repo: &Path, task: &str| Ok(task.to_string())))
+            .with_stop(Arc::new(|_repo: &Path, _task: &str| {
+                Err("no space labelled T1".to_string())
+            }));
+        assert_eq!(engine.start(Path::new("/repo"), "T1"), Ok("T1".to_string()));
+        assert_eq!(
+            engine.stop(Path::new("/repo"), "T1"),
+            Err("no space labelled T1".to_string())
+        );
+    }
+}

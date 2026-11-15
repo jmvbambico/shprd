@@ -1182,6 +1182,7 @@ dependencies = [
  "shprd-core",
  "shprd-git",
  "shprd-mux",
+ "shprd-mux-hc",
  "shprd-mux-herdr",
  "shprd-server",
  "shprd-views",
@@ -1244,6 +1245,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "shprd-mux",
  "tempfile",
  "thiserror",
  "tokio",

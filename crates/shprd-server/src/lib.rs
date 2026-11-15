@@ -8,6 +8,8 @@
 //! | `GET /api/state` | the snapshot: the fold, projected for a board |
 //! | `GET /api/changes` | long-poll for events after a sequence, `204` on timeout |
 //! | `POST /api/action` | one tab-typed envelope, run against the same log the CLI writes |
+//! | `POST /api/tasks` | add one task, as `shprd agent task add` does |
+//! | `GET /api/tasks/:id/changes` | the task's branch against its base, with line counts |
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
 //! | `GET /api/roster` | the programs a role may run, with their models and levels |
@@ -34,10 +36,12 @@ pub mod api;
 pub mod bindings;
 pub mod changes;
 pub mod dto;
+pub mod engine;
 pub mod error;
 pub mod pass;
 pub mod service;
 pub mod snapshot;
+pub mod tasks;
 pub mod tick;
 
 pub(crate) mod actions;
@@ -51,6 +55,7 @@ pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
 pub use changes::Touch;
+pub use engine::Engine;
 pub use error::{ApiReject, ServerError};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};

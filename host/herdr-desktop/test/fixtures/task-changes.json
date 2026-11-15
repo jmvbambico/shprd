@@ -1,0 +1,28 @@
+{
+  "task": "T2",
+  "base": "main",
+  "branch": "shprd/m10b/T2",
+  "merge_base": "f8954bcf012692554b4c831e7cae81833d842080",
+  "files": [
+    {
+      "path": "host/herdr-desktop/board.js",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "host/herdr-desktop/rows.js",
+      "added": 4,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "src/tasks.rs",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    }
+  ],
+  "added": 6,
+  "deleted": 0
+}

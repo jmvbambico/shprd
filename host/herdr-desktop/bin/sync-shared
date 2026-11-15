@@ -27,8 +27,10 @@ mods_for() {
     panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
     board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-spaces shprd-toasts" ;;
     client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
-    watch.js) echo "shprd-tasks shprd-asks shprd-coordinator shprd-status shprd-graph shprd-spaces shprd-toasts" ;;
+    watch.js) echo "shprd-tasks shprd-asks shprd-coordinator shprd-status shprd-graph shprd-spaces shprd-toasts shprd-accept shprd-task-pr" ;;
     spaces.js) echo "shprd-spaces shprd-toasts" ;;
+    accept.js) echo "shprd-accept" ;;
+    taskpr.js) echo "shprd-task-pr" ;;
     tabstrip.js) echo "shprd-tabs" ;;
     toasts.js) echo "shprd-toasts" ;;
     settings.js) echo "shprd-settings" ;;

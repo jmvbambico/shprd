@@ -418,6 +418,14 @@ pub struct Config {
     /// `None` leaves every listing off, so a service prepared by hand reads only
     /// the shipped catalogs.
     pub path_env: Option<String>,
+    /// The binary's spawn and close, so the person's start, retry and stop
+    /// actions reach an agent.
+    ///
+    /// It is the same two closures the tick's steps use: a start writes a brief,
+    /// makes a worktree and opens a tab, a stop closes the space the agent runs
+    /// in. A service started without them — every test that only drives the
+    /// router — refuses those three actions and reads the log exactly the same.
+    pub engine: Option<crate::engine::Engine>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -470,6 +478,7 @@ impl Config {
             prompts_dir: None,
             data: None,
             path_env: None,
+            engine: None,
         }
     }
 }
@@ -513,7 +522,11 @@ impl Service {
                 data: config.data.clone(),
                 path_env: config.path_env.clone(),
             },
-        )?;
+        )?
+        // The spawn and the close are the binary's, wired exactly as the tick's
+        // steps are; a service without them refuses the three actions that need
+        // a host.
+        .with_engine_opt(config.engine.clone());
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");

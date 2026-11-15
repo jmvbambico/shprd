@@ -20,6 +20,7 @@
 
 use axum::body::Bytes;
 use shprd_agents::roles::{Checked, Checker, Review};
+use shprd_core::config::MergePolicy;
 use shprd_core::settings::{Key, Loaded, Resolved, Scope, Value};
 
 use crate::api::AppState;
@@ -61,6 +62,23 @@ pub(crate) fn read(state: &AppState) -> Result<SettingsDto, ApiReject> {
     let place = Place::of(state)?;
     let loaded = place.load()?;
     Ok(document(state, &loaded, loaded.resolve(None)))
+}
+
+/// The merge policy this service resolves, when it can read the settings at all.
+///
+/// It is the one setting an *action* reads: `task.accept` records a human's
+/// approval, and only `tasks.merge = "ask"` waits for one. A service with no home
+/// directory cannot resolve anything, so this answers `None` and the caller
+/// leaves the decision to the run's rules rather than refusing for a reason it
+/// could not check.
+pub(crate) fn merge_policy(state: &AppState) -> Option<MergePolicy> {
+    let document = read(state).ok()?;
+    let row = document
+        .values
+        .iter()
+        .find(|row| row.key == "tasks.merge")?;
+    let text = row.value.as_ref()?.as_str()?;
+    shprd_core::settings::merge_of(text)
 }
 
 /// `PUT /api/settings`: write one key, and answer the settings as they now are.

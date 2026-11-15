@@ -35,7 +35,7 @@ use serde_json::Value;
 use shprd_core::state::RunInfo;
 use shprd_mux::Host;
 use shprd_server::{
-    AfterWrite, Config, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
+    AfterWrite, Config, Engine, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
     shutdown_signal,
 };
 
@@ -56,12 +56,16 @@ const LOG_ENV: &str = "SHPRD_LOG";
 pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     install_subscriber();
+    // The host is resolved once, here, and passed down: every pass, every spawn
+    // and every close of this service drives the same adapter, so a run cannot
+    // half-happen on one multiplexer and half on another (M10.9).
+    let (resolution, host) = crate::host::select();
     // The coordinator's space is part of the host setup a run needs, and its
     // label is derived rather than chosen, so the service makes it rather than
     // leaving a pass to refuse (M9 gate bug 6). A host that cannot be reached is
     // a warning and not a refusal to serve: the board is still what a person
     // reads, and the next start can make the space.
-    let workspace = prepare_space(&crate::cmd::spawn::real_mux(), &ctx.root);
+    let workspace = prepare_space(host.as_ref(), &ctx.root);
     if let SpaceNotice::Unavailable(reason) = &workspace {
         tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
     }
@@ -95,11 +99,16 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             ctx.json,
             run_at_start.as_ref().map(|run| run.run_id.clone()),
         ),
+        std::sync::Arc::from(host),
     )?;
     let announced = AnnouncedTick {
         interval_secs: tick.interval.as_secs(),
         max_running: tick.max_running,
     };
+    // The person's start, retry and stop actions are the same two closures the
+    // tick's steps run: one spawn path, one way of closing a task's space, so a
+    // board's Start and the engine's own start cannot drift apart.
+    config.engine = Some(engine_of(&tick.worker));
     config.tick = Some(tick);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -116,7 +125,14 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
         let info = service.info().clone();
-        announce(ctx, &info, &announced, run_at_start.as_ref(), &workspace);
+        announce(
+            ctx,
+            &info,
+            &announced,
+            run_at_start.as_ref(),
+            &workspace,
+            &resolution,
+        );
         service
             .run(shutdown_signal())
             .await
@@ -220,17 +236,32 @@ fn tick_config(
     home: &Path,
     hub: shprd_server::hub::Hub,
     notice: PassNotice,
+    host: Arc<dyn Host>,
 ) -> Result<TickConfig, CliError> {
     let config = crate::cmd::tick::load_config(ctx, home)?;
     let max_running = config.tick.max_running;
     let interval = Duration::from_secs(config.tick.interval_secs);
-    let worker = crate::cmd::tick::worker_with_hub(ctx, home, config, hub)?;
+    let worker = crate::cmd::tick::worker_with_hub(ctx, home, config, hub, host)?;
     Ok(TickConfig {
         worker: std::sync::Arc::new(worker),
         interval,
         max_running,
         notice: Some(notice),
     })
+}
+
+/// The binary's spawn and close, as the API's actions call them.
+///
+/// Both are the tick worker's own: it was built with the same closures a pass
+/// uses, so a person's start leaves exactly what the engine's start leaves. A
+/// worker built without a host's close (a record-only pass) gets an engine that
+/// says so when a stop is asked for.
+fn engine_of(worker: &std::sync::Arc<shprd_server::Worker>) -> Engine {
+    let engine = Engine::new(worker.start.clone());
+    match worker.close_worker.clone() {
+        Some(close) => engine.with_stop(close),
+        None => engine,
+    }
 }
 
 /// What the startup line says about the tick.
@@ -270,6 +301,7 @@ fn announce(
     tick: &AnnouncedTick,
     run: Option<&RunInfo>,
     space: &SpaceNotice,
+    host: &crate::host::Resolution,
 ) {
     let limits = WsLimits::default();
     let hint = run.is_none().then_some(NO_RUN_HINT);
@@ -289,6 +321,15 @@ fn announce(
                 "integration": run.integration_branch,
             })),
             "space": space_json(space),
+            "host": {
+                "kind": host.kind.name(),
+                "binary": host.kind.binary(),
+                "setting": host.setting.name(),
+                "why": host.why,
+                "fell_back": host.fell_back,
+                "herdr_core": host.probe.core,
+                "window": host.probe.window,
+            },
             "hint": hint,
             "ws": {
                 "ping_secs": limits.ping.as_secs(),
@@ -318,6 +359,7 @@ fn announce(
         None => println!("   run:          {NO_RUN_HINT}"),
     }
     println!("   space:        {}", space_line(space, &ctx.root));
+    println!("   host:         {}", host.line());
     println!("   token:        {}", info.token_path.display());
     println!("   service.json: {}", info.service_json.display());
     println!(

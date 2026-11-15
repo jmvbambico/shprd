@@ -5,9 +5,11 @@
 //! fold (a snapshot or a change notice), except `GET /api/settings`, which
 //! answers the settings files as they resolve (`crate::settings`), and
 //! `GET /api/roster`, which answers the programs a role may run
-//! (`crate::roster`). The writes are `POST /api/action`, which hands one
-//! [`Action`] to `actions`, `PUT /api/settings`, which writes one settings key,
-//! and the prompt routes, which store or reset one template's words.
+//! (`crate::roster`), and `GET /api/tasks/{id}/changes`, which reads git
+//! (`crate::tasks`). The writes are `POST /api/action`, which hands one
+//! [`Action`] to `actions`, `POST /api/tasks`, which adds one task,
+//! `PUT /api/settings`, which writes one settings key, and the prompt routes,
+//! which store or reset one template's words.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -35,6 +37,7 @@ use crate::dto::{
     HealthDto, PromptDto, PromptListDto, RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto,
     WsMessage,
 };
+use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
@@ -42,6 +45,7 @@ use crate::prompts as prompts_api;
 use crate::roster as roster_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
+use crate::tasks;
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -127,6 +131,13 @@ pub(crate) struct AppState {
     /// The shipped data the harness table is read from, when this service was
     /// given one. Only the settings checks need it.
     pub(crate) data: Option<DataDir>,
+    /// The binary's spawn and close, when this service was given them.
+    ///
+    /// Three of the person's actions — a start, a retry and a stop — are not an
+    /// event but the host's business, so the binary passes the same closures a
+    /// tick's steps use ([`crate::engine`]). A service without them refuses
+    /// those actions rather than pretending it started an agent.
+    pub(crate) engine: Option<Engine>,
     /// The prompts directory, when the caller set one.
     ///
     /// The binary resolves the configuration root once (where `$XDG_CONFIG_HOME`
@@ -254,6 +265,7 @@ impl App {
             home: paths.home,
             state_dir: state_dir.to_path_buf(),
             data: paths.data,
+            engine: None,
             prompts_dir: paths.prompts_dir,
             path_env: paths.path_env,
         };
@@ -351,6 +363,29 @@ impl App {
         self
     }
 
+    /// Give the service the binary's spawn and close, so the person's start,
+    /// retry and stop actions reach a host.
+    ///
+    /// The service cannot make either itself — a spawn writes a brief and opens
+    /// a tab, a stop closes a space — so they are passed in exactly as the
+    /// tick's own steps are.
+    pub fn with_engine(mut self, engine: Engine) -> Self {
+        self.state.engine = Some(engine);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// [`App::with_engine`], for a caller that may not have one.
+    ///
+    /// The service's config carries an `Option`, and a builder that turned
+    /// `None` into a refusal at the wrong place would be one more branch to
+    /// keep in step.
+    pub(crate) fn with_engine_opt(mut self, engine: Option<Engine>) -> Self {
+        self.state.engine = engine;
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Serve with no harness table at all, whatever the environment would find.
     ///
     /// A test uses it to prove what a machine without a data directory does,
@@ -370,6 +405,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks", get(asks))
         .route("/api/asks/answer", post(answer))
         .route("/api/action", post(action))
+        .route("/api/tasks", post(add_task))
+        .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
         .route("/api/roster", get(roster))
         .route("/api/prompts", get(list_prompts))
@@ -434,15 +471,15 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
     let reply = blocking(move || {
-        actions::answer_ask(
-            &repo,
-            &actor,
-            &hub,
-            after_write.as_ref(),
-            &body.task,
-            &body.ask,
-            &body.answer,
-        )
+        let ctx = actions::Context {
+            repo: &repo,
+            actor: &actor,
+            hub: &hub,
+            after_write: after_write.as_ref(),
+            engine: None,
+            merge: None,
+        };
+        actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)
     })
     .await?;
     Ok(Json(reply?))
@@ -538,13 +575,55 @@ async fn action(
     let action: Action = Action::from_value(value)
         .map_err(|err| ApiReject::bad_request(format!("a {kind:?} action is malformed: {err}")))?;
 
+    // The context borrows the service, and the work runs on a blocking thread,
+    // so the pieces it needs are moved in and rebuilt there.
     let repo = state.repo.clone();
     let actor = state.actor.clone();
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
-    let reply =
-        blocking(move || actions::run(&repo, &actor, &hub, after_write.as_ref(), action)).await?;
+    let engine = state.engine.clone();
+    let merge = settings_api::merge_policy(&state);
+    let reply = blocking(move || {
+        let ctx = actions::Context {
+            repo: &repo,
+            actor: &actor,
+            hub: &hub,
+            after_write: after_write.as_ref(),
+            engine: engine.as_ref(),
+            merge,
+        };
+        actions::run(&ctx, action)
+    })
+    .await?;
     Ok(Json(reply?))
+}
+
+/// `POST /api/tasks`: add one task, as `shprd agent task add` does.
+///
+/// The person's own verb: the service's actor is the person who started it, so a
+/// task added from a board is the orchestrator's peer rather than its
+/// subordinate, and the same rules check it either way.
+async fn add_task(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ActionReply>, ApiReject> {
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let reply = blocking(move || tasks::add(&state, &hub, after_write.as_ref(), &body)).await?;
+    Ok(Json(reply?))
+}
+
+/// `GET /api/tasks/{id}/changes`: the task's branch against its base.
+///
+/// The accept card's Changes section: the files the attempt changed and how much.
+/// It reads git — a fold says an attempt exists, and only the repository says
+/// what it did — so it answers the count line and the paths the card draws.
+async fn task_changes(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<crate::dto::TaskChangesDto>, ApiReject> {
+    let answer = blocking(move || tasks::changes(&state, &id)).await?;
+    answer.map(Json)
 }
 
 /// `GET /api/settings`: every key, its value and the layer it came from.

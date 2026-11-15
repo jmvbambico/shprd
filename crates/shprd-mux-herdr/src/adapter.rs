@@ -52,6 +52,9 @@ impl Host for HerdrMux {
             pane_grants: false,
             human_ask: false,
             keys: true,
+            // `pane send-text` types without pressing enter; a submit goes
+            // through `agent prompt` (or send-text plus Enter).
+            type_without_submit: true,
             // `pane wait-output` exists on both, and is what `wait` uses.
             wait: true,
             kill: true,

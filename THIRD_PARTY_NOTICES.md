@@ -75,11 +75,16 @@ SOFTWARE.
   two-line task rows and their second line from `mods/tasks/main.js` and
   `core/tasks.js`, the settings page's role rows, its picker button and its
   write-with-no-Save-step rule from `mods/shepherdr-settings/main.js`,
-  `mods/shepherdr-settings/settings.js` and `core/settings.js`, and the
-  needs-you cards — a question, permission or plan as one card with its choices
-  and the answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
+  `mods/shepherdr-settings/settings.js` and `core/settings.js`, the needs-you
+  cards — a question, permission or plan as one card with its choices and the
+  answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
   `host/herdr-desktop/mods/{shprd-settings,shprd-asks}/main.js` and their
-  `lib/{settings,asks}.js`, the installer's
+  `lib/{settings,asks}.js`, the Accept card's sections and folded Details, its
+  summary rule and its Changes count line from `mods/accept-card/main.js` and
+  `core/accept.js`, the task's pull-request card — the state word in a soft tint
+  beside the number, and a quiet line when there is nothing — from
+  `mods/task-pr/main.js`, and the task's head with its back link and switcher
+  from `mods/chat/main.js`'s `head` branch, the installer's
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
@@ -121,7 +126,12 @@ SOFTWARE.
   and the herdr-core client — the `hello` framing switch, the request ids and
   the per-call timeout, the pending-call cap, the method and version gate with
   its refusal wording, the stream credit protocol, and the terminal event fold
-  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`
+  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`; and the
+  Herdr desktop host — terminal input sent with no `caller` so it arrives as the
+  person's, the split between herdr-core for terminals and the window's own
+  command line for spaces, tabs and panes, and making a space through the window
+  — from `service/hub.ts` and `service/spaces.ts`, in
+  `crates/shprd-mux-hc/src/host.rs`
 - License: MIT
 
 MIT License

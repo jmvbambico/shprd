@@ -335,11 +335,13 @@ export function promptLine(prompt, saved = null) {
  *
  * Both are read straight from the document: a page that hid them would invite a
  * person to work in a pair of roles the engine will refuse at the next review.
+ * The service's effort-level *warnings* are not on this answer — its check runs
+ * without the catalogs, which is what a warning about a level needs — so the
+ * page does not pretend to show them.
  */
 export function health(document) {
   return {
     problems: document?.problems ?? [],
-    warnings: document?.warnings ?? [],
     notChecked: document?.not_checked ?? null,
   };
 }

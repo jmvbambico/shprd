@@ -270,7 +270,7 @@ test("a write says what it did", () => {
 });
 
 test("the settings' own problems and skipped checks are shown, not hidden", () => {
-  assert.deepEqual(health(SETTINGS), { problems: [], warnings: [], notChecked: null });
+  assert.deepEqual(health(SETTINGS), { problems: [], notChecked: null });
   const broken = {
     ...SETTINGS,
     problems: ["worker role is anthropic, reviewer role is anthropic: they are both anthropic"],

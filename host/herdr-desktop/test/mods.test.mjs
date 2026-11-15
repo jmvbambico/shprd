@@ -56,12 +56,31 @@ import {
 import {
   counts,
   lastFailure,
+  newTask,
+  rowActions,
   runLabel,
   runShort,
   runState,
   since,
   statusCounts,
+  taskById,
 } from "../mods/lib/board.js";
+import {
+  FILES_SHOWN,
+  SUMMARY_MAX,
+  WORDS,
+  card as acceptCard,
+  changeRows,
+  changesLine,
+  checks as handInChecks,
+  findings as reviewFindings,
+  head as acceptHead,
+  reviewLine,
+  verbs,
+  whereNow,
+  words as summaryWords,
+} from "../mods/lib/accept.js";
+import { PR_WORDS, openUrl, taskPr } from "../mods/lib/taskpr.js";
 
 /** One fixture, parsed. */
 function fixture(name) {
@@ -70,6 +89,10 @@ function fixture(name) {
 
 /** The snapshot a real `GET /api/state` answered. */
 const STATE = fixture("state.json");
+/** The other real snapshot: the M10.5 board, with a hand-in, a review and PRs. */
+const BOARD = fixture("board.json");
+/** What `GET /api/tasks/T2/changes` answered for that board's T2. */
+const CHANGES = fixture("task-changes.json");
 /** The events a real `GET /api/changes?since=0` answered, as the notice shapes. */
 const EVENTS = fixture("changes.json").events;
 /** The spaces and tabs a real `herdr-app ls` answered. */
@@ -533,4 +556,253 @@ test("a time in the bar is words, not a date", () => {
   assert.equal(since(now - 3 * 3_600_000, now), "3h ago");
   assert.equal(since(now - 2 * 86_400_000, now), "2d ago");
   assert.equal(since(undefined, now), "just now");
+});
+
+// -- the tasks panel's reading of a row's act ------------------------------
+
+/** One task of the M10.5 board, by id. */
+function boardTask(id) {
+  return BOARD.tasks.find((entry) => entry.id === id);
+}
+
+test("a row offers the one verb the engine has for its state", () => {
+  // T2 is passed, so its act opens the Accept card rather than posting a verb.
+  assert.deepEqual(rowActions(boardTask("T2")), [{ id: "review", label: "Review", action: null }]);
+  // T3 failed its review: the send-back is a spawn, which is what a retry is.
+  assert.deepEqual(rowActions(boardTask("T3")), [{ id: "retry", label: "Retry", action: "task.retry" }]);
+  // T5 is working, so the one act is a stop.
+  assert.deepEqual(rowActions(boardTask("T5")), [{ id: "stop", label: "Stop", action: "task.stop" }]);
+  // A done task is history, and a queued one waits for its deps: neither has an
+  // act, so a row never offers a press that would be refused.
+  assert.deepEqual(rowActions(boardTask("T1")), []);
+  assert.deepEqual(rowActions(boardTask("T4")), []);
+  assert.deepEqual(rowActions(boardTask("T6")), []);
+  assert.deepEqual(rowActions(null), []);
+});
+
+test("a task that may start is the one the rules would accept a start for", () => {
+  const startable = { ...boardTask("T6"), status: "queued", derived: { status: "to_do" } };
+  assert.deepEqual(rowActions(startable), [{ id: "start", label: "Start", action: "task.start" }]);
+  // Scheduled starts by itself at a time; starting it now is the same verb.
+  const scheduled = { ...startable, derived: { status: "scheduled" } };
+  assert.equal(rowActions(scheduled)[0].action, "task.start");
+  // A dropped task is not history to act on.
+  assert.deepEqual(rowActions({ ...startable, status: "dropped" }), []);
+});
+
+test("the add-task form says what is missing before the press", () => {
+  assert.deepEqual(newTask({ title: " Tabs ", scope: "a, b", acceptance: "it works; it stays" }), {
+    title: "Tabs",
+    scope: ["a", "b"],
+    acceptance: ["it works", "it stays"],
+    why: "",
+    ready: true,
+  });
+  assert.equal(newTask({}).ready, false);
+  assert.match(newTask({}).why, /title/);
+  assert.match(newTask({ title: "x" }).why, /folder or path/);
+  assert.match(newTask({ title: "x", scope: "a" }).why, /must be true/);
+});
+
+test("a panel finds the task its shared selection names, or nothing", () => {
+  assert.equal(taskById(BOARD, "T2").title, "Tasks panel");
+  assert.equal(taskById(BOARD, "nope"), null);
+  assert.equal(taskById(BOARD, null), null);
+  assert.equal(taskById(null, "T2"), null);
+});
+
+// -- the accept card's reading of a hand-in --------------------------------
+
+test("the card shows the task the panel picked", () => {
+  assert.equal(acceptCard(BOARD, "T3").title, "Accept card");
+  assert.equal(acceptCard(BOARD, "T9"), null);
+  const head = acceptHead(boardTask("T2"));
+  assert.equal(head.id, "T2");
+  assert.equal(head.word, "needs you");
+  assert.equal(head.tone, "red", "the engine wants the person, so the header says so");
+  assert.match(head.question, /^Accept T2\?$/);
+});
+
+test("a long summary keeps its first sentence and folds the rest away", () => {
+  const short = summaryWords(boardTask("T1"));
+  assert.equal(short.details, "", "a summary that fits is not folded");
+  assert.match(short.summary, /^the sidebar lists every task/);
+  // T2's summary fits as well, so nothing is folded.
+  assert.equal(summaryWords(boardTask("T2")).details, "");
+  // Over the limit, the top of the card is the first sentence and the whole text
+  // is under Details (Shepherdr's rule, `core/accept.js`'s `words()`).
+  const paragraph = `${boardTask("T2").attempts[0].report.summary}. It also pages the list and keeps the row's act at the end, then draws the counts over it and folds the rest away.`;
+  assert.ok(paragraph.length > SUMMARY_MAX);
+  const long = summaryWords({ attempts: [{ report: { summary: `  ${paragraph}\n` } }] });
+  assert.ok(long.summary.length <= SUMMARY_MAX + 1, long.summary);
+  assert.ok(long.summary.endsWith("…") || long.summary.endsWith("."), long.summary);
+  assert.ok(long.details.length > long.summary.length);
+  // A summary with no sentence end is cut at a word, not mid-word.
+  const cutAtWord = summaryWords({ attempts: [{ report: { summary: "word ".repeat(60) } }] });
+  assert.ok(cutAtWord.summary.endsWith("…"), cutAtWord.summary);
+  assert.ok(!cutAtWord.summary.includes("  "), cutAtWord.summary);
+  // Nothing said at all is said quietly.
+  assert.deepEqual(summaryWords(boardTask("T6")), { summary: "", details: "" });
+  assert.equal(summaryWords(null).summary, "");
+});
+
+test("the changes are counted once, from the branch git read", () => {
+  assert.equal(changesLine(CHANGES), "3 files changed · +6 −0");
+  assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed · +1 −2");
+  assert.equal(changesLine({ files: [] }), WORDS.noChanges);
+  assert.equal(changesLine(null), WORDS.noChanges);
+});
+
+test("the changed files are the biggest first, and a binary file says so", () => {
+  const { rows, rest } = changeRows(CHANGES);
+  assert.deepEqual(
+    rows.map((row) => [row.path, row.stat]),
+    [
+      ["host/herdr-desktop/rows.js", "+4 −0"],
+      ["host/herdr-desktop/board.js", "+1 −0"],
+      ["src/tasks.rs", "+1 −0"],
+    ],
+  );
+  assert.equal(rest, 0);
+  const many = {
+    files: Array.from({ length: FILES_SHOWN + 3 }, (_, n) => ({ path: `f${n}.rs`, added: n, deleted: 0 })),
+  };
+  const folded = changeRows(many);
+  assert.equal(folded.rows.length, FILES_SHOWN);
+  assert.equal(folded.rest, 3, "the card says how many it folded, once");
+  const binary = changeRows({ files: [{ path: "logo.png", added: 0, deleted: 0, binary: true }] });
+  assert.equal(binary.rows[0].stat, "binary", "a binary file is not +0 −0");
+});
+
+test("the checks are the ones the hand-in recorded, with their exit codes", () => {
+  const { rows, alsoRan } = handInChecks(boardTask("T2"));
+  assert.deepEqual(
+    rows.map((row) => [row.name, row.command, row.state]),
+    [
+      ["fmt", "cargo fmt --all --check", "passed"],
+      ["lint", "cargo clippy --workspace --all-targets -- -D warnings", "passed"],
+      ["tests", "cargo test --workspace", "passed"],
+    ],
+  );
+  // The detail is the last line it printed, cut: a whole tail would push the
+  // review off the card.
+  assert.equal(rows[2].detail, "test result: ok. 1652 passed; 0 failed");
+  assert.deepEqual(alsoRan, ["cargo test --workspace: 1652 passed"]);
+  // An attempt with no report at all says nothing rather than guessing.
+  assert.deepEqual(handInChecks(boardTask("T6")), { rows: [], alsoRan: [] });
+  // A failing exit code is a failed check, and a timeout is neither.
+  const failed = {
+    attempts: [{ report: { checks: [{ gate: "lint", command: "cargo clippy", exit_code: 101, output_tail: "error: boom" }] } }],
+  };
+  assert.equal(handInChecks(failed).rows[0].state, "failed");
+  const timedOut = {
+    attempts: [{ report: { checks: [{ gate: "tests", command: "cargo test", output_tail: "timed out" }] } }],
+  };
+  assert.equal(handInChecks(timedOut).rows[0].state, "unknown");
+});
+
+test("the reviewer's findings are worst first, each with its wave", () => {
+  const found = reviewFindings(boardTask("T3"));
+  assert.equal(found.length, 2);
+  assert.deepEqual(
+    found.map((finding) => [finding.severity, finding.word, finding.tone]),
+    [
+      ["major", "Major", "red"],
+      ["minor", "Minor", "amber"],
+    ],
+  );
+  assert.equal(found[0].reviewer, "codex", "a review's finding carries the reviewer");
+  assert.match(found[0].location, /^host\/herdr-desktop\/mods\/shprd-accept\/main\.js:/);
+  assert.match(found[0].detail, /tasks\.merge/);
+  // A gate of the engine's own is a finding too, but it has no reviewer.
+  const own = {
+    attempts: [{ reviews: [], gates: [{ gate: "integrate", passed: false, findings: [{ severity: "trivial", title: "t", detail: "" }] }] }],
+  };
+  assert.equal(reviewFindings(own)[0].reviewer, null);
+  // A task with no finding is an empty list, not a made-up one.
+  assert.deepEqual(reviewFindings(boardTask("T2")), []);
+});
+
+test("the review line names the reviewer and whether it was independent", () => {
+  assert.equal(reviewLine(boardTask("T2")).line, "codex reviewed it: passed · another vendor");
+  assert.equal(reviewLine(boardTask("T3")).line, "codex reviewed it: failed · another vendor");
+  const degraded = {
+    attempts: [{ reviews: [{ reviewer: "claude", degraded: true }], gates: [{ gate: "review", passed: true, findings: [], proven: true }] }],
+  };
+  const said = reviewLine(degraded);
+  assert.match(said.line, /same vendor, not independent/);
+  assert.equal(said.degraded, true);
+  const none = { attempts: [{ reviews: [], gates: [] }] };
+  assert.deepEqual(reviewLine(none), { line: WORDS.noReview, degraded: false });
+});
+
+test("the card offers Accept only where a merge policy asks", () => {
+  const ready = boardTask("T2");
+  assert.equal(verbs(ready, "ask").accept, true);
+  for (const policy of ["checks", "auto"]) {
+    const offered = verbs(ready, policy);
+    assert.equal(offered.accept, false, policy);
+    assert.match(offered.note, new RegExp(`tasks\.merge is ${policy}`));
+  }
+  // A service that could not say leaves the decision to the engine.
+  assert.equal(verbs(ready, null).accept, true);
+  // A hand-in nobody reviewed yet is not a decision for the person: the card
+  // offers no Accept until a review has passed it.
+  const reported = { id: "T9", status: "reported", derived: { status: "working" }, attempts: [] };
+  assert.equal(verbs(reported, "ask").accept, false);
+  assert.equal(verbs(boardTask("T2"), "ask").accept, true);
+  // A failed task is sent back, never accepted.
+  const failed = verbs(boardTask("T3"), "ask");
+  assert.deepEqual({ accept: failed.accept, sendBack: failed.sendBack, drop: failed.drop }, {
+    accept: false,
+    sendBack: true,
+    drop: true,
+  });
+  // Work in progress can be dropped, and nothing else: a send-back is refused
+  // while an attempt is unfinished, and an accept is not a decision yet.
+  const working = verbs(boardTask("T5"), "ask");
+  assert.deepEqual({ accept: working.accept, sendBack: working.sendBack, drop: working.drop }, {
+    accept: false,
+    sendBack: false,
+    drop: true,
+  });
+  // A landed or dropped task is not a decision any more.
+  for (const id of ["T1", "T4"]) {
+    assert.deepEqual(verbs(boardTask(id), "ask"), { accept: false, sendBack: false, drop: false, note: null });
+  }
+  assert.equal(whereNow(boardTask("T1")), "Landed: its work is in the base branch.");
+  assert.equal(whereNow(boardTask("T4")), "Landed: its work is in the base branch.");
+  assert.equal(whereNow(null), "This task is no longer on the board.");
+});
+
+// -- the task PR's reading of a landing ------------------------------------
+
+test("a task that landed through a forge shows its number, state and link", () => {
+  const merged = taskPr(boardTask("T1"));
+  assert.equal(merged.kind, "pr");
+  assert.equal(merged.number, "#58");
+  assert.equal(merged.state, PR_WORDS.merged);
+  assert.equal(merged.tone, "green");
+  assert.equal(openUrl(merged), "https://github.com/jmvbambico/shprd/pull/58");
+  const open = taskPr(boardTask("T2"));
+  assert.equal(open.state, PR_WORDS.open);
+  assert.equal(open.tone, "amber");
+  assert.equal(open.approved, false);
+  assert.equal(open.line, PR_WORDS.notApproved);
+});
+
+test("a local landing and a task that never landed say so, and open nothing", () => {
+  const local = taskPr(boardTask("T4"));
+  assert.equal(local.kind, "local", "it merged into its base, so there is no pull request");
+  assert.equal(local.number, null);
+  assert.equal(openUrl(local), null);
+  assert.match(local.line, /^Landed locally/);
+  const none = taskPr(boardTask("T5"));
+  assert.equal(none.kind, "none");
+  assert.equal(none.line, PR_WORDS.none);
+  assert.equal(openUrl(none), null);
+  // A URL that is not one is not opened: an empty call is a window asked for
+  // nothing.
+  assert.equal(openUrl({ kind: "pr", url: "" }), null);
+  assert.equal(openUrl({ kind: "pr", url: "/pull/1" }), null);
 });
