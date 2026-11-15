@@ -301,6 +301,139 @@ pub trait Host: Send + Sync {
     }
 }
 
+/// A boxed or shared host is a host: every verb goes to the host it wraps.
+///
+/// The wiring edge picks one adapter at run time — Herdr desktop's `hc`, the
+/// herdr TUI, tuios — and hands it down as `Box<dyn Host>` or `Arc<dyn Host>` so
+/// a service can keep one host for its whole life. Without these, every caller
+/// that holds the choice would have to reach through it with `&*`, and the verbs
+/// would read `mux.as_ref().spawn(…)` instead of `mux.spawn(…)`.
+///
+/// Every verb is forwarded verbatim, defaults included: boxing a host never
+/// changes what it answers.
+macro_rules! forward_a_wrapper {
+    ($($wrapper:ty),* $(,)?) => {
+        $(
+            impl<T: Host + ?Sized> Host for $wrapper {
+                fn capabilities(&self) -> Capabilities {
+                    (**self).capabilities()
+                }
+
+                fn find_space(&self, name: &str) -> Result<Option<Space>> {
+                    (**self).find_space(name)
+                }
+
+                fn list_spaces(&self) -> Result<Vec<Space>> {
+                    (**self).list_spaces()
+                }
+
+                fn ensure_space(&self, name: &str, cwd: &Path) -> Result<Space> {
+                    (**self).ensure_space(name, cwd)
+                }
+
+                fn create_space(&self, name: &str, cwd: &Path) -> Result<Space> {
+                    (**self).create_space(name, cwd)
+                }
+
+                fn close_space(&self, space: &SpaceId) -> Result<()> {
+                    (**self).close_space(space)
+                }
+
+                fn focus_space(&self, space: &SpaceId) -> Result<()> {
+                    (**self).focus_space(space)
+                }
+
+                fn list_tabs(&self, space: &SpaceId) -> Result<Vec<Tab>> {
+                    (**self).list_tabs(space)
+                }
+
+                fn rename_tab(&self, tab: &TabId, title: &str) -> Result<()> {
+                    (**self).rename_tab(tab, title)
+                }
+
+                fn focus_tab(&self, tab: &TabId) -> Result<()> {
+                    (**self).focus_tab(tab)
+                }
+
+                fn close_tab(&self, tab: &TabId) -> Result<()> {
+                    (**self).close_tab(tab)
+                }
+
+                fn spawn(
+                    &self,
+                    space: &SpaceId,
+                    title: &str,
+                    argv: &[String],
+                    env: &[(String, Option<String>)],
+                    cwd: &Path,
+                ) -> Result<Tab> {
+                    (**self).spawn(space, title, argv, env, cwd)
+                }
+
+                fn split(
+                    &self,
+                    pane: &PaneId,
+                    direction: Direction,
+                    ratio: f32,
+                    cwd: &Path,
+                ) -> Result<PaneId> {
+                    (**self).split(pane, direction, ratio, cwd)
+                }
+
+                fn close_pane(&self, pane: &PaneId) -> Result<()> {
+                    (**self).close_pane(pane)
+                }
+
+                fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {
+                    (**self).write(pane, text, submit)
+                }
+
+                fn keys(&self, pane: &PaneId, keys: &[Key]) -> Result<()> {
+                    (**self).keys(pane, keys)
+                }
+
+                fn read(&self, pane: &PaneId, lines: usize) -> Result<String> {
+                    (**self).read(pane, lines)
+                }
+
+                fn wait(&self, pane: &PaneId, wanted: &Waited, timeout: Duration) -> Result<Outcome> {
+                    (**self).wait(pane, wanted, timeout)
+                }
+
+                fn kill(&self, pane: &PaneId) -> Result<()> {
+                    (**self).kill(pane)
+                }
+
+                fn agent_state(&self, pane: &PaneId) -> Result<AgentState> {
+                    (**self).agent_state(pane)
+                }
+
+                fn exit_of(&self, pane: &PaneId) -> Result<Option<Outcome>> {
+                    (**self).exit_of(pane)
+                }
+
+                fn pane_process_group(&self, pane: &PaneId) -> Result<Option<u32>> {
+                    (**self).pane_process_group(pane)
+                }
+
+                fn subscribe(&self, timeout: Duration) -> Result<Vec<MuxEvent>> {
+                    (**self).subscribe(timeout)
+                }
+
+                fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {
+                    (**self).doc(space, name, body)
+                }
+
+                fn exec(&self, argv: &[String], cwd: &Path) -> Result<Outcome> {
+                    (**self).exec(argv, cwd)
+                }
+            }
+        )*
+    };
+}
+
+forward_a_wrapper!(Box<T>, std::sync::Arc<T>);
+
 /// [`Host::wait`]'s default: read the screen until it matches, or the program
 /// ends, or the timeout runs out.
 ///
