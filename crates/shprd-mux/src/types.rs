@@ -123,6 +123,13 @@ pub struct Capabilities {
     /// text plus the host's own submit ([`crate::Host::spawn`]'s `--submit` as it
     /// were), so a flow needing escape or arrow keys degrades to a refusal.
     pub keys: bool,
+    /// `write` can leave the text at the cursor (`write(…, submit = false)`).
+    ///
+    /// Without it the only way in is paste-then-submit, so keystroke-level work
+    /// that must not press enter — typing half a line, filling a field before
+    /// the point is confirmed — is refused rather than submitted
+    /// ([`crate::Host::write`]).
+    pub type_without_submit: bool,
     /// `wait` is answered by the host rather than by polling [`crate::Host::read`].
     pub wait: bool,
     /// `kill` ends a pane's program. Without it a pane can only be closed,
@@ -158,6 +165,7 @@ impl Capabilities {
             pane_grants: true,
             human_ask: true,
             keys: true,
+            type_without_submit: true,
             wait: true,
             kill: true,
             resumable_events: true,
@@ -180,6 +188,7 @@ impl Capabilities {
             pane_grants: false,
             human_ask: false,
             keys: false,
+            type_without_submit: false,
             wait: false,
             kill: false,
             resumable_events: false,
@@ -510,6 +519,7 @@ mod tests {
         assert!(caps.agent_state);
         assert!(!caps.split);
         assert!(!caps.keys);
+        assert!(!caps.type_without_submit);
         assert!(!caps.close_space);
         assert!(!caps.doc);
         assert!(!caps.exec);
@@ -518,6 +528,7 @@ mod tests {
     #[test]
     fn every_capability_is_on_in_the_full_set() {
         let caps = Capabilities::all();
+        assert!(caps.type_without_submit);
         assert!(caps.split_ratio);
         assert!(caps.pane_grants);
         assert!(caps.human_ask);

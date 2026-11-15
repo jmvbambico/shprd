@@ -224,7 +224,8 @@ fn marked(current: &BTreeMap<String, String>, var: &str) -> bool {
     current.get(var).map(String::as_str) == Some("1")
 }
 
-/// Section 1: the multiplexer we are inside and the binaries we would drive.
+/// Section 1: the multiplexer we are inside, the host a run would drive, and the
+/// binaries behind it.
 fn host(report: &mut Report, facts: &Facts) {
     let section = report.section("Host");
     if marked(&facts.current, "TUIOS_ENV") {
@@ -234,7 +235,17 @@ fn host(report: &mut Report, facts: &Facts) {
     } else {
         section.add(Level::Warn, "not inside herdr or tuios");
     }
-    for binary in ["herdr", "tuios"] {
+    // The host the verbs would drive, and why: the same resolution the run does
+    // (M10.9), so a person asking "which multiplexer is shprd using?" gets the
+    // answer the next spawn will act on rather than a second opinion.
+    let resolution = crate::host::resolve();
+    let level = if resolution.fell_back {
+        Level::Warn
+    } else {
+        Level::Ok
+    };
+    section.add(level, resolution.line());
+    for binary in ["herdr", "tuios", "hc", "herdr-app"] {
         match find_binary(binary, &facts.path_env) {
             Some(path) => section.add(Level::Ok, format!("{binary} {}", path.display())),
             None => section.add(Level::Warn, format!("{binary} not on PATH")),

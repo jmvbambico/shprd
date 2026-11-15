@@ -380,6 +380,14 @@ impl FakeMux {
         self
     }
 
+    /// Make the fake a host whose only way in is paste-then-submit: the
+    /// capability says so and a `write` without submit answers
+    /// [`MuxError::Unsupported`], the two agreeing the way a real adapter's do.
+    pub fn without_typing_unsubmitted(mut self) -> Self {
+        self.caps.type_without_submit = false;
+        self
+    }
+
     /// Make the fake a host without whole-space closes: the capability says so
     /// and `close_space` answers [`MuxError::Unsupported`], so a caller's
     /// tab-by-tab fallback is the only way its space can go away.
@@ -736,6 +744,9 @@ impl Host for FakeMux {
         inner
             .calls
             .push(Call::Write(pane.clone(), text.to_string(), submit));
+        if !submit && !self.caps.type_without_submit {
+            return Err(MuxError::Unsupported("typing text without submitting it"));
+        }
         inner.require_pane(pane)
     }
 
@@ -1028,6 +1039,27 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].root_pane, tab.root_pane);
         assert!(ok(mux.agent_state(&tab.root_pane)) == AgentState::Unknown);
+    }
+
+    #[test]
+    fn a_host_that_cannot_type_without_submitting_says_so_twice() {
+        // The flag and the act are the same fact said twice, as for every other
+        // capability: a caller may plan from one and still hit the other.
+        let mux = FakeMux::default().without_typing_unsubmitted();
+        let space = ok(mux.create_space("shprd · repo · r1 · T1", Path::new("/tmp/repo")));
+        let tab = ok(mux.spawn(
+            &space.id,
+            "claude·T1",
+            &["claude".to_string()],
+            &[],
+            Path::new("/tmp/repo"),
+        ));
+        assert!(!mux.capabilities().type_without_submit);
+        assert!(matches!(
+            mux.write(&tab.root_pane, "half a line", false),
+            Err(MuxError::Unsupported(_))
+        ));
+        ok(mux.write(&tab.root_pane, "a whole line", true));
     }
 
     #[test]
