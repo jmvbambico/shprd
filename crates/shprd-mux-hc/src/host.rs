@@ -236,6 +236,9 @@ impl Window {
         for variable in Endpoint::DROPPED {
             window.environment.push((variable.to_string(), None));
         }
+        for variable in Self::DROPPED {
+            window.environment.push((variable.to_string(), None));
+        }
         for (key, value) in endpoint.environment() {
             window.environment.push((key.to_string(), Some(value)));
         }
@@ -255,6 +258,19 @@ impl Window {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// The variables this command line hands its child, in the order it applies
+    /// them: [`None`] removes one, a value sets it, and the last entry for a
+    /// name wins.
+    ///
+    /// A caller that wants to know what the window will and will not inherit —
+    /// a test, or a person reading what the host was built from — reads it here
+    /// rather than guessing from the endpoint.
+    pub fn variables(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.environment
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_deref()))
     }
 
     /// The binary this command line runs.
@@ -361,6 +377,26 @@ impl Window {
             }),
         }
     }
+}
+
+impl Window {
+    /// The variables a window child must not inherit, on top of the endpoint's.
+    ///
+    /// They name a pane, a tab, a workspace, a core session or a herdr binary —
+    /// whatever started shprd — and a window command must act on the layout this
+    /// endpoint names, never on the one that happened to launch it (M7ef §2.1
+    /// unsets exactly these before it runs any window command). `HERDR_APP_HOME`
+    /// is deliberately absent: it names the window's own home, which is the one
+    /// thing the child *should* have, and the caller sets it after these
+    /// removals.
+    pub const DROPPED: [&'static str; 6] = [
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_SOCKET_PATH",
+        "HERDR_SESSION",
+        "HERDR_BIN_PATH",
+    ];
 }
 
 /// The shprd host for Herdr desktop: `hc` for terminals, the window for layout.
@@ -1623,6 +1659,37 @@ mod tests {
             "a label-made space's id is its label"
         );
         assert!(match_space(&spaces, "nobody").is_none());
+    }
+
+    #[test]
+    fn a_window_never_inherits_the_pane_that_started_shprd() {
+        use crate::client::Endpoint;
+        use crate::host::Window;
+
+        let endpoint = Endpoint::new().with_session("s53");
+        let window = Window::from_endpoint(&endpoint);
+        let applied: Vec<(&str, Option<&str>)> = window.variables().collect();
+        // The last word on each pane variable is "remove".
+        for name in Window::DROPPED {
+            let last = applied
+                .iter()
+                .rev()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| *value);
+            assert_eq!(last, Some(None), "{name} must be removed: {applied:?}");
+        }
+        // The core this endpoint names is set, after its own removal.
+        let session = applied
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == "HC_SESSION")
+            .map(|(_, value)| *value);
+        assert_eq!(session, Some(Some("s53")), "{applied:?}");
+        // The window's own home is the caller's to set, never removed here.
+        assert!(
+            !applied.iter().any(|(key, _)| *key == "HERDR_APP_HOME"),
+            "{applied:?}"
+        );
     }
 
     #[test]
