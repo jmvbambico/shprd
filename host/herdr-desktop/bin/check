@@ -23,6 +23,31 @@ app=1
 echo "== shared modules"
 ./bin/sync-shared --check
 
+echo "== gate-env"
+# The gate's private app home: the first-run keys are written there and never
+# into a person's own window, which is the rule the script itself refuses to
+# break. The check runs it against a folder of its own and reads the result back.
+gate=$(mktemp -d "${TMPDIR:-/tmp}/shprd-gate-env-check.XXXXXX")
+HERDR_APP_HOME="$gate/app" ./bin/gate-env --version 0.0.1 >/dev/null
+if ! grep -q '"frame.welcomed": "finished"' "$gate/app/data/shared.json"; then
+  echo "gate-env did not write the welcome key" >&2
+  rm -rf "$gate"
+  exit 1
+fi
+if ! grep -q '"frame.whatsnew": "0.0.1"' "$gate/app/data/shared.json"; then
+  echo "gate-env did not write the what's-new key" >&2
+  rm -rf "$gate"
+  exit 1
+fi
+# And it refuses the one home it must never touch.
+if HERDR_APP_HOME="$HOME/.config/herdr-app" ./bin/gate-env >/dev/null 2>&1; then
+  echo "gate-env wrote into the person's own Herdr home" >&2
+  rm -rf "$gate"
+  exit 1
+fi
+rm -rf "$gate"
+echo "ok: gate-env writes a private home and refuses the real one"
+
 echo "== client unit tests"
 if command -v bun >/dev/null 2>&1; then
   echo "   (bun)"

@@ -86,10 +86,11 @@ test("a block Herdr pruned says how to put it back", () => {
   assert.equal(seen.kind, "stop");
   assert.match(seen.title, /gone from the layout/);
   assert.match(seen.hint, /shprd install herdr-desktop/);
-  // Herdr shortens the layout file itself, so the installer refuses it until the
-  // app's copy is moved aside; the message says that rather than sending a person
-  // to a command that would only refuse.
-  assert.match(seen.message, /layouts\/shprd\.json/);
+  // Herdr shortens the layout file itself, and the installer recognises that
+  // prune as its own file and puts the block back, so the recovery is the
+  // install and nothing to move aside first.
+  assert.match(seen.message, /puts the block back/);
+  assert.doesNotMatch(seen.message, /Move `layouts/, "nothing has to be moved aside");
 });
 
 test("without dagr the block names the setting that fixes it", () => {

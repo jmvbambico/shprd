@@ -1,0 +1,130 @@
+#!/bin/sh
+# A private Herdr desktop for a test or a gate, with the welcome screen already
+# answered — so the first frame a check takes is the layout and not the first-run
+# welcome over it.
+#
+# A fresh `HERDR_APP_HOME` shows Herdr's first-run welcome over whatever layout is
+# shown, and a `layout.switch` does not clear it (the M10 gate saw exactly that:
+# its screenshots needed the welcome put away first). The welcome records its own
+# answer in the window's shared state, `data/shared.json`, under `frame.welcomed`,
+# and the "What's new" screen opens by itself after an update unless
+# `frame.whatsnew` names the version already seen. Writing those two keys before
+# the window starts is the whole of it: the window reads them at start and draws
+# the layout.
+#
+# **This is for a private app home only.** Every command here refuses to run
+# against Herdr's own home (`~/.config/herdr-app`), because writing those keys
+# there would tell the person's own window that it had already shown them the
+# welcome — which it would then never show them. Point it at a folder of your own:
+#
+#   HERDR_APP_HOME=$(mktemp -d)/app bin/gate-env
+#   HERDR_APP_HOME=/tmp/my-gate/app bin/gate-env
+#
+# With no `HERDR_APP_HOME`, it makes a temporary one and prints it, so a caller can
+# do `eval "$(bin/gate-env --export)"`.
+#
+#   bin/gate-env                    write the keys into $HERDR_APP_HOME
+#   bin/gate-env --export           the same, then print it as an export line
+#   bin/gate-env --print            say which home it would use, write nothing
+#   bin/gate-env --version VERSION  the version to record as the one seen
+#
+# The version defaults to the app's own (`herdr-app --version`), so "what's new"
+# stays quiet for the release that is running.
+
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+home=${HERDR_APP_HOME:-}
+
+mode=write
+version=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --export) mode=export ;;
+    --print) mode=print ;;
+    --version)
+      shift
+      version=${1:-}
+      ;;
+    *)
+      echo "gate-env: unknown argument $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$home" ]; then
+  if [ "$mode" = print ]; then
+    echo "gate-env: no HERDR_APP_HOME; a temporary one would be used" >&2
+    exit 1
+  fi
+  base=$(mktemp -d "${TMPDIR:-/tmp}/shprd-gate-env.XXXXXX")
+  home="$base/app"
+fi
+
+home=${home%/}
+
+# Herdr's own home, and the home of the window a person is looking at, are the
+# two places this must never write. `$HOME` is expanded here rather than left to
+# the caller so a relative or trailing-slash spelling cannot slip past.
+real=${home}
+case "$real" in
+  "~"/*) real="$HOME/${real#\~/}" ;;
+esac
+if [ "$real" = "$HOME/.config/herdr-app" ]; then
+  echo "gate-env: $home is the person's own Herdr desktop; use a private HERDR_APP_HOME" >&2
+  exit 1
+fi
+
+if [ -z "$version" ]; then
+  if command -v herdr-app >/dev/null 2>&1; then
+    # `herdr-app --version` answers "herdr-app 0.1.16"; the release notes key on
+    # the bare version.
+    version=$(herdr-app --version 2>/dev/null | awk '{print $NF}' || true)
+  fi
+  [ -n "$version" ] || version="0.1.16"
+fi
+
+if [ "$mode" = print ]; then
+  echo "$home"
+  exit 0
+fi
+
+mkdir -p "$home/data"
+shared="$home/data/shared.json"
+
+# The merge is done with `node` when it is there and a plain write when it is
+# not: the two keys are all this file is for on a fresh home, and a file that
+# already has others (a re-run over a home a window has used) must keep them.
+if command -v node >/dev/null 2>&1; then
+  SHARED="$shared" WELCOME="$version" node -e '
+    const fs = require("node:fs");
+    const path = process.env.SHARED;
+    let state = {};
+    try {
+      state = JSON.parse(fs.readFileSync(path, "utf8") || "{}");
+    } catch {
+      state = {};
+    }
+    if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+    if (state["frame.welcomed"] !== "finished" && state["frame.welcomed"] !== "skipped") {
+      state["frame.welcomed"] = "finished";
+    }
+    state["frame.whatsnew"] = process.env.WELCOME;
+    fs.mkdirSync(require("node:path").dirname(path), { recursive: true });
+    fs.writeFileSync(path, JSON.stringify(state, null, 2) + "\n");
+  '
+else
+  cat >"$shared" <<EOF
+{
+  "frame.welcomed": "finished",
+  "frame.whatsnew": "$version"
+}
+EOF
+fi
+
+echo "gate-env: $home is ready (frame.welcomed=finished, frame.whatsnew=$version)"
+if [ "$mode" = export ]; then
+  echo "export HERDR_APP_HOME='$home'"
+fi
