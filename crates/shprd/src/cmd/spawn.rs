@@ -33,7 +33,7 @@ use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
-use shprd_mux::{AgentState, Host};
+use shprd_mux::{AgentState, Host, PaneId};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -1862,7 +1862,7 @@ pub fn prompt(mux: &dyn Host, repo: &Path, task: &str, text: &str) -> Result<(),
 
 /// [`prompt`], against an explicit home directory, so a test needs no
 /// environment.
-fn prompt_in(
+pub(crate) fn prompt_in(
     mux: &dyn Host,
     home: &Path,
     ctx: &Ctx,
@@ -1895,6 +1895,48 @@ fn prompt_in(
         .ok_or_else(|| no_open_tab(task))?;
     mux.write(&tab.root_pane, text, true)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// Sends one turn of input to the run's coordinator, as the person.
+///
+/// The coordinator is the one pane shprd types into that is not a task's: the
+/// pane the run recorded when it launched one (`OrchestratorLaunched`), and
+/// otherwise the first tab of the repository's own space
+/// (`shprd · <folder>`), which is where `shprd serve` puts it. Both are panes
+/// shprd itself opened, so a chat line can never land in a person's own tab.
+pub(crate) fn prompt_coordinator(
+    mux: &dyn Host,
+    ctx: &Ctx,
+    text: &str,
+) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    if let Some(orchestrator) = state.orchestrator.as_ref() {
+        let pane = PaneId::new(orchestrator.pane.clone());
+        return mux
+            .write(&pane, text, true)
+            .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")));
+    }
+    let name = repo_space_name(&repo_name(&ctx.root)?);
+    let Some(space) = mux.find_space(&name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
+    })?
+    else {
+        return Err(no_coordinator());
+    };
+    let tabs = mux
+        .list_tabs(&space.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
+    let tab = tabs.first().ok_or_else(no_coordinator)?;
+    mux.write(&tab.root_pane, text, true)
+        .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")))
+}
+
+/// The refusal a coordinator with no reachable pane earns.
+fn no_coordinator() -> CliError {
+    CliError::Invalid(anyhow!(
+        "no open pane for the coordinator: start the run's coordinator in the \
+         repository's space, or `shprd serve` to make the space first"
+    ))
 }
 
 /// The run the folded event log names as active.

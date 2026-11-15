@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use serde_json::Value;
+use shprd_core::event::Actor;
 use shprd_core::state::RunInfo;
 use shprd_mux::Host;
 use shprd_server::{
@@ -82,6 +83,12 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         &home,
     )));
     config.data = resolve_data_dir(Some(&ctx.root)).ok();
+    // The chat's writes go through the host, the same adapter every other verb
+    // drives: one code path types into a pane, so a chat line lands where a
+    // prompt does and never in a tab shprd did not open.
+    config.chat = shprd_server::ChatHost::with(Arc::new(HostChat {
+        repo: ctx.root.clone(),
+    }));
     let tick = tick_config(
         ctx,
         &home,
@@ -140,6 +147,37 @@ fn install_subscriber() {
         .with_ansi(ansi)
         .with_target(false)
         .try_init();
+}
+
+/// The host as the chat uses it: one turn of the person's input, into a pane.
+///
+/// It holds nothing but the repository, because the host is made per call: a
+/// `shprd serve` that runs for days must pick up a herdr that was restarted
+/// under it, and the adapter rediscovers its socket every time it is built. The
+/// pane a space's agent runs in is resolved by the same path `shprd agent
+/// prompt` uses ([`crate::cmd::spawn::prompt_in`]), so a task's chat and a
+/// prompt can never disagree about which tab is the task's.
+struct HostChat {
+    /// The repository whose run log names each space's pane.
+    repo: std::path::PathBuf,
+}
+
+impl shprd_server::ChatWriter for HostChat {
+    fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
+        let mux = crate::cmd::spawn::real_mux();
+        // Reading the log needs the root; the actor is the person, because the
+        // line is theirs — the API never writes to the ledger for a chat turn,
+        // so nothing here can be mistaken for an engine decision.
+        let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
+        match space {
+            None => crate::cmd::spawn::prompt_coordinator(&mux, &ctx, text),
+            Some(task) => {
+                let home = resolve_home(None).map_err(|err| err.to_string())?;
+                crate::cmd::spawn::prompt_in(&mux, &home, &ctx, task, text)
+            }
+        }
+        .map_err(|err| err.to_string())
+    }
 }
 
 /// What the service did about the repository's own space when it started.
