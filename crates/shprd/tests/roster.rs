@@ -7,6 +7,10 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -62,7 +66,9 @@ fn write_script(dir: &Path, name: &str, body: &str) {
 
 /// Runs `shprd roster` with `PATH` limited to `bin` and the copied data dir.
 fn run(bin: &Path, data: &Path, args: &[&str]) -> Output {
-    match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, bin);
+    match command
         .arg("roster")
         .args(args)
         .env("PATH", bin.display().to_string())

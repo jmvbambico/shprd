@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 use shprd_core::event::{Actor, Event, EventKind};
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -153,6 +157,7 @@ impl Fixture {
         ];
         all.extend(args.iter().map(|arg| (*arg).to_string()));
         let mut command = Command::new(BIN);
+        isolate(&mut command, &self.home);
         command
             .args(&all)
             .env(FAKE_FORGE, self.forge_script().display().to_string())

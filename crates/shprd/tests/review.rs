@@ -11,6 +11,10 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -66,7 +70,9 @@ impl Scratch {
 fn run(scratch: &Scratch, args: &[&str]) -> Output {
     let mut all: Vec<String> = vec!["--repo".into(), scratch.root().display().to_string()];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, scratch.home.path());
+    command
         .args(&all)
         .env("SHPRD_HOME", scratch.home.path())
         .env("SHPRD_DATA_DIR", data_dir())
