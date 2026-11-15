@@ -440,6 +440,7 @@ pub fn handoff(
         archive: None,
         prompt: Some(&context.prompt),
         ask,
+        proof: context.proof,
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &[],

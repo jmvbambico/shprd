@@ -234,6 +234,7 @@ mod tests {
             report: None,
             gates,
             reviews: Vec::new(),
+            spawn_seq: None,
         }
     }
 

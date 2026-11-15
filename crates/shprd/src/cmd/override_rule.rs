@@ -195,6 +195,7 @@ mod tests {
                     changed_paths: vec!["crates/janitor/x.rs".to_string()],
                     commit: Some("abc123".to_string()),
                     skills_used: Vec::new(),
+                    proofs: Vec::new(),
                 },
             ),
             event(

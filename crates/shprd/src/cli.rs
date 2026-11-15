@@ -854,6 +854,14 @@ pub struct ReportArgs {
     /// Skill the agent used; repeatable.
     #[arg(long = "skill-used", value_name = "SKILL")]
     pub skills_used: Vec<String>,
+    /// Where the attempt left its proof — a screenshot, a command's real
+    /// output, a test run; repeatable.
+    ///
+    /// The proof path belongs here, never in `--summary`: the summary is one
+    /// plain line for the person, and a path there reads as jargon. The
+    /// reviewer sees every proof in the packet it checks the work against.
+    #[arg(long = "proof", value_name = "PATH")]
+    pub proofs: Vec<String>,
 }
 
 /// Arguments for `agent gate`.

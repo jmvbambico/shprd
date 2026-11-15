@@ -606,6 +606,7 @@ mod tests {
                 changed_paths: vec![format!("src/{id}/x.rs")],
                 commit: Some(format!("{id}-commit")),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }

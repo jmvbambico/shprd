@@ -91,6 +91,7 @@ fn brief_for(program: &str) -> String {
         archive: None,
         prompt: None,
         ask: AskRoute::of_harness(harness.asks().supported),
+        proof: true,
         settings: None,
         role: None,
         warnings: &[],

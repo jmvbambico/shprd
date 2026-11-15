@@ -331,6 +331,14 @@ pub struct Attempt {
     pub gates: Vec<GateResult>,
     /// Reviews dispatched for this attempt, in order.
     pub reviews: Vec<ReviewRequest>,
+    /// The log sequence that started this attempt, or [`None`] for one the
+    /// fold was handed rather than grew.
+    ///
+    /// It is what tells this attempt's asks from the ones an earlier attempt
+    /// raised: an ask belongs to the attempt whose spawn came before it and
+    /// whose report came after, so a reviewer judging this attempt reads this
+    /// attempt's cards and no others.
+    pub spawn_seq: Option<u64>,
 }
 
 /// A review handed to a reviewer for an attempt.
@@ -372,6 +380,13 @@ pub struct Report {
     pub commit: Option<String>,
     /// Skills the agent used.
     pub skills_used: Vec<String>,
+    /// Where the attempt left its proof, when the worker named one.
+    ///
+    /// A proof is a real artifact — a screenshot, a command's actual output, a
+    /// test run — recorded beside the summary rather than inside it, so the
+    /// reviewer can look at what the worker says it produced while the summary
+    /// stays one plain line for the person.
+    pub proofs: Vec<String>,
 }
 
 /// The outcome of one gate against one attempt.
@@ -566,6 +581,7 @@ impl RunState {
                         model: model.clone(),
                         worktree: worktree.clone(),
                         branch: branch.clone(),
+                        spawn_seq: Some(event.seq),
                         report: None,
                         gates: Vec::new(),
                         reviews: Vec::new(),
@@ -581,6 +597,7 @@ impl RunState {
                 changed_paths,
                 commit,
                 skills_used,
+                proofs,
                 ..
             } => {
                 // Only a completed report moves the task on to gating; a
@@ -605,6 +622,7 @@ impl RunState {
                                 .collect(),
                             commit: commit.clone(),
                             skills_used: skills_used.clone(),
+                            proofs: proofs.clone(),
                         });
                     }
                 }
@@ -1640,6 +1658,7 @@ mod tests {
                     changed_paths: vec!["src/a/x.rs".to_string()],
                     commit: Some("bbb222".to_string()),
                     skills_used: Vec::new(),
+                    proofs: Vec::new(),
                 },
             ),
             ev(

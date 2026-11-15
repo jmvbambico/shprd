@@ -1569,6 +1569,7 @@ project_dirs = []
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         })
         .unwrap_or_else(|err| panic!("{err}"));
         ctx.commit(EventKind::ReviewRequested {
@@ -2252,6 +2253,7 @@ project_dirs = []
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         })
         .unwrap_or_else(|err| panic!("{err}"));
         // The human also clears the dead attempt's worktree and branch.
@@ -3091,6 +3093,7 @@ project_dirs = []
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         })
         .unwrap_or_else(|err| panic!("{err}"));
     }
@@ -3260,6 +3263,7 @@ project_dirs = []
                 changed_paths: Vec::new(),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         ));
         log.push(ev(
