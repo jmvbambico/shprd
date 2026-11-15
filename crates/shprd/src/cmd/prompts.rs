@@ -7,8 +7,9 @@
 //!
 //! The prompts directory is `$XDG_CONFIG_HOME/shprd/prompts`, else
 //! `~/.config/shprd/prompts`, so a person who moves their XDG directories keeps
-//! their words. Nothing here reads a run log, so the verb works outside a
-//! repository.
+//! their words. The root is resolved once, here (the binary's edge), and the
+//! library takes it as a path. Nothing here reads a run log, so the verb works
+//! outside a repository.
 
 use std::path::Path;
 
@@ -16,12 +17,12 @@ use anyhow::anyhow;
 use shprd_core::prompts::{self, Installed, Listed, PromptError};
 
 use crate::cli::{PromptIdArgs, PromptsCommand};
-use crate::ctx::{CliError, resolve_home};
+use crate::ctx::{CliError, resolve_config_home, resolve_home};
 
 /// Runs `shprd prompts`, whichever verb the command line asked for.
 pub fn run(command: &PromptsCommand, json: bool, home: Option<&Path>) -> Result<(), CliError> {
     let home = resolve_home(home)?;
-    let dir = prompts::prompts_dir(&home);
+    let dir = prompts::prompts_dir(&resolve_config_home(&home));
     match command {
         PromptsCommand::List => list(&dir, json),
         PromptsCommand::Show(args) => show(&dir, args, json),

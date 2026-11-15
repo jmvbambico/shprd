@@ -58,7 +58,7 @@ pub fn run(
 ) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     let loaded = load(&home, root)?;
-    let checker = Checker::load(shprd_agents::harness::data_dir(root).as_deref());
+    let checker = Checker::load(crate::ctx::resolve_data_dir(root).ok().as_deref());
     match command {
         SettingsCommand::Show(args) => show(&loaded, root, args, json, &checker),
         SettingsCommand::Get(args) => get(&loaded, root, args, json, &checker),
@@ -337,7 +337,7 @@ fn with_catalogs(checker: Checker, resolved: &Resolved, root: Option<&Path>) -> 
     if programs.is_empty() {
         return checker;
     }
-    let Some(data) = shprd_agents::harness::data_dir(root) else {
+    let Ok(data) = crate::ctx::resolve_data_dir(root) else {
         return checker;
     };
     let Some(specs) = checker.specs() else {

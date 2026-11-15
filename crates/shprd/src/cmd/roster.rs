@@ -50,20 +50,18 @@ fn models(specs: &[HarnessSpec]) -> BTreeMap<String, String> {
     models
 }
 
-/// The data directory: `$SHPRD_DATA_DIR`, else `<git root>/data`, else the
-/// `../share/shprd/data` a packaged install puts next to the binary.
+/// The data directory for the checkout the caller is in.
 ///
-/// The checkout the caller is in, not the run's repository: a linked worktree of
-/// shprd itself carries its own branch's `data/harness`, while a worker's task
-/// worktree is told the engine's table with `SHPRD_DATA_DIR`.
+/// `$SHPRD_DATA_DIR`, else `<git root>/data`, else the `../share/shprd/data` a
+/// packaged install puts next to the binary, else the data home's. The checkout
+/// the caller is in, not the run's repository: a linked worktree of shprd itself
+/// carries its own branch's `data/harness`, while a worker's task worktree is
+/// told the engine's table with `SHPRD_DATA_DIR`. The resolution itself is the
+/// binary's edge ([`crate::ctx::resolve_data_dir`]), so this verb reads no
+/// directory variable of its own.
 pub(crate) fn resolve_data_dir() -> Result<PathBuf, CliError> {
     let root = crate::ctx::resolve_checkout(None).ok();
-    shprd_agents::harness::data_dir(root.as_deref()).ok_or_else(|| {
-        CliError::other(anyhow!(
-            "no harness data directory: set {} to a directory holding `harness/`",
-            shprd_agents::harness::DATA_ENV
-        ))
-    })
+    crate::ctx::resolve_data_dir(root.as_deref())
 }
 
 /// One detection as the aligned-ish human line the verb prints.

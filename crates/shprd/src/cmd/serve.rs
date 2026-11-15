@@ -35,13 +35,15 @@ use shprd_core::state::RunInfo;
 use shprd_mux::Mux;
 use shprd_server::{
     AfterWrite, Config, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
-    shutdown_signal, state_dir,
+    shutdown_signal,
 };
 
 use shprd_server::ServerError::AlreadyRunning;
 
 use crate::cli::ServeArgs;
-use crate::ctx::{CliError, Ctx, resolve_home};
+use crate::ctx::{
+    CliError, Ctx, resolve_config_home, resolve_data_dir, resolve_home, resolve_state_home,
+};
 
 /// The variable that sets how much the service logs.
 ///
@@ -66,10 +68,19 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // if one is started after the service was: a service that came up too early
     // must not look like an empty run.
     let run_at_start = ctx.state()?.run;
-    let mut config = Config::new(ctx.root.clone(), state_dir(&home));
+    // Everything the service reads from the machine is resolved here, once: the
+    // discovery files' state directory, the person's home, their prompts and the
+    // harness table. The service itself reads no environment variable.
+    let state_home = resolve_state_home(&home);
+    let mut config = Config::new(ctx.root.clone(), shprd_server::state_dir(&state_home));
     config.port = args.port;
     config.actor = ctx.actor.clone();
     config.after_write = Some(after_write(ctx));
+    config.home = Some(home.clone());
+    config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
+        &home,
+    )));
+    config.data = resolve_data_dir(Some(&ctx.root)).ok();
     let tick = tick_config(
         ctx,
         &home,

@@ -473,15 +473,36 @@ fn every_shipped_prompt_credits_shepherdr() {
 }
 
 #[test]
-fn a_prompts_directory_without_the_xdg_setting_is_the_home_one() {
-    // The environment's own `XDG_CONFIG_HOME` is not touched by a test: the
-    // default path is the one this asserts, and the CLI's integration test
-    // proves the variable is honoured in a child process.
-    if std::env::var_os("XDG_CONFIG_HOME").is_some_and(|value| !value.is_empty()) {
-        return;
-    }
+fn the_config_root_prefers_the_xdg_setting_over_the_home_one() {
+    // The production rule, with the environment's value handed in: a set
+    // `$XDG_CONFIG_HOME` wins and an unset or empty one falls back to
+    // `<home>/.config`.
     assert_eq!(
-        prompts_dir(Path::new("/home/me")),
+        config_home(Path::new("/home/me"), Some(OsStr::new("/xdg/config"))),
+        Path::new("/xdg/config")
+    );
+    assert_eq!(
+        config_home(Path::new("/home/me"), None),
+        Path::new("/home/me/.config")
+    );
+    assert_eq!(
+        config_home(Path::new("/home/me"), Some(OsStr::new(""))),
+        Path::new("/home/me/.config"),
+        "an empty setting is unset"
+    );
+}
+
+#[test]
+fn the_prompts_directory_sits_under_the_config_root() {
+    assert_eq!(
+        prompts_dir(&config_home(Path::new("/home/me"), None)),
         Path::new("/home/me/.config/shprd/prompts")
+    );
+    assert_eq!(
+        prompts_dir(&config_home(
+            Path::new("/home/me"),
+            Some(OsStr::new("/xdg"))
+        )),
+        Path::new("/xdg/shprd/prompts")
     );
 }

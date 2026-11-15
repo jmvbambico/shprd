@@ -110,7 +110,11 @@ pub(crate) struct AppState {
     pub(crate) after_write: Option<AfterWrite>,
     /// The bounds a socket lives under.
     pub(crate) ws: WsLimits,
-    /// The home directory the settings files live in, when there is one.
+    /// The home directory the settings files live in, when the caller set one.
+    ///
+    /// Nothing here reads `$SHPRD_HOME` or `$HOME`: the binary resolves the home
+    /// once ([`App::with_home`]) and a test passes its own, so the service can
+    /// never read or write a directory it was not pointed at.
     pub(crate) home: Option<PathBuf>,
     /// The state directory holding `service.json`, the token and the last pass's
     /// outcome ([`crate::pass`]).
@@ -118,10 +122,29 @@ pub(crate) struct AppState {
     /// The `data/` directory the harness table is read from, when this service
     /// was given one. Only the settings checks need it.
     pub(crate) data: Option<PathBuf>,
-    /// The prompts directory, when the caller set one. A service that does not
-    /// resolve it from its home directory; a test always sets it, so it can
-    /// never touch the developer's own prompts.
+    /// The prompts directory, when the caller set one.
+    ///
+    /// The binary resolves the configuration root once (where `$XDG_CONFIG_HOME`
+    /// wins over `<home>/.config`) and sets it ([`App::with_prompts_dir`]), and a
+    /// test always sets it, so neither the service nor a test ever resolves a
+    /// path from the process's own XDG settings.
     pub(crate) prompts_dir: Option<PathBuf>,
+}
+
+/// The directories the binary resolved for the service.
+///
+/// They are carried in rather than looked up, so the service reads no
+/// environment variable of its own: the binary resolves `--home`/`$SHPRD_HOME`,
+/// the configuration root (`$XDG_CONFIG_HOME`, else `<home>/.config`) and the
+/// data directory once, and passes them here.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Paths {
+    /// The home directory the settings files live in, when there is one.
+    pub(crate) home: Option<PathBuf>,
+    /// The prompts directory, when there is one.
+    pub(crate) prompts_dir: Option<PathBuf>,
+    /// The `data/` directory the harness table is read from, when there is one.
+    pub(crate) data: Option<PathBuf>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -165,6 +188,32 @@ impl App {
         after_write: Option<AfterWrite>,
         hub: Hub,
     ) -> Result<Self, ServerError> {
+        Self::prepare_all(
+            repo,
+            port,
+            actor,
+            state_dir,
+            after_write,
+            hub,
+            Paths::default(),
+        )
+    }
+
+    /// [`App::prepare_with_hub`], pointed at the directories the binary resolved
+    /// for the service.
+    ///
+    /// The paths are set before the router is built, so a start builds it once
+    /// and a client that finds the discovery record at once finds a service
+    /// ready to answer it.
+    pub(crate) fn prepare_all(
+        repo: &Path,
+        port: u16,
+        actor: &Actor,
+        state_dir: &Path,
+        after_write: Option<AfterWrite>,
+        hub: Hub,
+        paths: Paths,
+    ) -> Result<Self, ServerError> {
         let files = ServiceFiles::prepare(state_dir)?;
         files.write_record(port)?;
         let state = AppState {
@@ -177,10 +226,13 @@ impl App {
             hub,
             after_write,
             ws: WsLimits::default(),
-            home: environment_home(),
+            // Everything the service reads from the machine is resolved by the
+            // binary and carried in ([`crate::service::Config`]); a service
+            // prepared by hand reads nothing of the process's environment.
+            home: paths.home,
             state_dir: state_dir.to_path_buf(),
-            data: shprd_agents::harness::data_dir(Some(repo)),
-            prompts_dir: None,
+            data: paths.data,
+            prompts_dir: paths.prompts_dir,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -274,15 +326,6 @@ impl App {
         self.router = router(self.state.clone());
         self
     }
-}
-
-/// The home directory the settings files live in: `$SHPRD_HOME`, else `$HOME`.
-fn environment_home() -> Option<PathBuf> {
-    ["SHPRD_HOME", "HOME"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find(|value| !value.is_empty())
-        .map(PathBuf::from)
 }
 
 /// The whole API, with the gate in front of everything but health.
