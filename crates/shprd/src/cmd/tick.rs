@@ -40,7 +40,7 @@
 //! failed is printed and stays in the report — it never stops the other steps,
 //! so it is not the verb's own failure.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -139,13 +139,7 @@ pub(crate) fn worker_with_hub(
     let close_home = home.to_path_buf();
     let close_reviewer: Option<shprd_server::ReviewCloser> = (!record_only()).then(|| {
         std::sync::Arc::new(move |repo: &Path, task: &str, attempt: u32| {
-            let ctx = Ctx::new(repo.to_path_buf(), Actor::Engine, false, true);
-            let run = ctx
-                .state()
-                .ok()
-                .and_then(|state| state.run.map(|run| run.run_id))
-                .ok_or_else(|| String::from("the run has not started"))?;
-            let briefs = close_home.join(".shprd").join("briefs");
+            let (run, briefs) = run_and_briefs(repo, &close_home)?;
             crate::cmd::review::close_reviewer(
                 &crate::cmd::spawn::real_mux(),
                 &briefs,
@@ -155,6 +149,18 @@ pub(crate) fn worker_with_hub(
             )
             .map_err(|err| err.to_string())
         }) as shprd_server::ReviewCloser
+    });
+    // A landing closes the worker's tab, for the same reason and through the same
+    // one path `shprd agent integrate` uses: the records beside the briefs are
+    // the only tabs in reach, and a landed task cannot come back to one. A
+    // record-only pass has no tabs at all.
+    let close_worker_home = home.to_path_buf();
+    let close_worker: Option<shprd_server::WorkerCloser> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str| {
+            let (run, briefs) = run_and_briefs(repo, &close_worker_home)?;
+            crate::cmd::spawn::close_worker(&crate::cmd::spawn::real_mux(), &briefs, &run, task)
+                .map_err(|err| err.to_string())
+        }) as shprd_server::WorkerCloser
     });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two
     // effects it may have. A record-only pass has no tabs and no CLIs to probe,
@@ -200,11 +206,29 @@ pub(crate) fn worker_with_hub(
         start,
         review,
         close_reviewer,
+        close_worker,
         actor,
         after_write: None,
         hub,
         news,
     })
+}
+
+/// The run id and the briefs directory of `repo`, as a tab-closing closure needs
+/// them.
+///
+/// A tab record lives at `<briefs>/<run>/<task>-a<n>.tab`, so closing one needs
+/// both halves of its path. A log that names no run is not something either
+/// closure can act on — nothing landed, so no tab is owed a close — and it comes
+/// back as the reason the closure had nothing to do.
+fn run_and_briefs(repo: &Path, home: &Path) -> Result<(String, PathBuf), String> {
+    let ctx = Ctx::new(repo.to_path_buf(), Actor::Engine, false, true);
+    let run = ctx
+        .state()
+        .ok()
+        .and_then(|state| state.run.map(|run| run.run_id))
+        .ok_or_else(|| String::from("the run has not started"))?;
+    Ok((run, home.join(".shprd").join("briefs")))
 }
 
 /// How long a change must hold before the coordinator is told, ms.

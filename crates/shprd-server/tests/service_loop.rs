@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use shprd_core::event::{Actor, CheckReport, Event, EventKind, ReportStatus};
@@ -41,6 +41,8 @@ struct Fixture {
     root: PathBuf,
     /// The home whose `.shprd` holds the log, worktrees, briefs and reviews.
     home: PathBuf,
+    /// Every task whose worker tab the pass asked to close, in order.
+    closed: Arc<Mutex<Vec<String>>>,
 }
 
 impl Fixture {
@@ -55,6 +57,7 @@ impl Fixture {
             _temp: temp,
             root,
             home,
+            closed: Arc::new(Mutex::new(Vec::new())),
         };
         fixture.git(&["init", "-b", "main"]);
         fixture.git(&["config", "user.name", "shprd tests"]);
@@ -249,6 +252,16 @@ impl Fixture {
                 .map_err(|err| err.to_string())?;
             Ok(format!("started a reviewer on {task}"))
         });
+        // A landing closes the worker tab the task can no longer come back to,
+        // through the closure `serve` wires to `spawn::close_worker`.
+        let closed = Arc::clone(&self.closed);
+        let close_worker: shprd_server::WorkerCloser = Arc::new(move |_repo: &Path, task: &str| {
+            closed
+                .lock()
+                .map_err(|_| String::from("the call log is poisoned"))?
+                .push(task.to_string());
+            Ok(())
+        });
         Worker {
             repo: self.root.clone(),
             home: self.home.clone(),
@@ -264,11 +277,20 @@ impl Fixture {
             start,
             review: Some(review),
             close_reviewer: None,
+            close_worker: Some(close_worker),
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),
             news: None,
         }
+    }
+
+    /// Every task whose worker tab the passes asked to close, in order.
+    fn closed_workers(&self) -> Vec<String> {
+        self.closed
+            .lock()
+            .map(|closed| closed.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 }
 
@@ -402,6 +424,14 @@ fn successive_passes_decide_the_review_and_land_the_task_on_their_own() {
     let fourth = worker.tick().expect("the fourth pass ran");
     assert!(fourth.steps.is_empty(), "{fourth:?}");
 
+    // The landing closed the worker's tab, and only that: a tab of a task that
+    // did not land is still open.
+    assert_eq!(
+        fixture.closed_workers(),
+        vec![String::from("T1")],
+        "the landing closed T1's worker tab and nothing else"
+    );
+
     // The whole loop is in the ledger: one request, one pass, one landing.
     let passed = fixture
         .events()
@@ -469,5 +499,12 @@ fn successive_passes_decide_the_review_and_land_the_task_on_their_own() {
         fixture.state().tasks.get("T2").map(|task| task.status),
         Some(TaskStatus::Passed),
         "the task waits for its person"
+    );
+    // A task that was only asked about never lands, so its tab is not closed:
+    // the person may still need the worker's output to decide.
+    assert_eq!(
+        fixture.closed_workers(),
+        vec![String::from("T1")],
+        "an ask closes nothing"
     );
 }
