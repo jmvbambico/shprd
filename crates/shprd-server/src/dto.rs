@@ -194,6 +194,57 @@ pub struct RunDto {
     pub integration_branch: String,
 }
 
+/// One step of the last advance pass that failed.
+///
+/// It is the smallest thing that lets a board say what went wrong instead of
+/// showing an empty board: which task, which step, and the error the step was
+/// given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "FailedStepDto.ts")]
+pub struct FailedStepDto {
+    /// The task the step was about; empty when it was the pass's own failure.
+    pub task: String,
+    /// What the step was, e.g. `start`, `review`, `land`, or `pass`.
+    pub step: String,
+    /// Why it failed, one line.
+    pub error: String,
+}
+
+/// What the last advance pass did, as a board reads it.
+///
+/// A pass that fails a step goes on with the others and leaves the run where it
+/// was for that task, so the failure would otherwise be invisible: it is in the
+/// service's own output at best, and `/api/state` shows the tasks as they were.
+/// This is that pass, mirrored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "LastTickDto.ts")]
+pub struct LastTickDto {
+    /// When the pass finished, ms since the Unix epoch.
+    pub at_ms: u64,
+    /// How many steps it ran, the failed ones included.
+    pub steps: usize,
+    /// Every step that failed, in plan order.
+    pub failed: Vec<FailedStepDto>,
+}
+
+impl From<&crate::pass::LastPass> for LastTickDto {
+    fn from(last: &crate::pass::LastPass) -> Self {
+        Self {
+            at_ms: last.at_ms,
+            steps: last.steps,
+            failed: last
+                .failed
+                .iter()
+                .map(|step| FailedStepDto {
+                    task: step.task.clone(),
+                    step: step.step.clone(),
+                    error: step.error.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One task of the run plan, with its progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "TaskDto.ts")]
@@ -478,10 +529,20 @@ pub struct NeedDto {
 pub struct SnapshotDto {
     /// The log sequence this snapshot was folded up to.
     pub seq: u64,
-    /// The run's identity, once it has started.
+    /// The run's identity, once it has started; `null` before `shprd run start`.
+    #[serde(default)]
+    pub run: Option<RunDto>,
+    /// What the last advance pass did, once one has run against this
+    /// repository. A pass that failed a step is what a board shows as
+    /// "something went wrong", rather than an unchanged board.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub run: Option<RunDto>,
+    pub last_tick: Option<LastTickDto>,
+    /// What the person can do about a board that cannot advance on its own —
+    /// no run started, for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hint: Option<String>,
     /// Every task, in id order.
     pub tasks: Vec<TaskDto>,
     /// Every agent the run has seen.
@@ -958,6 +1019,8 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ReportStatusDto>()?,
         one::<SeverityDto>()?,
         one::<RunDto>()?,
+        one::<FailedStepDto>()?,
+        one::<LastTickDto>()?,
         one::<TaskDto>()?,
         one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,

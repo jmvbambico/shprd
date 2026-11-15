@@ -62,6 +62,7 @@ use crate::error::ServerError;
 use crate::hub::Hub;
 use crate::ledger;
 use crate::news::{self, NewsDesk, NewsSent};
+use crate::pass;
 use crate::service::AfterWrite;
 
 /// Where the facts a pass needs come from.
@@ -238,6 +239,12 @@ impl StepReport {
 /// What one pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickReport {
+    /// The run the pass advanced, when the repository has one.
+    ///
+    /// It is what lets a caller that started before `shprd run start` say the
+    /// run exists now, without asking the log again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
     /// Every step the pass ran, in plan order.
     pub steps: Vec<StepReport>,
     /// What the pass told each space's coordinator, when a news desk is wired.
@@ -336,8 +343,20 @@ impl Worker {
     /// A log that cannot be read is the one failure that ends the pass: there is
     /// nothing to plan from. Everything after that is per step.
     pub fn tick(&self) -> Result<TickReport, ServerError> {
-        let (state, _) =
-            ledger::load(&self.repo).map_err(|err| ServerError::Tick(err.to_string()))?;
+        let (state, _) = match ledger::load(&self.repo) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                // Nothing else can move until the log can be read, so this is
+                // the failure a person must hear about — recorded the same way
+                // a failed step is, then raised as before.
+                self.record(&pass::LastPass::unreadable(
+                    &self.repo,
+                    SystemClock.now_ms(),
+                    err.to_string(),
+                ));
+                return Err(ServerError::Tick(err.to_string()));
+            }
+        };
         // A worktree an older build made has no `info/exclude` entries, so its
         // worker would see shprd's own state as an untracked change. The repair
         // is one file read per live worktree and writes nothing when the entries
@@ -365,7 +384,10 @@ impl Worker {
             config: &config,
             review: self.review.is_some() && self.reviews_hand_ins(),
         });
-        let mut report = TickReport::default();
+        let mut report = TickReport {
+            run: state.run.as_ref().map(|run| run.run_id.clone()),
+            ..TickReport::default()
+        };
         for step in steps {
             let result = self.run_step(&config, &state, &step);
             report.steps.push(result);
@@ -378,7 +400,24 @@ impl Worker {
         // And the news last, from the log as the steps left it, so a task this
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
+        self.record(&pass::LastPass::of(
+            &report,
+            &self.repo,
+            SystemClock.now_ms(),
+        ));
         Ok(report)
+    }
+
+    /// Writes what this pass did where `shprd status` and `GET /api/state` read
+    /// it.
+    ///
+    /// The log is the record and this is its mirror for the people looking at
+    /// the run: a state directory that cannot be written is a warning, never a
+    /// failed pass.
+    fn record(&self, last: &pass::LastPass) {
+        if let Err(err) = last.write(&crate::service::state_dir(&self.home)) {
+            tracing::warn!(%err, "could not write the last pass's outcome");
+        }
     }
 
     /// Makes sure every live task worktree excludes shprd's own state.
@@ -1873,6 +1912,7 @@ fn phase_of(status: DerivedStatus) -> Phase {
 pub async fn run(
     worker: Arc<Worker>,
     interval: Duration,
+    notice: Option<crate::service::PassNotice>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
     let permit = Arc::new(tokio::sync::Mutex::new(()));
@@ -1887,11 +1927,16 @@ pub async fn run(
         });
         tokio::select! {
             joined = pass => match joined {
-                Ok(Ok(report)) => tracing::info!(
-                    steps = report.steps.len(),
-                    ok = report.ok(),
-                    "tick pass finished"
-                ),
+                Ok(Ok(report)) => {
+                    tracing::info!(
+                        steps = report.steps.len(),
+                        ok = report.ok(),
+                        "tick pass finished"
+                    );
+                    if let Some(notice) = &notice {
+                        notice(&report);
+                    }
+                }
                 Ok(Err(err)) => tracing::warn!(%err, "tick pass could not read the run"),
                 Err(err) => tracing::warn!(%err, "tick pass did not finish"),
             },

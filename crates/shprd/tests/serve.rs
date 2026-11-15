@@ -29,20 +29,43 @@ struct Service {
 impl Service {
     /// Starts the service and waits for the discovery file.
     fn start(repo: &Path, state: &Path, home: &Path) -> Self {
-        let child = Command::new(BIN)
-            .args([
-                "--repo",
-                &repo.display().to_string(),
-                "--home",
-                &home.display().to_string(),
-                "serve",
-                "--port",
-                "0",
-                "--json",
-            ])
+        Self::start_with(repo, state, home, true, Stdio::null(), Stdio::null())
+    }
+
+    /// Starts the service with its output going where the test can read it.
+    ///
+    /// `json` picks the banner's shape. Every service these tests start is
+    /// pointed at a multiplexer socket that does not exist: a pass must never
+    /// reach the person's own herdr session, and a start that cannot find a host
+    /// is exactly the failure the tests about visible failures are about.
+    fn start_with(
+        repo: &Path,
+        state: &Path,
+        home: &Path,
+        json: bool,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> Self {
+        let mut command = Command::new(BIN);
+        command.args([
+            "--repo",
+            &repo.display().to_string(),
+            "--home",
+            &home.display().to_string(),
+            "serve",
+            "--port",
+            "0",
+        ]);
+        if json {
+            command.arg("--json");
+        }
+        let child = command
             .env("XDG_STATE_HOME", state)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .env("HERDR_SOCKET_PATH", state.join("no-herdr-server.sock"))
+            .env_remove("SHPRD_TICK_RECORD_ONLY")
+            .env_remove("SHPRD_ACTOR")
+            .stdout(stdout)
+            .stderr(stderr)
             .spawn()
             .expect("the service starts");
         let service = Self { child };
@@ -121,6 +144,50 @@ fn repo_with_a_run() -> (TempDir, TempDir, TempDir) {
         String::from_utf8_lossy(&started.stderr)
     );
     (repo, state, home)
+}
+
+/// A throwaway repository root, with no run started in it at all.
+fn repo_without_a_run() -> (TempDir, TempDir, TempDir) {
+    (
+        TempDir::new().expect("repo dir"),
+        TempDir::new().expect("state dir"),
+        TempDir::new().expect("home dir"),
+    )
+}
+
+/// Makes the repository's passes run a second apart, so a test need not wait
+/// for the fifteen-second default.
+fn fast_tick(repo: &Path) {
+    let dir = repo.join(".shprd");
+    fs::create_dir_all(&dir).expect("mkdir .shprd");
+    fs::write(dir.join("config.toml"), "[tick]\ninterval_secs = 1\n")
+        .expect("write the tick config");
+}
+
+/// Runs one `shprd` verb in `repo`, asserting it worked.
+fn shprd(repo: &Path, home: &Path, state: &Path, args: &[&str]) -> String {
+    let output = Command::new(BIN)
+        .arg("--repo")
+        .arg(repo)
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .env("XDG_STATE_HOME", state)
+        .output()
+        .expect("the verb runs");
+    assert!(
+        output.status.success(),
+        "shprd {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// The `/api/state` document, as of the moment it is read.
+fn state_of(base: &str, token: &str) -> Value {
+    let (status, body) = get(&format!("{base}/api/state"), Some(token)).expect("state answers");
+    assert_eq!(status, 200);
+    serde_json::from_str(&body).expect("state is JSON")
 }
 
 /// The record the service wrote.
@@ -318,4 +385,314 @@ fn serve_answers_the_api_and_leaves_no_record_behind() {
             .len(),
         64
     );
+}
+
+#[test]
+fn a_service_started_before_the_run_says_so_and_sees_it_without_a_restart() {
+    // Bug 7 of the M9 gate: a service started in a repository whose run does
+    // not exist yet looked exactly like a run with no tasks — in the banner and
+    // on the board. Both say what to do instead, and the board picks the run up
+    // the moment `shprd run start` writes it.
+    let (repo, state, home) = repo_without_a_run();
+    fast_tick(repo.path());
+    let banner_path = state.path().join("serve.out");
+    let banner = fs::File::create(&banner_path).expect("the banner file");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        false,
+        Stdio::from(banner),
+        Stdio::null(),
+    );
+    let port = read_record(state.path())["port"].as_u64().expect("a port") as u16;
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+
+    // The banner names the verb, not an empty run.
+    let text = fs::read_to_string(&banner_path).expect("the banner is written");
+    assert!(text.contains("no run yet"), "the banner says so: {text}");
+    assert!(
+        text.contains("shprd run start"),
+        "the banner names the verb: {text}"
+    );
+
+    // And the board says the same thing.
+    let snapshot = state_of(&base, &token);
+    assert!(snapshot["run"].is_null(), "{snapshot}");
+    assert_eq!(
+        snapshot["hint"],
+        Value::from(shprd_server::NO_RUN_HINT),
+        "{snapshot}"
+    );
+
+    // A run started by another process reaches the same service, with no
+    // restart: the snapshot is folded on every request.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        let snapshot = state_of(&base, &token);
+        if snapshot["run"]["id"] == "r1" {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the run never reached the board: {snapshot}"
+        );
+        sleep(Duration::from_millis(100));
+    };
+    assert!(
+        snapshot.get("hint").is_none(),
+        "a board that can advance needs no hint: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["run"]["integration_branch"],
+        Value::from("integration/m9")
+    );
+
+    // The service said so on the output the banner used, once the first pass
+    // after the run start had run.
+    let out = read_when(&banner_path, "started after serve");
+    assert!(out.contains("r1"), "the service names the run: {out}");
+
+    service.stop();
+}
+
+#[test]
+fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
+    // Bug 1 of the M9 gate: `serve` installed no subscriber, so every
+    // `tracing::warn!` from a failed step was dropped and the operator never
+    // heard that the pass had failed. The warning is on stderr now, and the
+    // failure is on the board beside the tasks it left where they were.
+    let (repo, state, home) = repo_with_a_run();
+    fast_tick(repo.path());
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "a task nothing can start",
+            "--scope",
+            "a.txt",
+            "--acceptance",
+            "it works",
+        ],
+    );
+
+    let log_path = state.path().join("serve.err");
+    let log = fs::File::create(&log_path).expect("the log file");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        true,
+        Stdio::null(),
+        Stdio::from(log),
+    );
+    let port = read_record(state.path())["port"].as_u64().expect("a port") as u16;
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+
+    // The pass cannot start the task — there is no multiplexer at the socket
+    // this test points at — and says so on the board.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let snapshot = loop {
+        let snapshot = state_of(&base, &token);
+        let failed = snapshot["last_tick"]["failed"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !failed.is_empty() {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the failed pass never reached the board: {snapshot}"
+        );
+        sleep(Duration::from_millis(100));
+    };
+    let failed = &snapshot["last_tick"]["failed"][0];
+    assert_eq!(failed["task"], Value::from("T1"), "the task is named");
+    assert_eq!(failed["step"], Value::from("start"), "the step is named");
+    let error = failed["error"].as_str().expect("the error is a string");
+    assert!(!error.is_empty(), "the error says why: {failed}");
+    assert!(
+        snapshot["last_tick"]["steps"].as_u64().unwrap_or_default() > 0,
+        "the pass is counted: {snapshot}"
+    );
+    assert!(
+        !snapshot["tasks"].is_null() && snapshot["tasks"][0]["id"] == "T1",
+        "the board still shows the task the pass could not start: {snapshot}"
+    );
+
+    service.stop();
+
+    // `shprd status` says the same thing in one line on stderr, so the board on
+    // stdout is untouched — a `--json` caller still gets one document.
+    let status = Command::new(BIN)
+        .arg("--repo")
+        .arg(repo.path())
+        .arg("--home")
+        .arg(home.path())
+        .args(["status", "--json"])
+        .env("XDG_STATE_HOME", state.path())
+        .output()
+        .expect("status runs");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    serde_json::from_slice::<Value>(&status.stdout).expect("the status JSON is still one document");
+    let status_warning = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        status_warning.contains("warning: the last pass failed at `start` on T1"),
+        "status says the pass failed: {status_warning}"
+    );
+
+    // A finished run is not warned about for ever: nothing can act on it, and no
+    // pass will run again to clear the record.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &["run", "finish", "--abandon", "--yes"],
+    );
+    let finished = Command::new(BIN)
+        .arg("--repo")
+        .arg(repo.path())
+        .arg("--home")
+        .arg(home.path())
+        .arg("status")
+        .env("XDG_STATE_HOME", state.path())
+        .output()
+        .expect("status runs");
+    assert!(finished.status.success());
+    let finished_stderr = String::from_utf8_lossy(&finished.stderr);
+    assert!(
+        !finished_stderr.contains("the last pass failed"),
+        "a finished run's failure is history, not a warning: {finished_stderr}"
+    );
+
+    // The same failure, in the service's own words on stderr: proof that
+    // `serve` installed the subscriber every `tracing` line goes through.
+    let stderr = fs::read_to_string(&log_path).expect("the log is written");
+    assert!(
+        stderr.contains("tick step failed"),
+        "the failed step was logged: {stderr}"
+    );
+    assert!(stderr.contains("T1"), "the line names the task: {stderr}");
+    // The log's reason is the board's error. The first words are compared and
+    // not the whole line: a `tracing` field is quoted and escaped when it holds
+    // a quote, and the error is the same text either way.
+    let lead: String = error.chars().take(24).collect();
+    assert!(
+        stderr.contains(&lead),
+        "the board's error is the log's error: {stderr}"
+    );
+}
+
+/// Reads `path` until it holds `needle`, or says what it had.
+fn read_when(path: &Path, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never said {needle:?}: {text}",
+            path.display()
+        );
+        sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_json_service_keeps_stdout_one_document_when_the_run_starts() {
+    // The review of fix I: `--json` promises one machine-readable document on
+    // stdout, and the "run started after serve" notice appended a human line to
+    // the banner, so a consumer's `json.load` failed on the second line. The
+    // notice is news for a person, so it goes to stderr in this mode.
+    let (repo, state, home) = repo_without_a_run();
+    fast_tick(repo.path());
+    let out_path = state.path().join("serve.out");
+    let err_path = state.path().join("serve.err");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        true,
+        Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
+        Stdio::from(fs::File::create(&err_path).expect("the stderr file")),
+    );
+    let port = read_record(state.path())["port"].as_u64().expect("a port") as u16;
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+
+    // The banner is one document, and it says there is no run.
+    let banner = read_when(&out_path, "\"serving\"");
+    let value: Value = serde_json::from_str(&banner).expect("the banner is one JSON document");
+    assert!(value["run"].is_null(), "{value}");
+    assert_eq!(value["hint"], Value::from(shprd_server::NO_RUN_HINT));
+
+    // A run started afterwards reaches the board, and the service says so — on
+    // stderr, where it cannot spoil the document.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+    let notice = read_when(&err_path, "started after serve");
+    assert!(notice.contains("r1"), "the notice names the run: {notice}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let snapshot = state_of(&base, &token);
+        if snapshot["run"]["id"] == "r1" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the run never reached the board: {snapshot}"
+        );
+        sleep(Duration::from_millis(100));
+    }
+
+    service.stop();
+
+    // And stdout is still exactly the one document it started as.
+    let out = fs::read_to_string(&out_path).expect("the output is written");
+    let value: Value = serde_json::from_str(&out).expect("stdout is still one JSON document");
+    assert!(value["run"].is_null(), "{value}");
 }

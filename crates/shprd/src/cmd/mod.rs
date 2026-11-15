@@ -73,7 +73,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr);
 
     match cli.command {
-        None => view::status(&ctx),
+        None => view::status(&ctx, cli.global.home.as_deref()),
         Some(Command::Run { cmd }) => match cmd {
             RunCommand::Start(args) => run::start(&ctx, &args),
             RunCommand::Finish(args) => run::finish_verb(&ctx, &args, cli.global.home.as_deref()),
@@ -89,7 +89,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         },
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
-        Some(Command::Status) => view::status(&ctx),
+        Some(Command::Status) => view::status(&ctx, cli.global.home.as_deref()),
         Some(Command::PrBody) => view::pr_body(&ctx),
         Some(Command::Dagr { cmd }) => match cmd {
             DagrCommand::Sync => dagr::sync_verb(&ctx),

@@ -268,6 +268,10 @@ pub struct ServeArgs {
     ///
     /// The port a service really bound is written to `service.json` in the
     /// state directory, so a client reads it there rather than guessing.
+    ///
+    /// Every pass's failed step is logged on stderr at the level `SHPRD_LOG`
+    /// sets — `warn` by default, or `info`, `debug`, or a per-target form such
+    /// as `shprd_server=debug`.
     #[arg(long, value_name = "PORT", default_value_t = 0)]
     pub port: u16,
 }
