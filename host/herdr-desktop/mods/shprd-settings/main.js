@@ -31,7 +31,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, Textarea, TextareaState, h_flex, v_flex } from "gpui-base";
 import { nextCommand, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import {
   health,
   outcomeOf,
@@ -123,21 +123,28 @@ export default class Settings extends View {
     }
   }
 
-  /** Reads the settings, the roster and the template list. */
+  /**
+   * Reads the settings, the roster and the template list.
+   *
+   * A service that restarted is a different run's settings: `attach` notices it
+   * by the `id` in `service.json`, the page forgets what it read and reads all of
+   * it again, so a page never shows one service's roles over another's run
+   * (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.settings = null;
-          this.failure = "shprd serve is not running";
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.settings = null;
+        this.failure = "shprd serve is not running";
+        cx.notify();
+        return;
       }
-      const settings = await this.client.settings();
-      if (settings) this.settings = settings;
+      if (next.restarted) this.forget();
+      this.client = next.client;
+      const settings = await this.client.call("GET", "/api/settings", { strict: true });
+      this.settings = settings;
       // The service answered, so the page is not down. The roles are drawn
       // before the roster is asked: its pickers fill in when the programs
       // answer, and a page that waited on four model listings to show a table it
@@ -163,6 +170,19 @@ export default class Settings extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * Drops what the page read from the service that went away: its settings, its
+   * programs and its templates are that run's, and a new service has its own.
+   */
+  forget() {
+    this.settings = null;
+    this.roster = null;
+    this.prompts = null;
+    this.prompt = null;
+    this.open = null;
+    this.refusal = null;
   }
 
   /** Shows one picker's choices, or closes it. */

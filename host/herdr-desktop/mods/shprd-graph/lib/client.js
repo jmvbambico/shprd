@@ -30,6 +30,22 @@
 //
 // Shared: the source is `mods/lib/client.js`; `bin/sync-shared` copies it into
 // every mod folder as `lib/client.js`. Edit the source, never a copy.
+//
+// # A service that restarted, and a panel that must not freeze
+//
+// `GET /api/state` against a service that has gone away does **not** throw: a
+// guarded read runs out of time and answers `null` (the M10 gate's bug 5). A mod
+// that treated that `null` as "nothing new" kept painting the boards of a
+// service that was gone, for ever, while the new one had moved on. So there are
+// two rules here, and every mod follows them:
+//
+// - **[`attach`]**: the client is keyed on the discovery record's `id`. Before a
+//   panel reads, `attach` compares the `service.json` on disk with the id its
+//   client was made from; a different id — a restarted service, even one that
+//   took the same port — is a new client, and the panel re-reads everything.
+// - **[`stateOrThrow`]** (and [`Client.call`'s `strict` reads): a read that runs
+//   out of time is a **failure**, not an empty answer. The panel's `catch` drops
+//   the client, the next look rediscovers, and the panel fills in again.
 
 import { exec, home, readTextFile } from "herdr";
 
@@ -64,6 +80,29 @@ export class ServiceError extends Error {
     this.code = info.code ?? "failed";
     this.detail = info.detail ?? null;
   }
+}
+
+/**
+ * The error a failed read raises when the reason is that nothing answered.
+ *
+ * It is distinct from a [`ServiceError`] carrying a status: a refusal (a 422, a
+ * 401) is the service talking, and a panel keeps its client; no answer at all is
+ * how a service that restarted or died looks, and the client must go.
+ */
+export function noAnswer(message = "the service did not answer") {
+  return new ServiceError(message, { status: 0, code: "no-answer" });
+}
+
+/**
+ * `work`, or [`noAnswer`] when it answers nothing at all.
+ *
+ * A read a panel must not paint stale goes through this: `null` from a guarded
+ * call means the wait ran out, which is exactly what a dead service looks like.
+ */
+export async function answered(work, message) {
+  const answer = await work;
+  if (answer === null || answer === undefined) throw noAnswer(message);
+  return answer;
 }
 
 /**
@@ -281,13 +320,27 @@ export class Client {
   }
 
   /**
+   * This client's identity: the `id` in the `service.json` it was made from.
+   *
+   * [`attach`] compares it with the record on disk to notice a restart, so a
+   * panel can tell "the service I was talking to" from "the service there is
+   * now" without waiting for a call to fail.
+   */
+  id() {
+    return this.record?.id ?? null;
+  }
+
+  /**
    * One call, answered as JSON (or `null` when a read ran out of time).
    *
    * A refusal is a [`ServiceError`] carrying what the service said, because the
    * person needs the words ("a transition rule refused this") and not a status
-   * code.
+   * code. A read that ran out of time answers `null` unless `strict` is set, in
+   * which case it throws [`noAnswer`]: a panel that must not paint stale asks
+   * for that, because a service that went away is exactly a read that never
+   * answers.
    */
-  async call(method, path, { body = null, wait = READ_WAIT } = {}) {
+  async call(method, path, { body = null, wait = READ_WAIT, strict = false } = {}) {
     const write = method !== "GET";
     const url = `${this.base}${path}`;
     const init = { method, headers: this.headers(write) };
@@ -315,12 +368,19 @@ export class Client {
     // A write is never given up on by the client: the person pressed a button and
     // has to hear what happened, so it waits for the service's own answer.
     if (write || !this.wait) return call;
-    return guard(call, this.wait, wait);
+    const bounded = guard(call, this.wait, wait);
+    return strict ? answered(bounded) : bounded;
   }
 
-  /** `GET /api/state`: the whole board, folded now. */
+  /**
+   * `GET /api/state`: the whole board, folded now.
+   *
+   * A panel paints this, so it is read strictly: the answer is the board or a
+   * [`noAnswer`], never `null` left to be mistaken for "nothing new" (bug 5 of
+   * the M10 gate: a panel kept painting a service that had restarted).
+   */
   state() {
-    return this.call("GET", "/api/state");
+    return this.call("GET", "/api/state", { strict: true });
   }
 
   /**
@@ -338,7 +398,7 @@ export class Client {
 
   /** `GET /api/asks`: every card still waiting for the person. */
   asks() {
-    return this.call("GET", "/api/asks");
+    return this.call("GET", "/api/asks", { strict: true });
   }
 
   /** `POST /api/asks/answer`: answer one card, exactly once. */
@@ -437,8 +497,39 @@ export class Client {
   }
 }
 
-/** One sentence from a refusal body, for a toast or an inline error. */
-export function describe(body, status = 0) {
+/**
+ * The service a panel should talk to now, and whether it changed under it.
+ *
+ * A panel keeps one [`Client`] between reads, and a `shprd serve` that restarted
+ * is a different service: its `id` is new, its port may be the same one, and its
+ * board has moved on. Waiting for a call to fail is not enough to notice — a
+ * guarded read against a dead port answers `null` and looks like nothing new
+ * (the M10 gate's bug 5) — so the discovery record on disk is read before every
+ * read of the board, and a record that names another `id` (or is gone) is a
+ * restart.
+ *
+ * `current` is the panel's client, or `null` when it has none yet. `io` is what
+ * [`discover`] takes (`read`, `fetch`, `wait`, `dir`, `run`), so a test drives
+ * this with a table of files and a fake fetch.
+ *
+ * The answer is `{client, restarted}`: `client` is `null` when no service is
+ * running, `restarted` is true when the panel's old client is no longer the
+ * service on disk and every cache it kept must be thrown away.
+ */
+export async function attach(current, io = {}) {
+  const read = io.read ?? readTextFile;
+  const make = (found) => new Client(found, { fetch: io.fetch, wait: io.wait });
+  if (!current) {
+    const found = await discover(io);
+    return { client: found ? make(found) : null, restarted: false };
+  }
+  const record = await readServiceRecord(serviceFile(current.dir), read);
+  if (record && record.id === current.id()) return { client: current, restarted: false };
+  const found = await discover(io);
+  return { client: found ? make(found) : null, restarted: true };
+}
+
+/** One sentence from a refusal body, for a toast or an inline error. */export function describe(body, status = 0) {
   if (body && typeof body === "object") {
     const message = body.message ?? body.error;
     if (typeof message === "string" && message.trim() !== "") return message.trim();
@@ -446,6 +537,21 @@ export function describe(body, status = 0) {
   }
   if (typeof body === "string" && body.trim() !== "") return body.trim();
   return status > 0 ? `the service answered ${status}` : "the service did not answer";
+}
+
+/**
+ * Whether `client` is still the service that answers its `id` at `/api/health`.
+ *
+ * [`attach`] reads the discovery record, which is the cheap check and catches a
+ * restart that wrote a new one. This is the other half: a service killed outright
+ * leaves its record behind, and the only honest answer then is whether anything
+ * answers that record's `id` any more. A long poll that fails is checked with
+ * this before it is retried, so a dead port is looked for again rather than
+ * spun on.
+ */
+export async function alive(client) {
+  const health = await getJson(client.fetch, `${client.base}/api/health`, client.wait);
+  return Boolean(health && health.id === client.id());
 }
 
 /** One sentence for whatever a failed call threw, so a panel can show it. */

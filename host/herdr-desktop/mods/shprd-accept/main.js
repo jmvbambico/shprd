@@ -26,7 +26,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { props, run, setShared, shared, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import {
   WORDS,
   card,
@@ -84,22 +84,28 @@ export default class Accept extends View {
     return card(this.state, thread?.task ?? null);
   }
 
-  /** Reads the board once; a service that went away is looked for again. */
+  /**
+   * Reads the board once; a service that restarted or went away is looked for
+   * again, and everything cached about it is dropped.
+   *
+   * `attach` notices the restart by its `id`, and `state()` refuses to answer
+   * `null`, so the card never shows an old board's changes beside a new
+   * service's run (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.failure = "shprd serve is not running";
-          this.state = null;
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.failure = "shprd serve is not running";
+        this.state = null;
+        cx.notify();
+        return;
       }
-      const state = await this.client.state();
-      if (state) this.state = state;
+      if (next.restarted) this.forget();
+      this.client = next.client;
+      this.follow();
+      this.state = await this.client.state();
       this.failure = null;
       await this.readPolicy();
       await this.readChanges();
@@ -108,6 +114,19 @@ export default class Accept extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * Drops what was read from the service that went away: the policy and the
+   * task's changes are reads of that run, and a new service has its own.
+   */
+  forget() {
+    this.state = null;
+    this.policy = null;
+    this.policyAt = 0;
+    this.changes = null;
+    this.changesFor = null;
+    this.changesError = null;
   }
 
   /** Follows the service's change file for as long as this copy lives. */
