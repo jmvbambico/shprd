@@ -917,7 +917,10 @@ pub struct ReportArgs {
     ///
     /// The proof path belongs here, never in `--summary`: the summary is one
     /// plain line for the person, and a path there reads as jargon. The
-    /// reviewer sees every proof in the packet it checks the work against.
+    /// reviewer sees every proof in the packet it checks the work against, and
+    /// it reads the packet from outside the worktree, so a proof has to be
+    /// inside the task's worktree to be a proof at all: a path outside it is
+    /// refused.
     #[arg(long = "proof", value_name = "PATH")]
     pub proofs: Vec<String>,
 }

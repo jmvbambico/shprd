@@ -266,9 +266,9 @@ fn a_hand_in_records_its_proofs_apart_from_the_summary() {
             "--changed",
             "crates/shprd/src/main.rs",
             "--proof",
-            ".shprd/proof/menu.png",
+            "proof/menu.png",
             "--proof",
-            ".shprd/proof/tests.txt",
+            "proof/tests.txt",
             "--json",
         ],
     );
@@ -281,11 +281,115 @@ fn a_hand_in_records_its_proofs_apart_from_the_summary() {
     );
     assert_eq!(
         event.get("proofs"),
-        Some(&serde_json::json!([
-            ".shprd/proof/menu.png",
-            ".shprd/proof/tests.txt"
-        ])),
+        Some(&serde_json::json!(["proof/menu.png", "proof/tests.txt"])),
         "both proofs are recorded: {event}"
+    );
+}
+
+/// A proof outside the task's worktree is refused: the reviewer reads the
+/// packet from outside the worktree, so a path there is one it cannot open
+/// (item 6 of the M10.0 follow-ups).
+#[test]
+fn a_proof_outside_the_worktree_is_refused() {
+    let dir = repo();
+    let root = dir.path();
+    let outside = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+
+    let output = run(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "the menu opens",
+            "--proof",
+            &outside.path().join("tests.txt").display().to_string(),
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a proof the reviewer cannot open is refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("not inside the task's worktree"),
+        "the refusal says why: {stderr}"
+    );
+    assert!(
+        stderr.contains(root.display().to_string().as_str()),
+        "it names the worktree the proof belongs in: {stderr}"
+    );
+    assert!(
+        stderr.contains("--proof proof/tests.txt"),
+        "and shows the shape that works: {stderr}"
+    );
+    // Nothing was written: the log has the spawn and nothing after it.
+    let log = match std::fs::read_to_string(log_path(root)) {
+        Ok(text) => text,
+        Err(err) => panic!("read the log: {err}"),
+    };
+    assert!(
+        !log.contains("\"kind\":\"reported\""),
+        "a refused hand-in records nothing: {log}"
+    );
+}
+
+/// A proof inside the worktree is recorded, including one written with a `..`
+/// that stays inside it.
+#[test]
+fn a_proof_inside_the_worktree_is_recorded() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+
+    let printed = ok(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "the menu opens",
+            "--proof",
+            "proof/tests.txt",
+            "--proof",
+            "./proof/../proof/menu.png",
+            "--json",
+        ],
+    );
+    let event: Value = serde_json::from_str(&printed).unwrap_or(Value::Null);
+    assert_eq!(
+        event.get("proofs"),
+        Some(&serde_json::json!([
+            "proof/tests.txt",
+            "./proof/../proof/menu.png"
+        ])),
+        "the paths are recorded as the worker wrote them: {event}"
     );
 }
 
@@ -920,6 +1024,149 @@ fn integrated_task(root: &Path, branch: &str) {
     ok(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
+    );
+}
+
+/// `run start` makes the branch it integrates on, from `--base`, when it is not
+/// there: a run whose integration branch does not exist cannot move, and every
+/// start fails on it for ever (bug 2 of gate run #4).
+#[test]
+fn run_start_creates_the_integration_branch_from_the_base() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let base = git.git(&["rev-parse", "main"]);
+    assert!(
+        !git.has_ref("integration/m9"),
+        "the fixture starts without the branch"
+    );
+
+    let printed = ok(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "m9",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+            "--json",
+        ],
+    );
+    let event: Value = serde_json::from_str(&printed).unwrap_or(Value::Null);
+    assert_eq!(
+        event.get("kind").and_then(Value::as_str),
+        Some("run_started")
+    );
+
+    assert!(
+        git.has_ref("integration/m9"),
+        "the integration branch was made"
+    );
+    assert_eq!(
+        git.git(&["rev-parse", "integration/m9"]),
+        base,
+        "it is cut from the base branch"
+    );
+
+    // And the record says shprd made it, so the janitor may clean it up.
+    let log = match std::fs::read_to_string(log_path(&root)) {
+        Ok(text) => text,
+        Err(err) => panic!("read the log: {err}"),
+    };
+    assert_eq!(
+        resource_events(&root),
+        1,
+        "one branch was created and recorded"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.contains("\"kind\":\"resource\"")
+                && line.contains("\"resource\":\"branch\"")
+                && line.contains("integration/m9")
+                && line.contains("\"created\"")),
+        "the resource line names the branch it made: {log}"
+    );
+}
+
+/// A base branch that is not there either is the person's mistake, and the run
+/// must not start half made.
+#[test]
+fn run_start_refuses_a_missing_base_and_writes_nothing() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let output = run(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "m9",
+            "--base",
+            "release/9",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a missing base is the person's mistake: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("release/9"), "{stderr}");
+    assert!(
+        stderr.contains("integration/m9"),
+        "the branch it could not cut is named: {stderr}"
+    );
+    assert!(!git.has_ref("integration/m9"), "nothing was created");
+    assert!(
+        !root.join(".shprd").join("events.jsonl").exists(),
+        "a refused start writes no log"
+    );
+}
+
+/// A run started over a branch that is already there keeps it, and creates
+/// nothing: an existing branch may hold someone's commits.
+#[test]
+fn run_start_leaves_an_existing_integration_branch_alone() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    git.git(&["branch", "integration/m9", "main"]);
+    git.git(&["checkout", "integration/m9"]);
+    if let Err(err) = std::fs::write(root.join("work.txt"), "landed work\n") {
+        panic!("write work.txt: {err}");
+    }
+    git.git(&["add", "--", "work.txt"]);
+    git.git(&["commit", "-m", "work already integrated"]);
+    let tip = git.git(&["rev-parse", "integration/m9"]);
+    git.git(&["checkout", "main"]);
+
+    ok(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "m9",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+
+    assert_eq!(
+        git.git(&["rev-parse", "integration/m9"]),
+        tip,
+        "the existing branch and its commits are kept"
+    );
+    assert_eq!(
+        resource_events(&root),
+        0,
+        "an existing branch is not recorded as shprd's own"
     );
 }
 

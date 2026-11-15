@@ -8,16 +8,27 @@
 use std::path::Path;
 
 use anyhow::anyhow;
-use shprd_core::event::{Event, EventKind, TaskId};
+use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
 use shprd_core::rules::{abandonable_tasks, unfinished_tasks, unlanded};
 use shprd_core::state::RunState;
+use shprd_git::git::Git;
 use shprd_mux::{Mux, PaneId};
 
 use crate::cli::{EndRunArgs, RunStartArgs};
 use crate::cmd::{confirm, emit, spawn};
 use crate::ctx::{CliError, Ctx};
 
-/// Records the run's first event.
+/// Records the run's first event, and makes the branch it integrates on.
+///
+/// A run whose integration branch does not exist cannot move: every start cuts
+/// its worktree from that branch, so the first pass fails — every pass — and
+/// nothing says why. So the branch is made here, from `--base`, and recorded in
+/// the resource ledger like every other branch shprd creates. A base branch
+/// that does not exist either is the person's mistake, and is refused (exit 2)
+/// before anything is written.
+///
+/// A directory that is not a git repository is left alone: a run there is a
+/// log-only run, which is what the record-only paths and the tests use.
 pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
     let repo = ctx.root.to_string_lossy().to_string();
     let kind = EventKind::RunStarted {
@@ -26,8 +37,52 @@ pub fn start(ctx: &Ctx, args: &RunStartArgs) -> Result<(), CliError> {
         base_branch: args.base.clone(),
         integration_branch: args.integration.clone(),
     };
+    // A refused start must leave nothing behind, so the run's own rule is asked
+    // before the branch is made.
+    ctx.check(&kind)?;
+    let made = ensure_branch(&ctx.root, &args.base, &args.integration)?;
     let event = ctx.commit(kind)?;
+    if made {
+        ctx.commit(EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: args.integration.clone(),
+            task: None,
+        })?;
+    }
     emit(ctx, &event)
+}
+
+/// Makes sure `branch` exists, cutting it from `base` when it does not.
+///
+/// Answers whether it had to create it, so the caller can record that in the
+/// ledger exactly once. Every way it can fail is a refusal rather than a plain
+/// error: a person who names a branch that is not there has to be told which
+/// one, and the run must not start half made.
+fn ensure_branch(repo: &Path, base: &str, branch: &str) -> Result<bool, CliError> {
+    let git = Git::new(repo);
+    // Not a repository at all: a log-only run, with nothing to cut from.
+    if git.run(&["rev-parse", "--git-dir"]).is_err() {
+        return Ok(false);
+    }
+    if git.branch_exists(branch).unwrap_or(false) {
+        return Ok(false);
+    }
+    if git.rev_parse(base).is_err() {
+        return Err(CliError::Invalid(anyhow!(
+            "refusing to start run: branch {base:?} does not exist in {}, so {branch:?} cannot be \
+             cut from it\nname an existing base with --base, or make {base:?} first (`git branch \
+             {base}`)",
+            repo.display()
+        )));
+    }
+    git.run(&["branch", branch, base]).map_err(|err| {
+        CliError::Invalid(anyhow!(
+            "refusing to start run: could not create the integration branch {branch:?} from \
+             {base:?}: {err}"
+        ))
+    })?;
+    Ok(true)
 }
 
 /// Records that the run is over, closing the tabs it left open.

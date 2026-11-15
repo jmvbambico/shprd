@@ -524,9 +524,11 @@ fn proof_rule(proof: bool) -> String {
         return String::new();
     }
     "- leave one real proof of the work behind (a screenshot of the change, a command's actual \
-     output, a test run) and pass its path as `--proof <path>`, once per artifact: the proof path \
-     never goes in the summary, which is one plain line for the person. A mock is no proof of what \
-     people see; a bug fix shows the same repro failing before and passing after\n"
+     output, a test run) inside your worktree, and pass its path as `--proof <path>`, once per \
+     artifact: the artifact must be in the worktree, because that is the folder the reviewer is \
+     given, and a path outside it is refused. The proof path never goes in the summary, which is \
+     one plain line for the person. A mock is no proof of what people see; a bug fix shows the same \
+     repro failing before and passing after\n"
         .to_string()
 }
 
@@ -1025,7 +1027,7 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 - `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes
 - run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
 - say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
-- leave one real proof of the work behind (a screenshot of the change, a command's actual output, a test run) and pass its path as `--proof <path>`, once per artifact: the proof path never goes in the summary, which is one plain line for the person. A mock is no proof of what people see; a bug fix shows the same repro failing before and passing after
+- leave one real proof of the work behind (a screenshot of the change, a command's actual output, a test run) inside your worktree, and pass its path as `--proof <path>`, once per artifact: the artifact must be in the worktree, because that is the folder the reviewer is given, and a path outside it is refused. The proof path never goes in the summary, which is one plain line for the person. A mock is no proof of what people see; a bug fix shows the same repro failing before and passing after
 - report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used and `--proof <path>` for each artifact you left behind
 
 ## Asking the person
