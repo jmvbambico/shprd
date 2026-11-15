@@ -35,7 +35,7 @@ use serde_json::Value;
 use shprd_core::state::RunInfo;
 use shprd_mux::Host;
 use shprd_server::{
-    AfterWrite, Config, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
+    AfterWrite, Config, Engine, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
     shutdown_signal,
 };
 
@@ -114,6 +114,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         interval_secs: tick.interval.as_secs(),
         max_running: tick.max_running,
     };
+    // The person's start, retry and stop actions are the same two closures the
+    // tick's steps run: one spawn path, one way of closing a task's space, so a
+    // board's Start and the engine's own start cannot drift apart.
+    config.engine = Some(engine_of(&tick.worker));
     config.tick = Some(tick);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -253,6 +257,20 @@ fn tick_config(
         max_running,
         notice: Some(notice),
     })
+}
+
+/// The binary's spawn and close, as the API's actions call them.
+///
+/// Both are the tick worker's own: it was built with the same closures a pass
+/// uses, so a person's start leaves exactly what the engine's start leaves. A
+/// worker built without a host's close (a record-only pass) gets an engine that
+/// says so when a stop is asked for.
+fn engine_of(worker: &std::sync::Arc<shprd_server::Worker>) -> Engine {
+    let engine = Engine::new(worker.start.clone());
+    match worker.close_worker.clone() {
+        Some(close) => engine.with_stop(close),
+        None => engine,
+    }
 }
 
 /// What the startup line says about the tick.
