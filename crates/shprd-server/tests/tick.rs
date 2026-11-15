@@ -96,6 +96,7 @@ impl Fixture {
             start,
             review: None,
             close_reviewer: None,
+            close_worker: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),
@@ -429,6 +430,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: None,
         close_reviewer: None,
+        close_worker: None,
         actor: Actor::Engine,
         after_write: None,
         hub: hub.clone(),
@@ -635,6 +637,7 @@ fn a_hand_in_starts_the_engine_reviewer() {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
         close_reviewer: None,
+        close_worker: None,
         actor: Actor::Engine,
         after_write: None,
         hub: Hub::new(),
@@ -670,6 +673,7 @@ fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
         close_reviewer: None,
+        close_worker: None,
         actor: Actor::Engine,
         after_write: None,
         hub: Hub::new(),
@@ -694,6 +698,7 @@ fn reviewing(fixture: &Fixture, review: shprd_server::Reviewer) -> Worker {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
         close_reviewer: None,
+        close_worker: None,
         actor: Actor::Engine,
         after_write: None,
         hub: Hub::new(),
@@ -1189,6 +1194,70 @@ fn a_landing_goes_through_the_forge_and_the_ledger() {
         fixture.state().tasks.get("A").map(|task| task.status),
         Some(shprd_core::state::TaskStatus::Passed),
         "a failed landing writes nothing"
+    );
+}
+
+#[test]
+fn a_landing_closes_the_landed_tasks_worker_tab_and_no_others() {
+    // A landed task's worker tab stayed open with its agent done (the M9 gate's
+    // "also noticed"): nothing closed it, the way a verdict closes the reviewer's.
+    // The closer is asked for the task that landed and for nobody else — a pass
+    // that also starts another task leaves that task's tab alone.
+    let mut log = vec![started()];
+    log.extend(ready(2, "abc123"));
+    log.push(added(7, "B"));
+    let fixture = Fixture::new(log);
+    let mut facts = Scripted::default();
+    // The forge says the pull request is already merged: the pass records the
+    // landing it made outside shprd, which is a landing all the same.
+    facts.prs.insert(
+        String::from("A"),
+        PrFacts {
+            open: false,
+            merged: true,
+            checks: Some(true),
+            head: Some(String::from("abc123")),
+            number: Some(1),
+        },
+    );
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&closed);
+    let close_worker: shprd_server::WorkerCloser = Arc::new(move |_repo: &Path, task: &str| {
+        recorded
+            .lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(task.to_string());
+        Ok(())
+    });
+    let mut worker = fixture.worker(
+        Arc::new(facts),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    worker.close_worker = Some(close_worker);
+
+    let report = worker.tick().expect("the pass ran");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| format!("{}:{}", step.action, step.task))
+            .collect::<Vec<_>>(),
+        vec![String::from("mark_landed:A"), String::from("start:B")],
+        "{report:?}"
+    );
+    assert_eq!(
+        fixture.state().tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Integrated),
+        "A landed"
+    );
+    let called = closed.lock().expect("the call log");
+    assert_eq!(
+        *called,
+        vec![String::from("A")],
+        "only the landed task's tab is closed: B's is still in use"
     );
 }
 

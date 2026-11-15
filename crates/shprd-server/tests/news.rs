@@ -135,6 +135,7 @@ impl Fixture {
             start,
             review: None,
             close_reviewer: None,
+            close_worker: None,
             actor: Actor::Engine,
             after_write: None,
             hub: Hub::new(),

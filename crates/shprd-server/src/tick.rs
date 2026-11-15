@@ -287,6 +287,15 @@ pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + S
 /// log, and failing the step would tell the caller the review decided nothing.
 pub type ReviewCloser = Arc<dyn Fn(&Path, &str, u32) -> Result<(), String> + Send + Sync>;
 
+/// What the tick needs to close a landed task's worker tab.
+///
+/// A landing is the engine's record and the tab is the host's, so the binary
+/// passes the same `spawn::close_worker` the CLI's `agent integrate` uses. Only
+/// the records shprd wrote for that task are in reach, so a tab nobody put in
+/// `<briefs>/<run>/` is never closed. A host that refuses the close is logged
+/// and never fails the step: the landing is already in the log.
+pub type WorkerCloser = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
+
 /// Everything one pass runs against.
 pub struct Worker {
     /// The repository whose run log is advanced.
@@ -322,6 +331,14 @@ pub struct Worker {
     /// `None` when the caller has no host (a test, a record-only pass): a
     /// verdict is still recorded, and nothing is left open to close.
     pub close_reviewer: Option<ReviewCloser>,
+    /// Closes a landed task's worker tab once the landing is recorded.
+    ///
+    /// `None` when the caller has no host (a test, a record-only pass): a
+    /// landing is still recorded, and nothing is left open to close. A landed
+    /// task cannot come back to its tab — only a failed review sends a task
+    /// back, and only before it is integrated — so this is the last moment the
+    /// worker's tab is still useful.
+    pub close_worker: Option<WorkerCloser>,
     /// Who the pass's writes act as. The engine, always: the tick is shprd's
     /// own automation rather than a human's or an agent's action.
     pub actor: Actor,
@@ -1527,15 +1544,8 @@ impl Worker {
         let Some(outcome) = landed.outcome() else {
             return Ok(None);
         };
-        let event = self.commit(EventKind::TaskLanded {
-            task: task.to_string(),
-            base: base.to_string(),
-            head: landed.head().to_string(),
-            number: None,
-            outcome,
-        })?;
-        self.notify(Some(event));
-        Ok(Some(event))
+        self.record_landed(task, base, landed.head(), None, outcome)
+            .map(Some)
     }
 
     /// Records a local merge that conflicted, and the human it needs.
@@ -1597,22 +1607,53 @@ impl Worker {
                     head: found.head.clone(),
                 })?;
                 last = Some(event);
+                self.notify(Some(event));
             }
         }
         if let Some(outcome) = landed.outcome() {
-            let event = self.commit(EventKind::TaskLanded {
-                task: task.to_string(),
-                base: base.to_string(),
-                head: landed.head().to_string(),
-                number: landed.number(),
-                outcome,
-            })?;
-            last = Some(event);
-        }
-        if let Some(seq) = last {
-            self.notify(Some(seq));
+            last = Some(self.record_landed(task, base, landed.head(), landed.number(), outcome)?);
         }
         Ok(last)
+    }
+
+    /// Records that a task landed, and closes the worker tab that carried it.
+    ///
+    /// One record for all three ways a task lands — a forge merge, a local
+    /// merge into the integration branch, and a merge someone made outside
+    /// shprd — because the tab question is the same for all of them: a landed
+    /// task cannot come back to it. The close is logged when the host refuses, as
+    /// the reviewer's is, since the landing is already in the log.
+    fn record_landed(
+        &self,
+        task: &str,
+        base: &str,
+        head: &str,
+        number: Option<u64>,
+        outcome: LandOutcome,
+    ) -> Result<u64, String> {
+        let event = self.commit(EventKind::TaskLanded {
+            task: task.to_string(),
+            base: base.to_string(),
+            head: head.to_string(),
+            number,
+            outcome,
+        })?;
+        self.notify(Some(event));
+        self.close_worker_task(task);
+        Ok(event)
+    }
+
+    /// Closes a landed task's worker tab, logging a host that refuses.
+    ///
+    /// A close that fails is never fatal: the landing is recorded, and failing
+    /// the step would report a merge that already happened as a failure. Run end
+    /// sweeps whatever a refusal leaves behind.
+    fn close_worker_task(&self, task: &str) {
+        if let Some(close) = &self.close_worker
+            && let Err(err) = close(&self.repo, task)
+        {
+            tracing::warn!(task, %err, "the worker's tab did not close after its landing");
+        }
     }
 
     /// Records a merge the forge made outside shprd.
@@ -1658,14 +1699,7 @@ impl Worker {
                 .and_then(|task| task.pr.as_ref())
                 .map(|pr| pr.number)
         });
-        let event = self.commit(EventKind::TaskLanded {
-            task: task.to_string(),
-            base: run.base_branch.clone(),
-            head: head.clone(),
-            number,
-            outcome,
-        })?;
-        self.notify(Some(event));
+        let event = self.record_landed(task, &run.base_branch, &head, number, outcome)?;
         Ok(StepReport::done(
             &step,
             format!("{task} was merged outside shprd at {head}"),

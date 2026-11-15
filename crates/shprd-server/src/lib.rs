@@ -55,5 +55,5 @@ pub use service::{
 pub use snapshot::NO_RUN_HINT;
 pub use tick::{
     FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, ReviewCloser, Reviewer,
-    SharedForge, Starter, StepReport, TickReport, Worker,
+    SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,
 };

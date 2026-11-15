@@ -18,13 +18,21 @@
 //! subscriber at `SHPRD_LOG`'s level (default `warn`, to stderr), which is where
 //! every step's `tracing::warn!` goes, and it says in its banner whether the
 //! repository has a run at all.
+//!
+//! It also prepares the repository's workspace before the first pass: the label
+//! is derived from the folder name, so a workspace nobody made is a run that
+//! cannot start a task until someone reads a refusal (M9 gate bug 6). The
+//! banner says whether it found the workspace, made it, or could not reach the
+//! host at all.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use serde_json::Value;
 use shprd_core::state::RunInfo;
+use shprd_mux::Mux;
 use shprd_server::{
     AfterWrite, Config, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
     shutdown_signal, state_dir,
@@ -45,6 +53,15 @@ const LOG_ENV: &str = "SHPRD_LOG";
 pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     install_subscriber();
+    // The workspace is part of the host setup a run needs, and its label is
+    // derived rather than chosen, so the service makes it rather than leaving a
+    // pass to refuse (M9 gate bug 6). A host that cannot be reached is a
+    // warning and not a refusal to serve: the board is still what a person
+    // reads, and the next start can make the workspace.
+    let workspace = prepare_workspace(&crate::cmd::spawn::real_mux(), &ctx.root);
+    if let WorkspaceNotice::Unavailable(reason) = &workspace {
+        tracing::warn!(%reason, "the repository's workspace is not ready: a pass cannot start a task until it is");
+    }
     // The banner says whether there is a run at all, and the passes say so again
     // if one is started after the service was: a service that came up too early
     // must not look like an empty run.
@@ -82,7 +99,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
         let info = service.info().clone();
-        announce(ctx, &info, &announced, run_at_start.as_ref());
+        announce(ctx, &info, &announced, run_at_start.as_ref(), &workspace);
         service
             .run(shutdown_signal())
             .await
@@ -111,6 +128,36 @@ fn install_subscriber() {
         .with_ansi(ansi)
         .with_target(false)
         .try_init();
+}
+
+/// What the service did about the repository's workspace when it started.
+///
+/// The label is derived ([`crate::cmd::spawn::workspace_name`]) and a host
+/// refuses a duplicate, so nothing here renames, adopts or removes a workspace:
+/// the one shprd uses is the one whose label is exactly right, and everything
+/// else on the host is left alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceNotice {
+    /// The workspace was already there and is reused.
+    Reused(String),
+    /// The workspace was missing and is created at the repository root.
+    Created(String),
+    /// It could not be found or made; the reason names the label it wanted.
+    Unavailable(String),
+}
+
+/// Finds the repository's workspace, or creates it at the repository root.
+///
+/// This is the step that used to be left to a person (`docs/multiplexers.md`
+/// states the convention, but the folder name is load-bearing and a label that
+/// was almost right made every pass refuse). A host that cannot be asked at all
+/// is reported rather than fatal, because the API is useful without one.
+fn prepare_workspace(mux: &dyn Mux, repo: &Path) -> WorkspaceNotice {
+    match crate::cmd::spawn::ensure_workspace(mux, repo) {
+        Ok(prepared) if prepared.created => WorkspaceNotice::Created(prepared.workspace.name),
+        Ok(prepared) => WorkspaceNotice::Reused(prepared.workspace.name),
+        Err(err) => WorkspaceNotice::Unavailable(err.to_string()),
+    }
 }
 
 /// What the service says when a pass first sees a run the banner did not name.
@@ -204,6 +251,7 @@ fn announce(
     info: &shprd_server::ServiceInfo,
     tick: &AnnouncedTick,
     run: Option<&RunInfo>,
+    workspace: &WorkspaceNotice,
 ) {
     let limits = WsLimits::default();
     let hint = run.is_none().then_some(NO_RUN_HINT);
@@ -222,6 +270,7 @@ fn announce(
                 "base": run.base_branch,
                 "integration": run.integration_branch,
             })),
+            "workspace": workspace_json(workspace),
             "hint": hint,
             "ws": {
                 "ping_secs": limits.ping.as_secs(),
@@ -250,6 +299,7 @@ fn announce(
         ),
         None => println!("   run:          {NO_RUN_HINT}"),
     }
+    println!("   workspace:    {}", workspace_line(workspace, &ctx.root));
     println!("   token:        {}", info.token_path.display());
     println!("   service.json: {}", info.service_json.display());
     println!(
@@ -263,4 +313,132 @@ fn announce(
         tick.interval_secs, tick.max_running
     );
     println!("   stop with Ctrl-C or SIGTERM");
+}
+
+/// The banner's workspace line: what the service found, made, or could not make.
+///
+/// It is one line either way, so a service whose host is missing still prints a
+/// banner a person can read, and the failure to prepare the workspace is in the
+/// place the rest of the setup is.
+fn workspace_line(notice: &WorkspaceNotice, root: &Path) -> String {
+    match notice {
+        WorkspaceNotice::Created(label) => {
+            format!(
+                "created {label:?} at the repository root {}",
+                root.display()
+            )
+        }
+        WorkspaceNotice::Reused(label) => format!("{label:?} (already there, reused)"),
+        WorkspaceNotice::Unavailable(reason) => format!("not ready: {reason}"),
+    }
+}
+
+/// The banner's workspace line, as the one document's field.
+///
+/// A workspace that could not be prepared has no label to report, so it says so
+/// and carries the reason: the label is what a person fixes, and the reason is
+/// the only thing that says which label was wanted.
+fn workspace_json(notice: &WorkspaceNotice) -> Value {
+    match notice {
+        WorkspaceNotice::Created(label) => {
+            serde_json::json!({ "label": label, "state": "created" })
+        }
+        WorkspaceNotice::Reused(label) => {
+            serde_json::json!({ "label": label, "state": "reused" })
+        }
+        WorkspaceNotice::Unavailable(reason) => {
+            serde_json::json!({ "label": Value::Null, "state": "unavailable", "reason": reason })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shprd_mux::fake::{Call, FakeMux};
+    use tempfile::TempDir;
+
+    /// The label a repository's workspace carries, as the banner reports it.
+    fn label_of(repo: &Path) -> String {
+        match crate::cmd::spawn::repo_name(repo) {
+            Ok(name) => crate::cmd::spawn::workspace_name(&name),
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[test]
+    fn a_service_makes_the_missing_workspace_at_the_repository_root() {
+        // Bug 6 of the M9 gate: the label is derived from the folder name, and
+        // the workspace was left to a person, so a run refused every pass. The
+        // service creates it, with exactly that label, where the repository is.
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default();
+        let label = label_of(repo.path());
+
+        let notice = prepare_workspace(&mux, repo.path());
+
+        assert_eq!(notice, WorkspaceNotice::Created(label.clone()));
+        assert_eq!(
+            mux.calls(),
+            vec![
+                Call::FindWorkspace(label.clone()),
+                Call::CreateWorkspace(label.clone(), repo.path().to_path_buf()),
+            ],
+            "one lookup, one creation, and nothing else touched"
+        );
+        let line = workspace_line(&notice, repo.path());
+        assert!(line.contains("created"), "{line}");
+        assert!(line.contains(&label), "the label is named: {line}");
+    }
+
+    #[test]
+    fn a_service_reuses_the_workspace_that_is_already_there() {
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default();
+        let label = label_of(repo.path());
+        let made = mux
+            .create_workspace(&label, repo.path())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        let notice = prepare_workspace(&mux, repo.path());
+
+        assert_eq!(notice, WorkspaceNotice::Reused(label.clone()));
+        assert_eq!(
+            mux.calls(),
+            vec![Call::FindWorkspace(label)],
+            "a lookup only: nothing is created, renamed or focused"
+        );
+        let found = mux
+            .find_workspace(&made.name)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("the workspace is gone"));
+        assert_eq!(found.id, made.id);
+    }
+
+    #[test]
+    fn a_workspace_that_could_not_be_made_is_reported_not_hidden() {
+        // A host that is not there must not stop the service: the API is still
+        // the board a person reads. The banner says the one thing a pass will
+        // fail on, so it is not silent.
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let message = crate::cmd::spawn::missing_workspace_message(
+            &label_of(repo.path()),
+            &[String::from("shprd · gate repo")],
+        );
+        let notice = WorkspaceNotice::Unavailable(message);
+
+        let line = workspace_line(&notice, repo.path());
+        assert!(line.starts_with("not ready:"), "{line}");
+        assert!(
+            line.contains(&label_of(repo.path())),
+            "the label the host wanted is named: {line}"
+        );
+        assert!(
+            line.contains("shprd · gate repo"),
+            "and the one it has: {line}"
+        );
+        assert_eq!(workspace_json(&notice)["state"], "unavailable");
+        assert_eq!(workspace_json(&notice)["label"], Value::Null);
+    }
 }
