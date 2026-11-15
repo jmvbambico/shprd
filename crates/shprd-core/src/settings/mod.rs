@@ -150,7 +150,7 @@ const REPO_LIMIT: &str = "a repository's committed settings file may only set `t
      widen its own guards";
 
 /// The hint an unknown key's error carries.
-const KEY_HINT: &str = "keys are `roles.order`, `roles.<id>.<field>`, `tasks.<key>`, \
+const KEY_HINT: &str = "keys are `roles.order`, `roles.<id>.<field>`, `tasks.<key>`, `graph.dagr`, \
      `review.cross_vendor` and `host`";
 
 /// Where one layer of settings sits in the resolution chain, nearest first.
@@ -596,6 +596,9 @@ pub enum Key {
     },
     /// A `tasks.<key>`.
     Task(TaskKey),
+    /// `graph.dagr`: the program that draws the run's graph, when it is not
+    /// where shprd looks first.
+    GraphDagr,
     /// `review.cross_vendor`: whether a reviewer must be another vendor.
     CrossVendor,
     /// `host`: which terminal host shprd drives (`auto` picks one).
@@ -635,6 +638,7 @@ impl Key {
                     .to_owned(),
             }),
             ["tasks", name] => TaskKey::parse(name).map(Self::Task).ok_or_else(unknown),
+            ["graph", "dagr"] => Ok(Self::GraphDagr),
             ["review", "cross_vendor"] => Ok(Self::CrossVendor),
             ["host"] => Ok(Self::Host),
             ["land", "merge"] => Ok(Self::Task(TaskKey::Merge)),
@@ -654,6 +658,7 @@ impl Key {
             Self::RolesOrder => "roles.order".to_owned(),
             Self::Role { id, field } => format!("roles.{id}.{}", field.name()),
             Self::Task(key) => format!("tasks.{}", key.name()),
+            Self::GraphDagr => "graph.dagr".to_owned(),
             Self::CrossVendor => "review.cross_vendor".to_owned(),
             Self::Host => "host".to_owned(),
         }
@@ -682,6 +687,7 @@ impl Key {
                 | TaskKey::NewsSettleSecs => Kind::Number,
                 _ => Kind::Text,
             },
+            Self::GraphDagr => Kind::Text,
             Self::CrossVendor => Kind::Switch,
             Self::Host => Kind::OneOf(&HOST_WORDS),
         }
@@ -1229,6 +1235,23 @@ fn parse_sections(table: &toml::Table, origin: &str, limit: Limit) -> Result<Lay
                     store(&mut layer, Key::Task(key), value, origin, limit)?;
                 }
             }
+            "graph" => {
+                let section = item.as_table().ok_or_else(|| SettingsError::BadValue {
+                    key: named(origin, "graph"),
+                    reason: "must be a table".to_owned(),
+                })?;
+                for (field, value) in section {
+                    match field.as_str() {
+                        "dagr" => store(&mut layer, Key::GraphDagr, value, origin, limit)?,
+                        other => {
+                            return Err(SettingsError::UnknownKey {
+                                key: named(origin, &format!("graph.{other}")),
+                                hint: KEY_HINT,
+                            });
+                        }
+                    }
+                }
+            }
             "review" => {
                 let section = item.as_table().ok_or_else(|| SettingsError::BadValue {
                     key: named(origin, "review"),
@@ -1416,6 +1439,7 @@ pub fn builtin() -> Layer {
         Key::Task(TaskKey::NewsSettleSecs),
         Value::Number(i64::try_from(NEWS_SETTLE_SECS).unwrap_or(5)),
     );
+    layer.set(Key::GraphDagr, Value::Text(String::new()));
     layer.set(Key::CrossVendor, Value::Switch(true));
     layer.set(Key::Host, Value::Text(HostChoice::Auto.name().to_owned()));
     layer.set(
@@ -1917,6 +1941,18 @@ impl Resolved {
         }
     }
 
+    /// The program `graph.dagr` names, or [`None`] when the graph block should
+    /// find dagr itself (`PATH`, then the herdr plugin folder).
+    ///
+    /// An empty value is unset, which is what a person who has just reset the
+    /// key expects: the blocks fall back to looking for `dagr` on its own.
+    pub fn graph_dagr(&self) -> Option<&str> {
+        self.get(&Key::GraphDagr)
+            .and_then(|sourced| sourced.value.text())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+
     /// Which terminal host shprd drives, as the setting names it.
     ///
     /// A value this build does not know resolves to [`HostChoice::Auto`]: a
@@ -1978,6 +2014,7 @@ impl Resolved {
         for key in TASK_KEYS {
             self.push_row(&mut rows, Key::Task(key));
         }
+        self.push_row(&mut rows, Key::GraphDagr);
         self.push_row(&mut rows, Key::CrossVendor);
         self.push_row(&mut rows, Key::Host);
         rows

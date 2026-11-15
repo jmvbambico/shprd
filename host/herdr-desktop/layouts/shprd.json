@@ -199,13 +199,6 @@
                                   "content": {
                                     "mod": "shprd-task-pr"
                                   }
-                                },
-                                {
-                                  "id": "tasks-thread-graph",
-                                  "type": "block",
-                                  "content": {
-                                    "mod": "shprd-graph"
-                                  }
                                 }
                               ],
                               "active": "tasks-thread-accept"
@@ -238,6 +231,31 @@
                     }
                   ],
                   "active": "tasks"
+                },
+                {
+                  "id": "graph",
+                  "type": "stack",
+                  "size": {
+                    "px": 300
+                  },
+                  "min": 120,
+                  "active": "graph-note",
+                  "children": [
+                    {
+                      "id": "graph-note",
+                      "type": "block",
+                      "content": {
+                        "mod": "shprd-graph"
+                      }
+                    },
+                    {
+                      "id": "graph-term",
+                      "type": "block",
+                      "content": {
+                        "terminal": "shprd-graph"
+                      }
+                    }
+                  ]
                 }
               ],
               "resizable": false,

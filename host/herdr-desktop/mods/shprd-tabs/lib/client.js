@@ -314,6 +314,19 @@ export class Client {
     return this.call("GET", "/api/state");
   }
 
+  /**
+   * `GET /api/graph`: where the graph's program is and the command that draws
+   * the run.
+   *
+   * The service answers with what the binary found (`graph.dagr`, `PATH`, the
+   * herdr plugin), so a mod never probes the machine itself: a mod has no
+   * environment, and running `dagr check` from one would be a second answer to
+   * the question the service already answered.
+   */
+  graph() {
+    return this.call("GET", "/api/graph");
+  }
+
   /** `GET /api/asks`: every card still waiting for the person. */
   asks() {
     return this.call("GET", "/api/asks");
