@@ -73,7 +73,12 @@ SOFTWARE.
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
   two-line task rows and their second line from `mods/tasks/main.js` and
-  `core/tasks.js`, the installer's
+  `core/tasks.js`, the Accept card's sections and folded Details, its summary
+  rule and its Changes count line from `mods/accept-card/main.js` and
+  `core/accept.js`, the task's pull-request card — the state word in a soft tint
+  beside the number, and a quiet line when there is nothing — from
+  `mods/task-pr/main.js`, and the task's head with its back link and switcher
+  from `mods/chat/main.js`'s `head` branch, the installer's
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
