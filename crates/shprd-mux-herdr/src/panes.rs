@@ -1,9 +1,12 @@
 //! Panes: the process-bearing rectangles shprd starts agents in.
 //!
-//! A split returns herdr's `pane_info`; a prompt goes through `agent prompt`
-//! so it can never be mistaken for a shell command; and a pane's agent state
-//! comes from `agent get`, with "herdr sees no agent here" read as
-//! [`AgentState::Unknown`] rather than as an error.
+//! A split returns herdr's `pane_info`; a submitted write goes through
+//! `agent prompt` so it can never be mistaken for a shell command, falling back
+//! to `pane send-text` plus `Enter` for a pane herdr has not detected as an
+//! agent; keys are `pane send-keys`; a wait is `pane wait-output` for output and
+//! a process-info poll for an exit; and a pane's agent state comes from
+//! `agent get`, with "herdr sees no agent here" read as [`AgentState::Unknown`]
+//! rather than as an error.
 
 use serde_json::Value;
 use shprd_mux::{AgentState, Direction, Host as _, Key, MuxError, Outcome, PaneId, Result, Waited};
