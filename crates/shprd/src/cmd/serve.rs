@@ -57,7 +57,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         ctx,
         &home,
         config.hub.clone(),
-        run_notice(run_at_start.as_ref().map(|run| run.run_id.clone())),
+        run_notice(
+            ctx.json,
+            run_at_start.as_ref().map(|run| run.run_id.clone()),
+        ),
     )?;
     let announced = AnnouncedTick {
         interval_secs: tick.interval.as_secs(),
@@ -116,7 +119,11 @@ fn install_subscriber() {
 /// repository whose run does not exist yet would otherwise look like an empty
 /// run for ever. The notice fires once per run: the passes after the first have
 /// nothing new to say.
-fn run_notice(announced: Option<String>) -> PassNotice {
+///
+/// With `--json` the notice goes to stderr: the flag promises one document on
+/// stdout, and a line appended to it would make the banner unparseable. The
+/// board picks the run up by itself either way; this line is news for a person.
+fn run_notice(json: bool, announced: Option<String>) -> PassNotice {
     let seen = Arc::new(Mutex::new(announced));
     Arc::new(move |report: &TickReport| {
         let Some(run) = report.run.as_deref() else {
@@ -129,7 +136,12 @@ fn run_notice(announced: Option<String>) -> PassNotice {
             return;
         }
         *seen = Some(run.to_string());
-        println!("   run:          {run} (started after serve: the passes advance it)");
+        let line = format!("   run:          {run} (started after serve: the passes advance it)");
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     })
 }
 

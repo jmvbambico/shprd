@@ -628,3 +628,71 @@ fn read_when(path: &Path, needle: &str) -> String {
         sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn a_json_service_keeps_stdout_one_document_when_the_run_starts() {
+    // The review of fix I: `--json` promises one machine-readable document on
+    // stdout, and the "run started after serve" notice appended a human line to
+    // the banner, so a consumer's `json.load` failed on the second line. The
+    // notice is news for a person, so it goes to stderr in this mode.
+    let (repo, state, home) = repo_without_a_run();
+    fast_tick(repo.path());
+    let out_path = state.path().join("serve.out");
+    let err_path = state.path().join("serve.err");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        true,
+        Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
+        Stdio::from(fs::File::create(&err_path).expect("the stderr file")),
+    );
+    let port = read_record(state.path())["port"].as_u64().expect("a port") as u16;
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+
+    // The banner is one document, and it says there is no run.
+    let banner = read_when(&out_path, "\"serving\"");
+    let value: Value = serde_json::from_str(&banner).expect("the banner is one JSON document");
+    assert!(value["run"].is_null(), "{value}");
+    assert_eq!(value["hint"], Value::from(shprd_server::NO_RUN_HINT));
+
+    // A run started afterwards reaches the board, and the service says so — on
+    // stderr, where it cannot spoil the document.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "r1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+    let notice = read_when(&err_path, "started after serve");
+    assert!(notice.contains("r1"), "the notice names the run: {notice}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let snapshot = state_of(&base, &token);
+        if snapshot["run"]["id"] == "r1" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the run never reached the board: {snapshot}"
+        );
+        sleep(Duration::from_millis(100));
+    }
+
+    service.stop();
+
+    // And stdout is still exactly the one document it started as.
+    let out = fs::read_to_string(&out_path).expect("the output is written");
+    let value: Value = serde_json::from_str(&out).expect("stdout is still one JSON document");
+    assert!(value["run"].is_null(), "{value}");
+}
