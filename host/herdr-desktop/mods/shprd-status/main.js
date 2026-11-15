@@ -120,15 +120,26 @@ export default class Status extends View {
             .child("Needs you"),
         ),
       )
-      .when(failure !== null, (el) =>
-        el.child(div().text_color(colors.red).child(`⚠ ${failure}`)),
-      )
       .child(div().flex_1())
+      // The last pass's failure sits at the right, before the key hint and
+      // never instead of it: a bar that scrolled the way out of the window would
+      // be a worse dead end than the silence it is there to fix.
+      .when(failure !== null, (el) =>
+        el.child(
+          div()
+            .flex_none()
+            .max_w(560)
+            .overflow_hidden()
+            .text_color(colors.red)
+            .child(`⚠ ${failure}`),
+        ),
+      )
       .child(
         div()
           .id("palette")
           .px(6)
           .h(20)
+          .flex_none()
           .flex()
           .items_center()
           .rounded(RADIUS.control)
