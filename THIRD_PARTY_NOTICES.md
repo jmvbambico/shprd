@@ -66,8 +66,14 @@ SOFTWARE.
   colours and the space marks) from `lib/ui.js`, the status glyph shapes from
   `lib/dot.js`, the status-bar, tab-bar, pane-header and footer rows from
   `mods/workspace-status-chat`, `mods/tabs-tasks`, `mods/pane-chat` and
-  `mods/workspace-chrome-shepherdr`, the grouped two-line task rows and their
-  second line from `mods/tasks/main.js` and `core/tasks.js`, the installer's
+  `mods/workspace-chrome-shepherdr`, the sidebar's rows — a coloured mark, the
+  name, the count that needs the person, and a quiet section heading above them
+  — from `mods/spaces-chat/main.js` and `mods/spaces-chat/sections.js`, the
+  toast float and the numbers it follows — three at once, 360 px wide, a body cut
+  at 140 characters, a dot per level, and a timeout per level with the older ones
+  going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
+  two-line task rows and their second line from `mods/tasks/main.js` and
+  `core/tasks.js`, the installer's
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
@@ -109,12 +115,16 @@ SOFTWARE.
   and the herdr-core client — the `hello` framing switch, the request ids and
   the per-call timeout, the pending-call cap, the method and version gate with
   its refusal wording, the stream credit protocol, and the terminal event fold
-  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`,
-  and the chat's reading of an agent's own record — the line kinds each
-  CLI keeps, the fields a message and its tool calls are read from, and the
-  newest-page-then-what-it-gained shape — in
-  `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel —
-  the transcript's bubbles, the composer and the sidebar placement — in
+  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`; and the
+  Herdr desktop host — terminal input sent with no `caller` so it arrives as the
+  person's, the split between herdr-core for terminals and the window's own
+  command line for spaces, tabs and panes, and making a space through the window
+  — from `service/hub.ts` and `service/spaces.ts`, in
+  `crates/shprd-mux-hc/src/host.rs`; and the chat's reading of an agent's own
+  record — the line kinds each CLI keeps, the fields a message and its tool calls
+  are read from, and the newest-page-then-what-it-gained shape — in
+  `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel — the
+  transcript's bubbles, the composer and the sidebar placement — in
   `host/herdr-desktop/mods/shprd-coordinator/`
 - License: MIT
 

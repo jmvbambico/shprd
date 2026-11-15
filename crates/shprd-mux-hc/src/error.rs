@@ -69,6 +69,13 @@ pub enum Error {
     #[error("herdr-core is unreachable: {0}")]
     Unreachable(String),
 
+    /// The Herdr window could not be reached or would not do what was asked:
+    /// it is not running, its `herdr-app` is not installed, or it refused the
+    /// command. The window is a different program from the core, and its
+    /// failures must not read as the core's.
+    #[error("the Herdr window: {0}")]
+    Window(String),
+
     /// The core refused the call. `kind` is the core's stable taxonomy.
     #[error("herdr-core refused `{method}` ({kind}): {message}")]
     Refused {
@@ -120,5 +127,10 @@ impl Error {
     /// the state again instead of trusting what it had.
     pub fn is_unreachable(&self) -> bool {
         matches!(self, Self::Unreachable(_) | Self::Protocol(_))
+    }
+
+    /// Whether the Herdr window refused or could not be reached.
+    pub fn is_window(&self) -> bool {
+        matches!(self, Self::Window(_))
     }
 }

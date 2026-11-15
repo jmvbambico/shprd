@@ -29,7 +29,7 @@
               "id": "spaces",
               "type": "block",
               "content": {
-                "mod": "spaces"
+                "mod": "shprd-spaces"
               },
               "size": {
                 "weight": 1

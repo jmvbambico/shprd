@@ -1,8 +1,11 @@
-//! Spawning the fake `hc connect` and reading what it did.
+//! Spawning the fake `hc connect` and the stand-in for the Herdr window, and
+//! reading what either did.
 //!
 //! The fake is [`tests/support/fake_hc.py`](fake_hc.py): a real child process on
-//! a real pipe, speaking the bytes M7ef recorded. Each fake gets its own
-//! directory under the test's temporary folder, which is where its mode, its
+//! a real pipe, speaking the bytes M7ef recorded. [`Window`] is its counterpart
+//! for the window's `herdr-app` command line: a shell script that answers the
+//! commands the host sends and writes down every one of them. Each fake gets its
+//! own directory under the test's temporary folder, which is where its mode, its
 //! spawn marker and its request log live — never a home directory, never the
 //! person's own Herdr desktop.
 
@@ -10,8 +13,11 @@
 
 #[path = "live.rs"]
 pub mod live;
+pub mod window;
 
 use std::path::{Path, PathBuf};
+
+pub use window::Window;
 
 /// One fake `hc connect`, with its own script directory.
 ///
@@ -132,6 +138,19 @@ impl Fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fake_window_answers_and_writes_down_what_it_was_asked() {
+        let window = Window::new();
+        let value = window.window().status().expect("the fake window answers");
+        assert!(value.get("layout").is_some(), "{value}");
+        let made = window
+            .window()
+            .call("space.new", &[("--name", "shprd")])
+            .expect("space.new answers");
+        assert_eq!(made["space"], "spcnew");
+        assert_eq!(window.calls().len(), 2);
+    }
 
     #[test]
     fn a_fake_has_its_own_folder_and_a_runnable_binary() {

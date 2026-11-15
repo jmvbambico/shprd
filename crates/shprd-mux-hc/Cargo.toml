@@ -8,6 +8,7 @@ version.workspace = true
 description = "Herdr desktop (herdr-core, `hc`) client: framed JSON-RPC, event fold, placement and OSC 7501"
 
 [dependencies]
+shprd-mux = { path = "../shprd-mux" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -15,6 +16,7 @@ tokio = { workspace = true, features = [
     "io-util",
     "process",
     "rt",
+    "rt-multi-thread",
     "sync",
     "time",
     "macros",

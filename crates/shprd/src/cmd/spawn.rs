@@ -1857,9 +1857,15 @@ fn read_compat(data: &DataDir) -> Result<Vec<CompatEntry>, CliError> {
     Ok(list.skills)
 }
 
-/// The multiplexer the binary drives: the real herdr the human is working in.
-pub fn real_mux() -> shprd_mux_herdr::HerdrMux {
-    shprd_mux_herdr::HerdrMux::new()
+/// The host the binary drives, chosen at the wiring edge.
+///
+/// Which one it is — Herdr desktop, the herdr TUI or tuios — is
+/// [`crate::host::select`]'s decision, from the `host` setting and what this
+/// machine has (M10.9). Every verb reaches a host through here, so nothing in
+/// `cmd/` has to know which adapter it is holding: the trait's verbs are the
+/// same, and the capability flags are what says which of them a host has.
+pub fn real_mux() -> Box<dyn Host> {
+    crate::host::select().1
 }
 
 /// Sends one turn of input to the tab a task's agent runs in.
