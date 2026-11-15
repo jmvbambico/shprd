@@ -26,7 +26,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { run, spaces, theme } from "herdr";
 
 import { Client, discover, reason } from "./lib/client.js";
-import { rowCounts, sidebarRows } from "./lib/spaces.js";
+import { rowBadge, rowCounts, sidebarRows } from "./lib/spaces.js";
 import { badge, countBadge, note, statusGlyph } from "./lib/panel.js";
 import { SPACE, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -212,7 +212,9 @@ export default class Spaces extends View {
             ),
           )
           .child(div().flex_1())
-          .when(row.needs, (el) => el.child(badge(t, "!", colors.red, colors.on)))
+          .when(rowBadge(row) !== null, (el) =>
+            el.child(badge(t, rowBadge(row), colors.red, colors.on)),
+          )
           .child(div().flex_none().text_size(TEXT.label).text_color(fill).child(row.word)),
       )
       .child(

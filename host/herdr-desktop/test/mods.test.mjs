@@ -21,6 +21,7 @@ import {
   coordinatorRow,
   needWords,
   orderedTasks,
+  rowBadge,
   rowCounts,
   sidebarRows,
   spaceIndex,
@@ -200,6 +201,14 @@ test("the dropped tasks a run keeps are history, not rows", () => {
   };
   assert.deepEqual(orderedTasks(stale), []);
   assert.deepEqual(sidebarRows(stale, []).tasks, []);
+});
+
+test("a row's badge is a count on the run and a mark on a task", () => {
+  const rows = sidebarRows(STATE, SPACES);
+  assert.equal(rowBadge(rows.coordinator), "1", "how many tasks need the person");
+  assert.equal(rowBadge(rows.tasks.find((row) => row.id === "T3")), "!");
+  assert.equal(rowBadge(rows.tasks.find((row) => row.id === "T2")), null);
+  assert.equal(rowBadge(null), null);
 });
 
 test("row counts and task looks are the tokens' words", () => {

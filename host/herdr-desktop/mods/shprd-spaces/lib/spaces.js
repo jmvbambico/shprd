@@ -109,6 +109,21 @@ export function taskLook(task) {
   };
 }
 
+/**
+ * The badge a row carries, or null: the count a row is *about* where there is
+ * one, else a mark that it needs the person.
+ *
+ * The coordinator's row is about the whole run, so its badge is how many tasks
+ * need a person — a count. A task's row is about one task, so its badge is the
+ * exclamation the sidebar's heading counts: "needs you", told once in the row's
+ * own word and once in the place a person scans down.
+ */
+export function rowBadge(row) {
+  if (!row?.needs) return null;
+  if (row.kind === KIND.coordinator) return String(Number.isInteger(row.count) ? row.count : 1);
+  return "!";
+}
+
 /** How many rows of each kind a row set holds, for the heading's counts. */
 export function rowCounts(rows) {
   const tally = { needs: 0, ready: 0, working: 0, total: 0 };
@@ -186,6 +201,7 @@ export function coordinatorRow(state, space = null) {
     tone: run ? (state?.finished ? "green" : "amber") : "dim",
     glyph: run ? (state?.finished ? "tick" : "pie") : "ring",
     needs: tally.needs > 0,
+    count: tally.needs,
     ready: false,
     active: Boolean(space?.active),
     space,
