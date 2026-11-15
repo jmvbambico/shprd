@@ -3,7 +3,7 @@
 //! A reviewer never gets a worktree. It gets one folder holding everything it may
 //! read: the diff against the branch's merge base with the integration branch, the
 //! contract the attempt was written against, and the schema its findings must
-//! match. [`review`] takes the [`Mux`](shprd_mux::Mux) as a parameter, the way
+//! match. [`review`] takes the [`Host`](shprd_mux::Host) as a parameter, the way
 //! [`spawn`] does, so a test drives a fake host and nothing here reads the
 //! environment or starts a process of its own.
 
@@ -22,7 +22,7 @@ use shprd_core::gate::REVIEW_GATE;
 use shprd_core::settings::{ResolvedRole, Source, Sourced};
 use shprd_core::state::{AskRecord, Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
-use shprd_mux::Mux;
+use shprd_mux::Host;
 
 use crate::cli::ReviewArgs;
 use crate::cmd::deliver;
@@ -169,7 +169,7 @@ pub fn tab_record_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> Pa
 /// the tab counts as closed: that is the state the caller wanted anyway, the
 /// way [`handoff`](super::handoff) treats a vanished old tab.
 pub fn close_reviewer(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     briefs: &Path,
     run: &str,
     task: &str,
@@ -928,7 +928,7 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
 /// shell starts is the difference between reading a diff and editing the code.
 /// Returns the tab's id and title.
 fn open_reviewer(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &ReviewEnv<'_>,
     task: &str,
     reviewer: &Reviewer,
@@ -936,52 +936,11 @@ fn open_reviewer(
     brief: &ReviewBrief<'_>,
     brief_path: &Path,
 ) -> Result<(shprd_mux::TabId, String), CliError> {
-    let workspace = spawn::workspace_of(mux, &env.spawn)?;
+    // The reviewer joins the worker in the task's own space: one task, one
+    // group of terminals, so a person reading the host's bar sees the whole task
+    // and its reviewer beside it.
+    let space = spawn::task_space(mux, &env.spawn, task)?;
     let title = reviewer_title(&reviewer.agent, task);
-    let tab = mux
-        .create_tab(&workspace.id, &title, dir)
-        .map_err(|err| CliError::other(anyhow!(err).context("creating the reviewer tab")))?;
-    // The tab exists from here on, so every failure closes it again.
-    let started = start_in_tab(
-        mux, env, task, reviewer, dir, brief, brief_path, &title, &tab,
-    );
-    match started {
-        Ok(()) => Ok((tab.id, title)),
-        Err(err) => {
-            spawn::close_tab(mux, &tab.id);
-            Err(err)
-        }
-    }
-}
-
-/// The title of a reviewer's tab: `<agent>·<task>·review`.
-///
-/// The `review` suffix is what keeps a reviewer's tab from reading as the
-/// worker's, now that the role glyphs are gone.
-///
-/// // M10.2: a task's space holds both its worker and its reviewer, told apart
-/// by role there.
-fn reviewer_title(agent: &str, task: &str) -> String {
-    format!("{agent}·{task}·review")
-}
-
-/// Starts the reviewer's CLI in `tab` and hands it the brief.
-///
-/// A brief that does not arrive is reported, never fatal: the CLI is running,
-/// and the human can resend the brief into the tab. A lost first delivery is
-/// retried once by [`deliver_review_brief`] before it is reported.
-#[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
-fn start_in_tab(
-    mux: &dyn Mux,
-    env: &ReviewEnv<'_>,
-    task: &str,
-    reviewer: &Reviewer,
-    dir: &Path,
-    brief: &ReviewBrief<'_>,
-    brief_path: &Path,
-    title: &str,
-    tab: &shprd_mux::Tab,
-) -> Result<(), CliError> {
     let text = render_review_brief(brief);
     let (argv, brief_in_args) = reviewer_argv(
         &reviewer.spec,
@@ -1003,24 +962,56 @@ fn start_in_tab(
             data: Some(env.spawn.data_dir.clone()),
         },
     ));
-    mux.run(&tab.root_pane, &argv, &pairs)
-        .map_err(|err| CliError::other(anyhow!(err).context("starting the reviewer CLI")))?;
+    let tab = mux
+        .spawn(&space.id, &title, &argv, &pairs, dir)
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the reviewer tab")))?;
+    // The tab exists from here on, so every failure closes it again.
+    let started = deliver_review_turn(mux, env, reviewer, task, &text, &tab, brief_in_args);
+    match started {
+        Ok(()) => Ok((tab.id, title)),
+        Err(err) => {
+            spawn::close_tab(mux, &tab.id);
+            Err(err)
+        }
+    }
+}
+
+/// The title of a reviewer's tab: `<agent>·<task>·review`.
+///
+/// The `review` suffix is what keeps a reviewer's tab from reading as the
+/// worker's, now that the role glyphs are gone: the two sit in the same space,
+/// one tab apart, so the titles are what tells them apart.
+fn reviewer_title(agent: &str, task: &str) -> String {
+    format!("{agent}·{task}·review")
+}
+
+/// Hands the reviewer's brief to the CLI that is already running in `tab`.
+///
+/// A brief that does not arrive is reported, never fatal: the CLI is running,
+/// and the human can resend the brief into the tab. A lost first delivery is
+/// retried once by [`deliver_review_brief`] before it is reported.
+fn deliver_review_turn(
+    mux: &dyn Host,
+    env: &ReviewEnv<'_>,
+    reviewer: &Reviewer,
+    task: &str,
+    rendered: &str,
+    tab: &shprd_mux::Tab,
+    brief_in_args: bool,
+) -> Result<(), CliError> {
     // A brief that arrived as a system prompt leaves the CLI idle, waiting for a
     // first turn, so it gets the same one-line kickoff a worker gets; a reviewer
     // whose CLI has no system-prompt flag gets the whole brief typed in.
     let (text, what) = if brief_in_args {
         (deliver::KICKOFF, "review kickoff")
     } else {
-        (text.as_str(), "review brief")
+        (rendered, "review brief")
     };
     let delivery = deliver_review_brief(mux, env, reviewer, tab, text);
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
-    eprintln!(
-        "warning: {what} not delivered to {title}: {reason}; it is at {}",
-        brief_path.display()
-    );
+    eprintln!("warning: {what} not delivered: {reason}; the brief is beside the review packet");
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
         // The ledger says which turn was lost, the way the warning does: a
@@ -1047,7 +1038,7 @@ fn start_in_tab(
 /// start-up race; a reviewer that is genuinely stuck still produces exactly one
 /// warning and one escalation, and they carry the reason the last attempt gave.
 fn deliver_review_brief(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &ReviewEnv<'_>,
     reviewer: &Reviewer,
     tab: &shprd_mux::Tab,
@@ -1142,7 +1133,8 @@ fn render(
     })
 }
 
-/// Flattens a launch environment into the pairs [`Mux::run`] takes: set entries
+/// Flattens a launch environment into the pairs [`Host::spawn`] takes: set
+/// entries
 /// first, then the removals, both in name order.
 fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
     let mut pairs: Vec<(String, Option<String>)> = diff
@@ -1161,7 +1153,7 @@ fn env_pairs(diff: LaunchEnv) -> Vec<(String, Option<String>)> {
 /// behind. The effects then run in the order the packet needs: the files the
 /// reviewer reads, the brief that points at them, and only then the tab.
 pub fn review(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &ReviewEnv<'_>,
     req: &ReviewRequest,
 ) -> Result<ReviewReport, CliError> {
@@ -1612,7 +1604,10 @@ project_dirs = []
             }
         }
 
-        /// A fake host that already has this repository's workspace.
+        /// A fake host that already has this repository's coordinator space.
+        ///
+        /// The reviewer's tab goes in the task's own space, which the spawn
+        /// makes, so the fixture only seeds what a person would have opened.
         fn mux(&self) -> FakeMux {
             self.with_workspace(FakeMux::default().with_ready_agent())
         }
@@ -1626,7 +1621,7 @@ project_dirs = []
 
         /// Records this repository's workspace in `mux`, as a launcher would.
         fn with_workspace(&self, mux: FakeMux) -> FakeMux {
-            mux.create_workspace(&spawn::workspace_name(&self.repo_name()), self.root())
+            mux.create_space(&spawn::repo_space_name(&self.repo_name()), self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
             mux
         }
@@ -1663,7 +1658,7 @@ project_dirs = []
         mux.calls()
             .into_iter()
             .filter_map(|call| match call {
-                Call::Prompt(_, text) => Some(text),
+                Call::Write(_, text, _) => Some(text),
                 _ => None,
             })
             .collect()
@@ -1943,7 +1938,7 @@ project_dirs = []
         assert!(
             mux.calls()
                 .iter()
-                .all(|call| !matches!(call, Call::CreateTab(..))),
+                .all(|call| !matches!(call, Call::Spawn(..))),
             "no tab may be opened"
         );
     }
@@ -2064,7 +2059,7 @@ project_dirs = []
         assert!(
             mux.calls().iter().any(|call| matches!(
                 call,
-                Call::CreateTab(_, title, _) if title == &report.tab
+                Call::Spawn(_, title, _, _, _) if title == &report.tab
             )),
             "no tab titled {:?} was opened",
             report.tab
@@ -2085,7 +2080,7 @@ project_dirs = []
         let (title, cwd) = calls
             .iter()
             .find_map(|call| match call {
-                Call::CreateTab(_, title, cwd) => Some((title.clone(), cwd.clone())),
+                Call::Spawn(_, title, _, _, cwd) => Some((title.clone(), cwd.clone())),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no tab was created: {calls:?}"));
@@ -2113,7 +2108,7 @@ project_dirs = []
         let pairs = calls
             .iter()
             .find_map(|call| match call {
-                Call::Run(_, _, pairs) => Some(pairs.clone()),
+                Call::Spawn(_, _, _, pairs, _) => Some(pairs.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the reviewer CLI was not started: {calls:?}"));
@@ -2138,7 +2133,7 @@ project_dirs = []
         assert!(
             calls
                 .iter()
-                .any(|call| matches!(call, Call::Prompt(_, text) if text.contains("REVIEWER"))),
+                .any(|call| matches!(call, Call::Write(_, text, _) if text.contains("REVIEWER"))),
             "the brief was never typed in: {calls:?}"
         );
     }
@@ -2148,7 +2143,7 @@ project_dirs = []
         mux.calls()
             .into_iter()
             .find_map(|call| match call {
-                Call::Run(_, argv, _) => Some(argv),
+                Call::Spawn(_, _, argv, _, _) => Some(argv),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the reviewer CLI was not started"))
@@ -2403,7 +2398,7 @@ project_dirs = []
         );
         assert!(delivered[0].contains("REVIEWER"), "{delivered:?}");
         let landed = mux.calls().into_iter().find_map(|call| match call {
-            Call::Prompt(pane, _) => Some(pane),
+            Call::Write(pane, _, _) => Some(pane),
             _ => None,
         });
         assert_eq!(
@@ -2503,7 +2498,7 @@ project_dirs = []
         mux.calls()
             .into_iter()
             .filter_map(|call| match call {
-                Call::CreateTab(_, title, _) => Some(title),
+                Call::Spawn(_, title, _, _, _) => Some(title),
                 _ => None,
             })
             .collect()
@@ -2572,7 +2567,7 @@ project_dirs = []
         assert!(
             mux.calls()
                 .into_iter()
-                .any(|call| matches!(call, Call::Prompt(pane, text) if pane == fresh && text.contains("REVIEWER"))),
+                .any(|call| matches!(call, Call::Write(pane, text, _) if pane == fresh && text.contains("REVIEWER"))),
             "the brief is delivered to the fresh reviewer"
         );
         assert_eq!(
@@ -2814,14 +2809,22 @@ project_dirs = []
             .to_string()
     }
 
-    /// Every tab the fake host still has open in this repository's workspace.
+    /// Every tab the fake host still has open, across every space.
+    ///
+    /// A task's worker and reviewer share its own space, so "the space this
+    /// suite means" is whichever one the task's labels made; listing them all
+    /// is the simplest way to be right about it.
     fn open_tabs(mux: &FakeMux, env: &ReviewEnv<'_>) -> Vec<String> {
-        let workspace = spawn::workspace_of(mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
-        mux.list_tabs(&workspace.id)
+        let _ = env;
+        let mut ids: Vec<String> = mux
+            .list_spaces()
             .unwrap_or_else(|err| panic!("{err}"))
-            .into_iter()
+            .iter()
+            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
             .map(|tab| tab.id.to_string())
-            .collect()
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Opens a review of `T1` on `ctx`'s run: its environment, host and tab.
@@ -2884,9 +2887,9 @@ project_dirs = []
         let (env, mux, reviewer) = reviewed(&scratch, &ctx);
         // A worker's record sits beside the reviewer's in the same run folder:
         // both are tabs this run opened, so run end closes both.
-        let workspace = spawn::workspace_of(&mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
+        let space = spawn::task_space(&mux, &env.spawn, "T1").unwrap_or_else(|err| panic!("{err}"));
         let worker = mux
-            .create_tab(&workspace.id, "worker", scratch.root())
+            .spawn(&space.id, "worker", &[], &[], scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         std::fs::write(
             spawn::tab_path(&env.spawn.briefs_dir, &env.spawn.run, "T1", 1),

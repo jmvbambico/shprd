@@ -16,7 +16,7 @@ use shprd_core::gate::REVIEW_GATE;
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::settings::merge_name;
 use shprd_core::state::{RunState, Task, TaskStatus};
-use shprd_mux::{AgentState, Mux, MuxError, PaneId};
+use shprd_mux::{AgentState, Host, MuxError, PaneId};
 use shprd_watch::machine::{Action, EXIT_REASON, Health, Inputs, ParkReason, Policy, Watch};
 use shprd_watch::records::RecordError;
 use shprd_watch::records::claude::scan_claude;
@@ -164,7 +164,7 @@ impl Watcher {
     /// escalated and the next task is still watched.
     pub fn tick(
         &mut self,
-        mux: &dyn Mux,
+        mux: &dyn Host,
         env: &SpawnEnv<'_>,
         now_ms: u64,
     ) -> Result<Vec<String>, CliError> {
@@ -202,7 +202,7 @@ impl Watcher {
     /// that file into the gate result the run waits for.
     fn tick_reviews(
         &mut self,
-        mux: &dyn Mux,
+        mux: &dyn Host,
         env: &SpawnEnv<'_>,
         state: &RunState,
         lines: &mut Vec<String>,
@@ -341,7 +341,7 @@ impl Watcher {
     /// that prompt, not as a notice.
     fn notify(
         &mut self,
-        mux: &dyn Mux,
+        mux: &dyn Host,
         env: &SpawnEnv<'_>,
         now_ms: u64,
         lines: &mut Vec<String>,
@@ -361,7 +361,7 @@ impl Watcher {
                 if self.awaiting_human(mux, env, &pane, now_ms, lines)? {
                     return Ok(());
                 }
-                match mux.prompt(&pane, &text) {
+                match mux.write(&pane, &text, true) {
                     Ok(()) => Ok(()),
                     Err(err) => Err(err.to_string()),
                 }
@@ -406,7 +406,7 @@ impl Watcher {
     /// one escalation, not one of each per tick.
     fn awaiting_human(
         &mut self,
-        mux: &dyn Mux,
+        mux: &dyn Host,
         env: &SpawnEnv<'_>,
         pane: &PaneId,
         now_ms: u64,
@@ -450,7 +450,7 @@ impl Watcher {
 /// working orchestrator, and a screen the host will not hand over is no signal
 /// at all: both deliver, the way an unknown state does. Counting either as
 /// blocked would leave a healthy orchestrator unnoticed until the escalation.
-fn blocked_on_a_prompt(mux: &dyn Mux, env: &SpawnEnv<'_>, pane: &PaneId) -> bool {
+fn blocked_on_a_prompt(mux: &dyn Host, env: &SpawnEnv<'_>, pane: &PaneId) -> bool {
     if matches!(mux.agent_state(pane), Ok(AgentState::Blocked)) {
         return true;
     }
@@ -660,7 +660,7 @@ fn prompt_text(wanted: &[Notice]) -> String {
 /// One pass over one working task: read its pane and record, then act.
 fn tick_task(
     watcher: &mut Watcher,
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
     run: (&RunState, &[Event]),
     task: &Task,
@@ -888,21 +888,46 @@ fn awaiting_review(task: &Task) -> Option<u32> {
 /// that failed to answer is an error the caller must not read as an exit: a
 /// transient failure would otherwise mark a working agent dry and hand its task
 /// to somebody else.
-fn pane_for(mux: &dyn Mux, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
-    let name = spawn::workspace_name(&env.repo_name);
-    let Some(workspace) = mux.find_workspace(&name)? else {
-        return Ok(None);
+fn pane_for(mux: &dyn Host, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
+    let name = spawn::repo_space_name(&env.repo_name);
+    let Some(space) = mux.find_space(&name)? else {
+        // The coordinator's space is gone, but a task's own space may still
+        // hold the tab: every space is asked before the agent is called gone.
+        return Ok(every_tab(mux)?
+            .into_iter()
+            .find(|listed| listed.id.as_str() == tab)
+            .map(|listed| listed.root_pane));
     };
-    let tabs = mux.list_tabs(&workspace.id)?;
+    let mut tabs = mux.list_tabs(&space.id)?;
+    if !tabs.iter().any(|listed| listed.id.as_str() == tab) {
+        // A task's tabs are in the task's own space, not the repository's.
+        tabs = every_tab(mux)?;
+    }
     Ok(tabs
         .iter()
         .find(|listed| listed.id.as_str() == tab)
         .map(|listed| listed.root_pane.clone()))
 }
 
+/// Every tab the host has, across every space it can list.
+///
+/// A host that cannot list spaces contributes nothing rather than failing the
+/// pass: a task's tab is then simply not found, which is the answer a host that
+/// cannot say gives.
+fn every_tab(mux: &dyn Host) -> Result<Vec<shprd_mux::Tab>, MuxError> {
+    let Ok(spaces) = mux.list_spaces() else {
+        return Ok(Vec::new());
+    };
+    let mut tabs = Vec::new();
+    for space in spaces {
+        tabs.extend(mux.list_tabs(&space.id)?);
+    }
+    Ok(tabs)
+}
+
 /// Reads the pane once, folding a closed pane into "the process exited".
 fn observe(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     pane: Option<&PaneId>,
     patterns: &[String],
     sampler: &mut Sampler,
@@ -1446,11 +1471,17 @@ project_dirs = []
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    /// A fake multiplexer holding the repo's workspace.
+    /// A fake multiplexer holding the coordinator's space.
+    ///
+    /// A task's own space is made by the spawn that starts it, so a fixture only
+    /// has to provide the repository-level one a person would have opened.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&spawn::workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_space(
+            &spawn::repo_space_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
 
@@ -1478,16 +1509,13 @@ project_dirs = []
             .to_string()
     }
 
-    /// The pane the tab `tab` holds.
+    /// The pane the tab `tab` holds, in whichever space the task made.
     fn pane_of_tab(mux: &FakeMux, scratch: &Scratch, tab: &str) -> PaneId {
-        let name = spawn::workspace_name(&scratch.repo_name());
-        let workspace = mux
-            .find_workspace(&name)
+        let _ = scratch;
+        mux.list_spaces()
             .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("no workspace"));
-        mux.list_tabs(&workspace.id)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .into_iter()
+            .iter()
+            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
             .find(|listed| listed.id.as_str() == tab)
             .unwrap_or_else(|| panic!("no tab {tab}"))
             .root_pane
@@ -3044,13 +3072,13 @@ project_dirs = []
     /// The pane is a real tab in the fake host, because a prompt to a pane the
     /// host has never heard of fails.
     fn record_orchestrator(mux: &FakeMux, ctx: &Ctx, scratch: &Scratch) -> PaneId {
-        let name = spawn::workspace_name(&scratch.repo_name());
+        let name = spawn::repo_space_name(&scratch.repo_name());
         let workspace = mux
-            .find_workspace(&name)
+            .find_space(&name)
             .unwrap_or_else(|err| panic!("{err}"))
             .unwrap_or_else(|| panic!("no workspace"));
         let tab = mux
-            .create_tab(&workspace.id, "orchestrator", scratch.root())
+            .spawn(&workspace.id, "orchestrator", &[], &[], scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         ctx.commit(EventKind::OrchestratorLaunched {
             title: tab.title.clone(),
@@ -3066,7 +3094,7 @@ project_dirs = []
         mux.calls()
             .into_iter()
             .filter_map(|call| match call {
-                shprd_mux::fake::Call::Prompt(pane, text) => Some((pane, text)),
+                shprd_mux::fake::Call::Write(pane, text, _) => Some((pane, text)),
                 _ => None,
             })
             .collect()

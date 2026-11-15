@@ -6,13 +6,10 @@
 //! verb-specific live here and are made once: the argv-flag rules, how long to
 //! wait, and whether a prompt of the CLI's own is in the way.
 //!
-//! // M10.2: the space-per-task host model replaces the tab a process starts
-//! in; the delivery rules below stay.
-
 use std::time::{Duration, Instant};
 
 use shprd_agents::spec::{BlockingPrompt, LaunchSpec};
-use shprd_mux::{AgentState, Mux, PaneId};
+use shprd_mux::{AgentState, Host, PaneId};
 
 /// The model-argument template to render, empty when no model is chosen.
 ///
@@ -92,17 +89,17 @@ fn parse_wait(raw: Option<&str>) -> Duration {
         .map_or(DEFAULT_READY_WAIT, Duration::from_millis)
 }
 
-/// Types `text` into `pane` as the agent's first turn, once the host has
-/// detected an agent there.
+/// Types `text` into `pane` as the agent's first turn, submitted, once the host
+/// has detected an agent there.
 ///
 /// A host only accepts `prompt` for a pane it knows to be running an agent, and
 /// detection lags the launch: a CLI that has just been started is not an agent
-/// yet. So the wait polls [`Mux::agent_state`] until it is no longer
+/// yet. So the wait polls [`Host::agent_state`] until it is no longer
 /// [`AgentState::Unknown`]. Nothing here is fatal — a brief that never lands is
 /// reported to the human, not turned into a failed launch, because the process
 /// itself is up either way.
 pub fn deliver_brief(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     pane: &PaneId,
     text: &str,
     patterns: &[BlockingPrompt],
@@ -113,7 +110,7 @@ pub fn deliver_brief(
         Ok(Some(prompt)) => return Delivery::Blocked { prompt },
         Err(reason) => return Delivery::NotDelivered(reason),
     }
-    match mux.prompt(pane, text) {
+    match mux.write(pane, text, true) {
         Ok(()) => Delivery::Delivered,
         Err(err) => Delivery::NotDelivered(format!("the host refused the prompt: {err}")),
     }
@@ -125,7 +122,7 @@ pub fn deliver_brief(
 /// means the screen is showing a prompt that agent waits on a human to answer,
 /// named by the matching [`BlockingPrompt`].
 fn await_agent(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     pane: &PaneId,
     patterns: &[BlockingPrompt],
     wait: Duration,
@@ -170,7 +167,7 @@ fn await_agent(
 /// and reads only the last [`BLOCKING_PROMPT_LINES`] lines: a prompt still
 /// waiting is on screen, and the scrollback above it may mention one long gone.
 pub(crate) fn blocking_prompt(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     pane: &PaneId,
     patterns: &[BlockingPrompt],
 ) -> Option<String> {
@@ -226,14 +223,19 @@ mod tests {
 
     /// A one-tab workspace, ready to have a brief typed into its root pane.
     fn fixture() -> (shprd_mux::fake::FakeMux, PaneId) {
-        use shprd_mux::Mux as _;
+        use shprd_mux::Host as _;
         let mux = shprd_mux::fake::FakeMux::default();
-        let workspace =
-            match mux.create_workspace("shprd · repo", std::path::Path::new("/tmp/repo")) {
-                Ok(workspace) => workspace,
-                Err(error) => panic!("{error}"),
-            };
-        let tab = match mux.create_tab(&workspace.id, "sh·w1", std::path::Path::new("/tmp")) {
+        let workspace = match mux.create_space("shprd · repo", std::path::Path::new("/tmp/repo")) {
+            Ok(workspace) => workspace,
+            Err(error) => panic!("{error}"),
+        };
+        let tab = match mux.spawn(
+            &workspace.id,
+            "sh·w1",
+            &[],
+            &[],
+            std::path::Path::new("/tmp"),
+        ) {
             Ok(tab) => tab,
             Err(error) => panic!("{error}"),
         };
@@ -245,7 +247,7 @@ mod tests {
         mux.calls()
             .into_iter()
             .filter_map(|call| match call {
-                Call::Prompt(_, text) => Some(text),
+                Call::Write(_, text, _) => Some(text),
                 _ => None,
             })
             .collect()

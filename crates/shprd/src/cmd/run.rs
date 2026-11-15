@@ -12,7 +12,7 @@ use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind, TaskId};
 use shprd_core::rules::{abandonable_tasks, unfinished_tasks, unlanded};
 use shprd_core::state::RunState;
 use shprd_git::git::Git;
-use shprd_mux::{Mux, PaneId};
+use shprd_mux::{Host, PaneId};
 
 use crate::cli::{EndRunArgs, RunStartArgs};
 use crate::cmd::{confirm, emit, spawn};
@@ -93,7 +93,7 @@ fn ensure_branch(repo: &Path, base: &str, branch: &str) -> Result<bool, CliError
 /// committed after the last, so the tabs and panes the host keeps are
 /// collected, reported and escalated while the ledger still accepts an
 /// escalation.
-pub fn finish(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Result<(), CliError> {
+pub fn finish(mux: &dyn Host, ctx: &Ctx, home: Option<&Path>, end: EndRun) -> Result<(), CliError> {
     let state = ctx.state()?;
     let kind = end_kind(&state, end)?;
     ctx.check(&kind)?;
@@ -453,14 +453,14 @@ mod tests {
 
     /// A host with one workspace, and a tab in it.
     fn a_tab(mux: &FakeMux, fixture: &Fixture) -> Result<shprd_mux::Tab> {
-        let workspace = mux.find_workspace("ws").map_err(|err| anyhow!("{err}"))?;
+        let workspace = mux.find_space("ws").map_err(|err| anyhow!("{err}"))?;
         let workspace = match workspace {
             Some(workspace) => workspace,
             None => mux
-                .create_workspace("ws", fixture.repo.path())
+                .create_space("ws", fixture.repo.path())
                 .map_err(|err| anyhow!("{err}"))?,
         };
-        mux.create_tab(&workspace.id, "worker", fixture.repo.path())
+        mux.spawn(&workspace.id, "worker", &[], &[], fixture.repo.path())
             .map_err(|err| anyhow!("{err}"))
     }
 
@@ -644,6 +644,76 @@ mod tests {
         Ok(())
     }
 
+    /// Run end takes every task space and leaves the coordinator's alone.
+    ///
+    /// A run with no task in flight still has the spaces its tasks were given
+    /// (a dropped or abandoned one, say); ending the run is what removes them,
+    /// and the repository-level space is where a person's coordinator lives, so
+    /// it is never shprd's to close.
+    #[test]
+    fn finish_closes_the_tasks_spaces_and_keeps_the_coordinators() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let ctx = fixture.ctx()?;
+        ctx.commit(EventKind::TaskAdded {
+            task: "T2".to_string(),
+            title: "abandoned".to_string(),
+            scope: vec!["crates/shprd".to_string()],
+            acceptance: vec!["it works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        })
+        .map_err(|err| anyhow!("{err}"))?;
+        let mux = FakeMux::default();
+        let repo_name = fixture
+            .repo
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let coordinator = mux
+            .create_space(&spawn::repo_space_name(&repo_name), fixture.repo.path())
+            .map_err(|err| anyhow!("{err}"))?;
+        let task = mux
+            .create_space(
+                &spawn::task_space_name(&repo_name, RUN, "T2"),
+                fixture.repo.path(),
+            )
+            .map_err(|err| anyhow!("{err}"))?;
+
+        finish(
+            &mux,
+            &ctx,
+            Some(fixture.home.path()),
+            EndRun::finish(true, true),
+        )
+        .map_err(failed)?;
+
+        let spaces: Vec<shprd_mux::SpaceId> = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CloseSpace(closed) => Some(closed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spaces, vec![task.id.clone()], "only the task's space goes");
+        assert!(
+            mux.find_space(&spawn::repo_space_name(&repo_name))
+                .map_err(|err| anyhow!("{err}"))?
+                .is_some(),
+            "the coordinator's space stayed"
+        );
+        assert!(
+            mux.find_space(&spawn::task_space_name(&repo_name, RUN, "T2"))
+                .map_err(|err| anyhow!("{err}"))?
+                .is_none(),
+            "the task's space stayed"
+        );
+        assert!(coordinator.id != task.id);
+        Ok(())
+    }
+
     #[test]
     fn finish_counts_a_pane_and_tab_already_gone_as_closed() -> Result<()> {
         let fixture = Fixture::new()?;
@@ -655,10 +725,10 @@ mod tests {
         .map_err(|err| anyhow!("{err}"))?;
         let fake = FakeMux::default();
         let workspace = fake
-            .create_workspace("ws", fixture.repo.path())
+            .create_space("ws", fixture.repo.path())
             .map_err(|err| anyhow!("{err}"))?;
         let tab = fake
-            .create_tab(&workspace.id, "worker", fixture.repo.path())
+            .spawn(&workspace.id, "worker", &[], &[], fixture.repo.path())
             .map_err(|err| anyhow!("{err}"))?;
         fixture.record("T2-a1.tab", &tab.id)?;
         fake.close_tab(&tab.id).map_err(|err| anyhow!("{err}"))?;
