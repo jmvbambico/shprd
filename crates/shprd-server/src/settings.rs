@@ -147,7 +147,7 @@ fn document(state: &AppState, loaded: &Loaded, resolved: Resolved) -> SettingsDt
 
 /// The harness table this service was given, or why it has none.
 fn checker(state: &AppState) -> Checker {
-    Checker::load(state.data.as_deref())
+    Checker::load(state.data.as_ref())
 }
 
 /// The refusals the harness table has for these settings.

@@ -28,7 +28,20 @@ impl Harness {
     /// the TOML schema, and [`HarnessSpec::validate`] checks what the type
     /// cannot express. A spec that fails either is an error naming the file.
     pub fn load(path: &Path) -> Result<Harness, SpecError> {
-        let spec = crate::spec::load_file(path)?;
+        let text = std::fs::read_to_string(path).map_err(|source| SpecError::ReadFile {
+            path: path.to_owned(),
+            source,
+        })?;
+        Harness::parse(path, &text)
+    }
+
+    /// Check a harness file already read in, naming `path` in any error.
+    ///
+    /// This is [`Harness::load`] for a file that is not on this machine as a
+    /// file: the copy embedded in the binary, which [`crate::data::DataDir`]
+    /// reads into text.
+    pub fn parse(path: &Path, text: &str) -> Result<Harness, SpecError> {
+        let spec = crate::spec::parse(path, text)?;
         spec.validate().map_err(|source| SpecError::Invalid {
             path: path.to_owned(),
             source: Box::new(source),
@@ -155,44 +168,13 @@ impl Harness {
     }
 }
 
-/// Environment variable pointing shprd at the data directory, for a checkout or
-/// a packaged install.
-pub const DATA_ENV: &str = "SHPRD_DATA_DIR";
-
-/// The data directory: `explicit` (the `$SHPRD_DATA_DIR` the caller read),
-/// else `<root>/data` when it is one, else the `../share/shprd/data` a packaged
-/// install puts next to the binary, else `<data_home>/shprd/data`, which is
-/// where an install keeps it for every repository on the machine.
+/// Environment variable pointing shprd at the data directory, for a checkout, a
+/// worker's own table or a test's fixture.
 ///
-/// `root` is the repository the caller works in, when it has one: a checkout
-/// keeps its harness table in `data/`, and an installation keeps it beside the
-/// binary or under the data home. The environment wins, because a person who set
-/// the variable means it. Nothing here reads the environment itself: the
-/// binary resolves `$SHPRD_DATA_DIR` and [`data_home`] once and passes them in,
-/// so a test that names its own home never finds the developer's install.
-pub fn data_dir(root: Option<&Path>, explicit: Option<&Path>, data_home: &Path) -> Option<PathBuf> {
-    if let Some(dir) = explicit {
-        return Some(dir.to_path_buf());
-    }
-    let candidates = [
-        root.map(|root| root.join("data")),
-        packaged_data_dir(),
-        Some(installed_data_dir(data_home)),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|candidate| candidate.is_dir())
-}
-
-/// Where a packaged install puts the data next to its binary:
-/// `<binary dir>/../share/shprd/data`.
-fn packaged_data_dir() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .map(|dir| dir.join("../share/shprd/data"))
-}
+/// It wins over everything else, and the directory it names is read as the whole
+/// table; with it unset, [`crate::data::DataDir`] finds a person's overrides
+/// under the data home and then the copy embedded in the binary.
+pub const DATA_ENV: &str = "SHPRD_DATA_DIR";
 
 /// The data home for `home`: `xdg_data_home` (the `$XDG_DATA_HOME` the caller
 /// read) when it names a directory, else `<home>/.local/share`.
@@ -207,11 +189,6 @@ pub fn data_home(home: &Path, xdg_data_home: Option<&OsStr>) -> PathBuf {
     }
 }
 
-/// Where an install under `data_home` keeps the data: `<data_home>/shprd/data`.
-fn installed_data_dir(data_home: &Path) -> PathBuf {
-    data_home.join("shprd").join("data")
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -219,7 +196,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
-    use super::{Harness, data_dir, data_home};
+    use super::{Harness, data_home};
     use crate::asks::AskHookInstaller;
     use crate::spec::{
         AskHookConfig, BriefDelivery, BriefFileMode, CatalogParser, CatalogSource, StatusSource,
@@ -250,24 +227,12 @@ mod tests {
     fn a_named_data_directory_wins_as_it_is() {
         let home = tempfile::tempdir().expect("a temp home");
         let data_home = data_home(home.path(), Some(OsStr::new("/xdg/data")));
+        let named = home.path().join("named");
+        let data = crate::data::DataDir::resolve(Some(&named), Some(&data_home));
         assert_eq!(
-            data_dir(None, Some(home.path()), &data_home),
-            Some(home.path().to_path_buf())
-        );
-    }
-
-    /// A checkout's own `data/` is found without looking at the environment,
-    /// which is what makes a test's temp repository self-contained.
-    #[test]
-    fn a_checkout_data_directory_is_found_first() {
-        let checkout = tempfile::tempdir().expect("a temp checkout");
-        let data = checkout.path().join("data");
-        std::fs::create_dir_all(&data).expect("mkdir the table");
-        let home = tempfile::tempdir().expect("a temp home");
-        let data_home = data_home(home.path(), Some(OsStr::new("/xdg/data")));
-        assert_eq!(
-            data_dir(Some(checkout.path()), None, &data_home),
-            Some(data)
+            data.dir(),
+            Some(named.as_path()),
+            "a named directory is read as it is, whether or not it exists"
         );
     }
 

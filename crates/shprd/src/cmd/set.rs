@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use shprd_agents::models::{AgentRef, list_models, parse_effort};
-use shprd_agents::spec::{HarnessSpec, load_dir};
+use shprd_agents::spec::HarnessSpec;
 use shprd_core::config;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
@@ -66,9 +66,11 @@ fn execute_with_path(
     local: bool,
     path_env: &str,
 ) -> Result<(), CliError> {
-    let dir = roster::resolve_data_dir()?;
-    let specs = load_dir(&dir.join("harness")).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("loading {}", dir.display())))
+    let data = roster::resolve_data_dir();
+    let specs = data.harness_specs().map_err(|err| {
+        CliError::other(
+            anyhow!(err).context(format!("loading the harness table from {}", data.label())),
+        )
     })?;
     let change = change_of(args, &specs)?;
     let home = resolve_home(home)?;
@@ -740,8 +742,8 @@ mod tests {
     #[test]
     fn a_model_the_scripted_harness_does_not_list_warns() {
         let fixture = Fixture::new();
-        let dir = roster::resolve_data_dir().unwrap_or_else(|err| panic!("{err}"));
-        let specs = load_dir(&dir.join("harness")).unwrap_or_else(|err| panic!("{err}"));
+        let data = roster::resolve_data_dir();
+        let specs = data.harness_specs().unwrap_or_else(|err| panic!("{err}"));
 
         let warning = unknown_model_warning(
             "opencode/opencode/deepseek-v4.1-flash-free",

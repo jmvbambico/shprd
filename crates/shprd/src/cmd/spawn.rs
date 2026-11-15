@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use shprd_agents::data::DataDir;
 use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_agents::models::{AgentRef, Catalog};
 use shprd_agents::skills::{CompatEntry, Role as SkillRole, Verdict};
@@ -99,10 +100,11 @@ pub struct SpawnEnv<'a> {
     /// injects fixtures here; on a machine the map is empty and the spawn asks
     /// only the program it picked.
     pub catalogs: BTreeMap<String, Catalog>,
-    /// The `data/` directory, where a program's static catalog lives. The
-    /// launched CLI is told it as `SHPRD_DATA_DIR`, so the agent's own `shprd`
-    /// finds the same harnesses the engine did.
-    pub data_dir: PathBuf,
+    /// The data the engine read: the harness table, the model catalogs and the
+    /// skills tables. A directory named with `SHPRD_DATA_DIR` is handed to the
+    /// launched CLI as the same variable, so the agent's own `shprd` finds the
+    /// same harnesses the engine did; the embedded copy needs no variable.
+    pub data_dir: DataDir,
     /// The curated skill compatibility list.
     pub compat: Vec<CompatEntry>,
     /// The environment the launched CLI would inherit.
@@ -385,12 +387,7 @@ fn catalog_for(env: &SpawnEnv<'_>, program: &str) -> Option<Catalog> {
         .find(|candidate| candidate.spec.id == program)
         .map(|candidate| &candidate.spec)?;
     let path_env = std::env::var("PATH").unwrap_or_default();
-    shprd_agents::adapter::catalog(
-        spec,
-        &env.data_dir.join("models"),
-        &path_env,
-        CATALOG_TIMEOUT,
-    )
+    env.data_dir.catalog(spec, &path_env, CATALOG_TIMEOUT)
 }
 
 /// The name of the space a repository's coordinator tabs live in.
@@ -617,7 +614,7 @@ pub(crate) fn open_agent(
             run: Some(env.run.clone()),
             repo: worktree.path.clone(),
             home: Some(env.home.clone()),
-            data: Some(env.data_dir.clone()),
+            data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
     let tab = mux
@@ -1781,10 +1778,26 @@ pub use shprd_views::brief::{AskRoute, BriefInput, task_brief as render_brief};
 /// Everything that touches the machine is resolved here, once, so [`spawn`]
 /// itself stays pure logic plus the worktree and the multiplexer.
 pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, CliError> {
+    let data = crate::cmd::roster::resolve_data_dir();
+    build_env_in(ctx, home, &data)
+}
+
+/// [`build_env`], with the shipped data already resolved.
+///
+/// The data is the one thing a test cannot ask the environment for without
+/// racing every other test in the process, so it is passed in here: a spawn
+/// whose harness table is the copy embedded in the binary is built the same way
+/// an installed `shprd` builds it.
+pub fn build_env_in<'a>(
+    ctx: &'a Ctx,
+    home: Option<&Path>,
+    data: &DataDir,
+) -> Result<SpawnEnv<'a>, CliError> {
     let home = crate::ctx::resolve_home(home)?;
-    let data = crate::cmd::roster::resolve_data_dir()?;
-    let specs = shprd_agents::spec::load_dir(&data.join("harness")).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("loading {}", data.display())))
+    let specs = data.harness_specs().map_err(|err| {
+        CliError::other(
+            anyhow!(err).context(format!("loading the harness table from {}", data.label())),
+        )
     })?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     let programs: Vec<Program> = specs
@@ -1798,7 +1811,7 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
     let repo_config = ctx.root.join(".shprd").join("config.toml");
     let config = shprd_core::config::load(Some(&global), Some(&repo_config))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
-    let compat = read_compat(&data.join("skills").join("compat.toml"))?;
+    let compat = read_compat(data)?;
     let settings = Loaded::read(&home, Some(&ctx.root))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the settings")))?;
     let state = ctx.state()?;
@@ -1833,12 +1846,13 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
 /// Reads the curated compatibility list, treating a missing file as an empty
 /// list: a checkout without `data/skills` still spawns, it just adds no
 /// tag-selected skills.
-fn read_compat(path: &Path) -> Result<Vec<CompatEntry>, CliError> {
-    if !path.exists() {
+fn read_compat(data: &DataDir) -> Result<Vec<CompatEntry>, CliError> {
+    let rel = "skills/compat.toml";
+    if !data.contains(rel) {
         return Ok(Vec::new());
     }
-    let list = shprd_agents::skills::CompatList::load(path).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("loading {}", path.display())))
+    let list = data.compat().map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("loading {}", data.path(rel).display())))
     })?;
     Ok(list.skills)
 }
@@ -2277,7 +2291,7 @@ project_dirs = []
                 },
                 gates: vec!["cargo test --workspace".to_string()],
                 catalogs: BTreeMap::new(),
-                data_dir: self.home.path().to_path_buf(),
+                data_dir: DataDir::resolve(Some(self.home.path()), None),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
@@ -2365,6 +2379,50 @@ project_dirs = []
             launch: fake_spec("sh").launch,
             blocking_prompts: Vec::new(),
         }
+    }
+
+    /// The spawn plan of an installed binary: no `$SHPRD_DATA_DIR`, an empty
+    /// data home, and only the harness table, model catalogs and skills tables
+    /// the binary carries.
+    #[test]
+    fn a_spawn_plan_finds_the_pi_harness_in_the_embedded_data() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let data_home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let data = DataDir::resolve(None, Some(data_home.path()));
+        assert_eq!(
+            data.origin(),
+            &shprd_agents::data::Origin::Embedded,
+            "an empty data home is no override"
+        );
+
+        let env = build_env_in(&ctx, Some(scratch.home.path()), &data)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let ids: Vec<&str> = env
+            .programs
+            .iter()
+            .map(|program| program.spec.id.as_str())
+            .collect();
+        for id in ["claude", "codex", "kilo", "opencode", "pi"] {
+            assert!(
+                ids.contains(&id),
+                "{id} is not in the shipped harness table: {ids:?}"
+            );
+        }
+        // The rest of the plan is embedded too: claude's static catalog and the
+        // curated skills tables read with no directory on disk anywhere.
+        let claude = env
+            .programs
+            .iter()
+            .find(|program| program.spec.id == "claude")
+            .unwrap_or_else(|| panic!("no claude program"));
+        assert!(
+            env.data_dir
+                .catalog(&claude.spec, "", Duration::ZERO)
+                .is_some(),
+            "claude's static catalog should come from the binary"
+        );
+        assert!(!env.compat.is_empty(), "the skills table should be shipped");
     }
 
     #[test]
@@ -2745,7 +2803,9 @@ project_dirs = []
         assert!(
             pairs.contains(&(
                 "SHPRD_DATA_DIR".to_string(),
-                Some(env.data_dir.display().to_string())
+                env.data_dir
+                    .env_value()
+                    .map(|dir| dir.display().to_string())
             )),
             "{pairs:?}"
         );
