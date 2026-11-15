@@ -31,7 +31,7 @@
 // Shared: the source is `mods/lib/client.js`; `bin/sync-shared` copies it into
 // every mod folder as `lib/client.js`. Edit the source, never a copy.
 
-import { home, readTextFile } from "herdr";
+import { exec, home, readTextFile } from "herdr";
 
 /** The first look at a service gives up after this many ms. */
 export const HEALTH_WAIT = 1500;
@@ -98,7 +98,7 @@ export const PROBE = 'printf \'{"state":"%s"}\\n\' "${XDG_STATE_HOME:-}"';
  * `run` is `exec` from `herdr`; the last line of its stdout is the answer, so a
  * shell profile that prints a greeting does not break the parse.
  */
-export async function probeStateDir(run) {
+export async function probeStateDir(run = exec) {
   const result = await run("sh", ["-c", PROBE]).catch(() => null);
   const text = String(result?.stdout ?? "").trim();
   const line = text === "" ? "" : text.split("\n").pop();
@@ -108,6 +108,35 @@ export async function probeStateDir(run) {
   } catch {
     return {};
   }
+}
+
+/** How long the shell's answer is kept before it is asked again, ms. */
+export const PROBE_MS = 30_000;
+
+/** The last answer the shell gave, and when it gave it. */
+let probed = null;
+
+/**
+ * This computer's XDG answers, as the shell sees them.
+ *
+ * A mod has no environment: it inherits nothing of the person's shell, so
+ * `$XDG_STATE_HOME` is invisible to it even though `shprd serve` obeys it (the
+ * M7ef spike measured that a mod may `exec` but reads no environment of its
+ * own). Shepherdr's `lib/dirs.js` solves it the same way — ask `sh -c` once and
+ * keep the answer for a while — and so does this: the shell's last line, cached
+ * for [`PROBE_MS`], and a failed probe is no answer at all.
+ */
+export async function stateHome(run = exec) {
+  const now = Date.now();
+  if (probed !== null && now - probed.at < PROBE_MS) return probed.xdg;
+  const xdg = await probeStateDir(run);
+  probed = { xdg, at: now };
+  return xdg;
+}
+
+/** Forgets the shell's answer, so the next call asks again. */
+export function forgetStateHome() {
+  probed = null;
 }
 
 /**
@@ -197,7 +226,8 @@ function guard(work, wait, ms) {
 export async function discover(io = {}) {
   const read = io.read ?? readTextFile;
   const doFetch = io.fetch ?? fetch;
-  const dir = io.dir ?? stateDir(home(), io.xdg ?? {});
+  const xdg = io.dir ? {} : (io.xdg ?? (await stateHome(io.run)));
+  const dir = io.dir ?? stateDir(home(), xdg);
   const record = await readServiceRecord(serviceFile(dir), read);
   if (!record) return null;
   const base = baseUrl(record);

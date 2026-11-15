@@ -75,20 +75,19 @@ fn resolve_app_home(args: &InstallArgs, home: Option<&Path>) -> Result<PathBuf, 
     if let Some(value) = std::env::var_os("HERDR_APP_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
-    Ok(crate::ctx::resolve_home(home)?.join(".config").join("herdr-app"))
+    Ok(crate::ctx::resolve_home(home)?
+        .join(".config")
+        .join("herdr-app"))
 }
 
 /// The host tree to install from: `--from`, then `$SHPRD_HOST_DIR`, then the
 /// repository's `host/herdr-desktop`.
 fn resolve_host_dir(args: &InstallArgs) -> Result<PathBuf, CliError> {
-    let explicit = args
-        .from
-        .clone()
-        .or_else(|| {
-            std::env::var_os("SHPRD_HOST_DIR")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        });
+    let explicit = args.from.clone().or_else(|| {
+        std::env::var_os("SHPRD_HOST_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
     let candidate = match explicit {
         Some(path) => path,
         None => resolve_root(args.repo.as_deref())
@@ -265,8 +264,9 @@ fn walk(dir: &Path) -> Result<Vec<String>, CliError> {
 /// Sorted directory entries.
 fn read_dir(dir: &Path) -> Result<Vec<PathBuf>, CliError> {
     let mut entries = Vec::new();
-    let read = fs::read_dir(dir)
-        .map_err(|err| CliError::other(anyhow!(err).context(format!("reading {}", dir.display()))))?;
+    let read = fs::read_dir(dir).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("reading {}", dir.display())))
+    })?;
     for entry in read {
         let entry = entry.map_err(|err| {
             CliError::other(anyhow!(err).context(format!("reading {}", dir.display())))
@@ -333,11 +333,7 @@ impl InstallPlan {
 }
 
 /// Decides every step of an install against what is on disk now.
-fn plan(
-    host: &Path,
-    app_home: &Path,
-    previous: &Manifest,
-) -> Result<InstallPlan, CliError> {
+fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan, CliError> {
     let sources = source_files(host)?;
     let mut files = Vec::with_capacity(sources.len());
     let mut clashes = Vec::new();
@@ -371,10 +367,9 @@ fn plan(
                 Plan::Write
             }
             Err(err) => {
-                return Err(CliError::other(anyhow!(err).context(format!(
-                    "reading {}",
-                    target.display()
-                ))));
+                return Err(CliError::other(
+                    anyhow!(err).context(format!("reading {}", target.display())),
+                ));
             }
         };
         for dir in parents(&source.rel) {
@@ -395,10 +390,9 @@ fn plan(
         Ok(text) => parse_keys(&text, &their_path)?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
         Err(err) => {
-            return Err(CliError::other(anyhow!(err).context(format!(
-                "reading {}",
-                their_path.display()
-            ))));
+            return Err(CliError::other(
+                anyhow!(err).context(format!("reading {}", their_path.display())),
+            ));
         }
     };
     let before = theirs.clone();
@@ -408,10 +402,7 @@ fn plan(
     for (section, bindings) in &ours {
         for (key, command) in bindings {
             let current = theirs.get(section).and_then(|map| map.get(key));
-            let last = previous
-                .keys
-                .get(section)
-                .and_then(|map| map.get(key));
+            let last = previous.keys.get(section).and_then(|map| map.get(key));
             let take = match current {
                 None => true,
                 // Still what we wrote last time: ours to change.
@@ -465,12 +456,7 @@ fn plan(
 }
 
 /// An install, refusing every clash before it writes anything.
-fn install(
-    host: &Path,
-    app_home: &Path,
-    dry_run: bool,
-    json: bool,
-) -> Result<(), CliError> {
+fn install(host: &Path, app_home: &Path, dry_run: bool, json: bool) -> Result<(), CliError> {
     let previous = Manifest::read(app_home)?;
     let plan = plan(host, app_home, &previous)?;
     if !plan.clashes.is_empty() {
@@ -495,9 +481,7 @@ fn install(
             let target = app_home.join(&source.rel);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
-                    CliError::other(
-                        anyhow!(err).context(format!("making {}", parent.display())),
-                    )
+                    CliError::other(anyhow!(err).context(format!("making {}", parent.display())))
                 })?;
             }
             write_atomic(&target, &source.bytes)?;
@@ -508,7 +492,11 @@ fn install(
         plan.manifest.write(app_home)?;
     }
 
-    let changed = plan.files.iter().filter(|(_, plan)| *plan == Plan::Write).count();
+    let changed = plan
+        .files
+        .iter()
+        .filter(|(_, plan)| *plan == Plan::Write)
+        .count();
     if json {
         let value = serde_json::json!({
             "ok": true,
@@ -615,10 +603,9 @@ fn uninstall(app_home: &Path, dry_run: bool, json: bool) -> Result<(), CliError>
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(CliError::other(anyhow!(err).context(format!(
-                    "reading {}",
-                    path.display()
-                ))));
+                return Err(CliError::other(
+                    anyhow!(err).context(format!("reading {}", path.display())),
+                ));
             }
         }
     }
@@ -819,12 +806,18 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let dir = path
         .parent()
         .ok_or_else(|| CliError::other(anyhow!("{} has no folder", path.display())))?;
-    fs::create_dir_all(dir)
-        .map_err(|err| CliError::other(anyhow!(err).context(format!("making {}", dir.display()))))?;
+    fs::create_dir_all(dir).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("making {}", dir.display())))
+    })?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| CliError::other(anyhow!("{} is not a name this verb can write", path.display())))?;
+        .ok_or_else(|| {
+            CliError::other(anyhow!(
+                "{} is not a name this verb can write",
+                path.display()
+            ))
+        })?;
     let temporary = dir.join(format!(".{name}.shprd-tmp"));
     fs::write(&temporary, bytes).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("writing {}", temporary.display())))
@@ -838,7 +831,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{Manifest, parse_keys, parents, sha256};
+    use super::{Manifest, parents, parse_keys, sha256};
 
     #[test]
     fn a_hash_is_lowercase_hex_of_the_content() {
@@ -879,9 +872,12 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_manifest_is_the_absent_one() {
+    fn a_missing_manifest_reads_as_an_empty_one_at_this_version() {
         let dir = tempfile::tempdir().expect("temp dir");
         let manifest = Manifest::read(dir.path()).expect("read");
-        assert_eq!(manifest, Manifest::default());
+        assert_eq!(manifest.version, super::MANIFEST_VERSION);
+        assert!(manifest.files.is_empty());
+        assert!(manifest.dirs.is_empty());
+        assert!(manifest.keys.is_empty());
     }
 }

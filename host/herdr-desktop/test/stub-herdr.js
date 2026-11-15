@@ -1,5 +1,6 @@
-// The `herdr` module, stubbed for a unit test: the two functions `lib/` imports
-// (`home`, `readTextFile`), answering from a table a test fills.
+// The `herdr` module, stubbed for a unit test: the few functions `lib/` imports
+// (`home`, `readTextFile`, `watchFolder`, `exec`), answering from a table a test
+// fills.
 //
 // A Herdr mod imports `herdr` and nothing else of the app's; the unit test runs
 // under node (or bun), so `test/hooks.mjs` points that one specifier here and
@@ -45,6 +46,19 @@ export function reset() {
   READS.length = 0;
   MISSING = null;
   WATCH = async () => [];
+  RUN = async () => ({ code: 0, stdout: "", stderr: "" });
+}
+
+/** What `exec` answers; a test replaces it. */
+export let RUN = async () => ({ code: 0, stdout: "", stderr: "" });
+
+/** Sets what `exec` answers next. */
+export function setExec(next) {
+  RUN = next;
+}
+
+export async function exec(command, args, options) {
+  return RUN(command, args, options);
 }
 
 /** The folder watcher, stubbed: a test supplies what it answers. */

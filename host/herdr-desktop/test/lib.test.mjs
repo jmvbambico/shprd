@@ -20,12 +20,14 @@ import {
   changeFile,
   describe,
   discover,
+  forgetStateHome,
   probeStateDir,
   readServiceRecord,
   readToken,
   reason,
   serviceFile,
   stateDir,
+  stateHome,
   tokenFile,
 } from "../mods/lib/client.js";
 import {
@@ -181,6 +183,38 @@ test("discovery is probed from the home when no directory is given", async () =>
   const found = await discover({ fetch: doFetch });
   assert.equal(found.base, "http://127.0.0.1:9000");
   assert.equal(baseUrl({ port: 9000 }), "http://127.0.0.1:9000");
+});
+
+test("a mod with no environment asks the shell where the state directory is", async () => {
+  // Inside Herdr a mod inherits nothing of the person's shell, so
+  // `$XDG_STATE_HOME` is invisible to it even though `shprd serve` obeys it.
+  // The probe is how the window finds a service whose state directory moved.
+  forgetStateHome();
+  const asked = [];
+  const run = async (command, args) => {
+    asked.push([command, ...(args ?? [])]);
+    return { code: 0, stdout: '{"state":"/var/state"}\n', stderr: "" };
+  };
+  assert.deepEqual(await stateHome(run), { state: "/var/state" });
+  assert.deepEqual(asked[0], ["sh", "-c", 'printf \'{"state":"%s"}\\n\' "${XDG_STATE_HOME:-}"']);
+
+  // It is asked once, then kept for a while: a panel calls `discover` on every
+  // tick, and a shell spawn per tick is not something to spend on a path.
+  await stateHome(run);
+  assert.equal(asked.length, 1, "the answer is cached");
+  forgetStateHome();
+
+  // And `discover` uses it, which is the whole point: the record is looked for
+  // under what the shell said, not under the XDG default.
+  herdr.putFile("/var/state/shprd/service.json", '{"port": 7788, "id": "abc"}');
+  herdr.putFile("/var/state/shprd/token", "token-1");
+  const found = await discover({
+    run,
+    fetch: fakeFetch({ "/api/health": { body: { id: "abc" } } }),
+  });
+  assert.equal(found.dir, "/var/state/shprd");
+  assert.equal(found.base, "http://127.0.0.1:7788");
+  forgetStateHome();
 });
 
 test("the state directory probe reads the shell's last line", async () => {

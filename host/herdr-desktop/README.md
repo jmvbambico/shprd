@@ -25,6 +25,7 @@ mods/lib/               the shared modules: tokens, panel parts, the board's
                         its own folder.
 keys.json               the keys the layout expects, merged by the installer
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
+bin/check               all of it: the copies, the unit tests, `herdr-app check`
 test/                   the client's unit tests (node or bun, see below)
 ```
 
@@ -56,8 +57,6 @@ bun test --preload ./test/boot-bun.mjs test/
 Both run the same file, `test/lib.test.mjs`; `test/stub-herdr.js` stands in for
 the app's `herdr` module.
 
-Every mod and the layout pass `herdr-app check`:
-
-```
-for mod in mods/shprd-*; do herdr-app check "$mod"; done
-```
+`bin/check` runs all three. Every mod passes `herdr-app check` (the layout is
+checked by a window drawing it, which is what the screenshot is of); the check
+points `HERDR_APP_HOME` at a scratch folder, so it never touches a real window.

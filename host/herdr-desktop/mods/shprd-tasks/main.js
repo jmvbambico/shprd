@@ -23,7 +23,7 @@ import { run, theme } from "herdr";
 
 import { Client, discover, reason } from "./lib/client.js";
 import { counts, grouped, look, secondLine } from "./lib/board.js";
-import { card, cardHeader, countBadge, keycap, note, row as panelRow } from "./lib/panel.js";
+import { card, cardHeader, countBadge, keycap, note } from "./lib/panel.js";
 import { ref, SPACE, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -221,13 +221,22 @@ export default class Tasks extends View {
             .text_color(t.foreground)
             .child("Review")
         : null;
-    return panelRow(t, {
-      height: SPACE.rowTwo,
-      left,
-      right: h_flex().gap(8).items_center().when(act !== null, (el) => el.child(act)).child(glyph),
-      hover: true,
-      onClick: () => this.open(task),
-    });
+    // Shepherdr's row: the glyph at the left in a fixed box, then the two lines,
+    // then the one act at the end (M7b §2.3: "each row = 14 px status glyph,
+    // title, second line … and at the end the one act").
+    return h_flex()
+      .h(SPACE.rowTwo)
+      .flex_none()
+      .px(12)
+      .gap(8)
+      .items_center()
+      .rounded(8)
+      .cursor_pointer()
+      .hover((style) => style.bg(t.hover))
+      .on_click(() => this.open(task))
+      .child(glyph)
+      .child(v_flex().flex_1().gap(2).child(left))
+      .when(act !== null, (el) => el.child(act));
   }
 
   /**

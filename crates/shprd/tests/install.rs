@@ -44,7 +44,12 @@ impl Fixture {
     fn run(&self, args: &[&str]) -> Output {
         let mut command = Command::new(BIN);
         command
-            .args(["--home", self.app.path().to_str().unwrap(), "install", "herdr-desktop"])
+            .args([
+                "--home",
+                self.app.path().to_str().unwrap(),
+                "install",
+                "herdr-desktop",
+            ])
             .args(args)
             .arg("--app-home")
             .arg(self.app.path())
@@ -53,7 +58,10 @@ impl Fixture {
             // The fixture's own XDG directories, and no Herdr home in the
             // environment for the flag to lose to.
             .env("XDG_CONFIG_HOME", self.app.path().join(".config"))
-            .env("XDG_STATE_HOME", self.app.path().join(".local").join("state"))
+            .env(
+                "XDG_STATE_HOME",
+                self.app.path().join(".local").join("state"),
+            )
             .env_remove("HERDR_APP_HOME")
             .env_remove("SHPRD_HOST_DIR");
         command.output().unwrap_or_else(|error| {
@@ -81,12 +89,7 @@ impl Fixture {
             .and_then(Value::as_object)
             .expect("files")
             .iter()
-            .map(|(path, hash)| {
-                (
-                    path.clone(),
-                    hash.as_str().expect("a hash").to_string(),
-                )
-            })
+            .map(|(path, hash)| (path.clone(), hash.as_str().expect("a hash").to_string()))
             .collect()
     }
 
@@ -168,7 +171,11 @@ fn a_fresh_install_copies_the_layout_and_its_mods() {
     // The shared modules are copied into each mod, because a Herdr mod can only
     // import a file inside its own folder.
     assert!(fixture.app_path("mods/shprd-tasks/lib/client.js").is_file());
-    assert!(fixture.app_path("mods/shprd-status/lib/tokens.js").is_file());
+    assert!(
+        fixture
+            .app_path("mods/shprd-status/lib/tokens.js")
+            .is_file()
+    );
     // The shared source folder itself is not a mod, and is not installed.
     assert!(!fixture.app_path("mods/lib").exists());
 
@@ -261,7 +268,11 @@ fn an_install_keeps_a_foreign_file_and_refuses_to_overwrite_it() {
     );
     assert!(!fixture.app_path("mods/shprd-tasks").exists());
     assert!(!fixture.app_path("keys.json").exists());
-    assert!(!fixture.app_path("data/shprd-desktop/manifest.json").exists());
+    assert!(
+        !fixture
+            .app_path("data/shprd-desktop/manifest.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -282,9 +293,10 @@ fn a_merge_keeps_the_keys_the_person_bound_and_takes_the_rest() {
 
     ok(&fixture.run(&[]));
 
-    let keys: Value =
-        serde_json::from_str(&fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"))
-            .expect("JSON keys");
+    let keys: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
     // Their own section is untouched.
     assert_eq!(keys["global"]["cmd-k"], "app.palette");
     // Their binding of a key shprd wanted is kept.
@@ -319,7 +331,11 @@ fn an_uninstall_removes_only_what_the_manifest_lists() {
     assert!(!fixture.app_path("layouts/shprd.json").exists());
     assert!(!fixture.app_path("mods/shprd-tasks/main.js").exists());
     assert!(!fixture.app_path("mods/shprd-status").exists());
-    assert!(!fixture.app_path("data/shprd-desktop/manifest.json").exists());
+    assert!(
+        !fixture
+            .app_path("data/shprd-desktop/manifest.json")
+            .exists()
+    );
     // Their file is still there, and so is the folder it is in.
     assert_eq!(
         fs::read_to_string(fixture.app_path("mods/shprd-tasks/notes.md")).expect("their note"),

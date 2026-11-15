@@ -126,6 +126,9 @@ mod tests {
 
     #[test]
     fn the_file_sits_in_the_state_directory() {
-        assert_eq!(path(Path::new("/state/shprd")), PathBuf::from("/state/shprd/changes"));
+        assert_eq!(
+            path(Path::new("/state/shprd")),
+            PathBuf::from("/state/shprd/changes")
+        );
     }
 }
