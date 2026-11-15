@@ -412,8 +412,14 @@ impl Worker {
             run: state.run.as_ref().map(|run| run.run_id.clone()),
             ..TickReport::default()
         };
+        // A task whose step has failed the same way often enough has been put in
+        // front of a person on an earlier pass. Repeating the identical warning
+        // every fifteen seconds tells nobody anything new, so a step in that set
+        // says it on the debug channel instead. The step still runs and its
+        // failure is still recorded: what goes quiet is the terminal.
+        let quiet = self.quiet_failures(&state);
         for step in steps {
-            let result = self.run_step(&config, &state, &step);
+            let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
         // The ladder runs after the advance steps so a task this pass just
@@ -424,12 +430,102 @@ impl Worker {
         // And the news last, from the log as the steps left it, so a task this
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
+        self.record_failures(&report);
         self.record(&pass::LastPass::of(
             &report,
             &self.repo,
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Counts this pass's failures against the last one's, and asks a person
+    /// once a step has failed the same way three passes in a row.
+    ///
+    /// A step that keeps failing is the person's to fix — a task whose scope
+    /// overlaps another's, an integration branch nobody made — so the run is
+    /// right to stop, and wrong to say so only in a terminal. The first two
+    /// passes are warnings, because a host that was busy or a worktree another
+    /// writer held clears itself; the third is a card, recorded once, naming the
+    /// error and the verb that fixes it.
+    fn record_failures(&self, report: &TickReport) {
+        let previous = pass::Failures::read(&self.state_dir, &self.repo);
+        let failures = pass::Failures::next(previous.as_ref(), report, &self.repo);
+        for run in &failures.runs {
+            // Only on the pass that reached the count: the record carries the
+            // count forward, so a card written every pass after it would bury
+            // the log in the same decision.
+            if run.passes != pass::REPEATS_BEFORE_A_CARD {
+                continue;
+            }
+            if let Err(err) = self.escalate_repeated_failure(run) {
+                tracing::warn!(task = %run.task, step = %run.step, %err, "the card for a repeated failure could not be recorded");
+            }
+        }
+        if let Err(err) = failures.write(&self.state_dir) {
+            tracing::warn!(%err, "could not write the repeated-failure record");
+        }
+    }
+
+    /// The failures already put in front of a person, as `(task, step)`.
+    ///
+    /// A step that has failed the same way three passes running is a card once:
+    /// the record carries the count forward, so every pass after the third would
+    /// write the same card into the log again. The escalation itself is drawn
+    /// from the first card, and it leaves the board when the step stops failing
+    /// — which is what [`shprd_views::cards`] reads off the log.
+    fn quiet_failures(&self, state: &RunState) -> BTreeSet<(String, String)> {
+        let Some(failures) = pass::Failures::read(&self.state_dir, &self.repo) else {
+            return BTreeSet::new();
+        };
+        failures
+            .runs
+            .iter()
+            .filter(|run| run.passes >= pass::REPEATS_BEFORE_A_CARD)
+            .filter(|run| {
+                let marker =
+                    repeated_failure_prefix(&run.task, &run.step, attempt_of(state, &run.task));
+                state.escalations.iter().any(|escalation| {
+                    escalation.task.as_deref() == Some(run.task.as_str())
+                        && escalation.body.starts_with(&marker)
+                })
+            })
+            .map(|run| (run.task.clone(), run.step.clone()))
+            .collect()
+    }
+
+    /// Puts a step that keeps failing in front of a person, once.
+    ///
+    /// The body begins with [`repeated_failure_prefix`], which [`Self::quiet_failures`]
+    /// compares, so one run of failures costs one card rather than one every
+    /// fifteen seconds. It names the step and the error, and what the person has
+    /// to do: shprd cannot narrow a scope or make a branch for them.
+    fn escalate_repeated_failure(&self, run: &pass::FailureRun) -> Result<(), String> {
+        let state = ledger::load(&self.repo).map(|(state, _)| state).ok();
+        let attempt = state
+            .as_ref()
+            .map_or(0, |state| attempt_of(state, &run.task));
+        let marker = repeated_failure_prefix(&run.task, &run.step, attempt);
+        let told = state.is_some_and(|state| {
+            state.escalations.iter().any(|escalation| {
+                escalation.task.as_deref() == Some(run.task.as_str())
+                    && escalation.body.starts_with(&marker)
+            })
+        });
+        if told {
+            return Ok(());
+        }
+        let error = run.error.lines().next().unwrap_or_default().trim();
+        let seq = self.commit(EventKind::Escalated {
+            task: Some(run.task.clone()),
+            body: format!("{marker}{error}"),
+            default_action: format!(
+                "fix what the card names, then the engine retries `{}` on its next pass",
+                run.step
+            ),
+        })?;
+        self.notify(Some(seq));
+        Ok(())
     }
 
     /// Writes what this pass did where `shprd status` and `GET /api/state` read
@@ -911,7 +1007,13 @@ impl Worker {
     }
 
     /// Runs one step, mapping a failure to a reported one.
-    fn run_step(&self, config: &Config, state: &RunState, step: &Step) -> StepReport {
+    fn run_step(
+        &self,
+        config: &Config,
+        state: &RunState,
+        step: &Step,
+        quiet: &BTreeSet<(String, String)>,
+    ) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
             Step::Review { task } => self.review_task(state, task),
@@ -935,8 +1037,15 @@ impl Worker {
             Ok(report) => report,
             Err(reason) => {
                 // Logged, not raised: a failing step is news about one task, and
-                // the pass must reach the others.
-                tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
+                // the pass must reach the others. A failure a person has already
+                // been given a card for is logged quietly: the card is the
+                // telling, and a line every pass is noise on top of it.
+                let key = (step.task().to_string(), step.action().to_string());
+                if quiet.contains(&key) {
+                    tracing::debug!(action = step.action(), task = step.task(), %reason, "tick step still failing, already in front of a person");
+                } else {
+                    tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
+                }
                 StepReport::failed(step, reason)
             }
         }
@@ -1809,6 +1918,33 @@ fn ladder_state(state: &RunState) -> LadderState {
 /// escalation rather than one per pass.
 fn review_failure_prefix(task: &str) -> String {
     format!("{task}: the engine's review did not start: ")
+}
+
+/// What every escalation body for a step that keeps failing begins with.
+///
+/// It names the task, the step and the attempt the failure was about, so the
+/// next pass recognises its own card and writes no second one, a failure of a
+/// different step is a card of its own, and a new attempt after the fix is a
+/// card of its own too. It is shaped like
+/// [`shprd_core::gate::send_back_failure_prefix`], so a board's staleness rule
+/// reads it the same way: the card is history once a newer attempt exists.
+pub fn repeated_failure_prefix(task: &str, step: &str, attempt: u32) -> String {
+    format!(
+        "{task}: its `{step}` step has failed the same way {} passes in a row (attempt {attempt}): ",
+        pass::REPEATS_BEFORE_A_CARD
+    )
+}
+
+/// How many attempts the task has had, as the fold counts them.
+///
+/// A repeated-failure card names it, so the card is about the attempt the
+/// failure happened in and leaves the board when the work moves on.
+fn attempt_of(state: &RunState, task: &str) -> u32 {
+    state
+        .tasks
+        .get(task)
+        .and_then(|task| task.latest_attempt().map(|attempt| attempt.n))
+        .unwrap_or(0)
 }
 
 /// The log's spelling of a provider class.
