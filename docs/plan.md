@@ -1,7 +1,8 @@
 # Build plan
 
 Status: M0–M6 done (gate passed 2026-10-29). Re-planned from M7 on 2026-11-14:
-see "M7 onward · the pivot". Language: Rust (service) and TypeScript (web app).
+see "M7 onward · the pivot". M7 and M8 done 2026-11-14; M9 gate passed 2026-11-15
+(gate below). Language: Rust (service) and TypeScript (web app).
 
 The plan is cut into milestones. Each one ends at a **gate**: a demo you can run
 and a check that has to pass before the next milestone starts. Inside a
@@ -26,19 +27,21 @@ og.
 
 ```
 crates/
-  shprd-core/       events, fold, task model, transition rules, config      (no I/O beyond the log file)
-  shprd-views/      projectors: dagr run.json, brief, status, PR body       (pure functions of events)
-  shprd-git/        worktrees, scopes, integration branch, archive refs, janitor
-  shprd-roster/     harness table, CLI detection, sign-in, models, quota probes, skills discovery
-  shprd-watch/      watchdog signals and the dry/hand-off state machine
+  shprd-core/       events, fold, task model, transition rules, config, tick planner   (no I/O beyond the log file)
+  shprd-views/      projectors: dagr run.json, brief, status, PR body, coordinator news (pure functions of events)
+  shprd-git/        worktrees, per-task landing, forge (PRs), archive refs, janitor
+  shprd-agents/     harness table + adapters per agent CLI, roles and settings, detection, models, quota, asks
+  shprd-watch/      watchdog signals, provider-error classes, the fallback ladder
   shprd-mux/        host adapter trait + capability flags
   shprd-mux-herdr/  herdr adapter
-  shprd-mux-tuios/  tuios adapter
-  shprd-tui/        setup wizard, shprd·chat, remote box (ratatui)
+  shprd-server/     the service: HTTP + WebSocket API, auth, event hub, tick loop
   shprd/            the binary: clap CLI, wiring
 data/
   harness/*.toml    one file per agent CLI
+  models/           static model catalogs
+  templates/        shipped role prompts
   skills/compat.toml
+web/src/gen/        TypeScript bindings generated from the service's DTOs (ts-rs)
 ```
 
 Crate boundaries are the lane boundaries. Two agents never work in the same
@@ -321,6 +324,15 @@ Lanes: M9.1 first; then M9.2 ∥ M9.3 ∥ M9.5 ∥ M9.6; then M9.4 ∥ M9.7.
 
 **Gate:** one real task runs end to end with Pi as the worker and a reviewer
 from another vendor, including one needs-you card answered through the API.
+
+**Gate result (2026-11-15): passed** on the third live run, under `shprd serve` alone:
+Pi (DeepSeek) worked, Pi (GLM) reviewed, the worker raised its own card with
+`shprd ask raise`, the person answered over `POST /api/asks/answer`, and the tick
+landed the task on `integration/m9` under `tasks.merge = "auto"` with no other
+intervention. The runs found gaps that fixes A–K closed before the milestone PR
+(send-back after a failed review, asks in the review packet, visible tick failures,
+the workspace label). Known limit: Codex's live-launch test is skipped while the
+account is out of quota.
 
 ---
 
