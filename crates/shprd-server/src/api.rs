@@ -30,7 +30,7 @@ use crate::actions;
 use crate::auth;
 use crate::dto::{
     Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ClientMessage, ErrorCode,
-    HealthDto, PromptDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    GraphDto, HealthDto, PromptDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
@@ -130,6 +130,14 @@ pub(crate) struct AppState {
     /// test always sets it, so neither the service nor a test ever resolves a
     /// path from the process's own XDG settings.
     pub(crate) prompts_dir: Option<PathBuf>,
+    /// Where the graph's program is, as the binary found it.
+    ///
+    /// The binary is the one place that reads `graph.dagr`, `PATH` and the
+    /// herdr plugin folder ([`crate::graph::locate`]), so the service answers
+    /// `GET /api/graph` from a value rather than probing a machine it was not
+    /// pointed at. `None` is "nobody told this service", which the route says
+    /// out loud.
+    pub(crate) dagr: Option<crate::graph::Dagr>,
 }
 
 /// The directories the binary resolved for the service.
@@ -146,6 +154,8 @@ pub(crate) struct Paths {
     pub(crate) prompts_dir: Option<PathBuf>,
     /// The shipped data the harness table is read from, when there is one.
     pub(crate) data: Option<DataDir>,
+    /// Where the graph's program is, as the binary found it.
+    pub(crate) dagr: Option<crate::graph::Dagr>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -240,6 +250,7 @@ impl App {
             state_dir: state_dir.to_path_buf(),
             data: paths.data,
             prompts_dir: paths.prompts_dir,
+            dagr: paths.dagr,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -324,6 +335,16 @@ impl App {
         self
     }
 
+    /// Answer `GET /api/graph` with the program the binary found.
+    ///
+    /// A test passes its own answer, so the route is proven without probing the
+    /// machine the test runs on.
+    pub fn with_dagr(mut self, dagr: crate::graph::Dagr) -> Self {
+        self.state.dagr = Some(dagr);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Serve with no harness table at all, whatever the environment would find.
     ///
     /// A test uses it to prove what a machine without a data directory does,
@@ -343,6 +364,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks", get(asks))
         .route("/api/asks/answer", post(answer))
         .route("/api/action", post(action))
+        .route("/api/graph", get(graph))
         .route("/api/settings", get(settings).put(put_settings))
         .route("/api/prompts/{id}", get(read_prompt).put(put_prompt))
         .route("/api/ws", get(socket))
@@ -383,6 +405,27 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
     snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
     Ok(Json(snapshot))
+}
+
+/// `GET /api/graph`: where the graph's program is, and the command that draws
+/// the run.
+///
+/// The block in the Herdr window is a terminal running dagr, so this answers the
+/// command and the reason when there is none; the run's identity is read from
+/// the same log the board is folded from, so a graph and a board never disagree
+/// about which run they show.
+async fn graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let dagr = state.dagr.clone();
+    let run = blocking(move || ledger::load(&repo).map(|(state, _)| state.run))
+        .await?
+        .map_err(|err| ApiReject::internal(err.to_string()))?
+        .map(|run| run.run_id);
+    Ok(Json(GraphDto::new(
+        &state.repo,
+        run.as_deref(),
+        dagr.as_ref(),
+    )))
 }
 
 /// `GET /api/asks`: every ask still waiting for the person.

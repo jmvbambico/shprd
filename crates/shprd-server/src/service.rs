@@ -409,6 +409,13 @@ pub struct Config {
     /// embedded copy into this once, so the service reads no directory variable
     /// of its own.
     pub data: Option<DataDir>,
+    /// Where the graph's program is, as the binary found it.
+    ///
+    /// The binary locates dagr once ([`crate::graph::locate`]) and passes the
+    /// answer across, so the service answers `GET /api/graph` without reading a
+    /// `PATH` or a settings file of its own. `None` is a service nobody told,
+    /// which the route says rather than pretending there is no dagr.
+    pub dagr: Option<crate::graph::Dagr>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -460,6 +467,7 @@ impl Config {
             home: None,
             prompts_dir: None,
             data: None,
+            dagr: None,
         }
     }
 }
@@ -501,6 +509,7 @@ impl Service {
                 home: config.home.clone(),
                 prompts_dir: config.prompts_dir.clone(),
                 data: config.data.clone(),
+                dagr: config.dagr.clone(),
             },
         )?;
         let info = app.info();

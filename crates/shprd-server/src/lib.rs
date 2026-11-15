@@ -8,6 +8,7 @@
 //! | `GET /api/state` | the snapshot: the fold, projected for a board |
 //! | `GET /api/changes` | long-poll for events after a sequence, `204` on timeout |
 //! | `POST /api/action` | one tab-typed envelope, run against the same log the CLI writes |
+//! | `GET /api/graph` | where the graph's program is, and the command that draws the run |
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
 //! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
@@ -32,6 +33,7 @@ pub mod bindings;
 pub mod changes;
 pub mod dto;
 pub mod error;
+pub mod graph;
 pub mod pass;
 pub mod service;
 pub mod snapshot;
@@ -48,6 +50,7 @@ pub(crate) mod settings;
 pub use api::{App, WsLimits};
 pub use changes::Touch;
 pub use error::{ApiReject, ServerError};
+pub use graph::{Dagr, Located, Missing, Origin};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
 pub use service::{
