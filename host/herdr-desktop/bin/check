@@ -44,16 +44,20 @@ if ! command -v herdr-app >/dev/null 2>&1; then
   exit 0
 fi
 
-# A folder of our own for whatever the check wants to write, gone on exit.
+# A folder of our own for whatever the check writes, gone on exit. `herdr-app
+# check` writes `gpui-kit.d.ts` and `jsconfig.json` beside the mod it loads, so it
+# is run on a copy: the source tree stays exactly what a person would install.
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/shprd-desktop-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT INT TERM
+cp -R layouts mods "$scratch/"
 
 echo "== herdr-app check"
 # The app checks a mod folder, not a layout file: a layout is checked by the
 # window drawing it (`layout.switch`), which is what the hand-in's screenshot is
 # of. Every mod the layout names is checked here.
-for mod in mods/shprd-*; do
+count=0
+for mod in "$scratch"/mods/shprd-*; do
   HERDR_APP_HOME="$scratch/app" herdr-app check "$mod"
+  count=$((count + 1))
 done
-count=$(ls -d mods/shprd-* | wc -l | tr -d ' ')
 echo "ok: $count mods pass herdr-app check"

@@ -1,0 +1,5 @@
+# Written by `herdr-app check` (and by the app on every start) beside each mod's
+# `main.js`: the type files for this installed version of the app. They are not
+# ours and they change with the app, so they are never committed.
+gpui-kit.d.ts
+jsconfig.json

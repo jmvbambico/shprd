@@ -58,5 +58,8 @@ Both run the same file, `test/lib.test.mjs`; `test/stub-herdr.js` stands in for
 the app's `herdr` module.
 
 `bin/check` runs all three. Every mod passes `herdr-app check` (the layout is
-checked by a window drawing it, which is what the screenshot is of); the check
-points `HERDR_APP_HOME` at a scratch folder, so it never touches a real window.
+checked by a window drawing it, which is what the screenshot is of). The check
+runs on a **copy** in a scratch folder — `herdr-app check` writes
+`gpui-kit.d.ts` and `jsconfig.json` beside the mod it loads, and those are the
+app's, not ours — and points `HERDR_APP_HOME` there too, so it never touches a
+real window or this tree. `.gitignore` keeps them out if one is ever written.
