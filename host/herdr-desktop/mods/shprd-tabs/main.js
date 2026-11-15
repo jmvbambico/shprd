@@ -1,92 +1,224 @@
-// The tab bar: the shown space's tabs as pills, then the side panel's three
-// buttons — the shape Shepherdr's window uses.
+// The tab bar: the shown space's tabs as pills — the agent that runs in each, its
+// role in shprd's loop, and the state it is in — then the side panel's buttons.
+//
+// In shprd the tabs of one space are one task's terminals: its worker, its
+// reviewer and, when a provider cut a worker off, the backup that took over
+// (`shprd_mux`'s one-space-per-task rule). The tab's title is what says which
+// (`<agent>·<task>`, `<agent>·<task>·review`), and Herdr's live status is what
+// says how it is doing; `lib/tabstrip.js` joins those with the service's own word
+// for the task, so a pill is never a guess.
+//
+// Ported from Shepherdr's tab bar (MIT):
 //
 // - Source: <https://github.com/eliasstravik/shepherdr>
-// - Paths: `mods/tabs-tasks/main.js` (the pill row, the Files/Changes/Tasks
-//   buttons at the right, `window_drag` on the bar)
+// - Paths: `mods/tabs-tasks/main.js` (the pill row: the program's icon, the name,
+//   a spinner while working, a dot when something needs the person, the close
+//   mark on the shown pill; then Files / Changes / Tasks with its badge)
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
-// M10.3 builds the bar's frame and its panel buttons; M10.4 fills the agent's
-// own state on a pill (a spinner, a count, a close mark) and the `+` menu. What
-// is here is real, not a placeholder: the tabs are Herdr's live list, a click
-// selects, and the three buttons open the side panel's stacks.
+// The side panel's buttons open the layout's stacks — `layout.select` then
+// `layout.show` — because the panel is a stack in `layouts/shprd.json`, not
+// something a mod draws.
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { run, spaces, theme } from "herdr";
+import { layout, panes, run, spaces, theme } from "herdr";
 
-import { RADIUS, SPACE, TEXT } from "./lib/tokens.js";
+import { Client, discover, reason } from "./lib/client.js";
+import { badge, countBadge } from "./lib/panel.js";
+import { panelButtons, tabRows } from "./lib/tabstrip.js";
+import { RADIUS, TEXT, tone } from "./lib/tokens.js";
+
+/** How often the bar re-reads the board the pills borrow their words from. */
+const FLOOR_MS = 5000;
 
 export default class Tabs extends View {
   init(_props, cx) {
     this.cx = cx;
+    this.state = null;
+    this.client = null;
     this.shown = "tasks";
+    this.refresh();
+    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** Opens one of the side panel's stacks. */
+  /** Reads the board once; the pills fall back to Herdr's own status alone. */
+  async refresh(cx = this.cx) {
+    try {
+      if (!this.client) {
+        const found = await discover({ wait: (ms) => cx.sleep(ms) });
+        if (!found) {
+          cx.notify();
+          return;
+        }
+        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
+      }
+      const state = await this.client.state();
+      if (state) this.state = state;
+    } catch (err) {
+      // A restarted service answers with another id, so the next look finds the
+      // new port rather than dialling a dead one; the pills keep working without
+      // it, on the host's status alone.
+      this.client = null;
+      void reason(err);
+    }
+    cx.notify();
+  }
+
+  /** Shows one of the side panel's stacks, or hides the panel when it is up. */
   panel(child) {
-    this.shown = child;
-    run("layout.select", { stack: "panel-body", child });
-    run("layout.show", { id: "panel" });
+    const open = this.shown === child && this.panelShown();
+    this.shown = open ? null : child;
+    if (open) {
+      run("layout.hide", { id: "panel" });
+    } else {
+      run("layout.select", { stack: "panel-body", child });
+      run("layout.show", { id: "panel" });
+    }
     this.cx?.notify?.();
+  }
+
+  /** Whether the layout's panel block is showing, from the layout itself. */
+  panelShown() {
+    const panel = find(layout(), "panel");
+    return !panel?.hidden;
   }
 
   render() {
     const t = theme();
-    const space = spaces().find((s) => s.active);
-    const tabs = space?.tabs ?? [];
-    const pills = tabs.map((tab, index) => {
-      const active = Boolean(tab.active);
-      return h_flex()
-        .id(`tab-${tab.id}`)
-        .h(26)
-        .flex_none()
-        .px(10)
-        .gap(6)
-        .items_center()
-        .rounded(RADIUS.control)
-        .text_size(TEXT.body)
-        .text_color(active ? t.foreground : t.muted)
-        .when(active, (el) => el.bg(t.raised))
-        .when(!active, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
-        .when(!active, (el) => el.on_click(() => run("tab.select", { index: index + 1 })))
-        .child(tab.name || String(index + 1));
-    });
+    const colors = tone(t);
+    const space = spaces().find((entry) => entry.active);
+    const pills = tabRows(space, panes(), this.state).map((row) => this.pill(t, colors, row));
+    const buttons = panelButtons(this.state, this.shown).map((button) =>
+      this.button(t, colors, button),
+    );
     return h_flex()
       .size_full()
+      .min_w(0)
       .px(10)
-      .gap(6)
+      .gap(3)
       .items_center()
       .bg(t.chrome)
+      .border_b(1)
+      .border_color(t.border)
       .text_size(TEXT.label)
-      .children(pills)
-      .child(div().flex_1())
-      .child(this.button(t, "Files", "files"))
-      .child(this.button(t, "Changes", "changes"))
-      .child(this.button(t, "Tasks", "tasks"))
-      .child(this.button(t, "Asks", "asks"))
-      .child(this.button(t, "Settings", "settings"));
+      .child(
+        h_flex()
+          .flex_1()
+          .min_w(0)
+          .h_full()
+          .gap(3)
+          .items_center()
+          .overflow_x_scrollbar()
+          .children(pills),
+      )
+      .child(h_flex().gap(3).items_center().flex_none().children(buttons));
   }
 
-  /** One side-panel button, marked when that panel is the one shown. */
-  button(t, word, child) {
-    const active = this.shown === child;
+  /**
+   * One pill: the state dot, the agent and the task it is on, the role when it is
+   * not the worker's, the word, and the close mark on the shown tab.
+   *
+   * The agent and the task are the title shprd gave the tab, so a person reading
+   * the bar sees exactly what the run opened — a pill never renames anything.
+   */
+  pill(t, colors, row) {
+    const fill = row.tone === "dim" ? t.dim : (colors[row.tone] ?? t.dim);
     return h_flex()
-      .id(`panel-${child}`)
+      .id(`tab-${row.id}`)
+      .h(26)
+      .flex_none()
+      .px(9)
+      .gap(6)
+      .items_center()
+      .rounded(RADIUS.control)
+      .border_1()
+      .border_color(row.active ? t.border : t.chrome)
+      .bg(row.active ? t.raised : t.chrome)
+      .text_size(TEXT.body)
+      .text_color(row.active ? t.foreground : t.muted)
+      .hover((style) => style.bg(t.hover))
+      .on_click(() => run("tab.select", { id: row.id }))
+      .child(
+        div()
+          .w(7)
+          .h(7)
+          .flex_none()
+          .rounded(4)
+          .bg(fill),
+      )
+      .child(
+        div()
+          .flex_none()
+          .when(row.agent !== null, (el) => el.font_family("JetBrains Mono"))
+          .child(row.label),
+      )
+      .when(row.roleWord !== null && row.role !== "worker", (el) =>
+        el.child(
+          div()
+            .flex_none()
+            .px(4)
+            .rounded(4)
+            .bg(t.raised)
+            .text_size(TEXT.id)
+            .text_color(t.dim)
+            .child(row.roleWord.toLowerCase()),
+        ),
+      )
+      .child(div().flex_none().text_size(TEXT.id + 0.5).text_color(fill).child(row.word))
+      .when(row.zoomed, (el) => el.child(div().text_color(t.dim).child("Z")))
+      .when(row.active, (el) =>
+        el.child(
+          div()
+            .id(`close-${row.id}`)
+            .px(3)
+            .flex_none()
+            .rounded(4)
+            .text_color(t.dim)
+            .hover((style) => style.bg(t.hover).text_color(t.foreground))
+            .on_click((_event, cx) => {
+              cx?.stop_propagation?.();
+              run("tab.close", { id: row.id });
+            })
+            .child("×"),
+        ),
+      )
+      .when(row.needs, (el) =>
+        el.child(badge(t, "!", colors.red, colors.on)),
+      );
+  }
+
+  /** One side-panel button, marked when that stack is the one showing. */
+  button(t, colors, button) {
+    return h_flex()
+      .id(`panel-${button.id}`)
       .h(26)
       .flex_none()
       .px(8)
+      .gap(5)
       .items_center()
       .rounded(RADIUS.control)
-      .text_color(active ? t.foreground : t.muted)
-      .when(active, (el) => el.bg(t.selected))
-      .when(!active, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
-      .on_click(() => this.panel(child))
-      .child(word);
+      .bg(button.active ? t.selected : t.chrome)
+      .text_color(button.active ? t.foreground : t.muted)
+      .hover((style) => style.bg(t.hover))
+      .on_click(() => this.panel(button.id))
+      .child(button.word)
+      .when(button.needs > 0, (el) =>
+        el.child(badge(t, countBadge(button.needs), colors.red, colors.on)),
+      )
+      .when(button.ready > 0, (el) =>
+        el.child(badge(t, countBadge(button.ready), colors.green, colors.on)),
+      );
   }
 }
 
-// `SPACE` documents the bar's own height, which the layout file owns; a mod
-// reads it only to keep its pills inside it.
-void SPACE;
+/** The layout node called `id`, or null. */
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
