@@ -14,6 +14,8 @@
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
 //! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
 //! | `PUT /api/prompts/:id` | the person's words, stored over that prompt's file |
+//! | `GET /api/chat` | a space's conversation, read from its agent's own record, after a cursor |
+//! | `POST /api/chat` | one turn of the person's input, typed into that space's agent |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
 //!
 //! Everything but health needs `Authorization: Bearer <token>` from the state
@@ -32,6 +34,7 @@
 pub mod api;
 pub mod bindings;
 pub mod changes;
+pub mod chat;
 pub mod dto;
 pub mod engine;
 pub mod error;
@@ -51,6 +54,7 @@ pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
 pub use changes::Touch;
+pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
 pub use engine::Engine;
 pub use error::{ApiReject, ServerError};
 pub use news::{Coordinator, NewsDesk, NewsSent};
