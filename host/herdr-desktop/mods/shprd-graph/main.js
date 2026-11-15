@@ -11,12 +11,14 @@
 // Why a stack and a note rather than a bare terminal block: a Herdr mod cannot
 // draw a terminal (only a layout node or an overlay can), so the terminal is a
 // layout node — and a layout terminal block resolves its terminal **once**, by
-// name, when it first renders. The note is what makes that safe: it finds out
-// where dagr is, starts the terminal, waits for it to exist, and only then
-// selects the terminal's child, which binds to it. The terminal runs a small
-// shell loop, so a dagr that exits is restarted in the same terminal: herdr-core
-// keeps a terminal's address for its lifetime, and the block is bound to that
-// address.
+// name, when it first renders. Two things keep that binding right. The service
+// starts the terminal before the window loads the layout, which is what stops
+// Herdr pruning the block (see below); and this note is the fallback: it finds
+// out where dagr is, starts the terminal if the service did not, waits for it,
+// and only then selects the terminal's child, which binds to it. The terminal
+// runs a small shell loop, so a dagr that exits is restarted in the same
+// terminal: herdr-core keeps a terminal's address for its lifetime, and the
+// block is bound to that address.
 //
 // One thing this cannot do: put the node back if Herdr pruned it. Herdr removes a
 // layout terminal block whose terminal it cannot find when the layout loads and
@@ -241,14 +243,14 @@ export default class Graph extends View {
   }
 
   /**
-   * Puts the terminal's node into the layout, then shows it.
+   * Shows the terminal half of the stack.
    *
-   * The node is not in the shipped file (see the header), so it is added here:
-   * `layout.set` replaces a personal layout's tree, and the tree handed back is
-   * the one that is showing — same nodes, same clicks — with one more block in
-   * the graph's stack. The node has to be added *before* the select, because the
-   * select names a child that does not exist yet otherwise, and only once, so a
-   * layout that refuses the edit is reported rather than rewritten every tick.
+   * The node is in `layouts/shprd.json` and this only selects it: a mod may not
+   * edit a layout's structure on this build (`layout.set` from a mod changes
+   * nothing — from `herdr-app do` it does), so the block is installed and never
+   * written by this file. The service starts the terminal before the window loads
+   * the layout, which is what keeps Herdr from pruning the block; the check here
+   * is for the case it did anyway, where the note's message is the thing to read.
    */
   select() {
     if (!hasNode(layout(), GRAPH_TERM)) return;

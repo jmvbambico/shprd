@@ -53,9 +53,9 @@ ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
 
 ## The graph block
 
-The side panel's last row is the run's graph: a stack whose note
-(`mods/shprd-graph`) starts a terminal block running
-`dagr view <repo>/.dagr/run.json`. dagr draws the run's tasks, attempts and
+The side panel's last row is the run's graph: a stack with a terminal block
+running `dagr view <repo>/.dagr/run.json`, and the note (`mods/shprd-graph`) that
+explains it when there is nothing to draw. dagr draws the run's tasks, attempts and
 gates, and follows the file itself — the service rewrites it atomically after
 every ledger write (`crates/shprd-server/src/service.rs`'s after-write step,
 `shprd dagr sync`), so nothing relaunches it per write. The note is also what a
@@ -64,16 +64,29 @@ that fixes it (`[graph] dagr = "/path/to/dagr"`, or
 `shprd settings set graph.dagr /path/to/dagr`). `shprd doctor` says which probe
 found it — the setting, `PATH` or the `herdr-dagr` plugin's checkout.
 
-The terminal's node (`{ "terminal": "shprd-graph" }`) is **not** in
-`layouts/shprd.json`, and the reason is a Herdr behaviour worth knowing: a
-layout terminal block whose terminal does not exist when the layout loads is
-pruned from the file, and the pruned file is written back. A shipped node would
-therefore be gone before the mod could start the terminal it names — and the
-file would stop matching what the installer wrote. So the note starts the
-terminal itself (`hc run --bg`, in a shell loop that restarts `dagr view` in
-place, because herdr-core keeps a terminal's address for its lifetime), puts the
-node into the live tree with `layout.set`, and selects it. A new window repeats
-that, which is why the note is what a window shows for a moment.
+`layouts/shprd.json` holds the block: the stack `graph` with `graph-note` (the
+mod) and `graph-term` (`{ "terminal": "shprd-graph" }`). The terminal is started
+**before the window loads that layout**, by `shprd serve`
+(`crates/shprd/src/cmd/graph.rs`): Herdr resolves a layout terminal block by name
+when the layout loads and **prunes the block from the file** when no such terminal
+exists (measured), so a block that had to start its own terminal would be gone
+before it could. The service is up before the window is, so it does it there —
+`hc run --bg`, one `shprd-graph` terminal per session, reusing a live one that
+already draws this run and forgetting finished ones that would shadow the name.
+The terminal runs a shell loop that waits for the document and restarts
+`dagr view` when it exits (herdr-core keeps a terminal's address for its
+lifetime, so the block's binding stays right). It is started only when the host
+probe found a Herdr desktop; a machine on the herdr TUI has no window to draw a
+block in, and asking a core anything starts one.
+
+The mod is the note and the fallback. It reads `GET /api/graph` for where dagr is
+and what to run, keeps its own `hc run` in case the service did not start one (a
+service started before the window's core, a terminal someone ended), and selects
+the terminal's child once it is live — a mod may not edit a layout's structure on
+this build, so it only ever selects a node the layout already holds. If Herdr
+pruned the block anyway (a window opened on a fresh install with no service
+running), the note says so and gives the one recovery: move `layouts/shprd.json`
+aside and run `shprd install herdr-desktop`.
 
 ## Tests
 
