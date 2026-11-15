@@ -25,10 +25,21 @@
 //! - **Uninstall removes only the manifest's files**, and keeps any of them the
 //!   person has edited since (a change is theirs, not stale ours).
 //!
-//! The source tree is the repository's `host/herdr-desktop/`, resolved at the
-//! wiring edge: `$SHPRD_HOST_DIR` first, then `<repo>/host/herdr-desktop`. Every
-//! path here is carried in as a value; this module reads no environment variable
-//! itself.
+//! The source tree is the one this *binary* carries, not one the caller happens
+//! to stand in: `--from`, then `$SHPRD_HOST_DIR`, then a `host/herdr-desktop`
+//! beside the working directory (a checkout or worktree of shprd), then the
+//! checkout this binary was compiled from in a debug build, and finally the copy
+//! embedded in the binary at build time (`build.rs`, the same shape as
+//! `shprd-agents`'s `data/`). An installed `shprd` therefore installs its own
+//! desktop with no checkout at all, and a worker's worktree installs the worktree
+//! rather than the canonical checkout (the M10 gate's bug 6). Every path here is
+//! carried in as a value; this module reads no environment variable itself.
+//!
+//! A file Herdr pruned is put back: Herdr resolves a layout terminal block by
+//! name when the layout loads and rewrites the file without the block when no
+//! such terminal exists (measured, `crates/shprd/src/cmd/graph.rs`). The prune is
+//! the app's edit and not the person's, so an install whose manifest still owns
+//! the file restores it — only a change that is not a prune is refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -39,7 +50,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::cli::InstallArgs;
-use crate::ctx::{CliError, resolve_root};
+use crate::ctx::CliError;
+
+include!(concat!(env!("OUT_DIR"), "/host_tree.rs"));
 
 /// Where the manifest lives, relative to the app home.
 const MANIFEST_DIR: &str = "data/shprd-desktop";
@@ -61,8 +74,8 @@ pub fn run(args: &InstallArgs, home: Option<&Path>, json: bool) -> Result<(), Cl
     if args.uninstall {
         return uninstall(&app_home, args.dry_run, json);
     }
-    let host = resolve_host_dir(args)?;
-    install(&host, &app_home, args.dry_run, json)
+    let source = resolve_source(args)?;
+    install(&source, &app_home, args.dry_run, json)
 }
 
 /// The Herdr app home: `--app-home`, then `$HERDR_APP_HOME`, then
@@ -84,34 +97,138 @@ fn resolve_app_home(args: &InstallArgs, home: Option<&Path>) -> Result<PathBuf, 
         .join("herdr-app"))
 }
 
-/// The host tree to install from: `--from`, then `$SHPRD_HOST_DIR`, then the
-/// repository's `host/herdr-desktop`.
-fn resolve_host_dir(args: &InstallArgs) -> Result<PathBuf, CliError> {
-    let explicit = args.from.clone().or_else(|| {
-        std::env::var_os("SHPRD_HOST_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    });
-    let candidate = match explicit {
-        Some(path) => path,
-        None => resolve_root(args.repo.as_deref())
-            .map_err(|err| match err {
-                CliError::Other(source) => CliError::other(anyhow!(
-                    "no host tree: pass --from <dir>, set SHPRD_HOST_DIR, or run this inside the \
-                     shprd checkout ({source})"
-                )),
-                other => other,
-            })?
-            .join("host")
-            .join("herdr-desktop"),
-    };
-    if !candidate.join("layouts").is_dir() {
-        return Err(CliError::other(anyhow!(
-            "{} is not a Herdr desktop host tree: it has no `layouts/` directory",
-            candidate.display()
-        )));
+/// Where the files to install come from.
+///
+/// Two answers, because there are two things a person can install: a host tree
+/// they point at (their checkout, a worktree, a folder they edited), and the copy
+/// this binary carries. The embedded copy is what makes `shprd install
+/// herdr-desktop` work from a released binary with no checkout beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// A `host/herdr-desktop` directory.
+    Tree(PathBuf),
+    /// The copy embedded in this binary at build time.
+    Embedded,
+}
+
+impl Source {
+    /// Where the files came from, in words a person reads in the report.
+    fn label(&self) -> String {
+        match self {
+            Source::Tree(path) => path.display().to_string(),
+            Source::Embedded => String::from("embedded in this binary"),
+        }
     }
-    Ok(candidate)
+
+    /// Every file in the tree, relative to its root, sorted.
+    fn walk(&self) -> Result<Vec<String>, CliError> {
+        match self {
+            Source::Tree(root) => walk(root),
+            Source::Embedded => Ok(HOST_FILES
+                .iter()
+                .map(|(path, _)| (*path).to_string())
+                .collect()),
+        }
+    }
+
+    /// One file's bytes, by its path in the tree.
+    fn read(&self, rel: &str) -> Result<Vec<u8>, CliError> {
+        match self {
+            Source::Tree(root) => read_file(&root.join(rel)),
+            Source::Embedded => read_embedded(rel),
+        }
+    }
+
+    /// The bindings this tree's `keys.json` asks for, `section -> key -> command`.
+    ///
+    /// A tree with no `keys.json` asks for none, which is what a person who
+    /// deleted theirs from a copy meant.
+    fn keys(&self) -> Result<BTreeMap<String, BTreeMap<String, String>>, CliError> {
+        match self {
+            Source::Tree(root) => read_keys(&root.join("keys.json")),
+            Source::Embedded => match HOST_FILES.iter().find(|(path, _)| *path == "keys.json") {
+                Some((_, bytes)) => parse_keys(
+                    std::str::from_utf8(bytes)
+                        .map_err(|err| CliError::other(anyhow!(err).context("keys.json")))?,
+                    Path::new("keys.json"),
+                ),
+                None => Ok(BTreeMap::new()),
+            },
+        }
+    }
+}
+
+/// Whether a file in the tree is a layout Herdr may rewrite.
+fn layout_file(rel: &str) -> bool {
+    rel.starts_with("layouts/") && rel.ends_with(".json")
+}
+
+/// The tree to install from: `--from`, then `$SHPRD_HOST_DIR`, then a checkout
+/// under the working directory, then the checkout this binary was built from in
+/// a debug build, then the embedded copy.
+///
+/// A tree named outright (`--from`, `$SHPRD_HOST_DIR`) must be one: falling back
+/// to the embedded copy would install something other than what was asked for.
+/// The search under the working directory is quiet, because most directories a
+/// person runs `shprd` from hold no host tree at all.
+fn resolve_source(args: &InstallArgs) -> Result<Source, CliError> {
+    if let Some(path) = &args.from {
+        return Ok(Source::Tree(checked_tree(path, "--from")?));
+    }
+    if let Some(value) = std::env::var_os("SHPRD_HOST_DIR").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(&value);
+        return Ok(Source::Tree(checked_tree(&path, "$SHPRD_HOST_DIR")?));
+    }
+    for candidate in search_places(args) {
+        if candidate.join("layouts").is_dir() {
+            return Ok(Source::Tree(candidate));
+        }
+    }
+    Ok(Source::Embedded)
+}
+
+/// The `host/herdr-desktop` folders to try, best first, for a caller who named
+/// none.
+///
+/// The order is "what this binary is", not "where the person happens to be": a
+/// worktree the caller stands in, then the folder above it (a `host/` block
+/// inside a checkout), then — in a debug build only — the checkout the binary was
+/// compiled from, which is the same tree by another name. A release build has no
+/// such path to offer and says nothing about it.
+fn search_places(args: &InstallArgs) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push = |base: PathBuf| {
+        let candidate = base.join("host").join("herdr-desktop");
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    };
+    // `--repo` is the caller naming the checkout outright, so it comes before the
+    // working directory's own guess.
+    if let Some(repo) = &args.repo {
+        push(repo.clone());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        push(cwd.clone());
+        if let Some(parent) = cwd.parent() {
+            push(parent.to_path_buf());
+        }
+    }
+    if cfg!(debug_assertions) {
+        push(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
+    }
+    out
+}
+
+/// `path` as a host tree, or a refusal naming how it was named and what it lacks.
+fn checked_tree(path: &Path, named: &str) -> Result<PathBuf, CliError> {
+    if path.join("layouts").is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    Err(CliError::other(anyhow!(
+        "{} (from {named}) is not a Herdr desktop host tree: it has no `layouts/` directory",
+        path.display()
+    )))
 }
 
 /// The manifest: everything this verb wrote, so it can take back its own.
@@ -194,47 +311,149 @@ fn sha256(bytes: &[u8]) -> String {
 
 /// Every file of the host tree that belongs in the app home, sorted by path.
 ///
-/// The tree is `layouts/*.json`, `mods/<name>/…` for every `name` starting with
+/// The tree is `layouts/*.json`, `mods/<name>/...` for every `name` starting with
 /// `shprd-`, and `keys.json` — which is read, not copied: its bindings are merged
 /// into the person's. `mods/lib/` is the shared modules' source, copied into each
 /// mod folder by `bin/sync-shared`, so it is not itself installed.
-fn source_files(host: &Path) -> Result<Vec<SourceFile>, CliError> {
-    let mut files = Vec::new();
-    let layouts = host.join("layouts");
-    let mut entries = read_dir(&layouts)?;
-    entries.sort();
-    for path in entries {
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+///
+/// Which files there are is decided from the tree's own file list, so a directory
+/// and the embedded copy of it install exactly the same set.
+fn source_files(source: &Source) -> Result<Vec<SourceFile>, CliError> {
+    let mut out = Vec::new();
+    for rel in source.walk()? {
+        if !installable(&rel) {
             continue;
         }
-        let name = file_name(&path)?;
-        files.push(SourceFile {
-            rel: format!("layouts/{name}"),
-            bytes: read_file(&path)?,
+        out.push(SourceFile {
+            bytes: source.read(&rel)?,
+            rel,
         });
     }
+    out.sort_by(|left, right| left.rel.cmp(&right.rel));
+    Ok(out)
+}
 
-    let mods = host.join("mods");
-    let mut mod_dirs = read_dir(&mods)?;
-    mod_dirs.sort();
-    for dir in mod_dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-        let name = file_name(&dir)?;
-        if !name.starts_with(MOD_PREFIX) {
-            continue;
-        }
-        // A mod's own files, plus the shared modules it carries a copy of.
-        for rel in walk(&dir)? {
-            files.push(SourceFile {
-                rel: format!("mods/{name}/{rel}"),
-                bytes: read_file(&dir.join(&rel))?,
+/// Whether `on_disk` and `shipped` differ only by the terminal blocks Herdr
+/// prunes.
+///
+/// Herdr rewrites a layout file with a terminal block taken out when no terminal
+/// of that name exists when the layout loads (measured, `cmd/graph.rs`), because
+/// such a block has nothing to show. That rewrite is the app's edit, not the
+/// person's, and it is recognised structurally rather than by guessing Herdr's
+/// serializer: both documents are parsed, their terminal blocks are removed the
+/// way a prune removes them, and the two survivors are compared. A file that
+/// differs in anything else — a size, a colour, a key, a block the person added —
+/// is the person's and not ours to overwrite.
+fn same_minus_terminals(on_disk: &[u8], shipped: &[u8]) -> Result<bool, CliError> {
+    let theirs = parse_layout(on_disk)?;
+    let ours = parse_layout(shipped)?;
+    let mut theirs = without_terminals(theirs);
+    let mut ours = without_terminals(ours);
+    Ok(theirs == ours || {
+        // A prune also takes away what the missing block leaves pointing at
+        // nothing (a stack's `active`), so both sides are tidied the same way.
+        tidy(&mut theirs);
+        tidy(&mut ours);
+        theirs == ours
+    })
+}
+
+/// One layout file as a JSON document.
+fn parse_layout(bytes: &[u8]) -> Result<serde_json::Value, CliError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| CliError::other(anyhow!(err).context("a layout is not UTF-8")))?;
+    serde_json::from_str(text).map_err(|err| {
+        CliError::other(anyhow!(err).context("a layout in the host tree is not JSON"))
+    })
+}
+
+/// `node` with every terminal block removed, and every stack that a removal left
+/// empty taken away with it.
+fn without_terminals(mut node: serde_json::Value) -> serde_json::Value {
+    fn walk(node: &mut serde_json::Value) {
+        let Some(object) = node.as_object_mut() else {
+            return;
+        };
+        for key in ["children", "floating"] {
+            let Some(array) = object.get_mut(key).and_then(|value| value.as_array_mut()) else {
+                continue;
+            };
+            for child in array.iter_mut() {
+                walk(child);
+            }
+            array.retain(|child| {
+                !child
+                    .get("content")
+                    .and_then(|content| content.as_object())
+                    .is_some_and(|content| content.contains_key("terminal"))
+                    && !(child
+                        .get("children")
+                        .and_then(|value| value.as_array())
+                        .is_some_and(|children| children.is_empty())
+                        && child.get("type").and_then(|kind| kind.as_str()) == Some("stack"))
             });
         }
     }
-    files.sort_by(|left, right| left.rel.cmp(&right.rel));
-    Ok(files)
+    walk(&mut node);
+    node
+}
+
+/// Forgets every `active` that names no child of its node: what a prune leaves.
+fn tidy(node: &mut serde_json::Value) {
+    let Some(object) = node.as_object_mut() else {
+        return;
+    };
+    for key in ["children", "floating"] {
+        if let Some(array) = object.get_mut(key).and_then(|value| value.as_array_mut()) {
+            for child in array.iter_mut() {
+                tidy(child);
+            }
+        }
+    }
+    if let Some(serde_json::Value::String(active)) = object.get("active").cloned() {
+        let named = object
+            .get("children")
+            .and_then(|value| value.as_array())
+            .is_some_and(|children| {
+                children.iter().any(|child| {
+                    child.get("id").and_then(|id| id.as_str()) == Some(active.as_str())
+                })
+            });
+        if !named {
+            object.remove("active");
+        }
+    }
+}
+
+/// Whether a path in the tree is one this verb installs.
+///
+/// A layout is a top-level `layouts/<name>.json`; a mod is every file under
+/// `mods/<name>/` for a name this verb owns ([`MOD_PREFIX`]). Everything else —
+/// the host folder's `test/`, `bin/`, `README.md`, and the shared modules' source
+/// in `mods/lib/` — is not part of what a window needs.
+fn installable(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    if parts.iter().any(|part| part.starts_with('.')) {
+        return false;
+    }
+    match parts.as_slice() {
+        ["layouts", name] => name.ends_with(".json"),
+        ["mods", name, ..] if parts.len() > 2 => name.starts_with(MOD_PREFIX),
+        _ => false,
+    }
+}
+
+/// One file's bytes by its path in the tree.
+fn read_embedded(rel: &str) -> Result<Vec<u8>, CliError> {
+    HOST_FILES
+        .iter()
+        .find(|(path, _)| *path == rel)
+        .map(|(_, bytes)| (*bytes).to_vec())
+        .ok_or_else(|| {
+            CliError::other(anyhow!(
+                "{rel} is not in the desktop embedded in this binary"
+            ))
+        })
 }
 
 /// Every file under `dir`, relative to it, sorted; editor droppings skipped.
@@ -300,13 +519,23 @@ fn read_file(path: &Path) -> Result<Vec<u8>, CliError> {
         .map_err(|err| CliError::other(anyhow!(err).context(format!("reading {}", path.display()))))
 }
 
+impl Plan {
+    /// Whether this decision writes the file.
+    fn writes(self) -> bool {
+        matches!(self, Plan::Write | Plan::Restore)
+    }
+}
+
 /// What install would do with one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Plan {
-    /// Not there yet, or there and byte-identical to what we ship: write it.
+    /// Not there yet: write it.
     Write,
     /// There, and already exactly what we ship: nothing to do.
     Same,
+    /// There and ours, but Herdr pruned a terminal block out of it: put the
+    /// shipped file back.
+    Restore,
     /// There, and not ours: refuse the whole install and name it.
     Clash,
 }
@@ -337,8 +566,15 @@ impl InstallPlan {
 }
 
 /// Decides every step of an install against what is on disk now.
-fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan, CliError> {
-    let sources = source_files(host)?;
+///
+/// The one rule that puts a file back rather than refusing it: a file this verb
+/// wrote, unchanged since, that Herdr rewrote by pruning a layout terminal block
+/// it could not resolve. That prune is the app's edit and not the person's — it
+/// removes the block and nothing else — so it is recognised and the shipped file
+/// is written over it. Every other difference from what we wrote is the person's
+/// and is refused.
+fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<InstallPlan, CliError> {
+    let sources = source_files(source)?;
     let mut files = Vec::with_capacity(sources.len());
     let mut clashes = Vec::new();
     let mut manifest = Manifest {
@@ -361,6 +597,14 @@ fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan
                     // A file we wrote, unchanged since: ours to update.
                     manifest.files.insert(source.rel.clone(), hash);
                     Plan::Write
+                } else if ours.is_some()
+                    && layout_file(&source.rel)
+                    && same_minus_terminals(&current, &source.bytes)?
+                {
+                    // A file we wrote, then Herdr pruned a terminal block out of:
+                    // the app's edit, so the block is put back.
+                    manifest.files.insert(source.rel.clone(), hash);
+                    Plan::Restore
                 } else {
                     clashes.push(source.rel.clone());
                     Plan::Clash
@@ -368,7 +612,14 @@ fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 manifest.files.insert(source.rel.clone(), hash);
-                Plan::Write
+                // Not there at all is the ordinary first install; a file the
+                // manifest lists but that is gone was taken away after we wrote
+                // it, which is ours to put back.
+                if ours.is_some() {
+                    Plan::Restore
+                } else {
+                    Plan::Write
+                }
             }
             Err(err) => {
                 return Err(CliError::other(
@@ -393,8 +644,7 @@ fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan
 
     // The keys are merged after the files are decided, so a clash refuses before
     // any of this is written.
-    let keys_file = host.join("keys.json");
-    let ours = read_keys(&keys_file)?;
+    let ours = source.keys()?;
     let their_path = app_home.join("keys.json");
     let mut theirs = match fs::read_to_string(&their_path) {
         Ok(text) => parse_keys(&text, &their_path)?,
@@ -466,9 +716,9 @@ fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan
 }
 
 /// An install, refusing every clash before it writes anything.
-fn install(host: &Path, app_home: &Path, dry_run: bool, json: bool) -> Result<(), CliError> {
+fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Result<(), CliError> {
     let previous = Manifest::read(app_home)?;
-    let plan = plan(host, app_home, &previous)?;
+    let plan = plan(source, app_home, &previous)?;
     if !plan.clashes.is_empty() {
         let mut message = String::from(
             "these files are in the Herdr app home and are not shprd's, so nothing was written:\n",
@@ -484,17 +734,17 @@ fn install(host: &Path, app_home: &Path, dry_run: bool, json: bool) -> Result<()
     }
 
     if !dry_run {
-        for (source, decision) in &plan.files {
-            if *decision != Plan::Write {
+        for (file, decision) in &plan.files {
+            if !decision.writes() {
                 continue;
             }
-            let target = app_home.join(&source.rel);
+            let target = app_home.join(&file.rel);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
                     CliError::other(anyhow!(err).context(format!("making {}", parent.display())))
                 })?;
             }
-            write_atomic(&target, &source.bytes)?;
+            write_atomic(&target, &file.bytes)?;
         }
         if let Some(bytes) = &plan.keys_json {
             write_atomic(&app_home.join("keys.json"), bytes)?;
@@ -502,22 +752,24 @@ fn install(host: &Path, app_home: &Path, dry_run: bool, json: bool) -> Result<()
         plan.manifest.write(app_home)?;
     }
 
-    let changed = plan
-        .files
-        .iter()
-        .filter(|(_, plan)| *plan == Plan::Write)
-        .count();
+    let changed = plan.files.iter().filter(|(_, plan)| plan.writes()).count();
     if json {
         let value = serde_json::json!({
             "ok": true,
             "dry_run": dry_run,
             "app_home": app_home.display().to_string(),
-            "host": host.display().to_string(),
+            "source": source.label(),
             "no_op": plan.is_noop(),
             "written": plan
                 .files
                 .iter()
-                .filter(|(_, plan)| *plan == Plan::Write)
+                .filter(|(_, plan)| plan.writes())
+                .map(|(file, _)| file.rel.clone())
+                .collect::<Vec<_>>(),
+            "restored": plan
+                .files
+                .iter()
+                .filter(|(_, plan)| *plan == Plan::Restore)
                 .map(|(file, _)| file.rel.clone())
                 .collect::<Vec<_>>(),
             "unchanged": plan
@@ -557,9 +809,14 @@ fn install(host: &Path, app_home: &Path, dry_run: bool, json: bool) -> Result<()
         );
         return Ok(());
     }
-    for (source, decision) in &plan.files {
-        if *decision == Plan::Write {
-            println!("{prefix}{}", app_home.join(&source.rel).display());
+    for (file, decision) in &plan.files {
+        if *decision == Plan::Restore {
+            println!(
+                "{prefix}{} (put back after Herdr pruned it)",
+                app_home.join(&file.rel).display()
+            );
+        } else if *decision == Plan::Write {
+            println!("{prefix}{}", app_home.join(&file.rel).display());
         }
     }
     for (section, key, command) in &plan.keys {
