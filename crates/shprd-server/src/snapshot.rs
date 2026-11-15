@@ -13,7 +13,17 @@ use crate::dto::{
     ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskProgressDto,
 };
 
+/// What `GET /api/state` answers with when the repository has no run yet.
+///
+/// A service that starts before `shprd run start` must not look like a run that
+/// is merely empty, so the board says what to do instead of drawing nothing.
+pub const NO_RUN_HINT: &str = "no run yet: start one with `shprd run start`";
+
 /// Folds a run into the snapshot a client draws, as of `now_ms`.
+///
+/// The last pass's outcome is not in the log — a pass is the engine's own act,
+/// not an event — so [`SnapshotDto::last_tick`] is left to the caller that can
+/// read it ([`crate::pass`]). Everything else here is the fold's.
 pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
     SnapshotDto {
         seq: state.last_seq,
@@ -23,6 +33,8 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
             base_branch: run.base_branch.clone(),
             integration_branch: run.integration_branch.clone(),
         }),
+        last_tick: None,
+        hint: state.run.is_none().then(|| NO_RUN_HINT.to_string()),
         tasks: state
             .tasks
             .values()

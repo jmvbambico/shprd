@@ -112,6 +112,9 @@ pub(crate) struct AppState {
     pub(crate) ws: WsLimits,
     /// The home directory the settings files live in, when there is one.
     pub(crate) home: Option<PathBuf>,
+    /// The state directory holding `service.json`, the token and the last pass's
+    /// outcome ([`crate::pass`]).
+    pub(crate) state_dir: PathBuf,
     /// The `data/` directory the harness table is read from, when this service
     /// was given one. Only the settings checks need it.
     pub(crate) data: Option<PathBuf>,
@@ -175,6 +178,7 @@ impl App {
             after_write,
             ws: WsLimits::default(),
             home: environment_home(),
+            state_dir: state_dir.to_path_buf(),
             data: shprd_agents::harness::data_dir(Some(repo)),
             prompts_dir: None,
         };
@@ -311,11 +315,24 @@ async fn health(State(state): State<AppState>) -> Json<HealthDto> {
 }
 
 /// `GET /api/state`: the whole board, folded now.
+///
+/// The last pass's outcome comes from the state directory beside the snapshot,
+/// so a step that failed is visible on the board as well as in the service's own
+/// output: `shprd status` reads the same file.
 async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<SnapshotDto>, ApiReject> {
     let repo = state.repo.clone();
-    let loaded = blocking(move || ledger::load(&repo)).await?;
-    let (folded, _) = loaded.map_err(|err| ApiReject::internal(err.to_string()))?;
-    Ok(Json(SnapshotDto::from_state(&folded, SystemClock.now_ms())))
+    let dir = state.state_dir.clone();
+    let loaded = blocking(move || {
+        let folded = ledger::load(&repo);
+        let last = crate::pass::LastPass::read(&dir, &repo);
+        (folded, last)
+    })
+    .await?;
+    let (folded, last) = loaded;
+    let (folded, _) = folded.map_err(|err| ApiReject::internal(err.to_string()))?;
+    let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
+    snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
+    Ok(Json(snapshot))
 }
 
 /// `GET /api/asks`: every ask still waiting for the person.

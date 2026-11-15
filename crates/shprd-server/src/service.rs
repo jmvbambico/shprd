@@ -377,6 +377,14 @@ pub struct Config {
     pub tick: Option<TickConfig>,
 }
 
+/// Told what a pass did, after it did it, for the caller's own output.
+///
+/// `shprd serve` uses it to say the run exists when the service was started
+/// before `shprd run start`: the banner is printed once, so without a notice a
+/// service started too early would look like an empty run for ever. The service
+/// itself prints nothing; whoever wants to say something passes the words.
+pub type PassNotice = std::sync::Arc<dyn Fn(&crate::tick::TickReport) + Send + Sync>;
+
 /// How the service runs its tick.
 #[derive(Clone)]
 pub struct TickConfig {
@@ -386,6 +394,9 @@ pub struct TickConfig {
     pub interval: std::time::Duration,
     /// How many tasks of this repository may run at once, for the startup line.
     pub max_running: u32,
+    /// Told what every pass did, when the caller wants to say something about
+    /// it.
+    pub notice: Option<PassNotice>,
 }
 
 impl std::fmt::Debug for TickConfig {
@@ -495,8 +506,9 @@ impl Service {
         let ticker = tick.map(|tick| {
             let worker = std::sync::Arc::clone(&tick.worker);
             let interval = tick.interval;
+            let notice = tick.notice.clone();
             tokio::spawn(async move {
-                crate::tick::run(worker, interval, async {
+                crate::tick::run(worker, interval, notice, async {
                     // The service's own shutdown is awaited here, so the
                     // loop ends with it rather than with the socket.
                     let _ = stopped.await;

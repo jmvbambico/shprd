@@ -28,8 +28,8 @@ struct Fixture {
     app: App,
     token: String,
     id: String,
-    _state: TempDir,
-    _repo: TempDir,
+    state: TempDir,
+    repo: TempDir,
 }
 
 impl Fixture {
@@ -38,9 +38,20 @@ impl Fixture {
     /// The run start is the log's first event and every rule needs it, so it is
     /// written before the service is prepared, exactly as `shprd up` writes it.
     fn new() -> Self {
-        let state = tempfile::tempdir().expect("state dir");
         let repo = tempfile::tempdir().expect("repo dir");
         start_run(repo.path());
+        Self::prepared(repo, tempfile::tempdir().expect("state dir"))
+    }
+
+    /// A service over a repository with no run in its log at all.
+    fn without_a_run() -> Self {
+        let repo = tempfile::tempdir().expect("repo dir");
+        Self::prepared(repo, tempfile::tempdir().expect("state dir"))
+    }
+
+    /// A service over `repo` (already holding whatever log the test wrote) with
+    /// its discovery files in `state`.
+    fn prepared(repo: TempDir, state: TempDir) -> Self {
         let app =
             App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None).expect("prepare");
         let info = app.info();
@@ -50,8 +61,8 @@ impl Fixture {
             token: token.trim().to_string(),
             id: info.id,
             app,
-            _state: state,
-            _repo: repo,
+            state,
+            repo,
         }
     }
 
@@ -272,6 +283,82 @@ async fn a_request_from_another_origin_is_refused() {
         )
         .await;
     assert_eq!(own.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_board_with_no_run_says_what_to_do() {
+    // Bug 7 of the M9 gate: a service started before `shprd run start` answered
+    // a board with no run in it, which looks exactly like a run with no tasks.
+    // It says so now, and names the one verb that fixes it.
+    let fixture = Fixture::without_a_run();
+    let reply = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let snapshot = reply.json();
+    assert!(snapshot["run"].is_null(), "there is no run: {snapshot}");
+    assert_eq!(snapshot["hint"], json!(shprd_server::NO_RUN_HINT));
+
+    // A run started after the service was up shows without a restart: the
+    // snapshot is folded from the log on every request, never cached.
+    start_run(fixture.repo.path());
+    let after = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    let snapshot = after.json();
+    assert_eq!(snapshot["run"]["id"], json!("r1"));
+    assert!(
+        snapshot.get("hint").is_none(),
+        "a board that can advance needs no hint: {snapshot}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_pass_is_on_the_board() {
+    // A pass that fails a step goes on with the others and leaves the board as
+    // it was, so the failure has to be carried beside it. This is the shape
+    // `/api/state` answers with after a pass like that.
+    let fixture = Fixture::new();
+    let report = shprd_server::TickReport {
+        run: Some(String::from("r1")),
+        steps: vec![
+            shprd_server::StepReport {
+                action: String::from("start"),
+                task: String::from("T1"),
+                ok: false,
+                detail: String::from("no workspace \"shprd · repo\" yet"),
+                seq: None,
+            },
+            shprd_server::StepReport {
+                action: String::from("start"),
+                task: String::from("T2"),
+                ok: true,
+                detail: String::from("started T2"),
+                seq: Some(3),
+            },
+        ],
+        news: Vec::new(),
+    };
+    let last = shprd_server::LastPass::of(&report, fixture.repo.path(), 1_700_000_000_000);
+    last.write(fixture.state.path())
+        .expect("the pass is recorded");
+
+    let reply = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let snapshot = reply.json();
+    assert_eq!(snapshot["last_tick"]["at_ms"], json!(1_700_000_000_000u64));
+    assert_eq!(snapshot["last_tick"]["steps"], json!(2));
+    assert_eq!(
+        snapshot["last_tick"]["failed"],
+        json!([{
+            "task": "T1",
+            "step": "start",
+            "error": "no workspace \"shprd · repo\" yet",
+        }]),
+        "the step's own error reaches the board: {snapshot}"
+    );
 }
 
 #[tokio::test]

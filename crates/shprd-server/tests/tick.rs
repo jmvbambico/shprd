@@ -470,6 +470,82 @@ fn a_failing_step_is_recorded_and_the_others_still_run() {
 }
 
 #[test]
+fn a_failed_step_is_readable_after_the_pass() {
+    // Bug 1 of the M9 gate: a failing step said so only through a
+    // `tracing::warn!` that nothing printed, so the person saw a board that did
+    // not move and nothing more. The pass now leaves its outcome where
+    // `shprd status` and `GET /api/state` read it.
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    let forge: SharedForge = Arc::new(NoForge);
+    let facts = Arc::new(Scripted::default());
+    let start: shprd_server::Starter =
+        Arc::new(|_repo: &Path, _task: &str| Err(String::from("no agent CLI is installed")));
+    let worker = fixture.worker(
+        facts,
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    );
+    let report = worker.tick().expect("the pass ran");
+    assert!(!report.ok(), "the pass failed a step");
+
+    let dir = shprd_server::state_dir(&fixture.home);
+    let last = shprd_server::LastPass::read(&dir, &fixture.repo).expect("the pass is recorded");
+    assert_eq!(last.run.as_deref(), Some("r1"));
+    assert_eq!(last.steps, report.steps.len());
+    assert_eq!(
+        last.failed,
+        vec![shprd_server::FailedStep {
+            task: String::from("A"),
+            step: String::from("start"),
+            error: String::from("no agent CLI is installed"),
+        }],
+        "the step's own error is what the person reads"
+    );
+
+    // The next pass that works replaces it: the file is about the last pass,
+    // never about the worst one.
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    worker.tick().expect("the second pass ran");
+    let last = shprd_server::LastPass::read(&dir, &fixture.repo).expect("the pass is recorded");
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+}
+
+#[test]
+fn a_pass_that_cannot_read_the_run_is_recorded_too() {
+    // The one failure that ends a pass before any step runs is the one a
+    // person must hear about, because nothing else will move.
+    let fixture = Fixture::new(vec![started()]);
+    std::fs::write(
+        fixture.repo.join(".shprd").join("events.jsonl"),
+        "not an event\n",
+    )
+    .expect("a broken log");
+
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    assert!(worker.tick().is_err(), "a broken log ends the pass");
+
+    let dir = shprd_server::state_dir(&fixture.home);
+    let last = shprd_server::LastPass::read(&dir, &fixture.repo).expect("the failure is recorded");
+    let failed = last.failed.first().expect("one failed step");
+    assert_eq!(failed.step, "pass");
+    assert!(
+        !failed.error.is_empty(),
+        "the reason the pass could not run is carried"
+    );
+}
+
+#[test]
 fn a_pass_that_starts_a_task_records_it_once() {
     let fixture = Fixture::new(vec![started(), added(2, "A")]);
     let forge: SharedForge = Arc::new(NoForge);
@@ -1141,7 +1217,7 @@ fn a_failing_step_does_not_stop_the_loop() {
         let stop = async {
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
-        tick::run(worker, Duration::from_millis(10), stop).await;
+        tick::run(worker, Duration::from_millis(10), None, stop).await;
     });
     assert!(
         attempts.load(Ordering::SeqCst) > 1,
@@ -1178,7 +1254,7 @@ fn two_passes_never_overlap() {
         let stop = async {
             tokio::time::sleep(Duration::from_millis(400)).await;
         };
-        tick::run(worker, Duration::from_millis(5), stop).await;
+        tick::run(worker, Duration::from_millis(5), None, stop).await;
     });
     assert_eq!(
         peak.load(Ordering::SeqCst),

@@ -31,6 +31,7 @@ pub mod api;
 pub mod bindings;
 pub mod dto;
 pub mod error;
+pub mod pass;
 pub mod service;
 pub mod snapshot;
 pub mod tick;
@@ -46,10 +47,12 @@ pub(crate) mod settings;
 pub use api::{App, WsLimits};
 pub use error::{ApiReject, ServerError};
 pub use news::{Coordinator, NewsDesk, NewsSent};
+pub use pass::{FailedStep, LastPass};
 pub use service::{
-    AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig, VERSION,
-    serve, shutdown_signal, state_dir,
+    AfterWrite, Config, PassNotice, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig,
+    VERSION, serve, shutdown_signal, state_dir,
 };
+pub use snapshot::NO_RUN_HINT;
 pub use tick::{
     FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, ReviewCloser, Reviewer,
     SharedForge, Starter, StepReport, TickReport, Worker,
