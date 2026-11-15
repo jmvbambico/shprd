@@ -1,0 +1,12 @@
+opencode/beam-free
+opencode/big-pickle
+opencode/claude-fable-5
+opencode/claude-fable-5-1
+opencode/claude-fable-5-2
+opencode/claude-haiku-4-5
+opencode/claude-haiku-5-5
+opencode/claude-opus-4-5
+opencode/claude-opus-4-6
+opencode/claude-opus-4-7
+opencode/claude-opus-4-8
+opencode/claude-opus-5

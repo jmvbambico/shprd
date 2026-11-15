@@ -1,0 +1,9 @@
+# shprd's own gates. They live here, in the repository's own config, the same
+# way any other repository keeps its gates: the worker brief renders them, and
+# no code path carries shprd's own cargo commands.
+[gates]
+worker = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
+]

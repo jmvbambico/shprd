@@ -12,12 +12,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use shprd_agents::env::{EnvContext, Role, launch_env};
 use shprd_core::config::{self, Config};
 use shprd_core::event::{EventKind, GateStep};
 use shprd_git::gate::{self, GateRun};
 use shprd_git::git::Git;
 use shprd_git::integrate;
-use shprd_roster::env::{EnvContext, Role, launch_env};
 
 use crate::cli::FullGateArgs;
 use crate::cmd::run_lock;
@@ -165,6 +165,10 @@ fn worker_env(worktree: &Path, run_id: &str) -> Vec<(String, Option<String>)> {
         task: None,
         run: Some(run_id.to_string()),
         repo: worktree.to_path_buf(),
+        // A gate step often runs `shprd` itself, and must resolve the config and
+        // harness table this engine did.
+        home: crate::ctx::resolve_home(None).ok(),
+        data: crate::cmd::roster::resolve_data_dir().ok(),
     };
     launch_env(&base, Role::Worker, &ctx).as_pairs()
 }

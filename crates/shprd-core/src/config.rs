@@ -370,6 +370,133 @@ pub struct ConfigLayer {
     pub tick: Option<TickLayer>,
 }
 
+impl ConfigLayer {
+    /// Project the keys this layer holds under their pre-M9 names onto the
+    /// settings model.
+    ///
+    /// `[land] merge`, `[tick] max_running`, `[tick] interval_secs`,
+    /// `[janitor] archive_days`, `[janitor] namespace`, `[review] must_fix` and
+    /// `[review] rounds` predate `settings.toml`. They are folded into the same
+    /// `tasks.*` keys
+    /// ([`crate::settings::TaskKey`]) so a person who has not migrated resolves
+    /// to exactly the values their config file asked for; the settings file
+    /// sits above this layer and wins where both set the same key.
+    ///
+    /// `[roster] reviewer = "<program>/<model>"` is the same for the reviewer
+    /// role: it supplies `roles.reviewer.agent` and `roles.reviewer.model`, and
+    /// the reviewer's own `[roster.effort]` entry supplies
+    /// `roles.reviewer.effort`. A review reads its reviewer through the settings
+    /// resolution, so this is the lower fallback layer a person who set the
+    /// reviewer the old way keeps.
+    ///
+    /// What is not projected is what has no settings key: the rest of
+    /// `[roster]` (the coordinator, the worker list and the auto-approve
+    /// switch), `[skills]`, `[workspace]`, `[gates]`, `mux` and `[land]
+    /// protected` are still read by the verbs that need them, straight from
+    /// this file.
+    pub fn settings_projection(&self) -> crate::settings::Layer {
+        use crate::settings::{Key, Layer, RoleField, TaskKey, Value, merge_name, severity_name};
+
+        let mut layer = Layer::new();
+        if let Some(roster) = &self.roster
+            && let Some(written) = roster.reviewer.as_deref()
+        {
+            let (program, model) = split_agent(written);
+            if let Some(program) = program {
+                layer.set(reviewer_key(RoleField::Agent), Value::Text(program));
+            }
+            if let Some(model) = model {
+                layer.set(reviewer_key(RoleField::Model), Value::Text(model));
+            }
+            let effort = roster
+                .effort
+                .as_ref()
+                .and_then(|effort| effort.get(written))
+                .filter(|effort| !effort.trim().is_empty());
+            if let Some(effort) = effort {
+                layer.set(reviewer_key(RoleField::Effort), Value::Text(effort.clone()));
+            }
+        }
+        if let Some(merge) = self.land.as_ref().and_then(|land| land.merge) {
+            layer.set(
+                Key::Task(TaskKey::Merge),
+                Value::Text(merge_name(merge).to_owned()),
+            );
+        }
+        if let Some(tick) = &self.tick {
+            if let Some(max_running) = tick.max_running {
+                layer.set(
+                    Key::Task(TaskKey::MaxRunning),
+                    Value::Number(i64::from(max_running)),
+                );
+            }
+            if let Some(interval_secs) = tick.interval_secs {
+                layer.set(
+                    Key::Task(TaskKey::TickSecs),
+                    Value::Number(i64::try_from(interval_secs).unwrap_or(i64::MAX)),
+                );
+            }
+        }
+        if let Some(janitor) = &self.janitor {
+            if let Some(archive_days) = janitor.archive_days {
+                layer.set(
+                    Key::Task(TaskKey::ArchiveAfter),
+                    Value::Number(i64::from(archive_days)),
+                );
+            }
+            if let Some(namespace) = &janitor.namespace {
+                layer.set(
+                    Key::Task(TaskKey::ArchiveNamespace),
+                    Value::Text(namespace.clone()),
+                );
+            }
+        }
+        if let Some(review) = &self.review {
+            if let Some(must_fix) = review.must_fix {
+                layer.set(
+                    Key::Task(TaskKey::MustFix),
+                    Value::Text(severity_name(must_fix).to_owned()),
+                );
+            }
+            if let Some(rounds) = review.rounds {
+                layer.set(
+                    Key::Task(TaskKey::ReviewRounds),
+                    Value::Number(i64::from(rounds)),
+                );
+            }
+        }
+        layer
+    }
+}
+
+/// The settings key for one field of the reviewer role.
+fn reviewer_key(field: crate::settings::RoleField) -> crate::settings::Key {
+    crate::settings::Key::Role {
+        id: "reviewer".to_owned(),
+        field,
+    }
+}
+
+/// Splits an old `program/model` agent string into its two halves.
+///
+/// The model may itself hold `/` (`pi/deepseek/deepseek-v4.1-flash`), which is
+/// why only the first separator splits. An empty program or an empty model is
+/// treated as absent, so a malformed line projects nothing rather than an empty
+/// setting.
+fn split_agent(written: &str) -> (Option<String>, Option<String>) {
+    let trimmed = written.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    match trimmed.split_once('/') {
+        Some((program, model)) => (
+            Some(program.trim().to_owned()).filter(|program| !program.is_empty()),
+            Some(model.trim().to_owned()).filter(|model| !model.is_empty()),
+        ),
+        None => (Some(trimmed.to_owned()), None),
+    }
+}
+
 /// The `[roster]` section of a config file.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -640,6 +767,104 @@ mod tests {
         must_fix = "minor"
         rounds = 3
     "#;
+
+    #[test]
+    fn the_old_keys_project_onto_the_settings_model() {
+        use crate::settings::{Key, TaskKey, Value};
+
+        let global = layer(
+            r#"
+            [land]
+            merge = "checks"
+
+            [tick]
+            max_running = 2
+            interval_secs = 30
+
+            [janitor]
+            archive_days = 30
+            namespace = "old/"
+
+            [review]
+            must_fix = "minor"
+            rounds = 3
+            "#,
+        );
+        let projected = global.settings_projection();
+        let cases = [
+            (TaskKey::Merge, Value::Text("checks".to_owned())),
+            (TaskKey::MaxRunning, Value::Number(2)),
+            (TaskKey::TickSecs, Value::Number(30)),
+            (TaskKey::ArchiveAfter, Value::Number(30)),
+            (TaskKey::ArchiveNamespace, Value::Text("old/".to_owned())),
+            (TaskKey::MustFix, Value::Text("minor".to_owned())),
+            (TaskKey::ReviewRounds, Value::Number(3)),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                projected.get(&Key::Task(key)),
+                Some(&expected),
+                "{} should project",
+                key.name()
+            );
+        }
+        assert_eq!(
+            projected.len(),
+            7,
+            "the projection sets exactly the keys the file names"
+        );
+
+        // The old reviewer line and its effort become the reviewer role's pick.
+        let reviewer = layer(
+            r#"
+            [roster]
+            reviewer = "pi/deepseek/deepseek-v4.1-flash"
+
+            [roster.effort]
+            "pi/deepseek/deepseek-v4.1-flash" = "low"
+            "#,
+        )
+        .settings_projection();
+        let role = |field| Key::Role {
+            id: "reviewer".to_owned(),
+            field,
+        };
+        assert_eq!(
+            reviewer.get(&role(crate::settings::RoleField::Agent)),
+            Some(&Value::Text("pi".to_owned()))
+        );
+        assert_eq!(
+            reviewer.get(&role(crate::settings::RoleField::Model)),
+            Some(&Value::Text("deepseek/deepseek-v4.1-flash".to_owned())),
+            "the model keeps every `/` after the program's"
+        );
+        assert_eq!(
+            reviewer.get(&role(crate::settings::RoleField::Effort)),
+            Some(&Value::Text("low".to_owned()))
+        );
+        // A reviewer named without a model projects the program alone.
+        let program_only = layer("[roster]\nreviewer = \"codex\"\n").settings_projection();
+        assert_eq!(
+            program_only.get(&role(crate::settings::RoleField::Agent)),
+            Some(&Value::Text("codex".to_owned()))
+        );
+        assert!(
+            program_only
+                .get(&role(crate::settings::RoleField::Model))
+                .is_none(),
+            "no model was named"
+        );
+
+        // A file that names none of them projects to nothing, so the settings
+        // model's built-in values stand.
+        assert!(ConfigLayer::default().settings_projection().is_empty());
+        // `allow` was the old word for `auto` and projects as the same request.
+        let allow = layer("[land]\nmerge = \"allow\"\n");
+        assert_eq!(
+            allow.settings_projection().get(&Key::Task(TaskKey::Merge)),
+            Some(&Value::Text("auto".to_owned()))
+        );
+    }
 
     #[test]
     fn no_files_yields_defaults() {

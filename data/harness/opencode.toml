@@ -3,8 +3,9 @@
 # https://github.com/eliasstravik/herdr-projects
 #
 # Record, error and quota facts are from shprd's docs/agents.md (verified
-# 2026-10-27). Launch flags were re-checked with `opencode --help` (1.18.35)
-# but are not stated in docs/agents.md, so launch.verified is false.
+# 2026-10-27). M9.2 re-checked every launch and catalog fact against OpenCode
+# 1.18.35 on this machine: `opencode --help`, `opencode models`,
+# `opencode auth list` and ~/.config/opencode/plugins/.
 
 id = "opencode"
 name = "OpenCode"
@@ -31,17 +32,69 @@ dry_patterns = [
 binary = "opencode"
 version_args = ["--version"]
 signin_hint = "opencode auth login"
+# `opencode providers` (`auth` is an alias) lists the credentials a person has;
+# the list command is what 1.18.35 answers, and it prints no secret.
 signin_args = ["auth", "list"]
 
 [launch]
 interactive = ["opencode"]
+# `-m, --model` takes `provider/model`.
 model_args = ["-m", "{model}"]
 auto_approve = ["--auto"]
 resume_args = ["--session", "{session}"]
 verified = false
 
+[permissions]
+# opencode has one approval switch, `--auto` ("auto-approve permissions that are
+# not explicitly denied", `opencode --help` 1.18.35), and no permission mode, so
+# there are two modes: the program's own prompts, and auto-approval.
+# unverified: that leaving `--auto` off really leaves opencode asking before it
+# acts — the one-shot live launch in crates/shprd-agents/tests/live_launch.rs
+# approves nothing, so it does not exercise it. To check: run `opencode` with no
+# `--auto` and ask it to write a file.
+default = "ask"
+full = "auto"
+modes = [
+  { id = "ask", label = "Ask", args = [] },
+  { id = "auto", label = "Auto", args = ["--auto"] },
+]
+# No read-only mode: `opencode --help` has no sandbox or tool allowlist, and
+# M7c's reviewer for this program is the one-shot `opencode run`, not a launch
+# flag, so no mode here is a reviewer's.
+
+[permissions.across]
+# No cross-program map: Shepherdr maps only Claude and Codex. A role that moves to
+# opencode starts at [permissions].default.
+
 [models]
+# `opencode models [provider]` prints one `provider/model` per line and nothing
+# else on it, which is the first-token listing the default parser reads.
 list_command = ["opencode", "models"]
+
+[models.efforts]
+# `opencode --help` (1.18.35) has no effort or thinking flag, so the program
+# takes none.
+
+[brief]
+# No system-prompt flag: the brief is the program's first turn. The TUI's only
+# positional is `[project]`, so the brief cannot ride on the launch argv as a
+# prompt; it is typed into the pane (`--prompt` exists but a multi-line brief
+# may not be an argument).
+delivery = "first-message"
+
+[status]
+# The agent's own OSC 7501 report first, then the plugin it runs for us, then the
+# bottom of its pane. Verified on this machine: herdr installs
+# ~/.config/opencode/plugins/herdr-agent-state.js, which reports opencode's state.
+sources = ["osc7501", "hook", "screen"]
+
+[asks]
+# opencode has a plugin API and herdr's plugin sees `permission.asked` and
+# `question.asked`; shprd has no installer for one yet, so its installer is a
+# documented no-op (M9.5) and the watchdog falls back to screen detection.
+# unverified: that an opencode plugin can hold an ask until a person answers it
+# — a later adapter can add it when it can.
+supported = false
 
 [records]
 kind = "sqlite"

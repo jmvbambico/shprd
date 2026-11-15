@@ -45,7 +45,11 @@ pub fn approve_verb(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Resul
     approve_run(ctx, args, home)
 }
 
-/// Approves one task's own pull request at the commit its branch is at.
+/// Approves one task's landing at the commit its branch is at.
+///
+/// That is the task's own pull request when a landing opened one, and the
+/// task itself when there is no forge: a local landing has no pull request, so
+/// the approval is recorded on the task and landing reads it from there.
 ///
 /// The approval names that commit, so a task whose branch moved after it was
 /// approved has to be approved again: what the human read is what they agreed
@@ -58,18 +62,20 @@ fn approve_task(ctx: &Ctx, args: &ApproveArgs, task_id: &str) -> Result<(), CliE
             "no task {task_id:?} in this run: `shprd status` lists the ones it holds"
         ))
     })?;
-    let pr = task.pr.as_ref().ok_or_else(|| {
-        CliError::Invalid(anyhow!(
-            "no pull request yet for {task_id:?}: run `shprd land {task_id}` first, then approve it"
-        ))
-    })?;
-    let number = pr.number;
-    let url = pr.url.clone();
-    if pr.merged {
-        return Err(CliError::Invalid(anyhow!(
-            "{url} is already merged: there is nothing to approve"
-        )));
-    }
+    // A repository with no forge lands locally and has no pull request to
+    // approve; the head and the approval live on the task itself then.
+    let (number, label) = match task.pr.as_ref() {
+        Some(pr) => {
+            if pr.merged {
+                return Err(CliError::Invalid(anyhow!(
+                    "{} is already merged: there is nothing to approve",
+                    pr.url
+                )));
+            }
+            (pr.number, pr.url.clone())
+        }
+        None => (0, format!("{task_id}'s local landing")),
+    };
     let attempt = task
         .latest_attempt()
         .ok_or_else(|| CliError::Invalid(anyhow!("task {task_id:?} has no attempt to approve")))?;
@@ -79,10 +85,10 @@ fn approve_task(ctx: &Ctx, args: &ApproveArgs, task_id: &str) -> Result<(), CliE
             attempt.branch, attempt.worktree
         )))
     })?;
-    let question = format!("approve {url} at {}? [y/N] ", land::short(&head));
+    let question = format!("approve {label} at {}? [y/N] ", land::short(&head));
     if !confirm::answered(args.yes, "shprd approve", &question)? {
         return Err(CliError::Invalid(anyhow!(
-            "not approved: {url} still waits for one"
+            "not approved: {label} still waits for one"
         )));
     }
     let event = ctx.commit(EventKind::TaskApproved {
@@ -92,7 +98,7 @@ fn approve_task(ctx: &Ctx, args: &ApproveArgs, task_id: &str) -> Result<(), CliE
     })?;
     crate::cmd::emit(ctx, &event)?;
     if !ctx.json {
-        println!("approved {url} at {}", land::short(&head));
+        println!("approved {label} at {}", land::short(&head));
     }
     Ok(())
 }

@@ -1,9 +1,11 @@
-//! The HTTP surface: five routes, one of them a socket.
+//! The HTTP surface: one route per read, write and notice, one of them a socket.
 //!
 //! `GET /api/health` is the only unauthenticated one — it is the handshake, not
 //! a secret. Everything else is behind the gate in `auth`. Reads answer from the
-//! fold (a snapshot or a change notice); the only write is `POST /api/action`,
-//! which hands one [`Action`] to `actions` and adds nothing of its own.
+//! fold (a snapshot or a change notice), except `GET /api/settings`, which
+//! answers the settings files as they resolve (`crate::settings`). The writes
+//! are `POST /api/action`, which hands one [`Action`] to `actions`, and
+//! `PUT /api/settings`, which writes one settings key.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -12,7 +14,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
-use axum::extract::{Query, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -20,17 +22,21 @@ use axum::{Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
 use shprd_core::event::Actor;
+use shprd_core::log::{Clock, SystemClock};
 use tower_http::trace::TraceLayer;
 
 use crate::actions;
 use crate::auth;
 use crate::dto::{
-    Action, ActionReply, ChangeDto, ClientMessage, ErrorCode, HealthDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ClientMessage, ErrorCode,
+    HealthDto, PromptDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
+use crate::prompts as prompts_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
+use crate::settings as settings_api;
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -104,6 +110,41 @@ pub(crate) struct AppState {
     pub(crate) after_write: Option<AfterWrite>,
     /// The bounds a socket lives under.
     pub(crate) ws: WsLimits,
+    /// The home directory the settings files live in, when the caller set one.
+    ///
+    /// Nothing here reads `$SHPRD_HOME` or `$HOME`: the binary resolves the home
+    /// once ([`App::with_home`]) and a test passes its own, so the service can
+    /// never read or write a directory it was not pointed at.
+    pub(crate) home: Option<PathBuf>,
+    /// The state directory holding `service.json`, the token and the last pass's
+    /// outcome ([`crate::pass`]).
+    pub(crate) state_dir: PathBuf,
+    /// The `data/` directory the harness table is read from, when this service
+    /// was given one. Only the settings checks need it.
+    pub(crate) data: Option<PathBuf>,
+    /// The prompts directory, when the caller set one.
+    ///
+    /// The binary resolves the configuration root once (where `$XDG_CONFIG_HOME`
+    /// wins over `<home>/.config`) and sets it ([`App::with_prompts_dir`]), and a
+    /// test always sets it, so neither the service nor a test ever resolves a
+    /// path from the process's own XDG settings.
+    pub(crate) prompts_dir: Option<PathBuf>,
+}
+
+/// The directories the binary resolved for the service.
+///
+/// They are carried in rather than looked up, so the service reads no
+/// environment variable of its own: the binary resolves `--home`/`$SHPRD_HOME`,
+/// the configuration root (`$XDG_CONFIG_HOME`, else `<home>/.config`) and the
+/// data directory once, and passes them here.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Paths {
+    /// The home directory the settings files live in, when there is one.
+    pub(crate) home: Option<PathBuf>,
+    /// The prompts directory, when there is one.
+    pub(crate) prompts_dir: Option<PathBuf>,
+    /// The `data/` directory the harness table is read from, when there is one.
+    pub(crate) data: Option<PathBuf>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -147,6 +188,32 @@ impl App {
         after_write: Option<AfterWrite>,
         hub: Hub,
     ) -> Result<Self, ServerError> {
+        Self::prepare_all(
+            repo,
+            port,
+            actor,
+            state_dir,
+            after_write,
+            hub,
+            Paths::default(),
+        )
+    }
+
+    /// [`App::prepare_with_hub`], pointed at the directories the binary resolved
+    /// for the service.
+    ///
+    /// The paths are set before the router is built, so a start builds it once
+    /// and a client that finds the discovery record at once finds a service
+    /// ready to answer it.
+    pub(crate) fn prepare_all(
+        repo: &Path,
+        port: u16,
+        actor: &Actor,
+        state_dir: &Path,
+        after_write: Option<AfterWrite>,
+        hub: Hub,
+        paths: Paths,
+    ) -> Result<Self, ServerError> {
         let files = ServiceFiles::prepare(state_dir)?;
         files.write_record(port)?;
         let state = AppState {
@@ -159,6 +226,13 @@ impl App {
             hub,
             after_write,
             ws: WsLimits::default(),
+            // Everything the service reads from the machine is resolved by the
+            // binary and carried in ([`crate::service::Config`]); a service
+            // prepared by hand reads nothing of the process's environment.
+            home: paths.home,
+            state_dir: state_dir.to_path_buf(),
+            data: paths.data,
+            prompts_dir: paths.prompts_dir,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -176,6 +250,11 @@ impl App {
     /// The change counter this service publishes on.
     pub fn hub(&self) -> Hub {
         self.state.hub.clone()
+    }
+
+    /// The repository whose log this service serves.
+    pub fn repo(&self) -> &Path {
+        &self.state.repo
     }
 
     /// What the service tells a client about itself.
@@ -206,12 +285,59 @@ impl App {
     }
 }
 
+impl App {
+    /// Read and write the settings in `home` instead of the environment's home.
+    ///
+    /// A test that drives the settings routes passes its own home, so it can
+    /// never read or write the developer's own settings file.
+    pub fn with_home(mut self, home: PathBuf) -> Self {
+        self.state.home = Some(home);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Check the settings' roles against the harness table in `data`.
+    ///
+    /// A service without a data directory still resolves and writes the workflow
+    /// keys; it refuses a role, because a role nothing looked at must not be
+    /// stored.
+    pub fn with_data(mut self, data: PathBuf) -> Self {
+        self.state.data = Some(data);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Read and write the prompts in `dir` instead of under the home directory.
+    ///
+    /// A test passes its own directory, so it can never read or write the
+    /// developer's own prompt files.
+    pub fn with_prompts_dir(mut self, dir: PathBuf) -> Self {
+        self.state.prompts_dir = Some(dir);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Serve with no harness table at all, whatever the environment would find.
+    ///
+    /// A test uses it to prove what a machine without a data directory does,
+    /// without depending on whether the developer happens to have one installed.
+    pub fn without_data(mut self) -> Self {
+        self.state.data = None;
+        self.router = router(self.state.clone());
+        self
+    }
+}
+
 /// The whole API, with the gate in front of everything but health.
 pub(crate) fn router(state: AppState) -> Router {
     let guarded = Router::new()
         .route("/api/state", get(snapshot_handler))
         .route("/api/changes", get(changes))
+        .route("/api/asks", get(asks))
+        .route("/api/asks/answer", post(answer))
         .route("/api/action", post(action))
+        .route("/api/settings", get(settings).put(put_settings))
+        .route("/api/prompts/{id}", get(read_prompt).put(put_prompt))
         .route("/api/ws", get(socket))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
@@ -232,11 +358,55 @@ async fn health(State(state): State<AppState>) -> Json<HealthDto> {
 }
 
 /// `GET /api/state`: the whole board, folded now.
+///
+/// The last pass's outcome comes from the state directory beside the snapshot,
+/// so a step that failed is visible on the board as well as in the service's own
+/// output: `shprd status` reads the same file.
 async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<SnapshotDto>, ApiReject> {
     let repo = state.repo.clone();
-    let loaded = blocking(move || ledger::load(&repo)).await?;
-    let (folded, _) = loaded.map_err(|err| ApiReject::internal(err.to_string()))?;
-    Ok(Json(SnapshotDto::from_state(&folded)))
+    let dir = state.state_dir.clone();
+    let loaded = blocking(move || {
+        let folded = ledger::load(&repo);
+        let last = crate::pass::LastPass::read(&dir, &repo);
+        (folded, last)
+    })
+    .await?;
+    let (folded, last) = loaded;
+    let (folded, _) = folded.map_err(|err| ApiReject::internal(err.to_string()))?;
+    let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
+    snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
+    Ok(Json(snapshot))
+}
+
+/// `GET /api/asks`: every ask still waiting for the person.
+async fn asks(State(state): State<AppState>) -> Result<Json<AskListDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let now_ms = SystemClock.now_ms();
+    let list = blocking(move || actions::list_asks(&repo, now_ms)).await?;
+    Ok(Json(list?))
+}
+
+/// `POST /api/asks/answer`: answer one ask, exactly once.
+async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskReply>, ApiReject> {
+    let body: AnswerAsk = serde_json::from_slice(&body)
+        .map_err(|err| ApiReject::bad_request(format!("the body is not an answer: {err}")))?;
+    let repo = state.repo.clone();
+    let actor = state.actor.clone();
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let reply = blocking(move || {
+        actions::answer_ask(
+            &repo,
+            &actor,
+            &hub,
+            after_write.as_ref(),
+            &body.task,
+            &body.ask,
+            &body.answer,
+        )
+    })
+    .await?;
+    Ok(Json(reply?))
 }
 
 /// The query `GET /api/changes` takes.
@@ -336,6 +506,40 @@ async fn action(
     let reply =
         blocking(move || actions::run(&repo, &actor, &hub, after_write.as_ref(), action)).await?;
     Ok(Json(reply?))
+}
+
+/// `GET /api/settings`: every key, its value and the layer it came from.
+async fn settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiReject> {
+    let answer = blocking(move || settings_api::read(&state)).await?;
+    answer.map(Json)
+}
+
+/// `PUT /api/settings`: write one key, and answer the settings as they now are.
+async fn put_settings(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<SettingsWriteDto>, ApiReject> {
+    let answer = blocking(move || settings_api::write(&state, &body)).await?;
+    answer.map(Json)
+}
+
+/// `GET /api/prompts/:id`: one prompt's words, its file and its state.
+async fn read_prompt(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<PromptDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::read(&state, &id)).await?;
+    answer.map(Json)
+}
+
+/// `PUT /api/prompts/:id`: store the person's words over the file.
+async fn put_prompt(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    body: Bytes,
+) -> Result<Json<PromptDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::write(&state, &id, &body)).await?;
+    answer.map(Json)
 }
 
 /// `GET /api/ws`: the same change notices, pushed.

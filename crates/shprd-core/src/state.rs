@@ -7,9 +7,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::ask::{AskId, AskKind};
 use crate::event::{
-    Actor, AgentId, CheckReport, Event, EventKind, Finding, ReportStatus, ResourceAction,
-    ResourceKind, ReviewSource, TaskId,
+    Actor, AgentId, CheckReport, Event, EventKind, FallbackAction, Finding, ProviderClass,
+    ReportStatus, ResourceAction, ResourceKind, ReviewSource, TaskId,
 };
 use crate::rules::{self, RuleError};
 use crate::scope;
@@ -25,6 +26,12 @@ pub struct RunState {
     pub agents: BTreeMap<AgentId, AgentInfo>,
     /// Escalations raised during the run, in order.
     pub escalations: Vec<Escalation>,
+    /// Asks raised during the run, keyed by task and ask id.
+    ///
+    /// The queue's files hold the same asks; the fold is what the board and
+    /// the derived status read, so an answer recorded here is the one every
+    /// view sees.
+    pub asks: BTreeMap<(TaskId, AskId), AskRecord>,
     /// Rule overrides that name no task, so they apply to the whole run.
     ///
     /// Per-task overrides live on [`Task::overrides`]; these have no task to
@@ -140,6 +147,45 @@ pub struct RunInfo {
     pub integration_branch: String,
 }
 
+/// One ask as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskRecord {
+    /// Its id, unique inside the task.
+    pub id: AskId,
+    /// The task it belongs to.
+    pub task: TaskId,
+    /// Question, permission or plan.
+    pub kind: AskKind,
+    /// What the person is asked.
+    pub text: String,
+    /// The choices a card offers, when it has any.
+    pub options: Vec<String>,
+    /// When it was raised, ms since the Unix epoch.
+    pub created_at_ms: u64,
+    /// When it stops being open, ms since the Unix epoch, when it does.
+    pub expires_at_ms: Option<u64>,
+    /// The log sequence that raised it.
+    pub raised_seq: u64,
+    /// Its answer, once one was recorded.
+    pub answer: Option<AskAnswerRecord>,
+}
+
+impl AskRecord {
+    /// Whether it still waits for an answer at `now_ms`.
+    pub fn is_open_at(&self, now_ms: u64) -> bool {
+        self.answer.is_none() && self.expires_at_ms.is_none_or(|until| until > now_ms)
+    }
+}
+
+/// One ask's answer as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskAnswerRecord {
+    /// What the person answered.
+    pub text: String,
+    /// The log sequence that recorded the answer.
+    pub seq: u64,
+}
+
 /// A task in the run plan, plus its progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
@@ -182,6 +228,12 @@ pub struct Task {
     /// head a human approved and whether it merged. `None` until a landing
     /// asks the forge for one.
     pub pr: Option<PrInfo>,
+    /// The commit a human approved for this task's landing, if one has.
+    ///
+    /// The approval lives on the task rather than only on its pull request
+    /// because a repository with no forge lands locally and has no pull request
+    /// to hang it on. A forge landing keeps the same value on [`Task::pr`].
+    pub approved_head: Option<String>,
     /// The head a landing found nothing of its own to merge at, if one did.
     ///
     /// It is the one landing outcome that moves nothing: the branch had no work
@@ -191,6 +243,37 @@ pub struct Task {
     /// same attempt again on every pass. A new attempt clears it, because fresh
     /// work is exactly what a landing has not looked at yet.
     pub nothing_to_merge: Option<String>,
+    /// What the fallback ladder already did about provider cuts, in order.
+    ///
+    /// The ladder is idempotent by reading this: a nudge or a give-up names the
+    /// cut it answers, so the same one is never acted on twice, and a backup is
+    /// a `Backup` record whether or not its process started.
+    pub fallbacks: Vec<FallbackRecord>,
+}
+
+/// One thing the fallback ladder did, as the ledger recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackRecord {
+    /// Which kind of action it was.
+    pub action: FallbackAction,
+    /// The program the action was about.
+    pub agent: AgentId,
+    /// The program that took over, for a backup.
+    pub to_agent: Option<AgentId>,
+    /// The cut the action answers.
+    pub cut: String,
+    /// What kind of provider trouble it was.
+    pub class: ProviderClass,
+    /// Why, in a few words.
+    pub reason: String,
+    /// Which try it was.
+    pub tries: u32,
+    /// Whether a backup actually started, for a backup action.
+    pub started: Option<bool>,
+    /// When the event was appended, ms since the Unix epoch.
+    pub at_ms: u64,
+    /// Sequence number of the event that recorded it.
+    pub seq: u64,
 }
 
 /// The last progress line an agent recorded for a task.
@@ -248,6 +331,14 @@ pub struct Attempt {
     pub gates: Vec<GateResult>,
     /// Reviews dispatched for this attempt, in order.
     pub reviews: Vec<ReviewRequest>,
+    /// The log sequence that started this attempt, or [`None`] for one the
+    /// fold was handed rather than grew.
+    ///
+    /// It is what tells this attempt's asks from the ones an earlier attempt
+    /// raised: an ask belongs to the attempt whose spawn came before it and
+    /// whose report came after, so a reviewer judging this attempt reads this
+    /// attempt's cards and no others.
+    pub spawn_seq: Option<u64>,
 }
 
 /// A review handed to a reviewer for an attempt.
@@ -289,6 +380,13 @@ pub struct Report {
     pub commit: Option<String>,
     /// Skills the agent used.
     pub skills_used: Vec<String>,
+    /// Where the attempt left its proof, when the worker named one.
+    ///
+    /// A proof is a real artifact — a screenshot, a command's actual output, a
+    /// test run — recorded beside the summary rather than inside it, so the
+    /// reviewer can look at what the worker says it produced while the summary
+    /// stays one plain line for the person.
+    pub proofs: Vec<String>,
 }
 
 /// The outcome of one gate against one attempt.
@@ -456,7 +554,9 @@ impl RunState {
                         dropped_reason: None,
                         last_status: None,
                         pr: None,
+                        approved_head: None,
                         nothing_to_merge: None,
+                        fallbacks: Vec::new(),
                     },
                 );
             }
@@ -481,6 +581,7 @@ impl RunState {
                         model: model.clone(),
                         worktree: worktree.clone(),
                         branch: branch.clone(),
+                        spawn_seq: Some(event.seq),
                         report: None,
                         gates: Vec::new(),
                         reviews: Vec::new(),
@@ -496,6 +597,7 @@ impl RunState {
                 changed_paths,
                 commit,
                 skills_used,
+                proofs,
                 ..
             } => {
                 // Only a completed report moves the task on to gating; a
@@ -520,6 +622,7 @@ impl RunState {
                                 .collect(),
                             commit: commit.clone(),
                             skills_used: skills_used.clone(),
+                            proofs: proofs.clone(),
                         });
                     }
                 }
@@ -535,6 +638,38 @@ impl RunState {
                     entry.last_status = Some(TaskProgress {
                         message: message.clone(),
                         progress: *progress,
+                        seq: event.seq,
+                    });
+                }
+            }
+            EventKind::AskRaised {
+                task,
+                ask,
+                ask_kind,
+                text,
+                options,
+                created_at_ms,
+                expires_at_ms,
+            } => {
+                self.asks.insert(
+                    (task.clone(), ask.clone()),
+                    AskRecord {
+                        id: ask.clone(),
+                        task: task.clone(),
+                        kind: *ask_kind,
+                        text: text.clone(),
+                        options: options.clone(),
+                        created_at_ms: *created_at_ms,
+                        expires_at_ms: *expires_at_ms,
+                        raised_seq: event.seq,
+                        answer: None,
+                    },
+                );
+            }
+            EventKind::AskAnswered { task, ask, answer } => {
+                if let Some(record) = self.asks.get_mut(&(task.clone(), ask.clone())) {
+                    record.answer = Some(AskAnswerRecord {
+                        text: answer.clone(),
                         seq: event.seq,
                     });
                 }
@@ -623,6 +758,79 @@ impl RunState {
                     && let Some(current) = entry.attempts.last_mut()
                 {
                     current.agent = to_agent.clone();
+                }
+            }
+            EventKind::Nudged {
+                task,
+                agent,
+                cut,
+                class,
+                reason,
+                tries,
+                ..
+            } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.fallbacks.push(FallbackRecord {
+                        action: FallbackAction::Nudged,
+                        agent: agent.clone(),
+                        to_agent: None,
+                        cut: cut.clone(),
+                        class: *class,
+                        reason: reason.clone(),
+                        tries: *tries,
+                        started: None,
+                        at_ms: event.at_ms,
+                        seq: event.seq,
+                    });
+                }
+            }
+            EventKind::Backup {
+                task,
+                from_agent,
+                to_agent,
+                cut,
+                class,
+                reason,
+                started,
+                ..
+            } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.fallbacks.push(FallbackRecord {
+                        action: FallbackAction::Backup,
+                        agent: from_agent.clone(),
+                        to_agent: Some(to_agent.clone()),
+                        cut: cut.clone(),
+                        class: *class,
+                        reason: reason.clone(),
+                        tries: 0,
+                        started: Some(*started),
+                        at_ms: event.at_ms,
+                        seq: event.seq,
+                    });
+                }
+            }
+            EventKind::ProviderGaveUp {
+                task,
+                agent,
+                cut,
+                class,
+                reason,
+                tries,
+                ..
+            } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    entry.fallbacks.push(FallbackRecord {
+                        action: FallbackAction::GaveUp,
+                        agent: agent.clone(),
+                        to_agent: None,
+                        cut: cut.clone(),
+                        class: *class,
+                        reason: reason.clone(),
+                        tries: *tries,
+                        started: None,
+                        at_ms: event.at_ms,
+                        seq: event.seq,
+                    });
                 }
             }
             EventKind::Escalated {
@@ -725,7 +933,12 @@ impl RunState {
                 // run's pull request: the approval names one head, and landing
                 // honours it only while that head is still the tip.
                 if let Some(entry) = self.tasks.get_mut(task) {
-                    let approved_head = entry.pr.as_ref().and_then(|pr| pr.approved_head.clone());
+                    let approved_head = entry
+                        .pr
+                        .as_ref()
+                        .and_then(|pr| pr.approved_head.clone())
+                        .or_else(|| entry.approved_head.clone());
+                    entry.approved_head = approved_head.clone();
                     entry.pr = Some(PrInfo {
                         number: *number,
                         url: url.clone(),
@@ -740,10 +953,16 @@ impl RunState {
                 number,
                 head_sha,
             } => {
-                if let Some(pr) = self.tasks.get_mut(task).and_then(|entry| entry.pr.as_mut())
-                    && pr.number == *number
-                {
-                    pr.approved_head = Some(head_sha.clone());
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    // A local landing has no pull request: the task itself
+                    // carries the approval, and a forge landing reads the same
+                    // value from its pull request.
+                    entry.approved_head = Some(head_sha.clone());
+                    if let Some(pr) = entry.pr.as_mut()
+                        && pr.number == *number
+                    {
+                        pr.approved_head = Some(head_sha.clone());
+                    }
                 }
             }
             EventKind::TaskLanded {
@@ -911,6 +1130,90 @@ mod tests {
         events.truncate(2);
         events.extend(extra);
         RunState::fold(&events)
+    }
+
+    #[test]
+    fn the_fallback_ladder_records_its_three_actions_on_the_task() {
+        let state = match fold_extra(vec![
+            ev(
+                3,
+                EventKind::Nudged {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "claude".to_string(),
+                    cut: "cut-1".to_string(),
+                    class: ProviderClass::Overloaded,
+                    reason: "Provider overloaded".to_string(),
+                    tries: 1,
+                },
+            ),
+            ev(
+                4,
+                EventKind::Backup {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    from_agent: "claude".to_string(),
+                    to_agent: "codex".to_string(),
+                    cut: "cut-2".to_string(),
+                    class: ProviderClass::Quota,
+                    reason: "Out of allowance".to_string(),
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/a".to_string(),
+                    started: true,
+                },
+            ),
+            ev(
+                5,
+                EventKind::ProviderGaveUp {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    agent: "codex".to_string(),
+                    cut: "cut-3".to_string(),
+                    class: ProviderClass::Other,
+                    reason: "Provider error".to_string(),
+                    tries: 1,
+                },
+            ),
+        ]) {
+            Ok(state) => state,
+            Err(err) => panic!("the ladder events must fold: {err}"),
+        };
+        let records = &state.tasks["a"].fallbacks;
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].action, FallbackAction::Nudged);
+        assert_eq!(records[0].agent, "claude");
+        assert_eq!(records[0].cut, "cut-1");
+        assert_eq!(records[1].action, FallbackAction::Backup);
+        assert_eq!(records[1].to_agent.as_deref(), Some("codex"));
+        assert_eq!(records[1].started, Some(true));
+        assert_eq!(records[2].action, FallbackAction::GaveUp);
+        assert_eq!(records[2].reason, "Provider error");
+    }
+
+    #[test]
+    fn a_task_gets_only_one_backup_handover() {
+        let backup = |seq: u64, to: &str| {
+            ev(
+                seq,
+                EventKind::Backup {
+                    task: "a".to_string(),
+                    attempt: 1,
+                    from_agent: "claude".to_string(),
+                    to_agent: to.to_string(),
+                    cut: "cut-2".to_string(),
+                    class: ProviderClass::Quota,
+                    reason: "Out of allowance".to_string(),
+                    worktree: "/tmp/wt".to_string(),
+                    branch: "feature/a".to_string(),
+                    started: true,
+                },
+            )
+        };
+        let folded = fold_extra(vec![backup(3, "codex"), backup(4, "pi")]);
+        assert!(matches!(
+            folded,
+            Err(RuleError::TaskAlreadyBackedUp { ref task }) if task == "a"
+        ));
     }
 
     #[test]
@@ -1355,6 +1658,7 @@ mod tests {
                     changed_paths: vec!["src/a/x.rs".to_string()],
                     commit: Some("bbb222".to_string()),
                     skills_used: Vec::new(),
+                    proofs: Vec::new(),
                 },
             ),
             ev(

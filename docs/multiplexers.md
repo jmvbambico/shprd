@@ -15,6 +15,8 @@ Status: design.
 Inside `shprd·chat`, the chat keeps 68% of the width. The right column holds
 `dagr view` on top and the remote box below it.
 
+The workspace label is derived from the repo's folder name, exactly `shprd · <folder>`; `shprd serve` creates it or reuses the one with that exact label.
+
 Your own workspaces and sessions are never created, renamed or closed by shprd.
 
 ## Launch

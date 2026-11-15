@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod approve;
+pub mod ask;
 pub mod confirm;
 pub mod dagr;
 pub mod deliver;
@@ -12,7 +13,10 @@ pub mod handoff;
 pub mod integrate;
 pub mod janitor;
 pub mod land;
+pub mod live_fallback;
+pub mod live_news;
 pub mod override_rule;
+pub mod prompts;
 pub mod readmit;
 pub mod review;
 pub mod roster;
@@ -20,6 +24,7 @@ pub mod run;
 pub mod run_lock;
 pub mod serve;
 pub mod set;
+pub mod settings;
 pub mod spawn;
 pub mod sync;
 pub mod tick;
@@ -30,7 +35,7 @@ pub mod watch;
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
-use crate::cli::{Cli, Command, DagrCommand, RunCommand, TaskVerb};
+use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, TaskVerb};
 use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
 
 /// Runs whichever verb the command line asked for.
@@ -43,6 +48,22 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Set(args)) = &cli.command {
         return set::run(args, cli.global.home.as_deref(), cli.global.repo.as_deref());
     }
+    // `settings` reads files, not a log, so it answers outside a repository
+    // too: the person's own file applies everywhere.
+    if let Some(Command::Settings { cmd }) = &cli.command {
+        let root = settings_root(cli.global.repo.as_deref());
+        return settings::run(
+            cmd,
+            cli.global.json,
+            cli.global.home.as_deref(),
+            root.as_deref(),
+        );
+    }
+    // `prompts` reads and writes files, not a log, so it answers outside a
+    // repository too.
+    if let Some(Command::Prompts { cmd }) = &cli.command {
+        return prompts::run(cmd, cli.global.json, cli.global.home.as_deref());
+    }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
         return doctor::run(args, cli.global.json, cli.global.home.as_deref());
@@ -52,7 +73,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr);
 
     match cli.command {
-        None => view::status(&ctx),
+        None => view::status(&ctx, cli.global.home.as_deref()),
         Some(Command::Run { cmd }) => match cmd {
             RunCommand::Start(args) => run::start(&ctx, &args),
             RunCommand::Finish(args) => run::finish_verb(&ctx, &args, cli.global.home.as_deref()),
@@ -61,9 +82,14 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Task { cmd }) => match cmd {
             TaskVerb::Status(args) => agent::task_status(&ctx, &args),
         },
+        Some(Command::Ask { cmd }) => match cmd {
+            AskCommand::Hook(args) => ask::hook(&args, cli.global.repo.as_deref()),
+            AskCommand::Raise(args) => ask::raise(&args, &ctx),
+            AskCommand::Install(args) => ask::install(&args, cli.global.repo.as_deref()),
+        },
         Some(Command::State) => dump(&ctx),
         Some(Command::Brief) => view::brief(&ctx),
-        Some(Command::Status) => view::status(&ctx),
+        Some(Command::Status) => view::status(&ctx, cli.global.home.as_deref()),
         Some(Command::PrBody) => view::pr_body(&ctx),
         Some(Command::Dagr { cmd }) => match cmd {
             DagrCommand::Sync => dagr::sync_verb(&ctx),
@@ -79,6 +105,13 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             cli.global.home.as_deref(),
             cli.global.repo.as_deref(),
         ),
+        // Unreachable in practice: `settings` returns above.
+        Some(Command::Settings { cmd }) => {
+            let root = settings_root(cli.global.repo.as_deref());
+            settings::run(&cmd, ctx.json, cli.global.home.as_deref(), root.as_deref())
+        }
+        // Unreachable in practice: `prompts` returns above.
+        Some(Command::Prompts { cmd }) => prompts::run(&cmd, ctx.json, None),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
         Some(Command::Watch(args)) => watch::run_verb(&ctx, &args, cli.global.home.as_deref()),
         Some(Command::Gate(args)) => fullgate::gate_verb(&ctx, &args, cli.global.home.as_deref()),
@@ -151,6 +184,8 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
         EventKind::TaskStatus { .. } => "task_status",
+        EventKind::AskRaised { .. } => "ask_raised",
+        EventKind::AskAnswered { .. } => "ask_answered",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
@@ -173,6 +208,20 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::Nudged { .. } => "nudged",
+        EventKind::Backup { .. } => "backup",
+        EventKind::ProviderGaveUp { .. } => "provider_gave_up",
         EventKind::RunFinished { .. } => "run_finished",
+    }
+}
+
+/// The repository the settings are for: `--repo`, else this checkout, else none.
+///
+/// Settings work outside a repository, so a checkout that cannot be found is
+/// not an error: only the person's own file applies then.
+fn settings_root(explicit: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    match explicit {
+        Some(repo) => Some(repo.to_path_buf()),
+        None => resolve_root(None).ok(),
     }
 }

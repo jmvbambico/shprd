@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::anyhow;
+use shprd_agents::models::AgentRef;
 use shprd_core::event::{Event, EventKind};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_git::worktree::Worktree;
 use shprd_mux::{Mux, MuxError, TabId, Workspace};
-use shprd_roster::models::AgentRef;
 
 use crate::cli::HandoffArgs;
 use crate::cmd::spawn::{self, BriefInput, Launching, Pick, Program, SpawnEnv};
@@ -31,12 +31,25 @@ pub struct HandoffRequest {
     /// The agent taking it over, as `<program>/<model>`; `None` picks the next
     /// configured worker after the outgoing one.
     pub to: Option<String>,
+    /// The role whose words the newcomer starts with; the worker's when none
+    /// is named.
+    ///
+    /// A backup handover (a provider cut the worker's turn off) names `backup`,
+    /// so the newcomer reads what a takeover means and then the task, instead of
+    /// the brief written for the program that stopped.
+    pub role: Option<String>,
     /// True when a fresh process of the outgoing agent is a valid replacement.
     ///
     /// A worker whose process died is gone; the program is not. With this set
     /// the picker may choose the same agent again (and does, before it looks
     /// elsewhere), which is the only way a one-agent roster keeps working.
     pub same_worker: bool,
+    /// The opening the newcomer reads before the attempt's own brief.
+    ///
+    /// A backup handover supplies its own text — the chat tail and the work so
+    /// far — which then stands where the usual "you are taking over" section
+    /// would; the attempt's original brief still follows it.
+    pub opening: Option<String>,
 }
 
 /// The attempt being handed over: the latest one, which must be Working.
@@ -384,10 +397,35 @@ pub fn handoff(
     let handoff_no = previous_handoffs(&events, &task.id, attempt.n) + 1;
     let brief_path = handoff_brief_path(&env.briefs_dir, &env.run, &task.id, attempt.n, handoff_no);
     let checkpoint = checkpoint(&worktree, &from)?;
+    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
+    let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
+    let settings_role = env.settings.resolve(None).role(role_id);
+    let program = spawn::program_of(env.programs.as_slice(), &to.agent)?;
+    let chosen = spawn::applied(
+        &program.spec,
+        settings_role
+            .as_ref()
+            .and_then(|role| role.perm.as_ref())
+            .map(|perm| perm.value.as_str()),
+        settings_role.as_ref().is_some_and(|role| role.fast.value),
+    );
+    // The newcomer's program decides how it raises a needs-you card.
+    let ask = spawn::AskRoute::of_harness(program.spec.asks.supported);
+    // The newcomer's words are read before the workspace and the pane are
+    // touched: a prompt that cannot be read must cost nothing.
+    let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
     let workspace = spawn::workspace_of(mux, env)?;
+    // The newcomer keeps the worktree the attempt already has, which an older
+    // build may have made without shprd's state excluded. A warning, not a
+    // failure: the hand-off is about the work, not a tidy `git status`.
+    if let Err(err) = shprd_git::worktree::ensure_state_excluded(&worktree) {
+        eprintln!(
+            "warning: could not exclude shprd's state in {}: {err}",
+            worktree.display()
+        );
+    }
     let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
-    let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let start = BriefInput {
         task,
         run: &env.run,
@@ -397,21 +435,38 @@ pub fn handoff(
         branch: &attempt.branch,
         worktree: &attempt.worktree,
         skills: &skills,
+        gates: &env.gates,
         // A handoff is the same attempt, so nothing was archived for it.
         archive: None,
+        prompt: Some(&context.prompt),
+        ask,
+        proof: context.proof,
+        settings: Some(&context.settings),
+        role: context.role.as_ref(),
+        warnings: &[],
     };
-    let brief = handoff_brief(
-        &base_brief(env, &task.id, attempt.n, &start),
-        &Transfer {
-            from: &from,
-            to: &to.agent,
-            reason: &req.reason,
-            checkpoint: &checkpoint,
-            base_branch: &env.base_branch,
-            diffstat: &stats,
-            pane_tail: pane_tail.as_deref(),
-        },
-    );
+    // A worker continuing an attempt reads the brief it was launched with; a
+    // different role reads its own words, because that brief was written for
+    // the program that stopped.
+    let base = match role_id == spawn::BRIEF_ROLE {
+        true => base_brief(env, &task.id, attempt.n, &start),
+        false => spawn::render_brief(&start),
+    };
+    let brief = match &req.opening {
+        Some(opening) => format!("{opening}\n\n{base}"),
+        None => handoff_brief(
+            &base,
+            &Transfer {
+                from: &from,
+                to: &to.agent,
+                reason: &req.reason,
+                checkpoint: &checkpoint,
+                base_branch: &env.base_branch,
+                diffstat: &stats,
+                pane_tail: pane_tail.as_deref(),
+            },
+        ),
+    };
     spawn::write_brief(&brief_path, &brief)?;
     // Two agents in one worktree would both write the same files, so the
     // hand-off stops here: the checkpoint commit is already the record of the
@@ -446,6 +501,7 @@ pub fn handoff(
         &workspace,
         &Launching {
             pick: &to,
+            applied: &chosen,
             task: &task.id,
             effort: None,
             brief: &brief,
@@ -575,7 +631,9 @@ pub fn handoff_verb(ctx: &Ctx, args: &HandoffArgs, home: Option<&Path>) -> Resul
         task: args.task.clone(),
         reason: args.reason.clone(),
         to: args.to.clone(),
+        role: None,
         same_worker: false,
+        opening: None,
     };
     let report = handoff(&mux, &env, &request)?;
     if ctx.json {
@@ -606,12 +664,12 @@ mod tests {
     use std::process::Command;
     use std::time::Duration;
 
+    use shprd_agents::spec::HarnessSpec;
     use shprd_core::config::Skills;
     use shprd_core::event::Actor;
     use shprd_core::state::TaskStatus;
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
-    use shprd_roster::spec::HarnessSpec;
     use tempfile::TempDir;
 
     use crate::cmd::spawn::fault::{Fault, FlakyMux};
@@ -736,6 +794,9 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                prompts_dir: shprd_core::prompts::prompts_dir(&self.home.path().join(".config")),
+                home: self.home.path().to_path_buf(),
+                settings: shprd_core::settings::Loaded::default(),
                 run: "t1".to_string(),
                 base_branch: "integration/m5".to_string(),
                 repo_name: self.repo_name(),
@@ -751,6 +812,9 @@ project_dirs = []
                     workers: vec!["tdd".to_string()],
                     ..Skills::default()
                 },
+                gates: vec!["cargo test --workspace".to_string()],
+                catalogs: std::collections::BTreeMap::new(),
+                data_dir: self.home.path().to_path_buf(),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
@@ -785,7 +849,9 @@ project_dirs = []
             task: "T1".to_string(),
             reason: "the agent hit its limit".to_string(),
             to: to.map(str::to_string),
+            role: None,
             same_worker: false,
+            opening: None,
         }
     }
 
@@ -822,6 +888,39 @@ project_dirs = []
             report.brief.to_string_lossy().ends_with("T1-a1-h1.md"),
             "{:?}",
             report.brief
+        );
+    }
+
+    #[test]
+    fn a_backup_hand_off_uses_the_backup_roles_words() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.env(&ctx, &["sh", "pi"]);
+        let mux = mux_with_workspace(&scratch);
+        seed(&mux, &env);
+        let request = HandoffRequest {
+            task: "T1".to_string(),
+            reason: "the provider cut sh's turn off".to_string(),
+            to: Some("pi".to_string()),
+            role: Some("backup".to_string()),
+            same_worker: false,
+            opening: Some("<shprd-backup>context</shprd-backup>".to_string()),
+        };
+        let report = handoff(&mux, &env, &request).unwrap_or_else(|err| panic!("{err}"));
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        // The backup role's shipped words and a freshly rendered task, not the
+        // brief the stopped worker was launched with, with the ladder's
+        // takeover context before both.
+        assert!(
+            brief.contains("You are taking over one shprd task"),
+            "the backup role's prompt is in the brief: {brief}"
+        );
+        assert!(brief.contains("<shprd-backup>"), "{brief}");
+        assert!(brief.contains("# T1 Hand a task over"), "{brief}");
+        assert!(brief.contains("## Your settings"), "{brief}");
+        assert!(
+            brief.contains("- Program: pi (this task)"),
+            "the block names the program that took over: {brief}"
         );
     }
 

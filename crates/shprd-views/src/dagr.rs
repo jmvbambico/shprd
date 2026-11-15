@@ -473,6 +473,8 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::Spawned { .. } => "spawned",
         EventKind::Reported { .. } => "reported",
         EventKind::TaskStatus { .. } => "task_status",
+        EventKind::AskRaised { .. } => "ask_raised",
+        EventKind::AskAnswered { .. } => "ask_answered",
         EventKind::GatePassed { .. } => "gate_passed",
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
@@ -495,6 +497,9 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::WatchLaunched { .. } => "watch_launched",
         EventKind::OrchestratorNotified { .. } => "orchestrator_notified",
         EventKind::BaseSynced { .. } => "base_synced",
+        EventKind::Nudged { .. } => "nudged",
+        EventKind::Backup { .. } => "backup",
+        EventKind::ProviderGaveUp { .. } => "provider_gave_up",
         EventKind::RunFinished { .. } => "run_finished",
     }
 }
@@ -506,6 +511,8 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::Spawned { task, .. }
         | EventKind::Reported { task, .. }
         | EventKind::TaskStatus { task, .. }
+        | EventKind::AskRaised { task, .. }
+        | EventKind::AskAnswered { task, .. }
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
@@ -513,6 +520,9 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::TaskPrOpened { task, .. }
         | EventKind::TaskApproved { task, .. }
         | EventKind::TaskLanded { task, .. }
+        | EventKind::Nudged { task, .. }
+        | EventKind::Backup { task, .. }
+        | EventKind::ProviderGaveUp { task, .. }
         | EventKind::HandedOff { task, .. } => Some(task),
         EventKind::Escalated { task, .. } => task.as_deref(),
         _ => None,
@@ -795,6 +805,7 @@ mod tests {
             changed_paths: vec![path.to_string()],
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         }
     }
 

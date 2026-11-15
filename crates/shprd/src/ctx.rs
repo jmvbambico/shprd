@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use shprd_core::event::{Actor, Event, EventKind};
-use shprd_core::log::{Clock, EventLog, SystemClock};
+use shprd_core::log::{AppendError, Clock, EventLog, SystemClock};
 use shprd_core::rules::RuleError;
 use shprd_core::state::RunState;
 use shprd_git::worktree::Layout;
@@ -19,6 +19,18 @@ const HOME_ENV: &str = "SHPRD_HOME";
 /// Environment variable naming the repository root, for a caller whose working
 /// directory is not inside it — a reviewer's packet folder, for one.
 const REPO_ENV: &str = "SHPRD_REPO";
+
+/// Environment variable naming the config home, which wins over
+/// `<home>/.config`.
+const CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+
+/// Environment variable naming the state home, which wins over
+/// `<home>/.local/state`.
+const STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+
+/// Environment variable naming the data home, which wins over
+/// `<home>/.local/share`.
+const DATA_HOME_ENV: &str = "XDG_DATA_HOME";
 
 /// Exit code for a command a transition rule refused.
 pub const EXIT_REFUSED: u8 = 2;
@@ -145,15 +157,33 @@ impl Ctx {
 
     /// Checks `kind` against the current state, then appends it.
     ///
-    /// A refused event is never written. Returns the appended event.
+    /// A refused event is never written. The check runs with the log's lock
+    /// held ([`EventLog::append_checked`]), so two writers that would both pass
+    /// a check against the same state cannot both write: the second sees the
+    /// first's event and is refused rather than corrupting a log that must
+    /// fold.
     pub fn commit(&self, kind: EventKind) -> Result<Event, CliError> {
+        // The first check is the cheap one, against the log as it stands: a
+        // refused verb must leave no log file behind, and opening one to ask
+        // would create it. The second, under the lock, is the one that makes
+        // two writers safe.
         self.check(&kind)?;
         let clock = SystemClock;
         let mut log = EventLog::open(&self.log_path)
             .map_err(|err| CliError::other(anyhow!(err).context("opening the event log")))?;
+        let actor = self.actor.clone();
+        let checked = kind.clone();
         let event = log
-            .append(self.actor.clone(), kind, &clock)
-            .map_err(|err| CliError::other(anyhow!(err).context("appending to the event log")))?;
+            .append_checked(actor.clone(), kind, &clock, move |events| {
+                let state = RunState::fold(events)?;
+                state.check_as(&actor, &checked, SystemClock.now_ms())
+            })
+            .map_err(|err| match err {
+                AppendError::Refused(refused) => CliError::Refused(refused),
+                AppendError::Log(err) => {
+                    CliError::other(anyhow!(err).context("appending to the event log"))
+                }
+            })?;
         Ok(event)
     }
 }
@@ -162,7 +192,20 @@ impl Ctx {
 ///
 /// The env var exists because a command run outside the repository still has to
 /// name it: asking git only works when the working directory is inside one.
+/// Whatever names the root — the flag, the variable or the working directory —
+/// a linked git worktree resolves to the repository it was cut from, because
+/// that is where the run's log, config and worktrees live; see [`run_repo`].
 pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
+    Ok(run_repo(&resolve_checkout(explicit)?))
+}
+
+/// Resolves the checkout the caller works in, without leaving a worktree.
+///
+/// `--repo`, then `$SHPRD_REPO`, then the git top level of the working
+/// directory. A verb that writes into the checkout it was pointed at —
+/// `ask install` writes a program's hook there — needs the worktree itself, so
+/// it takes this rather than [`resolve_root`].
+pub fn resolve_checkout(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
     let named = explicit.map(|path| path.to_path_buf()).or_else(|| {
         std::env::var_os(REPO_ENV)
             .filter(|value| !value.is_empty())
@@ -172,6 +215,76 @@ pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
         Some(path) => Ok(path),
         None => git_top_level(),
     }
+}
+
+/// The repository a checkout belongs to, with a linked worktree's main worktree
+/// in place of the worktree itself.
+///
+/// A worker is launched with `$SHPRD_REPO` naming its own worktree, and its
+/// working directory is that worktree too, so both resolve there. The run's log
+/// is not there: it lives in the repository the worktree was cut from, whose
+/// `.git` the worktree's `.git` file points at. `git rev-parse
+/// --git-common-dir` names that `.git` and one parent step is the repository, so
+/// a `shprd` run from a worktree reads and writes the same run the service does.
+///
+/// Anything that is not a linked worktree — a main worktree, a plain directory,
+/// a path git refuses — is returned as it came.
+fn run_repo(checkout: &Path) -> PathBuf {
+    // A main worktree holds its own `.git` directory and a plain directory holds
+    // none; only a linked worktree (or a submodule, which git answers for below)
+    // holds the `.git` file this has to follow.
+    let git = checkout.join(".git");
+    if !git.is_file() {
+        return checkout.to_path_buf();
+    }
+    let Ok(common) = git_common_dir(checkout) else {
+        return checkout.to_path_buf();
+    };
+    // A linked worktree's common directory is `<repo>/.git`; a submodule's is
+    // `<repo>/.git/modules/<name>`, which names no repository of its own.
+    match common.file_name().and_then(|name| name.to_str()) {
+        Some(".git") => common
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| checkout.to_path_buf()),
+        _ => checkout.to_path_buf(),
+    }
+}
+
+/// Asks git for the directory a checkout's common git data lives in.
+///
+/// The answer is relative to the directory git ran in, which is `checkout`.
+fn git_common_dir(checkout: &Path) -> Result<PathBuf, CliError> {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(checkout)
+        .args(["rev-parse", "--git-common-dir"]);
+    let output = shprd_core::spawn::output(&mut command)
+        .context("running `git rev-parse --git-common-dir`")
+        .map_err(CliError::other)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::other(anyhow!(
+            "{} is not in a git repository: {}",
+            checkout.display(),
+            stderr.trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::other(anyhow!(
+            "git reported no common directory for {}",
+            checkout.display()
+        )));
+    }
+    let common = PathBuf::from(trimmed);
+    Ok(if common.is_absolute() {
+        common
+    } else {
+        checkout.join(common)
+    })
 }
 
 /// Asks git for the top level of the current working directory.
@@ -214,6 +327,58 @@ pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
     }
 }
 
+/// One environment variable's value, with an empty one read as unset.
+///
+/// This is the binary's only way of reading the variables below, so the rule —
+/// "the environment is read once, at the edge, and carried in as a value" —
+/// holds for every command: nothing in `cmd/`, and no library, looks one up for
+/// itself.
+fn env_value(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+/// Resolves the configuration root: `$XDG_CONFIG_HOME`, else `<home>/.config`.
+///
+/// It is where the person's prompts live, and the rule is the XDG one: a set
+/// variable wins outright, and an empty one is unset. It is resolved here, once,
+/// rather than in [`shprd_core::prompts`], so a test that builds its own home
+/// keeps its prompts there whatever the process's own XDG settings say.
+pub fn resolve_config_home(home: &Path) -> PathBuf {
+    shprd_core::prompts::config_home(home, env_value(CONFIG_HOME_ENV).as_deref())
+}
+
+/// Resolves the state home: `$XDG_STATE_HOME`, else `<home>/.local/state`.
+///
+/// The service's discovery files and the last pass's outcome live under it. The
+/// same edge rule applies: one read here, a value everywhere else.
+pub fn resolve_state_home(home: &Path) -> PathBuf {
+    shprd_server::state_home(home, env_value(STATE_HOME_ENV).as_deref())
+}
+
+/// Resolves the data home: `$XDG_DATA_HOME`, else `<home>/.local/share`.
+pub fn resolve_data_home(home: &Path) -> PathBuf {
+    shprd_agents::harness::data_home(home, env_value(DATA_HOME_ENV).as_deref())
+}
+
+/// Resolves the harness data directory for `root`: `$SHPRD_DATA_DIR`, else
+/// `<root>/data`, else the packaged install's copy, else the data home's.
+///
+/// `root` is the repository the caller works in, when it has one. Read here, at
+/// the edge, so a test that names its own home never finds the developer's
+/// install, and a run of the test suite can never depend on the machine's XDG
+/// directories.
+pub fn resolve_data_dir(root: Option<&Path>) -> Result<PathBuf, CliError> {
+    let explicit = env_value(shprd_agents::harness::DATA_ENV).map(PathBuf::from);
+    let home = resolve_home(None)?;
+    let data_home = resolve_data_home(&home);
+    shprd_agents::harness::data_dir(root, explicit.as_deref(), &data_home).ok_or_else(|| {
+        CliError::other(anyhow!(
+            "no harness data directory: set {} to a directory holding `harness/`",
+            shprd_agents::harness::DATA_ENV
+        ))
+    })
+}
+
 /// Resolves the layout shprd's git state lives in, with `namespace` as the
 /// branch prefix and archive namespace.
 ///
@@ -249,5 +414,103 @@ pub fn parse_actor(raw: &str) -> Result<Actor, CliError> {
                 "unknown actor {other:?}: expected engine, orchestrator, human or agent:<ID>"
             ))),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::run_repo;
+
+    /// Runs git in `dir`, asserting it succeeded, and returns its stdout.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Whether git is on this machine; without it these tests have nothing to
+    /// ask, and a skip is honest.
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    /// A repository with one commit, and the temp directory that keeps it.
+    fn repo() -> Option<(TempDir, PathBuf)> {
+        if !git_available() {
+            eprintln!("skipped: git is not on PATH");
+            return None;
+        }
+        let temp = TempDir::new().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.name", "shprd tests"]);
+        git(&root, &["config", "user.email", "tests@example.invalid"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "one\n").expect("write");
+        git(&root, &["add", "--", "a.txt"]);
+        git(&root, &["commit", "-m", "seed"]);
+        Some((temp, root))
+    }
+
+    #[test]
+    fn a_worktree_resolves_to_the_repository_it_was_cut_from() {
+        let Some((temp, root)) = repo() else {
+            return;
+        };
+        let worktree = temp.path().join("wt").join("T1");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                &worktree.display().to_string(),
+                "-b",
+                "shprd/r1/T1",
+            ],
+        );
+        assert!(
+            worktree.join(".git").is_file(),
+            "a linked worktree's .git is a file"
+        );
+
+        // git answers with the canonical path, so a `$TMPDIR` that is a symlink
+        // (`/var` on macOS) comes back resolved.
+        let expected = std::fs::canonicalize(&root).expect("canonicalize the repo");
+        assert_eq!(run_repo(&worktree), expected);
+    }
+
+    #[test]
+    fn a_main_worktree_resolves_to_itself() {
+        let Some((_temp, root)) = repo() else {
+            return;
+        };
+        assert_eq!(run_repo(&root), root);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_worktree_resolves_to_itself() {
+        let temp = TempDir::new().expect("tempdir");
+        assert_eq!(run_repo(temp.path()), temp.path());
     }
 }

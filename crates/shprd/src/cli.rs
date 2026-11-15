@@ -24,7 +24,13 @@ pub struct Cli {
 /// Options every subcommand accepts.
 #[derive(Debug, Args)]
 pub struct Global {
-    /// Repository root; defaults to the git top level of the current directory.
+    /// Repository root; defaults to `$SHPRD_REPO`, then the git top level of the
+    /// current directory.
+    ///
+    /// A linked git worktree resolves to the repository it was cut from, so a
+    /// worker's own verbs find the run from its worktree; `$SHPRD_REPO` keeps
+    /// that meaning, and a verb that writes into the checkout itself (ask
+    /// install) still uses the worktree it names.
     #[arg(long, global = true, value_name = "PATH")]
     pub repo: Option<PathBuf>,
     /// Who is acting: `engine`, `orchestrator`, `human` or `agent:<ID>`.
@@ -67,6 +73,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: TaskVerb,
     },
+    /// Asks: the hook a program runs when its agent waits for an answer.
+    Ask {
+        /// Which ask verb.
+        #[command(subcommand)]
+        cmd: AskCommand,
+    },
     /// Print the folded run state.
     State,
     /// Print the rehydration brief: what an agent needs to resume.
@@ -90,6 +102,29 @@ pub enum Command {
     /// Write a roster role into the global config, or with `--repo <PATH>`
     /// into that repository's `.shprd/config.toml`.
     Set(SetArgs),
+    /// Read and write the settings: roles, the workflow keys, their layers.
+    ///
+    /// The layers are resolved nearest first: the task's own record, your entry
+    /// for this repository, your defaults, the repository's committed
+    /// `.shprd/settings.toml` (allow-listed keys only) and then the values shprd
+    /// ships. Every value is printed with the layer it came from.
+    Settings {
+        /// Which settings verb.
+        #[command(subcommand)]
+        cmd: SettingsCommand,
+    },
+    /// Read and write the prompts the roles start with.
+    ///
+    /// The shipped words are written to `~/.config/shprd/prompts/<id>.md`
+    /// (`$XDG_CONFIG_HOME` wins) on first use. An installed file is replaced
+    /// with today's words only when it is byte-identical to a retired default,
+    /// so an unedited default never goes stale and an edit is never lost;
+    /// `reset` is the explicit way back to the shipped words.
+    Prompts {
+        /// Which prompts verb.
+        #[command(subcommand)]
+        cmd: PromptsCommand,
+    },
     /// Check this machine's setup and print what to fix.
     Doctor(DoctorArgs),
     /// Watch every working agent and hand work over when one goes dry.
@@ -122,16 +157,20 @@ pub enum Command {
     Serve(ServeArgs),
     /// Advance the run once, now: start what may start, land what may land.
     ///
-    /// This is the same pass `shprd serve` runs every `[tick] interval_secs`
-    /// (15 by default). It starts a queued task whose `deps` have all landed, up
-    /// to `[tick] max_running` (4 by default) tasks running at once, lands a task
-    /// `[land] merge` allows, records a pull request merged outside shprd, and
-    /// says once when a ready task's policy is `ask`.
+    /// This is the same pass `shprd serve` runs every `tasks.tick_secs`
+    /// (15 by default, also settable as `[tick] interval_secs`). It starts a
+    /// queued task whose `deps` have all landed, up to `tasks.max_running`
+    /// (4 by default) tasks running at once, starts a reviewer on a hand-in,
+    /// records the verdict when the reviewer's findings have settled, lands a
+    /// task `tasks.merge` allows — asked about the branch the landing writes —
+    /// records a pull request merged outside shprd, and says once when a ready
+    /// task's policy is `ask`.
     ///
     /// `--once` spells out that this invocation is one pass; the verb never
     /// loops. With `--json` it prints one document, `{"steps": [...]}`, each step being
     /// `{action, task, ok, detail, seq?}` where `action` is one of `start`,
-    /// `land`, `mark_landed`, `needs_you` and `seq` is the log line it appended
+    /// `review`, `verdict`, `land`, `mark_landed`, `needs_you`, `nudge`,
+    /// `backup` or `give_up`, and `seq` is the log line it appended
     /// when it appended one. Without `--json` it prints one line per action, or
     /// `ok nothing to advance` when the pass found nothing to do.
     ///
@@ -229,6 +268,10 @@ pub struct ServeArgs {
     ///
     /// The port a service really bound is written to `service.json` in the
     /// state directory, so a client reads it there rather than guessing.
+    ///
+    /// Every pass's failed step is logged on stderr at the level `SHPRD_LOG`
+    /// sets — `warn` by default, or `info`, `debug`, or a per-target form such
+    /// as `shprd_server=debug`.
     #[arg(long, value_name = "PORT", default_value_t = 0)]
     pub port: u16,
 }
@@ -345,6 +388,99 @@ pub struct ManyAgents {
     pub agents: Vec<String>,
 }
 
+/// Settings verbs.
+#[derive(Debug, Subcommand)]
+pub enum SettingsCommand {
+    /// Print every key, its value and the layer it came from.
+    Show(SettingsShowArgs),
+    /// Print one key's value and where it came from.
+    Get(SettingsGetArgs),
+    /// Set one key: your own default, or this repository's entry with `--for-repo`.
+    Set(SettingsSetArgs),
+    /// Remove one key, so it inherits again.
+    Unset(SettingsUnsetArgs),
+}
+
+/// Arguments for `settings show`.
+#[derive(Debug, Args)]
+pub struct SettingsShowArgs {
+    /// Resolve for this task: the agent its own newest attempt ran is the
+    /// nearest layer.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `settings get`.
+#[derive(Debug, Args)]
+pub struct SettingsGetArgs {
+    /// The key, e.g. `tasks.merge` or `roles.worker.agent`. The names the old
+    /// config file used (`tick.max_running`, `janitor.archive_days`, ...) are
+    /// accepted too.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// Resolve for this task.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `settings set`.
+#[derive(Debug, Args)]
+pub struct SettingsSetArgs {
+    /// The key, e.g. `roles.reviewer.agent` or `tasks.max_running`.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// The value. Lists are items separated by commas, switches are
+    /// `true`/`false` (or `on`/`off`), and everything else is taken as written.
+    #[arg(value_name = "VALUE")]
+    pub value: String,
+    /// Write this repository's entry instead of your own defaults.
+    ///
+    /// The entry is keyed by the repository folder's name; a repository's
+    /// committed `.shprd/settings.toml` is not written from here, because
+    /// changing it is a commit in that repository.
+    #[arg(long = "for-repo")]
+    pub for_repo: bool,
+    /// Refused: a task's own settings come from its attempts in the run log.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Arguments for `settings unset`.
+#[derive(Debug, Args)]
+pub struct SettingsUnsetArgs {
+    /// The key to remove.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// Remove it from this repository's entry instead of your own defaults.
+    #[arg(long = "for-repo")]
+    pub for_repo: bool,
+    /// Refused: a task's own settings come from its attempts in the run log.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+}
+
+/// Prompts verbs.
+#[derive(Debug, Subcommand)]
+pub enum PromptsCommand {
+    /// Print every prompt, its state and the file it is stored in.
+    List,
+    /// Print one prompt's words.
+    Show(PromptIdArgs),
+    /// Print the file one prompt is stored in, writing it first on first use.
+    Path(PromptIdArgs),
+    /// Put the shipped words back over whatever the file holds.
+    Reset(PromptIdArgs),
+}
+
+/// Arguments naming one prompt.
+#[derive(Debug, Args)]
+pub struct PromptIdArgs {
+    /// The prompt: `assistant` (the coordinator's, also `coordinator`),
+    /// `worker`, `reviewer`, `backup`, or the id of a prompt of your own.
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
 /// Arguments for `doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
@@ -435,6 +571,117 @@ pub enum TaskCommand {
     /// The same verb as `shprd agent report`; this is the spelling a worker's
     /// brief uses.
     Report(ReportArgs),
+}
+
+/// The ask verbs.
+#[derive(Debug, Subcommand)]
+pub enum AskCommand {
+    /// Write one ask from a program's hook payload and wait for its answer.
+    ///
+    /// The payload is JSON on stdin, in the shape Claude Code and Codex send to
+    /// a `PermissionRequest` hook. Nothing is printed on timeout or on any
+    /// error: the hook never decides by itself.
+    Hook(AskHookArgs),
+    /// Raise one ask yourself, for a program whose CLI has no ask hook.
+    ///
+    /// This is the agent-facing form: it writes the card into the run's queue,
+    /// records it in the ledger and blocks until the person answers, then
+    /// prints the answer on stdout for the agent to carry on with. A timeout
+    /// prints nothing, leaves the card open and exits non-zero, because nobody
+    /// answered. A worker's brief names this verb only for a program whose
+    /// harness says it has no ask hook (`[asks] supported = false`).
+    Raise(AskRaiseArgs),
+    /// Write a program's ask hook into a task's worktree-local config file.
+    ///
+    /// The target is the program's own project file — Claude Code's
+    /// `.claude/settings.local.json`, Codex's `.codex/hooks.json` plus
+    /// `.codex/config.toml` — never the person's global config. A program with
+    /// no hook of its own (pi, opencode) is left untouched, and the board falls
+    /// back to reading its screen.
+    Install(AskInstallArgs),
+}
+
+/// Arguments for `ask raise`.
+#[derive(Debug, Args)]
+pub struct AskRaiseArgs {
+    /// What kind of ask this is: a question, a permission or a plan.
+    #[arg(long, value_enum, value_name = "KIND", default_value = "question")]
+    pub kind: AskKindArg,
+    /// What the person is asked, in one sentence naming what you need and why.
+    #[arg(long, value_name = "TEXT")]
+    pub text: String,
+    /// A choice the card offers. Repeat for two to four, your recommendation
+    /// first. A permission or plan with no choices offers Allow and Deny.
+    #[arg(long = "option", value_name = "LABEL")]
+    pub options: Vec<String>,
+    /// How long to wait for an answer, in seconds.
+    ///
+    /// Defaults to 1800 seconds. A timeout prints nothing on stdout, leaves the
+    /// card open and exits non-zero: nothing is decided on the person's behalf.
+    #[arg(long = "timeout-secs", value_name = "SECS")]
+    pub timeout_secs: Option<u64>,
+    /// The task the ask belongs to; normally `$SHPRD_TASK` inside a worker's
+    /// worktree.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+    /// The ask's id; one is made when it is omitted.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
+}
+
+/// Arguments for `ask install`.
+#[derive(Debug, Args)]
+pub struct AskInstallArgs {
+    /// The program whose hook is installed: `claude`, `codex`, and so on.
+    #[arg(long, value_name = "PROGRAM", default_value = "claude")]
+    pub program: String,
+    /// The task's worktree, whose config file gets the hook. Defaults to the
+    /// working directory.
+    #[arg(long, value_name = "DIR")]
+    pub worktree: Option<PathBuf>,
+    /// Where the hook script goes. Defaults to `<worktree>/.shprd/ask-hook.sh`.
+    #[arg(long, value_name = "PATH")]
+    pub hook: Option<PathBuf>,
+}
+
+/// What kind of ask a flag names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AskKindArg {
+    /// A question the agent asks and waits on.
+    Question,
+    /// Permission to run a tool.
+    Permission,
+    /// A plan to approve.
+    Plan,
+}
+
+/// Arguments for `ask hook`.
+#[derive(Debug, Args)]
+pub struct AskHookArgs {
+    /// The program whose hook is calling: `claude`, `codex`, and so on.
+    #[arg(long, value_name = "PROGRAM", default_value = "claude")]
+    pub program: String,
+    /// How long to wait for an answer, in seconds.
+    ///
+    /// Defaults to the harness's ask timeout, or 1800 seconds. A test uses a
+    /// short one; a timeout prints nothing, as the program's own prompt stays.
+    #[arg(long = "timeout-secs", value_name = "SECS")]
+    pub timeout_secs: Option<u64>,
+    /// The task the ask belongs to; normally `$SHPRD_TASK` inside the worktree.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+    /// The ask's kind, when the payload is not a program's hook shape.
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub kind: Option<AskKindArg>,
+    /// What the person is asked, when the payload is not a program's hook shape.
+    #[arg(long, value_name = "TEXT")]
+    pub text: Option<String>,
+    /// A choice a card offers. Repeat for more than one.
+    #[arg(long = "option", value_name = "LABEL")]
+    pub options: Vec<String>,
+    /// The ask's id; one is made when it is omitted.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
 }
 
 /// Agent-callable task verbs.
@@ -611,6 +858,14 @@ pub struct ReportArgs {
     /// Skill the agent used; repeatable.
     #[arg(long = "skill-used", value_name = "SKILL")]
     pub skills_used: Vec<String>,
+    /// Where the attempt left its proof — a screenshot, a command's real
+    /// output, a test run; repeatable.
+    ///
+    /// The proof path belongs here, never in `--summary`: the summary is one
+    /// plain line for the person, and a path there reads as jargon. The
+    /// reviewer sees every proof in the packet it checks the work against.
+    #[arg(long = "proof", value_name = "PATH")]
+    pub proofs: Vec<String>,
 }
 
 /// Arguments for `agent gate`.

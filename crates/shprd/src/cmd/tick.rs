@@ -9,9 +9,12 @@
 //!
 //! ```json
 //! {
+//!   "run": "m9",                      // the run it advanced, when there is one
 //!   "steps": [
 //!     {
-//!       "action": "start",            // start | land | mark_landed | needs_you
+//!       "action": "start",            // start | review | verdict | land
+//!                                     // | mark_landed | needs_you | send_back
+//!                                     // | escalate | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
 //!       "detail": "started T1 attempt 1 with claude in ...",
@@ -21,17 +24,30 @@
 //! }
 //! ```
 //!
-//! Without it, one line per action. A pass whose steps all worked exits 0; one
-//! that could not read the run exits 1. A step that failed is printed and stays
-//! in the report — it never stops the other steps, so it is not the verb's own
-//! failure.
+//! A pass that told the coordinator something carries it too, one entry per
+//! space, with the lines that were typed into its pane:
+//!
+//! ```json
+//! { "steps": [], "news": [{ "space": "shprd", "lines": ["<shprd-news …>…"] }] }
+//! ```
+//!
+//! A repository with no remote, or no forge, lands its tasks on the run's
+//! integration branch in shprd's own worktree instead of through a pull
+//! request; the policy is the same one a forge landing reads.
+//!
+//! Without JSON, one line per action and one per told line. A pass whose steps
+//! all worked exits 0; one that could not read the run exits 1. A step that
+//! failed is printed and stays in the report — it never stops the other steps,
+//! so it is not the verb's own failure.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use shprd_core::config;
+use shprd_core::event::Actor;
 use shprd_git::forge::{Forge, GhForge};
-use shprd_server::{Starter, TickReport, Worker};
+use shprd_server::{NewsDesk, Starter, TickReport, Worker};
 
 use crate::cli::TickArgs;
 use crate::ctx::{CliError, Ctx, resolve_home};
@@ -104,17 +120,128 @@ pub(crate) fn worker_with_hub(
         let spawn_ctx = Ctx::new(repo.to_path_buf(), spawn_actor.clone(), false, true);
         crate::cmd::agent::start_for_tick(&spawn_ctx, &spawn_home, task)
     });
+    // The engine starts the reviewer on a hand-in, as `shprd agent review` does:
+    // the closure is that verb's own `review()`, so the cross-vendor rule, the
+    // packet, the brief and the kickoff cannot drift between the two callers. A
+    // pass plans a review step only when the settings name a reviewer (the
+    // service asks on every pass) and the caller is not record-only.
+    let review_home = home.to_path_buf();
+    let review_actor = actor.clone();
+    let review: Option<shprd_server::Reviewer> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str| {
+            let review_ctx = Ctx::new(repo.to_path_buf(), review_actor.clone(), false, true);
+            crate::cmd::review::review_for_tick(&review_ctx, &review_home, task)
+        }) as shprd_server::Reviewer
+    });
+    // A verdict closes the reviewer's tab, and the tab belongs to the host, so a
+    // pass that decides a review calls the same `review::close_reviewer` the
+    // verb does. A record-only pass has no tabs at all.
+    let close_home = home.to_path_buf();
+    let close_reviewer: Option<shprd_server::ReviewCloser> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str, attempt: u32| {
+            let (run, briefs) = run_and_briefs(repo, &close_home)?;
+            crate::cmd::review::close_reviewer(
+                &crate::cmd::spawn::real_mux(),
+                &briefs,
+                &run,
+                task,
+                attempt,
+            )
+            .map_err(|err| err.to_string())
+        }) as shprd_server::ReviewCloser
+    });
+    // A landing closes the worker's tab, for the same reason and through the same
+    // one path `shprd agent integrate` uses: the records beside the briefs are
+    // the only tabs in reach, and a landed task cannot come back to one. A
+    // record-only pass has no tabs at all.
+    let close_worker_home = home.to_path_buf();
+    let close_worker: Option<shprd_server::WorkerCloser> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path, task: &str| {
+            let (run, briefs) = run_and_briefs(repo, &close_worker_home)?;
+            crate::cmd::spawn::close_worker(&crate::cmd::spawn::real_mux(), &briefs, &run, task)
+                .map_err(|err| err.to_string())
+        }) as shprd_server::WorkerCloser
+    });
+    // The fallback ladder's host: transcript facts, sign-in probes, and the two
+    // effects it may have. A record-only pass has no tabs and no CLIs to probe,
+    // so it is not wired there.
+    let fallback: Option<shprd_server::FallbackSourceArc> = if record_only() {
+        None
+    } else {
+        let name = repo
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        ctx.state()
+            .ok()
+            .and_then(|state| state.run.map(|run| run.run_id))
+            .map(|run| {
+                std::sync::Arc::new(crate::cmd::live_fallback::LiveFallback::new(
+                    &repo, home, &run, &name,
+                )) as shprd_server::FallbackSourceArc
+            })
+    };
+    // The news' delivery: the coordinator's pane, through the host adapter. A
+    // record-only pass has no tabs to type into, so it is not wired there.
+    let news = if record_only() {
+        None
+    } else {
+        Some(NewsDesk {
+            coordinator: Arc::new(crate::cmd::live_news::LiveNews::new(Box::new(
+                crate::cmd::spawn::real_mux(),
+            ))),
+            settle_ms: settle_ms(home, &repo),
+            clock: Arc::new(shprd_core::log::SystemClock),
+        })
+    };
+    let local = crate::cmd::land::local_landing(&shprd_git::git::Git::new(&repo));
     Ok(Worker {
         repo,
         home: home.to_path_buf(),
+        state_dir: shprd_server::state_dir(&crate::ctx::resolve_state_home(home)),
         config,
         facts,
+        fallback,
         forge,
+        local,
         start,
+        review,
+        close_reviewer,
+        close_worker,
         actor,
         after_write: None,
         hub,
+        news,
     })
+}
+
+/// The run id and the briefs directory of `repo`, as a tab-closing closure needs
+/// them.
+///
+/// A tab record lives at `<briefs>/<run>/<task>-a<n>.tab`, so closing one needs
+/// both halves of its path. A log that names no run is not something either
+/// closure can act on — nothing landed, so no tab is owed a close — and it comes
+/// back as the reason the closure had nothing to do.
+fn run_and_briefs(repo: &Path, home: &Path) -> Result<(String, PathBuf), String> {
+    let ctx = Ctx::new(repo.to_path_buf(), Actor::Engine, false, true);
+    let run = ctx
+        .state()
+        .ok()
+        .and_then(|state| state.run.map(|run| run.run_id))
+        .ok_or_else(|| String::from("the run has not started"))?;
+    Ok((run, home.join(".shprd").join("briefs")))
+}
+
+/// How long a change must hold before the coordinator is told, ms.
+///
+/// It is the settings model's `tasks.news_settle_secs`, whose built-in value is
+/// Shepherdr's five seconds. A settings file that cannot be read is not a reason
+/// to lose the news, so the built-in applies then.
+fn settle_ms(home: &Path, repo: &Path) -> u64 {
+    let seconds = shprd_core::settings::Loaded::read(home, Some(repo))
+        .map(|loaded| loaded.resolve(None).tasks().news_settle_secs)
+        .unwrap_or(shprd_core::settings::NEWS_SETTLE_SECS);
+    seconds.saturating_mul(1_000)
 }
 
 /// True when the environment asks for a record-only start, in a debug build.
@@ -233,9 +360,14 @@ fn print_report(ctx: &Ctx, args: &TickArgs, report: &TickReport) {
         }
         return;
     }
-    if report.steps.is_empty() {
+    if report.steps.is_empty() && report.news.is_empty() {
         println!("ok nothing to advance");
         return;
+    }
+    for sent in &report.news {
+        for line in &sent.lines {
+            println!("ok news {}: {line}", sent.space);
+        }
     }
     for step in &report.steps {
         let mark = if step.ok { "ok" } else { "failed" };

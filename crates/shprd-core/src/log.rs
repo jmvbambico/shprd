@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Error as JsonError;
 
 use crate::event::{Actor, Event, EventKind};
+use crate::rules::RuleError;
 
 /// Wall-clock source, injectable so tests are deterministic.
 pub trait Clock {
@@ -79,6 +80,29 @@ pub enum LogError {
         /// The sequence number it actually carried.
         found: u64,
     },
+    /// The transition rules refused an event checked by
+    /// [`EventLog::append_checked`].
+    ///
+    /// [`EventLog::append`] approves every event it is given, so it never
+    /// returns this; a caller that lets the rules decide gets
+    /// [`AppendError::Refused`] instead.
+    #[error(transparent)]
+    Refused(Box<RuleError>),
+}
+
+/// Why an append that checked the log it joins wrote nothing.
+///
+/// [`EventLog::append_checked`] holds the log's lock across the check and the
+/// write, so the two cannot be split by another writer; this is what tells the
+/// caller which half failed.
+#[derive(Debug, thiserror::Error)]
+pub enum AppendError {
+    /// The transition rules refused the event, so nothing was written.
+    #[error(transparent)]
+    Refused(#[from] RuleError),
+    /// The log could not be read or written.
+    #[error(transparent)]
+    Log(#[from] LogError),
 }
 
 /// An open handle for appending to a run's event log.
@@ -131,12 +155,67 @@ impl EventLog {
     /// truncated away first, so the new event never shares a line with it.
     /// Exactly one `\n`-terminated JSON line is written and flushed to disk
     /// before returning.
+    ///
+    /// This does not check the event against the transition rules: a caller
+    /// that must not write a refused event uses [`EventLog::append_checked`],
+    /// which does, with the lock held so two processes cannot both pass.
     pub fn append(
         &mut self,
         actor: Actor,
         kind: EventKind,
         clock: &dyn Clock,
     ) -> Result<Event, LogError> {
+        match self.append_inner(
+            actor,
+            kind,
+            clock,
+            None::<fn(&[Event]) -> Result<(), RuleError>>,
+        ) {
+            Ok(Ok(event)) => Ok(event),
+            Ok(Err(refused)) => Err(LogError::Refused(Box::new(refused))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Append one event after `check` has approved it against the log it will
+    /// join, all under the log's lock.
+    ///
+    /// [`EventLog::append`] leaves a window between a caller's check and the
+    /// write: two processes that both check an event against the same state
+    /// both write it, and a log that must fold (one `ask_raised` per ask, one
+    /// run start) is then corrupt for every reader. This closes the window by
+    /// folding under the lock: the second writer sees the first writer's event
+    /// and is refused.
+    pub fn append_checked<F>(
+        &mut self,
+        actor: Actor,
+        kind: EventKind,
+        clock: &dyn Clock,
+        check: F,
+    ) -> Result<Event, AppendError>
+    where
+        F: FnOnce(&[Event]) -> Result<(), RuleError>,
+    {
+        match self.append_inner(actor, kind, clock, Some(check))? {
+            Ok(event) => Ok(event),
+            Err(refused) => Err(AppendError::Refused(refused)),
+        }
+    }
+
+    /// The one write path: lock, read, check, repair, write, unlock.
+    ///
+    /// The outer error is the log; the inner one is the check's refusal, and
+    /// an inner `Err` means nothing was written.
+    fn append_inner<F>(
+        &mut self,
+        actor: Actor,
+        kind: EventKind,
+        clock: &dyn Clock,
+        check: Option<F>,
+    ) -> Result<Result<Event, RuleError>, LogError>
+    where
+        F: FnOnce(&[Event]) -> Result<(), RuleError>,
+    {
         let file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -151,6 +230,12 @@ impl EventLog {
         })?;
 
         let outcome = read_locked(&file, &self.path)?;
+        if let Some(check) = check
+            && let Err(refused) = check(&outcome.events)
+        {
+            let _ = file.unlock();
+            return Ok(Err(refused));
+        }
         // A crash can leave a partial line behind. Reads skip it, but an append
         // would glue the new event onto it, so cut it off before writing.
         repair_torn_tail(&file, &self.path)?;
@@ -179,7 +264,7 @@ impl EventLog {
         unlocked?;
 
         self.next_seq = seq.saturating_add(1);
-        Ok(event)
+        Ok(Ok(event))
     }
 
     /// Read and validate every event in the log at `path`.
@@ -342,6 +427,7 @@ mod tests {
             changed_paths: vec![],
             commit: None,
             skills_used: vec![],
+            proofs: Vec::new(),
         }
     }
 
@@ -428,6 +514,70 @@ mod tests {
         assert_eq!(reopened.next_seq(), 4, "reopen resumes after the last seq");
         let fourth = append(&mut reopened, finished());
         assert_eq!(fourth.seq, 4, "the next append continues the log");
+    }
+
+    #[test]
+    fn two_checked_appends_of_the_same_event_leave_one() {
+        // What a check-then-append can lose: two writers (here two handles, as
+        // two processes would) fold the same state, both pass the rules, and
+        // both write an event only one of which is allowed — a log that no
+        // reader can fold. Holding the lock across the check makes the second
+        // fold the first's event and be refused.
+        let dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(err) => panic!("tempdir: {err}"),
+        };
+        let path = dir.path().join(".shprd/events.jsonl");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut writers = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let gate = gate.clone();
+            writers.push(std::thread::spawn(move || {
+                let mut log = match EventLog::open(&path) {
+                    Ok(log) => log,
+                    Err(err) => panic!("open failed: {err}"),
+                };
+                gate.wait();
+                let outcome = log.append_checked(
+                    Actor::Engine,
+                    started(),
+                    &FixedClock(1_700_000_000_000),
+                    |events| {
+                        if events
+                            .iter()
+                            .any(|event| matches!(&event.kind, EventKind::RunStarted { .. }))
+                        {
+                            return Err(RuleError::RunAlreadyStarted);
+                        }
+                        Ok(())
+                    },
+                );
+                match outcome {
+                    Ok(_) => true,
+                    Err(AppendError::Refused(RuleError::RunAlreadyStarted)) => false,
+                    Err(err) => panic!("an append failed for another reason: {err}"),
+                }
+            }));
+        }
+        let wins = writers
+            .into_iter()
+            .map(|writer| match writer.join() {
+                Ok(won) => won,
+                Err(_) => panic!("a writer panicked"),
+            })
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1, "exactly one checked writer wins");
+
+        let log = match EventLog::open(&path) {
+            Ok(log) => log,
+            Err(err) => panic!("reopen failed: {err}"),
+        };
+        let outcome = read_all(&log);
+        assert_eq!(outcome.events.len(), 1, "the refused event was not written");
+        assert_eq!(outcome.events[0].seq, 1);
+        drop(log);
     }
 
     #[test]

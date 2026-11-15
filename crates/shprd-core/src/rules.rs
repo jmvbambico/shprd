@@ -46,6 +46,12 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
+    /// A task already had its one backup handover.
+    #[error("task {task:?} already had its backup handover")]
+    TaskAlreadyBackedUp {
+        /// The task.
+        task: TaskId,
+    },
     /// The task declares no scope.
     #[error("task {task:?} has an empty scope")]
     EmptyScope {
@@ -176,6 +182,22 @@ pub enum RuleError {
         "task {task:?} attempt {attempt} already has a review verdict and cannot be reviewed again"
     )]
     ReviewDecided {
+        /// The task.
+        task: TaskId,
+        /// The attempt.
+        attempt: u32,
+    },
+    /// The attempt's review already has a verdict, so a second one is refused.
+    ///
+    /// It is [`RuleError::ReviewDecided`] for a verdict rather than a request:
+    /// two readers of one packet (a watchdog and the service's pass, a person
+    /// and the engine) both plan from a state that says the review is owed, and
+    /// only the log under its lock can tell the second of them that the first
+    /// has already decided it.
+    #[error(
+        "task {task:?} attempt {attempt} already has a review verdict: a review is decided once"
+    )]
+    ReviewAlreadyDecided {
         /// The task.
         task: TaskId,
         /// The attempt.
@@ -366,6 +388,46 @@ pub enum RuleError {
     UnopenedPullRequest {
         /// The number the event named.
         number: u64,
+    },
+    /// An ask the log never saw raised cannot be answered.
+    #[error("task {task:?} has no ask {ask:?}")]
+    UnknownAsk {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+    },
+    /// An ask already has an answer; a second one is refused.
+    #[error("ask {ask:?} of task {task:?} was already answered")]
+    AskAlreadyAnswered {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+    },
+    /// The ask timed out before anyone answered it.
+    #[error("ask {ask:?} of task {task:?} expired at {expires_at_ms}")]
+    AskExpired {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+        /// When it stopped being answerable.
+        expires_at_ms: u64,
+    },
+    /// An ask with that id was already raised for the task.
+    #[error("ask {ask:?} of task {task:?} was already raised")]
+    AskAlreadyRaised {
+        /// The task.
+        task: TaskId,
+        /// The ask.
+        ask: crate::ask::AskId,
+    },
+    /// An ask or its answer had no words.
+    #[error("task {task:?}: an ask and its answer must say something")]
+    EmptyAsk {
+        /// The task.
+        task: TaskId,
     },
     /// An approval was recorded by something that is not a human.
     #[error("{actor:?} cannot approve a pull request: only a human can")]
@@ -706,6 +768,16 @@ fn check_with(
             message,
             progress,
         } => check_task_status(state, task, message, *progress, provenance),
+        EventKind::AskRaised {
+            task,
+            ask,
+            text,
+            created_at_ms,
+            ..
+        } => check_ask_raised(state, task, ask, text, *created_at_ms, provenance),
+        EventKind::AskAnswered {
+            task, ask, answer, ..
+        } => check_ask_answered(state, task, ask, answer, now_ms, provenance),
         EventKind::TaskDropped { task, reason } => {
             check_task_dropped(state, actor, task, reason, provenance)
         }
@@ -713,6 +785,26 @@ fn check_with(
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
             check_handed_off(state, task, to_agent, now_ms, provenance)
+        }
+        // The fallback ladder acts on an agent that is already running: the
+        // task it names must be one the run still holds, and nothing else is
+        // the log's to judge. A backup may only be recorded when the same task
+        // has no backup yet, which is the once-per-task rule read where the
+        // fact is written rather than trusted to the planner.
+        EventKind::Nudged { task, .. } | EventKind::ProviderGaveUp { task, .. } => {
+            check_not_dropped(state, task, provenance)
+        }
+        EventKind::Backup { task, .. } => {
+            check_not_dropped(state, task, provenance)?;
+            if state.tasks.get(task).is_some_and(|entry| {
+                entry
+                    .fallbacks
+                    .iter()
+                    .any(|record| record.action == crate::event::FallbackAction::Backup)
+            }) {
+                return Err(RuleError::TaskAlreadyBackedUp { task: task.clone() });
+            }
+            Ok(())
         }
         EventKind::Escalated { task, .. } => match task {
             Some(task) => task_in(state, task).map(|_| ()),
@@ -871,6 +963,10 @@ fn check_approved(
 /// human's alone, it names the pull request the log holds for that task, and a
 /// pull request that already merged could not have been gated by it. Asking
 /// that the head be non-empty keeps an approval from naming nothing.
+///
+/// A local landing has no pull request, so number `0` with a head is the
+/// approval of the task itself: there is nothing to open and nothing to merge
+/// on a forge, and a human still has to say yes.
 fn check_task_approved(
     state: &RunState,
     actor: &Actor,
@@ -889,6 +985,7 @@ fn check_task_approved(
             Err(RuleError::MergedPullRequest { number })
         }
         Some(pr) if pr.number == number && !head_sha.trim().is_empty() => Ok(()),
+        None if number == 0 && !head_sha.trim().is_empty() => Ok(()),
         _ => Err(RuleError::UnopenedPullRequest { number }),
     }
 }
@@ -1237,6 +1334,75 @@ fn check_task_status(
     Ok(())
 }
 
+/// Rules for raising an ask: it names a task the run holds, is new, and says
+/// something.
+fn check_ask_raised(
+    state: &RunState,
+    task: &str,
+    ask: &str,
+    text: &str,
+    _created_at_ms: u64,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    task_in(state, task)?;
+    check_not_dropped(state, task, provenance)?;
+    if text.trim().is_empty() {
+        return Err(RuleError::EmptyAsk {
+            task: task.to_string(),
+        });
+    }
+    if state
+        .asks
+        .contains_key(&(task.to_string(), ask.to_string()))
+    {
+        return Err(RuleError::AskAlreadyRaised {
+            task: task.to_string(),
+            ask: ask.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Rules for answering an ask: the log knows it, it has no answer yet, it has
+/// not timed out, and the answer says something.
+fn check_ask_answered(
+    state: &RunState,
+    task: &str,
+    ask: &str,
+    answer: &str,
+    now_ms: u64,
+    _provenance: Provenance,
+) -> Result<(), RuleError> {
+    task_in(state, task)?;
+    let Some(record) = state.asks.get(&(task.to_string(), ask.to_string())) else {
+        return Err(RuleError::UnknownAsk {
+            task: task.to_string(),
+            ask: ask.to_string(),
+        });
+    };
+    if record.answer.is_some() {
+        return Err(RuleError::AskAlreadyAnswered {
+            task: task.to_string(),
+            ask: ask.to_string(),
+        });
+    }
+    if let Some(until) = record.expires_at_ms
+        && until <= now_ms
+    {
+        return Err(RuleError::AskExpired {
+            task: task.to_string(),
+            ask: ask.to_string(),
+            expires_at_ms: until,
+        });
+    }
+    if answer.trim().is_empty() {
+        return Err(RuleError::EmptyAsk {
+            task: task.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Rules for recording a gate outcome: it needs a completed report.
 fn check_gate(
     state: &RunState,
@@ -1294,6 +1460,15 @@ fn check_gate(
 /// with. A log written before requests carried a seq cannot answer the
 /// question, and one written before this rule holds verdicts this rule would
 /// refuse, so replay keeps them all.
+///
+/// A review is decided once per attempt. Two deciders can both plan from a state
+/// that says the review is owed — a `shprd watch` and the service's own pass, a
+/// person and the engine — and the log under its lock is the only place that can
+/// tell the second of them that the first already recorded the verdict. Without
+/// this the same packet is folded twice into two gate results, which is what the
+/// M9 gate's second run found: one `findings.json`, two `gate_passed` events.
+/// A second review of the same attempt needs a new attempt, and a fresh request
+/// on a decided attempt is refused by [`check_review_requested`] anyway.
 fn check_verdict(
     provenance: Provenance,
     state: &RunState,
@@ -1323,6 +1498,16 @@ fn check_verdict(
             });
         }
     };
+    let current = state
+        .tasks
+        .get(task)
+        .and_then(|found| found.attempts.iter().find(|current| current.n == attempt));
+    if current.is_some_and(|current| current.gates.iter().any(|gate| gate.gate == REVIEW_GATE)) {
+        return Err(RuleError::ReviewAlreadyDecided {
+            task: task.to_string(),
+            attempt,
+        });
+    }
     match latest_review(state, task, attempt) {
         Some(request)
             if request.reviewer == source.reviewer && request.seq == source.request_seq =>
@@ -1388,11 +1573,29 @@ fn check_review_requested(
     Ok(())
 }
 
+/// Whether a person accepted the newest failure of `task`.
+///
+/// It is an `integrate_after_failed_gate` override recorded after the gate that
+/// failed, which is what the rule means: a human's word that this failure may
+/// land. A failed task is `Failed` rather than `Passed`, so the acceptance is
+/// also what lets a landing look at the work at all.
+fn accepted_after_failure(task: &Task) -> bool {
+    let Some(failed) = task
+        .latest_attempt()
+        .and_then(|attempt| attempt.gates.iter().rfind(|gate| !gate.passed))
+    else {
+        return false;
+    };
+    task.overrides
+        .iter()
+        .any(|record| record.rule == INTEGRATE_AFTER_FAILED_GATE && record.seq > failed.seq)
+}
+
 /// Rules for integrating a passed task: a failed gate needs a later override.
 fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Result<(), RuleError> {
     check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
-    if found.status != TaskStatus::Passed {
+    if found.status != TaskStatus::Passed && !accepted_after_failure(found) {
         return Err(RuleError::NotPassed {
             task: task.to_string(),
             found: found.status,
@@ -1439,9 +1642,14 @@ fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Res
 /// rather than a claim someone typed.
 ///
 /// The task also has to be `Passed`: a task that failed a gate after its
-/// review is not ready, however good the review was.
+/// review is not ready, however good the review was. The one exception is a
+/// person's acceptance of that failure — an `integrate_after_failed_gate`
+/// override recorded after it — because that is the decision the rule exists
+/// for: work a reviewer rejected lands on a human's recorded word and degrades
+/// the pull request's review marker.
 pub fn ready_to_land(task: &Task) -> Result<(), RuleError> {
-    if task.status != TaskStatus::Passed {
+    let accepted = accepted_after_failure(task);
+    if task.status != TaskStatus::Passed && !accepted {
         return Err(RuleError::NotPassed {
             task: task.id.clone(),
             found: task.status,
@@ -1484,6 +1692,11 @@ pub fn ready_to_land(task: &Task) -> Result<(), RuleError> {
                 attempt: attempt.n,
             });
         }
+    }
+    // A person who accepted the failure answered the review, so there is no
+    // review requirement left to check: the hand-in above is all that is left.
+    if accepted {
+        return Ok(());
     }
     let request = attempt
         .reviews
@@ -1717,6 +1930,8 @@ fn expect_current_attempt<'a>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use crate::event::{Actor, Event, Finding, Severity};
 
@@ -1787,6 +2002,7 @@ mod tests {
                 changed_paths: strings(paths),
                 commit: Some("abc123".to_string()),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }
@@ -1804,6 +2020,7 @@ mod tests {
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }
@@ -1832,6 +2049,7 @@ mod tests {
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }
@@ -2369,6 +2587,7 @@ mod tests {
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         );
         assert!(matches!(
@@ -3540,7 +3759,9 @@ mod tests {
     ///
     /// The field defaults to `0`, which no request has, so such a verdict can
     /// never be recorded now; replay keeps it because a run's history is read,
-    /// not re-judged, exactly as a verdict without provenance is kept.
+    /// not re-judged, exactly as a verdict without provenance is kept. A second
+    /// verdict on the same attempt is refused for the reason that matters most:
+    /// the review already has one.
     #[test]
     fn a_legacy_verdict_without_a_request_seq_still_folds() {
         let mut log = reviewable();
@@ -3550,16 +3771,71 @@ mod tests {
         ));
         let state = folded(&log);
         assert_eq!(status(&state, "a"), TaskStatus::Passed);
-        // Recording the same thing now is refused: absence is a legacy reading,
-        // never a way past the rule.
+        // Recording the same thing now is refused, never accepted as a second
+        // verdict: absence is a legacy reading, never a way past the rule.
         assert!(matches!(
             state.check_as(
                 &Actor::Engine,
                 &review_gate(true, Some(provenance_for("codex/m1", 0))),
                 7_000
             ),
-            Err(RuleError::StaleReviewVerdict { .. })
+            Err(RuleError::ReviewAlreadyDecided { .. })
         ));
+    }
+
+    /// One review is decided once, whatever answers it.
+    ///
+    /// The M9 gate's second run found a `shprd watch` and the service's pass both
+    /// deciding one reviewer's packet: both plan from a state that says the
+    /// review is owed, and a second `gate_passed` answering the same request used
+    /// to be accepted. The log under its lock is the only place that can tell the
+    /// second decider the first has already recorded the verdict, so the rules
+    /// are what refuse it.
+    #[test]
+    fn a_second_verdict_for_one_attempt_is_refused() {
+        for first in [true, false] {
+            for second in [true, false] {
+                let mut log = reviewable();
+                log.push(ev(
+                    6,
+                    review_gate(first, Some(provenance_for("codex/m1", 5))),
+                ));
+                let state = folded(&log);
+                assert!(
+                    matches!(
+                        state.check_as(
+                            &Actor::Engine,
+                            &review_gate(second, Some(provenance_for("codex/m1", 5))),
+                            7_000
+                        ),
+                        Err(RuleError::ReviewAlreadyDecided { .. })
+                    ),
+                    "a {second} verdict after a {first} one must be refused"
+                );
+            }
+        }
+        // A second attempt is a new review, so it is not refused: the refusal is
+        // per attempt, not per task. A failed verdict is what sends the task back
+        // to a worker, which is what a new attempt needs.
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        log.push(spawned(7, "a", 2, "agent-1"));
+        log.push(reported(8, "a", 2, &["src/a/x.rs"]));
+        log.push(review_requested(9, "a", 2, "codex/m1", false));
+        let state = folded(&log);
+        let second = EventKind::GatePassed {
+            task: "a".to_string(),
+            attempt: 2,
+            gate: "review".to_string(),
+            findings: Vec::new(),
+            source: Some(provenance_for("codex/m1", 9)),
+        };
+        state
+            .check_as(&Actor::Engine, &second, 10_000)
+            .unwrap_or_else(|err| panic!("a new attempt's verdict was refused: {err}"));
     }
 
     /// A human's drop of task `a`, at `seq`.
@@ -3677,6 +3953,7 @@ mod tests {
                 changed_paths: strings(&["src/a/x.rs"]),
                 commit: Some("abc123".to_string()),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         );
         match state.check_as(&actor, &late.kind, 7_000) {
@@ -3942,6 +4219,59 @@ mod tests {
     }
 
     #[test]
+    fn a_human_who_accepted_a_failed_review_lets_it_land() {
+        // "Take it as it is", the second choice a spent review's card offers:
+        // the override is the person's recorded word that the failure may land,
+        // and it is what `shprd override --rule integrate_after_failed_gate`
+        // writes after the card names it.
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        let state = folded(&log);
+        assert!(matches!(
+            ready_to_land(state.tasks.get("a").expect("task a")),
+            Err(RuleError::NotPassed { .. })
+        ));
+
+        log.push(by(
+            7,
+            Actor::Human,
+            EventKind::Override {
+                task: "a".to_string(),
+                rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: "the reviewer was wrong about the batch".to_string(),
+            },
+        ));
+        let state = folded(&log);
+        ready_to_land(state.tasks.get("a").expect("task a"))
+            .unwrap_or_else(|err| panic!("the person accepted it: {err}"));
+
+        // An override recorded before the failure accepts nothing: it was about
+        // a different one.
+        let mut early = reviewable();
+        early.push(by(
+            6,
+            Actor::Human,
+            EventKind::Override {
+                task: "a".to_string(),
+                rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: "an older word".to_string(),
+            },
+        ));
+        early.push(ev(
+            7,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        let state = folded(&early);
+        assert!(matches!(
+            ready_to_land(state.tasks.get("a").expect("task a")),
+            Err(RuleError::NotPassed { .. })
+        ));
+    }
+
+    #[test]
     fn a_task_still_in_flight_is_not_ready_to_land() {
         let state = folded(&[
             started(1),
@@ -3975,5 +4305,132 @@ mod tests {
             },
         ));
         assert_eq!(status(&folded(&log), "a"), TaskStatus::Passed);
+    }
+
+    fn ask_raised(seq: u64, id: &str, ask: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AskRaised {
+                task: id.to_string(),
+                ask: ask.to_string(),
+                ask_kind: crate::ask::AskKind::Permission,
+                text: "Run: cargo test".to_string(),
+                options: vec!["Allow".to_string(), "Deny".to_string()],
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            },
+        )
+    }
+
+    fn ask_answered(seq: u64, id: &str, ask: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AskAnswered {
+                task: id.to_string(),
+                ask: ask.to_string(),
+                answer: "allow".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn an_ask_is_raised_against_a_task_the_run_holds() {
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ask_raised(3, "a", "q1"),
+        ]);
+        let record = state
+            .asks
+            .get(&("a".to_string(), "q1".to_string()))
+            .expect("the ask is in the fold");
+        assert_eq!(record.text, "Run: cargo test");
+        assert!(record.answer.is_none());
+
+        let mut log = vec![started(1), added(2, "a", &["src/a"], &[])];
+        log.push(ask_raised(3, "missing", "q1"));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::UnknownTask { .. })
+        ));
+    }
+
+    #[test]
+    fn an_ask_can_only_be_raised_once() {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ask_raised(3, "a", "q1"),
+        ];
+        log.push(ask_raised(4, "a", "q1"));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::AskAlreadyRaised { .. })
+        ));
+    }
+
+    #[test]
+    fn an_answer_to_an_unknown_ask_is_refused() {
+        let state = folded(&[started(1), added(2, "a", &["src/a"], &[])]);
+        let kind = EventKind::AskAnswered {
+            task: "a".to_string(),
+            ask: "never-raised".to_string(),
+            answer: "allow".to_string(),
+        };
+        assert!(matches!(
+            state.check_as(
+                &Actor::Agent {
+                    id: "claude".to_string()
+                },
+                &kind,
+                2_000
+            ),
+            Err(RuleError::UnknownAsk { .. })
+        ));
+    }
+
+    #[test]
+    fn an_ask_is_answered_only_once() {
+        let mut log = vec![
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            ask_raised(3, "a", "q1"),
+            ask_answered(4, "a", "q1"),
+        ];
+        let state = folded(&log);
+        assert_eq!(
+            state
+                .asks
+                .get(&("a".to_string(), "q1".to_string()))
+                .and_then(|record| record.answer.as_ref())
+                .map(|answer| answer.text.as_str()),
+            Some("allow")
+        );
+        log.push(ask_answered(5, "a", "q1"));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::AskAlreadyAnswered { .. })
+        ));
+    }
+
+    #[test]
+    fn a_question_that_says_nothing_is_refused() {
+        let mut log = vec![started(1), added(2, "a", &["src/a"], &[])];
+        log.push(ev(
+            3,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "q1".to_string(),
+                ask_kind: crate::ask::AskKind::Question,
+                text: "  ".to_string(),
+                options: Vec::new(),
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            },
+        ));
+        assert!(matches!(
+            RunState::fold(&log),
+            Err(RuleError::EmptyAsk { .. })
+        ));
     }
 }

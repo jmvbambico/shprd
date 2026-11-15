@@ -11,9 +11,11 @@
 
 use std::path::Path;
 
+use shprd_core::ask::{Ask, AskError, AskQueue};
 use shprd_core::event::{Actor, EventKind, status_line};
+use shprd_core::log::{Clock, SystemClock};
 
-use crate::dto::{Action, ActionReply, TaskDto};
+use crate::dto::{Action, ActionReply, AskDto, AskListDto, AskReply, TaskDto};
 use crate::error::ApiReject;
 use crate::hub::Hub;
 use crate::ledger::{self, CommitError, ReadError};
@@ -78,6 +80,105 @@ pub(crate) fn run(
     }
 }
 
+/// Every ask still open for the run's tasks at `now_ms`, oldest first.
+pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiReject> {
+    let (state, _) = ledger::load(repo).map_err(read_error)?;
+    let mut asks: Vec<&shprd_core::state::AskRecord> = state
+        .asks
+        .values()
+        .filter(|ask| ask.is_open_at(now_ms))
+        .collect();
+    asks.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.task.cmp(&right.task))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(AskListDto {
+        asks: asks.into_iter().map(snapshot::ask).collect(),
+    })
+}
+
+/// Answers one ask, exactly once, and records it in the log.
+///
+/// The queue file is claimed first: its atomic create-new answer is what makes
+/// two cards racing for the same ask leave one winner. The event is appended
+/// second, under the log's own lock, and if a rule refuses it the claimed
+/// answer is put back so the card can be tried again.
+pub(crate) fn answer_ask(
+    repo: &Path,
+    actor: &Actor,
+    hub: &Hub,
+    after_write: Option<&AfterWrite>,
+    task: &str,
+    ask: &str,
+    answer: &str,
+) -> Result<AskReply, ApiReject> {
+    if answer.trim().is_empty() {
+        return Err(ApiReject::bad_request(
+            "an answer needs at least one character",
+        ));
+    }
+    let queue = AskQueue::for_repo(repo);
+    let now_ms = SystemClock.now_ms();
+    let answered: Ask = queue.answer(task, ask, answer, now_ms).map_err(ask_error)?;
+    let kind = EventKind::AskAnswered {
+        task: task.to_string(),
+        ask: ask.to_string(),
+        answer: answer.to_string(),
+    };
+    let event = match ledger::commit(repo, actor, kind) {
+        Ok(event) => event,
+        Err(err) => {
+            // Nothing was written: free the ask for another attempt.
+            if let Ok(path) = queue.answer_path(task, ask) {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(commit_error(err));
+        }
+    };
+    hub.publish(event.seq);
+    if let Some(step) = after_write {
+        step.call(repo);
+    }
+    let (state, _) = ledger::load(repo).map_err(read_error)?;
+    let asked: AskDto = state
+        .asks
+        .get(&(task.to_string(), ask.to_string()))
+        .map(snapshot::ask)
+        .unwrap_or_else(|| AskDto {
+            id: answered.id,
+            task: answered.task,
+            kind: answered.kind.into(),
+            text: answered.text,
+            options: answered.options,
+            created_at_ms: answered.created_at_ms,
+            expires_at_ms: answered.expires_at_ms,
+        });
+    Ok(AskReply {
+        ok: true,
+        ask: asked,
+    })
+}
+
+/// Maps an ask-queue failure to the status a client sees.
+fn ask_error(err: AskError) -> ApiReject {
+    match &err {
+        AskError::UnknownAsk { .. } => ApiReject::new(
+            axum::http::StatusCode::NOT_FOUND,
+            crate::dto::ErrorCode::NotFound,
+            err.to_string(),
+        ),
+        AskError::AlreadyAnswered { .. } | AskError::Expired { .. } => {
+            ApiReject::refused(err.to_string())
+        }
+        AskError::InvalidName { .. } => ApiReject::bad_request(err.to_string()),
+        AskError::Io { .. } | AskError::Parse { .. } | AskError::AlreadyRaised { .. } => {
+            ApiReject::internal(err.to_string())
+        }
+    }
+}
+
 /// Appends one event and answers with the task it was about, folded again.
 ///
 /// Every arm above ends here, so a new action cannot forget the rule check, the
@@ -96,10 +197,11 @@ fn commit(
         step.call(repo);
     }
     let (state, _) = ledger::load(repo).map_err(read_error)?;
+    let now_ms = SystemClock.now_ms();
     let folded: Option<TaskDto> = task
         .as_deref()
         .and_then(|task| state.tasks.get(task))
-        .map(snapshot::task);
+        .map(|task| snapshot::task_of(&state, task, now_ms));
     Ok(ActionReply {
         ok: true,
         seq: event.seq,

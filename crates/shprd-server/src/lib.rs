@@ -1,6 +1,6 @@
 //! `shprd-server`: the service every shprd UI calls.
 //!
-//! One loopback listener, one token, five routes:
+//! One loopback listener, one token, these routes:
 //!
 //! | Route | What it is |
 //! |---|---|
@@ -8,6 +8,10 @@
 //! | `GET /api/state` | the snapshot: the fold, projected for a board |
 //! | `GET /api/changes` | long-poll for events after a sequence, `204` on timeout |
 //! | `POST /api/action` | one tab-typed envelope, run against the same log the CLI writes |
+//! | `GET /api/settings` | every settings key, its value and the layer it came from |
+//! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
+//! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
+//! | `PUT /api/prompts/:id` | the person's words, stored over that prompt's file |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
 //!
 //! Everything but health needs `Authorization: Bearer <token>` from the state
@@ -27,6 +31,7 @@ pub mod api;
 pub mod bindings;
 pub mod dto;
 pub mod error;
+pub mod pass;
 pub mod service;
 pub mod snapshot;
 pub mod tick;
@@ -35,13 +40,20 @@ pub(crate) mod actions;
 pub(crate) mod auth;
 pub mod hub;
 pub(crate) mod ledger;
+pub mod news;
+pub(crate) mod prompts;
+pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
 pub use error::{ApiReject, ServerError};
+pub use news::{Coordinator, NewsDesk, NewsSent};
+pub use pass::{FailedStep, LastPass};
 pub use service::{
-    AfterWrite, Config, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig, VERSION,
-    serve, shutdown_signal, state_dir,
+    AfterWrite, Config, PassNotice, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig,
+    VERSION, serve, shutdown_signal, state_dir, state_home,
 };
+pub use snapshot::NO_RUN_HINT;
 pub use tick::{
-    FactsSource, LiveFacts, LiveFn, SharedForge, Starter, StepReport, TickReport, Worker,
+    FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, ReviewCloser, Reviewer,
+    SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,
 };

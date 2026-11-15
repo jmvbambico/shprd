@@ -462,6 +462,7 @@ mod tests {
             changed_paths: Vec::new(),
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         })
         .map_err(failed)?;
         Ok(())

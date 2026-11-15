@@ -8,6 +8,8 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use shprd_core::ask::AskKind;
 use shprd_core::state::{RunState, TaskStatus};
 use ts_rs::TS;
 
@@ -47,6 +49,84 @@ impl From<TaskStatus> for TaskStatusDto {
             TaskStatus::Failed => Self::Failed,
             TaskStatus::Integrated => Self::Integrated,
             TaskStatus::Dropped => Self::Dropped,
+        }
+    }
+}
+
+/// The eight words a board row can show, from M8.5's status rules.
+///
+/// It is [`shprd_views::derived::DerivedStatus`] with a TypeScript type on it:
+/// the service derives it from the fold and hands it to the client beside the
+/// stored [`TaskStatusDto`], so a card and the CLI's `status` never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "DerivedStatusDto.ts")]
+pub enum DerivedStatusDto {
+    /// Added, nothing started on it.
+    ToDo,
+    /// Starts by itself at a time.
+    Scheduled,
+    /// Waits for something before it may start.
+    Queued,
+    /// An agent is on it, or the engine is finishing its work.
+    Working,
+    /// Nothing moves without the person.
+    NeedsYou,
+    /// Its agent is at rest and said ready; what is left is the person's.
+    Ready,
+    /// Its merge is under way, and nothing about it is the person's.
+    Merging,
+    /// Finished, or it never will be.
+    Done,
+}
+
+impl From<shprd_views::derived::DerivedStatus> for DerivedStatusDto {
+    fn from(status: shprd_views::derived::DerivedStatus) -> Self {
+        use shprd_views::derived::DerivedStatus;
+        match status {
+            DerivedStatus::ToDo => Self::ToDo,
+            DerivedStatus::Scheduled => Self::Scheduled,
+            DerivedStatus::Queued => Self::Queued,
+            DerivedStatus::Working => Self::Working,
+            DerivedStatus::NeedsYou => Self::NeedsYou,
+            DerivedStatus::Ready => Self::Ready,
+            DerivedStatus::Merging => Self::Merging,
+            DerivedStatus::Done => Self::Done,
+        }
+    }
+}
+
+/// Why a task reads Needs you.
+///
+/// It is [`shprd_views::derived::Need`] with a TypeScript type on it: an ask,
+/// something shprd found, an agent that went quiet, no agent left, or a
+/// provider cut whose retries are used up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "NeedKindDto.ts")]
+pub enum NeedKindDto {
+    /// Something shprd found that only the person can settle.
+    Attention,
+    /// The agent asks something: a question, a permission, a plan, a folder to
+    /// trust.
+    Asks,
+    /// The agent went quiet without saying ready.
+    Reply,
+    /// No agent is left on it.
+    Stopped,
+    /// Its provider cut it off and the retries are used up.
+    Provider,
+}
+
+impl From<shprd_views::derived::Need> for NeedKindDto {
+    fn from(need: shprd_views::derived::Need) -> Self {
+        use shprd_views::derived::Need;
+        match need {
+            Need::Attention => Self::Attention,
+            Need::Asks => Self::Asks,
+            Need::Reply => Self::Reply,
+            Need::Stopped => Self::Stopped,
+            Need::Provider => Self::Provider,
         }
     }
 }
@@ -114,6 +194,57 @@ pub struct RunDto {
     pub integration_branch: String,
 }
 
+/// One step of the last advance pass that failed.
+///
+/// It is the smallest thing that lets a board say what went wrong instead of
+/// showing an empty board: which task, which step, and the error the step was
+/// given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "FailedStepDto.ts")]
+pub struct FailedStepDto {
+    /// The task the step was about; empty when it was the pass's own failure.
+    pub task: String,
+    /// What the step was, e.g. `start`, `review`, `land`, or `pass`.
+    pub step: String,
+    /// Why it failed, one line.
+    pub error: String,
+}
+
+/// What the last advance pass did, as a board reads it.
+///
+/// A pass that fails a step goes on with the others and leaves the run where it
+/// was for that task, so the failure would otherwise be invisible: it is in the
+/// service's own output at best, and `/api/state` shows the tasks as they were.
+/// This is that pass, mirrored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "LastTickDto.ts")]
+pub struct LastTickDto {
+    /// When the pass finished, ms since the Unix epoch.
+    pub at_ms: u64,
+    /// How many steps it ran, the failed ones included.
+    pub steps: usize,
+    /// Every step that failed, in plan order.
+    pub failed: Vec<FailedStepDto>,
+}
+
+impl From<&crate::pass::LastPass> for LastTickDto {
+    fn from(last: &crate::pass::LastPass) -> Self {
+        Self {
+            at_ms: last.at_ms,
+            steps: last.steps,
+            failed: last
+                .failed
+                .iter()
+                .map(|step| FailedStepDto {
+                    task: step.task.clone(),
+                    step: step.step.clone(),
+                    error: step.error.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One task of the run plan, with its progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "TaskDto.ts")]
@@ -122,8 +253,11 @@ pub struct TaskDto {
     pub id: String,
     /// Human-readable title.
     pub title: String,
-    /// Where the task is in its lifecycle.
+    /// Where the task is in its lifecycle, as the log stores it.
     pub status: TaskStatusDto,
+    /// The word a person sees for it, from M8.5's status rules, with why it
+    /// needs them when it does.
+    pub derived: TaskDerivedDto,
     /// Repo-relative paths the task may change.
     pub scope: Vec<String>,
     /// What must be true when the task is done.
@@ -145,6 +279,28 @@ pub struct TaskDto {
     pub last_status: Option<TaskProgressDto>,
     /// Attempts made so far, in order.
     pub attempts: Vec<AttemptDto>,
+}
+
+/// One task as a person sees it: its derived word, and why it needs them.
+///
+/// The service derives it from the fold (M8.5's [`shprd_views::derived`]
+/// rules), an open ask included, so a card shows **Needs you** while an agent
+/// waits. It reads the log alone: a task whose agent went quiet without saying
+/// ready reads as Working here rather than claiming an agent stopped, since the
+/// snapshot handler has no terminal to look at (the service's own tick does).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskDerivedDto.ts")]
+pub struct TaskDerivedDto {
+    /// The eight-word status a row shows.
+    pub status: DerivedStatusDto,
+    /// Why it needs the person, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub need: Option<NeedKindDto>,
+    /// The row's second line, at most 40 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
 }
 
 /// The last progress line an agent recorded for a task.
@@ -271,6 +427,82 @@ pub struct AgentDto {
     pub dry_until_ms: Option<u64>,
 }
 
+/// What an agent is waiting for, as a card shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "AskKindDto.ts")]
+pub enum AskKindDto {
+    /// The agent asks a question and waits for an answer.
+    Question,
+    /// The agent asks permission to run a tool.
+    Permission,
+    /// The agent offers a plan and waits for approval.
+    Plan,
+}
+
+impl From<AskKind> for AskKindDto {
+    fn from(kind: AskKind) -> Self {
+        match kind {
+            AskKind::Question => Self::Question,
+            AskKind::Permission => Self::Permission,
+            AskKind::Plan => Self::Plan,
+        }
+    }
+}
+
+/// One ask still waiting for the person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AskDto.ts")]
+pub struct AskDto {
+    /// Its id, unique inside the task.
+    pub id: String,
+    /// The task it belongs to.
+    pub task: String,
+    /// Question, permission or plan.
+    pub kind: AskKindDto,
+    /// What the person is asked.
+    pub text: String,
+    /// The choices a card offers, when it has any.
+    pub options: Vec<String>,
+    /// When it was raised, ms since the Unix epoch.
+    pub created_at_ms: u64,
+    /// When it stops being open, ms since the Unix epoch, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expires_at_ms: Option<u64>,
+}
+
+/// What `GET /api/asks` answers with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AskListDto.ts")]
+pub struct AskListDto {
+    /// Every open ask, oldest first.
+    pub asks: Vec<AskDto>,
+}
+
+/// The body of `POST /api/asks/answer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AnswerAsk.ts")]
+pub struct AnswerAsk {
+    /// The task the ask belongs to.
+    pub task: String,
+    /// The ask to answer.
+    pub ask: String,
+    /// What the person answered: `allow`/`deny`, `approve`/`reject`, or their
+    /// own words for a question.
+    pub answer: String,
+}
+
+/// What answering an ask answers with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AskReply.ts")]
+pub struct AskReply {
+    /// True; a refusal answers with [`ErrorBody`] and a failure status.
+    pub ok: bool,
+    /// The ask as it now stands, with its answer.
+    pub ask: AskDto,
+}
+
 /// Something waiting on a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "NeedDto.ts")]
@@ -297,24 +529,36 @@ pub struct NeedDto {
 pub struct SnapshotDto {
     /// The log sequence this snapshot was folded up to.
     pub seq: u64,
-    /// The run's identity, once it has started.
+    /// The run's identity, once it has started; `null` before `shprd run start`.
+    #[serde(default)]
+    pub run: Option<RunDto>,
+    /// What the last advance pass did, once one has run against this
+    /// repository. A pass that failed a step is what a board shows as
+    /// "something went wrong", rather than an unchanged board.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub run: Option<RunDto>,
+    pub last_tick: Option<LastTickDto>,
+    /// What the person can do about a board that cannot advance on its own —
+    /// no run started, for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hint: Option<String>,
     /// Every task, in id order.
     pub tasks: Vec<TaskDto>,
     /// Every agent the run has seen.
     pub agents: Vec<AgentDto>,
     /// Everything waiting on a human, oldest first.
     pub needs: Vec<NeedDto>,
+    /// Every ask still waiting for the person, oldest first.
+    pub asks: Vec<AskDto>,
     /// Whether the run has finished.
     pub finished: bool,
 }
 
 impl SnapshotDto {
-    /// Folds `state` into the snapshot a board draws.
-    pub fn from_state(state: &RunState) -> Self {
-        snapshot::snapshot(state)
+    /// Folds `state` into the snapshot a board draws, as of `now_ms`.
+    pub fn from_state(state: &RunState, now_ms: u64) -> Self {
+        snapshot::snapshot(state, now_ms)
     }
 }
 
@@ -555,6 +799,205 @@ pub enum ClientMessage {
     },
 }
 
+/// The layer one settings value came from, nearest first.
+///
+/// The same names `shprd settings show` prints: `task`, `repo_entry`, `you`,
+/// `legacy`, `repo_file` and `built_in`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "SettingsSourceDto.ts")]
+pub enum SettingsSourceDto {
+    /// The task's own record.
+    Task,
+    /// The person's entry for this repository.
+    RepoEntry,
+    /// The person's own defaults.
+    You,
+    /// The keys the person's pre-M9 `config.toml` still sets.
+    Legacy,
+    /// The repository's committed `.shprd/settings.toml`.
+    RepoFile,
+    /// The values shprd ships.
+    BuiltIn,
+}
+
+/// One settings key, its value and the layer it came from.
+///
+/// `value` is a string, a number, a boolean or a list of strings, as the key
+/// takes; both it and `source` are `null` when nothing sets the key, because a
+/// settings page has to draw an unset field too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsValueDto.ts")]
+pub struct SettingsValueDto {
+    /// The key's canonical dotted name, e.g. `roles.worker.agent`.
+    pub key: String,
+    /// The value, or `null` when nothing sets it.
+    #[ts(type = "string | number | boolean | Array<string> | null")]
+    pub value: Option<Value>,
+    /// The layer that set it, or `null`.
+    #[ts(type = "SettingsSourceDto | null")]
+    pub source: Option<SettingsSourceDto>,
+}
+
+/// Every setting the service resolved, with where each value came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsDto.ts")]
+pub struct SettingsDto {
+    /// The name this repository's entry is keyed by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo: Option<String>,
+    /// Every key, in the order a settings page draws them.
+    pub values: Vec<SettingsValueDto>,
+    /// What is wrong with the resolved roles, if anything.
+    ///
+    /// Reading never refuses: a pair of settings that would not work is
+    /// reported here so the page can show it. A write of one is refused.
+    pub problems: Vec<String>,
+    /// Why the roles could not be checked at all, when they could not.
+    ///
+    /// An empty `problems` list and an unchecked one must not look alike: a
+    /// service with no harness data directory cannot tell whether a reviewer is
+    /// another vendor, so it says so here rather than showing a clean bill of
+    /// health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub not_checked: Option<String>,
+}
+
+/// One write to the settings.
+///
+/// A body without `value` removes the key, so it inherits again. `for_repo`
+/// writes this repository's entry instead of the person's own defaults. A
+/// repository's committed file is never written through the API: changing it is
+/// a commit in that repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsPutDto.ts")]
+pub struct SettingsPutDto {
+    /// The key to write, e.g. `tasks.merge`.
+    pub key: String,
+    /// The value to store, or absent to remove the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "string | number | boolean | Array<string>")]
+    pub value: Option<Value>,
+    /// Write this repository's entry instead of the person's own defaults.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_repo: bool,
+}
+
+/// One prompt, as the file on this machine holds it.
+///
+/// `state` says whether the file is exactly the words this build ships
+/// (`default`) or the person's own (`edited`); `path` is the file an editor
+/// opens, and `text` is what an agent is given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptDto.ts")]
+pub struct PromptDto {
+    /// The id the prompt is stored under.
+    pub id: String,
+    /// The file it lives in.
+    pub path: String,
+    /// Its words.
+    pub text: String,
+    /// Whether the file is the shipped default or the person's own words.
+    pub state: PromptStateDto,
+}
+
+/// Whether one prompt file is the shipped default or the person's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "PromptStateDto.ts")]
+pub enum PromptStateDto {
+    /// The file holds exactly the words this build ships.
+    Default,
+    /// The file holds the person's own words, or an older build's untracked
+    /// default.
+    Edited,
+}
+
+/// One prompt write: the words to store over the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptPutDto.ts")]
+pub struct PromptPutDto {
+    /// The role's standing words, exactly as they should be stored.
+    pub text: String,
+}
+
+/// What one write did, and the settings as they now resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SettingsWriteDto.ts")]
+pub struct SettingsWriteDto {
+    /// What happened to the key.
+    pub outcome: SettingsOutcomeDto,
+    /// The settings, resolved after the write.
+    pub settings: SettingsDto,
+}
+
+/// What one write did to the key it named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "SettingsOutcomeDto.ts")]
+pub enum SettingsOutcomeDto {
+    /// The value is now in the scope's layer.
+    Stored,
+    /// The value equals what the scope would inherit, so nothing was stored.
+    EqualToInherited,
+    /// The key was removed from the scope's layer.
+    Removed,
+    /// The key was not in the scope's layer, so there was nothing to remove.
+    WasUnset,
+}
+
+impl From<shprd_core::settings::Source> for SettingsSourceDto {
+    fn from(source: shprd_core::settings::Source) -> Self {
+        match source {
+            shprd_core::settings::Source::Task => Self::Task,
+            shprd_core::settings::Source::RepoEntry => Self::RepoEntry,
+            shprd_core::settings::Source::You => Self::You,
+            shprd_core::settings::Source::Legacy => Self::Legacy,
+            shprd_core::settings::Source::RepoFile => Self::RepoFile,
+            shprd_core::settings::Source::BuiltIn => Self::BuiltIn,
+        }
+    }
+}
+
+impl From<shprd_core::settings::WriteOutcome> for SettingsOutcomeDto {
+    fn from(outcome: shprd_core::settings::WriteOutcome) -> Self {
+        match outcome {
+            shprd_core::settings::WriteOutcome::Stored => Self::Stored,
+            shprd_core::settings::WriteOutcome::EqualToInherited => Self::EqualToInherited,
+            shprd_core::settings::WriteOutcome::Removed => Self::Removed,
+            shprd_core::settings::WriteOutcome::WasUnset => Self::WasUnset,
+        }
+    }
+}
+
+impl SettingsDto {
+    /// Project resolved settings for the API.
+    pub fn from_resolved(
+        resolved: &shprd_core::settings::Resolved,
+        repo: Option<&str>,
+        problems: Vec<String>,
+        not_checked: Option<String>,
+    ) -> Self {
+        Self {
+            repo: repo.map(str::to_owned),
+            values: resolved
+                .rows()
+                .into_iter()
+                .map(|row| SettingsValueDto {
+                    key: row.key,
+                    value: row.value.as_ref().map(shprd_core::settings::Value::to_json),
+                    source: row.source.map(SettingsSourceDto::from),
+                })
+                .collect(),
+            problems,
+            not_checked,
+        }
+    }
+}
+
 /// Every type the API exports, as `(file name, file contents)`.
 ///
 /// Order does not matter: the generator writes one file per type and takes each
@@ -570,9 +1013,14 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
     }
     Ok(vec![
         one::<TaskStatusDto>()?,
+        one::<DerivedStatusDto>()?,
+        one::<NeedKindDto>()?,
+        one::<TaskDerivedDto>()?,
         one::<ReportStatusDto>()?,
         one::<SeverityDto>()?,
         one::<RunDto>()?,
+        one::<FailedStepDto>()?,
+        one::<LastTickDto>()?,
         one::<TaskDto>()?,
         one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,
@@ -582,6 +1030,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ReviewDto>()?,
         one::<AgentDto>()?,
         one::<NeedDto>()?,
+        one::<AskKindDto>()?,
+        one::<AskDto>()?,
+        one::<AskListDto>()?,
+        one::<AnswerAsk>()?,
+        one::<AskReply>()?,
         one::<SnapshotDto>()?,
         one::<HealthDto>()?,
         one::<EventNoticeDto>()?,
@@ -592,6 +1045,15 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ErrorBody>()?,
         one::<WsMessage>()?,
         one::<ClientMessage>()?,
+        one::<SettingsSourceDto>()?,
+        one::<SettingsValueDto>()?,
+        one::<SettingsDto>()?,
+        one::<SettingsPutDto>()?,
+        one::<SettingsWriteDto>()?,
+        one::<PromptDto>()?,
+        one::<PromptStateDto>()?,
+        one::<PromptPutDto>()?,
+        one::<SettingsOutcomeDto>()?,
     ])
 }
 

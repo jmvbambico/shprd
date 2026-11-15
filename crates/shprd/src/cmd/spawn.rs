@@ -3,7 +3,10 @@
 //! Spawning is the one verb that has effects outside the log, so all of it lives
 //! in [`spawn`], which takes the [`Mux`] as a parameter: the binary hands it a
 //! real adapter, and the tests hand it a [`shprd_mux::fake::FakeMux`]. Nothing in
-//! this module reads the environment or starts a process of its own.
+//! this module reads the environment or starts a process of its own, with one
+//! exception: when an effort level has to be checked against a model, the chosen
+//! program is asked for its catalog through [`shprd_agents::adapter::catalog`],
+//! and a test injects that catalog into [`SpawnEnv::catalogs`] instead.
 //!
 //! A spawn is one attempt at one task: it picks an agent, selects the skills
 //! that attempt must load, writes the brief, creates the worktree, opens the
@@ -16,19 +19,30 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
+use shprd_agents::models::{AgentRef, Catalog};
+use shprd_agents::skills::{CompatEntry, Role as SkillRole, Verdict};
+use shprd_agents::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 use shprd_core::config::Skills;
-use shprd_core::event::{Actor, EventKind, Finding, ResourceAction, ResourceKind, Severity};
-use shprd_core::state::{GateResult, ResourceStatus, RunState, Task, TaskStatus};
+use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind};
+use shprd_core::prompts::{self, PromptRef};
+use shprd_core::settings::{
+    Key, Layer, Loaded, Resolved, ResolvedRole, RoleField, Source, Sourced, Value,
+};
+use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{AgentState, Mux};
-use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
-use shprd_roster::models::AgentRef;
-use shprd_roster::skills::{CompatEntry, Role as SkillRole, Verdict};
-use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::ctx::{CliError, Ctx};
+
+/// How long one model listing may take while a spawn decides whether to pass an
+/// effort flag.
+///
+/// The listing only feeds a warning, so a slow or absent CLI must not hold the
+/// spawn: a catalog that does not answer in time leaves the setting as it was.
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One agent CLI the spawn can launch.
 #[derive(Debug, Clone)]
@@ -52,6 +66,19 @@ pub struct SpawnEnv<'a> {
     pub layout: Layout,
     /// The directory brief files are written under, `<home>/.shprd/briefs`.
     pub briefs_dir: PathBuf,
+    /// The person's home directory, which holds their settings.
+    pub home: PathBuf,
+    /// The directory the role prompts are read from and installed into:
+    /// `<config_home>/shprd/prompts`, with `$XDG_CONFIG_HOME` winning over
+    /// `<home>/.config`.
+    ///
+    /// It is resolved once, by [`build_env`], so a spawn never reads
+    /// `$XDG_CONFIG_HOME` and a test that builds its own home keeps its prompts
+    /// there whatever the process's own XDG settings say.
+    pub prompts_dir: PathBuf,
+    /// The settings as they resolve for this repository, before a task's own
+    /// layer is added: the brief's Settings block is rendered from them.
+    pub settings: Loaded,
     /// The run this task belongs to.
     pub run: String,
     /// The branch a worktree is cut from: the run's integration branch.
@@ -64,6 +91,18 @@ pub struct SpawnEnv<'a> {
     pub workers: Vec<String>,
     /// `[skills]` from the config: the skills every worker is given.
     pub skills: Skills,
+    /// The repository's worker gate commands, from its resolved `[gates]`
+    /// config. Empty when it configures none, and then the brief says so rather
+    /// than telling the worker to run another project's gates.
+    pub gates: Vec<String>,
+    /// The model catalogs already read for this spawn, by program id. A test
+    /// injects fixtures here; on a machine the map is empty and the spawn asks
+    /// only the program it picked.
+    pub catalogs: BTreeMap<String, Catalog>,
+    /// The `data/` directory, where a program's static catalog lives. The
+    /// launched CLI is told it as `SHPRD_DATA_DIR`, so the agent's own `shprd`
+    /// finds the same harnesses the engine did.
+    pub data_dir: PathBuf,
     /// The curated skill compatibility list.
     pub compat: Vec<CompatEntry>,
     /// The environment the launched CLI would inherit.
@@ -106,6 +145,9 @@ pub struct SpawnReport {
     pub brief: PathBuf,
     /// The skills the attempt must load, in the order they were selected.
     pub skills: Vec<String>,
+    /// What the person should know about the launch: an effort level the model
+    /// cannot use, and so on. Nothing here is fatal.
+    pub warnings: Vec<String>,
     /// The attempt this spawn archived and replaced, when it was a retry.
     pub replaced: Option<Replaced>,
 }
@@ -158,11 +200,54 @@ pub fn spawn(
 ) -> Result<SpawnReport, CliError> {
     let state = env.ctx.state()?;
     let task = task_of(&state, &req.task)?;
-    let pick = choose_agent(req.agent.as_deref(), &env.workers, &env.programs)?;
+    let role = env.settings.resolve(None).role(BRIEF_ROLE);
+    // The worker role's choice comes first, then the configured workers: a
+    // person who set `roles.worker.agent` gets that program, and `--agent`
+    // still wins over both.
+    let candidates = role_candidates(role.as_ref(), &env.workers);
+    let mut pick = choose_agent(req.agent.as_deref(), &candidates, &env.programs)?;
+    if req.agent.is_none()
+        && let Some(model) = role
+            .as_ref()
+            .and_then(|role| role.model.as_ref())
+            .filter(|model| !model.value.trim().is_empty())
+    {
+        pick.model = Some(model.value.clone());
+    }
+    let effort = req
+        .effort
+        .clone()
+        .or_else(|| {
+            role.as_ref()
+                .and_then(|role| role.effort.as_ref())
+                .map(|effort| effort.value.clone())
+                .filter(|effort| !effort.trim().is_empty())
+        })
+        .filter(|effort| !effort.trim().is_empty());
+    // What the catalog says about the level decides whether the flag is passed;
+    // the setting itself stays as it was written, so the brief can say both what
+    // was asked for and why it does nothing.
+    let (launch_effort, effort_warning) =
+        effective_effort(env, &pick.agent, pick.model.as_deref(), effort.clone());
+    let warnings: Vec<String> = effort_warning.into_iter().collect();
     let attempt = task.attempts.len() as u32 + 1;
     let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
+    // What the launch applies is decided before the brief is written, because
+    // the Settings block names it.
+    let program = program_of(env.programs.as_slice(), &pick.agent)?;
+    let chosen = applied(
+        &program.spec,
+        named(role.as_ref().and_then(|role| role.perm.as_ref())),
+        role.as_ref().is_some_and(|role| role.fast.value),
+    );
+    // How this program raises a needs-you card is the harness's fact alone
+    // (`[asks] supported`), so the brief never has to know a program's name.
+    let ask = AskRoute::of_harness(program.spec.asks.supported);
+    // The role's words and the Settings block are read before anything is
+    // touched: an agent whose prompt cannot be read must cost nothing.
+    let context = brief_context(env, BRIEF_ROLE, &pick, effort.as_deref(), &chosen)?;
     let brief_path = brief_path(&env.briefs_dir, &env.run, &task.id, attempt);
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
@@ -183,7 +268,14 @@ pub fn spawn(
         branch: &branch,
         worktree: &worktree.display().to_string(),
         skills: &skills,
+        gates: &env.gates,
         archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
+        prompt: Some(&context.prompt),
+        ask,
+        proof: context.proof,
+        settings: Some(&context.settings),
+        role: context.role.as_ref(),
+        warnings: &warnings,
     });
     write_brief(&brief_path, &brief)?;
     // The workspace must exist before a worktree does, so a repo the human has
@@ -198,8 +290,9 @@ pub fn spawn(
         &workspace,
         &Launching {
             pick: &pick,
+            applied: &chosen,
             task: &task.id,
-            effort: req.effort.as_deref(),
+            effort: launch_effort.as_deref(),
             brief: &brief,
             brief_path: &brief_path,
             worktree: &created,
@@ -233,8 +326,57 @@ pub fn spawn(
         tab,
         brief: brief_path,
         skills,
+        warnings,
         replaced,
     })
+}
+
+/// The effort to pass and the warning when the model cannot use it.
+///
+/// The setting itself is not changed here, only what reaches the argv: a level
+/// the catalog says the model cannot use is not passed, and the warning says
+/// why, so a person is not left believing it applies.
+fn effective_effort(
+    env: &SpawnEnv<'_>,
+    program: &str,
+    model: Option<&str>,
+    effort: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let Some(effort) = effort else {
+        return (None, None);
+    };
+    let Some(catalog) = catalog_for(env, program) else {
+        return (Some(effort), None);
+    };
+    match catalog.effort_warning(program, model, &effort) {
+        Some(warning) => (None, Some(warning)),
+        None => (Some(effort), None),
+    }
+}
+
+/// The catalog for `program`: the one a caller injected, else the one the
+/// program gives itself.
+///
+/// A test injects a fixture into [`SpawnEnv::catalogs`] and no CLI runs. On a
+/// machine the map is empty, and only the program the spawn picked is asked,
+/// with [`CATALOG_TIMEOUT`]; a listing that cannot be read is `None`, because
+/// this only ever feeds a warning.
+fn catalog_for(env: &SpawnEnv<'_>, program: &str) -> Option<Catalog> {
+    if let Some(catalog) = env.catalogs.get(program) {
+        return Some(catalog.clone());
+    }
+    let spec = env
+        .programs
+        .iter()
+        .find(|candidate| candidate.spec.id == program)
+        .map(|candidate| &candidate.spec)?;
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    shprd_agents::adapter::catalog(
+        spec,
+        &env.data_dir.join("models"),
+        &path_env,
+        CATALOG_TIMEOUT,
+    )
 }
 
 /// The name of the workspace that hosts a repository's tabs.
@@ -259,19 +401,119 @@ pub(crate) fn worker_title(agent: &str, task: &str) -> String {
     format!("{agent}·{task}")
 }
 
-/// The repository's workspace, or an error telling the human to create it.
+/// A repository's own name: the last component of its path.
+///
+/// It is the input to [`workspace_name`], so this is where the label's one
+/// derivation gets its input from, for a caller holding a path rather than a
+/// [`SpawnEnv`] (`shprd serve` does, before there is a run to spawn for).
+pub(crate) fn repo_name(repo: &Path) -> Result<String, CliError> {
+    repo.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))
+}
+
+/// The repository's workspace, or an error telling the human what to do.
 pub(crate) fn workspace_of(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
 ) -> Result<shprd_mux::Workspace, CliError> {
-    let name = workspace_name(&env.repo_name);
-    mux.find_workspace(&name)
-        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
-        .ok_or_else(|| {
-            CliError::Invalid(anyhow!(
-                "no workspace {name:?} yet: create it in your multiplexer first"
-            ))
-        })
+    workspace_named(mux, &workspace_name(&env.repo_name))
+}
+
+/// The workspace labelled `name`, or the refusal a missing one earns.
+///
+/// The label is derived ([`workspace_name`]) and a host refuses a duplicate, so
+/// nothing is ever renamed or adopted here: the workspace shprd uses is the one
+/// whose label is exactly `name`. A refusal names that label and the ones the
+/// host does have, because the label is the one thing a person can fix.
+pub(crate) fn workspace_named(mux: &dyn Mux, name: &str) -> Result<shprd_mux::Workspace, CliError> {
+    let found = mux.find_workspace(name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the workspace {name:?}")))
+    })?;
+    if let Some(workspace) = found {
+        return Ok(workspace);
+    }
+    // A host that cannot list still gets the refusal; it just cannot name what
+    // it does have, and says so rather than guessing.
+    let existing = match mux.list_workspaces() {
+        Ok(workspaces) => workspaces
+            .into_iter()
+            .map(|workspace| workspace.name)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Err(CliError::Invalid(anyhow!(missing_workspace_message(
+        name, &existing
+    ))))
+}
+
+/// What a person reads when the workspace a run needs is not there.
+///
+/// The expected label comes first and the labels the host does have follow, so
+/// a workspace named almost right (`shprd · gate repo` for the folder `repo`)
+/// is visible as the difference it is. `shprd serve` creates the workspace at
+/// startup, which is why the refusal can point at it.
+pub(crate) fn missing_workspace_message(expected: &str, existing: &[String]) -> String {
+    let mut message = format!(
+        "no workspace {expected:?} yet: a run's tabs open in the workspace labelled \
+         `shprd · <repo folder name>`, and shprd leaves every other workspace alone. \
+         `shprd serve` creates it at startup; without a service, create it in your multiplexer \
+         with that exact label"
+    );
+    match existing.split_first() {
+        Some(_) => {
+            let listed: Vec<String> = existing.iter().map(|name| format!("{name:?}")).collect();
+            message.push_str(&format!(". The host has: {}", listed.join(", ")));
+        }
+        None => message.push_str(". The host has no workspace at all"),
+    }
+    message
+}
+
+/// A repository's workspace, made at the repository root when the host has none.
+///
+/// `shprd serve` calls this at startup: the label is derived from the folder
+/// name rather than chosen by a person, so leaving the workspace to be created
+/// by hand is a run that silently cannot start a task (M9 gate bug 6). Only the
+/// workspace with exactly that label is reused, and only that label is created;
+/// anything else on the host is left alone.
+pub(crate) struct PreparedWorkspace {
+    /// The workspace tabs open in.
+    pub(crate) workspace: shprd_mux::Workspace,
+    /// True when this call created it, false when it was already there.
+    pub(crate) created: bool,
+}
+
+/// [`PreparedWorkspace`]: find the repository's workspace, or create it.
+pub(crate) fn ensure_workspace(mux: &dyn Mux, repo: &Path) -> Result<PreparedWorkspace, CliError> {
+    let name = workspace_name(&repo_name(repo)?);
+    let found = mux.find_workspace(&name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the workspace {name:?}")))
+    })?;
+    if let Some(workspace) = found {
+        return Ok(PreparedWorkspace {
+            workspace,
+            created: false,
+        });
+    }
+    match mux.create_workspace(&name, repo) {
+        Ok(workspace) => Ok(PreparedWorkspace {
+            workspace,
+            created: true,
+        }),
+        // Two services can start at once; the loser of the race finds what the
+        // winner made rather than reporting a failure it can do nothing about.
+        Err(err) => match mux.find_workspace(&name) {
+            Ok(Some(workspace)) => Ok(PreparedWorkspace {
+                workspace,
+                created: false,
+            }),
+            _ => Err(CliError::other(anyhow!(err).context(format!(
+                "creating the workspace {name:?} at {}",
+                repo.display()
+            )))),
+        },
+    }
 }
 
 /// Opens the agent's tab and starts its CLI in it.
@@ -283,6 +525,8 @@ pub(crate) fn workspace_of(
 pub(crate) struct Launching<'a> {
     /// The agent that was picked.
     pub(crate) pick: &'a Pick,
+    /// The access mode and fast switch this launch applies.
+    pub(crate) applied: &'a Applied,
     /// The task it works on.
     pub(crate) task: &'a str,
     /// The effort it runs at, when one was asked for.
@@ -303,6 +547,7 @@ pub(crate) fn open_agent(
 ) -> Result<(shprd_mux::TabId, String), CliError> {
     let Launching {
         pick,
+        applied,
         task,
         effort,
         brief,
@@ -316,7 +561,7 @@ pub(crate) fn open_agent(
     // The tab exists from here on, so every failure closes it again: a tab left
     // open points at a worktree the failing spawn is about to remove.
     match start_in_tab(
-        mux, env, pick, effort, brief, brief_path, worktree, task, &title, &tab,
+        mux, env, pick, applied, effort, brief, brief_path, worktree, task, &title, &tab,
     ) {
         Ok(()) => Ok((tab.id, title)),
         Err(err) => {
@@ -335,6 +580,7 @@ fn start_in_tab(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
     pick: &Pick,
+    applied: &Applied,
     effort: Option<&str>,
     brief: &str,
     brief_path: &Path,
@@ -343,8 +589,11 @@ fn start_in_tab(
     title: &str,
     tab: &shprd_mux::Tab,
 ) -> Result<(), CliError> {
+    let program = program_of(env.programs.as_slice(), &pick.agent)?;
     let (argv, brief_in_args) = launch_argv(
         &pick.launch,
+        &program.spec,
+        applied,
         pick.model.as_deref(),
         effort,
         brief,
@@ -358,6 +607,8 @@ fn start_in_tab(
             task: Some(task.to_string()),
             run: Some(env.run.clone()),
             repo: worktree.path.clone(),
+            home: Some(env.home.clone()),
+            data: Some(env.data_dir.clone()),
         },
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
@@ -1087,6 +1338,31 @@ pub(crate) fn program_of<'a>(
         })
 }
 
+/// The agent strings a spawn tries, in order: the worker role's program and
+/// model when it names a program, then the configured workers.
+///
+/// A role's program that is not installed falls through to the configured
+/// workers, exactly as an uninstalled worker does, so a machine without it
+/// still starts the task.
+fn role_candidates(role: Option<&ResolvedRole>, workers: &[String]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(role) = role
+        && let Some(agent) = &role.agent
+    {
+        let model = role
+            .model
+            .as_ref()
+            .map(|model| model.value.as_str())
+            .filter(|model| !model.is_empty());
+        candidates.push(match model {
+            Some(model) => format!("{}/{model}", agent.value),
+            None => agent.value.clone(),
+        });
+    }
+    candidates.extend(workers.iter().cloned());
+    candidates
+}
+
 /// Picks the agent for an attempt.
 ///
 /// An explicit `--agent` wins even when its CLI is not installed, because the
@@ -1194,157 +1470,147 @@ pub(crate) fn write_brief(path: &Path, text: &str) -> Result<(), CliError> {
         .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
-/// What a brief says, as data, so the rendering is testable on its own.
-pub struct BriefInput<'a> {
-    /// The task the attempt works on.
-    pub task: &'a Task,
-    /// The run id.
-    pub run: &'a str,
-    /// The attempt number.
-    pub attempt: u32,
-    /// The program the attempt runs.
-    pub agent: &'a str,
-    /// The model it runs, when one was chosen.
-    pub model: Option<&'a str>,
-    /// The branch the agent commits on.
-    pub branch: &'a str,
-    /// The worktree the agent works in.
-    pub worktree: &'a str,
-    /// The skills the attempt must load first.
-    pub skills: &'a [String],
-    /// The archive ref the previous attempt's commits are held under, when
-    /// this attempt replaced one.
-    pub archive: Option<&'a str>,
-}
-
-/// The gate that sent the previous attempt back, when its latest gate failed.
+/// What a launch puts on the command line beyond the program's base command:
+/// the access mode and the fast switch.
 ///
-/// A new attempt starts from the same task, so the brief repeats what the
-/// review or the gates rejected instead of making the agent rediscover it.
-fn previous_failure(task: &Task, attempt: u32) -> Option<&GateResult> {
-    let earlier = task
-        .attempts
-        .iter()
-        .filter(|earlier| earlier.n < attempt)
-        .max_by_key(|earlier| earlier.n)?;
-    let gate = earlier.gates.last()?;
-    (!gate.passed).then_some(gate)
+/// A launch applies one access mode. The role names it when the program declares
+/// that mode; otherwise it is the program's full-access mode, which is the
+/// auto-approval shprd has always started unattended agents with. Fast is on
+/// only when the role asks for it and the program has the switch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Applied {
+    /// The access mode id on the command line, when the program declares one.
+    pub(crate) perm: Option<String>,
+    /// Whether the program's fast switch is on.
+    pub(crate) fast: bool,
 }
 
-/// The word the brief prints for a finding's severity.
-fn severity_word(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Critical => "critical",
-        Severity::Major => "major",
-        Severity::Minor => "minor",
-        Severity::Trivial => "trivial",
+/// Decides what a launch applies from the role's choice and the program's spec.
+pub(crate) fn applied(spec: &HarnessSpec, perm: Option<&str>, fast: bool) -> Applied {
+    let perm = perm
+        .filter(|id| spec.permissions.mode(id).is_some())
+        .map(str::to_owned)
+        .or_else(|| spec.permissions.full_mode().map(|mode| mode.id.clone()));
+    Applied {
+        fast: fast && spec.fast.available(),
+        perm,
     }
 }
 
-/// The longest detail the brief keeps from a previous attempt's finding, so one
-/// verbose finding cannot push the rest of the brief out of view.
-const DETAIL_LIMIT: usize = 300;
-
-/// One finding as the brief lists it: `- <severity>: <title> (<where>) — <why>`.
-fn finding_line(finding: &Finding) -> String {
-    let detail: String = finding.detail.chars().take(DETAIL_LIMIT).collect();
-    let detail = if detail.len() < finding.detail.len() {
-        format!("{detail}…")
-    } else {
-        detail
-    };
-    let title = if finding.title.trim().is_empty() {
-        finding
-            .location
-            .as_deref()
-            .unwrap_or(finding.detail.as_str())
-    } else {
-        finding.title.as_str()
-    };
-    let where_ = match &finding.location {
-        Some(location) => format!(" ({location})"),
-        None => String::new(),
-    };
-    format!(
-        "- {}: {title}{where_} — {detail}\n",
-        severity_word(finding.severity)
-    )
-}
-
-/// Renders the brief an agent reads before its first turn.
+/// The role's words and the settings that shape one attempt, for a brief.
 ///
-/// It states only what the agent cannot look up faster itself: where it works,
-/// what "done" means, what it may touch, which skills to load, and how to report.
-pub fn render_brief(input: &BriefInput<'_>) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# {} {}\n\n", input.task.id, input.task.title));
-    out.push_str(&format!(
-        "run `{}`, attempt {}, agent `{}`{}\n",
-        input.run,
-        input.attempt,
-        input.agent,
-        match input.model {
-            Some(model) => format!(" ({model})"),
-            None => String::new(),
-        }
-    ));
-    out.push_str(&format!(
-        "branch `{}` in worktree `{}`\n\n",
-        input.branch, input.worktree
-    ));
-    if let Some(ref_name) = input.archive {
-        out.push_str(&format!(
-            "the attempt before this one was archived at `{ref_name}`: \
-             `git cherry-pick {ref_name}` brings over whatever of its work you still need\n\n"
-        ));
-    }
-    if let Some(gate) = previous_failure(input.task, input.attempt) {
-        out.push_str("## Why the previous attempt was sent back\n\n");
-        out.push_str(&format!("gate `{}` failed:\n\n", gate.gate));
-        for finding in &gate.findings {
-            out.push_str(&finding_line(finding));
-        }
-        out.push_str("Fix these first; keep what already works.\n");
-    }
-    out.push_str("\n## Acceptance criteria\n\n");
-    for item in &input.task.acceptance {
-        out.push_str(&format!("- {item}\n"));
-    }
-    out.push_str("\n## Scope — change only these paths\n\n");
-    for path in &input.task.scope {
-        out.push_str(&format!("- {path}\n"));
-    }
-    out.push_str("\n## Skills to load first\n\n");
-    if input.skills.is_empty() {
-        out.push_str("- none\n");
-    }
-    for skill in input.skills {
-        out.push_str(&format!("- {skill}\n"));
-    }
-    out.push_str("\n## Rules\n\n");
-    out.push_str(&format!(
-        "- work only in `{}`; change nothing outside the scope above\n",
-        input.worktree
-    ));
-    out.push_str(&format!(
-        "- commit on your branch `{}`; never push, never open a pull request\n",
-        input.branch
-    ));
-    out.push_str("- run the worker gates before you report: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\n");
-    out.push_str(&format!(
-        "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
-        t = input.task.id
-    ));
-    out.push_str(&format!(
-        "- report when you are done: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
-         plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused \
-         without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each \
-         path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used\n",
-        t = input.task.id,
-        a = input.attempt
-    ));
-    out
+/// The Settings block has to name the layer that set each value, and the values
+/// a spawn decides itself are the task's own: the program it launches, the model
+/// and the effort it chose. Those are put into a task layer, but only where the
+/// role names nothing, so a program the person set still reads as theirs. The
+/// access mode and the fast switch are replaced by what the launch applies, so a
+/// line never claims a mode or a tier the command line does not carry.
+pub(crate) struct BriefContext {
+    /// The role's standing instructions, read now.
+    pub(crate) prompt: String,
+    /// The settings as this task resolves them.
+    pub(crate) settings: Resolved,
+    /// The role the block describes.
+    pub(crate) role: Option<ResolvedRole>,
+    /// Whether the run asks every task for one proof, from `tasks.proof`.
+    pub(crate) proof: bool,
 }
+
+/// The role a worker's brief is written for.
+pub(crate) const BRIEF_ROLE: &str = "worker";
+
+/// Reads the role's prompt and resolves the settings for one attempt.
+///
+/// A prompt that cannot be read is refused before the worktree, the tab and the
+/// event: an agent started without its words would do the wrong work quickly.
+pub(crate) fn brief_context(
+    env: &SpawnEnv<'_>,
+    role_id: &str,
+    pick: &Pick,
+    effort: Option<&str>,
+    applied: &Applied,
+) -> Result<BriefContext, CliError> {
+    let base = env.settings.resolve(None);
+    let mut task = Layer::new();
+    if let Some(role) = base.role(role_id) {
+        let key = |field: RoleField| Key::Role {
+            id: role_id.to_owned(),
+            field,
+        };
+        // The block must name what actually runs: a value the role left unset,
+        // or set to a program this machine does not have, is the task's own.
+        if named(role.agent.as_ref()) != Some(pick.agent.as_str()) {
+            task.set(key(RoleField::Agent), Value::Text(pick.agent.clone()));
+        }
+        if named(role.model.as_ref()) != pick.model.as_deref()
+            && let Some(model) = &pick.model
+        {
+            task.set(key(RoleField::Model), Value::Text(model.clone()));
+        }
+        if named(role.effort.as_ref()) != effort
+            && let Some(effort) = effort
+        {
+            task.set(key(RoleField::Effort), Value::Text(effort.to_owned()));
+        }
+    }
+    let settings = env.settings.resolve(Some(&task));
+    let mut role = settings.role(role_id);
+    if let Some(role) = role.as_mut() {
+        // What the launch applies, not what the settings wanted: a mode the
+        // program does not declare is the program's full-access one, and a role
+        // that asks for fast on a program without the switch runs without it.
+        let kept = role.perm.clone();
+        role.perm = match (applied.perm.as_deref(), named(kept.as_ref())) {
+            (Some(id), Some(named)) if id == named => kept,
+            (Some(id), _) => Some(Sourced::new(id.to_owned(), Source::BuiltIn)),
+            (None, _) => None,
+        };
+        if role.fast.value != applied.fast {
+            role.fast = Sourced::new(applied.fast, Source::BuiltIn);
+        }
+    }
+    let prompt = role_prompt(env, role_id)?;
+    let proof = settings.tasks().proof;
+    Ok(BriefContext {
+        prompt,
+        settings,
+        role,
+        proof,
+    })
+}
+
+/// One resolved role field's text, for comparing it with what a launch chose.
+fn named(field: Option<&Sourced<String>>) -> Option<&str> {
+    field.map(|field| field.value.as_str())
+}
+
+/// The standing words of `role_id`: the file its `prompt` names, read.
+///
+/// A role that names no prompt has no words to give, so the built-in prompt of
+/// its own id is used; a custom role's `prompt:<id>` or path is read as it
+/// says. A prompt that cannot be read is refused before anything is started.
+pub(crate) fn role_prompt(env: &SpawnEnv<'_>, role_id: &str) -> Result<String, CliError> {
+    let resolved = env.settings.resolve(None);
+    let reference = resolved
+        .role(role_id)
+        .map(|role| role.prompt.value)
+        .unwrap_or_else(|| format!("{}{role_id}", PromptRef::PREFIX));
+    let reference = PromptRef::parse(&reference).map_err(invalid)?;
+    reference.read(&env.prompts_dir, &env.home).map_err(invalid)
+}
+
+/// A prompt that cannot be read is the person's to fix, so it is a refusal.
+fn invalid(error: shprd_core::prompts::PromptError) -> CliError {
+    CliError::Invalid(anyhow!(error))
+}
+
+/// The brief a task's agent reads: the role's words, the task, the Settings
+/// block.
+///
+/// The rendering lives in [`shprd_views::brief`] with the run's other views, so
+/// the whole document can be snapshot-tested without a worktree; the name
+/// `render_brief` stays here because that is what this module's callers use.
+pub use shprd_views::brief::{AskRoute, BriefInput, task_brief as render_brief};
 
 /// Builds the environment a spawn runs in from the process environment, the
 /// config and the run log.
@@ -1354,14 +1620,14 @@ pub fn render_brief(input: &BriefInput<'_>) -> String {
 pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, CliError> {
     let home = crate::ctx::resolve_home(home)?;
     let data = crate::cmd::roster::resolve_data_dir()?;
-    let specs = shprd_roster::spec::load_dir(&data.join("harness")).map_err(|err| {
+    let specs = shprd_agents::spec::load_dir(&data.join("harness")).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("loading {}", data.display())))
     })?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     let programs: Vec<Program> = specs
         .iter()
         .map(|spec| Program {
-            installed: shprd_roster::detect::find_binary(&spec.detect.binary, &path_env).is_some(),
+            installed: shprd_agents::detect::find_binary(&spec.detect.binary, &path_env).is_some(),
             spec: spec.clone(),
         })
         .collect();
@@ -1370,27 +1636,31 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
     let config = shprd_core::config::load(Some(&global), Some(&repo_config))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
     let compat = read_compat(&data.join("skills").join("compat.toml"))?;
+    let settings = Loaded::read(&home, Some(&ctx.root))
+        .map_err(|err| CliError::other(anyhow!(err).context("loading the settings")))?;
     let state = ctx.state()?;
     let run = state
         .run
         .as_ref()
         .ok_or_else(|| CliError::other(anyhow!("no run yet: start one with `shprd run start`")))?;
-    let repo_name = ctx
-        .root
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", ctx.root.display())))?;
+    let repo_name = repo_name(&ctx.root)?;
     let base_env = std::env::vars().collect();
     Ok(SpawnEnv {
         ctx,
         layout: Layout::default_for_home(&home),
         briefs_dir: home.join(".shprd").join("briefs"),
+        prompts_dir: prompts::prompts_dir(&crate::ctx::resolve_config_home(&home)),
+        home,
+        settings,
         run: run.run_id.clone(),
         base_branch: run.integration_branch.clone(),
         repo_name,
         programs,
         workers: config.roster.workers.clone(),
         skills: config.skills.clone(),
+        gates: config.gates.worker.clone(),
+        catalogs: BTreeMap::new(),
+        data_dir: data.clone(),
         compat,
         base_env,
         ready_wait: super::deliver::ready_wait(),
@@ -1404,7 +1674,7 @@ fn read_compat(path: &Path) -> Result<Vec<CompatEntry>, CliError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let list = shprd_roster::skills::CompatList::load(path).map_err(|err| {
+    let list = shprd_agents::skills::CompatList::load(path).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("loading {}", path.display())))
     })?;
     Ok(list.skills)
@@ -1438,19 +1708,7 @@ fn prompt_in(
 ) -> Result<(), CliError> {
     let run = active_run(ctx)?;
     let repo = &ctx.root;
-    let repo_name = repo
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))?;
-    let name = workspace_name(&repo_name);
-    let workspace = mux
-        .find_workspace(&name)
-        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
-        .ok_or_else(|| {
-            CliError::Invalid(anyhow!(
-                "no workspace {name:?} yet: create it in your multiplexer first"
-            ))
-        })?;
+    let workspace = workspace_named(mux, &workspace_name(&repo_name(repo)?))?;
     let tabs = mux
         .list_tabs(&workspace.id)
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
@@ -1594,7 +1852,7 @@ pub fn live_tasks(
 /// Only `run`'s directory is read: a task id reused in a later run must not
 /// resolve to the older run's tab. The attempt number is part of the file name,
 /// so the highest one names the tab a prompt should reach.
-fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
+pub(crate) fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
     let prefix = format!("{task}-a");
     let mut best: Option<(u32, PathBuf)> = None;
     for file in std::fs::read_dir(briefs.join(run)).ok()?.flatten() {
@@ -1621,14 +1879,28 @@ fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<PathBuf> {
 /// argument, which is also what says whether it has to be typed in instead.
 fn launch_argv(
     launch: &LaunchSpec,
+    spec: &HarnessSpec,
+    applied: &Applied,
     model: Option<&str>,
     effort: Option<&str>,
     brief: &str,
     brief_path: &Path,
 ) -> Result<(Vec<String>, bool), CliError> {
     let mut argv = launch.interactive.clone();
-    if let Some(auto) = &launch.auto_approve {
-        argv.extend(auto.iter().cloned());
+    // One access mode: the one the role named when the program declares it,
+    // else the program's full-access mode. A program whose spec declares no
+    // modes keeps the auto-approval flags it has always been started with.
+    match applied
+        .perm
+        .as_deref()
+        .and_then(|id| spec.permissions.mode(id))
+    {
+        Some(mode) => argv.extend(mode.args.iter().cloned()),
+        None => {
+            if let Some(auto) = &launch.auto_approve {
+                argv.extend(auto.iter().cloned());
+            }
+        }
     }
     let values = Values {
         model: model.map(str::to_string),
@@ -1644,6 +1916,12 @@ fn launch_argv(
     )?);
     if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
         argv.extend(render(launch, effort_args, &values)?);
+    }
+    // Fast is said out loud in both directions, as Shepherdr's `argvFor` does:
+    // a program that can be told to turn fast off is, so a person's own setting
+    // cannot quietly win over the role's.
+    if spec.fast.available() {
+        argv.extend(spec.fast.args(applied.fast).iter().cloned());
     }
     let mut brief_in_args = false;
     if let Some(system_prompt_args) = &launch.system_prompt_args {
@@ -1684,7 +1962,7 @@ mod flow_tests {
     use super::*;
     use std::process::Command;
 
-    use shprd_core::event::{Actor, ReportStatus, ReviewSource};
+    use shprd_core::event::{Actor, Finding, ReportStatus, ReviewSource, Severity};
     use shprd_core::state::{ResourceRecord, ResourceStatus, TaskStatus};
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
@@ -1816,6 +2094,9 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                prompts_dir: shprd_core::prompts::prompts_dir(&self.home.path().join(".config")),
+                home: self.home.path().to_path_buf(),
+                settings: Loaded::default(),
                 run: "t1".to_string(),
                 base_branch: "integration/m4".to_string(),
                 repo_name: self.repo_name(),
@@ -1828,12 +2109,29 @@ project_dirs = []
                     workers: vec!["tdd".to_string()],
                     ..Skills::default()
                 },
+                gates: vec!["cargo test --workspace".to_string()],
+                catalogs: BTreeMap::new(),
+                data_dir: self.home.path().to_path_buf(),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
                 // otherwise stall every test that launches one.
                 ready_wait: Duration::ZERO,
             }
+        }
+
+        /// [`Scratch::spawn_env`], with the person's settings read from `text`.
+        ///
+        /// It writes `~/.config/shprd/settings.toml` in the temp home, so a role's
+        /// pick reaches a spawn the way it does on a real machine.
+        fn spawn_env_with<'a>(&self, ctx: &'a Ctx, text: &str) -> SpawnEnv<'a> {
+            let dir = self.home.path().join(".config").join("shprd");
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
+            std::fs::write(dir.join("settings.toml"), text).unwrap_or_else(|err| panic!("{err}"));
+            let mut env = self.spawn_env(ctx);
+            env.settings =
+                Loaded::read(self.home.path(), None).unwrap_or_else(|err| panic!("{err}"));
+            env
         }
     }
 
@@ -1995,6 +2293,187 @@ project_dirs = []
         assert!(live.is_empty());
     }
 
+    /// A person who set the worker role's pick gets that program and model,
+    /// even though another worker is configured, and the brief says so as
+    /// theirs rather than as the program's own default.
+    #[test]
+    fn the_worker_roles_pick_beats_the_configured_workers() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"pi\"\nmodel = \"sonnet\"\neffort = \"high\"\n",
+        );
+        env.programs.push(Program {
+            spec: fake_spec("pi"),
+            installed: true,
+        });
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.agent, "pi");
+        assert_eq!(report.model.as_deref(), Some("sonnet"));
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("- Program: pi (you)"), "{brief}");
+        assert!(brief.contains("- Model: sonnet (you)"), "{brief}");
+        assert!(brief.contains("- Effort: high (you)"), "{brief}");
+    }
+
+    /// A model its catalog says cannot think is not passed an effort flag, and
+    /// the launch says so: the setting looks applied but is not.
+    #[test]
+    fn a_no_thinking_model_is_not_passed_the_effort_flag() {
+        use shprd_agents::models::{Catalog, CatalogModel};
+
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"pi\"\nmodel = \"Command Code/deepseek/x\"\neffort = \"high\"\n",
+        );
+        env.programs.push(Program {
+            spec: fake_spec("pi"),
+            installed: true,
+        });
+        let catalog = Catalog {
+            models: vec![CatalogModel {
+                id: "Command Code/deepseek/x".to_string(),
+                name: "x".to_string(),
+                efforts: Vec::new(),
+                default_effort: None,
+                fast: false,
+            }],
+            efforts: vec!["off".to_string(), "low".to_string(), "high".to_string()],
+        };
+        env.catalogs.insert("pi".to_string(), catalog);
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("not thinking"),
+            "{:?}",
+            report.warnings
+        );
+        let launched: Vec<Vec<String>> = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv),
+                _ => None,
+            })
+            .collect();
+        let argv = launched
+            .first()
+            .unwrap_or_else(|| panic!("no CLI was started"));
+        assert!(
+            !argv.iter().any(|arg| arg == "--thinking"),
+            "a model that cannot think must not be passed a level: {argv:?}"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("## Warnings"), "{brief}");
+    }
+
+    /// The shipped Claude Code spec, so a test uses the access modes and fast
+    /// switch a real role can set.
+    fn claude_spec() -> HarnessSpec {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
+        shprd_agents::spec::load_dir(&dir)
+            .unwrap_or_else(|err| panic!("the shipped harness table: {err}"))
+            .into_iter()
+            .find(|spec| spec.id == "claude")
+            .unwrap_or_else(|| panic!("the shipped table has no claude spec"))
+    }
+
+    /// A spawn's argv, from what the fake host was asked to run.
+    fn spawn_argv(calls: &[Call]) -> Vec<String> {
+        calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"))
+    }
+
+    /// The role's access mode and fast switch are on the command line and in
+    /// the brief: a line the agent reads never claims something not in force.
+    #[test]
+    fn the_roles_access_mode_and_fast_switch_reach_the_launch_and_the_brief() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"claude\"\nperm = \"plan\"\nfast = true\n",
+        );
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = spawn_argv(&mux.calls());
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--permission-mode", "plan"]),
+            "the role's mode is on the command line: {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--settings", "{\"fastMode\":true}"]),
+            "the role's fast switch is on the command line: {argv:?}"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(brief.contains("- Permissions: plan (you)"), "{brief}");
+        assert!(brief.contains("- Fast mode: on (you)"), "{brief}");
+    }
+
+    /// A mode the program does not declare is not claimed: the launch falls back
+    /// to the program's full-access mode, and the brief says that instead.
+    #[test]
+    fn a_mode_the_program_lacks_is_not_claimed_in_the_brief() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"claude\"\nperm = \"read-only\"\n",
+        );
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = spawn_argv(&mux.calls());
+        assert!(
+            argv.contains(&"--dangerously-skip-permissions".to_string()),
+            "the full-access mode is what runs: {argv:?}"
+        );
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        assert!(
+            brief.contains("- Permissions: bypassPermissions (built in)"),
+            "the block names the mode in force, not the one that was set: {brief}"
+        );
+        assert!(
+            !brief.contains("- Permissions: read-only"),
+            "the block does not claim a mode the program lacks: {brief}"
+        );
+    }
+
     #[test]
     fn spawn_creates_a_worktree_and_records_it() {
         let scratch = Scratch::new();
@@ -2018,8 +2497,20 @@ project_dirs = []
         assert_eq!(report.branch, "shprd/t1/T1");
         assert_eq!(report.skills, vec!["tdd"]);
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        // The role's own words come first: the shipped worker prompt is
+        // installed on first use and read into the brief.
+        assert!(
+            brief.starts_with("<!--"),
+            "the shipped worker prompt leads the brief: {brief}"
+        );
+        assert!(brief.contains("You work on one shprd task"), "{brief}");
         assert!(brief.contains("Make spawn real"), "{brief}");
         assert!(brief.contains("crates/shprd"), "{brief}");
+        // And the Settings block names the program this spawn chose as the
+        // task's own, with the inherited values below it.
+        assert!(brief.contains("## Your settings"), "{brief}");
+        assert!(brief.contains("- Program: sh (this task)"), "{brief}");
+        assert!(brief.contains("- Merge: ask (built in)"), "{brief}");
         // The tab id is recorded beside the brief, so a later prompt reaches
         // this exact tab even when another tab carries the same title.
         let recorded = tab_path(
@@ -2076,6 +2567,22 @@ project_dirs = []
         assert!(pairs.contains(&("SHPRD_TASK".to_string(), Some("T1".to_string()))));
         assert!(pairs.contains(&("SHPRD_RUN".to_string(), Some("t1".to_string()))));
         assert!(pairs.contains(&("SHPRD_ACTOR".to_string(), Some("agent:sh".to_string()))));
+        // The worker's own `shprd` must resolve this engine's config and
+        // harnesses, not whatever `$HOME` holds (bug 11).
+        assert!(
+            pairs.contains(&(
+                "SHPRD_HOME".to_string(),
+                Some(env.home.display().to_string())
+            )),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&(
+                "SHPRD_DATA_DIR".to_string(),
+                Some(env.data_dir.display().to_string())
+            )),
+            "{pairs:?}"
+        );
         assert!(!pairs.contains(&("GH_TOKEN".to_string(), Some("secret".to_string()))));
         assert!(pairs.contains(&("GH_TOKEN".to_string(), None)));
         // The spec has no system-prompt arguments, so the brief is typed in.
@@ -2144,6 +2651,7 @@ project_dirs = []
             changed_paths: vec!["crates/shprd/src/cmd/spawn.rs".to_string()],
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         })
         .unwrap_or_else(|err| panic!("{err}"));
     }
@@ -2869,13 +3377,117 @@ project_dirs = []
         };
         assert!(message.contains("no active run"), "{message}");
     }
+
+    #[test]
+    fn a_missing_workspace_is_created_at_the_repository_root() {
+        // Bug 6 of the M9 gate: the label is derived from the folder name and
+        // the workspace was left to a person, so a run refused every pass until
+        // someone read the refusal. `serve` creates it instead, with exactly that
+        // label, at the repository root.
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let name = workspace_name(&scratch.repo_name());
+
+        let prepared = ensure_workspace(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(prepared.created, "the workspace was missing, so it is made");
+        assert_eq!(prepared.workspace.name, name);
+        assert_eq!(
+            mux.calls(),
+            vec![
+                Call::FindWorkspace(name.clone()),
+                Call::CreateWorkspace(name, scratch.root().to_path_buf()),
+            ],
+            "one lookup, one creation, and nothing else touched"
+        );
+    }
+
+    #[test]
+    fn an_existing_workspace_is_reused_and_no_other_is_created() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let human = mux
+            .create_workspace("my own work", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let ours = mux
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        let prepared = ensure_workspace(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!prepared.created, "the workspace was already there");
+        assert_eq!(prepared.workspace.id, ours.id, "the one with that label");
+        assert_eq!(
+            mux.calls(),
+            vec![Call::FindWorkspace(workspace_name(&scratch.repo_name()))],
+            "a lookup only: nothing is created, renamed or focused"
+        );
+        let workspaces = mux.list_workspaces().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            workspaces.iter().any(|found| found.id == human.id),
+            "the person's own workspace is untouched: {workspaces:?}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_names_the_expected_label_and_the_ones_the_host_has() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+        // The gate's attempt A: a workspace whose label is almost right.
+        mux.create_workspace("shprd · gate repo", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace("my own work", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let text = match workspace_of(&mux, &env) {
+            Ok(workspace) => panic!("the workspace {} was accepted", workspace.id),
+            Err(err) => err.to_string(),
+        };
+
+        let expected = workspace_name(&scratch.repo_name());
+        assert!(
+            text.contains(&format!("{expected:?}")),
+            "the expected label is named: {text}"
+        );
+        assert!(
+            text.contains("\"shprd · gate repo\""),
+            "the near miss is listed: {text}"
+        );
+        assert!(
+            text.contains("\"my own work\""),
+            "every workspace the host has is listed: {text}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_says_when_the_host_has_no_workspace_at_all() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+
+        let text = match workspace_of(&mux, &env) {
+            Ok(workspace) => panic!("the workspace {} was accepted", workspace.id),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(text.contains("no workspace at all"), "{text}");
+        assert!(
+            text.contains("shprd serve"),
+            "the verb that fixes it: {text}"
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shprd_core::state::TaskStatus;
-    use shprd_roster::skills::Role as SkillRole;
+    use shprd_agents::skills::Role as SkillRole;
+    use shprd_core::event::{Finding, Severity};
+    use shprd_core::state::{GateResult, TaskStatus};
 
     #[test]
     fn a_task_tab_record_is_matched_by_its_whole_name() {
@@ -2953,11 +3565,110 @@ mod tests {
         }
     }
 
+    /// A harness spec with no access modes and no fast switch: the argv tests
+    /// about the model and the brief must not carry flags they do not use.
+    fn bare_spec() -> HarnessSpec {
+        let text = r#"
+id = "claude"
+name = "Fake"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "claude"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["claude"]
+model_args = ["--model", "{model}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{session}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+"#;
+        toml::from_str(text).unwrap_or_else(|err| panic!("the test spec is invalid: {err}"))
+    }
+
+    /// A harness spec with two access modes and a fast switch.
+    fn modes_spec() -> HarnessSpec {
+        let text = r#"
+id = "claude"
+name = "Fake"
+vendor = "pi"
+verified_version = "1.0.0"
+dry_patterns = []
+
+[detect]
+binary = "claude"
+version_args = ["--version"]
+signin_hint = "fake"
+signin_args = []
+
+[launch]
+interactive = ["claude"]
+model_args = ["--model", "{model}"]
+verified = false
+
+[models]
+provider_qualified = false
+
+[records]
+kind = "jsonl"
+location = "~/.fake/{session}.jsonl"
+errors = "error"
+verified = true
+
+[quota]
+source = "none"
+
+[skills]
+home_dirs = []
+project_dirs = []
+
+[permissions]
+default = "plan"
+full = "yolo"
+modes = [
+  { id = "plan", label = "Plan", args = ["--permission-mode", "plan"] },
+  { id = "yolo", label = "Full", args = ["--yes"] },
+]
+
+[fast]
+on = ["--fast"]
+off = ["--no-fast"]
+"#;
+        toml::from_str(text).unwrap_or_else(|err| panic!("the test spec is invalid: {err}"))
+    }
+
     #[test]
     fn a_task_without_a_model_gets_no_model_flags() {
         let brief = Path::new("/tmp/brief.md");
-        let (argv, in_args) = launch_argv(&launch(), None, None, "brief", brief)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let (argv, in_args) = launch_argv(
+            &launch(),
+            &bare_spec(),
+            &Applied::default(),
+            None,
+            None,
+            "brief",
+            brief,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(argv, ["claude".to_string()]);
         assert!(!in_args);
     }
@@ -2965,8 +3676,16 @@ mod tests {
     #[test]
     fn a_task_with_a_model_gets_its_flags() {
         let brief = Path::new("/tmp/brief.md");
-        let (argv, _) = launch_argv(&launch(), Some("opus"), None, "brief", brief)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let (argv, _) = launch_argv(
+            &launch(),
+            &bare_spec(),
+            &Applied::default(),
+            Some("opus"),
+            None,
+            "brief",
+            brief,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(
             argv,
             [
@@ -2974,6 +3693,61 @@ mod tests {
                 "--model".to_string(),
                 "opus".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn a_launch_carries_the_access_mode_and_fast_switch_it_applied() {
+        let brief = Path::new("/tmp/brief.md");
+        let spec = modes_spec();
+        let chosen = applied(&spec, Some("plan"), true);
+        assert_eq!(chosen.perm.as_deref(), Some("plan"));
+        assert!(chosen.fast);
+        let (argv, _) = launch_argv(&launch(), &spec, &chosen, None, None, "brief", brief)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(argv.contains(&"--permission-mode".to_string()), "{argv:?}");
+        assert!(argv.contains(&"plan".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--fast".to_string()), "{argv:?}");
+        assert!(
+            !argv.contains(&"--no-fast".to_string()),
+            "fast on is said once: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn a_role_that_names_no_mode_gets_full_access() {
+        let spec = modes_spec();
+        let chosen = applied(&spec, None, false);
+        assert_eq!(
+            chosen.perm.as_deref(),
+            Some("yolo"),
+            "the full-access mode is the pre-M9 auto-approval"
+        );
+        assert!(!chosen.fast);
+        let brief = Path::new("/tmp/brief.md");
+        let (argv, _) = launch_argv(&launch(), &spec, &chosen, None, None, "brief", brief)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(argv.contains(&"--yes".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--no-fast".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn a_mode_the_program_does_not_declare_falls_back_to_full_access() {
+        let spec = modes_spec();
+        let chosen = applied(&spec, Some("read-only"), true);
+        assert_eq!(
+            chosen.perm.as_deref(),
+            Some("yolo"),
+            "a mode the program has no flags for is not claimed"
+        );
+    }
+
+    #[test]
+    fn fast_is_applied_only_where_the_program_has_the_switch() {
+        let chosen = applied(&bare_spec(), None, true);
+        assert!(
+            !chosen.fast,
+            "a program with no fast switch is not told to go fast"
         );
     }
 
@@ -2992,8 +3766,10 @@ mod tests {
             overrides: Vec::new(),
             dropped_reason: None,
             pr: None,
+            approved_head: None,
             last_status: None,
             nothing_to_merge: None,
+            fallbacks: Vec::new(),
         }
     }
 
@@ -3072,7 +3848,14 @@ mod tests {
             branch: "shprd/m4/M4.4",
             worktree: "/wt/m4/M4.4",
             skills: &skills,
+            gates: &["cargo test --workspace".to_string()],
             archive: None,
+            prompt: None,
+            ask: AskRoute::Hook,
+            proof: true,
+            settings: None,
+            role: None,
+            warnings: &[],
         });
         for needle in [
             "# M4.4 Make spawn real",
@@ -3117,7 +3900,14 @@ mod tests {
             branch: "shprd/m4/M4.4",
             worktree: "/wt/m4/M4.4",
             skills: &skills,
+            gates: &[],
             archive: None,
+            prompt: None,
+            ask: AskRoute::Hook,
+            proof: true,
+            settings: None,
+            role: None,
+            warnings: &[],
         });
         for needle in [
             "## Why the previous attempt was sent back",
@@ -3148,7 +3938,14 @@ mod tests {
                 branch: "shprd/m4/M4.4",
                 worktree: "/wt/m4/M4.4",
                 skills: &skills,
+                gates: &[],
                 archive: None,
+                prompt: None,
+                ask: AskRoute::Hook,
+                proof: true,
+                settings: None,
+                role: None,
+                warnings: &[],
             })
         };
         assert!(!brief_for(1).contains("sent back"));
@@ -3177,6 +3974,7 @@ mod tests {
                 seq: 7,
             }],
             reviews: Vec::new(),
+            spawn_seq: None,
         });
         plan
     }

@@ -30,6 +30,17 @@ impl Mux for HerdrMux {
         self.lookup_workspace(name)
     }
 
+    fn list_workspaces(&self) -> Result<Vec<Workspace>> {
+        Ok(self
+            .workspaces()?
+            .into_iter()
+            .map(|(id, name)| Workspace {
+                id: WorkspaceId::new(id),
+                name,
+            })
+            .collect())
+    }
+
     fn create_workspace(&self, name: &str, cwd: &Path) -> Result<Workspace> {
         self.new_workspace(name, cwd)
     }

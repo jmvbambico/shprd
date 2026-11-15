@@ -1,15 +1,20 @@
 # Launch flags adapted from herdr-projects (MIT), docs/agents.md, commit a6787e1.
 # Copyright (c) 2026 Elias Stravik
 # https://github.com/eliasstravik/herdr-projects
+# Permission modes, their cross-program map and the ask-hook facts are adapted
+# from Shepherdr (MIT), core/agents.js (`MODES`, `PERM_ACROSS`, `argvFor`) and
+# bin/shepherdr (`HOOKS`), tag v3.1.34, commit a3f327a.
+# https://github.com/eliasstravik/shepherdr
 #
 # Record, error and quota facts are from shprd's docs/agents.md (verified
-# 2026-10-27). Launch flags were re-checked with `codex --help` (0.164.0) but
-# are not stated in docs/agents.md, so launch.verified is false.
+# 2026-10-27). M9.2 re-checked every launch, catalog and ask fact against Codex
+# 0.167.0 on this machine: `codex --help`, `codex debug models` (the JSON
+# catalog), `~/.codex/hooks.json` and ~/.codex/config.toml.
 
 id = "codex"
 name = "Codex"
 vendor = "openai"
-verified_version = "0.164.0"
+verified_version = "0.167.0"
 # Whole phrases only, and always a fallback: the screen is read when the record
 # and the retry signal say nothing, and only from the bottom lines of a stopped
 # agent's pane. Bare "quota" and "429" are not patterns, because a file, a diff
@@ -18,12 +23,12 @@ verified_version = "0.164.0"
 # error types; the plain English lines are conservative guesses at the CLI's
 # own wording, not wording taken from a CLI's docs.
 dry_patterns = [
-    "429 Too Many Requests",
-    "rate limit",
-    "rate_limit_exceeded",
-    "insufficient_quota",
-    "insufficient credits",
-    "usage limit reached",
+  "429 Too Many Requests",
+  "rate limit",
+  "rate_limit_exceeded",
+  "insufficient_quota",
+  "insufficient credits",
+  "usage limit reached",
 ]
 
 [detect]
@@ -35,11 +40,14 @@ signin_args = ["login", "status"]
 [launch]
 # herdr-projects starts codex for work with --no-daemon as well; it belongs to
 # the base command, not to approval handling.
-# The update check is off for every codex launch, worker and reviewer: 0.164
+# The update check is off for every codex launch, worker and reviewer: codex
 # opens an "Update available!" screen before it accepts a turn, and a brief
-# typed into that screen is never delivered.
+# typed into that screen is never delivered. `check_for_update_on_startup` is
+# one of 0.167.0's own config keys.
 interactive = ["codex", "--no-daemon", "-c", "check_for_update_on_startup=false"]
 model_args = ["-m", "{model}"]
+# `model_reasoning_effort` is a 0.167.0 config key; the level itself comes with
+# each model in `codex debug models`.
 effort_args = ["-c", "model_reasoning_effort={effort}"]
 auto_approve = ["--dangerously-bypass-approvals-and-sandbox"]
 # A reviewer gets no auto-approval; it gets a sandbox instead. Its working
@@ -51,8 +59,96 @@ reviewer_args = ["--sandbox", "workspace-write"]
 resume_args = ["resume", "{session}"]
 verified = false
 
+[permissions]
+# Shepherdr's Codex modes (M7c 2.2), each as the arguments that select it.
+# `read-only` and `auto` are the sandbox plus the approval policy; `full` is the
+# one flag that skips both. `codex --help` (0.167.0) takes `-s read-only`,
+# `-s workspace-write`, `-a never`, `-a on-request` and
+# `--dangerously-bypass-approvals-and-sandbox`.
+# Shepherdr sends `-a on-request` with read-only too; shprd sends `never`, so a
+# reviewer nobody sits beside never waits on an approval it cannot get.
+#
+# The default is the conservative one. Shepherdr's Codex default is `auto`
+# (M7c 2.2); shprd starts a role that names no mode read-only, so it can never
+# act unprompted until a role says otherwise.
+# Decided in M9.3: a role that names no `perm` runs this `default`; the settings
+# model never substitutes a mode of its own (see `crates/shprd-core/src/settings`).
+default = "read-only"
+full = "full"
+readonly = "read-only"
+modes = [
+  { id = "read-only", label = "Read only", args = ["-s", "read-only", "-a", "never"] },
+  { id = "auto", label = "Auto", args = ["-s", "workspace-write", "-a", "on-request"] },
+  { id = "full", label = "Full access", args = ["--dangerously-bypass-approvals-and-sandbox"] },
+]
+
+[permissions.across]
+# Shepherdr's PERM_ACROSS, read as "this program's nearest mode to <theirs>".
+# A mode it does not name (Claude's `manual`) falls back to [permissions].default.
+"claude:plan" = "read-only"
+"claude:auto" = "auto"
+"claude:acceptEdits" = "auto"
+"claude:bypassPermissions" = "full"
+
+# No `[fast]` section: fast here is a service tier, and codex 0.167.0's own
+# catalog reports `service_tiers: []` for every model on this account, so there
+# is no tier to ask for. Shepherdr's `-c service_tier="fast"` (core/agents.js)
+# is not backed by this catalog; the adapter refuses `fast` for codex instead of
+# sending a value the program may ignore or reject.
+
 [models]
+# `codex debug models` renders the model catalog as JSON, per signed-in account
+# (0.167.0: five rows, two of them `visibility: "hide"`).
 list_command = ["codex", "debug", "models"]
+parser = "codex_catalog"
+
+[models.efforts]
+# The levels come with each model in that catalog
+# (`supported_reasoning_levels[].effort`); the list below is the fallback for a
+# catalog that cannot be read, taken from the same catalog.
+source = "catalog"
+levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
+
+[brief]
+# Codex takes the brief as its first turn: `-c developer_instructions=` has no
+# file form and an argument may not hold a newline.
+delivery = "first-message"
+
+[status]
+# The agent's own OSC 7501 report first, then a hook it runs for us, then the
+# bottom of its pane. Verified on this machine: herdr installs a SessionStart
+# hook into ~/.codex/hooks.json (status hooks are the person's own; the ask hook
+# below is worktree-local).
+sources = ["osc7501", "hook", "screen"]
+
+[asks]
+# Codex fires `PermissionRequest` for an approval; the shape is the one this
+# machine's ~/.codex/hooks.json already has (`hooks.<Event>[].hooks[]`), and it
+# waits up to 1800 s for an answer. Codex's own config docs name a project
+# `.codex/config.toml` as "settings for a trusted repository, including sandbox,
+# MCP, hooks, model, and reasoning defaults", so the project config is where a
+# task's hook belongs — never the person's ~/.codex/hooks.json (M9.5). The
+# installer writes `.codex/hooks.json` and turns hooks on in the worktree's own
+# `.codex/config.toml`.
+# unverified: that `hooks = true` is the key that turns project hooks on (codex
+# 0.167 also carries a `hooks` feature flag), that the file is `.codex/hooks.json`
+# rather than a `.codex/hooks/` directory, and that a fresh project hook needs its
+# trust recorded (codex has `--dangerously-bypass-hook-trust` for that). A live
+# pass settles all three.
+supported = true
+config = ".codex/hooks.json"
+format = "codex_hooks"
+command = "sh '{hook}'"
+timeout_seconds = 1800
+
+[[asks.events]]
+kind = "permission"
+event = "PermissionRequest"
+
+# unverified: whether Codex 0.167 fires anything for a question or a plan. Its
+# `--help` and its binary's hook events list no such event, so only the
+# permission card is claimed. To check: ask codex a question in a session with a
+# PermissionRequest hook installed and watch whether the hook runs.
 
 [records]
 kind = "jsonl"
@@ -67,8 +163,8 @@ source = "codex_wham"
 home_dirs = ["~/.codex/skills", "~/.agents/skills"]
 project_dirs = [".agents/skills"]
 
-# Codex 0.164 offers an update on startup ("Update available!" ... "Skip until
-# next version") and waits for an answer, so a brief typed in then is lost.
+# Codex offers an update on startup ("Update available!" ... "Skip until next
+# version") and waits for an answer, so a brief typed in then is lost.
 # `launch.interactive` switches the check off; this catches a build that
 # ignores the flag.
 [[blocking_prompts]]

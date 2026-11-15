@@ -11,9 +11,11 @@ axum.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shprd-agents = { path = "../shprd-agents" }
 shprd-core = { path = "../shprd-core" }
 shprd-git = { path = "../shprd-git" }
 shprd-views = { path = "../shprd-views" }
+shprd-watch = { path = "../shprd-watch" }
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

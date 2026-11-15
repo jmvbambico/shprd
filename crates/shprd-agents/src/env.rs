@@ -10,6 +10,11 @@
 //! The result is a [`LaunchEnv`]: a small diff over the caller's base
 //! environment, which a supervisor applies with [`LaunchEnv::apply_to`] or
 //! translates into `Command` calls with [`LaunchEnv::as_pairs`].
+//!
+//! The rule that an agent never inherits a parent Claude Code session is
+//! borrowed from Shepherdr (MIT), `mods/tasks/bin/herdr_task/launch.py`
+//! (`CLEAN_ENV`), tag v3.1.34, commit a3f327a.
+//! https://github.com/eliasstravik/shepherdr
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -68,6 +73,33 @@ const FOREIGN_VARS: &[&str] = &[
 /// Prefixes reserved by other orchestrators; anything under them is removed.
 const FOREIGN_PREFIXES: &[&str] = &["OMNIGENT_", "OG_"];
 
+/// Environment variable naming the home directory shprd keeps its config,
+/// briefs and worktrees in, as the engine resolved it.
+const HOME_ENV: &str = "SHPRD_HOME";
+
+/// Environment variable naming the data directory holding `harness/` and
+/// `skills/`, as the engine resolved it.
+const DATA_ENV: &str = "SHPRD_DATA_DIR";
+
+/// Names a parent Claude Code session leaves in the environment, exactly.
+///
+/// A terminal holder started from inside Claude Code hands every CLI it starts
+/// these: with them Claude Code saves no transcript and skips its folder-trust
+/// prompt, so an agent shprd starts never inherits them (Shepherdr's
+/// `CLEAN_ENV`, `mods/tasks/bin/herdr_task/launch.py`, SHEP-86).
+const PARENT_CLAUDE_EXACT: &[&str] = &["CLAUDECODE", "CLAUDE_PID"];
+
+/// The prefix a parent Claude Code session's own variables carry.
+const PARENT_CLAUDE_PREFIX: &str = "CLAUDE_CODE_";
+
+/// `CLAUDE_CODE_*` suffixes that are the person's own configuration, kept.
+///
+/// `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+/// friends set how Claude Code behaves, not which session it is in.
+const PARENT_CLAUDE_KEEP: &[&str] = &[
+    "USE_", "SKIP_", "DISABLE_", "ENABLE_", "MAX_", "OAUTH_", "CLIENT_", "API_",
+];
+
 /// What shprd knows about the launch and wants the CLI to inherit.
 #[derive(Debug, Clone)]
 pub struct EnvContext {
@@ -79,6 +111,12 @@ pub struct EnvContext {
     pub run: Option<String>,
     /// The checkout the CLI works in, exposed as `SHPRD_REPO`.
     pub repo: PathBuf,
+    /// The home directory the engine keeps its config, briefs and worktrees in,
+    /// exposed as `SHPRD_HOME` when the engine has one resolved.
+    pub home: Option<PathBuf>,
+    /// The data directory holding `harness/` and `skills/`, exposed as
+    /// `SHPRD_DATA_DIR` when the engine resolved one.
+    pub data: Option<PathBuf>,
 }
 
 /// A diff over a base environment: names to set and names to drop.
@@ -165,6 +203,11 @@ pub fn launch_env(base: &BTreeMap<String, String>, role: Role, ctx: &EnvContext)
             remove.insert(name.clone());
         }
     }
+    for name in base.keys() {
+        if is_parent_claude_marker(name) {
+            remove.insert(name.clone());
+        }
+    }
     remove.retain(|name| !is_protected(name));
 
     set.insert("SHPRD_ACTOR".to_string(), ctx.actor.clone());
@@ -175,8 +218,38 @@ pub fn launch_env(base: &BTreeMap<String, String>, role: Role, ctx: &EnvContext)
     if let Some(run) = &ctx.run {
         set.insert("SHPRD_RUN".to_string(), run.clone());
     }
+    set_engine_dirs(base, ctx, &mut set);
 
     LaunchEnv { set, remove }
+}
+
+/// Hand the engine's home and data directory to the CLI it starts.
+///
+/// An agent runs `shprd` itself — `task status`, the ask hook, the hand-in — and
+/// has to resolve the same config, briefs and harness table the service does. A
+/// GUI-started service or a `--home` flag leaves no `SHPRD_HOME` in the child's
+/// inherited environment, so the engine's resolved directory is set explicitly;
+/// a home or data directory the base environment already carries is passed
+/// through, so a caller that resolves neither still forwards the engine's. A
+/// launch whose engine has neither set gets neither, and the CLI falls back to
+/// `$HOME` as before.
+fn set_engine_dirs(
+    base: &BTreeMap<String, String>,
+    ctx: &EnvContext,
+    set: &mut BTreeMap<String, String>,
+) {
+    for (name, resolved) in [
+        (HOME_ENV, ctx.home.as_deref()),
+        (DATA_ENV, ctx.data.as_deref()),
+    ] {
+        let value = match resolved {
+            Some(dir) => Some(dir.display().to_string()),
+            None => base.get(name).filter(|value| !value.is_empty()).cloned(),
+        };
+        if let Some(value) = value {
+            set.insert(name.to_string(), value);
+        }
+    }
 }
 
 /// Append a `credential.helper = ""` entry to git's command-scoped config.
@@ -196,6 +269,21 @@ fn blank_credential_helper(base: &BTreeMap<String, String>, set: &mut BTreeMap<S
     );
     set.insert(format!("GIT_CONFIG_VALUE_{existing}"), String::new());
     set.insert("GIT_CONFIG_COUNT".to_string(), (existing + 1).to_string());
+}
+
+/// Whether a name marks the session a parent Claude Code runs.
+///
+/// `CLAUDECODE`, `CLAUDE_PID` and `CLAUDE_CODE_*` are markers; a `CLAUDE_CODE_*`
+/// name under one of [`PARENT_CLAUDE_KEEP`] is configuration and stays, and
+/// `CLAUDE_CONFIG_DIR` is neither.
+fn is_parent_claude_marker(name: &str) -> bool {
+    if PARENT_CLAUDE_EXACT.contains(&name) {
+        return true;
+    }
+    match name.strip_prefix(PARENT_CLAUDE_PREFIX) {
+        Some(rest) => !PARENT_CLAUDE_KEEP.iter().any(|keep| rest.starts_with(keep)),
+        None => false,
+    }
 }
 
 /// Whether a name is off limits for removal regardless of any prefix rule.
@@ -236,6 +324,14 @@ mod tests {
             ("OPENCODE_CONFIG_DIR", "/tmp/opencode"),
             ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
             ("OPENCODE_DISABLE_CLAUDE_CODE", "1"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_PID", "4242"),
+            ("CLAUDE_CODE_CHILD_SESSION", "1"),
+            ("CLAUDE_CODE_SESSION_ID", "fake-session"),
+            ("CLAUDE_CODE_MESSAGING_TOKEN", "secret"),
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+            ("CLAUDE_CONFIG_DIR", "/home/dev/.claude"),
             ("HERDR_SESSION", "s1"),
             ("TUIOS_SOCKET", "/tmp/tuios.sock"),
         ] {
@@ -250,6 +346,8 @@ mod tests {
             task: Some("M3.5".to_string()),
             run: Some("run-2".to_string()),
             repo: PathBuf::from("/repo"),
+            home: None,
+            data: None,
         }
     }
 
@@ -324,6 +422,40 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_claude_code_session_is_not_inherited() {
+        let base = base_env();
+        for role in [
+            Role::Engine,
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+        ] {
+            let env = launch_env(&base, role, &ctx());
+            let applied = env.apply_to(&base);
+            for name in [
+                "CLAUDECODE",
+                "CLAUDE_PID",
+                "CLAUDE_CODE_CHILD_SESSION",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_MESSAGING_TOKEN",
+            ] {
+                assert!(!applied.contains_key(name), "{role:?} kept {name}");
+            }
+            for name in [
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CONFIG_DIR",
+            ] {
+                assert_eq!(
+                    applied.get(name),
+                    base.get(name),
+                    "{role:?} dropped the person's own {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn foreign_vars_go_for_every_role() {
         let base = base_env();
         for role in [Role::Orchestrator, Role::Worker, Role::Reviewer] {
@@ -381,10 +513,66 @@ mod tests {
             task: None,
             run: None,
             repo: PathBuf::from("/repo"),
+            home: None,
+            data: None,
         };
         let env = launch_env(&base, Role::Orchestrator, &bare);
         assert!(!env.set.contains_key("SHPRD_TASK"));
         assert!(!env.set.contains_key("SHPRD_RUN"));
+    }
+
+    #[test]
+    fn the_engines_home_and_data_directory_are_handed_to_the_cli() {
+        let base = base_env();
+        let engine = EnvContext {
+            home: Some(PathBuf::from("/srv/shprd-home")),
+            data: Some(PathBuf::from("/srv/shprd-data")),
+            ..ctx()
+        };
+        for role in [Role::Worker, Role::Reviewer] {
+            let env = launch_env(&base, role, &engine);
+            let applied = env.apply_to(&base);
+            assert_eq!(
+                applied.get("SHPRD_HOME").map(String::as_str),
+                Some("/srv/shprd-home"),
+                "{role:?}: a worker's own shprd must read the engine's config"
+            );
+            assert_eq!(
+                applied.get("SHPRD_DATA_DIR").map(String::as_str),
+                Some("/srv/shprd-data"),
+                "{role:?}: a worker's own shprd must find the engine's harnesses"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_the_engine_does_not_set_is_not_invented() {
+        let base = base_env();
+        let env = launch_env(&base, Role::Worker, &ctx());
+        assert!(!env.set.contains_key("SHPRD_HOME"), "{:?}", env.set);
+        assert!(!env.set.contains_key("SHPRD_DATA_DIR"), "{:?}", env.set);
+        let applied = env.apply_to(&base);
+        assert!(!applied.contains_key("SHPRD_HOME"));
+        assert!(!applied.contains_key("SHPRD_DATA_DIR"));
+    }
+
+    #[test]
+    fn an_inherited_home_is_passed_through() {
+        // A caller that resolves neither still forwards what the engine's own
+        // environment carries, so `SHPRD_HOME=<dir> shprd agent spawn` works the
+        // way the variable means.
+        let mut base = base_env();
+        base.insert("SHPRD_HOME".to_string(), "/env/shprd-home".to_string());
+        base.insert("SHPRD_DATA_DIR".to_string(), "/env/shprd-data".to_string());
+        let applied = launch_env(&base, Role::Worker, &ctx()).apply_to(&base);
+        assert_eq!(
+            applied.get("SHPRD_HOME").map(String::as_str),
+            Some("/env/shprd-home")
+        );
+        assert_eq!(
+            applied.get("SHPRD_DATA_DIR").map(String::as_str),
+            Some("/env/shprd-data")
+        );
     }
 
     #[test]
@@ -505,6 +693,8 @@ mod tests {
             task: None,
             run: None,
             repo: repo.to_path_buf(),
+            home: None,
+            data: None,
         };
         let applied = launch_env(&base, Role::Worker, &worker_ctx).apply_to(&base);
 

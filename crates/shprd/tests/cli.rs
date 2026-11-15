@@ -236,6 +236,57 @@ fn happy_path_reaches_integrated() {
     assert!(log_path(root).exists(), "no log file was written");
 }
 
+/// A proof is recorded beside the summary, not inside it: the hand-in event
+/// carries the paths, and the summary stays the one plain line the person reads.
+#[test]
+fn a_hand_in_records_its_proofs_apart_from_the_summary() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+
+    let printed = ok(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "the menu opens",
+            "--changed",
+            "crates/shprd/src/main.rs",
+            "--proof",
+            ".shprd/proof/menu.png",
+            "--proof",
+            ".shprd/proof/tests.txt",
+            "--json",
+        ],
+    );
+    let event: Value = serde_json::from_str(&printed).unwrap_or(Value::Null);
+    assert_eq!(event.get("kind").and_then(Value::as_str), Some("reported"));
+    assert_eq!(
+        event.get("summary").and_then(Value::as_str),
+        Some("the menu opens"),
+        "the summary is unchanged: {event}"
+    );
+    assert_eq!(
+        event.get("proofs"),
+        Some(&serde_json::json!([
+            ".shprd/proof/menu.png",
+            ".shprd/proof/tests.txt"
+        ])),
+        "both proofs are recorded: {event}"
+    );
+}
+
 #[test]
 fn overlapping_scope_is_refused() {
     let dir = repo();
@@ -485,7 +536,10 @@ fn a_scripted_run_writes_the_document_and_the_views() {
 
     let status = ok_with_path(root, &["status"], bin_dir);
     assert!(status.contains("T1"), "status was {status:?}");
-    assert!(status.contains('✓'), "status was {status:?}");
+    assert!(
+        status.contains("Done (landed)"),
+        "a landed task says so: {status:?}"
+    );
 
     let body = ok_with_path(root, &["pr-body"], bin_dir);
     assert!(body.contains("## Tasks"), "pr-body was {body:?}");

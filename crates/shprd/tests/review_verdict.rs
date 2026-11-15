@@ -362,8 +362,18 @@ fn the_second_failed_round_escalates_at_rounds_two() {
         .filter(|event| event.get("kind").and_then(Value::as_str) == Some("escalated"))
         .collect();
     assert_eq!(escalated.len(), 1, "expected one escalation in {log:?}");
-    let body = escalated[0].get("body").and_then(Value::as_str);
-    assert_eq!(body, Some("review failed 2 times"));
+    let body = match escalated[0].get("body").and_then(Value::as_str) {
+        Some(body) => body,
+        None => panic!("the card has no body: {:?}", escalated[0]),
+    };
+    assert!(
+        body.starts_with(&shprd_core::gate::rounds_spent_prefix("T1", 2, 2)),
+        "{body}"
+    );
+    assert!(body.contains("a finding"), "it names what failed: {body}");
+    for choice in ["retry with another round", "take it as it is", "drop it"] {
+        assert!(body.contains(choice), "the card offers its choices: {body}");
+    }
 }
 
 #[test]
@@ -565,4 +575,55 @@ fn the_verdict_runs_from_a_directory_outside_the_repository() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert!(stdout.contains("review passed"), "{stdout:?}");
     }
+}
+
+#[test]
+fn a_review_decided_by_another_caller_is_said_once() {
+    // The M9 gate's second run found a `shprd watch` and the service's own pass
+    // both deciding one reviewer's packet. Both plan from a state that says the
+    // review is owed, so the log under its lock is what refuses the second
+    // verdict — and the verb that loses that race says the review is decided
+    // instead of recording it twice or failing.
+    let fixture = Fixture::new();
+    fixture.add_task("T1");
+    fixture.attempt("T1", 1);
+    let first = fixture.review("T1", 1, &finding("minor"));
+    assert!(first.status.success(), "the first verdict is recorded");
+    assert_eq!(
+        kinds(&fixture.root)
+            .iter()
+            .filter(|k| *k == "gate_passed")
+            .count(),
+        1
+    );
+
+    // The other decider runs the same verb on the same settled packet.
+    let second = fixture.run(&[
+        "--as",
+        "engine",
+        "agent",
+        "review-verdict",
+        "--task",
+        "T1",
+        "--attempt",
+        "1",
+    ]);
+    assert!(
+        second.status.success(),
+        "losing the race is not a failure: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("review already decided"),
+        "the losing caller says so, got {stdout:?}"
+    );
+    assert_eq!(
+        kinds(&fixture.root)
+            .iter()
+            .filter(|kind| *kind == "gate_passed")
+            .count(),
+        1,
+        "one review, one verdict"
+    );
 }

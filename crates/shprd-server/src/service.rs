@@ -5,6 +5,7 @@
 //! a token file only the owner can read. The client reads the port, confirms the
 //! `id` at `GET /api/health`, and only then sends the token.
 
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -13,20 +14,31 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
-use crate::api::App;
+use crate::api::{App, Paths};
 use crate::error::ServerError;
 
 /// The version every answer reports.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Where this service keeps its discovery files, under the XDG state directory.
+/// Where this service keeps its discovery files: `<state_home>/shprd`.
 ///
-/// `$XDG_STATE_HOME` wins; otherwise the state lives in `~/.local/state`, with
-/// `home` standing in for `$HOME`.
-pub fn state_dir(home: &Path) -> PathBuf {
-    match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-        Some(dir) => PathBuf::from(dir).join("shprd"),
-        None => home.join(".local").join("state").join("shprd"),
+/// The state home itself comes from [`state_home`], resolved once by the binary,
+/// so the service never reads `$XDG_STATE_HOME` or `$HOME` for itself.
+pub fn state_dir(state_home: &Path) -> PathBuf {
+    state_home.join("shprd")
+}
+
+/// The state home for `home`: `xdg_state_home` (the `$XDG_STATE_HOME` the caller
+/// read) when it names a directory, else `<home>/.local/state`.
+///
+/// The value is an argument rather than an environment lookup so the one place
+/// that reads `$XDG_STATE_HOME` is the binary's wiring, and a test that names its
+/// own home can never write into the developer's state directory. An empty value
+/// is unset, which is what the XDG specification says.
+pub fn state_home(home: &Path, xdg_state_home: Option<&OsStr>) -> PathBuf {
+    match xdg_state_home.filter(|value| !value.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => home.join(".local").join("state"),
     }
 }
 
@@ -375,7 +387,31 @@ pub struct Config {
     /// without it — every test that only drives the router — answers requests
     /// and advances nothing.
     pub tick: Option<TickConfig>,
+    /// The home directory the settings routes read and write, when the caller
+    /// resolved one.
+    ///
+    /// The binary resolves it once (`--home`, then `$SHPRD_HOME`, then `$HOME`)
+    /// and a test passes its own, so the service never reads the environment to
+    /// find it. `None` leaves the settings routes refusing.
+    pub home: Option<PathBuf>,
+    /// The prompts directory the API reads and writes, when the caller resolved
+    /// one.
+    ///
+    /// The binary resolves it from the configuration root once
+    /// (`$XDG_CONFIG_HOME`, else `<home>/.config`) and a test passes its own, so
+    /// the service never reads `$XDG_CONFIG_HOME` itself.
+    pub prompts_dir: Option<PathBuf>,
+    /// The `data/` directory the settings checks read the harness table from.
+    pub data: Option<PathBuf>,
 }
+
+/// Told what a pass did, after it did it, for the caller's own output.
+///
+/// `shprd serve` uses it to say the run exists when the service was started
+/// before `shprd run start`: the banner is printed once, so without a notice a
+/// service started too early would look like an empty run for ever. The service
+/// itself prints nothing; whoever wants to say something passes the words.
+pub type PassNotice = std::sync::Arc<dyn Fn(&crate::tick::TickReport) + Send + Sync>;
 
 /// How the service runs its tick.
 #[derive(Clone)]
@@ -386,6 +422,9 @@ pub struct TickConfig {
     pub interval: std::time::Duration,
     /// How many tasks of this repository may run at once, for the startup line.
     pub max_running: u32,
+    /// Told what every pass did, when the caller wants to say something about
+    /// it.
+    pub notice: Option<PassNotice>,
 }
 
 impl std::fmt::Debug for TickConfig {
@@ -407,6 +446,9 @@ impl Config {
             after_write: None,
             hub: crate::hub::Hub::new(),
             tick: None,
+            home: None,
+            prompts_dir: None,
+            data: None,
         }
     }
 }
@@ -434,13 +476,21 @@ impl Service {
             .local_addr()
             .map_err(ServerError::NoAddress)?
             .port();
-        let app = App::prepare_with_hub(
+        let app = App::prepare_all(
             &config.repo,
             port,
             &config.actor,
             &config.state_dir,
             config.after_write.clone(),
             config.hub.clone(),
+            // Everything the service reads from the machine was resolved by the
+            // binary and carried here, so the service never consults the
+            // environment for a path of its own.
+            Paths {
+                home: config.home.clone(),
+                prompts_dir: config.prompts_dir.clone(),
+                data: config.data.clone(),
+            },
         )?;
         let info = app.info();
         let tick = config.tick.clone();
@@ -487,11 +537,17 @@ impl Service {
             tick: _,
         } = self;
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        // Writers outside this process — a program's ask hook, the CLI — append
+        // to the same log. Watching its stamp is what wakes a long poll for an
+        // ask raised that way, so a card arrives without waiting for a client
+        // to poll the file.
+        let watcher = tokio::spawn(watch_log(app.repo().to_path_buf(), app.hub()));
         let ticker = tick.map(|tick| {
             let worker = std::sync::Arc::clone(&tick.worker);
             let interval = tick.interval;
+            let notice = tick.notice.clone();
             tokio::spawn(async move {
-                crate::tick::run(worker, interval, async {
+                crate::tick::run(worker, interval, notice, async {
                     // The service's own shutdown is awaited here, so the
                     // loop ends with it rather than with the socket.
                     let _ = stopped.await;
@@ -503,6 +559,7 @@ impl Service {
             .with_graceful_shutdown(shutdown)
             .await;
         let _ = stop.send(());
+        watcher.abort();
         if let Some(ticker) = ticker {
             let _ = ticker.await;
         }
@@ -510,6 +567,28 @@ impl Service {
         tracing::info!(port = info.port, "shprd service stopped");
         served.map_err(ServerError::Serve)?;
         removed
+    }
+}
+
+/// Publishes every log change a writer outside this process makes.
+///
+/// The log is re-read only when its stamp changes, so a quiet run costs a
+/// `stat` per tick; the publish is what wakes long polls and sockets.
+async fn watch_log(repo: std::path::PathBuf, hub: crate::hub::Hub) {
+    let mut seen: Option<crate::ledger::Stamp> = None;
+    let mut last = 0;
+    loop {
+        let current = crate::ledger::stamp(&repo).ok().flatten();
+        if current != seen {
+            seen = current;
+            if let Ok(seq) = crate::ledger::last_seq(&repo)
+                && seq > last
+            {
+                last = seq;
+                hub.publish(seq);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
@@ -645,16 +724,23 @@ mod tests {
     }
 
     #[test]
-    fn the_state_dir_honours_xdg_state_home() {
+    fn the_state_home_honours_the_xdg_setting_it_is_given() {
+        // The production rule, with the environment's value handed in: no test
+        // reads the process's own `$XDG_STATE_HOME`.
         let home = Path::new("/home/example");
-        // The environment belongs to the process, so only the fallback is
-        // asserted here; the override is asserted where it is set.
-        if std::env::var_os("XDG_STATE_HOME").is_none() {
-            assert_eq!(
-                state_dir(home),
-                home.join(".local").join("state").join("shprd")
-            );
-        }
+        assert_eq!(
+            state_dir(&state_home(home, None)),
+            home.join(".local").join("state").join("shprd")
+        );
+        assert_eq!(
+            state_dir(&state_home(home, Some(std::ffi::OsStr::new("/xdg/state")))),
+            Path::new("/xdg/state").join("shprd")
+        );
+        assert_eq!(
+            state_dir(&state_home(home, Some(std::ffi::OsStr::new("")))),
+            home.join(".local").join("state").join("shprd"),
+            "an empty setting is unset"
+        );
     }
 
     #[tokio::test]

@@ -46,7 +46,7 @@ the work. See [Availability](availability.md).
 ## Harness table
 
 One TOML file per CLI in `data/harness/`, loaded and validated by
-`shprd-roster::spec`:
+`shprd-agents::spec` (exposed as `shprd_agents::Harness`):
 
 - **detect:** binary name, version arguments, sign-in hint.
 - **launch:** the interactive command, plus **argument templates**:

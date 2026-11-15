@@ -5,18 +5,14 @@
 //! outside a repository.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::anyhow;
-use shprd_roster::detect::{Detection, SignIn, detect_all, vendor_name};
-use shprd_roster::spec::{HarnessSpec, load_dir};
+use shprd_agents::detect::{Detection, SignIn, detect_all, vendor_name};
+use shprd_agents::spec::{HarnessSpec, load_dir};
 
 use crate::cli::RosterArgs;
 use crate::ctx::CliError;
-
-/// Environment variable pointing shprd at the data directory, for a checkout
-/// or a packaged install.
-const DATA_ENV: &str = "SHPRD_DATA_DIR";
 
 /// Environment variable giving the model to probe the pi sign-in with.
 const PI_MODEL_ENV: &str = "SHPRD_PI_MODEL";
@@ -54,26 +50,18 @@ fn models(specs: &[HarnessSpec]) -> BTreeMap<String, String> {
     models
 }
 
-/// The data directory: `$SHPRD_DATA_DIR`, else `<git root>/data`, else the
-/// `../share/shprd/data` a packaged install puts next to the binary.
+/// The data directory for the checkout the caller is in.
+///
+/// `$SHPRD_DATA_DIR`, else `<git root>/data`, else the `../share/shprd/data` a
+/// packaged install puts next to the binary, else the data home's. The checkout
+/// the caller is in, not the run's repository: a linked worktree of shprd itself
+/// carries its own branch's `data/harness`, while a worker's task worktree is
+/// told the engine's table with `SHPRD_DATA_DIR`. The resolution itself is the
+/// binary's edge ([`crate::ctx::resolve_data_dir`]), so this verb reads no
+/// directory variable of its own.
 pub(crate) fn resolve_data_dir() -> Result<PathBuf, CliError> {
-    if let Some(dir) = std::env::var_os(DATA_ENV).filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(dir));
-    }
-    let root = crate::ctx::resolve_root(None).ok();
-    let packaged = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .map(|dir| dir.join("../share/shprd/data"));
-    let candidates = [root.map(|root| root.join("data")), packaged];
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.is_dir() {
-            return Ok(candidate);
-        }
-    }
-    Err(CliError::other(anyhow!(
-        "no harness data directory: set {DATA_ENV} to a directory holding `harness/`"
-    )))
+    let root = crate::ctx::resolve_checkout(None).ok();
+    crate::ctx::resolve_data_dir(root.as_deref())
 }
 
 /// One detection as the aligned-ish human line the verb prints.

@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ask::{AskId, AskKind};
+
 /// Identifies a task inside a run.
 pub type TaskId = String;
 
@@ -79,6 +81,38 @@ pub fn status_line(text: &str) -> String {
     let mut capped: String = collapsed.chars().take(TASK_STATUS_MAX_CHARS - 1).collect();
     capped.push('\u{2026}');
     capped
+}
+
+/// What kind of provider trouble cut a turn off, as the fallback ladder reads
+/// it.
+///
+/// It mirrors `shprd_watch::records::ErrorKind`; the tick maps one onto the
+/// other because `shprd-core` sits below the watchdog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderClass {
+    /// A rate limit: waiting and trying again is the fix.
+    RateLimit,
+    /// The account is out of allowance: a quota, credit or billing limit.
+    Quota,
+    /// The credentials were rejected: the login is gone.
+    Auth,
+    /// The provider is down or overloaded.
+    Overloaded,
+    /// Anything else the reader could not classify.
+    Other,
+}
+
+/// What the fallback ladder did about one provider cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackAction {
+    /// A carry-on message was sent.
+    Nudged,
+    /// The task was handed to another program, once.
+    Backup,
+    /// The ladder ended and a person was asked.
+    GaveUp,
 }
 
 /// How many lines of a hand-in check's output the event keeps.
@@ -368,6 +402,14 @@ pub enum EventKind {
         commit: Option<String>,
         /// Skills the agent used.
         skills_used: Vec<String>,
+        /// Where this attempt left its proof, when the worker named one.
+        ///
+        /// A proof is the artifact a person can look at — a screenshot, a
+        /// command's real output, a test run — and it belongs beside the
+        /// summary, not inside it: the summary is one plain line for the
+        /// person, and a path there would be jargon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        proofs: Vec<String>,
     },
     /// An agent recorded where it is on a task.
     ///
@@ -381,6 +423,45 @@ pub enum EventKind {
         message: String,
         /// How far the agent says it has got, from 0 to 100.
         progress: Option<u8>,
+    },
+    /// An agent raised a question, permission or plan and waits for an answer.
+    ///
+    /// The ask itself lives in the file queue beside the log
+    /// ([`crate::ask::AskQueue`]); this event is the durable record the fold
+    /// and every view read, so a card and the board cannot disagree about
+    /// whether something still needs the person.
+    AskRaised {
+        /// The task it belongs to.
+        task: TaskId,
+        /// Its id, unique inside the task.
+        ask: AskId,
+        /// Question, permission or plan.
+        ///
+        /// Spelled `ask_kind` because `kind` is the event tag itself.
+        ask_kind: AskKind,
+        /// What the person is asked.
+        text: String,
+        /// The choices a card offers, when it has any.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+        /// When it was raised, ms since the Unix epoch.
+        created_at_ms: u64,
+        /// When it stops being open, ms since the Unix epoch, when it does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at_ms: Option<u64>,
+    },
+    /// A raised ask was answered; the answer is what the waiting hook prints.
+    ///
+    /// An answer to an ask the log does not know, or to one already answered,
+    /// is refused by the rules ([`crate::rules::RuleError::UnknownAsk`],
+    /// [`crate::rules::RuleError::AskAlreadyAnswered`]).
+    AskAnswered {
+        /// The task it belongs to.
+        task: TaskId,
+        /// The ask.
+        ask: AskId,
+        /// What the person answered.
+        answer: String,
     },
     /// A gate passed for an attempt.
     GatePassed {
@@ -582,7 +663,8 @@ pub enum EventKind {
     TaskApproved {
         /// The task.
         task: TaskId,
-        /// The forge's number for the pull request.
+        /// The forge's number for the pull request, or `0` when the task lands
+        /// locally and has no pull request.
         number: u64,
         /// The commit the human approved.
         head_sha: String,
@@ -663,6 +745,72 @@ pub enum EventKind {
         /// The integration branch's head after the merge.
         int_sha: String,
     },
+    /// A provider cut a turn off and the fallback ladder sent the agent a
+    /// carry-on message.
+    ///
+    /// The event is the ladder's own clock: it names the cut it answers, so a
+    /// later pass neither sends the same nudge twice nor restarts the waits.
+    Nudged {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+        /// The program that was cut off.
+        agent: AgentId,
+        /// A stable identity for the cut, from the CLI's own record.
+        cut: String,
+        /// What kind of provider trouble it was.
+        class: ProviderClass,
+        /// Why, in a few words.
+        reason: String,
+        /// Which try this nudge is.
+        tries: u32,
+    },
+    /// The fallback ladder handed a task to another program, once.
+    ///
+    /// `started` is false when the handover was attempted and could not be
+    /// made: it is still recorded, because Shepherdr's rule is one try per
+    /// task and the person decides after a failed one. A backup is never
+    /// recorded twice for one task.
+    Backup {
+        /// The task.
+        task: TaskId,
+        /// The attempt that continues.
+        attempt: u32,
+        /// The program handing the task over.
+        from_agent: AgentId,
+        /// The program taking it over.
+        to_agent: AgentId,
+        /// The cut that ended the ladder.
+        cut: String,
+        /// What kind of provider trouble ended it.
+        class: ProviderClass,
+        /// Why the handover happened.
+        reason: String,
+        /// The worktree the newcomer continues in.
+        worktree: String,
+        /// The branch the newcomer commits on.
+        branch: String,
+        /// Whether the backup actually started.
+        started: bool,
+    },
+    /// The fallback ladder ended without a backup: a person has to decide.
+    ProviderGaveUp {
+        /// The task.
+        task: TaskId,
+        /// Attempt number.
+        attempt: u32,
+        /// The program that cannot go on.
+        agent: AgentId,
+        /// The cut that ended the ladder.
+        cut: String,
+        /// What kind of provider trouble it was.
+        class: ProviderClass,
+        /// Why it needs the person, in one line.
+        reason: String,
+        /// Which try ended the ladder.
+        tries: u32,
+    },
     /// The run finished.
     RunFinished {
         /// The tasks the run ended with unfinished, when a human abandoned
@@ -676,6 +824,41 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         abandoned: Vec<TaskId>,
     },
+}
+
+impl EventKind {
+    /// The task this event is about, when it is about one.
+    ///
+    /// The log is how a reader follows one task: which events name it is the
+    /// same question every reader asks, so it is answered once here rather
+    /// than matched again in each view. Run-wide events (`RunStarted`,
+    /// `FullGate`, `BaseSynced`, the two launcher events) name none, and
+    /// `Escalated` names one only when it is not run-wide.
+    pub fn task(&self) -> Option<&str> {
+        match self {
+            Self::TaskAdded { task, .. }
+            | Self::Spawned { task, .. }
+            | Self::Reported { task, .. }
+            | Self::TaskStatus { task, .. }
+            | Self::AskRaised { task, .. }
+            | Self::AskAnswered { task, .. }
+            | Self::GatePassed { task, .. }
+            | Self::GateFailed { task, .. }
+            | Self::Integrated { task, .. }
+            | Self::TaskDropped { task, .. }
+            | Self::ReviewRequested { task, .. }
+            | Self::HandedOff { task, .. }
+            | Self::Override { task, .. }
+            | Self::TaskPrOpened { task, .. }
+            | Self::TaskApproved { task, .. }
+            | Self::TaskLanded { task, .. }
+            | Self::Nudged { task, .. }
+            | Self::Backup { task, .. }
+            | Self::ProviderGaveUp { task, .. } => Some(task),
+            Self::Escalated { task, .. } => task.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -750,6 +933,7 @@ mod tests {
                 changed_paths: vec!["crates/shprd-core/src/event.rs".to_string()],
                 commit: Some("abc123".to_string()),
                 skills_used: vec!["tdd".to_string()],
+                proofs: Vec::new(),
             },
             EventKind::TaskStatus {
                 task: "M1.1".to_string(),
@@ -858,6 +1042,36 @@ mod tests {
                 base_sha: "abc1234".to_string(),
                 int_sha: "def5678".to_string(),
             },
+            EventKind::Nudged {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                agent: "claude".to_string(),
+                cut: "cut-1".to_string(),
+                class: ProviderClass::Overloaded,
+                reason: "Provider overloaded".to_string(),
+                tries: 1,
+            },
+            EventKind::Backup {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                from_agent: "claude".to_string(),
+                to_agent: "codex".to_string(),
+                cut: "cut-5".to_string(),
+                class: ProviderClass::RateLimit,
+                reason: "Rate limited, still after 5 tries".to_string(),
+                worktree: "/tmp/wt".to_string(),
+                branch: "feature/m1-events".to_string(),
+                started: true,
+            },
+            EventKind::ProviderGaveUp {
+                task: "M1.1".to_string(),
+                attempt: 1,
+                agent: "codex".to_string(),
+                cut: "cut-6".to_string(),
+                class: ProviderClass::Other,
+                reason: "Provider error".to_string(),
+                tries: 1,
+            },
             EventKind::RunFinished {
                 abandoned: Vec::new(),
             },
@@ -867,7 +1081,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 23, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 26, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {
@@ -899,6 +1113,38 @@ mod tests {
             }
             other => panic!("expected a passed gate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_event_names_the_task_it_is_about() {
+        let spawned = EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt".to_string(),
+            branch: "b".to_string(),
+        };
+        assert_eq!(spawned.task(), Some("T1"));
+        let escalated = EventKind::Escalated {
+            task: Some("T2".to_string()),
+            body: "check it".to_string(),
+            default_action: "stop".to_string(),
+        };
+        assert_eq!(escalated.task(), Some("T2"));
+        let run_wide = EventKind::Escalated {
+            task: None,
+            body: "check it".to_string(),
+            default_action: "stop".to_string(),
+        };
+        assert_eq!(run_wide.task(), None);
+        let start = EventKind::RunStarted {
+            run_id: "r1".to_string(),
+            repo: "/repo".to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "integration/m1".to_string(),
+        };
+        assert_eq!(start.task(), None, "a run-wide event is about no task");
     }
 
     #[test]

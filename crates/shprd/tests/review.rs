@@ -49,6 +49,17 @@ impl Scratch {
     fn root(&self) -> &Path {
         self.repo.path()
     }
+
+    /// Writes the reviewer the M9.3 way: a role in `settings.toml`.
+    fn settings_reviewer(&self, agent: &str, model: &str) {
+        let config = self.home.path().join(".config").join("shprd");
+        std::fs::create_dir_all(&config).unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(
+            config.join("settings.toml"),
+            format!("version = 1\n\n[roles.reviewer]\nagent = \"{agent}\"\nmodel = \"{model}\"\n"),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+    }
 }
 
 /// Runs the binary with `--repo`, `SHPRD_HOME` and `SHPRD_DATA_DIR` set.
@@ -59,6 +70,17 @@ fn run(scratch: &Scratch, args: &[&str]) -> Output {
         .args(&all)
         .env("SHPRD_HOME", scratch.home.path())
         .env("SHPRD_DATA_DIR", data_dir())
+        // The scratch home's own XDG directories, so a review installs the
+        // reviewer's prompt there and never in the machine's real config home.
+        .env("XDG_CONFIG_HOME", scratch.home.path().join(".config"))
+        .env(
+            "XDG_STATE_HOME",
+            scratch.home.path().join(".local").join("state"),
+        )
+        .env(
+            "XDG_DATA_HOME",
+            scratch.home.path().join(".local").join("share"),
+        )
         .output()
         .unwrap_or_else(|err| panic!("running {BIN} failed: {err}"))
 }
@@ -207,6 +229,25 @@ fn review_refuses_a_reviewer_from_the_authors_vendor() {
         !scratch.home.path().join(".shprd").join("reviews").exists(),
         "a refused review must write nothing"
     );
+}
+
+#[test]
+fn review_reads_the_reviewer_from_the_settings_role() {
+    // The cross-vendor rule runs against the reviewer the settings resolve, not
+    // against the pre-M9 `[roster] reviewer` the verb used to read.
+    let scratch = Scratch::new(None);
+    scratch.settings_reviewer("pi", "anthropic/claude-opus-5-5");
+    plan(&scratch);
+    reported(&scratch, "pi/anthropic/claude-sonnet-4");
+
+    let stderr = refused(
+        &scratch,
+        &["agent", "review", "--task", "T1"],
+        "both run models from the anthropic family",
+    );
+    assert!(stderr.contains("--degraded"), "{stderr}");
+    // The old advice must not appear: the reviewer is configured.
+    assert!(!stderr.contains("no reviewer is configured"), "{stderr}");
 }
 
 #[test]

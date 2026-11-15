@@ -4,7 +4,7 @@
 //! one dry agent, two escalations and two overrides.
 
 use shprd_core::event::{Actor, Event, EventKind, Finding, ReportStatus, Severity};
-use shprd_core::state::RunState;
+use shprd_core::state::{RunState, Task};
 
 /// 2023-11-14 22:13:20 UTC: the fixed clock every fixture event hangs off.
 pub const NOW: u64 = 1_700_000_000_000;
@@ -52,7 +52,7 @@ pub fn events() -> Vec<Event> {
         ),
         task(2, "M1.1", "event log", "crates/shprd-core"),
         task(3, "M1.2", "views", "crates/shprd-views"),
-        task(4, "M1.3", "roster", "crates/shprd-roster"),
+        task(4, "M1.3", "roster", "crates/shprd-agents"),
         ev(
             5,
             EventKind::Spawned {
@@ -76,6 +76,7 @@ pub fn events() -> Vec<Event> {
                 changed_paths: vec!["crates/shprd-core/src/event.rs".to_string()],
                 commit: Some("abc123".to_string()),
                 skills_used: vec!["tdd".to_string()],
+                proofs: Vec::new(),
             },
         ),
         ev(
@@ -118,6 +119,7 @@ pub fn events() -> Vec<Event> {
                 changed_paths: vec!["crates/shprd-views/src/brief.rs".to_string()],
                 commit: Some("aaa111".to_string()),
                 skills_used: vec!["tdd".to_string(), "simplify".to_string()],
+                proofs: Vec::new(),
             },
         ),
         ev(
@@ -209,5 +211,41 @@ pub fn many_tasks(count: u64) -> RunState {
     match RunState::fold(&events) {
         Ok(state) => state,
         Err(err) => panic!("the fixture log must fold: {err}"),
+    }
+}
+
+/// One queued task, folded on its own: `id`, `title`, these scopes, and one
+/// acceptance line, for the brief's snapshot tests.
+pub fn queued(id: &str, title: &str, scopes: &[&str]) -> Task {
+    let events = vec![
+        ev(
+            1,
+            EventKind::RunStarted {
+                run_id: "run-7".to_string(),
+                repo: "/tmp/repo".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/m1".to_string(),
+            },
+        ),
+        ev(
+            2,
+            EventKind::TaskAdded {
+                task: id.to_string(),
+                title: title.to_string(),
+                scope: scopes.iter().map(|scope| (*scope).to_string()).collect(),
+                acceptance: vec![format!("{id} does what it says")],
+                tags: vec!["rust".to_string()],
+                skills: vec!["tdd".to_string()],
+                deps: vec![],
+            },
+        ),
+    ];
+    let state = match RunState::fold(&events) {
+        Ok(state) => state,
+        Err(err) => panic!("the fixture log must fold: {err}"),
+    };
+    match state.tasks.get(id) {
+        Some(task) => task.clone(),
+        None => panic!("the fixture log holds {id}"),
     }
 }

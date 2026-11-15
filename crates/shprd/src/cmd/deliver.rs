@@ -11,8 +11,8 @@
 
 use std::time::{Duration, Instant};
 
+use shprd_agents::spec::{BlockingPrompt, LaunchSpec};
 use shprd_mux::{AgentState, Mux, PaneId};
-use shprd_roster::spec::{BlockingPrompt, LaunchSpec};
 
 /// The model-argument template to render, empty when no model is chosen.
 ///
@@ -166,7 +166,7 @@ fn await_agent(
 /// brief or a notice may be typed into. The return type says that much, because
 /// a `Result` let "the host answered" read like "a prompt is waiting".
 ///
-/// The match is case-insensitive, like [`shprd_roster::spec::HarnessSpec::dry_patterns`],
+/// The match is case-insensitive, like [`shprd_agents::spec::HarnessSpec::dry_patterns`],
 /// and reads only the last [`BLOCKING_PROMPT_LINES`] lines: a prompt still
 /// waiting is on screen, and the scrollback above it may mention one long gone.
 pub(crate) fn blocking_prompt(
@@ -188,7 +188,7 @@ pub(crate) fn blocking_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shprd_roster::spec::LaunchSpec;
+    use shprd_agents::spec::LaunchSpec;
 
     fn launch() -> LaunchSpec {
         LaunchSpec {

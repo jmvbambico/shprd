@@ -12,15 +12,17 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use serde_json::{Value, json};
-use shprd_core::event::{EventKind, ReportStatus};
+use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
+use shprd_agents::families::{Families, agent_vendor};
+use shprd_agents::models::AgentRef;
+use shprd_agents::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
+use shprd_core::ask::AskId;
+use shprd_core::event::{EventKind, ReportStatus, TaskId};
 use shprd_core::gate::REVIEW_GATE;
-use shprd_core::state::{Attempt, Task, TaskStatus};
+use shprd_core::settings::{ResolvedRole, Source, Sourced};
+use shprd_core::state::{AskRecord, Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_mux::Mux;
-use shprd_roster::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
-use shprd_roster::families::{Families, agent_vendor};
-use shprd_roster::models::AgentRef;
-use shprd_roster::spec::{BlockingPrompt, HarnessSpec, LaunchSpec, Values, render_args};
 
 use crate::cli::ReviewArgs;
 use crate::cmd::deliver;
@@ -48,8 +50,9 @@ pub struct ReviewEnv<'a> {
     pub spawn: SpawnEnv<'a>,
     /// Where review packets are written: `<home>/.shprd/reviews`.
     pub reviews_dir: PathBuf,
-    /// `roster.reviewer`: the agent a review runs on, when one is configured.
-    pub reviewer: Option<String>,
+    /// The `roles.reviewer` row the settings resolve: the agent a review runs
+    /// on, or a role that names no program yet.
+    pub reviewer: ReviewerRole,
     /// How long to wait before retrying a brief the reviewer did not take.
     ///
     /// It is data rather than a constant so a test can set it to
@@ -59,21 +62,38 @@ pub struct ReviewEnv<'a> {
 }
 
 impl ReviewEnv<'_> {
-    /// Builds the environment from the process environment, the config and the
+    /// Builds the environment from the process environment, the settings and the
     /// run log.
     pub fn build<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<ReviewEnv<'a>, CliError> {
         let home = crate::ctx::resolve_home(home)?;
         let spawn = spawn::build_env(ctx, Some(&home))?;
-        // `build_env` keeps what a spawn needs; the reviewer is the one roster
-        // entry only a review reads, so it is read here.
-        let global = home.join(".config").join("shprd").join("config.toml");
-        let repo_config = ctx.root.join(".shprd").join("config.toml");
-        let config = shprd_core::config::load(Some(&global), Some(&repo_config))
-            .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
+        // The reviewer is the `roles.reviewer` row, resolved the way every other
+        // setting is: the person's settings file, then their old `config.toml`,
+        // then this repository's committed file. A reviewer named the pre-M9 way
+        // therefore still resolves, with the legacy layer as its source.
+        let mut reviewer = spawn
+            .settings
+            .resolve(None)
+            .role(REVIEWER_ROLE)
+            .map(|role| ReviewerRole::resolved(&role))
+            .unwrap_or_default();
+        if reviewer.agent().is_none() {
+            // A repository's own `.shprd/config.toml` predates the settings model
+            // and is not a settings layer, so its `[roster] reviewer` is the last
+            // fallback: a repository that named its reviewer the old way keeps it.
+            let global = home.join(".config").join("shprd").join("config.toml");
+            let repo_config = ctx.root.join(".shprd").join("config.toml");
+            let config = shprd_core::config::load(Some(&global), Some(&repo_config))
+                .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
+            if let Some(written) = config.roster.reviewer.as_deref() {
+                let effort = config.roster.effort.get(written).map(String::as_str);
+                reviewer = ReviewerRole::written(written, effort);
+            }
+        }
         Ok(ReviewEnv {
             spawn,
             reviews_dir: home.join(".shprd").join("reviews"),
-            reviewer: config.roster.reviewer,
+            reviewer,
             brief_retry_wait: BRIEF_RETRY_WAIT,
         })
     }
@@ -113,7 +133,7 @@ pub struct ReviewReport {
 
 /// Where a review packet lives: `<reviews>/<run>/<task>-a<attempt>/`.
 pub fn packet_dir(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
-    reviews.join(run).join(format!("{task}-a{attempt}"))
+    shprd_core::review::packet_dir(reviews, run, task, attempt)
 }
 
 /// The file a reviewer writes its findings to, inside its packet folder.
@@ -121,7 +141,7 @@ pub fn packet_dir(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBu
 /// It is the one file read back out of a packet: the watchdog watches it, so a
 /// finished review is picked up without the reviewer running any command.
 pub fn findings_path(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
-    packet_dir(reviews, run, task, attempt).join("findings.json")
+    shprd_core::review::findings_path(reviews, run, task, attempt)
 }
 
 /// Where a reviewer's brief lives: `<briefs>/<run>/<task>-a<attempt>-review.md`.
@@ -168,12 +188,24 @@ pub fn close_reviewer(
 pub struct ContractInput<'a> {
     /// The task that was attempted.
     pub task: &'a Task,
+    /// Every ask the run folded, from which this attempt's own are picked.
+    ///
+    /// The fold keeps one record per ask, task-wide, so the attempt whose spawn
+    /// came before a card and whose report came after is the attempt that
+    /// raised it. An attempt built by hand, with no `spawn_seq`, gets every ask
+    /// the task raised: there is nothing to tell them apart by, and showing too
+    /// much is never what hides an acceptance criterion.
+    pub asks: &'a [(TaskId, AskId, AskRecord)],
 }
 
 /// Renders the contract a reviewer checks the diff against.
 ///
 /// It carries what the diff cannot say: what the task was for, what "done"
-/// meant, what the attempt was allowed to touch, and what the agent claimed.
+/// meant, what the attempt was allowed to touch, what it asked the person and
+/// what they answered, and what the agent claimed — including where its
+/// proof is. An acceptance criterion that says "ask first, then use the answer"
+/// is unverifiable from a diff alone, so the asks belong in the packet rather
+/// than only in the agent's summary.
 pub fn render_contract(input: &ContractInput<'_>) -> String {
     let task = input.task;
     let mut out = String::new();
@@ -199,6 +231,7 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     for path in &task.scope {
         out.push_str(&format!("- {path}\n"));
     }
+    out.push_str(&asks_section(attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
     let Some(report) = report else {
@@ -208,10 +241,70 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     out.push_str(&format!("- summary: {}\n", report.summary));
     out.push_str(&listed("tests", &report.tests));
     out.push_str(&listed("changed paths", &report.changed_paths));
+    out.push_str(&listed("proof", &report.proofs));
     if let Some(commit) = &report.commit {
         out.push_str(&format!("- commit: {commit}\n"));
     }
     out
+}
+
+/// The asks this attempt raised, and what the person answered.
+///
+/// The section is written even when the attempt asked nothing: a reviewer
+/// reading "none" knows a criterion about asking was never met, while a missing
+/// section reads like a packet that lost something.
+fn asks_section(attempt: Option<&Attempt>, asks: &[(TaskId, AskId, AskRecord)]) -> String {
+    let mut out = String::from("\n## Asks raised during this attempt\n\n");
+    let found: Vec<&AskRecord> = asks
+        .iter()
+        .filter(|(_, _, record)| raised_in(attempt, record))
+        .map(|(_, _, record)| record)
+        .collect();
+    if found.is_empty() {
+        out.push_str("- none: this attempt asked the person nothing\n");
+        return out;
+    }
+    for record in found {
+        out.push_str(&format!(
+            "- {} `{}`: {}\n",
+            record.kind.word(),
+            record.id,
+            record.text
+        ));
+        out.push_str(&format!(
+            "  - options: {}\n",
+            if record.options.is_empty() {
+                "none".to_owned()
+            } else {
+                record.options.join(", ")
+            }
+        ));
+        out.push_str(&format!(
+            "  - answer: {}\n",
+            match &record.answer {
+                Some(answer) => answer.text.as_str(),
+                None => "unanswered",
+            }
+        ));
+    }
+    out
+}
+
+/// Whether `record` was raised while `attempt` was the live one.
+///
+/// The attempt's spawn came first and its report came after, so an ask raised
+/// in that window belongs to this attempt. Without a recorded spawn — an
+/// attempt a test built, or one folded from a log written before the field
+/// existed — every ask counts, because a packet that shows too much is
+/// never the one that hides a criterion.
+fn raised_in(attempt: Option<&Attempt>, record: &AskRecord) -> bool {
+    let Some(attempt) = attempt else {
+        return true;
+    };
+    let Some(spawn) = attempt.spawn_seq else {
+        return true;
+    };
+    record.raised_seq > spawn
 }
 
 /// One reported list, saying so plainly when the agent claimed none.
@@ -283,9 +376,18 @@ fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<P
     let diff =
         diff_against_merge_base(&env.spawn.ctx.root, &env.spawn.base_branch, &attempt.branch)?;
     write_file(&dir.join("diff.patch"), &diff)?;
+    // The attempt's own asks come from the fold, which is the only place an
+    // answer is recorded: the reviewer reads the same answer the worker did.
+    let state = env.spawn.ctx.state()?;
+    let asks: Vec<(TaskId, AskId, AskRecord)> = state
+        .asks
+        .iter()
+        .filter(|((ask_task, _), _)| *ask_task == task.id)
+        .map(|((ask_task, ask), record)| (ask_task.clone(), ask.clone(), record.clone()))
+        .collect();
     write_file(
         &dir.join("contract.md"),
-        &render_contract(&ContractInput { task }),
+        &render_contract(&ContractInput { task, asks: &asks }),
     )?;
     write_file(&dir.join("findings.schema.json"), &schema_text()?)?;
     Ok(dir)
@@ -376,6 +478,25 @@ fn restartable_attempt(task: &Task) -> Result<&Attempt, CliError> {
     reviewed_attempt(task)
 }
 
+/// Refuses a review while one is already out for the same attempt.
+///
+/// A task is still `Reported` between its request and the verdict, so a second
+/// plain review would look legal. It is not: the first reviewer is still
+/// running, and recording a second request would overwrite the only record of
+/// its tab. The way forward is `--again`, which closes that reviewer and starts
+/// a fresh one.
+fn refuse_pending_review(task: &Task, attempt: &Attempt) -> Result<(), CliError> {
+    if attempt.reviews.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Invalid(anyhow!(
+        "task {:?} attempt {} already has a review requested and no verdict yet: pass --again to \
+         replace it, or wait for the reviewer to write its findings",
+        task.id,
+        attempt.n
+    )))
+}
+
 /// Refuses a restart the findings file says is a mistake.
 ///
 /// The watchdog reads the reviewer's `findings.json` once it settles, so a
@@ -433,6 +554,115 @@ fn clear_findings(reviews: &Path, run: &str, task: &str, attempt: u32) -> Result
     }
 }
 
+/// The role id a review resolves its reviewer from.
+pub const REVIEWER_ROLE: &str = "reviewer";
+
+/// The reviewer the settings name: the resolved `roles.reviewer` row.
+///
+/// It is plain data so the pick and the argv can be tested without a settings
+/// file, and every field keeps the layer that supplied it: a value the old
+/// `config.toml` still sets reads as [`Source::Legacy`], not as the person's own
+/// settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewerRole {
+    /// The program, in the words of the settings role.
+    pub agent: Option<Sourced<String>>,
+    /// The model, in the program's own words.
+    pub model: Option<Sourced<String>>,
+    /// The effort level, in the program's own words.
+    pub effort: Option<Sourced<String>>,
+    /// The access mode, one of the program's `[permissions]` ids.
+    pub perm: Option<Sourced<String>>,
+    /// Whether the role only reads, as the settings resolve it.
+    pub readonly: bool,
+    /// Whether the role may review: its kind is `reviewer`, or it only reads.
+    pub may_review: bool,
+}
+
+impl ReviewerRole {
+    /// The role as one settings resolution answers it.
+    pub fn resolved(role: &ResolvedRole) -> Self {
+        Self {
+            agent: role.agent.clone(),
+            model: role.model.clone(),
+            effort: role.effort.clone(),
+            perm: role.perm.clone(),
+            readonly: role.readonly.value,
+            may_review: role.may_review(),
+        }
+    }
+
+    /// A reviewer written the pre-M9 way, `program/model`, as the legacy layer
+    /// names it.
+    ///
+    /// The model keeps every `/` after the program's, because a multi-model CLI
+    /// names its provider there (`pi/deepseek/deepseek-v4.1-flash`).
+    pub fn written(written: &str, effort: Option<&str>) -> Self {
+        let trimmed = written.trim();
+        let (agent, model) = match trimmed.split_once('/') {
+            Some((program, model)) if !model.trim().is_empty() => {
+                (program.trim(), Some(model.trim()))
+            }
+            _ => (trimmed, None),
+        };
+        let text = |value: &str| Sourced::new(value.to_owned(), Source::Legacy);
+        Self {
+            agent: Some(text(agent)).filter(|agent| !agent.value.is_empty()),
+            model: model.map(text),
+            effort: effort
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .map(text),
+            perm: None,
+            // The legacy key named a reviewer, so the role reviews: the
+            // built-in reviewer is a `reviewer` that only reads.
+            readonly: true,
+            may_review: true,
+        }
+    }
+
+    /// The program, when the role names one.
+    pub fn agent(&self) -> Option<&str> {
+        self.agent
+            .as_ref()
+            .map(|agent| agent.value.trim())
+            .filter(|agent| !agent.is_empty())
+    }
+
+    /// The model, when the role names one.
+    pub fn model(&self) -> Option<&str> {
+        self.model
+            .as_ref()
+            .map(|model| model.value.trim())
+            .filter(|model| !model.is_empty())
+    }
+
+    /// The effort, when the role names one.
+    pub fn effort(&self) -> Option<&str> {
+        self.effort
+            .as_ref()
+            .map(|effort| effort.value.trim())
+            .filter(|effort| !effort.is_empty())
+    }
+
+    /// The access mode, when the role names one.
+    pub fn perm(&self) -> Option<&str> {
+        self.perm
+            .as_ref()
+            .map(|perm| perm.value.trim())
+            .filter(|perm| !perm.is_empty())
+    }
+
+    /// The program and model as the old one-word agent string would write them.
+    fn written_agent(&self) -> Option<String> {
+        let agent = self.agent()?;
+        Some(match self.model() {
+            Some(model) => format!("{agent}/{model}"),
+            None => agent.to_owned(),
+        })
+    }
+}
+
 /// The agent a review runs on, with everything needed to start it.
 #[derive(Debug, Clone)]
 pub struct Reviewer {
@@ -440,8 +670,13 @@ pub struct Reviewer {
     pub agent: String,
     /// The model to select, when the configured string carried one.
     pub model: Option<String>,
-    /// How to start the program.
-    pub launch: LaunchSpec,
+    /// The effort level, when the role names one.
+    pub effort: Option<String>,
+    /// The access mode the role names, when the program offers it.
+    pub perm: Option<String>,
+    /// The harness spec the program runs from: how to start it, and how a
+    /// reviewer is confined.
+    pub spec: HarnessSpec,
     /// The prompts the CLI waits on a human to answer before it reads anything.
     pub blocking_prompts: Vec<BlockingPrompt>,
     /// Whether this review is cross-vendor or degraded.
@@ -459,20 +694,35 @@ pub struct Reviewer {
 /// on DeepSeek reviewed by a `pi` reviewer on Claude is cross-vendor, and a `pi`
 /// worker on Claude reviewed by Claude Code is not. An agent whose family cannot
 /// be proven, such as one running a router, is never assumed independent.
+///
+/// The reviewer is the `roles.reviewer` row the settings resolve, so the program,
+/// model, effort, access mode and the read-only rule all come from one place;
+/// the pre-M9 `[roster] reviewer` reaches the same answer through the settings'
+/// legacy layer. The cross-vendor check is made against this resolved reviewer,
+/// never against a separate config value.
 pub fn choose_reviewer(
-    configured: Option<&str>,
+    role: &ReviewerRole,
     author: &str,
     author_model: Option<&str>,
     programs: &[Program],
     degraded: bool,
 ) -> Result<Reviewer, CliError> {
-    let raw = configured.ok_or_else(|| {
+    let raw = role.written_agent().ok_or_else(|| {
         CliError::Invalid(anyhow!(
-            "no reviewer is configured: set one with `shprd set reviewer <program>/<model>`"
+            "no reviewer is configured: set one with `shprd settings set roles.reviewer.agent \
+             <program>` and `roles.reviewer.model <model>`, or the old way with `shprd set \
+             reviewer <program>/<model>`"
         ))
     })?;
+    if !role.may_review {
+        return Err(CliError::Invalid(anyhow!(
+            "the role `reviewer` may not review: only a role of kind `reviewer`, or one marked \
+             readonly, may review; set `roles.reviewer.kind = \"reviewer\"` or \
+             `roles.reviewer.readonly = true`"
+        )));
+    }
     let specs: Vec<HarnessSpec> = spawn::spec_table(programs);
-    let parsed = AgentRef::parse(raw, &specs).map_err(|err| {
+    let parsed = AgentRef::parse(&raw, &specs).map_err(|err| {
         CliError::Invalid(anyhow!(err).context(format!(
             "the configured reviewer `{raw}` is not a usable agent"
         )))
@@ -492,7 +742,17 @@ pub fn choose_reviewer(
     let mut reviewer = Reviewer {
         agent: parsed.program,
         model: parsed.model,
-        launch: program.spec.launch.clone(),
+        // The role's effort is applied where the CLI takes one; a program with
+        // no effort flag runs at its own default.
+        effort: role.effort().map(str::to_owned),
+        // The mode is kept only when the program offers it, and never when it is
+        // the program's full-access one: a reviewer may not act unprompted.
+        perm: role
+            .perm()
+            .filter(|id| program.spec.permissions.mode(id).is_some())
+            .filter(|id| program.spec.permissions.full.as_deref() != Some(*id))
+            .map(str::to_owned),
+        spec: program.spec.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
         // `--degraded` is only recorded where the review needs the label: the
         // branches below set it, and it stays false for an independent review.
@@ -510,13 +770,13 @@ pub fn choose_reviewer(
     let unknown = match (&author_vendor, &reviewer_vendor) {
         (Some(_), Some(_)) => None,
         (None, _) => Some(author_label.as_str()),
-        (_, None) => Some(raw),
+        (_, None) => Some(raw.as_str()),
     };
     if let Some(agent) = unknown {
         if !degraded {
             return Err(CliError::Invalid(anyhow!(
                 "cannot prove the reviewer is a different vendor: {agent} has no known model \
-                 family: set a reviewer with a known family with `shprd set reviewer`, or pass \
+                 family: set a reviewer with a known family in `roles.reviewer`, or pass \
                  --degraded to review anyway"
             )));
         }
@@ -530,8 +790,8 @@ pub fn choose_reviewer(
         if !degraded {
             return Err(CliError::Invalid(anyhow!(
                 "the reviewer `{raw}` and `{author_label}`, which wrote this change, both run \
-                 models from the {vendor} family: set a reviewer from another vendor with \
-                 `shprd set reviewer`, or pass --degraded to review anyway"
+                 models from the {vendor} family: set a reviewer from another vendor in \
+                 `roles.reviewer`, or pass --degraded to review anyway"
             )));
         }
         eprintln!(
@@ -598,6 +858,8 @@ pub struct ReviewBrief<'a> {
     pub dir: &'a str,
     /// Whether the review is degraded, and so must say so.
     pub degraded: bool,
+    /// The reviewer role's standing words, when its prompt can be read.
+    pub prompt: Option<&'a str>,
 }
 
 /// Renders the brief a reviewer reads before its first turn.
@@ -608,6 +870,10 @@ pub struct ReviewBrief<'a> {
 /// is outside the repository and the engine records the verdict instead.
 pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     let mut out = String::new();
+    if let Some(prompt) = input.prompt {
+        out.push_str(prompt.trim_end());
+        out.push_str("\n\n");
+    }
     out.push_str(&format!(
         "# REVIEW {} {}\n\n",
         input.task.id, input.task.title
@@ -635,7 +901,10 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str(
         "- `diff.patch` — the whole change, against its merge base with the integration branch\n",
     );
-    out.push_str("- `contract.md` — the task, what \"done\" meant, and what the agent reported\n");
+    out.push_str(
+        "- `contract.md` — the task, what \"done\" meant, what the agent reported, and the \
+         asks it raised with the person's answers\n",
+    );
     out.push_str("- `findings.schema.json` — the shape of what you write\n\n");
     out.push_str("- Read those three files, in this folder, and nothing else.\n");
     out.push_str("- Never open or edit the repository or any worktree; the diff is the truth you judge. If the packet does not show something you need, record that as a finding.\n");
@@ -643,6 +912,7 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str("## What to write\n\n");
     out.push_str("Write `findings.json` in this folder, matching `findings.schema.json`: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write an empty array — `[]` — when nothing is wrong: an empty array is a clean review, and it is the answer to aim for.\n\n");
     out.push_str("Judge the diff against the acceptance criteria and the scope: what it does wrong, what it misses, what it changes that it may not touch. A critical or major finding blocks integration, so spend them on things that matter.\n\n");
+    out.push_str("A criterion that is about asking the person is checked from the contract's asks: their text, their options and the answer the person gave. An ask with `answer: unanswered` never got the person's word. The reported proofs are the artifacts to check a criterion about proof against; one the worker did not name is not there.\n\n");
     out.push_str("## Then\n\n");
     out.push_str(
         "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
@@ -714,8 +984,10 @@ fn start_in_tab(
 ) -> Result<(), CliError> {
     let text = render_review_brief(brief);
     let (argv, brief_in_args) = reviewer_argv(
-        &reviewer.launch,
+        &reviewer.spec,
         reviewer.model.as_deref(),
+        reviewer.effort.as_deref(),
+        reviewer.perm.as_deref(),
         &text,
         brief_path,
     )?;
@@ -727,27 +999,37 @@ fn start_in_tab(
             task: Some(task.to_string()),
             run: Some(env.spawn.run.clone()),
             repo: dir.to_path_buf(),
+            home: Some(env.spawn.home.clone()),
+            data: Some(env.spawn.data_dir.clone()),
         },
     ));
     mux.run(&tab.root_pane, &argv, &pairs)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the reviewer CLI")))?;
-    if brief_in_args {
-        return Ok(());
-    }
-    let delivery = deliver_review_brief(mux, env, reviewer, tab, &text);
+    // A brief that arrived as a system prompt leaves the CLI idle, waiting for a
+    // first turn, so it gets the same one-line kickoff a worker gets; a reviewer
+    // whose CLI has no system-prompt flag gets the whole brief typed in.
+    let (text, what) = if brief_in_args {
+        (deliver::KICKOFF, "review kickoff")
+    } else {
+        (text.as_str(), "review brief")
+    };
+    let delivery = deliver_review_brief(mux, env, reviewer, tab, text);
     let Some(reason) = delivery.reason() else {
         return Ok(());
     };
     eprintln!(
-        "warning: review brief not delivered to {title}: {reason}; it is at {}",
+        "warning: {what} not delivered to {title}: {reason}; it is at {}",
         brief_path.display()
     );
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
-        body: "review brief not delivered".to_string(),
+        // The ledger says which turn was lost, the way the warning does: a
+        // kickoff that never arrived and a brief that never arrived are fixed
+        // the same way but are different causes to read.
+        body: format!("{what} not delivered"),
         default_action: format!(
             "run `shprd agent review --task {task} --again`, which closes the reviewer \
-             tab and delivers the brief again; never type into the reviewer's tab"
+             tab and delivers the {what} again; never type into the reviewer's tab"
         ),
     };
     if let Err(err) = env.spawn.ctx.commit(escalation) {
@@ -782,8 +1064,8 @@ fn deliver_review_brief(
 
 /// The argv a reviewer's CLI starts with.
 ///
-/// The order is the base command, the flags that confine a reviewer's writes
-/// ([`LaunchSpec::reviewer_args`]), the model and finally the brief as the
+/// The order is the base command, the flags that confine a reviewer's tools
+/// ([`review_confinement`]), the model, the effort, and finally the brief as the
 /// system prompt. A reviewer never gets [`LaunchSpec::auto_approve`]: it runs
 /// beside a human, so its tools must prompt rather than act unprompted, and a
 /// reviewer that could silently write could read or change the worktree the
@@ -791,48 +1073,71 @@ fn deliver_review_brief(
 /// in as an argument, which is also what says whether it has to be typed in
 /// instead.
 fn reviewer_argv(
-    launch_spec: &LaunchSpec,
+    spec: &HarnessSpec,
     model: Option<&str>,
+    effort: Option<&str>,
+    perm: Option<&str>,
     brief: &str,
     brief_path: &Path,
 ) -> Result<(Vec<String>, bool), CliError> {
-    let mut argv = launch_spec.interactive.clone();
-    if let Some(confine) = &launch_spec.reviewer_args {
-        argv.extend(confine.iter().cloned());
-    }
+    let launch = &spec.launch;
+    let mut argv = launch.interactive.clone();
+    argv.extend(review_confinement(spec, perm));
     let values = Values {
         model: model.map(str::to_string),
-        // A reviewer has no effort level of its own: `roster.effort` is keyed by
-        // worker agent strings, and a reviewer is chosen for its vendor, not its
-        // depth.
-        effort: None,
+        effort: effort.map(str::to_string),
         prompt: Some(brief.to_string()),
         prompt_file: Some(brief_path.display().to_string()),
         session: None,
     };
-    argv.extend(render(
-        launch_spec,
-        deliver::model_args(launch_spec, model),
-        &values,
-    )?);
+    argv.extend(render(spec, deliver::model_args(launch, model), &values)?);
+    if let (Some(effort_args), Some(_)) = (&launch.effort_args, effort) {
+        argv.extend(render(spec, effort_args, &values)?);
+    }
     let mut brief_in_args = false;
-    if let Some(system_prompt_args) = &launch_spec.system_prompt_args {
-        argv.extend(render(launch_spec, system_prompt_args, &values)?);
+    if let Some(system_prompt_args) = &launch.system_prompt_args {
+        argv.extend(render(spec, system_prompt_args, &values)?);
         brief_in_args = true;
     }
     Ok((argv, brief_in_args))
 }
 
+/// The flags that confine a reviewer's tools, before the model.
+///
+/// A role that names an access mode the program offers gets exactly that mode,
+/// unless it is the program's full-access one: a reviewer may not act
+/// unprompted, so a full-access mode is refused here as the settings check
+/// refuses it, and the program's own reviewer confinement applies instead.
+/// A role that names no mode keeps [`LaunchSpec::reviewer_args`], which is the
+/// program's own answer to "how does a reviewer stay out of the worktree and
+/// still write its findings": codex's workspace-write sandbox is that answer.
+///
+/// A role marked read-only is not handed the program's read-only *tool set*
+/// when it names no mode: for codex and pi those modes (`-s read-only`,
+/// `--tools read,grep,find,ls`) cannot write the packet's `findings.json`, so
+/// the review would never produce a verdict. The program's reviewer confinement
+/// is what keeps such a reviewer out of the worktree instead. A role that names
+/// a read-only mode explicitly still gets it, as does one that names any other
+/// mode the program offers.
+fn review_confinement(spec: &HarnessSpec, perm: Option<&str>) -> Vec<String> {
+    if let Some(mode) = perm.and_then(|id| spec.permissions.mode(id))
+        && spec.permissions.full.as_deref() != Some(mode.id.as_str())
+    {
+        return mode.args.clone();
+    }
+    spec.launch.reviewer_args.clone().unwrap_or_default()
+}
+
 /// Renders one argument template, naming the template when it cannot be filled.
 fn render(
-    launch_spec: &LaunchSpec,
+    spec: &HarnessSpec,
     template: &[String],
     values: &Values,
 ) -> Result<Vec<String>, CliError> {
     render_args(template, values).map_err(|err| {
         CliError::other(anyhow!(err).context(format!(
             "filling the launch arguments {template:?} of {:?}",
-            launch_spec.interactive
+            spec.launch.interactive
         )))
     })
 }
@@ -865,10 +1170,16 @@ pub fn review(
     let attempt = if req.again {
         restartable_attempt(task)?
     } else {
-        reviewed_attempt(task)?
+        let attempt = reviewed_attempt(task)?;
+        // One reviewer at a time on one attempt: a second plain review would
+        // append a second request, overwrite the tab record and leave the first
+        // reviewer running with nothing naming it. Only `--again` replaces a
+        // review that is still out.
+        refuse_pending_review(task, attempt)?;
+        attempt
     };
     let reviewer = choose_reviewer(
-        env.reviewer.as_deref(),
+        &env.reviewer,
         &attempt.agent,
         attempt.model.as_deref(),
         &env.spawn.programs,
@@ -877,6 +1188,9 @@ pub fn review(
     if let Some(note) = &reviewer.note {
         eprintln!("{note}");
     }
+    // The reviewer's standing words are read before any effect: a prompt that
+    // cannot be read must leave no packet, tab or event behind.
+    let prompt = spawn::role_prompt(&env.spawn, "reviewer")?;
     // A restart replaces the review it restarts: the old reviewer's tab is
     // closed and any findings it half-wrote are removed before the packet is
     // rebuilt, so nothing reads a stale verdict as this review's.
@@ -903,6 +1217,7 @@ pub fn review(
         model: reviewer.model.as_deref(),
         dir: &dir.display().to_string(),
         degraded: reviewer.degraded,
+        prompt: Some(&prompt),
     };
     spawn::write_brief(&brief_path, &render_review_brief(&brief))?;
     // Who reviews, and whether the review can be independent, is a recorded
@@ -959,6 +1274,26 @@ pub fn review_verb(ctx: &Ctx, args: &ReviewArgs, home: Option<&Path>) -> Result<
     Ok(())
 }
 
+/// Starts the review of one task on the engine's behalf, as the tick does.
+///
+/// It is [`review`] with the verb's own arguments, so the service runs exactly
+/// the code a person's `shprd agent review` runs. It returns one line for the
+/// pass's report: which reviewer was started, and where.
+pub fn review_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, String> {
+    let mux = spawn::real_mux();
+    let env = ReviewEnv::build(ctx, Some(home)).map_err(|err| err.to_string())?;
+    let request = ReviewRequest {
+        task: task.to_string(),
+        degraded: false,
+        again: false,
+    };
+    let report = review(&mux, &env, &request).map_err(|err| err.to_string())?;
+    Ok(format!(
+        "started {} on {} attempt {} in tab {}",
+        report.agent, report.task, report.attempt, report.tab
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -967,8 +1302,9 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration, SystemTime};
 
-    use shprd_core::config::Skills;
+    use shprd_core::config::{ConfigLayer, Skills};
     use shprd_core::event::{Actor, ReviewSource};
+    use shprd_core::settings::{File, Loaded, Source as LayerSource};
     use shprd_git::worktree::Layout;
     use shprd_mux::fake::{Call, FakeMux};
     use shprd_mux::{AgentState, PaneId};
@@ -996,6 +1332,51 @@ mod tests {
         fake_model_spec(id, vendor, false, false)
     }
 
+    /// A fake CLI that takes its brief as a system prompt, the way pi and
+    /// claude do: the brief arrives as a file, so a review must still deliver a
+    /// first turn or the CLI sits idle.
+    fn fake_prompt_spec(id: &str, vendor: &str) -> HarnessSpec {
+        fake_spec_text(
+            id,
+            vendor,
+            false,
+            false,
+            "system_prompt_args = [\"--system-prompt\", \"{prompt_file}\"]\n",
+        )
+    }
+
+    /// The reviewer role a test builds from an old one-word agent string.
+    fn reviewer_role(reviewer: Option<&str>) -> ReviewerRole {
+        reviewer
+            .map(|written| ReviewerRole::written(written, None))
+            .unwrap_or_default()
+    }
+
+    /// The reviewer role a settings document resolves to.
+    fn settings_reviewer(text: &str) -> ReviewerRole {
+        let mut loaded = Loaded::default();
+        loaded.file = File::parse(text).unwrap_or_else(|err| panic!("{err}"));
+        ReviewerRole::resolved(
+            &loaded
+                .resolve(None)
+                .role(REVIEWER_ROLE)
+                .unwrap_or_else(|| panic!("the reviewer role is missing")),
+        )
+    }
+
+    /// The reviewer role a pre-M9 `config.toml` resolves to.
+    fn legacy_reviewer(config: &str) -> ReviewerRole {
+        let layer: ConfigLayer = toml::from_str(config).unwrap_or_else(|err| panic!("{err}"));
+        let mut loaded = Loaded::default();
+        loaded.file.legacy = layer.settings_projection();
+        ReviewerRole::resolved(
+            &loaded
+                .resolve(None)
+                .role(REVIEWER_ROLE)
+                .unwrap_or_else(|| panic!("the reviewer role is missing")),
+        )
+    }
+
     /// A fake CLI that runs other vendors' models, when `multi_model` says so,
     /// and wants the provider in the model name when `provider_qualified` does.
     fn fake_model_spec(
@@ -1003,6 +1384,17 @@ mod tests {
         vendor: &str,
         multi_model: bool,
         provider_qualified: bool,
+    ) -> HarnessSpec {
+        fake_spec_text(id, vendor, multi_model, provider_qualified, "")
+    }
+
+    /// One fake CLI spec, with `launch_extra` added to its `[launch]` block.
+    fn fake_spec_text(
+        id: &str,
+        vendor: &str,
+        multi_model: bool,
+        provider_qualified: bool,
+        launch_extra: &str,
     ) -> HarnessSpec {
         let text = format!(
             r#"
@@ -1022,7 +1414,18 @@ signin_args = []
 [launch]
 interactive = ["sh"]
 model_args = ["--model", "{{model}}"]
-verified = false
+effort_args = ["--effort", "{{effort}}"]
+{launch_extra}verified = false
+
+[permissions]
+default = "manual"
+full = "full"
+readonly = "read-only"
+modes = [
+  {{ id = "manual", label = "Manual", args = [] }},
+  {{ id = "read-only", label = "Read only", args = ["--mode", "read-only"] }},
+  {{ id = "full", label = "Full", args = ["--mode", "full"] }},
+]
 
 [models]
 provider_qualified = {provider_qualified}
@@ -1138,6 +1541,7 @@ project_dirs = []
                 changed_paths: vec!["README.md".to_string()],
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             })
             .unwrap_or_else(|err| panic!("{err}"));
         }
@@ -1180,12 +1584,20 @@ project_dirs = []
                     ctx,
                     layout: Layout::default_for_home(self.home.path()),
                     briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                    prompts_dir: shprd_core::prompts::prompts_dir(
+                        &self.home.path().join(".config"),
+                    ),
+                    home: self.home.path().to_path_buf(),
+                    settings: shprd_core::settings::Loaded::default(),
                     run: "t1".to_string(),
                     base_branch: "integration/m4".to_string(),
                     repo_name: self.repo_name(),
                     programs,
                     workers: vec!["sh".to_string()],
                     skills: Skills::default(),
+                    gates: Vec::new(),
+                    catalogs: std::collections::BTreeMap::new(),
+                    data_dir: self.home.path().to_path_buf(),
                     compat: Vec::new(),
                     base_env,
                     // No wait: a fake pane that never reports an agent would
@@ -1193,7 +1605,7 @@ project_dirs = []
                     ready_wait: Duration::ZERO,
                 },
                 reviews_dir: self.home.path().join(".shprd").join("reviews"),
-                reviewer: reviewer.map(str::to_string),
+                reviewer: reviewer_role(reviewer),
                 // No wait before the retry either, so the two delivery tests run
                 // through the same path without sleeping.
                 brief_retry_wait: Duration::ZERO,
@@ -1320,6 +1732,13 @@ project_dirs = []
         );
 
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
+        // The reviewer's own words lead the brief: the shipped reviewer prompt
+        // is installed on first use and read in.
+        assert!(brief.starts_with("<!--"), "{brief}");
+        assert!(
+            brief.contains("You review one finished attempt's work"),
+            "{brief}"
+        );
         // The reviewer writes and stops: no shprd verb is asked of it, because
         // its folder is outside the repository and the engine records the
         // verdict.
@@ -1327,6 +1746,176 @@ project_dirs = []
         assert!(brief.contains("findings.json` and stop"), "{brief}");
         assert!(brief.contains("REVIEWER"), "{brief}");
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
+    }
+
+    /// The contract for a task with one completed attempt, as text.
+    ///
+    /// It goes through the real log: the asks are folded events, so a test that
+    /// built them by hand would not prove the packet reads what the run
+    /// recorded.
+    fn contract_text(scratch: &Scratch, answers: &[(&str, Option<&str>)]) -> String {
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "sh".to_string(),
+            model: None,
+            worktree: "/tmp/wt/T1".to_string(),
+            branch: "feature/t1".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        for (n, (ask, answer)) in answers.iter().enumerate() {
+            ctx.commit(EventKind::AskRaised {
+                task: "T1".to_string(),
+                ask: (*ask).to_string(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: format!("question {n}"),
+                options: vec!["add".to_string(), "sum".to_string()],
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            if let Some(answer) = answer {
+                ctx.commit(EventKind::AskAnswered {
+                    task: "T1".to_string(),
+                    ask: (*ask).to_string(),
+                    answer: (*answer).to_string(),
+                })
+                .unwrap_or_else(|err| panic!("{err}"));
+            }
+        }
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "made it real".to_string(),
+            tests: vec!["cargo test".to_string()],
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: vec!["README.md".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: vec![".shprd/proof/test-run.txt".to_string()],
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = spawn::task_of(&state, "T1").unwrap_or_else(|err| panic!("{err}"));
+        let asks: Vec<(TaskId, AskId, AskRecord)> = state
+            .asks
+            .iter()
+            .map(|((task, ask), record)| (task.clone(), ask.clone(), record.clone()))
+            .collect();
+        render_contract(&ContractInput { task, asks: &asks })
+    }
+
+    #[test]
+    fn the_contract_carries_the_attempts_asks_and_their_answers() {
+        let scratch = Scratch::new();
+        let contract = contract_text(&scratch, &[("c1", Some("add"))]);
+        let snapshot = "\n\
+## Asks raised during this attempt
+
+- question `c1`: question 0
+  - options: add, sum
+  - answer: add
+
+## What the agent reported
+";
+        let start = contract
+            .find("\n## Asks raised during this attempt")
+            .unwrap_or_else(|| panic!("the packet carries the asks: {contract}"));
+        assert!(
+            contract[start..].starts_with(snapshot),
+            "the ask section is the answered card: {contract}"
+        );
+        assert!(
+            contract.contains("- proof:\n  - .shprd/proof/test-run.txt\n"),
+            "the proof is in the packet: {contract}"
+        );
+    }
+
+    #[test]
+    fn the_contract_says_plainly_when_an_ask_is_unanswered() {
+        let scratch = Scratch::new();
+        let contract = contract_text(&scratch, &[("c1", None)]);
+        assert!(
+            contract.contains(
+                "- question `c1`: question 0\n  - options: add, sum\n  - answer: unanswered\n"
+            ),
+            "{contract}"
+        );
+    }
+
+    #[test]
+    fn the_contract_says_so_when_the_attempt_asked_nothing() {
+        let scratch = Scratch::new();
+        let contract = contract_text(&scratch, &[]);
+        assert!(
+            contract.contains(
+                "## Asks raised during this attempt\n\n- none: this attempt asked the person nothing\n"
+            ),
+            "{contract}"
+        );
+    }
+
+    /// The packet on disk, not just the renderer: `write_packet` reads the fold,
+    /// so a card raised and answered between the attempt's spawn and its report
+    /// reaches the reviewer.
+    #[test]
+    fn the_written_packet_carries_the_attempts_own_ask() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "sh".to_string(),
+            model: None,
+            worktree: "/tmp/wt/T1".to_string(),
+            branch: "feature/t1".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let raised = ctx
+            .commit(EventKind::AskRaised {
+                task: "T1".to_string(),
+                ask: "c1".to_string(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: "which name?".to_string(),
+                options: vec!["add".to_string(), "sum".to_string()],
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(raised.seq > 0, "the ask is in the log");
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "made it real".to_string(),
+            tests: vec!["cargo test".to_string()],
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: vec!["README.md".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+
+        let report =
+            review(&scratch.mux(), &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let contract = std::fs::read_to_string(report.dir.join("contract.md"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            contract.contains(
+                "## Asks raised during this attempt\n\n- question `c1`: which name?\n  - options: add, sum\n  - answer: unanswered\n"
+            ),
+            "the packet on disk carries the ask: {contract}"
+        );
     }
 
     #[test]
@@ -1554,6 +2143,242 @@ project_dirs = []
         );
     }
 
+    /// The argv the first reviewer tab's CLI was started with.
+    fn launched_argv(mux: &FakeMux) -> Vec<String> {
+        mux.calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Run(_, argv, _) => Some(argv),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the reviewer CLI was not started"))
+    }
+
+    #[test]
+    fn the_reviewer_comes_from_the_settings_role() {
+        // The program, model, effort and access mode are the reviewer role's
+        // own, resolved through the settings, not a separate config value.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let mut env = scratch.review_env_with(
+            &ctx,
+            None,
+            vec![
+                Program {
+                    spec: fake_spec("sh", "pi"),
+                    installed: true,
+                },
+                Program {
+                    spec: fake_spec("codex", "openai"),
+                    installed: true,
+                },
+            ],
+        );
+        env.reviewer = settings_reviewer(
+            "[roles.reviewer]\nagent = \"codex\"\nmodel = \"m1\"\neffort = \"high\"\nperm = \"read-only\"\n",
+        );
+        let reviewer = env
+            .reviewer
+            .agent
+            .as_ref()
+            .unwrap_or_else(|| panic!("no program"));
+        assert_eq!(reviewer.value, "codex");
+        assert_eq!(
+            reviewer.source,
+            LayerSource::You,
+            "the reviewer comes from the person's settings"
+        );
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(report.agent, "codex");
+        assert_eq!(report.model.as_deref(), Some("m1"));
+        let argv = launched_argv(&mux);
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--model".to_string(), "m1".to_string()]),
+            "the role's model reaches the CLI: {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--effort".to_string(), "high".to_string()]),
+            "the role's effort reaches the CLI: {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--mode".to_string(), "read-only".to_string()]),
+            "the role's read-only mode reaches the CLI: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn the_legacy_roster_reviewer_still_resolves_and_says_where_it_came_from() {
+        // A person who named the reviewer the pre-M9 way keeps it: the old
+        // config file is the lower settings layer, and the role says so.
+        let role = legacy_reviewer(
+            "[roster]\nreviewer = \"codex/gpt-5-codex\"\n\n[roster.effort]\n\"codex/gpt-5-codex\" = \"high\"\n",
+        );
+        assert_eq!(role.agent(), Some("codex"));
+        assert_eq!(role.model(), Some("gpt-5-codex"));
+        assert_eq!(role.effort(), Some("high"));
+        assert_eq!(
+            role.agent.as_ref().map(|agent| agent.source),
+            Some(LayerSource::Legacy),
+            "the reviewer's program comes from the old config file"
+        );
+    }
+
+    #[test]
+    fn the_cross_vendor_check_uses_the_settings_reviewer() {
+        // The same family on both sides is refused, and the message names the
+        // programme the settings chose: the check reads the resolved role.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported_with(&ctx, "pi", Some("deepseek/deepseek-v4.1-flash"));
+        let mut env = scratch.review_env_with(&ctx, None, family_programs());
+        env.reviewer = settings_reviewer(
+            "[roles.reviewer]\nagent = \"pi\"\nmodel = \"deepseek/deepseek-v4.1-flash\"\n",
+        );
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &request(false)).expect_err("the families match");
+        assert_eq!(err.exit_code(), 2);
+        let message = format!("{err}");
+        assert!(
+            message.contains("both run models from the deepseek family"),
+            "{message}"
+        );
+        assert!(!env.reviews_dir.exists(), "a refused review writes nothing");
+    }
+
+    #[test]
+    fn a_settings_role_that_may_not_review_is_refused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let mut env = scratch.review_env(&ctx, None);
+        env.reviewer = settings_reviewer(
+            "[roles.reviewer]\nagent = \"codex\"\nmodel = \"m1\"\nkind = \"worker\"\nreadonly = false\n",
+        );
+        let mux = scratch.mux();
+
+        let err = review(&mux, &env, &request(false)).expect_err("a worker role may not review");
+        let message = format!("{err}");
+        assert!(message.contains("may not review"), "{message}");
+        assert!(message.contains("readonly"), "{message}");
+        assert_eq!(opened_tabs(&mux).len(), 0, "no reviewer tab opened");
+    }
+
+    #[test]
+    fn a_system_prompt_reviewer_is_given_the_kickoff() {
+        // A CLI whose brief arrives as a system prompt starts idle: without the
+        // kickoff turn it never reads the packet, and the review sits for ever.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env_with(
+            &ctx,
+            Some("codex/m1"),
+            vec![
+                Program {
+                    spec: fake_spec("sh", "pi"),
+                    installed: true,
+                },
+                Program {
+                    spec: fake_prompt_spec("codex", "openai"),
+                    installed: true,
+                },
+            ],
+        );
+        let mux = scratch.mux();
+
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = launched_argv(&mux);
+        assert!(
+            argv.contains(&"--system-prompt".to_string()),
+            "the brief travels as a system prompt: {argv:?}"
+        );
+        assert_eq!(
+            prompts(&mux),
+            vec![deliver::KICKOFF.to_string()],
+            "the reviewer gets the same first turn a worker gets"
+        );
+        assert!(
+            escalations(&ctx).is_empty(),
+            "a delivered kickoff escalates nothing"
+        );
+    }
+
+    #[test]
+    fn a_kickoff_that_never_arrives_is_escalated() {
+        // The reviewer's pane never becomes an agent, so the kickoff cannot be
+        // typed in: the review must not sit silently idle.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env_with(
+            &ctx,
+            Some("codex/m1"),
+            vec![
+                Program {
+                    spec: fake_spec("sh", "pi"),
+                    installed: true,
+                },
+                Program {
+                    spec: fake_prompt_spec("codex", "openai"),
+                    installed: true,
+                },
+            ],
+        );
+        let mux = scratch.unready_mux();
+
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let escalations = escalations(&ctx);
+        assert_eq!(escalations.len(), 1, "{escalations:?}");
+        assert_eq!(
+            escalations[0].1, "review kickoff not delivered",
+            "the ledger says which turn was lost"
+        );
+        assert!(
+            escalations[0]
+                .2
+                .contains("delivers the review kickoff again"),
+            "the default action names the same turn: {:?}",
+            escalations[0].2
+        );
+        assert!(prompts(&mux).is_empty(), "nothing may be typed in");
+    }
+
+    #[test]
+    fn a_second_review_of_the_same_attempt_is_refused() {
+        // One attempt has one reviewer at a time: a second plain review would
+        // record a second request and lose the tab the first one opened.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+        let mux = scratch.mux();
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let err = review(&mux, &env, &request(false)).expect_err("the review is already out");
+        let message = format!("{err}");
+        assert!(
+            message.contains("already has a review requested"),
+            "{message}"
+        );
+        assert!(message.contains("--again"), "{message}");
+        assert_eq!(opened_tabs(&mux).len(), 1, "no second reviewer is opened");
+        assert_eq!(
+            recorded_reviews(&ctx).len(),
+            1,
+            "the first request is the only one recorded"
+        );
+    }
+
     #[test]
     fn a_brief_whose_first_delivery_fails_is_retried_once() {
         // A CLI that is not yet detected as an agent misses the first brief:
@@ -1623,7 +2448,7 @@ project_dirs = []
         assert_eq!(
             default_action,
             "run `shprd agent review --task T1 --again`, which closes the reviewer tab and \
-             delivers the brief again; never type into the reviewer's tab"
+             delivers the review brief again; never type into the reviewer's tab"
         );
         assert_eq!(
             detection_polls(&mux),
@@ -1952,8 +2777,9 @@ project_dirs = []
                 continue;
             }
             checked += 1;
-            let (argv, _) = reviewer_argv(&spec.launch, Some("m1"), "brief", Path::new("b.md"))
-                .unwrap_or_else(|err| panic!("{}: {err}", spec.id));
+            let (argv, _) =
+                reviewer_argv(&spec, Some("m1"), None, None, "brief", Path::new("b.md"))
+                    .unwrap_or_else(|err| panic!("{}: {err}", spec.id));
             for flag in auto {
                 assert!(
                     !argv.contains(&flag),
@@ -1970,7 +2796,7 @@ project_dirs = []
         // The packet directory is the reviewer's cwd, so a workspace-write
         // sandbox is what keeps a codex reviewer's writes out of the worktree.
         let spec = shipped_spec("codex");
-        let (argv, _) = reviewer_argv(&spec.launch, Some("m1"), "brief", Path::new("b.md"))
+        let (argv, _) = reviewer_argv(&spec, Some("m1"), None, None, "brief", Path::new("b.md"))
             .unwrap_or_else(|err| panic!("{err}"));
         assert!(
             argv.windows(2)
@@ -2103,7 +2929,7 @@ project_dirs = []
         scratch.reported_with(&ctx, "pi", Some("deepseek/deepseek-v4.1-flash"));
         let programs = family_programs();
         let chosen = choose_reviewer(
-            Some("pi/claude/claude-opus-5-5"),
+            &ReviewerRole::written("pi/claude/claude-opus-5-5", None),
             "pi",
             Some("deepseek/deepseek-v4.1-flash"),
             &programs,

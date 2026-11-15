@@ -25,7 +25,8 @@ const INTEGRATION_PATH_TASK: &str = "_int";
 pub struct IntegrationWorktree {
     /// Where it is on disk: `<root>/<repo>/<run>/_int`.
     pub path: PathBuf,
-    /// The branch checked out in it: `<namespace><run>/int`.
+    /// The branch checked out in it: `<namespace><run>/int` for the run-level
+    /// path, or the run's declared integration branch for a local landing.
     pub branch: String,
     /// True when [`open_integration`] created it, false when it was already
     /// there.
@@ -123,6 +124,16 @@ pub enum IntegrateError {
     },
 }
 
+/// Makes sure the integration worktree excludes shprd's own state.
+///
+/// An integration worktree an older build made has no `info/exclude` entries, so
+/// a landing that reuses it would see `.shprd/` and `.dagr/` as untracked work.
+/// The repair is idempotent and costs one file read, so every open makes it.
+fn repair_state_excluded(path: &Path) -> Result<(), IntegrateError> {
+    crate::worktree::ensure_state_excluded(path)?;
+    Ok(())
+}
+
 /// Opens, and on first use creates, the integration worktree of `run`.
 ///
 /// Both the branch `<namespace><run>/int` and the path
@@ -153,6 +164,7 @@ pub fn open_integration(
                     detail: format!("it is on {checked_out:?}"),
                 });
             }
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch,
@@ -172,6 +184,7 @@ pub fn open_integration(
             }
             let path_text = path_text(&path)?;
             git.run(&["worktree", "add", "-b", &branch, &path_text, &base_sha])?;
+            repair_state_excluded(&path)?;
             Ok(IntegrationWorktree {
                 path,
                 branch,
@@ -189,6 +202,94 @@ pub fn open_integration(
             detail: "the path exists but its branch does not".to_string(),
         }),
     }
+}
+
+/// Opens, and on first use creates, a worktree for the run's own integration
+/// branch — the branch the run's attempts are cut from.
+///
+/// Unlike [`open_integration`], the branch is named by the run rather than made
+/// up here, and it may already exist: `integration/m9` is a branch a human can
+/// have made before the run started. Both the branch and the worktree are
+/// created together or not at all, and the worktree is at
+/// `<root>/<repo_name>/<run>/_int`, never in the user's checkout.
+///
+/// # Errors
+///
+/// Fails when git cannot be driven, when the path is occupied by a worktree on
+/// another branch, or when the branch is missing but its path is not.
+pub fn open_integration_branch(
+    repo: &Path,
+    layout: &Layout,
+    repo_name: &str,
+    run: &str,
+    branch: &str,
+    base: &str,
+) -> Result<IntegrationWorktree, IntegrateError> {
+    let git = Git::new(repo);
+    let path = layout.path(repo_name, run, INTEGRATION_PATH_TASK);
+    let branch_exists = git.branch_exists(branch)?;
+    let path_exists = path.exists();
+    match (branch_exists, path_exists) {
+        (true, true) => {
+            let checked_out = Git::new(&path).current_branch()?;
+            if checked_out.as_deref() != Some(branch) {
+                return Err(IntegrateError::BadState {
+                    path,
+                    branch: branch.to_string(),
+                    detail: format!("it is on {checked_out:?}"),
+                });
+            }
+            repair_state_excluded(&path)?;
+            Ok(IntegrationWorktree {
+                path,
+                branch: branch.to_string(),
+                created: false,
+            })
+        }
+        (true, false) => {
+            create_parent(&path)?;
+            let path_text = path_text(&path)?;
+            git.run(&["worktree", "add", &path_text, branch])?;
+            repair_state_excluded(&path)?;
+            Ok(IntegrationWorktree {
+                path,
+                branch: branch.to_string(),
+                created: true,
+            })
+        }
+        (false, false) => {
+            let base_sha = git.rev_parse(base)?;
+            create_parent(&path)?;
+            let path_text = path_text(&path)?;
+            git.run(&["worktree", "add", "-b", branch, &path_text, &base_sha])?;
+            repair_state_excluded(&path)?;
+            Ok(IntegrationWorktree {
+                path,
+                branch: branch.to_string(),
+                created: true,
+            })
+        }
+        (false, true) => Err(IntegrateError::BadState {
+            path,
+            branch: branch.to_string(),
+            detail: "the path exists but its branch does not".to_string(),
+        }),
+    }
+}
+
+/// Creates the directory a worktree will sit in.
+fn create_parent(path: &Path) -> Result<(), IntegrateError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if let Err(source) = std::fs::create_dir_all(parent) {
+        return Err(WorktreeError::Io {
+            path: parent.to_path_buf(),
+            source,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// A path as git should see it.
