@@ -466,20 +466,43 @@ fn config_section(report: &mut Report, facts: &Facts) -> Roles {
             return Roles::resolve(facts, None);
         }
     };
-    match (&global, repo_layer.as_deref()) {
-        (Some(global), Some(repo)) => section.add(
+    // Only the files that are there: naming one shprd never writes sends a
+    // person looking for a file that does not exist, and an M9 install keeps
+    // everything in `settings.toml`.
+    let present = config_files(facts);
+    match present.as_slice() {
+        [] => section.add(
             Level::Ok,
-            format!(
-                "loads and validates ({} and {})",
-                global.display(),
-                repo.display()
-            ),
+            "loads and validates (no config.toml: the settings file is the only layer)",
         ),
-        _ => section.add(Level::Ok, "loads and validates"),
+        [one] => section.add(Level::Ok, format!("loads and validates ({one})")),
+        [one, two, ..] => section.add(Level::Ok, format!("loads and validates ({one} and {two})")),
     }
     let roles = Roles::resolve(facts, Some(&loaded));
     roles_section(section, &roles);
     roles
+}
+
+/// The `config.toml` files this machine actually has, as `path`s.
+///
+/// The person's file first, then the repository's, which is the order the layers
+/// are read in. A file that is not there is left out: a page that named it would
+/// send a person looking for something shprd never wrote.
+fn config_files(facts: &Facts) -> Vec<String> {
+    let global = facts
+        .home
+        .as_ref()
+        .map(|home| home.join(".config").join("shprd").join("config.toml"));
+    let repo = facts
+        .repo
+        .as_ref()
+        .map(|root| root.join(".shprd").join("config.toml"));
+    [global, repo]
+        .into_iter()
+        .flatten()
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect()
 }
 
 /// Prints the three role lines the engine would act on, and where each came

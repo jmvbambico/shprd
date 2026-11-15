@@ -300,6 +300,76 @@ fn reads_the_roles_from_settings_when_there_is_no_legacy_config() {
     );
 }
 
+/// The Config line names only files that are there: a settings-only install has
+/// no `config.toml`, and naming two paths that do not exist sends a person
+/// looking for a file shprd never writes (item 5 of the M10.0 follow-ups).
+#[test]
+fn the_config_line_names_only_files_that_exist() {
+    let setup = Setup::settings_only(
+        "version = 1\n\n\
+         [roles.worker]\nagent = \"pi\"\nmodel = \"commandcode/deepseek/deepseek-v4.1-flash\"\n\n\
+         [roles.reviewer]\nagent = \"pi\"\nmodel = \"commandcode/z-ai/glm-5.3-flash\"\n",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "doctor should pass: {text}");
+    let config_line = text
+        .lines()
+        .find(|line| line.contains("loads and validates"))
+        .unwrap_or_else(|| panic!("no Config line in {text}"));
+    assert!(
+        !config_line.contains(".config/shprd/config.toml")
+            && !config_line.contains(".shprd/config.toml"),
+        "no path to a file that is not there is given: {config_line}"
+    );
+    assert!(
+        config_line.contains("no config.toml: the settings file is the only layer"),
+        "the page says which layer answered: {config_line}"
+    );
+}
+
+/// With both config files there, both are named: that is the shape the two-path
+/// line is for.
+#[test]
+fn the_config_line_names_both_files_when_both_are_there() {
+    let setup = Setup::new(
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
+    );
+    // A repository layer too, which the run is pointed at.
+    let root = setup.tmp.path().join("repo");
+    let repo_config = root.join(".shprd");
+    if let Err(error) = fs::create_dir_all(&repo_config) {
+        panic!("creating {} failed: {error}", repo_config.display());
+    }
+    if let Err(error) = fs::write(repo_config.join("config.toml"), "[gates]\n") {
+        panic!("writing the repo config failed: {error}");
+    }
+    let output = setup.run(&[
+        ("SHPRD_REPO", &root.display().to_string()),
+        (
+            "SHPRD_HOME",
+            &setup.tmp.path().join("home").display().to_string(),
+        ),
+    ]);
+    let text = stdout(&output);
+    let config_line = text
+        .lines()
+        .find(|line| line.contains("loads and validates"))
+        .unwrap_or_else(|| panic!("no Config line in {text}"));
+    assert!(
+        config_line.contains(".config/shprd/config.toml"),
+        "the person's file is named: {config_line}"
+    );
+    assert!(
+        config_line.contains(".shprd/config.toml"),
+        "the repository's file is named too: {config_line}"
+    );
+    assert!(
+        !config_line.contains("no config.toml:"),
+        "a page with both files says nothing about a missing one: {config_line}"
+    );
+}
+
 /// The legacy roster is still the layer under the settings: a home with only
 /// `config.toml` keeps the role lines it wrote.
 #[test]
