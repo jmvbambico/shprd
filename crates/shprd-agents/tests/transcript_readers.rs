@@ -56,7 +56,10 @@ fn locate(program: &str, home: &Path) -> Transcript {
 
 /// Copy `from` into `to`, depth first.
 fn copy_dir(from: &Path, to: &Path) {
-    for entry in fs::read_dir(from).expect("the fixture home reads").flatten() {
+    for entry in fs::read_dir(from)
+        .expect("the fixture home reads")
+        .flatten()
+    {
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
             fs::create_dir_all(&target).unwrap();
@@ -93,7 +96,10 @@ fn claude_reads_the_persons_turn_the_agents_reply_and_its_tool_as_one_conversati
     assert_eq!(page.messages[1].tools[0].name, "Bash");
     assert_eq!(page.messages[1].tools[0].summary, "shprd tick --once");
     assert_eq!(page.messages[2].role, Role::Assistant);
-    assert_eq!(page.messages[2].text, "The last pass started T2 and landed T1.");
+    assert_eq!(
+        page.messages[2].text,
+        "The last pass started T2 and landed T1."
+    );
     assert!(page.messages[2].at_ms.is_some());
     // The subagent's sidechain and the tool result are in the file and are not
     // messages: a person did not read them and the agent did not say them.
@@ -121,7 +127,8 @@ fn a_half_written_last_line_is_read_once_it_is_complete() {
     assert_eq!(page.messages.len(), 2, "the half-written line is not read");
     // The program finishes writing it, and the page picks up the rest.
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(format!("{}\n", &last[half..]).as_bytes()).unwrap();
+    file.write_all(format!("{}\n", &last[half..]).as_bytes())
+        .unwrap();
     let page = transcript.read(&page.cursor).expect("the fixture reads");
     assert_eq!(page.messages.len(), 1);
     assert_eq!(
@@ -154,7 +161,9 @@ fn a_cursor_from_another_session_starts_again() {
     let (_dir, home) = recorded("pi");
     let transcript = locate("pi", &home);
     let page = transcript.read("").expect("the fixture reads");
-    let strays = transcript.read("some-other-session@999").expect("the fixture reads");
+    let strays = transcript
+        .read("some-other-session@999")
+        .expect("the fixture reads");
     assert_eq!(strays.messages.len(), page.messages.len());
     assert!(!strays.messages.is_empty());
 }
@@ -163,8 +172,14 @@ fn a_cursor_from_another_session_starts_again() {
 fn a_cursor_past_the_end_of_a_shorter_file_starts_again() {
     let (_dir, home) = recorded("claude");
     let transcript = locate("claude", &home);
-    let page = transcript.read("5f0c-session@9999999").expect("the fixture reads");
-    assert_eq!(page.messages.len(), 3, "a truncated record is read from its start");
+    let page = transcript
+        .read("5f0c-session@9999999")
+        .expect("the fixture reads");
+    assert_eq!(
+        page.messages.len(),
+        3,
+        "a truncated record is read from its start"
+    );
 }
 
 #[test]
@@ -175,12 +190,18 @@ fn pi_reads_its_reply_with_the_call_summarised() {
     let page = transcript.read("").expect("the fixture reads");
     assert_eq!(page.messages.len(), 2);
     assert_eq!(page.messages[0].role, Role::User);
-    assert_eq!(page.messages[0].text, "Start task T3 and tell me how it goes.");
+    assert_eq!(
+        page.messages[0].text,
+        "Start task T3 and tell me how it goes."
+    );
     assert_eq!(page.messages[1].role, Role::Assistant);
     assert_eq!(page.messages[1].text, "Starting T3 now.");
     assert_eq!(page.messages[1].tools.len(), 1);
     assert_eq!(page.messages[1].tools[0].name, "bash");
-    assert_eq!(page.messages[1].tools[0].summary, "shprd agent spawn --task T3");
+    assert_eq!(
+        page.messages[1].tools[0].summary,
+        "shprd agent spawn --task T3"
+    );
     assert_eq!(page.messages[1].at_ms, Some(1_794_616_785_000));
 }
 
@@ -277,19 +298,16 @@ fn opencode_reads_on_from_the_message_index_and_only_finds_its_own_directory() {
 fn a_program_with_no_transcript_section_has_nothing_to_read() {
     let kilo = harness("kilo");
     assert!(!kilo.transcript().readable());
-    assert!(Transcript::locate(kilo.transcript(), Path::new("/home/you"), Path::new(CWD)).is_none());
+    assert!(
+        Transcript::locate(kilo.transcript(), Path::new("/home/you"), Path::new(CWD)).is_none()
+    );
 }
 
 #[test]
 fn a_session_that_was_never_written_is_no_transcript() {
     let empty = tempfile::tempdir().expect("a temp home");
     assert!(
-        Transcript::locate(
-            harness("claude").transcript(),
-            empty.path(),
-            Path::new(CWD)
-        )
-        .is_none()
+        Transcript::locate(harness("claude").transcript(), empty.path(), Path::new(CWD)).is_none()
     );
 }
 

@@ -1904,11 +1904,7 @@ pub(crate) fn prompt_in(
 /// otherwise the first tab of the repository's own space
 /// (`shprd · <folder>`), which is where `shprd serve` puts it. Both are panes
 /// shprd itself opened, so a chat line can never land in a person's own tab.
-pub(crate) fn prompt_coordinator(
-    mux: &dyn Host,
-    ctx: &Ctx,
-    text: &str,
-) -> Result<(), CliError> {
+pub(crate) fn prompt_coordinator(mux: &dyn Host, ctx: &Ctx, text: &str) -> Result<(), CliError> {
     let state = ctx.state()?;
     if let Some(orchestrator) = state.orchestrator.as_ref() {
         let pane = PaneId::new(orchestrator.pane.clone());

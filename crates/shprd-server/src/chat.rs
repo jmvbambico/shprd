@@ -332,8 +332,5 @@ fn harness_spec(state: &AppState, program: &str) -> Result<Option<HarnessSpec>, 
             data.display()
         ))
     })?;
-    Ok(table
-        .specs
-        .into_iter()
-        .find(|spec| spec.id == program))
+    Ok(table.specs.into_iter().find(|spec| spec.id == program))
 }

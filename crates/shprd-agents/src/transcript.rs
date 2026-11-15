@@ -203,9 +203,7 @@ impl Transcript {
         let format = spec.format?;
         let location = spec.location.as_deref()?;
         match format {
-            TranscriptFormat::OpencodeStorage => {
-                locate_store(&expand_path(location, home)?, cwd)
-            }
+            TranscriptFormat::OpencodeStorage => locate_store(&expand_path(location, home)?, cwd),
             _ => locate_file(format, location, home, cwd),
         }
     }
@@ -363,7 +361,10 @@ fn claude_message(value: &Value) -> Option<Message> {
     }
     let kind = value.get("type")?.as_str()?;
     let content = value.get("message")?.get("content")?;
-    let at_ms = value.get("timestamp").and_then(|at| at.as_str()).and_then(iso_ms);
+    let at_ms = value
+        .get("timestamp")
+        .and_then(|at| at.as_str())
+        .and_then(iso_ms);
     let (role, text, tools) = match kind {
         "user" => (Role::User, texts(content, &["text"]), Vec::new()),
         "assistant" => {
@@ -401,10 +402,12 @@ fn pi_message(value: &Value) -> Option<Message> {
     } else {
         Vec::new()
     };
-    let at_ms = message
-        .get("timestamp")
-        .and_then(number_ms)
-        .or_else(|| value.get("timestamp").and_then(|at| at.as_str()).and_then(iso_ms));
+    let at_ms = message.get("timestamp").and_then(number_ms).or_else(|| {
+        value
+            .get("timestamp")
+            .and_then(|at| at.as_str())
+            .and_then(iso_ms)
+    });
     let message = Message {
         role,
         text,
@@ -423,7 +426,10 @@ fn codex_message(value: &Value) -> Option<Message> {
         return None;
     }
     let payload = value.get("payload")?;
-    let at_ms = value.get("timestamp").and_then(|at| at.as_str()).and_then(iso_ms);
+    let at_ms = value
+        .get("timestamp")
+        .and_then(|at| at.as_str())
+        .and_then(iso_ms);
     match payload.get("type")?.as_str()? {
         "message" => {
             let role = match payload.get("role")?.as_str()? {
@@ -517,10 +523,7 @@ fn tool_uses(content: &Value, kind: &str, arguments: &str) -> Vec<ToolCall> {
                 .and_then(Value::as_str)
                 .unwrap_or("tool")
                 .to_owned(),
-            summary: block
-                .get(arguments)
-                .map(summary_of)
-                .unwrap_or_default(),
+            summary: block.get(arguments).map(summary_of).unwrap_or_default(),
         })
         .collect()
 }
@@ -662,7 +665,7 @@ fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
             candidates.push((updated, id.to_owned(), path));
         }
     }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates.sort_by_key(|candidate| candidate.0);
     let (_, session, _) = candidates.pop()?;
     Some(Transcript {
         format: TranscriptFormat::OpencodeStorage,
@@ -728,10 +731,7 @@ fn store_messages(root: &Path, session: &str) -> Result<Vec<(PathBuf, String)>, 
     // The id breaks a tie, so two messages created in the same millisecond keep
     // the order the program wrote them in.
     found.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    Ok(found
-        .into_iter()
-        .map(|(_, id, path)| (path, id))
-        .collect())
+    Ok(found.into_iter().map(|(_, id, path)| (path, id)).collect())
 }
 
 /// One OpenCode message, joined with the parts of which it is made.
@@ -809,12 +809,10 @@ fn pattern_parts(
     cwd: &Path,
     format: TranscriptFormat,
 ) -> Option<(PathBuf, Vec<String>)> {
-    let (root, body) = if let Some(rest) = location.strip_prefix("~/") {
-        (home.to_path_buf(), rest)
-    } else if let Some(rest) = location.strip_prefix('/') {
-        (PathBuf::from("/"), rest)
-    } else {
-        return None;
+    let (root, body) = match (location.strip_prefix("~/"), location.strip_prefix('/')) {
+        (Some(rest), _) => (home.to_path_buf(), rest),
+        (None, Some(rest)) => (PathBuf::from("/"), rest),
+        (None, None) => return None,
     };
     let slug = cwd_slug(format, cwd);
     let components = body

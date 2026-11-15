@@ -105,12 +105,10 @@ impl Fixture {
     /// The service with a host that refuses every write, as a space with no
     /// open pane does.
     fn with_a_refusing_host(mut self) -> Self {
-        self.app = self
-            .app
-            .with_chat_writer(Arc::new(Recorder {
-                refuse: true,
-                ..Recorder::default()
-            }));
+        self.app = self.app.with_chat_writer(Arc::new(Recorder {
+            refuse: true,
+            ..Recorder::default()
+        }));
         self
     }
 
@@ -132,7 +130,11 @@ impl Fixture {
         std::fs::create_dir_all(&dir).unwrap();
         let mut text = String::new();
         for (from_the_person, words) in messages {
-            let role = if *from_the_person { "user" } else { "assistant" };
+            let role = if *from_the_person {
+                "user"
+            } else {
+                "assistant"
+            };
             let value = json!({
                 "type": role,
                 "isSidechain": false,
@@ -216,8 +218,7 @@ impl Fixture {
     /// `GET /api/chat` for `space`, from `since`.
     async fn chat(&self, space: &str, since: &str) -> Reply {
         self.send(
-            Call::get(&format!("/api/chat?space={space}&since={since}"))
-                .with_token(&self.token),
+            Call::get(&format!("/api/chat?space={space}&since={since}")).with_token(&self.token),
         )
         .await
     }
@@ -264,7 +265,9 @@ impl Call {
     }
 
     fn request(&self) -> Request<Body> {
-        let mut builder = Request::builder().method(self.method.clone()).uri(&self.uri);
+        let mut builder = Request::builder()
+            .method(self.method.clone())
+            .uri(&self.uri);
         if let Some(token) = &self.token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -385,9 +388,7 @@ async fn a_cursor_pages_forward_and_a_repeated_cursor_sees_nothing_again() {
 #[tokio::test]
 async fn a_long_record_pages_with_more_and_then_the_rest() {
     let fixture = Fixture::new("claude");
-    let messages: Vec<(bool, String)> = (0..250)
-        .map(|n| (true, format!("message {n}")))
-        .collect();
+    let messages: Vec<(bool, String)> = (0..250).map(|n| (true, format!("message {n}"))).collect();
     let borrowed: Vec<(bool, &str)> = messages
         .iter()
         .map(|(who, text)| (*who, text.as_str()))
@@ -493,9 +494,12 @@ async fn sending_types_the_line_into_the_coordinators_pane() {
     let fixture = Fixture::new("claude");
     let reply = fixture
         .send(
-            Call::post("/api/chat", json!({"space": "coordinator", "text": "  hello  "}))
-                .with_token(&fixture.token)
-                .with_write_header(),
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "  hello  "}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
@@ -515,9 +519,12 @@ async fn sending_to_a_task_names_that_task_and_an_unknown_one_is_refused_before_
     fixture.spawn_task("T1", "claude", &worktree);
     let reply = fixture
         .send(
-            Call::post("/api/chat", json!({"space": "T1", "text": "how is it going?"}))
-                .with_token(&fixture.token)
-                .with_write_header(),
+            Call::post(
+                "/api/chat",
+                json!({"space": "T1", "text": "how is it going?"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
@@ -615,7 +622,12 @@ async fn a_service_with_no_host_refuses_a_send_instead_of_pretending() {
         )
         .await;
     assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
-    assert!(reply.body["message"].as_str().unwrap().contains("Nothing was sent"));
+    assert!(
+        reply.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing was sent")
+    );
     assert!(fixture.recorder.lines().is_empty() || fixture.recorder.refuse);
 }
 

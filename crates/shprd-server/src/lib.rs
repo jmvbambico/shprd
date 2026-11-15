@@ -31,8 +31,8 @@
 
 pub mod api;
 pub mod bindings;
-pub mod chat;
 pub mod changes;
+pub mod chat;
 pub mod dto;
 pub mod error;
 pub mod pass;
@@ -49,8 +49,8 @@ pub(crate) mod prompts;
 pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
-pub use chat::{ChatHost, ChatWriter, Space as ChatSpace, COORDINATOR};
 pub use changes::Touch;
+pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
 pub use error::{ApiReject, ServerError};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
