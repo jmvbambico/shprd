@@ -570,6 +570,30 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
         "status says the pass failed: {status_warning}"
     );
 
+    // A finished run is not warned about for ever: nothing can act on it, and no
+    // pass will run again to clear the record.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &["run", "finish", "--abandon", "--yes"],
+    );
+    let finished = Command::new(BIN)
+        .arg("--repo")
+        .arg(repo.path())
+        .arg("--home")
+        .arg(home.path())
+        .arg("status")
+        .env("XDG_STATE_HOME", state.path())
+        .output()
+        .expect("status runs");
+    assert!(finished.status.success());
+    let finished_stderr = String::from_utf8_lossy(&finished.stderr);
+    assert!(
+        !finished_stderr.contains("the last pass failed"),
+        "a finished run's failure is history, not a warning: {finished_stderr}"
+    );
+
     // The same failure, in the service's own words on stderr: proof that
     // `serve` installed the subscriber every `tracing` line goes through.
     let stderr = fs::read_to_string(&log_path).expect("the log is written");
