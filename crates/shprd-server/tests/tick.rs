@@ -488,12 +488,17 @@ fn a_pass_that_starts_a_task_records_it_once() {
 
 /// A task that spawned and handed in, with one passing check and no review yet.
 fn handed_in(seq: u64) -> Vec<Event> {
+    handed_in_attempt(seq, 1)
+}
+
+/// [`handed_in`] for attempt `attempt`.
+fn handed_in_attempt(seq: u64, attempt: u32) -> Vec<Event> {
     vec![
         ev(
             seq,
             EventKind::Spawned {
                 task: String::from("A"),
-                attempt: 1,
+                attempt,
                 agent: String::from("claude"),
                 model: None,
                 worktree: String::from("/wt/A"),
@@ -504,7 +509,7 @@ fn handed_in(seq: u64) -> Vec<Event> {
             seq + 1,
             EventKind::Reported {
                 task: String::from("A"),
-                attempt: 1,
+                attempt,
                 status: ReportStatus::Completed,
                 summary: String::from("done"),
                 tests: Vec::new(),
@@ -718,6 +723,302 @@ fn a_review_the_cross_vendor_rule_refuses_is_escalated_once() {
             .contains("both run models from the deepseek family"),
         "{escalations:?}"
     );
+}
+
+/// Runs git in `dir` and returns its trimmed stdout, asserting success.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "shprd tests")
+        .env("GIT_AUTHOR_EMAIL", "tests@example.invalid")
+        .env("GIT_COMMITTER_NAME", "shprd tests")
+        .env("GIT_COMMITTER_EMAIL", "tests@example.invalid")
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Appends one event to `fixture`'s log as `actor`, the way a verb would.
+fn append(fixture: &Fixture, actor: Actor, kind: EventKind) {
+    let path = fixture.repo.join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("open the log");
+    log.append(actor, kind, &SystemClock)
+        .expect("the event is legal");
+}
+
+/// A starter that records an attempt the way `shprd agent spawn --task` does:
+/// a real worktree on the task's branch, and the `Spawned` event.
+///
+/// The worktree is created once and reused by the attempt after it, because a
+/// retry replaces the attempt on the same path and branch and the real spawn's
+/// archiving is tested where it lives.
+fn real_start(
+    repo: PathBuf,
+    home: PathBuf,
+    worktree: PathBuf,
+    branch: String,
+) -> shprd_server::Starter {
+    Arc::new(move |_repo: &Path, task: &str| {
+        if !worktree.is_dir() {
+            shprd_git::worktree::create(
+                &repo,
+                &shprd_git::worktree::Layout::default_for_home(&home),
+                "r1",
+                task,
+                "integration/m8",
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        let path = repo.join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).map_err(|err| err.to_string())?;
+        let events = EventLog::read_all(&path)
+            .map_err(|err| err.to_string())?
+            .events;
+        let attempt = RunState::fold(&events)
+            .map_err(|err| err.to_string())?
+            .tasks
+            .get(task)
+            .map(|found| found.attempts.len() as u32 + 1)
+            .unwrap_or(1);
+        log.append(
+            Actor::Engine,
+            EventKind::Spawned {
+                task: task.to_string(),
+                attempt,
+                agent: String::from("claude"),
+                model: None,
+                worktree: worktree.display().to_string(),
+                branch: branch.clone(),
+            },
+            &SystemClock,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(format!("started {task} attempt {attempt}"))
+    })
+}
+
+#[test]
+fn a_failed_review_is_sent_back_and_the_second_round_lands() {
+    // Bug 2 of the M9 gate: a review that failed with a round left must send the
+    // task back by itself, with the reviewer's findings in the new brief, and
+    // the attempt after it lands under `auto` with no hand work at all.
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    // A repository a landing can merge into: no remote, so the run's own
+    // integration worktree is where `auto` lands.
+    git_in(&fixture.repo, &["init", "-b", "main"]);
+    std::fs::write(fixture.repo.join("seed.txt"), "the seed\n").expect("write the seed");
+    git_in(&fixture.repo, &["add", "seed.txt"]);
+    git_in(&fixture.repo, &["commit", "-m", "seed"]);
+    git_in(&fixture.repo, &["branch", "integration/m8"]);
+
+    let home = fixture.home.clone();
+    let layout = shprd_git::worktree::Layout::default_for_home(&home);
+    let repo_name = fixture
+        .repo
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .expect("the repo has a name");
+    let worktree = layout.path(&repo_name, "r1", "A");
+    let branch = layout.branch_name("r1", "A");
+    let start = real_start(
+        fixture.repo.clone(),
+        home.clone(),
+        worktree.clone(),
+        branch.clone(),
+    );
+    let mut worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    );
+    worker.local = true;
+
+    // Pass 1: the queued task starts, and the worktree is real.
+    let first = worker.tick().expect("the first pass ran");
+    assert_eq!(first.steps.len(), 1, "{first:?}");
+    assert_eq!(first.steps[0].action, "start", "{first:?}");
+    assert_eq!(first.steps[0].task, "A");
+    assert!(worktree.is_dir(), "{}", worktree.display());
+
+    // The worker commits and hands in; the engine asks for its review, and the
+    // reviewer finds something that blocks.
+    std::fs::write(worktree.join("task-A.txt"), "one\n").expect("write the work");
+    git_in(&worktree, &["add", "task-A.txt"]);
+    git_in(&worktree, &["commit", "-m", "the work"]);
+    let head = git_in(&worktree, &["rev-parse", "HEAD"]);
+    append(
+        &fixture,
+        Actor::Agent {
+            id: String::from("claude"),
+        },
+        EventKind::Reported {
+            task: String::from("A"),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: String::from("done"),
+            tests: Vec::new(),
+            checks: vec![CheckReport {
+                gate: String::from("tests"),
+                command: String::from("true"),
+                exit_code: Some(0),
+                output_tail: String::new(),
+            }],
+            changed_paths: vec![String::from("task-A.txt")],
+            commit: Some(head),
+            skills_used: Vec::new(),
+        },
+    );
+    append(
+        &fixture,
+        Actor::Engine,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 1,
+            reviewer: String::from("codex"),
+            degraded: false,
+        },
+    );
+    write_findings_for_attempt(
+        &fixture,
+        "A",
+        1,
+        r#"[{"severity":"critical","title":"the retry loses the batch","detail":"do not drop it"}]"#,
+    );
+
+    // Pass 2: the pass decides the review, and one of two rounds is spent.
+    let second = worker.tick().expect("the second pass ran");
+    assert_eq!(second.steps.len(), 1, "{second:?}");
+    assert_eq!(second.steps[0].action, "verdict", "{second:?}");
+    assert_eq!(
+        fixture.state().tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Failed),
+        "a blocking finding fails the attempt"
+    );
+
+    // Pass 3: the failed review sends the task back by itself.
+    let third = worker.tick().expect("the third pass ran");
+    assert_eq!(third.steps.len(), 1, "{third:?}");
+    assert_eq!(third.steps[0].action, "send_back", "{third:?}");
+    assert!(third.steps[0].ok, "{third:?}");
+    let state = fixture.state();
+    let task = state.tasks.get("A").expect("the task");
+    assert_eq!(
+        task.attempts.last().map(|attempt| attempt.n),
+        Some(2),
+        "the send-back started a second attempt"
+    );
+    let spawned = fixture
+        .events()
+        .into_iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::Spawned { .. }))
+        .expect("the new attempt is in the log");
+    assert_eq!(spawned.actor, Actor::Engine, "the engine records it");
+
+    // The brief the second attempt gets carries the reviewer's findings, because
+    // the spawn path renders it from the gate the log holds.
+    let brief = shprd_views::brief::task_brief(&shprd_views::brief::BriefInput {
+        task,
+        run: "r1",
+        attempt: 2,
+        agent: "claude",
+        model: None,
+        branch: &branch,
+        worktree: &worktree.display().to_string(),
+        skills: &[],
+        gates: &[],
+        archive: None,
+        prompt: None,
+        ask: shprd_views::brief::AskRoute::Hook,
+        settings: None,
+        role: None,
+        warnings: &[],
+    });
+    assert!(
+        brief.contains("## Why the previous attempt was sent back"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("the retry loses the batch"),
+        "the findings reach the new brief: {brief}"
+    );
+
+    // The second attempt fixes it and hands in; its review passes.
+    std::fs::write(worktree.join("task-A.txt"), "one\ntwo\n").expect("write the fix");
+    git_in(&worktree, &["add", "task-A.txt"]);
+    git_in(&worktree, &["commit", "-m", "the fix"]);
+    let fixed = git_in(&worktree, &["rev-parse", "HEAD"]);
+    append(
+        &fixture,
+        Actor::Agent {
+            id: String::from("claude"),
+        },
+        EventKind::Reported {
+            task: String::from("A"),
+            attempt: 2,
+            status: ReportStatus::Completed,
+            summary: String::from("fixed"),
+            tests: Vec::new(),
+            checks: vec![CheckReport {
+                gate: String::from("tests"),
+                command: String::from("true"),
+                exit_code: Some(0),
+                output_tail: String::new(),
+            }],
+            changed_paths: vec![String::from("task-A.txt")],
+            commit: Some(fixed),
+            skills_used: Vec::new(),
+        },
+    );
+    append(
+        &fixture,
+        Actor::Engine,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 2,
+            reviewer: String::from("codex"),
+            degraded: false,
+        },
+    );
+    write_findings_for_attempt(&fixture, "A", 2, "[]");
+
+    let fourth = worker.tick().expect("the fourth pass ran");
+    assert_eq!(fourth.steps.len(), 1, "{fourth:?}");
+    assert_eq!(fourth.steps[0].action, "verdict", "{fourth:?}");
+    assert_eq!(
+        fixture.state().tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Passed),
+        "a clean review passes"
+    );
+
+    // The next pass lands it under `auto`, into the run's integration branch.
+    let fifth = worker.tick().expect("the fifth pass ran");
+    assert_eq!(fifth.steps.len(), 1, "{fifth:?}");
+    assert_eq!(fifth.steps[0].action, "land", "{fifth:?}");
+    assert!(fifth.steps[0].ok, "{fifth:?}");
+    assert_eq!(
+        fixture.state().tasks.get("A").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Integrated),
+        "the loop closed"
+    );
+    let integration = layout.path(&repo_name, "r1", "_int");
+    assert_eq!(
+        git_in(&integration, &["show", "integration/m8:task-A.txt"]),
+        "one\ntwo",
+        "the task's work is on the integration branch"
+    );
+
+    // Nothing is left to do, and the run is quiet as it should be.
+    let sixth = worker.tick().expect("the sixth pass ran");
+    assert!(sixth.steps.is_empty(), "{sixth:?}");
 }
 
 #[test]
@@ -1192,8 +1493,13 @@ fn a_cut_with_no_backup_asks_the_person_once() {
 /// Writes the findings file a reviewer for `task` attempt 1 wrote, backdated so
 /// a pass trusts it without waiting out the settle window.
 fn write_findings(fixture: &Fixture, task: &str, body: &str) {
+    write_findings_for_attempt(fixture, task, 1, body);
+}
+
+/// [`write_findings`] for one named attempt.
+fn write_findings_for_attempt(fixture: &Fixture, task: &str, attempt: u32, body: &str) {
     let reviews = fixture.home.join(".shprd").join("reviews");
-    let path = shprd_core::review::findings_path(&reviews, "r1", task, 1);
+    let path = shprd_core::review::findings_path(&reviews, "r1", task, attempt);
     std::fs::create_dir_all(path.parent().expect("a packet folder")).expect("mkdir the packet");
     std::fs::write(&path, body).expect("write the findings");
     let file = std::fs::File::options()
@@ -1321,6 +1627,317 @@ fn a_blocking_finding_fails_the_review_and_sends_the_task_back() {
             .any(|escalation| escalation.task.as_deref() == Some("A")),
         "one failed round is not an escalation"
     );
+}
+
+/// A review gate failure with one major finding, as the engine records it.
+fn review_failed(seq: u64, id: &str, attempt: u32, request_seq: u64) -> Event {
+    ev(
+        seq,
+        EventKind::GateFailed {
+            task: id.to_string(),
+            attempt,
+            gate: String::from("review"),
+            findings: vec![shprd_core::event::Finding {
+                severity: shprd_core::event::Severity::Major,
+                title: String::from("the retry loses the batch"),
+                location: Some(String::from("src/calc.py:12")),
+                detail: String::from("the second batch is dropped"),
+            }],
+            source: Some(ReviewSource {
+                reviewer: String::from("codex"),
+                findings_sha256: String::from(
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                ),
+                request_seq,
+            }),
+        },
+    )
+}
+
+/// A task whose review failed on attempt 1 and again on attempt 2: its two
+/// rounds are spent, and nothing recorded the card the second failure owes.
+fn two_spent_rounds() -> Fixture {
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    log.push(ev(
+        5,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 1,
+            reviewer: String::from("codex"),
+            degraded: false,
+        },
+    ));
+    log.push(review_failed(6, "A", 1, 5));
+    log.extend(handed_in_attempt(7, 2));
+    log.push(ev(
+        9,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 2,
+            reviewer: String::from("codex"),
+            degraded: false,
+        },
+    ));
+    log.push(review_failed(10, "A", 2, 9));
+    Fixture::new(log)
+}
+
+#[test]
+fn an_exhausted_review_puts_one_card_in_the_state() {
+    // Bug 2 of the M9 gate, the second half: a review that spent its rounds must
+    // ask the person under the service's own pass, with no coordinator to tell
+    // and no orchestrator to type anything.
+    let fixture = two_spent_rounds();
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+
+    let report = worker.tick().expect("the pass ran");
+    assert_eq!(report.steps.len(), 1, "{report:?}");
+    assert_eq!(report.steps[0].action, "escalate");
+    assert!(report.steps[0].ok, "{report:?}");
+    let seq = report.steps[0].seq.expect("the write is named");
+    let event = fixture
+        .events()
+        .into_iter()
+        .find(|event| event.seq == seq)
+        .expect("the escalation is in the log");
+    assert_eq!(event.actor, Actor::Engine, "the engine records the card");
+
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert_eq!(snapshot.needs.len(), 1, "{:?}", snapshot.needs);
+    let card = &snapshot.needs[0];
+    assert_eq!(card.task.as_deref(), Some("A"));
+    assert!(
+        card.body.contains("the retry loses the batch"),
+        "the card says what failed: {}",
+        card.body
+    );
+    for choice in ["retry with another round", "take it as it is", "drop it"] {
+        assert!(card.body.contains(choice), "{}", card.body);
+    }
+
+    // One card per failure: a second pass says nothing and adds nothing.
+    let again = worker.tick().expect("the second pass ran");
+    assert!(again.steps.is_empty(), "{again:?}");
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert_eq!(snapshot.needs.len(), 1, "{:?}", snapshot.needs);
+}
+
+#[test]
+fn a_retry_answer_makes_the_pass_send_the_task_back() {
+    // The card's first choice is answered through the existing API —
+    // `POST /api/asks/answer` records this `AskAnswered` — and the pass honours
+    // it: one more round, spent by sending the task back.
+    let fixture = two_spent_rounds();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&calls);
+    let start: shprd_server::Starter = Arc::new(move |repo: &Path, task: &str| {
+        seen.lock()
+            .map_err(|_| String::from("the call log is poisoned"))?
+            .push(task.to_string());
+        let path = repo.join(".shprd").join("events.jsonl");
+        let mut log = EventLog::open(&path).map_err(|err| err.to_string())?;
+        let attempt = RunState::fold(
+            &EventLog::read_all(&path)
+                .map_err(|err| err.to_string())?
+                .events,
+        )
+        .map_err(|err| err.to_string())?
+        .tasks
+        .get(task)
+        .map(|found| found.attempts.len() as u32 + 1)
+        .unwrap_or(1);
+        log.append(
+            Actor::Engine,
+            EventKind::Spawned {
+                task: task.to_string(),
+                attempt,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/A"),
+                branch: String::from("shprd/r1/A"),
+            },
+            &SystemClock,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(format!("started {task} attempt {attempt}"))
+    });
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    );
+
+    let first = worker.tick().expect("the first pass ran");
+    assert_eq!(first.steps[0].action, "escalate", "{first:?}");
+
+    append(
+        &fixture,
+        Actor::Human,
+        EventKind::AskAnswered {
+            task: String::from("A"),
+            ask: shprd_core::gate::rounds_spent_ask(2),
+            answer: String::from(shprd_core::gate::RETRY_CHOICE),
+        },
+    );
+
+    let second = worker.tick().expect("the second pass ran");
+    assert_eq!(second.steps.len(), 1, "{second:?}");
+    assert_eq!(second.steps[0].action, "send_back", "{second:?}");
+    assert_eq!(*calls.lock().expect("the call log"), vec!["A".to_string()]);
+
+    // The card was about attempt 2, and the task is on attempt 3: the board
+    // stops showing it, and the choices with it.
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert!(snapshot.needs.is_empty(), "{:?}", snapshot.needs);
+    assert!(snapshot.asks.is_empty(), "{:?}", snapshot.asks);
+}
+
+#[test]
+fn a_review_verdict_that_spends_the_rounds_leaves_one_card() {
+    // The same card when the verdict is the pass's own decision: `gate::decide`
+    // records it, and the pass must not add a second one beside it.
+    let fixture = handed_in_and_reviewed();
+    write_findings(
+        &fixture,
+        "A",
+        r#"[{"severity":"critical","title":"it deletes the file","detail":"do not"}]"#,
+    );
+    let worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+
+    // The first failing round is a send-back: no card yet.
+    let first = worker.tick().expect("the pass ran");
+    assert_eq!(first.steps[0].action, "verdict", "{first:?}");
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert!(
+        snapshot.needs.is_empty(),
+        "one round of two is not a card: {:?}",
+        snapshot.needs
+    );
+
+    // The second attempt fails its review as well: the rounds are spent.
+    let path = fixture.repo.join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("open the log");
+    log.append(
+        Actor::Engine,
+        EventKind::Spawned {
+            task: String::from("A"),
+            attempt: 2,
+            agent: String::from("claude"),
+            model: None,
+            worktree: String::from("/wt/A"),
+            branch: String::from("shprd/r1/A"),
+        },
+        &SystemClock,
+    )
+    .expect("attempt 2 spawns");
+    log.append(
+        Actor::Agent {
+            id: String::from("claude"),
+        },
+        EventKind::Reported {
+            task: String::from("A"),
+            attempt: 2,
+            status: ReportStatus::Completed,
+            summary: String::from("done"),
+            tests: Vec::new(),
+            checks: vec![CheckReport {
+                gate: String::from("tests"),
+                command: String::from("cargo test"),
+                exit_code: Some(0),
+                output_tail: String::new(),
+            }],
+            changed_paths: Vec::new(),
+            commit: Some(String::from("abc123")),
+            skills_used: Vec::new(),
+        },
+        &SystemClock,
+    )
+    .expect("attempt 2 hands in");
+    log.append(
+        Actor::Engine,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 2,
+            reviewer: String::from("codex"),
+            degraded: false,
+        },
+        &SystemClock,
+    )
+    .expect("attempt 2 is reviewed");
+    write_findings_for_attempt(
+        &fixture,
+        "A",
+        2,
+        r#"[{"severity":"critical","title":"it deletes the file","detail":"do not"}]"#,
+    );
+
+    let second = worker.tick().expect("the second pass ran");
+    assert_eq!(second.steps.len(), 1, "{second:?}");
+    assert_eq!(second.steps[0].action, "verdict", "{second:?}");
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert_eq!(
+        snapshot.needs.len(),
+        1,
+        "the last round asks once: {:?}",
+        snapshot.needs
+    );
+
+    // The next pass makes the card answerable: the choices are an ask a board
+    // answers through `POST /api/asks/answer`, and the card itself is not
+    // written a second time.
+    let third = worker.tick().expect("the third pass ran");
+    assert_eq!(third.steps.len(), 1, "{third:?}");
+    assert_eq!(third.steps[0].action, "escalate", "{third:?}");
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert_eq!(snapshot.needs.len(), 1, "one card: {:?}", snapshot.needs);
+    assert_eq!(
+        snapshot.asks.len(),
+        1,
+        "one answerable card: {:?}",
+        snapshot.asks
+    );
+    assert_eq!(
+        snapshot.asks[0].options,
+        vec![
+            String::from("retry with another round"),
+            String::from("take it as it is"),
+            String::from("drop it")
+        ],
+        "the card offers the person's choices"
+    );
+    let escalations = fixture
+        .events()
+        .into_iter()
+        .filter(|event| matches!(event.kind, EventKind::Escalated { .. }))
+        .count();
+    assert_eq!(
+        escalations, 1,
+        "the card is written once, not once per pass"
+    );
+
+    // And then the run is as far as it goes: the decision is the person's.
+    let fourth = worker.tick().expect("the fourth pass ran");
+    assert!(fourth.steps.is_empty(), "{fourth:?}");
+    let state = fixture.state();
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, 1_700_000_000_000);
+    assert_eq!(snapshot.needs.len(), 1, "{:?}", snapshot.needs);
+    assert_eq!(snapshot.asks.len(), 1, "{:?}", snapshot.asks);
 }
 
 #[test]

@@ -362,8 +362,18 @@ fn the_second_failed_round_escalates_at_rounds_two() {
         .filter(|event| event.get("kind").and_then(Value::as_str) == Some("escalated"))
         .collect();
     assert_eq!(escalated.len(), 1, "expected one escalation in {log:?}");
-    let body = escalated[0].get("body").and_then(Value::as_str);
-    assert_eq!(body, Some("review failed 2 times"));
+    let body = match escalated[0].get("body").and_then(Value::as_str) {
+        Some(body) => body,
+        None => panic!("the card has no body: {:?}", escalated[0]),
+    };
+    assert!(
+        body.starts_with(&shprd_core::gate::rounds_spent_prefix("T1", 2, 2)),
+        "{body}"
+    );
+    assert!(body.contains("a finding"), "it names what failed: {body}");
+    for choice in ["retry with another round", "take it as it is", "drop it"] {
+        assert!(body.contains(choice), "the card offers its choices: {body}");
+    }
 }
 
 #[test]

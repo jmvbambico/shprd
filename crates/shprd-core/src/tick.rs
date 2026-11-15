@@ -21,6 +21,12 @@
 //! - [`Step::Land`] a task `shprd_core::rules::ready_to_land` accepts, when its
 //!   merge policy allows it;
 //! - [`Step::MarkLanded`] a task whose pull request merged outside shprd;
+//! - [`Step::SendBack`] a task whose review failed while review rounds are
+//!   left: a new attempt, through the same spawn path a person's
+//!   `agent spawn --task` uses, which already carries the reviewer's findings
+//!   into the new brief;
+//! - [`Step::Escalate`] a task whose review rounds are spent: one card in front
+//!   of a person, recorded even when the run has no coordinator;
 //! - [`Step::NeedsYou`] for a task whose policy is `ask`, recorded once and not
 //!   again on every pass.
 //!
@@ -36,6 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, MergePolicy};
 use crate::event::{LandOutcome, ReportStatus};
+use crate::gate::{self, Next};
 use crate::rules;
 use crate::state::{RunState, Task, TaskStatus};
 
@@ -186,6 +193,32 @@ pub enum Step {
         /// What needs deciding, in one line.
         body: String,
     },
+    /// Send a task whose review failed back for another attempt.
+    ///
+    /// The attempt is started by the same spawn path a person's
+    /// `shprd agent spawn --task` runs, so the new brief carries "why the
+    /// previous attempt was sent back" from the failed review gate the log
+    /// holds, and nothing about spawning is written twice.
+    SendBack {
+        /// The task to try again.
+        task: String,
+        /// The attempt that failed its review and that this replaces.
+        attempt: u32,
+    },
+    /// Ask a person what to do with a task whose review rounds are spent.
+    ///
+    /// It is planned for a failed review whose card cannot be answered yet, so
+    /// it appears under the service's tick alone, with no coordinator and no
+    /// orchestrator to tell. The executor records exactly one card per failure,
+    /// and its choices once, as an ask a board answers through the API.
+    Escalate {
+        /// The task that needs them.
+        task: String,
+        /// What failed, and the person's choices, in one line.
+        body: String,
+        /// The action taken if nobody answers.
+        default_action: String,
+    },
 }
 
 impl Step {
@@ -197,7 +230,9 @@ impl Step {
             | Self::Verdict { task }
             | Self::Land { task, .. }
             | Self::MarkLanded { task, .. }
-            | Self::NeedsYou { task, .. } => task,
+            | Self::NeedsYou { task, .. }
+            | Self::SendBack { task, .. }
+            | Self::Escalate { task, .. } => task,
         }
     }
 
@@ -210,6 +245,8 @@ impl Step {
             Self::Land { .. } => "land",
             Self::MarkLanded { .. } => "mark_landed",
             Self::NeedsYou { .. } => "needs_you",
+            Self::SendBack { .. } => "send_back",
+            Self::Escalate { .. } => "escalate",
         }
     }
 }
@@ -368,6 +405,13 @@ fn step_for(
             }
         };
     }
+    // A review that failed is the loop's own work: another attempt while the
+    // rounds it may use are left, and a person's card once they are spent. This
+    // is what keeps a run from going quiet on a `Needs you` row nobody can act
+    // on.
+    if let Some(step) = after_failed_review(input, task, phase, running, max_running) {
+        return Some(step);
+    }
     // A queued task whose dependencies have all landed is the `--after` wait
     // releasing, and the concurrency cap is what keeps one repository from
     // running every task of the plan at once.
@@ -381,6 +425,76 @@ fn step_for(
     *running += 1;
     Some(Step::Start {
         task: task.id.clone(),
+    })
+}
+
+/// What a task whose review failed is owed now, if anything.
+///
+/// The two answers are exclusive: rounds left sends the task back to an agent,
+/// and rounds spent asks a person. Neither is planned twice for one failure —
+/// the send-back records the new attempt, which is the next pass's newest
+/// attempt, and the card is recognised by the ask that carries its choices.
+fn after_failed_review(
+    input: &Input<'_>,
+    task: &Task,
+    phase: Phase,
+    running: &mut u32,
+    max_running: u32,
+) -> Option<Step> {
+    let state = input.state;
+    if task.status != TaskStatus::Failed {
+        return None;
+    }
+    gate::latest_failed_review(task)?;
+    let attempt = task.latest_attempt()?.n;
+    // The allowance is the configured one plus every round a person granted by
+    // answering this task's card, so one answer buys one attempt.
+    let allowed = gate::allowance(state, task, input.config.review.rounds);
+    match gate::after_failure(task, allowed) {
+        // A send-back is a spawn, so it takes a slot and an agent that is still
+        // live on the task keeps it: the attempt it replaces must be finished.
+        Next::SendBack => {
+            if input.facts.is_live(&task.id) || matches!(phase, Phase::Working | Phase::Merging) {
+                return None;
+            }
+            // A send-back that did not start is a person's to start: one card
+            // saying so is what keeps a broken host from costing a spawn a
+            // pass, every pass, with nobody told.
+            let marker = gate::send_back_failure_prefix(&task.id, attempt);
+            if already_told(state, &task.id, &marker) {
+                return None;
+            }
+            if *running >= max_running {
+                return None;
+            }
+            *running += 1;
+            Some(Step::SendBack {
+                task: task.id.clone(),
+                attempt,
+            })
+        }
+        // The card is recorded once — the verdict decision normally writes it,
+        // and this covers a failure that reached the log any other way — and it
+        // is planned until it can be answered: the choices are an ask, which is
+        // what a board answers through the API.
+        Next::Escalate => {
+            let ask = gate::rounds_spent_ask(attempt);
+            if state.asks.contains_key(&(task.id.clone(), ask)) {
+                return None;
+            }
+            Some(Step::Escalate {
+                task: task.id.clone(),
+                body: gate::rounds_spent_body(task, attempt, gate::failed_review_rounds(task)),
+                default_action: gate::ESCALATION_ACTION.to_string(),
+            })
+        }
+    }
+}
+
+/// Whether an escalation for `task` whose body begins with `marker` is recorded.
+fn already_told(state: &RunState, task: &str, marker: &str) -> bool {
+    state.escalations.iter().any(|escalation| {
+        escalation.task.as_deref() == Some(task) && escalation.body.starts_with(marker)
     })
 }
 
@@ -630,6 +744,30 @@ mod tests {
                 attempt,
                 gate: "review".to_string(),
                 findings: Vec::new(),
+                source: Some(ReviewSource {
+                    reviewer: "codex".to_string(),
+                    findings_sha256:
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                            .to_string(),
+                    request_seq,
+                }),
+            },
+        )
+    }
+
+    fn review_failed(seq: u64, id: &str, attempt: u32, request_seq: u64) -> Event {
+        ev(
+            seq,
+            EventKind::GateFailed {
+                task: id.to_string(),
+                attempt,
+                gate: "review".to_string(),
+                findings: vec![crate::event::Finding {
+                    severity: crate::event::Severity::Major,
+                    title: format!("the {id} retry loses work"),
+                    location: None,
+                    detail: String::from("the batch is dropped on a retry"),
+                }],
                 source: Some(ReviewSource {
                     reviewer: "codex".to_string(),
                     findings_sha256:
@@ -1355,6 +1493,278 @@ mod tests {
         let after = folded(&log);
         let steps = plan_for(&after, &Facts::default(), &config(MergePolicy::Auto, 4));
         assert!(steps.is_empty(), "A has landed: {steps:?}");
+    }
+
+    /// A log whose one task handed in and had its review fail on attempt 1.
+    fn review_failed_log(id: &str) -> Vec<Event> {
+        vec![
+            started(1),
+            added(2, id, &[]),
+            spawned(3, id, 1),
+            reported(4, id, 1),
+            review_requested(5, id, 1),
+            review_failed(6, id, 1, 5),
+        ]
+    }
+
+    /// The same task on attempt 2, whose review failed as well: two spent
+    /// rounds of the default two.
+    fn two_failed_rounds_log(id: &str) -> Vec<Event> {
+        let mut log = review_failed_log(id);
+        log.push(spawned(7, id, 2));
+        log.push(reported(8, id, 2));
+        log.push(review_requested(9, id, 2));
+        log.push(review_failed(10, id, 2, 9));
+        log
+    }
+
+    #[test]
+    fn a_failed_review_with_rounds_left_is_sent_back_by_itself() {
+        // The bug the M9 gate found: the review failed with a round left and
+        // the pass planned nothing, so the run went quiet on a row nobody could
+        // act on.
+        let state = folded(&review_failed_log("A"));
+        assert_eq!(
+            state.tasks.get("A").map(|task| task.status),
+            Some(TaskStatus::Failed)
+        );
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 1,
+            }],
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_review_with_no_rounds_left_escalates_instead() {
+        let state = folded(&two_failed_rounds_log("A"));
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert_eq!(steps.len(), 1, "never both: {steps:?}");
+        let Step::Escalate {
+            task,
+            body,
+            default_action,
+        } = &steps[0]
+        else {
+            panic!("a task out of rounds asks a person: {steps:?}");
+        };
+        assert_eq!(task, "A");
+        assert!(
+            body.starts_with(&gate::rounds_spent_prefix("A", 2, 2)),
+            "{body}"
+        );
+        assert!(
+            body.contains("the A retry loses work"),
+            "it says what failed: {body}"
+        );
+        assert!(body.contains("retry with another round"), "{body}");
+        assert_eq!(default_action, gate::ESCALATION_ACTION);
+    }
+
+    #[test]
+    fn one_failed_review_is_never_both_and_never_twice() {
+        // One failure, two passes over it: the same single step, and never a
+        // send-back beside an escalation.
+        let state = folded(&review_failed_log("A"));
+        let first = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        let second = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(matches!(first[0], Step::SendBack { .. }), "{first:?}");
+    }
+
+    #[test]
+    fn the_attempt_after_a_send_back_plans_no_second_one() {
+        // What recording the send-back leaves behind: attempt 2 is the newest,
+        // so the failure on attempt 1 has been answered.
+        let mut log = review_failed_log("A");
+        log.push(spawned(7, "A", 2));
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "A was sent back once: {steps:?}");
+    }
+
+    #[test]
+    fn a_recorded_card_is_not_planned_again() {
+        // The verdict decision may already have recorded the card, so the step
+        // is planned until the card can be answered; once it is, nothing is.
+        let log = two_failed_rounds_log("A");
+        let state = folded(&log);
+        let first = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        let Step::Escalate { body, .. } = &first[0] else {
+            panic!("a card: {first:?}");
+        };
+        let mut asked = log;
+        asked.push(escalated(11, "A", body));
+        let state = folded(&asked);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(
+            matches!(steps.as_slice(), [Step::Escalate { .. }]),
+            "the card still needs its answer route: {steps:?}"
+        );
+
+        let mut answered = asked;
+        answered.push(ev(
+            12,
+            EventKind::AskRaised {
+                task: String::from("A"),
+                ask: gate::rounds_spent_ask(2),
+                ask_kind: crate::ask::AskKind::Question,
+                text: String::from("out of rounds"),
+                options: Vec::new(),
+                created_at_ms: 12_000,
+                expires_at_ms: None,
+            },
+        ));
+        let state = folded(&answered);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "the card was said once: {steps:?}");
+    }
+
+    #[test]
+    fn a_send_back_waits_while_an_agent_is_live_on_the_task() {
+        let state = folded(&review_failed_log("A"));
+        let mut facts = Facts::default();
+        facts.live.insert(String::from("A"));
+        let steps = plan_for(&state, &facts, &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "its agent is still there: {steps:?}");
+    }
+
+    #[test]
+    fn a_send_back_takes_one_of_the_running_slots() {
+        // Two tasks whose reviews failed, one slot: one goes back now and the
+        // other waits for a slot, so a pass can never exceed the cap.
+        let mut log = review_failed_log("A");
+        log.push(added(7, "B", &[]));
+        log.push(spawned(8, "B", 1));
+        log.push(reported(9, "B", 1));
+        log.push(review_requested(10, "B", 1));
+        log.push(review_failed(11, "B", 1, 10));
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 1));
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 1,
+            }],
+            "{steps:?}"
+        );
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 2));
+        assert_eq!(steps.len(), 2, "a second slot frees B: {steps:?}");
+    }
+
+    #[test]
+    fn a_send_back_that_did_not_start_is_a_persons_card() {
+        let mut log = review_failed_log("A");
+        log.push(escalated(
+            7,
+            "A",
+            &format!("{}no workspace", gate::send_back_failure_prefix("A", 1)),
+        ));
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "the card was said once: {steps:?}");
+    }
+
+    #[test]
+    fn a_failed_non_review_gate_is_left_to_its_own_escalation() {
+        // A landing that conflicted records a failed `integrate` gate and an
+        // escalation of its own; the review passed, so it is not sent back.
+        let mut log = ready_log("A");
+        log.push(ev(
+            7,
+            EventKind::GateFailed {
+                task: String::from("A"),
+                attempt: 1,
+                gate: String::from("integrate"),
+                findings: vec![crate::event::Finding {
+                    severity: crate::event::Severity::Major,
+                    title: String::from("conflicts with the integration branch"),
+                    location: None,
+                    detail: String::new(),
+                }],
+                source: None,
+            },
+        ));
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "{steps:?}");
+    }
+
+    #[test]
+    fn a_retry_answer_grants_one_more_round() {
+        // The card's first choice is answered through the API: one more round
+        // for this task, which the next pass spends by sending it back once.
+        let mut log = two_failed_rounds_log("A");
+        let ask = gate::rounds_spent_ask(2);
+        log.push(ev(
+            11,
+            EventKind::AskRaised {
+                task: String::from("A"),
+                ask: ask.clone(),
+                ask_kind: crate::ask::AskKind::Question,
+                text: String::from("out of rounds"),
+                options: Vec::new(),
+                created_at_ms: 11_000,
+                expires_at_ms: None,
+            },
+        ));
+        log.push(ev(
+            12,
+            EventKind::AskAnswered {
+                task: String::from("A"),
+                ask,
+                answer: String::from(gate::RETRY_CHOICE),
+            },
+        ));
+        let state = folded(&log);
+        assert_eq!(
+            gate::granted_rounds(&state, state.tasks.get("A").expect("A")),
+            1
+        );
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 2,
+            }],
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_is_not_a_retry_grants_nothing() {
+        let mut log = two_failed_rounds_log("A");
+        let ask = gate::rounds_spent_ask(2);
+        log.push(ev(
+            11,
+            EventKind::AskRaised {
+                task: String::from("A"),
+                ask: ask.clone(),
+                ask_kind: crate::ask::AskKind::Question,
+                text: String::from("out of rounds"),
+                options: Vec::new(),
+                created_at_ms: 11_000,
+                expires_at_ms: None,
+            },
+        ));
+        log.push(ev(
+            12,
+            EventKind::AskAnswered {
+                task: String::from("A"),
+                ask,
+                answer: String::from("take it as it is"),
+            },
+        ));
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "the person decided: {steps:?}");
     }
 
     #[test]

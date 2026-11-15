@@ -12,8 +12,8 @@
 //!   "steps": [
 //!     {
 //!       "action": "start",            // start | review | verdict | land
-//!                                     // | mark_landed | needs_you | nudge
-//!                                     // | backup | give_up
+//!                                     // | mark_landed | needs_you | send_back
+//!                                     // | escalate | nudge | backup | give_up
 //!       "task": "T1",
 //!       "ok": true,
 //!       "detail": "started T1 attempt 1 with claude in ...",
