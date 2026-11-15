@@ -284,8 +284,8 @@ pub fn resolve() -> Resolution {
 /// It answers the [`Resolution`] beside the host, so the service's banner and
 /// `shprd doctor` can say which host a run is on without probing a second time.
 pub fn select() -> (Resolution, Box<dyn Host>) {
-    let resolution = resolve();
-    let host = open(&resolution);
+    let mut resolution = resolve();
+    let host = open(&mut resolution);
     (resolution, host)
 }
 
@@ -296,19 +296,35 @@ pub fn select() -> (Resolution, Box<dyn Host>) {
 /// with a warning rather than by a run that cannot start a task. The warning is
 /// the whole point: a person must not be left believing their terminals are on
 /// the desktop when they are not.
-fn open(resolution: &Resolution) -> Box<dyn Host> {
+fn open(resolution: &mut Resolution) -> Box<dyn Host> {
     if resolution.kind != HostKind::HerdrDesktop {
         return Box::new(shprd_mux_herdr::HerdrMux::new());
     }
     match HcHost::connect(endpoint(), window()) {
         Ok(host) => Box::new(host),
         Err(error) => {
-            eprintln!(
-                "warning: Herdr desktop did not answer ({error}); using the herdr TUI instead"
-            );
+            // The resolution is amended, not just warned about: the banner and
+            // `--json` describe the host a run actually drives, and a service
+            // that says "herdr-desktop" while typing into the herdr TUI says two
+            // different things about the same run.
+            fell_back_at_open(resolution, &error.to_string());
+            eprintln!("warning: {}", resolution.why);
             Box::new(shprd_mux_herdr::HerdrMux::new())
         }
     }
+}
+
+/// Record that the host the setting named did not open, and the run is on the
+/// herdr TUI instead.
+///
+/// It is a separate function so the wording is one thing, and so a test can
+/// check what a person then reads without a desktop that refuses to connect.
+fn fell_back_at_open(resolution: &mut Resolution, reason: &str) {
+    let named = resolution.kind;
+    resolution.kind = HostKind::Herdr;
+    resolution.fell_back = true;
+    resolution.why =
+        format!("host = {named}, but herdr-core did not open ({reason}); using herdr instead");
 }
 
 /// The `host` setting for this home and repository, `auto` when it cannot be
@@ -541,6 +557,28 @@ mod tests {
         assert!(chosen.why.contains("not on PATH"), "{}", chosen.why);
         let chosen = choose(HostChoice::Tuios, probe);
         assert!(chosen.why.contains("not on PATH"), "{}", chosen.why);
+    }
+
+    #[test]
+    fn an_open_time_fallback_amends_what_the_banner_says() {
+        // The probe said the desktop was there; opening it failed. What a person
+        // reads — and what `--json` carries — must be the host the run is on,
+        // not the one the setting named.
+        let mut resolution = choose(HostChoice::HerdrDesktop, super::tests::desktop());
+        assert_eq!(resolution.kind, HostKind::HerdrDesktop);
+        super::fell_back_at_open(&mut resolution, "herdr-core is unreachable: it died");
+        assert_eq!(resolution.kind, HostKind::Herdr);
+        assert!(resolution.fell_back);
+        assert_eq!(
+            resolution.line(),
+            "host: herdr — host = herdr-desktop, but herdr-core did not open \
+             (herdr-core is unreachable: it died); using herdr instead"
+        );
+        assert_eq!(
+            resolution.probe.core.as_deref(),
+            Some("0.1.21"),
+            "the facts stay"
+        );
     }
 
     #[test]
