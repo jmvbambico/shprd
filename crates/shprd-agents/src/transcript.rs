@@ -631,7 +631,8 @@ fn locate_file(
 ///
 /// OpenCode stores one folder a project and one file a session, so the session
 /// that belongs to a directory is the one that says so, not the newest one on
-/// the machine.
+/// the machine. The comparison follows symlinks: a session recorded from the
+/// resolved path belongs to the directory a person names by its symlinked one.
 fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
     let sessions = root.join("session");
     let mut candidates: Vec<(i64, String, PathBuf)> = Vec::new();
@@ -653,8 +654,10 @@ fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
             let Some(id) = value.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            // A session that records no directory at all is not refused: an
+            // older OpenCode writes the folder only into the message parts.
             let directory = value.get("directory").and_then(Value::as_str);
-            if directory.is_some_and(|directory| Path::new(directory) != cwd) {
+            if directory.is_some_and(|directory| !same_dir(Path::new(directory), cwd)) {
                 continue;
             }
             let updated = value
@@ -693,7 +696,23 @@ fn codex_belongs(path: &Path, cwd: &Path) -> bool {
         .get("payload")
         .and_then(|payload| payload.get("cwd"))
         .and_then(Value::as_str)
-        .is_some_and(|recorded| Path::new(recorded) == cwd)
+        .is_some_and(|recorded| same_dir(Path::new(recorded), cwd))
+}
+
+/// Whether two paths name the same directory.
+///
+/// A record names the directory its program saw, which on macOS is the resolved
+/// form (`/private/var/…`) while a person's command line may hold the symlinked
+/// one (`/tmp/…`), so equality of the text is not enough: both are resolved when
+/// they are on disk and compared again.
+fn same_dir(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// OpenCode's message files for one session, oldest first, as `(path, id)`.

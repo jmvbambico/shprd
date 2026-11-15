@@ -294,6 +294,29 @@ fn opencode_reads_on_from_the_message_index_and_only_finds_its_own_directory() {
     assert_eq!(locate("opencode", &home).session(), "ses_fixture");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_record_is_matched_through_a_symlinked_directory() {
+    let (dir, home) = recorded("opencode");
+    // The session records `/work/repo`, which is not on this machine. Renew the
+    // same session under a real directory, then ask for it by a symlink to that
+    // directory: the reader follows the link rather than comparing the words.
+    let real = dir.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("linked");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let session = home.join(".local/share/opencode/storage/session/proj_fixture/ses_fixture.json");
+    let text = fs::read_to_string(&session).unwrap();
+    fs::write(
+        &session,
+        text.replace("/work/repo", &real.display().to_string()),
+    )
+    .unwrap();
+    let transcript = Transcript::locate(harness("opencode").transcript(), &home, &link)
+        .expect("the session is found through the symlink");
+    assert_eq!(transcript.session(), "ses_fixture");
+}
+
 #[test]
 fn a_program_with_no_transcript_section_has_nothing_to_read() {
     let kilo = harness("kilo");
