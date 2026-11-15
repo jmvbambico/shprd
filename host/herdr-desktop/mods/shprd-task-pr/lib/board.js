@@ -95,6 +95,52 @@ export function look(task) {
 }
 
 /**
+ * The live tasks per word, in the order a panel groups them: what needs the
+ * person first, then what moves, then what waits, then what is over.
+ *
+ * `counts` answers the four numbers a badge shows; this answers all eight, for a
+ * status bar that says how the whole board stands. A word nobody's task is in
+ * is left out, so a bar never draws a row of zeroes.
+ */
+export function statusCounts(state) {
+  const byWord = new Map(STATUS_ORDER.map((word) => [word, 0]));
+  for (const task of state?.tasks ?? []) {
+    if (!isLive(task)) continue;
+    const word = task?.derived?.status;
+    if (byWord.has(word)) byWord.set(word, byWord.get(word) + 1);
+  }
+  const rows = [];
+  for (const word of STATUS_ORDER) {
+    const count = byWord.get(word) ?? 0;
+    if (count === 0) continue;
+    rows.push({ status: word, word: STATUS[word].word, tone: STATUS[word].tone, count });
+  }
+  return rows;
+}
+
+/**
+ * The run's own state as one word: what the status bar says at the left.
+ *
+ * A service that answered but has no run is not the same as a service that is
+ * not there — the bar draws `down` for the second and this for the first.
+ */
+export function runState(state) {
+  if (!state?.run) return "none";
+  return state.finished ? "finished" : "running";
+}
+
+/** How long ago `at` was, in words a bar can show (`just now`, `4m`, `2h`). */
+export function since(at, now = Date.now()) {
+  const ms = Number.isFinite(at) ? now - at : 0;
+  if (ms < 45_000) return "just now";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/**
  * The run as the status bar names it: the run's id, else why there is none.
  *
  * `GET /api/state` answers `run: null` with a `hint` before `shprd run start`,
@@ -105,6 +151,20 @@ export function runLabel(state) {
   const run = state?.run;
   if (!run) return state?.hint ?? "No run yet";
   return `run ${run.id} · ${run.integration_branch}`;
+}
+
+/**
+ * The run as a *status bar* names it: its id alone, because the branch it lands
+ * on is on the sidebar's coordinator row already and the bar has one line for
+ * everything.
+ *
+ * A bar with no run says why, exactly as [`runLabel`] does: a bar that said
+ * "no run" without naming the verb would be a dead end.
+ */
+export function runShort(state) {
+  const run = state?.run;
+  if (!run) return state?.hint ?? "No run yet";
+  return `run ${run.id}`;
 }
 
 /** The newest attempt of a task, when it has one. */

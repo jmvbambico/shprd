@@ -146,6 +146,30 @@ export function keycap(t, text) {
 }
 
 /**
+ * The status glyph, in a fixed box so nothing moves when a state changes.
+ *
+ * It is drawn rather than shipped: the layout carries no icon assets, and a mod's
+ * `svg()` needs a file beside it. The shapes are Shepherdr's (`lib/dot.js`): a
+ * ring for what waits, a filled dot for *Needs you*, a disc for *Ready*, a
+ * half-filled ring for *Working*, a paused ring for *Merging*. `shape` is a row's
+ * `{glyph, tone}`, as `lib/spaces.js` and `lib/tabstrip.js` build it, and `colors`
+ * is `tone(theme())`.
+ */
+export function statusGlyph(t, shape, colors, size = 14) {
+  const color = !shape || shape.tone === "dim" ? t.dim : (colors?.[shape.tone] ?? t.dim);
+  const box = div().w(size).h(size).flex_none().flex().items_center().justify_center();
+  const kind = shape?.glyph ?? "ring";
+  const round = Math.floor(size / 2);
+  const inner =
+    kind === "dot"
+      ? div().w(size - 4).h(size - 4).rounded(Math.floor((size - 4) / 2)).bg(color)
+      : kind === "tick"
+        ? div().w(size).h(size).rounded(round).bg(color)
+        : div().w(size).h(size).rounded(round).border_1().border_color(color);
+  return box.child(inner);
+}
+
+/**
  * The body of a panel that M10.4–M10.6–M10.8 will fill.
  *
  * It is a placeholder that says so, in the panel and not in a tooltip (the

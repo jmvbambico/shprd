@@ -1,0 +1,98 @@
+{
+  "spaces": [
+    {
+      "id": "sp6fc07f309f35da6153bb51c505c7643e",
+      "name": "shprd \u00b7 shop",
+      "folder": "/tmp/sh55/shop",
+      "machine": null,
+      "active": false,
+      "tabs": [
+        {
+          "id": "tb7f8f53b94b8452ef79a5a2ec68bd6c95",
+          "name": "Assistant",
+          "active": true,
+          "zoomed": false,
+          "panes": 1
+        }
+      ]
+    },
+    {
+      "id": "spb37cbdcfbd79aee12db6d44a3d6bb421",
+      "name": "shprd \u00b7 shop \u00b7 m10a \u00b7 T1",
+      "folder": "/tmp/sh55/shop",
+      "machine": null,
+      "active": false,
+      "tabs": [
+        {
+          "id": "tb2ad636ac95354e4fac5dd619d21fa4cf",
+          "name": "claude\u00b7T1",
+          "active": true,
+          "zoomed": false,
+          "panes": 1
+        }
+      ]
+    },
+    {
+      "id": "sp4008b644880e2a9fd9be89b445b5e8e0",
+      "name": "shprd \u00b7 shop \u00b7 m10a \u00b7 T2",
+      "folder": "/tmp/sh55/shop",
+      "machine": null,
+      "active": true,
+      "tabs": [
+        {
+          "id": "tb93db52a88efc2db4e746333055f5d081",
+          "name": "claude\u00b7T2",
+          "active": false,
+          "zoomed": false,
+          "panes": 1
+        },
+        {
+          "id": "tb4ea6b9bebe91d9bcc0dc708d2c6c135e",
+          "name": "codex\u00b7T2\u00b7review",
+          "active": true,
+          "zoomed": false,
+          "panes": 1
+        }
+      ]
+    },
+    {
+      "id": "sp9f8977ab07f5b65a064285d3ea1f0169",
+      "name": "shprd \u00b7 shop \u00b7 m10a \u00b7 T3",
+      "folder": "/tmp/sh55/shop",
+      "machine": null,
+      "active": false,
+      "tabs": [
+        {
+          "id": "tb32f1f97a7636d25575c73df055efed8c",
+          "name": "claude\u00b7T3",
+          "active": false,
+          "zoomed": false,
+          "panes": 1
+        },
+        {
+          "id": "tbff3edb923c9e57203cd55ad19047c320",
+          "name": "codex\u00b7T3\u00b7review",
+          "active": true,
+          "zoomed": false,
+          "panes": 1
+        }
+      ]
+    },
+    {
+      "id": "sp9e089aad39af785f10f187bee019d279",
+      "name": "shprd \u00b7 shop \u00b7 m10a \u00b7 T4",
+      "folder": "/tmp/sh55/shop",
+      "machine": null,
+      "active": false,
+      "tabs": [
+        {
+          "id": "tb62c4b793606478bee876bbda3d11c17a",
+          "name": "claude\u00b7T4",
+          "active": true,
+          "zoomed": false,
+          "panes": 1
+        }
+      ]
+    }
+  ]
+}
