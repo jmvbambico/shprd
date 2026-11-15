@@ -305,6 +305,7 @@ fn ready(seq: u64, commit: &str) -> Vec<Event> {
                 changed_paths: Vec::new(),
                 commit: Some(commit.to_string()),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         ),
         ev(
@@ -522,6 +523,7 @@ fn handed_in_attempt(seq: u64, attempt: u32) -> Vec<Event> {
                 changed_paths: Vec::new(),
                 commit: Some(String::from("abc123")),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         ),
     ]

@@ -24,8 +24,11 @@
 //! left out: a one-shot prompt approves nothing, and `codex exec` does not take
 //! `-a` at all.
 //!
-//! An account that is out of usage fails its test with the program's own
-//! usage-limit message; that is the account, not the harness.
+//! An account that is out of usage skips its test: the program's own error is
+//! matched against the dry and rate-limit phrases [`shprd_agents::exhausted`]
+//! knows, and a match prints `skipped: <program> out of quota` and returns. That
+//! is the account's state, not the harness's, and a milestone gate must not read
+//! as a harness failure on a machine whose accounts are not all paid up.
 //!
 //! Each CLI must be installed and signed in; a program that is not installed
 //! fails its test with that reason. Nothing is written outside the temp
@@ -38,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use shprd_agents::adapter::{Brief, BriefRoute, Host, Pick, launch};
 use shprd_agents::env::{EnvContext, Role};
+use shprd_agents::exhausted::exhausted;
 use shprd_agents::harness::Harness;
 
 /// How long one program gets to answer before it is stopped.
@@ -210,6 +214,12 @@ fn live(id: &str) {
     let argv = one_shot(&harness, &launch.argv, prompt);
     let (status, stdout, stderr) = run(&argv, dir.path());
     let reply = format!("{stdout}\n{stderr}").to_lowercase();
+    // A spent account is not a broken harness: the program says so in its own
+    // words, and the test says it skipped instead of failing.
+    if let Some(phrase) = exhausted(&harness.spec().dry_patterns, &reply) {
+        println!("skipped: {id} out of quota (matched `{phrase}`)");
+        return;
+    }
     assert!(
         status.success(),
         "{id} exited with {status}\nargv: {argv:?}\nstdout: {stdout}\nstderr: {stderr}"

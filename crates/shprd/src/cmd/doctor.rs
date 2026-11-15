@@ -17,6 +17,7 @@ use shprd_agents::quota::{self, ProbeContext, QuotaReport, QuotaState};
 use shprd_agents::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
 use shprd_agents::spec::{HarnessSpec, load_dir};
 use shprd_core::config::{self, Config, Roster};
+use shprd_core::settings::{Loaded, Resolved, ResolvedRole, RoleKind, Source};
 
 use crate::cli::DoctorArgs;
 use crate::ctx::{CliError, resolve_home};
@@ -133,13 +134,13 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     let mut report = Report::default();
     host(&mut report, &facts);
     let specs = data(&mut report, &facts);
-    let config = config_section(&mut report, &facts);
+    let roles = config_section(&mut report, &facts);
     let clean = worker_env(&facts);
-    let detections = detect_every(&facts, &specs, config.as_ref());
+    let detections = detect_every(&facts, &specs, &roles);
     agents(&mut report, &detections);
-    review(&mut report, &facts, &specs, config.as_ref());
+    review(&mut report, &facts, &specs, &roles);
     if !no_quota {
-        quota_section(&mut report, &facts, &specs, config.as_ref());
+        quota_section(&mut report, &facts, &specs, &roles);
     }
     skills_section(&mut report, &facts, &specs, &clean, &detections);
     launch_env_section(&mut report, &facts, &clean);
@@ -281,8 +282,172 @@ fn data(report: &mut Report, facts: &Facts) -> Vec<HarnessSpec> {
     specs
 }
 
-/// Section 3: the layered config and the three role agent strings.
-fn config_section(report: &mut Report, facts: &Facts) -> Option<Config> {
+/// The roles this machine would actually run, and where each came from.
+///
+/// The settings are what the engine dispatches from: `shprd spawn` reads
+/// `roles.worker.*` and `shprd agent review` reads `roles.reviewer.*`, so the
+/// page a person runs to check their setup must read the same resolution. The
+/// legacy `[roster]` layer is the fallback, and only that: a person who has
+/// migrated sees what the engine will do, and a person who has not still sees
+/// their old choice working.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Roles {
+    /// The coordinator: the role of kind `coordinator`, or the roster's.
+    orchestrator: Option<String>,
+    /// The reviewer: the role of kind `reviewer` that may review, or the
+    /// roster's.
+    reviewer: Option<String>,
+    /// The programs a task may be dispatched to, in the order a spawn tries
+    /// them: the worker role's agent, then the roster's workers.
+    workers: Vec<String>,
+    /// The layer each role's answer came from, for the line that prints it.
+    sources: BTreeMap<&'static str, Source>,
+    /// Whether the old `[roster] orchestrator_auto_approve` switch is on.
+    auto_approve: bool,
+}
+
+impl Roles {
+    /// The roles a legacy `[roster]` alone names.
+    ///
+    /// It is the layer this machine had before M9, and it stays the fallback:
+    /// [`Roles::resolve`] starts here and lets the settings replace what they
+    /// name, so a person who has not migrated sees their old choice and a
+    /// person who has sees the engine's.
+    fn from_roster(roster: Option<&Roster>) -> Roles {
+        let Some(roster) = roster else {
+            return Roles::default();
+        };
+        let text = |agent: &String| agent.trim().to_owned();
+        let mut roles = Roles {
+            auto_approve: roster.orchestrator_auto_approve,
+            ..Roles::default()
+        };
+        if let Some(agent) = roster
+            .orchestrator
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            roles.orchestrator = Some(agent.to_owned());
+            roles.sources.insert("orchestrator", Source::Legacy);
+        }
+        if let Some(agent) = roster
+            .reviewer
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            roles.reviewer = Some(agent.to_owned());
+            roles.sources.insert("reviewer", Source::Legacy);
+        }
+        roles.workers = roster
+            .workers
+            .iter()
+            .map(text)
+            .filter(|agent| !agent.is_empty())
+            .collect();
+        roles
+    }
+
+    /// Resolve the roles for this `home` and repository.
+    ///
+    /// The settings win where they name a program, because they are what the
+    /// engine dispatches from; the legacy roster is what is left when they do
+    /// not.
+    fn resolve(facts: &Facts, config: Option<&Config>) -> Roles {
+        let mut roles = Roles::from_roster(config.map(|config| &config.roster));
+        let resolved = facts
+            .home
+            .as_ref()
+            .and_then(|home| Loaded::read(home, facts.repo.as_deref()).ok())
+            .map(|loaded| loaded.resolve(None));
+        let Some(resolved) = resolved else {
+            return roles;
+        };
+        // The coordinator is a role of kind `coordinator`; the built-in one is
+        // `coordinator`, so a settings-only home finds it there.
+        if let Some((agent, source)) = kind_role(&resolved, RoleKind::Coordinator)
+            .as_ref()
+            .and_then(role_agent)
+        {
+            roles.orchestrator = Some(agent);
+            roles.sources.insert("orchestrator", source);
+        }
+        // The reviewer is the role a review actually uses: one that may review,
+        // which is a `reviewer` or a role that only reads.
+        if let Some((agent, source)) = resolved
+            .roles()
+            .into_iter()
+            .find(|role| role.may_review())
+            .as_ref()
+            .and_then(role_agent)
+        {
+            roles.reviewer = Some(agent);
+            roles.sources.insert("reviewer", source);
+        }
+        // Every program the run could dispatch to: the worker role first, then
+        // the machine's list, exactly as `role_candidates` orders them.
+        if let Some((agent, source)) = resolved.role("worker").as_ref().and_then(role_agent) {
+            roles.workers.retain(|known| *known != agent);
+            roles.workers.insert(0, agent);
+            roles.sources.insert("worker", source);
+        }
+        roles
+    }
+
+    /// The layer one role's answer came from, when one has an answer.
+    fn source(&self, name: &str) -> Option<Source> {
+        self.sources.get(name).copied()
+    }
+
+    /// Every agent string the roles name, coordinator first.
+    ///
+    /// It is what the piped-in checks read: a sign-in probe that needs a model,
+    /// a quota line that asks whether anything dispatches this program, and the
+    /// free-pin test all ask the same "what does this machine run" question.
+    fn every_agent(&self) -> impl Iterator<Item = &String> {
+        self.orchestrator
+            .iter()
+            .chain(self.reviewer.iter())
+            .chain(self.workers.iter())
+    }
+}
+
+/// The first role of `kind`, in the order a settings page lists them.
+fn kind_role(resolved: &Resolved, kind: RoleKind) -> Option<ResolvedRole> {
+    resolved
+        .roles()
+        .into_iter()
+        .find(|role| role.kind.value == kind)
+}
+
+/// A role's program and model as one agent string, and the layer that named it.
+///
+/// It is the same `program/model` the legacy roster writes, so a line and a
+/// vendor check read the two layers alike.
+fn role_agent(role: &ResolvedRole) -> Option<(String, Source)> {
+    let agent = role.agent.as_ref()?;
+    let program = agent.value.trim();
+    if program.is_empty() {
+        return None;
+    }
+    let text = match role.model.as_ref().map(|model| model.value.trim()) {
+        Some(model) if !model.is_empty() => format!("{program}/{model}"),
+        _ => program.to_owned(),
+    };
+    // The nearer layer wins: a program from `you` and a model from `built in`
+    // is the person's own choice, so the program's layer is the one to show.
+    Some((text, agent.source))
+}
+
+/// Section 3: the layered config, then the roles it resolves to.
+///
+/// The role lines read the settings ([`Roles::resolve`]), which is what the
+/// engine dispatches from, so a person who set a role the M9 way sees that
+/// choice here rather than a legacy roster that says nothing. The returned
+/// `Config` is still the file's own answer: `[gates]`, `[skills]` and the
+/// auto-approve switch have no settings key and are read straight from it.
+fn config_section(report: &mut Report, facts: &Facts) -> Roles {
     let section = report.section("Config");
     let global = facts
         .home
@@ -296,7 +461,9 @@ fn config_section(report: &mut Report, facts: &Facts) -> Option<Config> {
         Ok(loaded) => loaded,
         Err(err) => {
             section.add(Level::Fail, format!("does not load: {err}"));
-            return None;
+            // The settings are a separate file: a broken `config.toml` must
+            // not hide a reviewer the person set the M9 way.
+            return Roles::resolve(facts, None);
         }
     };
     match (&global, repo_layer.as_deref()) {
@@ -310,29 +477,46 @@ fn config_section(report: &mut Report, facts: &Facts) -> Option<Config> {
         ),
         _ => section.add(Level::Ok, "loads and validates"),
     }
-    let roster = &loaded.roster;
-    role(section, "orchestrator", roster.orchestrator.as_deref());
-    if roster.orchestrator_auto_approve {
+    let roles = Roles::resolve(facts, Some(&loaded));
+    roles_section(section, &roles);
+    roles
+}
+
+/// Prints the three role lines the engine would act on, and where each came
+/// from.
+fn roles_section(section: &mut Section, roles: &Roles) {
+    role(
+        section,
+        "orchestrator",
+        roles.orchestrator.as_deref(),
+        roles,
+    );
+    if roles.auto_approve {
         section.add(
             Level::Warn,
             "orchestrator runs with auto-approve: the PR gate relies on its brief",
         );
     }
-    role(section, "reviewer", roster.reviewer.as_deref());
-    if roster.workers.is_empty() {
+    role(section, "reviewer", roles.reviewer.as_deref(), roles);
+    if roles.workers.is_empty() {
         section.add(Level::Warn, "workers not set");
     } else {
-        section.add(Level::Ok, format!("workers {}", roster.workers.join(", ")));
+        let list = roles.workers.join(", ");
+        match roles.source("worker") {
+            Some(source) => section.add(Level::Ok, format!("workers {list} ({})", source.label())),
+            None => section.add(Level::Ok, format!("workers {list}")),
+        }
     }
-    Some(loaded)
 }
 
-/// Adds one role line: the agent string, or a warning that it is unset.
-fn role(section: &mut Section, name: &str, agent: Option<&str>) {
+/// Adds one role line: the agent string and its layer, or a warning that it is
+/// unset.
+fn role(section: &mut Section, name: &str, agent: Option<&str>, roles: &Roles) {
     match agent {
-        Some(agent) if !agent.trim().is_empty() => {
-            section.add(Level::Ok, format!("{name} {agent}"));
-        }
+        Some(agent) if !agent.trim().is_empty() => match roles.source(name) {
+            Some(source) => section.add(Level::Ok, format!("{name} {agent} ({})", source.label())),
+            None => section.add(Level::Ok, format!("{name} {agent}")),
+        },
         _ => section.add(Level::Warn, format!("{name} not set")),
     }
 }
@@ -350,25 +534,15 @@ fn worker_env(facts: &Facts) -> LaunchEnv {
     env::launch_env(&facts.current, Role::Worker, &ctx)
 }
 
-/// The model the pi sign-in probe needs: from the roster, else the environment.
-fn pi_models(
-    facts: &Facts,
-    specs: &[HarnessSpec],
-    config: Option<&Config>,
-) -> BTreeMap<String, String> {
+/// The model the pi sign-in probe needs: from the roles, else the environment.
+fn pi_models(facts: &Facts, specs: &[HarnessSpec], roles: &Roles) -> BTreeMap<String, String> {
     if !specs.iter().any(|spec| spec.id == "pi") {
         return BTreeMap::new();
     }
-    let roster = config.map(|config| &config.roster);
-    let from_roster = roster.and_then(|roster| {
-        roster
-            .workers
-            .iter()
-            .chain(roster.orchestrator.iter())
-            .chain(roster.reviewer.iter())
-            .find_map(|agent| model_after_pi(specs, agent))
-    });
-    let model = from_roster.or_else(|| {
+    let from_roles = roles
+        .every_agent()
+        .find_map(|agent| model_after_pi(specs, agent));
+    let model = from_roles.or_else(|| {
         facts
             .current
             .get("SHPRD_PI_MODEL")
@@ -392,12 +566,12 @@ fn model_after_pi(specs: &[HarnessSpec], agent: &str) -> Option<String> {
 }
 
 /// Probes every harness CLI with the environment a worker is launched with.
-fn detect_every(facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) -> Vec<Detection> {
+fn detect_every(facts: &Facts, specs: &[HarnessSpec], roles: &Roles) -> Vec<Detection> {
     if specs.is_empty() {
         return Vec::new();
     }
     let pairs = worker_env(facts).as_pairs();
-    let models = pi_models(facts, specs, config);
+    let models = pi_models(facts, specs, roles);
     detect_all(specs, &facts.path_env, &pairs, &models)
 }
 
@@ -470,18 +644,10 @@ fn families_table(facts: &Facts) -> Families {
 /// An agent string that names no vendor is reported as a warning line rather
 /// than skipped, and a review with any such agent never claims independence:
 /// an unchecked worker could share the reviewer's vendor.
-fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], config: Option<&Config>) {
+fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], roles: &Roles) {
     let section = report.section("Review");
     let families = families_table(facts);
-    let Some(roster) = config.map(|config| &config.roster) else {
-        section.add(Level::Warn, "no config loads, so no reviewer to check");
-        return;
-    };
-    let reviewer = roster
-        .reviewer
-        .as_deref()
-        .filter(|agent| !agent.trim().is_empty());
-    let Some(reviewer) = reviewer else {
+    let Some(reviewer) = roles.reviewer.as_deref() else {
         section.add(Level::Warn, "reviewer not set, so no cross-vendor review");
         return;
     };
@@ -498,7 +664,7 @@ fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], config: Opt
         }
     };
     let mut clashes: Vec<&str> = Vec::new();
-    for worker in &roster.workers {
+    for worker in &roles.workers {
         match vendor_or_reason(specs, &families, worker) {
             Ok(worker_vendor) => {
                 if vendor == Some(worker_vendor) {
@@ -531,12 +697,7 @@ fn review(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], config: Opt
 }
 
 /// Section 6: what quota each agent reports, never naming a credential.
-fn quota_section(
-    report: &mut Report,
-    facts: &Facts,
-    specs: &[HarnessSpec],
-    config: Option<&Config>,
-) {
+fn quota_section(report: &mut Report, facts: &Facts, specs: &[HarnessSpec], roles: &Roles) {
     let section = report.section("Quota");
     let Some(home) = facts.home.clone() else {
         section.add(
@@ -546,13 +707,13 @@ fn quota_section(
         return;
     };
     let mut ctx = ProbeContext::new(home.clone());
-    ctx.free_pin = free_pin(config, &home);
+    ctx.free_pin = free_pin(roles, &home);
     for agent in ["claude", "codex", "kilo"] {
         if !specs.iter().any(|spec| spec.id == agent) {
             section.add(Level::Info, format!("{agent}  not in the harness table"));
             continue;
         }
-        let in_role = fills_a_role(config, specs, agent);
+        let in_role = fills_a_role(roles, specs, agent);
         let (level, text) = quota_line(&quota::probe(agent, &ctx), in_role);
         section.add(level, text);
     }
@@ -563,40 +724,26 @@ fn quota_section(
 /// A configured free model wins, because it is the one a dispatch would use. A
 /// machine with no kilo pick at all still counts when kilo's own config names
 /// a free router: the paid balance is zero there and does not bind.
-fn free_pin(config: Option<&Config>, home: &Path) -> bool {
-    if configured_free_pin(config) {
+fn free_pin(roles: &Roles, home: &Path) -> bool {
+    if configured_free_pin(roles) {
         return true;
     }
     quota::kilo::free_pin(quota::kilo::default_model(home).as_deref())
 }
 
 /// Whether a configured kilo agent string pins the free tier.
-fn configured_free_pin(config: Option<&Config>) -> bool {
-    let Some(roster) = config.map(|config| &config.roster) else {
-        return false;
-    };
-    every_agent(roster)
+fn configured_free_pin(roles: &Roles) -> bool {
+    roles
+        .every_agent()
         .any(|agent| agent.starts_with("kilo/") && quota::kilo::free_pin(Some(agent.as_str())))
 }
 
-/// Every agent string the roster names, in any role.
-fn every_agent(roster: &Roster) -> impl Iterator<Item = &String> {
-    roster
-        .workers
-        .iter()
-        .chain(roster.orchestrator.iter())
-        .chain(roster.reviewer.iter())
-}
-
-/// Whether `agent`'s program fills at least one role in the loaded config.
+/// Whether `agent`'s program fills at least one role.
 ///
 /// Every configured string is parsed against the harness table, so a bare
 /// `kilo` in a role counts exactly like `kilo/kilo-auto/free` does.
-fn fills_a_role(config: Option<&Config>, specs: &[HarnessSpec], agent: &str) -> bool {
-    let Some(roster) = config.map(|config| &config.roster) else {
-        return false;
-    };
-    every_agent(roster).any(|pinned| {
+fn fills_a_role(roles: &Roles, specs: &[HarnessSpec], agent: &str) -> bool {
+    roles.every_agent().any(|pinned| {
         AgentRef::parse(pinned, specs)
             .map(|named| named.program == agent)
             .unwrap_or(false)
@@ -830,7 +977,12 @@ mod tests {
         let mut config = config(None, &["kilo", "gemini/pro"]);
         config.roster.reviewer = Some("claude/opus".to_owned());
         let mut page = Report::default();
-        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        review(
+            &mut page,
+            &Facts::resolve(None),
+            &specs,
+            &Roles::from_roster(Some(&config.roster)),
+        );
         let text = render(&page);
         assert!(text.contains("cannot check vendor of gemini/pro"), "{text}");
         assert!(!text.contains("independent of every worker"), "{text}");
@@ -842,7 +994,12 @@ mod tests {
         let mut config = config(None, &["claude/opus"]);
         config.roster.reviewer = Some("gemini/pro".to_owned());
         let mut page = Report::default();
-        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        review(
+            &mut page,
+            &Facts::resolve(None),
+            &specs,
+            &Roles::from_roster(Some(&config.roster)),
+        );
         let text = render(&page);
         assert!(text.contains("cannot check vendor of gemini/pro"), "{text}");
         assert!(!text.contains("independent of every worker"), "{text}");
@@ -855,7 +1012,12 @@ mod tests {
         let mut config = config(None, &["pi/Command Code/deepseek/deepseek-v4.1-flash"]);
         config.roster.reviewer = Some("pi/openrouter/anthropic/claude-opus-5-5".to_owned());
         let mut page = Report::default();
-        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        review(
+            &mut page,
+            &Facts::resolve(None),
+            &specs,
+            &Roles::from_roster(Some(&config.roster)),
+        );
         let text = render(&page);
         assert!(
             text.contains("runs the anthropic family, independent of every worker"),
@@ -871,7 +1033,12 @@ mod tests {
         let mut config = config(None, &["pi/claude/claude-opus-5-5"]);
         config.roster.reviewer = Some("claude/claude-opus-5-5".to_owned());
         let mut page = Report::default();
-        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        review(
+            &mut page,
+            &Facts::resolve(None),
+            &specs,
+            &Roles::from_roster(Some(&config.roster)),
+        );
         let text = render(&page);
         assert!(
             text.contains("✗ reviewer claude/claude-opus-5-5 runs the anthropic family"),
@@ -890,7 +1057,12 @@ mod tests {
         let mut config = config(None, &["kilo/kilo-auto/free"]);
         config.roster.reviewer = Some("codex/gpt-5-codex".to_owned());
         let mut page = Report::default();
-        review(&mut page, &Facts::resolve(None), &specs, Some(&config));
+        review(
+            &mut page,
+            &Facts::resolve(None),
+            &specs,
+            &Roles::from_roster(Some(&config.roster)),
+        );
         let text = render(&page);
         assert!(
             text.contains("! cannot check vendor of kilo/kilo-auto/free"),
@@ -912,7 +1084,8 @@ mod tests {
     /// A report holding only this one quota line, and the level it carries.
     fn line_level(config: Option<&Config>, agent: &str, state: QuotaState) -> (Level, bool) {
         let specs = harness_specs();
-        let in_role = fills_a_role(config, &specs, agent);
+        let roles = Roles::from_roster(config.map(|config| &config.roster));
+        let in_role = fills_a_role(&roles, &specs, agent);
         let (level, text) = quota_line(&report(agent, state), in_role);
         let mut report = Report::default();
         report.section("Quota").add(level, text);
@@ -940,7 +1113,7 @@ mod tests {
             data: None,
         };
         let mut report = Report::default();
-        assert!(config_section(&mut report, &facts).is_some());
+        config_section(&mut report, &facts);
         render(&report)
     }
 
@@ -1013,25 +1186,30 @@ mod tests {
         let home = home_with_kilo(Some(
             "{\n  // picked by hand\n  \"model\": \"ohmyproxy/kilo-auto/free\",\n}\n",
         ));
-        assert!(free_pin(None, home.path()));
+        assert!(free_pin(&Roles::default(), home.path()));
 
         let paid = home_with_kilo(Some("{\"model\": \"kilo/openai/gpt-5\"}"));
-        assert!(!free_pin(None, paid.path()));
+        assert!(!free_pin(&Roles::default(), paid.path()));
     }
 
     #[test]
     fn a_model_merely_named_free_is_not_the_free_tier() {
         let paid = config(None, &["kilo/vendor/free-lunch"]);
-        assert!(!configured_free_pin(Some(&paid)));
+        assert!(!configured_free_pin(&Roles::from_roster(Some(
+            &paid.roster
+        ))));
         let free = config(None, &["kilo/kilo/kilo-auto/free"]);
-        assert!(configured_free_pin(Some(&free)));
+        assert!(configured_free_pin(&Roles::from_roster(Some(&free.roster))));
     }
 
     #[test]
     fn a_configured_free_pin_wins_over_kilos_own_model() {
         let home = home_with_kilo(Some("{\"model\": \"kilo/openai/gpt-5\"}"));
         let config = config(None, &["kilo/kilo-auto/free"]);
-        assert!(free_pin(Some(&config), home.path()));
+        assert!(free_pin(
+            &Roles::from_roster(Some(&config.roster)),
+            home.path()
+        ));
     }
 
     /// A temp home, holding a kilo jsonc with `body` when one is given.

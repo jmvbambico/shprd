@@ -320,6 +320,9 @@ pub struct BriefInput<'a> {
     pub prompt: Option<&'a str>,
     /// How this program raises a needs-you card, from its harness.
     pub ask: AskRoute,
+    /// Whether the run asks every task for one proof artifact, from the
+    /// resolved `tasks.proof` setting.
+    pub proof: bool,
     /// The settings as this task resolves them, for the Settings block.
     pub settings: Option<&'a Resolved>,
     /// The role whose values the Settings block describes.
@@ -426,11 +429,13 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         "- say where you are as you go: `shprd task status {t} --msg <one short line> [--progress 0-100]`\n",
         t = input.task.id
     ));
+    out.push_str(&proof_rule(input.proof));
     out.push_str(&format!(
         "- report when you are done: `shprd agent report --task {t} --attempt {a} --status <completed|blocked|failed> --summary <one line>` \
          plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused \
          without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each \
-         path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used\n",
+         path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used \
+         and `--proof <path>` for each artifact you left behind\n",
         t = input.task.id,
         a = input.attempt
     ));
@@ -505,6 +510,24 @@ fn gate_rule(gates: &[String]) -> String {
         "- run the worker gates before you report: {}\n",
         commands.join(", ")
     )
+}
+
+/// The Rules line that tells the agent where its proof goes, when it needs one.
+///
+/// It sits before the hand-in rule, not after it, because a hand-in is spent
+/// once: a worker that reads "say where it is in your summary" only after
+/// reporting has already written a summary it cannot change, and the re-report
+/// is refused. The proof path goes in `--proof`, where it costs the summary
+/// nothing, so the first report is right.
+fn proof_rule(proof: bool) -> String {
+    if !proof {
+        return String::new();
+    }
+    "- leave one real proof of the work behind (a screenshot of the change, a command's actual \
+     output, a test run) and pass its path as `--proof <path>`, once per artifact: the proof path \
+     never goes in the summary, which is one plain line for the person. A mock is no proof of what \
+     people see; a bug fix shows the same repro failing before and passing after\n"
+        .to_string()
 }
 
 /// The settings that shape one task, each with the layer that set it.
@@ -844,6 +867,7 @@ mod tests {
             archive: None,
             prompt: None,
             ask: AskRoute::Hook,
+            proof: true,
             settings: None,
             role: None,
             warnings: &[],
@@ -968,6 +992,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             archive: None,
             prompt: Some("You work on one shprd task.\nStay within scope.\n"),
             ask: AskRoute::Hook,
+            proof: true,
             settings: Some(&resolved),
             role: Some(&role),
             warnings: &[],
@@ -1000,7 +1025,8 @@ branch `task/30-m9-4` in worktree `/home/me/.shprd/worktrees/shprd/m9/M9.4`
 - `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes
 - run the worker gates before you report: `cargo fmt --all --check`, `cargo test --workspace`
 - say where you are as you go: `shprd task status M9.4 --msg <one short line> [--progress 0-100]`
-- report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit and `--skill-used <name>` for each skill above you actually used
+- leave one real proof of the work behind (a screenshot of the change, a command's actual output, a test run) and pass its path as `--proof <path>`, once per artifact: the proof path never goes in the summary, which is one plain line for the person. A mock is no proof of what people see; a bug fix shows the same repro failing before and passing after
+- report when you are done: `shprd agent report --task M9.4 --attempt 1 --status <completed|blocked|failed> --summary <one line>` plus `--check <gate>|<command>|<exit code>[|<last 20 lines>]` for every gate you ran (a completed hand-in is refused without them, and refused if any exited non-zero), `--test <cmd>` for each command you ran, `--changed <path>` for each path you changed, `--commit <sha>` for your commit, `--skill-used <name>` for each skill above you actually used and `--proof <path>` for each artifact you left behind
 
 ## Asking the person
 
@@ -1046,6 +1072,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             archive: None,
             prompt: None,
             ask: AskRoute::Hook,
+            proof: true,
             settings: None,
             role: None,
             warnings: &[],
@@ -1077,6 +1104,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             archive: None,
             prompt: None,
             ask: AskRoute::Hook,
+            proof: true,
             settings: None,
             role: None,
             warnings: &warnings,
@@ -1105,6 +1133,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             archive: None,
             prompt: None,
             ask: AskRoute::Hook,
+            proof: true,
             settings: None,
             role: None,
             warnings: &[],
@@ -1128,6 +1157,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             archive: None,
             prompt: None,
             ask,
+            proof: true,
             settings: None,
             role: None,
             warnings: &[],
@@ -1176,6 +1206,63 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
                 "- `.shprd/` and `.dagr/` are shprd's own: the run's log, asks and graph live there, and the worktree's git already ignores them. Never commit them, never add them to the repository's `.gitignore`, and leave them out of your changes\n"
             ),
             "{text}"
+        );
+    }
+
+    /// The proof rule comes before the hand-in rule, and it says where the proof
+    /// path goes. A hand-in is spent once, so a worker that only learns about
+    /// `--proof` after reporting has no report left to correct.
+    #[test]
+    fn the_proof_rule_is_read_before_the_hand_in_rule() {
+        let text = plain_brief(AskRoute::Hook);
+        let proof = text
+            .find("- leave one real proof of the work behind")
+            .unwrap_or_else(|| panic!("the brief names the proof rule: {text}"));
+        let report = text
+            .find("- report when you are done:")
+            .unwrap_or_else(|| panic!("the brief names the hand-in rule: {text}"));
+        assert!(proof < report, "the proof rule comes first: {text}");
+        assert!(
+            text.contains("pass its path as `--proof <path>`"),
+            "the rule says where the proof path goes: {text}"
+        );
+        assert!(
+            text.contains("never goes in the summary"),
+            "the rule keeps the proof path out of the summary: {text}"
+        );
+        assert!(
+            text.contains("`--proof <path>` for each artifact you left behind"),
+            "the hand-in rule repeats the flag: {text}"
+        );
+    }
+
+    /// A run that does not ask for proof says nothing about it, so the rule
+    /// never becomes a line a worker skips over.
+    #[test]
+    fn a_run_without_proof_has_no_proof_rule() {
+        let plan = brief_task();
+        let text = task_brief(&BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt: 1,
+            agent: "claude",
+            model: None,
+            branch: "task/30-m9-4",
+            worktree: "/wt/M9.4",
+            skills: &[],
+            gates: &[],
+            archive: None,
+            prompt: None,
+            ask: AskRoute::Hook,
+            proof: false,
+            settings: None,
+            role: None,
+            warnings: &[],
+        });
+        assert!(!text.contains("leave one real proof"), "{text}");
+        assert!(
+            text.contains("`--proof <path>` for each artifact you left behind"),
+            "the flag is still named by the hand-in rule: {text}"
         );
     }
 

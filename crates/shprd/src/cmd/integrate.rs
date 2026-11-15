@@ -348,6 +348,7 @@ mod tests {
                 changed_paths: vec!["README.md".to_string()],
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             })
             .unwrap_or_else(|err| panic!("{err}"));
         }

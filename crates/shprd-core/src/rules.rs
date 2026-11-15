@@ -2002,6 +2002,7 @@ mod tests {
                 changed_paths: strings(paths),
                 commit: Some("abc123".to_string()),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }
@@ -2019,6 +2020,7 @@ mod tests {
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }
@@ -2047,6 +2049,7 @@ mod tests {
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         )
     }
@@ -2584,6 +2587,7 @@ mod tests {
                 changed_paths: strings(&["src/a"]),
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         );
         assert!(matches!(
@@ -3949,6 +3953,7 @@ mod tests {
                 changed_paths: strings(&["src/a/x.rs"]),
                 commit: Some("abc123".to_string()),
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             },
         );
         match state.check_as(&actor, &late.kind, 7_000) {

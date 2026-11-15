@@ -322,6 +322,7 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         changed_paths: args.changed.clone(),
         commit: args.commit.clone(),
         skills_used: args.skills_used.clone(),
+        proofs: args.proofs.clone(),
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)

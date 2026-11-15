@@ -494,6 +494,7 @@ fn retried_events(worktree: &Path, dropped: bool) -> Vec<Event> {
         changed_paths: Vec::new(),
         commit: None,
         skills_used: Vec::new(),
+        proofs: Vec::new(),
     };
     let mut kinds = vec![
         EventKind::RunStarted {

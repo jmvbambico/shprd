@@ -402,6 +402,14 @@ pub enum EventKind {
         commit: Option<String>,
         /// Skills the agent used.
         skills_used: Vec<String>,
+        /// Where this attempt left its proof, when the worker named one.
+        ///
+        /// A proof is the artifact a person can look at — a screenshot, a
+        /// command's real output, a test run — and it belongs beside the
+        /// summary, not inside it: the summary is one plain line for the
+        /// person, and a path there would be jargon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        proofs: Vec<String>,
     },
     /// An agent recorded where it is on a task.
     ///
@@ -925,6 +933,7 @@ mod tests {
                 changed_paths: vec!["crates/shprd-core/src/event.rs".to_string()],
                 commit: Some("abc123".to_string()),
                 skills_used: vec!["tdd".to_string()],
+                proofs: Vec::new(),
             },
             EventKind::TaskStatus {
                 task: "M1.1".to_string(),

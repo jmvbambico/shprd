@@ -89,8 +89,23 @@ const WORKER_M9_ASKS: &str = include_str!("../../../data/templates/history/worke
 const WORKER_M9_ASKS_DIGEST: &str =
     "59e22b0f71d7810c737e8ead9937852cd1166f3867653aea7fea92970081583f";
 
+/// The worker wording M9.6 shipped, which put the proof rule after the hand-in
+/// rule and sent the proof path into the summary. A hand-in is spent once, so
+/// today's words put the rule first and give the path its own `--proof` flag.
+#[cfg(test)]
+const WORKER_M9_PROOF: &str = include_str!("../../../data/templates/history/worker-m9-proof.md");
+
+/// The SHA-256 of [`WORKER_M9_PROOF`], the worker's fourth retired default.
+const WORKER_M9_PROOF_DIGEST: &str =
+    "a371c687e291a4ed26386320b8f5bb9f08adf6764d459e7055e75edaa78ebcf8";
+
 /// The worker's retired defaults.
-const WORKER_OLD: &[&str] = &[WORKER_FIRST_DIGEST, WORKER_M9_DIGEST, WORKER_M9_ASKS_DIGEST];
+const WORKER_OLD: &[&str] = &[
+    WORKER_FIRST_DIGEST,
+    WORKER_M9_DIGEST,
+    WORKER_M9_ASKS_DIGEST,
+    WORKER_M9_PROOF_DIGEST,
+];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
 /// the ask route is the program's, not one CLI tool's.
@@ -132,6 +147,19 @@ const ASSISTANT_ASKS_RAISE_DIGEST: &str =
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST, ASSISTANT_ASKS_RAISE_DIGEST];
 
+/// The reviewer wording M9.6 shipped, which did not name the asks the packet
+/// now carries. A criterion about asking is only checkable from those, so
+/// today's words say to use them.
+#[cfg(test)]
+const REVIEWER_M9_ASKS: &str = include_str!("../../../data/templates/history/reviewer-m9-asks.md");
+
+/// The SHA-256 of [`REVIEWER_M9_ASKS`], the reviewer's first retired default.
+const REVIEWER_M9_ASKS_DIGEST: &str =
+    "3d9ee44b1a18395e0463945ab0d34baed819d8ec7ad8fa3896491ec0120a517c";
+
+/// The reviewer's retired defaults.
+const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST];
+
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [
     ShippedPrompt {
@@ -153,7 +181,7 @@ pub const SHIPPED: [ShippedPrompt; 4] = [
         role: "reviewer",
         about: "Reads a finished attempt's diff and decides.",
         text: include_str!("../../../data/templates/reviewer.md"),
-        old: &[],
+        old: REVIEWER_OLD,
     },
     ShippedPrompt {
         id: "backup",
