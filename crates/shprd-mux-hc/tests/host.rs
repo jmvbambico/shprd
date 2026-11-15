@@ -561,6 +561,24 @@ fn a_subscription_reports_a_terminal_that_ended() {
 }
 
 #[test]
+fn a_host_dropped_inside_an_async_context_is_quiet() {
+    // `shprd serve` holds its host in the service and drops it when the service
+    // stops — inside the service's async context. A tokio runtime that waits for
+    // its workers on drop panics there ("Cannot drop a runtime in a context
+    // where blocking is not allowed"), which turned every Ctrl-C on Herdr
+    // desktop into exit code 101: this is that drop, and nothing may panic.
+    let (_fake, host) = host("normal");
+    host.read(&PaneId::new("t20"), 5).expect("the core reads");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime to drop the host inside");
+    runtime.block_on(async move {
+        drop(host);
+    });
+}
+
+#[test]
 fn a_core_that_is_not_there_is_an_error_a_person_can_read() {
     let endpoint = Endpoint::with_binary("/nonexistent/hc")
         .with_timeout(Duration::from_secs(1))

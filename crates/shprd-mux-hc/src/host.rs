@@ -131,6 +131,52 @@ const SCREEN_LINES: usize = 200;
 /// decide whether it is "not found", "forbidden" or a plain failure.
 type CoreResult<T> = crate::error::Result<T>;
 
+/// The tokio runtime one host's client runs on, and how it is shut down.
+///
+/// herdr-core's client is asynchronous and [`shprd_mux::Host`] is not, so every
+/// host owns a small runtime and blocks on it per call. What that runtime may
+/// **not** do is wait for its workers when it is dropped: a `Runtime`'s own drop
+/// waits, and a drop that waits panics inside an async context ("Cannot drop a
+/// runtime in a context where blocking is not allowed"). `shprd serve` is
+/// exactly that case — it keeps the host in its service and drops it when the
+/// service stops — so this runtime is shut down with
+/// [`tokio::runtime::Runtime::shutdown_background`], which hands the waiting
+/// back, and a host can then be dropped from a verb's thread, a blocking task or
+/// the service's stop with the same result: nothing.
+#[derive(Debug)]
+struct Driver(Option<tokio::runtime::Runtime>);
+
+impl Driver {
+    /// A runtime for one host: two workers, which is what the client's reader,
+    /// its keeper and whoever is waiting on a call need.
+    fn new() -> CoreResult<Self> {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map(|runtime| Self(Some(runtime)))
+            .map_err(|error| {
+                Error::Output(format!(
+                    "cannot start the runtime herdr-core needs: {error}"
+                ))
+            })
+    }
+
+    /// Run `future` to completion, or answer [`None`] when the host is being
+    /// dropped (the only moment the runtime is not there any more).
+    fn block_on<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
+        self.0.as_ref().map(|runtime| runtime.block_on(future))
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 /// The `herdr-app` command line: the window's half of the host.
 ///
 /// The client's half is [`HcClient`], and this is the other one — spaces, tabs
@@ -338,11 +384,14 @@ impl std::fmt::Debug for HcHost {
 
 /// What every clone of a host shares.
 struct Inner {
-    /// The runtime the client's tasks run on. Declared first so it outlives the
-    /// client it drives while `Inner` is dropped.
-    runtime: tokio::runtime::Runtime,
     /// The link to herdr-core and its fold.
+    ///
+    /// Declared first so it is dropped before the runtime it runs on: the
+    /// `hc connect` child dies with it (`kill_on_drop`), and the runtime is
+    /// still there while that happens.
     client: HcClient,
+    /// The runtime the client's tasks run on, shut down without waiting.
+    driver: Driver,
     /// The window's command line.
     window: Window,
     /// What the host can do, decided once at construction.
@@ -378,18 +427,21 @@ impl HcHost {
     /// is synchronous.
     pub fn connect(endpoint: Endpoint, window: Window) -> Result<Self> {
         let attached = window.attached();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|error| {
+        let driver = Driver::new().map_err(|error| {
+            MuxError::command(
+                "starting the runtime herdr-core talks on",
+                error.to_string(),
+            )
+        })?;
+        let connected = driver
+            .block_on(HcClient::connect(endpoint))
+            .ok_or_else(|| {
                 MuxError::command(
-                    "starting the runtime herdr-core talks on",
-                    error.to_string(),
+                    "connecting to herdr-core",
+                    "the host was dropped while it connected",
                 )
             })?;
-        let client = runtime
-            .block_on(HcClient::connect(endpoint))
+        let client = connected
             .map_err(|error| MuxError::command("connecting to herdr-core", error.to_string()))?;
         let mut changes = client.changes();
         // The snapshot the subscription folded is the baseline: `subscribe`
@@ -424,8 +476,8 @@ impl HcHost {
         };
         let host = Self {
             inner: Arc::new(Inner {
-                runtime,
                 client,
+                driver,
                 window,
                 capabilities,
                 changes: Mutex::new(changes),
@@ -482,15 +534,17 @@ impl HcHost {
     /// One call, as the client's own error.
     fn core(&self, method: &str, params: Value) -> CoreResult<Value> {
         self.inner
-            .runtime
+            .driver
             .block_on(self.inner.client.call(method, params))
+            .unwrap_or_else(|| Err(shutting_down()))
     }
 
     /// One call with a timeout, as the client's own error.
     fn core_with(&self, method: &str, params: Value, timeout: Duration) -> CoreResult<Value> {
         self.inner
-            .runtime
+            .driver
             .block_on(self.inner.client.call_with(method, params, timeout))
+            .unwrap_or_else(|| Err(shutting_down()))
     }
 
     /// One call, as the trait's error, for a verb that cannot be "not found".
@@ -538,8 +592,9 @@ impl HcHost {
     fn refresh_layout(&self) -> Result<State> {
         let value = self
             .inner
-            .runtime
+            .driver
             .block_on(self.inner.client.layout())
+            .unwrap_or_else(|| Err(shutting_down()))
             .map_err(|error| core_error("doc.get", error))?;
         if let Ok(mut layout) = self.inner.layout.lock() {
             *layout = value;
@@ -1101,10 +1156,13 @@ impl Host for HcHost {
             let mut changes = self.inner.changes.lock().map_err(|_| {
                 MuxError::command("listening for changes", "the channel is poisoned")
             })?;
-            let _ = self
+            if let Some(waited) = self
                 .inner
-                .runtime
-                .block_on(async { tokio::time::timeout(timeout, changes.changed()).await });
+                .driver
+                .block_on(async { tokio::time::timeout(timeout, changes.changed()).await })
+            {
+                let _ = waited;
+            }
             changes.borrow_and_update().clone()
         };
         self.diff(seen_at_call)
@@ -1397,6 +1455,15 @@ fn terminal_of_pane(layout: &Value, pane: &str) -> Option<String> {
                 .flatten()
         })
         .find_map(|tab| tab.get("root").and_then(|root| walk(root, pane)))
+}
+
+/// What a call answers when the host is already shutting down.
+///
+/// It cannot happen through the trait — a verb borrows the host, so the runtime
+/// is there — but a `None` from [`Driver::block_on`] must be an answer, not a
+/// panic.
+fn shutting_down() -> Error {
+    Error::Output("the host is shutting down".to_string())
 }
 
 /// The trait's error for one herdr-core refusal.
