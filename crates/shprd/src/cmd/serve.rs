@@ -12,26 +12,53 @@
 //! once on demand — a queued task starts, a task the policy allows lands, a
 //! merge made outside shprd is recorded — and its writes are published on the
 //! service's change channel like any other.
+//!
+//! A pass that fails a step carries on with the others, so the failure has to be
+//! said out loud or the operator never hears it: `serve` installs a `tracing`
+//! subscriber at `SHPRD_LOG`'s level (default `warn`, to stderr), which is where
+//! every step's `tracing::warn!` goes, and it says in its banner whether the
+//! repository has a run at all.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::anyhow;
-use shprd_server::{AfterWrite, Config, Service, TickConfig, WsLimits, shutdown_signal, state_dir};
+use shprd_core::state::RunInfo;
+use shprd_server::{
+    AfterWrite, Config, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
+    shutdown_signal, state_dir,
+};
 
 use shprd_server::ServerError::AlreadyRunning;
 
 use crate::cli::ServeArgs;
 use crate::ctx::{CliError, Ctx, resolve_home};
 
+/// The variable that sets how much the service logs.
+///
+/// It takes the same directives `RUST_LOG` does — `warn` (the default), `info`,
+/// `debug`, or a per-target form such as `shprd_server=debug`.
+const LOG_ENV: &str = "SHPRD_LOG";
+
 /// Runs the service until the process is asked to stop.
 pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliError> {
     let home = resolve_home(home)?;
+    install_subscriber();
+    // The banner says whether there is a run at all, and the passes say so again
+    // if one is started after the service was: a service that came up too early
+    // must not look like an empty run.
+    let run_at_start = ctx.state()?.run;
     let mut config = Config::new(ctx.root.clone(), state_dir(&home));
     config.port = args.port;
     config.actor = ctx.actor.clone();
     config.after_write = Some(after_write(ctx));
-    let tick = tick_config(ctx, &home, config.hub.clone())?;
+    let tick = tick_config(
+        ctx,
+        &home,
+        config.hub.clone(),
+        run_notice(run_at_start.as_ref().map(|run| run.run_id.clone())),
+    )?;
     let announced = AnnouncedTick {
         interval_secs: tick.interval.as_secs(),
         max_running: tick.max_running,
@@ -52,11 +79,57 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
         let info = service.info().clone();
-        announce(ctx, &info, &announced);
+        announce(ctx, &info, &announced, run_at_start.as_ref());
         service
             .run(shutdown_signal())
             .await
             .map_err(|err| CliError::other(anyhow!(err).context("serving the run")))
+    })
+}
+
+/// Installs the subscriber every `tracing` line in the service goes through.
+///
+/// The binary is the only place that decides where log lines go, so it is the
+/// only place that installs one: the level is `SHPRD_LOG`'s (default `warn`),
+/// and the lines go to stderr so `serve`'s banner on stdout stays the one thing
+/// a person reads on purpose. A subscriber that is already installed — a test
+/// that captured one, a process that set one up — is left alone.
+fn install_subscriber() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::filter::LevelFilter;
+    let filter = tracing_subscriber::EnvFilter::try_from_env(LOG_ENV)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(LevelFilter::WARN.to_string()));
+    // Colour only for a person watching: a log a supervisor redirects to a file
+    // is read by something that would keep the escape codes.
+    let ansi = std::io::stderr().is_terminal();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(ansi)
+        .with_target(false)
+        .try_init();
+}
+
+/// What the service says when a pass first sees a run the banner did not name.
+///
+/// The banner is printed once, before the first pass, so a service started in a
+/// repository whose run does not exist yet would otherwise look like an empty
+/// run for ever. The notice fires once per run: the passes after the first have
+/// nothing new to say.
+fn run_notice(announced: Option<String>) -> PassNotice {
+    let seen = Arc::new(Mutex::new(announced));
+    Arc::new(move |report: &TickReport| {
+        let Some(run) = report.run.as_deref() else {
+            return;
+        };
+        let Ok(mut seen) = seen.lock() else {
+            return;
+        };
+        if seen.as_deref() == Some(run) {
+            return;
+        }
+        *seen = Some(run.to_string());
+        println!("   run:          {run} (started after serve: the passes advance it)");
     })
 }
 
@@ -69,6 +142,7 @@ fn tick_config(
     ctx: &Ctx,
     home: &Path,
     hub: shprd_server::hub::Hub,
+    notice: PassNotice,
 ) -> Result<TickConfig, CliError> {
     let config = crate::cmd::tick::load_config(ctx, home)?;
     let max_running = config.tick.max_running;
@@ -78,6 +152,7 @@ fn tick_config(
         worker: std::sync::Arc::new(worker),
         interval,
         max_running,
+        notice: Some(notice),
     })
 }
 
@@ -109,9 +184,17 @@ fn after_write(ctx: &Ctx) -> AfterWrite {
 /// Says where the service is and how to reach it.
 ///
 /// The token itself is never printed — only the file it is in, which is `0600`
-/// in the state directory.
-fn announce(ctx: &Ctx, info: &shprd_server::ServiceInfo, tick: &AnnouncedTick) {
+/// in the state directory. The run is named when there is one, and the line
+/// says what to do when there is not: a service that came up before
+/// `shprd run start` must not look like a run with no tasks in it.
+fn announce(
+    ctx: &Ctx,
+    info: &shprd_server::ServiceInfo,
+    tick: &AnnouncedTick,
+    run: Option<&RunInfo>,
+) {
     let limits = WsLimits::default();
+    let hint = run.is_none().then_some(NO_RUN_HINT);
     if ctx.json {
         let value = serde_json::json!({
             "serving": ctx.root.display().to_string(),
@@ -122,6 +205,12 @@ fn announce(ctx: &Ctx, info: &shprd_server::ServiceInfo, tick: &AnnouncedTick) {
             "pid": info.pid,
             "token": info.token_path.display().to_string(),
             "service_json": info.service_json.display().to_string(),
+            "run": run.map(|run| serde_json::json!({
+                "id": run.run_id,
+                "base": run.base_branch,
+                "integration": run.integration_branch,
+            })),
+            "hint": hint,
             "ws": {
                 "ping_secs": limits.ping.as_secs(),
                 "idle_secs": limits.idle.as_secs(),
@@ -142,6 +231,13 @@ fn announce(ctx: &Ctx, info: &shprd_server::ServiceInfo, tick: &AnnouncedTick) {
         info.id,
         info.version
     );
+    match run {
+        Some(run) => println!(
+            "   run:          {} · {} → {}",
+            run.run_id, run.base_branch, run.integration_branch
+        ),
+        None => println!("   run:          {NO_RUN_HINT}"),
+    }
     println!("   token:        {}", info.token_path.display());
     println!("   service.json: {}", info.service_json.display());
     println!(
