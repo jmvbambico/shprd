@@ -409,6 +409,14 @@ pub struct Config {
     /// embedded copy into this once, so the service reads no directory variable
     /// of its own.
     pub data: Option<DataDir>,
+    /// The binary's spawn and close, so the person's start, retry and stop
+    /// actions reach an agent.
+    ///
+    /// It is the same two closures the tick's steps use: a start writes a brief,
+    /// makes a worktree and opens a tab, a stop closes the space the agent runs
+    /// in. A service started without them — every test that only drives the
+    /// router — refuses those three actions and reads the log exactly the same.
+    pub engine: Option<crate::engine::Engine>,
     /// What types a chat line into a space's agent, when the binary has a host.
     ///
     /// Typing into a pane is the host's verb, so the binary passes the same
@@ -467,6 +475,7 @@ impl Config {
             home: None,
             prompts_dir: None,
             data: None,
+            engine: None,
             chat: crate::chat::ChatHost::new(),
         }
     }
@@ -510,14 +519,15 @@ impl Service {
                 prompts_dir: config.prompts_dir.clone(),
                 data: config.data.clone(),
             },
-        )?;
-        // The writer is attached after the router is built, which rebuilds it:
-        // the two orders are the same service, and this one keeps the chat out
-        // of the path a test's `App::prepare` walks.
-        let app = match config.chat.get() {
-            Some(writer) => app.with_chat_writer(writer.clone()),
-            None => app,
-        };
+        )?
+        // The spawn and the close are the binary's, wired exactly as the tick's
+        // steps are; a service without them refuses the three actions that need
+        // a host.
+        .with_engine_opt(config.engine.clone())
+        // The chat's writer is that same host. Attaching it rebuilds the router,
+        // which a client never sees: the record is written before either is
+        // wired, and a request cannot arrive until the listener is serving.
+        .with_chat_opt(config.chat.get().cloned());
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");

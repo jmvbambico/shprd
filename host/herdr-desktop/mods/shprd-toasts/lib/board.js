@@ -89,6 +89,20 @@ export function grouped(state) {
   return groups;
 }
 
+/**
+ * The task a panel's shared selection names, from the board it is reading.
+ *
+ * The board is the only place a task is looked up: a panel shares *which* task it
+ * is showing (`shared("tasks.thread")`, Shepherdr's own contract) and never a copy
+ * of the task, so two views of one drill-in cannot drift apart. A task that is no
+ * longer on the board answers null — it landed or was dropped while a view was
+ * open, and that is a calm answer, not a missing one.
+ */
+export function taskById(state, id) {
+  if (!id) return null;
+  return (state?.tasks ?? []).find((task) => task.id === id) ?? null;
+}
+
 /** One task's status, as the tone and glyph a row draws. */
 export function look(task) {
   return statusOf(task?.derived?.status);
@@ -194,4 +208,65 @@ export function lastFailure(state) {
   const where = first.task ? ` on ${first.task}` : "";
   const others = failed.length - 1;
   return `${first.step}${where}: ${cut(first.error, 80)}${others > 0 ? ` (+${others})` : ""}`;
+}
+
+/**
+ * The one act a row offers, as `{id, label, action}` — or nothing.
+ *
+ * The verbs are the engine's, and a row offers one only where that verb would
+ * be accepted: a start needs a task the rules call queued, a retry needs one
+ * whose attempt failed (a send-back is a spawn, and a spawn is refused while any
+ * attempt is unfinished), and a stop needs an agent that is supposed to be
+ * running. A ready row's act is not an action at all: it opens the Accept card,
+ * so `action` is null and the row knows to drill in.
+ *
+ * Nothing is offered for a task that is merging, done or dropped: those are the
+ * engine's or history's, and a button that always refuses is worse than none.
+ */
+export function rowActions(task) {
+  const word = task?.derived?.status;
+  const status = task?.status;
+  if (!isLive(task)) return [];
+  if (word === "ready" || status === "passed" || status === "reported") {
+    return [{ id: "review", label: "Review", action: null }];
+  }
+  if (status === "queued" && (word === "to_do" || word === "scheduled")) {
+    return [{ id: "start", label: "Start", action: "task.start" }];
+  }
+  if (status === "failed") {
+    return [{ id: "retry", label: "Retry", action: "task.retry" }];
+  }
+  if (status === "working" && word === "working") {
+    return [{ id: "stop", label: "Stop", action: "task.stop" }];
+  }
+  return [];
+}
+
+/**
+ * The tasks a panel can offer to start, and the ones it must leave alone.
+ *
+ * It is the add-task form's reading of the board: what the service would accept
+ * as a scope (`a path, or a folder`) is not decided here — the rules are — but a
+ * title and one acceptance line are what the form asks for, and a form that sent
+ * an empty one would be refused for it. `id` also says why a form cannot be
+ * submitted yet, in words, or is empty when it can.
+ */
+export function newTask(body) {
+  const title = String(body?.title ?? "").trim();
+  const scope = String(body?.scope ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  const acceptance = String(body?.acceptance ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  const why = title === ""
+    ? "A task needs a title"
+    : scope.length === 0
+      ? "Name the folder or path it may change"
+      : acceptance.length === 0
+        ? "Say what must be true when it is done"
+        : "";
+  return { title, scope, acceptance, why, ready: why === "" };
 }
