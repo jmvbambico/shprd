@@ -1,0 +1,431 @@
+{
+  "seq": 34,
+  "run": {
+    "id": "m10b",
+    "repo": "/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-57/repo",
+    "base_branch": "main",
+    "integration_branch": "integration/m10"
+  },
+  "last_tick": {
+    "at_ms": 1794750062750,
+    "steps": 2,
+    "failed": [
+      {
+        "task": "T3",
+        "step": "send_back",
+        "error": "no installed worker CLI: pass --agent, or set one with `shprd set workers` (configured: none)"
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Spaces sidebar",
+      "status": "integrated",
+      "derived": {
+        "status": "done"
+      },
+      "scope": [
+        "host/herdr-desktop/mods/shprd-spaces"
+      ],
+      "acceptance": [
+        "A row is one task; its colour is the word shprd gave it."
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [],
+      "attempts": [
+        {
+          "n": 1,
+          "agent": "claude",
+          "model": "claude-opus-5-5",
+          "worktree": "/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-57/repo",
+          "branch": "shprd/m10b/T1",
+          "report": {
+            "status": "completed",
+            "summary": "the sidebar lists every task, with the word shprd gave it",
+            "tests": [
+              "cargo test --workspace: 1640 passed"
+            ],
+            "checks": [
+              {
+                "gate": "fmt",
+                "command": "cargo fmt --all --check",
+                "exit_code": 0,
+                "output_tail": ""
+              },
+              {
+                "gate": "lint",
+                "command": "cargo clippy --workspace --all-targets -- -D warnings",
+                "exit_code": 0,
+                "output_tail": "Finished dev profile"
+              },
+              {
+                "gate": "tests",
+                "command": "cargo test --workspace",
+                "exit_code": 0,
+                "output_tail": "test result: ok. 1640 passed"
+              }
+            ],
+            "changed_paths": [
+              "host/herdr-desktop/mods/shprd-spaces/main.js"
+            ],
+            "commit": "4f2c1ab",
+            "skills_used": [
+              "rust"
+            ]
+          },
+          "gates": [
+            {
+              "gate": "review",
+              "passed": true,
+              "findings": [],
+              "proven": true
+            }
+          ],
+          "reviews": [
+            {
+              "reviewer": "codex",
+              "degraded": false
+            }
+          ]
+        }
+      ],
+      "pr": {
+        "number": 58,
+        "url": "https://github.com/jmvbambico/shprd/pull/58",
+        "head": "shprd/m10b/T1",
+        "state": "merged",
+        "approved": true
+      }
+    },
+    {
+      "id": "T2",
+      "title": "Tasks panel",
+      "status": "passed",
+      "derived": {
+        "status": "needs_you",
+        "need": "attention",
+        "reason": "T2 is ready to land: run `shprd approve\u2026"
+      },
+      "scope": [
+        "host/herdr-desktop/mods/shprd-tasks",
+        "host/herdr-desktop/mods/lib/board.js"
+      ],
+      "acceptance": [
+        "The board groups tasks by their derived status",
+        "A row's act is the engine's verb for it"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [],
+      "attempts": [
+        {
+          "n": 1,
+          "agent": "claude",
+          "model": "claude-opus-5-5",
+          "worktree": "/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-57/repo",
+          "branch": "shprd/m10b/T2",
+          "report": {
+            "status": "completed",
+            "summary": "the board groups by derived status and every row ends in the one act the engine has for it, so a person never presses a verb that would be refused",
+            "tests": [
+              "cargo test --workspace: 1652 passed"
+            ],
+            "checks": [
+              {
+                "gate": "fmt",
+                "command": "cargo fmt --all --check",
+                "exit_code": 0,
+                "output_tail": ""
+              },
+              {
+                "gate": "lint",
+                "command": "cargo clippy --workspace --all-targets -- -D warnings",
+                "exit_code": 0,
+                "output_tail": "Finished dev profile in 12.40s"
+              },
+              {
+                "gate": "tests",
+                "command": "cargo test --workspace",
+                "exit_code": 0,
+                "output_tail": "test result: ok. 1652 passed; 0 failed"
+              }
+            ],
+            "changed_paths": [
+              "host/herdr-desktop/mods/shprd-tasks/main.js",
+              "host/herdr-desktop/mods/lib/board.js"
+            ],
+            "commit": "b81d3c9",
+            "skills_used": [
+              "rust"
+            ]
+          },
+          "gates": [
+            {
+              "gate": "review",
+              "passed": true,
+              "findings": [],
+              "proven": true
+            }
+          ],
+          "reviews": [
+            {
+              "reviewer": "codex",
+              "degraded": false
+            }
+          ]
+        }
+      ],
+      "pr": {
+        "number": 61,
+        "url": "https://github.com/jmvbambico/shprd/pull/61",
+        "head": "shprd/m10b/T2",
+        "state": "open",
+        "approved": false
+      }
+    },
+    {
+      "id": "T3",
+      "title": "Accept card",
+      "status": "failed",
+      "derived": {
+        "status": "needs_you",
+        "need": "attention",
+        "reason": "the footer offers Accept where\u2026"
+      },
+      "scope": [
+        "host/herdr-desktop/mods/shprd-accept"
+      ],
+      "acceptance": [
+        "The card shows the branch's changes, the hand-in's checks and the review's findings"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [],
+      "attempts": [
+        {
+          "n": 1,
+          "agent": "claude",
+          "model": "claude-opus-5-5",
+          "worktree": "/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-57/repo",
+          "branch": "shprd/m10b/T3",
+          "report": {
+            "status": "completed",
+            "summary": "the accept card reads the branch's changes, the hand-in's checks and the review's findings",
+            "tests": [
+              "cargo test --workspace: 1648 passed"
+            ],
+            "checks": [
+              {
+                "gate": "fmt",
+                "command": "cargo fmt --all --check",
+                "exit_code": 0,
+                "output_tail": ""
+              },
+              {
+                "gate": "tests",
+                "command": "cargo test --workspace",
+                "exit_code": 0,
+                "output_tail": "test result: ok. 1648 passed; 0 failed"
+              }
+            ],
+            "changed_paths": [
+              "host/herdr-desktop/mods/shprd-accept/main.js"
+            ],
+            "commit": "9ac02f1",
+            "skills_used": [
+              "rust"
+            ]
+          },
+          "gates": [
+            {
+              "gate": "review",
+              "passed": false,
+              "findings": [
+                {
+                  "severity": "major",
+                  "title": "the footer offers Accept where tasks.merge is auto",
+                  "location": "host/herdr-desktop/mods/shprd-accept/main.js:412",
+                  "detail": "With `tasks.merge = \"auto\"` nothing waits for an approval, so the button records a decision no landing reads. Show it only where the policy is `ask`."
+                },
+                {
+                  "severity": "minor",
+                  "title": "the changes line counts files that are not on the branch",
+                  "location": "host/herdr-desktop/mods/lib/accept.js:52",
+                  "detail": "`changesLine` counts every file the response carries, including the ones `changeRows` folded away. Say `and N more` once, in one place."
+                }
+              ],
+              "proven": true
+            }
+          ],
+          "reviews": [
+            {
+              "reviewer": "codex",
+              "degraded": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "Task PR",
+      "status": "integrated",
+      "derived": {
+        "status": "done"
+      },
+      "scope": [
+        "host/herdr-desktop/mods/shprd-task-pr"
+      ],
+      "acceptance": [
+        "A landed task shows its pull request, and a local landing says there is none"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [],
+      "attempts": [
+        {
+          "n": 1,
+          "agent": "claude",
+          "model": "claude-opus-5-5",
+          "worktree": "/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-57/repo",
+          "branch": "shprd/m10b/T4",
+          "report": {
+            "status": "completed",
+            "summary": "a landed task shows its pull request, and a local landing says once that it has none",
+            "tests": [
+              "cargo test --workspace: 1636 passed"
+            ],
+            "checks": [
+              {
+                "gate": "tests",
+                "command": "cargo test --workspace",
+                "exit_code": 0,
+                "output_tail": "test result: ok. 1636 passed"
+              }
+            ],
+            "changed_paths": [
+              "host/herdr-desktop/mods/shprd-task-pr/main.js"
+            ],
+            "commit": "c2e17b0",
+            "skills_used": [
+              "rust"
+            ]
+          },
+          "gates": [
+            {
+              "gate": "review",
+              "passed": true,
+              "findings": [],
+              "proven": true
+            }
+          ],
+          "reviews": [
+            {
+              "reviewer": "codex",
+              "degraded": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "T5",
+      "title": "Toasts",
+      "status": "working",
+      "derived": {
+        "status": "working"
+      },
+      "scope": [
+        "crates/shprd-server/src/news.rs"
+      ],
+      "acceptance": [
+        "Three toasts at once, oldest first"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [],
+      "last_status": {
+        "message": "the rows clip; the expiry next",
+        "progress": 62,
+        "seq": 32
+      },
+      "attempts": [
+        {
+          "n": 1,
+          "agent": "claude",
+          "model": "claude-opus-5-5",
+          "worktree": "/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-57/repo",
+          "branch": "shprd/m10b/T5",
+          "gates": [],
+          "reviews": []
+        }
+      ]
+    },
+    {
+      "id": "T6",
+      "title": "Coordinator chat",
+      "status": "queued",
+      "derived": {
+        "status": "queued",
+        "reason": "after T3"
+      },
+      "scope": [
+        "host/herdr-desktop/mods/shprd-coordinator"
+      ],
+      "acceptance": [
+        "The coordinator's conversation is readable in the panel"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [
+        "T3"
+      ],
+      "attempts": []
+    },
+    {
+      "id": "T7",
+      "title": "Settings",
+      "status": "queued",
+      "derived": {
+        "status": "queued",
+        "reason": "after T2"
+      },
+      "scope": [
+        "host/herdr-desktop/mods/shprd-settings"
+      ],
+      "acceptance": [
+        "Roles and prompts are editable from the window"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [
+        "T2"
+      ],
+      "attempts": []
+    }
+  ],
+  "agents": [
+    {
+      "id": "claude",
+      "dry": false
+    }
+  ],
+  "needs": [
+    {
+      "task": "T2",
+      "body": "T2 is ready to land: run `shprd approve T2`",
+      "default_action": "wait for a human to approve T2",
+      "seq": 33
+    },
+    {
+      "task": "T3",
+      "body": "T3: sending attempt 1 back did not start: no installed worker CLI: pass --agent, or set one with `shprd set workers` (configured: none)",
+      "default_action": "fix what the card names, then run `shprd agent spawn --task T3`: the engine plans no second send-back for this attempt",
+      "seq": 34
+    }
+  ],
+  "asks": [],
+  "finished": false
+}
