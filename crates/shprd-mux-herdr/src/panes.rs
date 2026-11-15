@@ -201,6 +201,9 @@ impl HerdrMux {
         wanted: &Waited,
         timeout: Duration,
     ) -> Result<Outcome> {
+        // A wait for either outcome spends one budget, not one per side: the
+        // output wait gets the whole of it, and the exit poll gets what is left.
+        let started = std::time::Instant::now();
         let text = match wanted {
             Waited::Exit => None,
             Waited::Output(text) | Waited::Either(text) => Some(text.as_str()),
@@ -230,7 +233,8 @@ impl HerdrMux {
             }
         }
         if matches!(wanted, Waited::Exit | Waited::Either(_)) {
-            return self.poll_exit(pane, timeout);
+            let remaining = timeout.saturating_sub(started.elapsed());
+            return self.poll_exit(pane, remaining);
         }
         Ok(Outcome::running())
     }
