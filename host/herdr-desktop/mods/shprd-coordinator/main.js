@@ -43,7 +43,7 @@ import {
   toolLine,
   when,
 } from "./lib/chat.js";
-import { card, cardHeader, keycap, note } from "./lib/panel.js";
+import { card, cardHeader, note } from "./lib/panel.js";
 import { RADIUS, SPACE, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -156,6 +156,8 @@ export default class Coordinator extends View {
     const shown = latest(this.chat, this.compact ? SHOWN.compact : SHOWN.tall);
     const said = this.refusal ?? this.failure ?? status(this.chat);
     return card(t, [
+      // The header names the panel and the program it reads, nothing else: a
+      // key cap here would promise a binding this panel does not have.
       cardHeader(
         t,
         h_flex()
@@ -168,7 +170,6 @@ export default class Coordinator extends View {
               .text_color(t.dim)
               .child(this.chat.program ?? "no program set"),
           ),
-        keycap(t, "M10.8"),
       ),
       v_flex()
         .flex_1()
