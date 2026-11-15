@@ -18,7 +18,8 @@ mods/shprd-accept/      the Accept card            (M10.5)
 mods/shprd-task-pr/     the task's pull request    (M10.5)
 mods/shprd-asks/        the needs-you cards        (M10.6)
 mods/shprd-settings/    roles, agents, prompts     (M10.6)
-mods/shprd-graph/       dagr in a terminal block   (M10.7)
+mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
+                        where dagr is          (M10.7)
 mods/shprd-coordinator/ the coordinator's chat     (M10.8)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
 mods/lib/               the shared modules: tokens, panel parts, the board's
@@ -49,6 +50,30 @@ the `token` file beside it — and follows it with a long poll
 (`GET /api/changes`) plus the change file the service rewrites after every
 ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
 `mods/lib/watch.js`.
+
+## The graph block
+
+The side panel's last row is the run's graph: a stack whose note
+(`mods/shprd-graph`) starts a terminal block running
+`dagr view <repo>/.dagr/run.json`. dagr draws the run's tasks, attempts and
+gates, and follows the file itself — the service rewrites it atomically after
+every ledger write (`crates/shprd-server/src/service.rs`'s after-write step,
+`shprd dagr sync`), so nothing relaunches it per write. The note is also what a
+person sees when there is no dagr: the message names `graph.dagr`, the setting
+that fixes it (`[graph] dagr = "/path/to/dagr"`, or
+`shprd settings set graph.dagr /path/to/dagr`). `shprd doctor` says which probe
+found it — the setting, `PATH` or the `herdr-dagr` plugin's checkout.
+
+The terminal's node (`{ "terminal": "shprd-graph" }`) is **not** in
+`layouts/shprd.json`, and the reason is a Herdr behaviour worth knowing: a
+layout terminal block whose terminal does not exist when the layout loads is
+pruned from the file, and the pruned file is written back. A shipped node would
+therefore be gone before the mod could start the terminal it names — and the
+file would stop matching what the installer wrote. So the note starts the
+terminal itself (`hc run --bg`, in a shell loop that restarts `dagr view` in
+place, because herdr-core keeps a terminal's address for its lifetime), puts the
+node into the live tree with `layout.set`, and selects it. A new window repeats
+that, which is why the note is what a window shows for a moment.
 
 ## Tests
 
