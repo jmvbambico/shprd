@@ -19,6 +19,10 @@ use serde_json::Value;
 use shprd_core::event::{Actor, Event, EventKind};
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -150,6 +154,10 @@ impl Fixture {
         ];
         all.extend(args.iter().map(|arg| (*arg).to_string()));
         let mut command = Command::new(BIN);
+        // A pass asks the host what is live and can start a task in a tab, so a
+        // pass that inherited the pane's socket would work in the person's own
+        // herdr session. It gets a socket that does not exist instead.
+        isolate(&mut command, &self.home);
         command
             .args(&all)
             .env(FAKE_FORGE, self.forge_script().display().to_string())

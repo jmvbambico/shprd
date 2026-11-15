@@ -8,6 +8,10 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -137,6 +141,9 @@ impl Setup {
     /// Runs `shprd doctor --no-quota` and returns what it printed.
     fn run(&self, env: &[(&str, &str)]) -> Output {
         let mut command = Command::new(BIN);
+        // The temp home, not the machine: a diagnosis of this fixture, and a
+        // child that cannot reach the person's herdr session or desktop.
+        isolate(&mut command, &self.tmp.path().join("home"));
         command
             .args(["doctor", "--no-quota"])
             .env("PATH", self.tmp.path().join("bin").display().to_string())
@@ -169,8 +176,9 @@ impl Setup {
             )
             .env_remove("SHPRD_HOME")
             .env_remove("SHPRD_PI_MODEL")
-            .env_remove("TUIOS_ENV")
-            .env_remove("HERDR_ENV")
+            // `TUIOS_ENV`, `HERDR_ENV` and every other host variable are
+            // removed by `isolate` above, so a doctor run from a herdr pane
+            // diagnoses the fixture and not the pane it started in.
             .env_remove("OPENCODE_DISABLE_EXTERNAL_SKILLS");
         for (name, value) in env {
             command.env(name, value);

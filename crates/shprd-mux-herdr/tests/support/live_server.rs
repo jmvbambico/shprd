@@ -6,14 +6,25 @@
 //! socket-path rule, one readiness loop and one cleanup to keep honest.
 //!
 //! The server is isolated twice over: `HOME` and `HERDR_SOCKET_PATH` both point
-//! into a fresh temporary directory, so a live test cannot see, or touch, the
-//! multiplexer the human is working in.
+//! into a fresh temporary directory, and every `herdr` command this helper runs
+//! goes through `isolate` (in `support/herdr_env.rs`) first, so a live test
+//! cannot see, or touch, the multiplexer the human is working in. The `HERDR_ENV`,
+//! `HERDR_PANE_ID` and `HC_SESSION` a herdr pane exports to the test process are
+//! removed as well: the socket alone would not keep a `herdr server` started
+//! here from inheriting the pane it was started in.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+
+/// The isolation rule, re-exported so a test that includes this file gets it
+/// without loading `herdr_env.rs` as a second module of its own.
+#[path = "herdr_env.rs"]
+pub mod herdr_env;
+
+use herdr_env::isolate;
 
 /// How long a `herdr server` gets to answer before the test fails.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -77,7 +88,9 @@ impl LiveServer {
                 return None;
             }
         };
-        let child = match Command::new("herdr")
+        let mut command = Command::new("herdr");
+        isolate(&mut command, server.home());
+        let child = match command
             .arg("server")
             .env("HOME", server.home())
             .env("HERDR_SOCKET_PATH", &server.socket)
@@ -125,7 +138,9 @@ impl LiveServer {
 
     /// Runs one `herdr` command against this server.
     pub fn herdr(&self, args: &[&str]) -> Result<Output, String> {
-        let output = Command::new("herdr")
+        let mut command = Command::new("herdr");
+        isolate(&mut command, self.home());
+        let output = command
             .args(args)
             .env("HOME", self.home())
             .env("HERDR_SOCKET_PATH", &self.socket)
@@ -142,7 +157,9 @@ impl LiveServer {
 impl Drop for LiveServer {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = Command::new("herdr")
+            let mut command = Command::new("herdr");
+            isolate(&mut command, self.home());
+            let _ = command
                 .args(["server", "stop"])
                 .env("HOME", self.home())
                 .env("HERDR_SOCKET_PATH", &self.socket)

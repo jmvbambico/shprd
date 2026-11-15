@@ -13,6 +13,10 @@ use std::thread;
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -35,11 +39,9 @@ fn run(root: &Path, args: &[&str]) -> Output {
         "--no-dagr".into(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
-        .args(&all)
-        .env_remove("SHPRD_ACTOR")
-        .output()
-    {
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command.args(&all).env_remove("SHPRD_ACTOR").output() {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -217,7 +219,9 @@ fn a_task_status_records_a_capped_one_line_message() {
     );
 
     // The event is the actor's own: an agent's shell records it as that agent.
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -261,7 +265,9 @@ fn task_status_is_safe_from_parallel_agents() {
         let root = root_path.clone();
         handles.push(thread::spawn(move || {
             let message = format!("writer {index}");
-            let output = Command::new(BIN)
+            let mut command = Command::new(BIN);
+            isolate(&mut command, &root);
+            let output = command
                 .args([
                     "--repo",
                     &root.display().to_string(),

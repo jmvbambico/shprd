@@ -8,6 +8,10 @@ use serde_json::Value;
 use shprd_core::event::{Actor, Event, EventKind, ResourceAction, ResourceKind};
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -23,11 +27,9 @@ fn repo() -> TempDir {
 fn run(root: &Path, args: &[&str]) -> Output {
     let mut all: Vec<String> = vec!["--repo".into(), root.display().to_string()];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
-        .args(&all)
-        .env_remove("SHPRD_ACTOR")
-        .output()
-    {
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command.args(&all).env_remove("SHPRD_ACTOR").output() {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -385,7 +387,9 @@ fn verbs_before_run_start_are_refused() {
 fn run_with_path(root: &Path, args: &[&str], bin_dir: &Path) -> Output {
     let mut all: Vec<String> = vec!["--repo".into(), root.display().to_string()];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
         .env("PATH", bin_dir)
@@ -603,7 +607,9 @@ fn dagr_sync_checks_the_document_when_a_checker_is_given() {
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
         .args(["--repo", &root.display().to_string(), "dagr", "sync"])
         .env_remove("SHPRD_ACTOR")
         .env("SHPRD_DAGR_BIN", checker)
@@ -627,7 +633,9 @@ fn a_failing_sync_does_not_undo_a_write() {
     let dir = repo();
     let root = dir.path();
     // A checker that always refuses: `/bin/false`.
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -776,11 +784,9 @@ fn run_with_home(root: &Path, home: &Path, args: &[&str]) -> Output {
         home.display().to_string(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
-        .args(&all)
-        .env_remove("SHPRD_ACTOR")
-        .output()
-    {
+    let mut command = Command::new(BIN);
+    isolate(&mut command, home);
+    match command.args(&all).env_remove("SHPRD_ACTOR").output() {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -1060,7 +1066,9 @@ fn abandoning_is_refused_for_an_agent_actor_even_with_yes() {
     start(root);
     add_task(root, "T2", "crates/y");
     let before = last_event(root);
-    let output = match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = match command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -1369,7 +1377,9 @@ fn an_orchestrator_may_not_re_admit_an_agent() {
     add_task(root, "T1", "crates/shprd");
     mark_dry(root, "w1");
     let before = last_event(root);
-    let output = match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = match command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -1462,7 +1472,9 @@ fn run_as(root: &Path, actor: &str, args: &[&str]) -> Output {
         "--json".to_string(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
         .env("SHPRD_ACTOR", actor)
@@ -1675,7 +1687,9 @@ fn a_drop_that_cannot_find_the_home_is_refused_and_logs_nothing() {
         "not needed after all".to_string(),
         "--yes".to_string(),
     ];
-    let output = match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = match command
         .args(&args)
         .env_remove("SHPRD_ACTOR")
         .env_remove("SHPRD_HOME")

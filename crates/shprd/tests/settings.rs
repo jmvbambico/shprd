@@ -14,6 +14,10 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -43,7 +47,9 @@ impl Fixture {
 
     /// Runs `shprd settings <args>` for this fixture.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .arg("settings")
             .args(args)
             .arg("--repo")
@@ -65,7 +71,9 @@ impl Fixture {
     /// environment's is removed and the temp home holds none, so the role
     /// checks have nothing to read.
     fn run_without_data(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .arg("settings")
             .args(args)
             .arg("--repo")
@@ -85,7 +93,9 @@ impl Fixture {
 
     /// Runs any shprd verb in this fixture's repository.
     fn shprd(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .args(args)
             .arg("--repo")
             .arg(&self.repo)

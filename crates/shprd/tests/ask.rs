@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -77,8 +81,17 @@ struct Service {
 
 impl Service {
     /// Starts the service and waits for its discovery record.
+    ///
+    /// `isolate` comes first, and it is what this whole file turns on: `serve`
+    /// prepares the repository's workspace at startup through the real herdr
+    /// adapter, so a service that inherited the pane's `HERDR_SOCKET_PATH` would
+    /// create one in the person's own session. Pointed at a socket that does not
+    /// exist, the service warns that the workspace is not ready instead, and the
+    /// asks these tests are about still work.
     fn start(repo: &Path, state: &Path, home: &Path) -> Self {
-        let child = Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, state);
+        let child = command
             .args([
                 "--repo",
                 &repo.display().to_string(),
@@ -147,7 +160,9 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
         "--no-dagr".into(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
         .env_remove("SHPRD_TASK")
@@ -175,6 +190,7 @@ fn ok_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Out
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
     let mut command = Command::new(BIN);
+    isolate(&mut command, root);
     command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
@@ -225,6 +241,7 @@ fn spawn_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Child {
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
     let mut command = Command::new(BIN);
+    isolate(&mut command, root);
     command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
@@ -391,7 +408,9 @@ fn a_hook_waits_for_an_answer_a_card_posts_and_prints_it() {
 
     // The hook a program runs: it raises the ask and waits for an answer.
     let hook_timeout = hook_timeout_secs().to_string();
-    let hook = Command::new(BIN)
+    let mut hook_command = Command::new(BIN);
+    isolate(&mut hook_command, repo.path());
+    let hook = hook_command
         .args([
             "--repo",
             &repo.path().display().to_string(),
@@ -769,7 +788,9 @@ fn two_hooks_racing_the_same_id_leave_the_ask_answerable() {
 fn a_hook_that_times_out_prints_nothing() {
     let (repo, state, home) = repo_with_a_task();
     let _service = Service::start(repo.path(), state.path(), home.path());
-    let output = Command::new(BIN)
+    let mut hook_command = Command::new(BIN);
+    isolate(&mut hook_command, repo.path());
+    let output = hook_command
         .args([
             "--repo",
             &repo.path().display().to_string(),

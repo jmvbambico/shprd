@@ -14,6 +14,10 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -98,6 +102,7 @@ impl Fixture {
         ];
         all.extend(args.iter().map(|arg| (*arg).to_string()));
         let mut command = Command::new(BIN);
+        isolate(&mut command, &self.home);
         command
             .args(&all)
             .env("SHPRD_HOME", &self.home)
@@ -115,6 +120,7 @@ impl Fixture {
     /// launch gives it, and no `--repo`.
     fn worker_command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
+        isolate(&mut command, &self.home);
         command
             .args(["--no-dagr"])
             .args(args)
@@ -328,6 +334,7 @@ fn the_repository_root_still_works_the_way_it_did() {
     succeeded(&["task", "status", "T1"], output);
 
     let mut named = Command::new(BIN);
+    isolate(&mut named, &fixture.home);
     let output = named
         .args(["--no-dagr", "task", "status", "T1", "--msg", "by variable"])
         .current_dir(fixture._temp.path())
