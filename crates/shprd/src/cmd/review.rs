@@ -1584,6 +1584,9 @@ project_dirs = []
                     ctx,
                     layout: Layout::default_for_home(self.home.path()),
                     briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                    prompts_dir: shprd_core::prompts::prompts_dir(
+                        &self.home.path().join(".config"),
+                    ),
                     home: self.home.path().to_path_buf(),
                     settings: shprd_core::settings::Loaded::default(),
                     run: "t1".to_string(),

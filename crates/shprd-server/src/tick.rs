@@ -302,6 +302,13 @@ pub struct Worker {
     pub repo: PathBuf,
     /// The home directory shprd keeps state in.
     pub home: PathBuf,
+    /// The state directory the last pass's outcome is written to
+    /// ([`crate::pass::LastPass`]).
+    ///
+    /// The binary resolves it from the state home once (`$XDG_STATE_HOME`, else
+    /// `<home>/.local/state`) and passes it in, so a pass never reads the
+    /// environment to find it.
+    pub state_dir: PathBuf,
     /// The resolved config: the merge policy and the tick's own settings.
     pub config: Config,
     /// The facts outside the log.
@@ -432,7 +439,7 @@ impl Worker {
     /// the run: a state directory that cannot be written is a warning, never a
     /// failed pass.
     fn record(&self, last: &pass::LastPass) {
-        if let Err(err) = last.write(&crate::service::state_dir(&self.home)) {
+        if let Err(err) = last.write(&self.state_dir) {
             tracing::warn!(%err, "could not write the last pass's outcome");
         }
     }

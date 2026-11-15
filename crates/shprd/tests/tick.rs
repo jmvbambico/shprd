@@ -154,6 +154,12 @@ impl Fixture {
             .args(&all)
             .env(FAKE_FORGE, self.forge_script().display().to_string())
             .env(RECORD_ONLY, "1")
+            // This fixture's own XDG directories: a pass's discovery files and
+            // its last-pass record belong in the temp home, never in the
+            // developer's or the runner's real ones.
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("XDG_STATE_HOME", self.home.join(".local").join("state"))
+            .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
             .env_remove(ACTOR_ENV);
         command
     }

@@ -265,6 +265,7 @@ impl Fixture {
         Worker {
             repo: self.root.clone(),
             home: self.home.clone(),
+            state_dir: shprd_server::state_dir(&shprd_server::state_home(&self.home, None)),
             // The file layers say nothing about a merge policy: the settings are
             // the only place `auto` is written.
             config: shprd_core::config::Config::default(),

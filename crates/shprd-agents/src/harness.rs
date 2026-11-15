@@ -5,6 +5,7 @@
 //! own: every accessor reads the spec, and the few that choose between fields
 //! say which one wins.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::asks::{AskHookInstaller, HarnessAskHook};
@@ -158,54 +159,117 @@ impl Harness {
 /// a packaged install.
 pub const DATA_ENV: &str = "SHPRD_DATA_DIR";
 
-/// The data directory: `$SHPRD_DATA_DIR`, else `<root>/data` when it is one,
-/// else the `../share/shprd/data` a packaged install puts next to the binary,
-/// else `$XDG_DATA_HOME/shprd/data` (`~/.local/share/shprd/data` by default),
-/// which is where an install keeps it for every repository on the machine.
+/// The data directory: `explicit` (the `$SHPRD_DATA_DIR` the caller read),
+/// else `<root>/data` when it is one, else the `../share/shprd/data` a packaged
+/// install puts next to the binary, else `<data_home>/shprd/data`, which is
+/// where an install keeps it for every repository on the machine.
 ///
 /// `root` is the repository the caller works in, when it has one: a checkout
 /// keeps its harness table in `data/`, and an installation keeps it beside the
 /// binary or under the data home. The environment wins, because a person who set
-/// the variable means it.
-pub fn data_dir(root: Option<&Path>) -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(DATA_ENV).filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(dir));
+/// the variable means it. Nothing here reads the environment itself: the
+/// binary resolves `$SHPRD_DATA_DIR` and [`data_home`] once and passes them in,
+/// so a test that names its own home never finds the developer's install.
+pub fn data_dir(root: Option<&Path>, explicit: Option<&Path>, data_home: &Path) -> Option<PathBuf> {
+    if let Some(dir) = explicit {
+        return Some(dir.to_path_buf());
     }
-    let packaged = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .map(|dir| dir.join("../share/shprd/data"));
-    let installed = installed_data_dir();
-    let candidates = [root.map(|root| root.join("data")), packaged, installed];
+    let candidates = [
+        root.map(|root| root.join("data")),
+        packaged_data_dir(),
+        Some(installed_data_dir(data_home)),
+    ];
     candidates
         .into_iter()
         .flatten()
         .find(|candidate| candidate.is_dir())
 }
 
-/// Where an install keeps the data next to a person's own files:
-/// `$XDG_DATA_HOME/shprd/data`, or `~/.local/share/shprd/data`.
-fn installed_data_dir() -> Option<PathBuf> {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".local").join("share"))
-        })?;
-    Some(data_home.join("shprd").join("data"))
+/// Where a packaged install puts the data next to its binary:
+/// `<binary dir>/../share/shprd/data`.
+fn packaged_data_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join("../share/shprd/data"))
+}
+
+/// The data home for `home`: `xdg_data_home` (the `$XDG_DATA_HOME` the caller
+/// read) when it names a directory, else `<home>/.local/share`.
+///
+/// An empty value is unset, which is what the XDG specification says. The value
+/// is an argument rather than an environment lookup so the one place that reads
+/// `$XDG_DATA_HOME` — and `$HOME` behind it — is the binary's wiring.
+pub fn data_home(home: &Path, xdg_data_home: Option<&OsStr>) -> PathBuf {
+    match xdg_data_home.filter(|value| !value.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => home.join(".local").join("share"),
+    }
+}
+
+/// Where an install under `data_home` keeps the data: `<data_home>/shprd/data`.
+fn installed_data_dir(data_home: &Path) -> PathBuf {
+    data_home.join("shprd").join("data")
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
-    use super::Harness;
+    use super::{Harness, data_dir, data_home};
     use crate::asks::AskHookInstaller;
     use crate::spec::{
         AskHookConfig, BriefDelivery, BriefFileMode, CatalogParser, CatalogSource, StatusSource,
     };
+
+    /// The production rule with the environment's value handed in: a set
+    /// `$XDG_DATA_HOME` wins, and an unset or empty one falls back to the
+    /// person's `~/.local/share`.
+    #[test]
+    fn the_data_home_honours_the_xdg_setting_it_is_given() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            data_home(home, Some(OsStr::new("/xdg/data"))),
+            Path::new("/xdg/data")
+        );
+        assert_eq!(data_home(home, None), home.join(".local").join("share"));
+        assert_eq!(
+            data_home(home, Some(OsStr::new(""))),
+            home.join(".local").join("share"),
+            "an empty setting is unset"
+        );
+    }
+
+    /// A directory named outright is the answer, whether or not it exists and
+    /// whatever the checkout and the data home hold: this is what a worker's
+    /// `SHPRD_DATA_DIR` means.
+    #[test]
+    fn a_named_data_directory_wins_as_it_is() {
+        let home = tempfile::tempdir().expect("a temp home");
+        let data_home = data_home(home.path(), Some(OsStr::new("/xdg/data")));
+        assert_eq!(
+            data_dir(None, Some(home.path()), &data_home),
+            Some(home.path().to_path_buf())
+        );
+    }
+
+    /// A checkout's own `data/` is found without looking at the environment,
+    /// which is what makes a test's temp repository self-contained.
+    #[test]
+    fn a_checkout_data_directory_is_found_first() {
+        let checkout = tempfile::tempdir().expect("a temp checkout");
+        let data = checkout.path().join("data");
+        std::fs::create_dir_all(&data).expect("mkdir the table");
+        let home = tempfile::tempdir().expect("a temp home");
+        let data_home = data_home(home.path(), Some(OsStr::new("/xdg/data")));
+        assert_eq!(
+            data_dir(Some(checkout.path()), None, &data_home),
+            Some(data)
+        );
+    }
 
     fn harness_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness")

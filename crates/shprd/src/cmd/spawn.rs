@@ -66,8 +66,16 @@ pub struct SpawnEnv<'a> {
     pub layout: Layout,
     /// The directory brief files are written under, `<home>/.shprd/briefs`.
     pub briefs_dir: PathBuf,
-    /// The person's home directory, which holds their prompts and settings.
+    /// The person's home directory, which holds their settings.
     pub home: PathBuf,
+    /// The directory the role prompts are read from and installed into:
+    /// `<config_home>/shprd/prompts`, with `$XDG_CONFIG_HOME` winning over
+    /// `<home>/.config`.
+    ///
+    /// It is resolved once, by [`build_env`], so a spawn never reads
+    /// `$XDG_CONFIG_HOME` and a test that builds its own home keeps its prompts
+    /// there whatever the process's own XDG settings say.
+    pub prompts_dir: PathBuf,
     /// The settings as they resolve for this repository, before a task's own
     /// layer is added: the brief's Settings block is rendered from them.
     pub settings: Loaded,
@@ -1588,9 +1596,7 @@ pub(crate) fn role_prompt(env: &SpawnEnv<'_>, role_id: &str) -> Result<String, C
         .map(|role| role.prompt.value)
         .unwrap_or_else(|| format!("{}{role_id}", PromptRef::PREFIX));
     let reference = PromptRef::parse(&reference).map_err(invalid)?;
-    reference
-        .read(&prompts::prompts_dir(&env.home), &env.home)
-        .map_err(invalid)
+    reference.read(&env.prompts_dir, &env.home).map_err(invalid)
 }
 
 /// A prompt that cannot be read is the person's to fix, so it is a refusal.
@@ -1643,6 +1649,7 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         ctx,
         layout: Layout::default_for_home(&home),
         briefs_dir: home.join(".shprd").join("briefs"),
+        prompts_dir: prompts::prompts_dir(&crate::ctx::resolve_config_home(&home)),
         home,
         settings,
         run: run.run_id.clone(),
@@ -2087,6 +2094,7 @@ project_dirs = []
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
                 briefs_dir: self.home.path().join(".shprd").join("briefs"),
+                prompts_dir: shprd_core::prompts::prompts_dir(&self.home.path().join(".config")),
                 home: self.home.path().to_path_buf(),
                 settings: Loaded::default(),
                 run: "t1".to_string(),

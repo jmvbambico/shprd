@@ -20,6 +20,18 @@ const HOME_ENV: &str = "SHPRD_HOME";
 /// directory is not inside it — a reviewer's packet folder, for one.
 const REPO_ENV: &str = "SHPRD_REPO";
 
+/// Environment variable naming the config home, which wins over
+/// `<home>/.config`.
+const CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+
+/// Environment variable naming the state home, which wins over
+/// `<home>/.local/state`.
+const STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+
+/// Environment variable naming the data home, which wins over
+/// `<home>/.local/share`.
+const DATA_HOME_ENV: &str = "XDG_DATA_HOME";
+
 /// Exit code for a command a transition rule refused.
 pub const EXIT_REFUSED: u8 = 2;
 
@@ -313,6 +325,58 @@ pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
             .map(PathBuf::from)
             .ok_or_else(|| CliError::other(anyhow!("no home directory: pass --home"))),
     }
+}
+
+/// One environment variable's value, with an empty one read as unset.
+///
+/// This is the binary's only way of reading the variables below, so the rule —
+/// "the environment is read once, at the edge, and carried in as a value" —
+/// holds for every command: nothing in `cmd/`, and no library, looks one up for
+/// itself.
+fn env_value(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+/// Resolves the configuration root: `$XDG_CONFIG_HOME`, else `<home>/.config`.
+///
+/// It is where the person's prompts live, and the rule is the XDG one: a set
+/// variable wins outright, and an empty one is unset. It is resolved here, once,
+/// rather than in [`shprd_core::prompts`], so a test that builds its own home
+/// keeps its prompts there whatever the process's own XDG settings say.
+pub fn resolve_config_home(home: &Path) -> PathBuf {
+    shprd_core::prompts::config_home(home, env_value(CONFIG_HOME_ENV).as_deref())
+}
+
+/// Resolves the state home: `$XDG_STATE_HOME`, else `<home>/.local/state`.
+///
+/// The service's discovery files and the last pass's outcome live under it. The
+/// same edge rule applies: one read here, a value everywhere else.
+pub fn resolve_state_home(home: &Path) -> PathBuf {
+    shprd_server::state_home(home, env_value(STATE_HOME_ENV).as_deref())
+}
+
+/// Resolves the data home: `$XDG_DATA_HOME`, else `<home>/.local/share`.
+pub fn resolve_data_home(home: &Path) -> PathBuf {
+    shprd_agents::harness::data_home(home, env_value(DATA_HOME_ENV).as_deref())
+}
+
+/// Resolves the harness data directory for `root`: `$SHPRD_DATA_DIR`, else
+/// `<root>/data`, else the packaged install's copy, else the data home's.
+///
+/// `root` is the repository the caller works in, when it has one. Read here, at
+/// the edge, so a test that names its own home never finds the developer's
+/// install, and a run of the test suite can never depend on the machine's XDG
+/// directories.
+pub fn resolve_data_dir(root: Option<&Path>) -> Result<PathBuf, CliError> {
+    let explicit = env_value(shprd_agents::harness::DATA_ENV).map(PathBuf::from);
+    let home = resolve_home(None)?;
+    let data_home = resolve_data_home(&home);
+    shprd_agents::harness::data_dir(root, explicit.as_deref(), &data_home).ok_or_else(|| {
+        CliError::other(anyhow!(
+            "no harness data directory: set {} to a directory holding `harness/`",
+            shprd_agents::harness::DATA_ENV
+        ))
+    })
 }
 
 /// Resolves the layout shprd's git state lives in, with `namespace` as the

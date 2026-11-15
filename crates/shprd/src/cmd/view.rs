@@ -82,7 +82,8 @@ fn worth_a_warning(state: &RunState, last: &shprd_server::LastPass) -> bool {
 /// The last pass the service (or `shprd tick`) ran against this repository.
 fn last_pass(ctx: &Ctx, home: Option<&Path>) -> Option<shprd_server::LastPass> {
     let home = resolve_home(home).ok()?;
-    shprd_server::LastPass::read(&shprd_server::state_dir(&home), &ctx.root)
+    let state_home = crate::ctx::resolve_state_home(&home);
+    shprd_server::LastPass::read(&shprd_server::state_dir(&state_home), &ctx.root)
 }
 
 /// `shprd pr-body`: the pull-request body: the log, rendered as Markdown.

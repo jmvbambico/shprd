@@ -88,6 +88,7 @@ impl Fixture {
         Worker {
             repo: self.repo.clone(),
             home: self.home.clone(),
+            state_dir: shprd_server::state_dir(&shprd_server::state_home(&self.home, None)),
             config,
             facts,
             fallback: None,
@@ -422,6 +423,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
     let worker = Worker {
         repo: fixture.repo.clone(),
         home: fixture.home.clone(),
+        state_dir: shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None)),
         config: config(shprd_core::config::MergePolicy::Ask),
         facts: Arc::new(facts),
         fallback: None,
@@ -491,7 +493,7 @@ fn a_failed_step_is_readable_after_the_pass() {
     let report = worker.tick().expect("the pass ran");
     assert!(!report.ok(), "the pass failed a step");
 
-    let dir = shprd_server::state_dir(&fixture.home);
+    let dir = shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None));
     let last = shprd_server::LastPass::read(&dir, &fixture.repo).expect("the pass is recorded");
     assert_eq!(last.run.as_deref(), Some("r1"));
     assert_eq!(last.steps, report.steps.len());
@@ -537,7 +539,7 @@ fn a_pass_that_cannot_read_the_run_is_recorded_too() {
     );
     assert!(worker.tick().is_err(), "a broken log ends the pass");
 
-    let dir = shprd_server::state_dir(&fixture.home);
+    let dir = shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None));
     let last = shprd_server::LastPass::read(&dir, &fixture.repo).expect("the failure is recorded");
     let failed = last.failed.first().expect("one failed step");
     assert_eq!(failed.step, "pass");
@@ -629,6 +631,7 @@ fn a_hand_in_starts_the_engine_reviewer() {
     let worker = Worker {
         repo: fixture.repo.clone(),
         home: fixture.home.clone(),
+        state_dir: shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None)),
         config: config(shprd_core::config::MergePolicy::Auto),
         facts: Arc::new(Scripted::default()),
         fallback: None,
@@ -665,6 +668,7 @@ fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
     let worker = Worker {
         repo: fixture.repo.clone(),
         home: fixture.home.clone(),
+        state_dir: shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None)),
         config: config(shprd_core::config::MergePolicy::Auto),
         facts: Arc::new(Scripted::default()),
         fallback: None,
@@ -690,6 +694,7 @@ fn reviewing(fixture: &Fixture, review: shprd_server::Reviewer) -> Worker {
     Worker {
         repo: fixture.repo.clone(),
         home: fixture.home.clone(),
+        state_dir: shprd_server::state_dir(&shprd_server::state_home(&fixture.home, None)),
         config: config(shprd_core::config::MergePolicy::Auto),
         facts: Arc::new(Scripted::default()),
         fallback: None,

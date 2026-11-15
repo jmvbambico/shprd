@@ -70,6 +70,17 @@ fn run(scratch: &Scratch, args: &[&str]) -> Output {
         .args(&all)
         .env("SHPRD_HOME", scratch.home.path())
         .env("SHPRD_DATA_DIR", data_dir())
+        // The scratch home's own XDG directories, so a review installs the
+        // reviewer's prompt there and never in the machine's real config home.
+        .env("XDG_CONFIG_HOME", scratch.home.path().join(".config"))
+        .env(
+            "XDG_STATE_HOME",
+            scratch.home.path().join(".local").join("state"),
+        )
+        .env(
+            "XDG_DATA_HOME",
+            scratch.home.path().join(".local").join("share"),
+        )
         .output()
         .unwrap_or_else(|err| panic!("running {BIN} failed: {err}"))
 }

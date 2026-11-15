@@ -40,19 +40,17 @@ pub(crate) fn write(state: &AppState, id: &str, body: &Bytes) -> Result<PromptDt
 
 /// The prompts directory this service reads and writes.
 ///
-/// It is the person's own, under the service's home; a test points it at a temp
-/// directory so it can never touch the developer's prompts.
+/// It is the person's own, resolved by the binary from `$XDG_CONFIG_HOME` (else
+/// `<home>/.config`) and passed in; a test points it at a temp directory. The
+/// service does not resolve it itself, so it never reads the process's XDG
+/// settings and can never touch the developer's prompts by accident.
 fn prompts_dir(state: &AppState) -> Result<PathBuf, ApiReject> {
-    if let Some(dir) = &state.prompts_dir {
-        return Ok(dir.clone());
-    }
-    let home = state.home.as_deref().ok_or_else(|| {
+    state.prompts_dir.clone().ok_or_else(|| {
         ApiReject::internal(
-            "this service has no home directory, so it cannot find the prompts: \
-             set SHPRD_HOME or HOME",
+            "this service was not told where the prompts are: `shprd serve` sets it from \
+             $XDG_CONFIG_HOME, else <home>/.config",
         )
-    })?;
-    Ok(prompts::prompts_dir(home))
+    })
 }
 
 /// The DTO one installed prompt becomes.

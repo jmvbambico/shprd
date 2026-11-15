@@ -16,6 +16,15 @@
 //! also calls), so a person can read and edit what an agent is told without
 //! digging in the binary.
 //!
+//! # The environment is the binary's
+//!
+//! Nothing here reads the process environment: the configuration root is
+//! resolved once, where the binary is wired to the machine ([`config_home`]
+//! takes the `$XDG_CONFIG_HOME` value as an argument), and passed in as a
+//! path. A test that builds its own home therefore keeps its prompts there
+//! whatever the process's own XDG settings say, and two tests can never write
+//! into the same real directory.
+//!
 //! # The upgrade rule
 //!
 //! A shipped default changes between builds; an installed file does not. So a
@@ -35,6 +44,7 @@
 //! a3f327a, MIT). The words themselves are adapted from those files for
 //! shprd's verbs; the Rust shape is shprd's own.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -215,15 +225,23 @@ pub fn canonical(id: &str) -> &str {
     }
 }
 
-/// The prompts directory for `home`: `$XDG_CONFIG_HOME/shprd/prompts`, else
-/// `<home>/.config/shprd/prompts`.
-pub fn prompts_dir(home: &Path) -> PathBuf {
-    config_home(home).join("shprd").join("prompts")
+/// The prompts directory under `config_home`: `<config_home>/shprd/prompts`.
+///
+/// The root itself comes from [`config_home`], resolved once by the caller, so a
+/// library never consults the process environment for it.
+pub fn prompts_dir(config_home: &Path) -> PathBuf {
+    config_home.join("shprd").join("prompts")
 }
 
-/// The configuration root: `$XDG_CONFIG_HOME`, else `<home>/.config`.
-fn config_home(home: &Path) -> PathBuf {
-    match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+/// The configuration root for `home`: `xdg_config_home` (the `$XDG_CONFIG_HOME`
+/// the caller read) when it names a directory, else `<home>/.config`.
+///
+/// The value is an argument rather than an environment lookup so that the one
+/// place that reads `$XDG_CONFIG_HOME` is the binary's wiring, and every test
+/// can state the answer it wants. An empty value is unset, which is what the
+/// XDG specification says.
+pub fn config_home(home: &Path, xdg_config_home: Option<&OsStr>) -> PathBuf {
+    match xdg_config_home.filter(|value| !value.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => home.join(".config"),
     }

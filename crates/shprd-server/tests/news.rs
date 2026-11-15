@@ -127,6 +127,7 @@ impl Fixture {
         Worker {
             repo: self.repo.clone(),
             home: self.home.clone(),
+            state_dir: shprd_server::state_dir(&shprd_server::state_home(&self.home, None)),
             config: shprd_core::config::Config::default(),
             facts: Arc::new(Scripted { live }),
             fallback: None,
