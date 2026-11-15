@@ -18,7 +18,7 @@ use std::path::Path;
 
 use anyhow::anyhow;
 use shprd_core::event::EventKind;
-use shprd_mux::Mux;
+use shprd_mux::Host;
 
 use crate::cli::DropArgs;
 use crate::cmd::{confirm, spawn};
@@ -29,13 +29,13 @@ pub fn drop_verb(ctx: &Ctx, args: &DropArgs, home: Option<&Path>) -> Result<(), 
     drop_task(&spawn::real_mux(), ctx, args, home, &confirm::named_actor())
 }
 
-/// Drops a task, closing every tab the run recorded for it first.
+/// Drops a task, closing the space it works in first.
 ///
 /// Every rule refusal happens before the question, and the question before
 /// anything is written: the event, the tabs and the log are one decision, and a
 /// human who says no gets the run they had — with its agent still running.
 pub fn drop_task(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     ctx: &Ctx,
     args: &DropArgs,
     home: Option<&Path>,
@@ -78,11 +78,11 @@ pub fn drop_task(
         )));
     }
 
-    // The agents go first. A tab left open is a worker that can keep typing
+    // The agents go first. A space left open is a worker that can keep typing
     // into a task the run has decided against — its branch may be archived and
     // its worktree gone by the time it commits — so a close that genuinely
     // fails refuses the drop, and nothing is written.
-    stop_task_tabs(mux, home, &run.run_id, &args.task)?;
+    stop_task_tabs(mux, ctx, home, &run.run_id, &args.task)?;
     let event = ctx.commit(kind)?;
     crate::cmd::emit(ctx, &event)?;
     if !ctx.json {
@@ -105,21 +105,23 @@ fn dropped_phrase(task: &str, status: &str, task_record: &shprd_core::state::Tas
     }
 }
 
-/// Closes every tab the run recorded for `task`, worker and reviewer alike.
+/// Closes the space `task` works in, or every tab the run recorded for it when
+/// the host cannot close a whole space.
 ///
-/// The records a spawn and a review wrote beside the briefs are the only list of
-/// tabs the task has, so this is where a drop finds them. A tab the host no
-/// longer knows is closed already — a human shut it, say — which is the state
-/// this verb wanted anyway; a tab the host keeps is a refusal, because the
-/// agent in it is still able to act on work the run has taken away. The message
-/// names the tab by id so the human can close it by hand and run the verb again.
+/// One task, one space: the worker and the reviewer are tabs of it, so this is
+/// where a drop finds both. A space the host no longer knows is closed already —
+/// a human shut it, say — which is the state this verb wanted anyway; a space
+/// the host keeps is a refusal, because the agent in it is still able to act on
+/// work the run has taken away. The message names what is still open so the
+/// human can close it by hand and run the verb again.
 ///
 /// A home that cannot be resolved is a refusal too. It means the briefs folder
 /// cannot be found, which is not the same as there being no records in it: the
 /// task may well have a tab open somewhere this drop cannot look, and a drop
 /// that cannot check must not go ahead and leave the agent behind.
 fn stop_task_tabs(
-    mux: &dyn Mux,
+    mux: &dyn Host,
+    ctx: &Ctx,
     home: Option<&Path>,
     run: &str,
     task: &str,
@@ -130,10 +132,15 @@ fn stop_task_tabs(
         )))
     })?;
     let briefs = home.join(".shprd").join("briefs");
-    spawn::close_task_tabs(mux, &briefs, run, task).map_err(|err| {
+    let repo_name = spawn::repo_name(&ctx.root).map_err(|err| {
+        CliError::Invalid(anyhow!(err).context(format!(
+            "the repository's folder name could not be read, so the space of task {task} cannot be found: run `shprd drop` from the repository"
+        )))
+    })?;
+    spawn::close_task_space(mux, &briefs, run, &repo_name, task).map_err(|err| {
         CliError::Invalid(
             anyhow!(err).context(format!(
-                "task {task} may still have an agent working in it: close the tab it names by hand, then run `shprd drop` again"
+                "task {task} may still have an agent working in it: close the space or tab it names by hand, then run `shprd drop` again"
             )),
         )
     })
@@ -409,42 +416,28 @@ mod tests {
 
     impl StuckTabMux {
         fn new() -> Self {
-            Self {
-                inner: FakeMux::default(),
-            }
+            // No keeper: every tab the drop asks to close is held open.
+            let mut inner = FakeMux::default();
+            inner.failing_tab_closes(None, "the tab is held open by a running process");
+            Self { inner }
         }
     }
 
-    impl Mux for StuckTabMux {
+    impl shprd_mux::Host for StuckTabMux {
         fn capabilities(&self) -> shprd_mux::Capabilities {
             self.inner.capabilities()
         }
-        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<shprd_mux::Workspace>> {
-            self.inner.find_workspace(name)
+        fn find_space(&self, name: &str) -> shprd_mux::Result<Option<shprd_mux::Space>> {
+            self.inner.find_space(name)
         }
-        fn create_workspace(
-            &self,
-            name: &str,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::Workspace> {
-            self.inner.create_workspace(name, cwd)
+        fn create_space(&self, name: &str, cwd: &Path) -> shprd_mux::Result<shprd_mux::Space> {
+            self.inner.create_space(name, cwd)
         }
-        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
-            self.inner.focus_workspace(workspace)
+        fn focus_space(&self, space: &shprd_mux::SpaceId) -> shprd_mux::Result<()> {
+            self.inner.focus_space(space)
         }
-        fn list_tabs(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
-            self.inner.list_tabs(workspace)
-        }
-        fn create_tab(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-            title: &str,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::Tab> {
-            self.inner.create_tab(workspace, title, cwd)
+        fn list_tabs(&self, space: &shprd_mux::SpaceId) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
+            self.inner.list_tabs(space)
         }
         fn rename_tab(&self, tab: &shprd_mux::TabId, title: &str) -> shprd_mux::Result<()> {
             self.inner.rename_tab(tab, title)
@@ -460,6 +453,16 @@ mod tests {
                 format!("tab {} is held open by a running process", tab.as_str()),
             ))
         }
+        fn spawn(
+            &self,
+            space: &shprd_mux::SpaceId,
+            title: &str,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+            cwd: &Path,
+        ) -> shprd_mux::Result<shprd_mux::Tab> {
+            self.inner.spawn(space, title, argv, env, cwd)
+        }
         fn split(
             &self,
             pane: &shprd_mux::PaneId,
@@ -469,19 +472,13 @@ mod tests {
         ) -> shprd_mux::Result<shprd_mux::PaneId> {
             self.inner.split(pane, direction, ratio, cwd)
         }
-        fn run(
+        fn write(
             &self,
             pane: &shprd_mux::PaneId,
-            argv: &[String],
-            env: &[(String, Option<String>)],
+            text: &str,
+            submit: bool,
         ) -> shprd_mux::Result<()> {
-            self.inner.run(pane, argv, env)
-        }
-        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.send_text(pane, text)
-        }
-        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.prompt(pane, text)
+            self.inner.write(pane, text, submit)
         }
         fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
             self.inner.read(pane, lines)
@@ -492,8 +489,8 @@ mod tests {
         ) -> shprd_mux::Result<shprd_mux::AgentState> {
             self.inner.agent_state(pane)
         }
-        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
-            self.inner.next_events(timeout)
+        fn subscribe(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
+            self.inner.subscribe(timeout)
         }
     }
 

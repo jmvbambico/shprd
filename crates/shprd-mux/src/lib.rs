@@ -1,16 +1,42 @@
-//! Host adapter trait + capability flags.
+//! The host adapter trait: the nine verbs every multiplexer shprd drives can
+//! answer, plus the capability flags that say which ones a given host cannot.
 //!
-//! Everything shprd does to a terminal multiplexer goes through [`Mux`]: open a
-//! workspace per repository, a tab per agent, a pane per process, and read back
-//! what the agent is doing. `shprd-mux-herdr` implements it for herdr, and
-//! [`fake::FakeMux`] implements it for tests in other crates.
+//! Everything shprd does to a terminal host goes through [`Host`]. The verbs are
+//! the ones Herdr desktop (through `hc`), herdr TUI and tuios (through tuios's
+//! herdr-compatible shim) all understand, which is why they are named for what
+//! a caller wants rather than for any one host's CLI:
 //!
-//! // M10.2: the trait still speaks tabs because it models a terminal host;
-//! the space-per-task model shprd moves to is designed there, not here.
+//! | verb | what it is for |
+//! |---|---|
+//! | [`Host::spawn`] | start a program in a tab of a task's space |
+//! | [`Host::write`] | type text into a pane, submittable or not |
+//! | [`Host::keys`] | press named keys (enter, esc, arrows) |
+//! | [`Host::read`] | the screen or scrollback tail of a pane |
+//! | [`Host::wait`] | block until a program exits or its screen shows something |
+//! | [`Host::kill`] | end a pane's program |
+//! | [`Host::subscribe`] | status and lifecycle events |
+//! | [`Host::doc`] | open a document or file block, where the host has one |
+//! | [`Host::exec`] | one-shot command, output and exit code |
 //!
-//! The trait is deliberately process-shaped rather than shell-shaped: programs
-//! start from an argv, never from a string, so a branch name or a title can
-//! never turn into a command.
+//! A host advertises what it lacks in [`Host::capabilities`], and every verb it
+//! does not have answers [`MuxError::Unsupported`] naming the capability. The
+//! two answers are the same fact said twice so that a caller may check first
+//! (the plan) and still degrade if it forgot (the act).
+//!
+//! # One space per task
+//!
+//! The layout is [`Space`]s (a herdr workspace, a tuios session), each holding
+//! [`Tab`]s, each holding [`PaneId`]s. shprd gives **a task its own space**,
+//! labelled from the task, and keeps one repository-level space
+//! (`shprd · <folder>`) for the coordinator. [`Host::ensure_space`] finds or
+//! makes one, [`Host::close_space`] removes a task's when it lands.
+//!
+//! # Shape of the trait
+//!
+//! The trait is deliberately process-shaped rather than shell-shaped: a program
+//! starts from an argv, never from a string, so a branch name or a title can
+//! never turn into a command. Text that is meant as a shell line is typed
+//! through [`Host::write`], which the caller chose to do.
 
 pub mod fake;
 pub mod types;
@@ -19,11 +45,11 @@ use std::path::Path;
 use std::time::Duration;
 
 pub use types::{
-    AgentState, Capabilities, Direction, MuxError, MuxEvent, PaneId, Tab, TabId, Workspace,
-    WorkspaceId,
+    AgentState, Capabilities, Direction, Key, MuxError, MuxEvent, Outcome, PaneId, Space, SpaceId,
+    Tab, TabId, Waited, Workspace, WorkspaceId,
 };
 
-/// What every [`Mux`] method returns.
+/// What every [`Host`] method returns.
 pub type Result<T> = std::result::Result<T, MuxError>;
 
 /// The terminal multiplexer shprd drives.
@@ -33,43 +59,82 @@ pub type Result<T> = std::result::Result<T, MuxError>;
 /// Every method that takes an id returns [`MuxError::NotFound`] when the host
 /// does not know it, so a race with a human closing a tab is an ordinary error
 /// and never a panic.
-pub trait Mux: Send + Sync {
+pub trait Host: Send + Sync {
     /// What this host can do, consulted once per adapter before a plan is
-    /// built. Implementations must answer from the host's version, not by
-    /// trying the operation.
+    /// built.
+    ///
+    /// Implementations answer from the host's version, from what a plugin was
+    /// granted (tuios) and from a refusal the host has already given — never by
+    /// trying an operation for the purpose of finding out. `shprd-mux-herdr` is
+    /// the example of the last one: a `forbidden` reply marks that verb, and the
+    /// flag stops promising it from then on.
     fn capabilities(&self) -> Capabilities;
 
-    /// Find a workspace by name. `Ok(None)` means "no such workspace", which
-    /// is not an error — the caller will create it.
-    fn find_workspace(&self, name: &str) -> Result<Option<Workspace>>;
+    /// The space shprd calls `name`, or `Ok(None)` when the host has none.
+    ///
+    /// `None` is not an error: the caller will make it. A host that cannot list
+    /// its spaces still answers `None` or `Some` for the label it was asked
+    /// about; it just cannot say what else it has, which
+    /// [`Capabilities::list_spaces`] is about.
+    fn find_space(&self, name: &str) -> Result<Option<Space>>;
 
-    /// Every workspace the host has, in the host's display order.
+    /// Every space the host has, in the host's display order.
     ///
     /// Only where a name cannot be guessed: a refusal is worth reading when it
     /// says which label shprd expected *and* which ones the host has, and there
     /// is no other way to learn the latter. A host that cannot list answers
     /// [`MuxError::Unsupported`], which is the trait's "cannot do that" signal;
     /// callers then say only what they expected, rather than failing.
-    fn list_workspaces(&self) -> Result<Vec<Workspace>> {
-        Err(MuxError::Unsupported("list workspaces"))
+    fn list_spaces(&self) -> Result<Vec<Space>> {
+        Err(MuxError::Unsupported("listing spaces"))
     }
 
-    /// Create a workspace named `name`, with its first pane started in `cwd`.
+    /// Find the space called `name`, or make it with its first pane in `cwd`.
+    ///
+    /// Only that label is reused and only that label is created: anything else
+    /// on the host is left alone, so two services starting at once cannot give a
+    /// task a second space, and a space a human made with an almost-right label
+    /// is never adopted as shprd's own.
+    ///
+    /// The default is [`Host::find_space`] then [`Host::create_space`], with the
+    /// loser of a creation race reading back what the winner made.
+    fn ensure_space(&self, name: &str, cwd: &Path) -> Result<Space> {
+        if let Some(space) = self.find_space(name)? {
+            return Ok(space);
+        }
+        match self.create_space(name, cwd) {
+            Ok(space) => Ok(space),
+            Err(err) => match self.find_space(name) {
+                Ok(Some(space)) => Ok(space),
+                _ => Err(err),
+            },
+        }
+    }
+
+    /// Create a space named `name`, with its first pane started in `cwd`.
     /// Fails with [`MuxError::Command`] if the host refuses (e.g. duplicate
-    /// name) rather than silently returning the existing one.
-    fn create_workspace(&self, name: &str, cwd: &Path) -> Result<Workspace>;
+    /// name) rather than silently returning the existing one, and with
+    /// [`MuxError::Forbidden`] when the host knows the verb and will not allow
+    /// this caller it (tuios without the `admin` grant).
+    fn create_space(&self, name: &str, cwd: &Path) -> Result<Space>;
 
-    /// Bring a workspace to the front for the human watching the screen. Has no
+    /// Close a space and everything in it.
+    ///
+    /// This is how a landed task's space goes away, in one call rather than one
+    /// per tab. A space the host has already forgotten is [`MuxError::NotFound`],
+    /// which a caller tidying up reads as "already done". A host without
+    /// [`Capabilities::close_space`] answers [`MuxError::Unsupported`] and the
+    /// caller empties the space tab by tab instead.
+    fn close_space(&self, _space: &SpaceId) -> Result<()> {
+        Err(MuxError::Unsupported("closing a space"))
+    }
+
+    /// Bring a space to the front for the human watching the screen. Has no
     /// effect on any process; safe to call on every status poll.
-    fn focus_workspace(&self, workspace: &WorkspaceId) -> Result<()>;
+    fn focus_space(&self, space: &SpaceId) -> Result<()>;
 
-    /// Every tab in a workspace, in the host's display order.
-    fn list_tabs(&self, workspace: &WorkspaceId) -> Result<Vec<Tab>>;
-
-    /// Create a tab in `workspace` titled `title`, whose first pane starts in
-    /// `cwd`. The returned [`Tab`] carries the root pane every later split is
-    /// made from.
-    fn create_tab(&self, workspace: &WorkspaceId, title: &str, cwd: &Path) -> Result<Tab>;
+    /// Every tab in a space, in the host's display order.
+    fn list_tabs(&self, space: &SpaceId) -> Result<Vec<Tab>>;
 
     /// Retitle an existing tab. Idempotent: renaming to the current title
     /// succeeds.
@@ -82,6 +147,34 @@ pub trait Mux: Send + Sync {
     /// [`MuxError::NotFound`]; callers that race a human should ignore it.
     fn close_tab(&self, tab: &TabId) -> Result<()>;
 
+    /// Start `argv` as a new tab's program in `space`, with the tab titled
+    /// `title` and its pane starting in `cwd`.
+    ///
+    /// This is the verb a spawn uses: one call makes the tab shprd will name in
+    /// its records and starts the agent in it, so a half-made tab is not a state
+    /// a caller has to undo. `env` applies to the new process only: `Some(v)`
+    /// sets the variable, `None` removes it from the inherited environment.
+    /// Order is preserved, so a later entry for the same key wins.
+    ///
+    /// A host that cannot start a program in a tab answers
+    /// [`MuxError::Unsupported`] when [`Capabilities::spawn`] is false.
+    fn spawn(
+        &self,
+        space: &SpaceId,
+        title: &str,
+        argv: &[String],
+        env: &[(String, Option<String>)],
+        cwd: &Path,
+    ) -> Result<Tab>;
+
+    /// Split `pane` into a second pane, returning the new one.
+    ///
+    /// `ratio` is the share of the split axis the *existing* pane keeps, in
+    /// `0.0..=1.0`; hosts without [`Capabilities::split_ratio`] ignore it and
+    /// split evenly. The new pane starts in `cwd`. A host without
+    /// [`Capabilities::split`] answers [`MuxError::Unsupported`].
+    fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId>;
+
     /// Close one pane, leaving its tab and its siblings alone.
     ///
     /// Used to retire a pane whose program shprd did not start, once a
@@ -91,39 +184,77 @@ pub trait Mux: Send + Sync {
     /// Such a host reports [`Capabilities::close_pane`] as false, so a caller
     /// that would be left with an unwanted process can tell before planning.
     fn close_pane(&self, _pane: &PaneId) -> Result<()> {
-        Err(MuxError::Unsupported("close pane"))
+        Err(MuxError::Unsupported("closing a pane"))
     }
 
-    /// Split `pane`, returning the new pane. `ratio` is the share of the split
-    /// axis the *existing* pane keeps, in `0.0..=1.0`; hosts without
-    /// [`Capabilities::split_ratio`] ignore it and split evenly. The new pane
-    /// starts in `cwd`.
-    fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId>;
-
-    /// Start `argv` as the pane's program. Never a shell string.
+    /// Type `text` into `pane`, submitting it (pressing enter) when `submit`.
     ///
-    /// `env` applies to the new process only: `Some(v)` sets the variable,
-    /// `None` removes it from the inherited environment. Order is preserved,
-    /// so a later entry for the same key wins.
-    fn run(&self, pane: &PaneId, argv: &[String], env: &[(String, Option<String>)]) -> Result<()>;
+    /// With `submit`, this is one turn of input for an agent and one line for a
+    /// shell — which is why it takes a flag rather than a thinner verb: a host
+    /// presses its own enter, so shprd never has to send a newline byte as text.
+    /// Without it the text lands at the cursor unsent, for keystroke-level work.
+    fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()>;
 
-    /// Type `text` into the pane without submitting it. Used for keystroke-level
-    /// interaction; prefer [`Mux::prompt`] when the target is an agent.
-    fn send_text(&self, pane: &PaneId, text: &str) -> Result<()>;
+    /// Press `keys` in `pane`, in order.
+    ///
+    /// A host without [`Capabilities::keys`] answers
+    /// [`MuxError::Unsupported`]: pressing escape or an arrow key is not
+    /// something a caller can pretend it did.
+    fn keys(&self, _pane: &PaneId, _keys: &[Key]) -> Result<()> {
+        Err(MuxError::Unsupported("pressing keys"))
+    }
 
-    /// Submit `text` to the agent running in `pane` as one turn of input: the
-    /// host writes it and presses enter. This is the only way shprd talks to an
-    /// agent, so a prompt can never be mistaken for a shell command.
-    fn prompt(&self, pane: &PaneId, text: &str) -> Result<()>;
-
-    /// The last `lines` lines of a pane's screen, as the host renders them.
-    /// Trailing blank lines are the host's business; callers trim.
+    /// The last `lines` lines of a pane's screen — its scrollback tail as the
+    /// host renders it. Trailing blank lines are the host's business; callers
+    /// trim.
     fn read(&self, pane: &PaneId, lines: usize) -> Result<String>;
+
+    /// Wait up to `timeout` for `wanted` in `pane`.
+    ///
+    /// Returns what happened: the program exited, the screen showed the output
+    /// that was waited for, or (an [`Outcome`] with `exited == false` and no
+    /// `output`) the timeout expired with the program still running. A timeout
+    /// is normal, not an error. A host with [`Capabilities::wait`] answers in
+    /// one call; the default implementation polls [`Host::read`] (and
+    /// [`Host::exit_of`]) instead.
+    fn wait(&self, pane: &PaneId, wanted: &Waited, timeout: Duration) -> Result<Outcome> {
+        wait_by_polling(
+            |lines| self.read(pane, lines),
+            || self.exit_of(pane),
+            wanted,
+            timeout,
+        )
+    }
+
+    /// End the program running in `pane`, leaving the pane itself.
+    ///
+    /// A host without [`Capabilities::kill`] answers
+    /// [`MuxError::Unsupported`], and a caller closes the pane instead. A pane
+    /// the host no longer knows is [`MuxError::NotFound`], the same answer every
+    /// other verb gives for a vanished object.
+    fn kill(&self, _pane: &PaneId) -> Result<()> {
+        Err(MuxError::Unsupported("killing a pane's program"))
+    }
 
     /// The agent state the host reports for `pane`. Returns
     /// [`AgentState::Unknown`] — not an error — when the host has no opinion or
     /// does not support state at all (see [`Capabilities::agent_state`]).
     fn agent_state(&self, pane: &PaneId) -> Result<AgentState>;
+
+    /// Whether the program in `pane` has ended, as far as the host can tell.
+    ///
+    /// `Ok(None)` means the host cannot say, which is not an error and not an
+    /// exit: callers keep their conservative reading. A pane the host no longer
+    /// knows is [`MuxError::NotFound`], never `Ok(None)`: a vanished pane is a
+    /// process that stopped, and a caller that reads it as "cannot tell" never
+    /// replaces it. The default implementation derives the answer from
+    /// [`Host::agent_state`].
+    fn exit_of(&self, pane: &PaneId) -> Result<Option<Outcome>> {
+        Ok(match self.agent_state(pane)? {
+            AgentState::Done => Some(Outcome::exited(None)),
+            _ => None,
+        })
+    }
 
     /// The process group the host sees in the foreground of `pane`.
     ///
@@ -134,10 +265,7 @@ pub trait Mux: Send + Sync {
     ///
     /// `Ok(None)` means the host cannot tell, which is not an error: callers
     /// keep their conservative behaviour (leave the pane alone) rather than
-    /// read "no group" as "not mine". A pane the host does not know is
-    /// [`MuxError::NotFound`], never `Ok(None)`: the pane's process is gone,
-    /// which is a different answer from a live pane with no group to report,
-    /// and the one callers replace.
+    /// read "no group" as "not mine".
     fn pane_process_group(&self, _pane: &PaneId) -> Result<Option<u32>> {
         Ok(None)
     }
@@ -148,5 +276,87 @@ pub trait Mux: Send + Sync {
     /// is normal and not an error. With [`Capabilities::resumable_events`],
     /// events produced before the call are still delivered; without it, events
     /// that happened while nobody was reading are lost.
-    fn next_events(&self, timeout: Duration) -> Result<Vec<MuxEvent>>;
+    fn subscribe(&self, timeout: Duration) -> Result<Vec<MuxEvent>>;
+
+    /// Open `document` where the host has documents: a layout entry, a mod, a
+    /// file block beside a task's terminals.
+    ///
+    /// `body` is what to show, when the host renders content rather than a file
+    /// the document names. Returns whatever id or handle the host gave, which
+    /// is opaque to shprd and only ever handed back to the host. A host without
+    /// [`Capabilities::doc`] answers [`MuxError::Unsupported`], and the caller
+    /// puts the same text in a pane instead.
+    fn doc(&self, _space: &SpaceId, _name: &str, _body: &str) -> Result<String> {
+        Err(MuxError::Unsupported("opening a document"))
+    }
+
+    /// Run `argv` once, without a pane, and answer its exit code and streams.
+    ///
+    /// This is for work that must not depend on a shell or a terminal: a
+    /// one-shot command whose output is read rather than watched. A host
+    /// without [`Capabilities::exec`] answers [`MuxError::Unsupported`], and the
+    /// caller runs the same argv itself with `std::process`.
+    fn exec(&self, _argv: &[String], _cwd: &Path) -> Result<Outcome> {
+        Err(MuxError::Unsupported("running a one-shot command"))
+    }
+}
+
+/// [`Host::wait`]'s default: read the screen until it matches, or the program
+/// ends, or the timeout runs out.
+///
+/// The poll interval is short enough that a caller cannot tell the difference
+/// for a screen wait, and the first read happens before any sleep so an answer
+/// that is already on screen costs no wait at all.
+pub(crate) fn wait_by_polling(
+    read: impl Fn(usize) -> Result<String>,
+    exit: impl Fn() -> Result<Option<Outcome>>,
+    wanted: &Waited,
+    timeout: Duration,
+) -> Result<Outcome> {
+    /// How long between two reads when the host has no `wait` of its own.
+    const POLL: Duration = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    loop {
+        if let Waited::Output(text) | Waited::Either(text) = wanted {
+            // A screen too long to hold the needle is read in a window big
+            // enough for a whole terminal, which is all a prompt or a result
+            // line ever needs.
+            let screen = read(SCREEN_LINES)?;
+            if screen.contains(text.as_str()) {
+                return Ok(Outcome::matched(screen));
+            }
+        }
+        if let Some(outcome) = exit()?
+            && matches!(wanted, Waited::Exit | Waited::Either(_))
+        {
+            return Ok(outcome);
+        }
+        let waited = started.elapsed();
+        if waited >= timeout {
+            return Ok(Outcome::running());
+        }
+        std::thread::sleep(POLL.min(timeout - waited));
+    }
+}
+
+/// How many lines a polling wait reads: a full screen, so a prompt or a result
+/// line is never cut off.
+const SCREEN_LINES: usize = 200;
+
+/// The space shprd gives one task: its name, derived from the task and the run.
+///
+/// One task, one space: a person reading the host's bar sees which task each
+/// group of terminals belongs to, and closing a task's space closes exactly its
+/// tabs. The repository's own space ([`repo_space_name`]) stays, for the
+/// coordinator.
+pub fn task_space_name(repo_name: &str, run: &str, task: &str) -> String {
+    format!("shprd · {repo_name} · {run} · {task}")
+}
+
+/// The space the coordinator's tabs live in, named after the repository folder.
+///
+/// This is the one space a run does not own, so it outlives every task and is
+/// only ever emptied, never closed.
+pub fn repo_space_name(repo_name: &str) -> String {
+    format!("shprd · {repo_name}")
 }

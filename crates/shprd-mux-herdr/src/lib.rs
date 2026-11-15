@@ -1,4 +1,4 @@
-//! Herdr adapter: [`HerdrMux`] implements [`shprd_mux::Mux`] by shelling out to
+//! Herdr adapter: [`HerdrMux`] implements [`shprd_mux::Host`] by shelling out to
 //! the `herdr` binary.
 //!
 //! Every call runs one `herdr` process and reads the single JSON object the CLI
@@ -27,15 +27,30 @@
 //! `herdr` treats them as the default target and a command aimed at a private
 //! server must never land in the pane that started shprd.
 //!
-//! Panes are process-shaped, not shell-shaped: [`shprd_mux::Mux::run`] takes an
-//! argv and this adapter quotes it element by element before handing it to the
-//! pane, so a branch name or a title is never re-parsed as shell syntax.
+//! Programs are process-shaped, not shell-shaped: [`shprd_mux::Host::spawn`]
+//! takes an argv and this adapter quotes it element by element before handing it
+//! to the pane, so a branch name or a title is never re-parsed as shell syntax.
 //!
-//! Events come from [`shprd_mux::Mux::next_events`], which polls
+//! Events come from [`shprd_mux::Host::subscribe`], which polls
 //! `herdr api snapshot` and diffs it: herdr 0.9.5 exposes `events.subscribe` and
 //! `events.wait` on the socket but nothing on the CLI, so events produced while
 //! nobody was polling are lost and [`shprd_mux::Capabilities::resumable_events`]
 //! is `false`.
+//!
+//! # Spaces, and tuios
+//!
+//! A herdr workspace is what the trait calls a space, and a tuios session is the
+//! same thing under the shim. shprd gives each task one, labelled from the task
+//! (`shprd · <repo> · <run> · <task>`), and keeps the repository's own
+//! (`shprd · <repo>`) for the coordinator's tabs; `workspace close` is what
+//! removes a landed task's space in one call.
+//!
+//! tuios runs this same CLI through its compatibility layer and refuses anything
+//! that creates a pane or a space without the `admin` grant, answering
+//! `{"code":"forbidden", …}` where herdr answers `ok` (M7g §2.7). That refusal is
+//! mapped to [`shprd_mux::MuxError::Forbidden`], which carries the host's own
+//! instructions so a person can grant what is missing; every other host error
+//! stays a [`shprd_mux::MuxError::Command`].
 
 mod adapter;
 mod cli;
@@ -50,16 +65,48 @@ use std::path::{Path, PathBuf};
 /// Drives one herdr server through the `herdr` command line.
 ///
 /// It holds no connection, so every method is one independent process; the only
-/// state is the last snapshot [`Mux::next_events`] saw, behind a mutex so the
-/// adapter is `Send + Sync` and can be shared by the scheduler and the event
-/// pump at once.
+/// state is the last snapshot [`shprd_mux::Host::subscribe`] saw, behind a mutex
+/// so the adapter is `Send + Sync` and can be shared by the scheduler and the
+/// event pump at once.
 #[derive(Debug)]
 pub struct HerdrMux {
     bin: PathBuf,
     socket: Option<PathBuf>,
     home: Option<PathBuf>,
-    /// Last snapshot this adapter saw, for [`Mux::next_events`].
+    /// Last snapshot this adapter saw, for [`shprd_mux::Host::subscribe`].
     seen: std::sync::Mutex<Option<events::Snapshot>>,
+    /// Verbs this host has refused for this caller (tuios answers `forbidden`
+    /// where herdr answers `ok`). A refusal is remembered so the capability
+    /// flags stop promising something the host will not do.
+    refused: std::sync::Mutex<Refused>,
+}
+
+/// Which verbs a host has refused, so the capability flags can say so.
+///
+/// It is measured, not guessed: the first refusal is what sets a flag, and
+/// [`shprd_mux::Host::capabilities`] reads it back. A host that has never
+/// refused anything reports everything it always did, which is why an adapter
+/// built for herdr keeps its full set of flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// `spawn` / `workspace create` / `tab create` was refused.
+    pub(crate) spawn: bool,
+    /// `pane split` was refused.
+    pub(crate) split: bool,
+    /// `workspace close` was refused.
+    pub(crate) close_space: bool,
+}
+
+impl Refused {
+    /// Remember a refusal of `verb`, if it is one the flags model.
+    pub(crate) fn record(&mut self, verb: &str) {
+        match verb {
+            "spawn" => self.spawn = true,
+            "split" => self.split = true,
+            "close space" => self.close_space = true,
+            _ => {}
+        }
+    }
 }
 
 impl HerdrMux {
@@ -71,6 +118,7 @@ impl HerdrMux {
             socket: None,
             home: None,
             seen: std::sync::Mutex::new(None),
+            refused: std::sync::Mutex::new(Refused::default()),
         }
     }
 }
@@ -109,5 +157,22 @@ impl HerdrMux {
     /// The herdr binary this adapter runs.
     pub fn bin(&self) -> &Path {
         &self.bin
+    }
+
+    /// Record that the host refused `verb`, recovering from a poisoned lock
+    /// instead of panicking.
+    pub(crate) fn note_refusal(&self, verb: &str) {
+        match self.refused.lock() {
+            Ok(mut refused) => refused.record(verb),
+            Err(poisoned) => poisoned.into_inner().record(verb),
+        }
+    }
+
+    /// The verbs this host has refused so far.
+    pub(crate) fn refused(&self) -> Refused {
+        match self.refused.lock() {
+            Ok(refused) => *refused,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
     }
 }

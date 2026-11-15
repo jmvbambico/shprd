@@ -77,23 +77,68 @@ impl HerdrMux {
 }
 
 impl HerdrMux {
-    /// Create a tab labelled `title` in `workspace`, root pane in `cwd`.
-    pub(crate) fn new_tab(&self, workspace: &WorkspaceId, title: &str, cwd: &Path) -> Result<Tab> {
+    /// Create a tab and start `argv` in its root pane, which is the whole of
+    /// `spawn` on this host: herdr's `tab create` makes the tab and its pane,
+    /// and the program goes in with `pane send-text`/`send-keys` once the pane
+    /// exists.
+    ///
+    /// `env` is applied to the started program only, through the same quoted
+    /// `exec env -u … NAME=VALUE …` line [`crate::HerdrMux::run_argv`] builds:
+    /// herdr's `--env` sets a variable for the pane's own process, which is a
+    /// different promise (it cannot remove one, and it leaks into whatever the
+    /// human runs there next).
+    ///
+    /// Nothing is left half-made: a tab whose program could not be started is
+    /// closed before the error goes back, so a caller's own cleanup is only ever
+    /// about the worktree and the ledger.
+    pub(crate) fn spawn_in_space(
+        &self,
+        workspace: &WorkspaceId,
+        title: &str,
+        argv: &[String],
+        env: &[(String, Option<String>)],
+        cwd: &Path,
+    ) -> Result<Tab> {
+        let tab = self.new_tab_verb(workspace, title, cwd)?;
+        // A tab with no program to start is a tab the caller wanted anyway:
+        // an empty prompt for a human to type into.
+        if argv.is_empty() {
+            return Ok(tab);
+        }
+        if let Err(error) = self.run_argv(&tab.root_pane, argv, env) {
+            // The tab exists and points at a program that is not running; the
+            // caller asked for a tab *with* a program, so it goes.
+            let _ = self.kill_tab(&tab.id);
+            return Err(error);
+        }
+        Ok(tab)
+    }
+
+    /// The one `tab create` call every tab-making verb goes through.
+    fn new_tab_verb(&self, workspace: &WorkspaceId, title: &str, cwd: &Path) -> Result<Tab> {
         let cwd = cwd.to_string_lossy().into_owned();
-        let result = self.call(
-            "create tab",
-            &[
-                "tab",
-                "create",
-                "--workspace",
+        let args: Vec<&str> = vec![
+            "tab",
+            "create",
+            "--workspace",
+            workspace.as_str(),
+            "--cwd",
+            &cwd,
+            "--label",
+            title,
+            "--no-focus",
+        ];
+        let result = self
+            .call_verb(
+                "spawn",
+                "workspace",
                 workspace.as_str(),
-                "--cwd",
-                &cwd,
-                "--label",
-                title,
-                "--no-focus",
-            ],
-        )?;
+                "create tab",
+                &args,
+            )?
+            .ok_or_else(|| {
+                MuxError::command("create tab", "herdr answered with no result object")
+            })?;
         let tab = result
             .get("tab")
             .ok_or_else(|| MuxError::command("create tab", "herdr answered without a tab"))?;
@@ -144,7 +189,8 @@ impl HerdrMux {
 
     /// Close a tab and its panes.
     pub(crate) fn kill_tab(&self, tab: &TabId) -> Result<()> {
-        self.call_as(
+        self.call_verb(
+            "close tab",
             "tab",
             tab.as_str(),
             "close tab",

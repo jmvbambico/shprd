@@ -1,7 +1,7 @@
 //! Workspaces: the herdr window shprd keeps per repository.
 //!
-//! herdr names a workspace with a free-text `label`, so [`shprd_mux::Mux`]'s
-//! "workspace name" is the label and the workspace id is herdr's `wN`. Finding
+//! herdr names a workspace with a free-text `label`, so [`shprd_mux::Host`]'s
+//! "space name" is the label and the space id is herdr's `wN`. Finding
 //! a workspace by name therefore lists and compares rather than asking herdr
 //! for a name, and creating one that already exists fails on herdr's side,
 //! which is what the trait asks for.
@@ -52,7 +52,7 @@ impl HerdrMux {
     /// Create a workspace and let herdr start its first pane in `cwd`.
     ///
     /// `--no-focus` keeps the human's screen where it is; shprd only moves
-    /// focus when [`shprd_mux::Mux::focus_workspace`] is called.
+    /// focus when [`shprd_mux::Host::focus_space`] is called.
     pub(crate) fn new_workspace(&self, name: &str, cwd: &Path) -> Result<Workspace> {
         let cwd = cwd.to_string_lossy().into_owned();
         let result = self.call(
@@ -84,6 +84,28 @@ impl HerdrMux {
             id: WorkspaceId::new(id),
             name: label.to_string(),
         })
+    }
+
+    /// Close a space and every tab in it.
+    ///
+    /// `herdr workspace close <id>` takes the id positionally and takes its
+    /// tabs with it, which is what makes a landed task's space one call to
+    /// remove rather than one per tab. A workspace the host no longer knows is
+    /// already closed, which is what the caller wanted, so
+    /// [`MuxError::NotFound`] is success here — the same rule
+    /// [`shprd_mux::Host::close_tab`]'s callers apply.
+    pub(crate) fn kill_workspace(&self, workspace: &WorkspaceId) -> Result<()> {
+        let args = ["workspace", "close", workspace.as_str()];
+        match self.call_verb(
+            "close space",
+            "space",
+            workspace.as_str(),
+            "close workspace",
+            &args,
+        ) {
+            Ok(_) | Err(MuxError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Bring a workspace to the front.
