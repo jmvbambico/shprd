@@ -816,7 +816,7 @@ project_dirs = []
                 },
                 gates: vec!["cargo test --workspace".to_string()],
                 catalogs: std::collections::BTreeMap::new(),
-                data_dir: self.home.path().to_path_buf(),
+                data_dir: shprd_agents::data::DataDir::resolve(Some(self.home.path()), None),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would

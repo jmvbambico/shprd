@@ -58,7 +58,8 @@ pub fn run(
 ) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     let loaded = load(&home, root)?;
-    let checker = Checker::load(crate::ctx::resolve_data_dir(root).ok().as_deref());
+    let data = crate::ctx::resolve_data_dir();
+    let checker = Checker::load(Some(&data));
     match command {
         SettingsCommand::Show(args) => show(&loaded, root, args, json, &checker),
         SettingsCommand::Get(args) => get(&loaded, root, args, json, &checker),
@@ -141,7 +142,7 @@ fn show(
 ) -> Result<(), CliError> {
     let task = task_layer(root, args.task.as_deref())?;
     let resolved = loaded.resolve(task.as_ref());
-    let checker = with_catalogs(checker.clone(), &resolved, root);
+    let checker = with_catalogs(checker.clone(), &resolved);
     let checked = check(&resolved, &checker);
     let skipped = skipped_note(&checked, &resolved);
     if json {
@@ -187,7 +188,7 @@ fn get(
     let task = task_layer(root, args.task.as_deref())?;
     let resolved = loaded.resolve(task.as_ref());
     let row = row_of(&resolved, &key);
-    let checker = with_catalogs(checker.clone(), &resolved, root);
+    let checker = with_catalogs(checker.clone(), &resolved);
     let checked = check(&resolved, &checker);
     let skipped = skipped_note(&checked, &resolved);
     if json {
@@ -327,7 +328,7 @@ fn check(resolved: &Resolved, checker: &Checker) -> Checked {
 /// Only those are read: a program no role gives an effort is never asked, so a
 /// read of the settings stays a read. A listing that cannot be read is skipped —
 /// the effort check then says nothing rather than guessing.
-fn with_catalogs(checker: Checker, resolved: &Resolved, root: Option<&Path>) -> Checker {
+fn with_catalogs(checker: Checker, resolved: &Resolved) -> Checker {
     let roles = resolved.roles();
     let programs: Vec<&str> = roles
         .iter()
@@ -337,14 +338,11 @@ fn with_catalogs(checker: Checker, resolved: &Resolved, root: Option<&Path>) -> 
     if programs.is_empty() {
         return checker;
     }
-    let Ok(data) = crate::ctx::resolve_data_dir(root) else {
-        return checker;
-    };
     let Some(specs) = checker.specs() else {
         return checker;
     };
+    let data = crate::ctx::resolve_data_dir();
     let path_env = std::env::var("PATH").unwrap_or_default();
-    let models_dir = data.join("models");
     let mut catalogs = BTreeMap::new();
     for program in programs {
         if catalogs.contains_key(program) {
@@ -353,9 +351,7 @@ fn with_catalogs(checker: Checker, resolved: &Resolved, root: Option<&Path>) -> 
         let Some(spec) = specs.iter().find(|spec| spec.id == program) else {
             continue;
         };
-        if let Some(catalog) =
-            shprd_agents::adapter::catalog(spec, &models_dir, &path_env, CATALOG_TIMEOUT)
-        {
+        if let Some(catalog) = data.catalog(spec, &path_env, CATALOG_TIMEOUT) {
             catalogs.insert(program.to_owned(), catalog);
         }
     }

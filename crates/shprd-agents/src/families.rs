@@ -94,7 +94,17 @@ impl Families {
             path: path.to_owned(),
             source,
         })?;
-        let table: Families = toml::from_str(&source).map_err(|source| FamilyError::Parse {
+        Families::parse(path, &source)
+    }
+
+    /// Loads and validates the table already read in, naming `path` in any
+    /// error.
+    ///
+    /// This is [`Families::load`] for a table that is not a file on this
+    /// machine: the copy embedded in the binary, which
+    /// [`crate::data::DataDir`] reads into text.
+    pub(crate) fn parse(path: &Path, source: &str) -> Result<Families, FamilyError> {
+        let table: Families = toml::from_str(source).map_err(|source| FamilyError::Parse {
             path: path.to_owned(),
             source: Box::new(source),
         })?;

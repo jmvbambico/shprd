@@ -174,7 +174,16 @@ impl CompatList {
             path: path.to_path_buf(),
             source,
         })?;
-        let list: Self = toml::from_str(&text).map_err(|source| SkillsError::Parse {
+        Self::parse(path, &text)
+    }
+
+    /// Load and validate a compatibility list already read in.
+    ///
+    /// This is [`CompatList::load`] for a file that is not on this machine: the
+    /// copy embedded in the binary, which [`crate::data::DataDir`] reads into
+    /// text. `path` is what an error names.
+    pub(crate) fn parse(path: &Path, text: &str) -> Result<Self, SkillsError> {
+        let list: Self = toml::from_str(text).map_err(|source| SkillsError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
@@ -277,7 +286,16 @@ impl VisibilityRules {
             path: path.to_path_buf(),
             source,
         })?;
-        let rules: Self = toml::from_str(&text).map_err(|source| SkillsError::Parse {
+        Self::parse(path, &text)
+    }
+
+    /// Load and validate visibility rules already read in.
+    ///
+    /// This is [`VisibilityRules::load`] for a file that is not on this
+    /// machine: the copy embedded in the binary, which
+    /// [`crate::data::DataDir`] reads into text. `path` is what an error names.
+    pub(crate) fn parse(path: &Path, text: &str) -> Result<Self, SkillsError> {
+        let rules: Self = toml::from_str(text).map_err(|source| SkillsError::Parse {
             path: path.to_path_buf(),
             source,
         })?;

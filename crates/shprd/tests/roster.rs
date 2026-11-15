@@ -164,3 +164,58 @@ fn prints_a_json_array_when_asked() {
     assert_eq!(claude["vendor"], "anthropic");
     assert_eq!(claude["reason"], serde_json::Value::Null);
 }
+
+/// An installed `shprd` finds its harness table with no data directory and no
+/// checkout to read one from: the binary carries the shipped programs itself.
+#[test]
+fn an_installed_binary_lists_the_programs_it_ships() {
+    let tmp = match TempDir::new() {
+        Ok(tmp) => tmp,
+        Err(error) => panic!("tempdir failed: {error}"),
+    };
+    // A working directory that is not a checkout, a home with no overrides and
+    // an empty `PATH`: nothing on this machine can answer but the binary.
+    let elsewhere = tmp.path().join("elsewhere");
+    let home = tmp.path().join("home");
+    let bin = tmp.path().join("bin");
+    for dir in [&elsewhere, &home, &bin] {
+        if let Err(error) = fs::create_dir_all(dir) {
+            panic!("creating {} failed: {error}", dir.display());
+        }
+    }
+    let mut command = Command::new(BIN);
+    isolate(&mut command, &bin);
+    let output = command
+        .current_dir(&elsewhere)
+        .args(["roster", "--json"])
+        .env("PATH", &bin)
+        .env_remove("SHPRD_DATA_DIR")
+        .env_remove("SHPRD_PI_MODEL")
+        .env("SHPRD_HOME", &home)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local").join("share"))
+        .output()
+        .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"));
+    assert!(
+        output.status.success(),
+        "roster failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let rows: Vec<serde_json::Value> = match serde_json::from_str(&stdout) {
+        Ok(rows) => rows,
+        Err(error) => panic!("output is not JSON ({error}): {stdout}"),
+    };
+    let ids: Vec<&str> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
+    for id in ["claude", "codex", "kilo", "opencode", "pi"] {
+        assert!(
+            ids.contains(&id),
+            "{id} is missing from the roster: {ids:?}"
+        );
+    }
+    assert_eq!(rows.len(), ids.len(), "every row names a program: {stdout}");
+    assert!(
+        rows.iter().all(|row| row["binary"].is_null()),
+        "an empty PATH installs nothing: {stdout}"
+    );
+}
