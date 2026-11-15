@@ -427,6 +427,7 @@ mod tests {
             changed_paths: vec![],
             commit: None,
             skills_used: vec![],
+            proofs: Vec::new(),
         }
     }
 

@@ -280,6 +280,28 @@ fn the_worker_m9_asks_digest_is_the_listed_one() {
     assert!(WORKER_M9_ASKS.as_bytes() != worker().text.as_bytes());
 }
 
+#[test]
+fn the_worker_m9_proof_digest_is_the_listed_one() {
+    assert_eq!(digest(WORKER_M9_PROOF.as_bytes()), WORKER_M9_PROOF_DIGEST);
+    assert!(
+        worker().old.contains(&WORKER_M9_PROOF_DIGEST),
+        "the retired default is in the worker's list"
+    );
+    assert!(WORKER_M9_PROOF.as_bytes() != worker().text.as_bytes());
+}
+
+/// A build that installed the wording which put the proof rule after the
+/// hand-in rule upgrades it: a hand-in is spent once, so the rule has to be
+/// read before the report.
+#[test]
+fn an_untouched_proof_default_is_upgraded() {
+    let temp = dir();
+    std::fs::write(worker_path(temp.path()), WORKER_M9_PROOF).expect("an old install");
+    let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert_eq!(installed.text, worker().text, "today's words won");
+}
+
 /// A build that installed the wording which only knew the CLI's question tool
 /// upgrades it: the ask route is the program's, and the old words say otherwise.
 #[test]

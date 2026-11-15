@@ -805,6 +805,7 @@ mod tests {
             changed_paths: vec![path.to_string()],
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         }
     }
 

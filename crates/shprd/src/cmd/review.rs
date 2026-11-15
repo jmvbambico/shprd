@@ -192,7 +192,8 @@ pub struct ContractInput<'a> {
 /// Renders the contract a reviewer checks the diff against.
 ///
 /// It carries what the diff cannot say: what the task was for, what "done"
-/// meant, what the attempt was allowed to touch, and what the agent claimed.
+/// meant, what the attempt was allowed to touch, and what the agent claimed —
+/// including where its proof is.
 pub fn render_contract(input: &ContractInput<'_>) -> String {
     let task = input.task;
     let mut out = String::new();
@@ -227,6 +228,7 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     out.push_str(&format!("- summary: {}\n", report.summary));
     out.push_str(&listed("tests", &report.tests));
     out.push_str(&listed("changed paths", &report.changed_paths));
+    out.push_str(&listed("proof", &report.proofs));
     if let Some(commit) = &report.commit {
         out.push_str(&format!("- commit: {commit}\n"));
     }
@@ -1454,6 +1456,7 @@ project_dirs = []
                 changed_paths: vec!["README.md".to_string()],
                 commit: None,
                 skills_used: Vec::new(),
+                proofs: Vec::new(),
             })
             .unwrap_or_else(|err| panic!("{err}"));
         }

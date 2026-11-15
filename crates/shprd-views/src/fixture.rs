@@ -76,6 +76,7 @@ pub fn events() -> Vec<Event> {
                 changed_paths: vec!["crates/shprd-core/src/event.rs".to_string()],
                 commit: Some("abc123".to_string()),
                 skills_used: vec!["tdd".to_string()],
+                proofs: Vec::new(),
             },
         ),
         ev(
@@ -118,6 +119,7 @@ pub fn events() -> Vec<Event> {
                 changed_paths: vec!["crates/shprd-views/src/brief.rs".to_string()],
                 commit: Some("aaa111".to_string()),
                 skills_used: vec!["tdd".to_string(), "simplify".to_string()],
+                proofs: Vec::new(),
             },
         ),
         ev(

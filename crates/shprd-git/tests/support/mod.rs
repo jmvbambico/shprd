@@ -215,6 +215,7 @@ pub fn integrated_run(
             changed_paths: vec!["crates/x/a.rs".to_string()],
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         },
         EventKind::GatePassed {
             task: task.to_string(),

@@ -189,6 +189,7 @@ impl Fixture {
             changed_paths: vec![name],
             commit: Some(head),
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         });
     }
 

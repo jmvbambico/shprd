@@ -89,8 +89,23 @@ const WORKER_M9_ASKS: &str = include_str!("../../../data/templates/history/worke
 const WORKER_M9_ASKS_DIGEST: &str =
     "59e22b0f71d7810c737e8ead9937852cd1166f3867653aea7fea92970081583f";
 
+/// The worker wording M9.6 shipped, which put the proof rule after the hand-in
+/// rule and sent the proof path into the summary. A hand-in is spent once, so
+/// today's words put the rule first and give the path its own `--proof` flag.
+#[cfg(test)]
+const WORKER_M9_PROOF: &str = include_str!("../../../data/templates/history/worker-m9-proof.md");
+
+/// The SHA-256 of [`WORKER_M9_PROOF`], the worker's fourth retired default.
+const WORKER_M9_PROOF_DIGEST: &str =
+    "a371c687e291a4ed26386320b8f5bb9f08adf6764d459e7055e75edaa78ebcf8";
+
 /// The worker's retired defaults.
-const WORKER_OLD: &[&str] = &[WORKER_FIRST_DIGEST, WORKER_M9_DIGEST, WORKER_M9_ASKS_DIGEST];
+const WORKER_OLD: &[&str] = &[
+    WORKER_FIRST_DIGEST,
+    WORKER_M9_DIGEST,
+    WORKER_M9_ASKS_DIGEST,
+    WORKER_M9_PROOF_DIGEST,
+];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
 /// the ask route is the program's, not one CLI tool's.

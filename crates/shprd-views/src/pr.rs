@@ -529,6 +529,7 @@ mod tests {
                 changed_paths: vec!["crates/shprd-views/src/pr.rs".to_string()],
                 commit: None,
                 skills_used: vec![],
+                proofs: Vec::new(),
             },
         )
     }

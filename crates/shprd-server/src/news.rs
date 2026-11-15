@@ -482,6 +482,7 @@ mod tests {
             changed_paths: Vec::new(),
             commit: Some(String::from("abc123")),
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         }
     }
 

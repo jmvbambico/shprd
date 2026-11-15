@@ -264,6 +264,7 @@ pub fn spawn(
         archive: replaced.as_ref().map(|earlier| earlier.ref_name.as_str()),
         prompt: Some(&context.prompt),
         ask,
+        proof: context.proof,
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &warnings,
@@ -1403,6 +1404,8 @@ pub(crate) struct BriefContext {
     pub(crate) settings: Resolved,
     /// The role the block describes.
     pub(crate) role: Option<ResolvedRole>,
+    /// Whether the run asks every task for one proof, from `tasks.proof`.
+    pub(crate) proof: bool,
 }
 
 /// The role a worker's brief is written for.
@@ -1459,10 +1462,12 @@ pub(crate) fn brief_context(
         }
     }
     let prompt = role_prompt(env, role_id)?;
+    let proof = settings.tasks().proof;
     Ok(BriefContext {
         prompt,
         settings,
         role,
+        proof,
     })
 }
 
@@ -2554,6 +2559,7 @@ project_dirs = []
             changed_paths: vec!["crates/shprd/src/cmd/spawn.rs".to_string()],
             commit: None,
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         })
         .unwrap_or_else(|err| panic!("{err}"));
     }
@@ -3651,6 +3657,7 @@ off = ["--no-fast"]
             archive: None,
             prompt: None,
             ask: AskRoute::Hook,
+            proof: true,
             settings: None,
             role: None,
             warnings: &[],
@@ -3702,6 +3709,7 @@ off = ["--no-fast"]
             archive: None,
             prompt: None,
             ask: AskRoute::Hook,
+            proof: true,
             settings: None,
             role: None,
             warnings: &[],
@@ -3739,6 +3747,7 @@ off = ["--no-fast"]
                 archive: None,
                 prompt: None,
                 ask: AskRoute::Hook,
+                proof: true,
                 settings: None,
                 role: None,
                 warnings: &[],
