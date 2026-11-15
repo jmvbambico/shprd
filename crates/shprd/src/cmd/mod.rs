@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod drop;
 pub mod fullgate;
 pub mod handoff;
+pub mod install;
 pub mod integrate;
 pub mod janitor;
 pub mod land;
@@ -64,6 +65,11 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Prompts { cmd }) = &cli.command {
         return prompts::run(cmd, cli.global.json, cli.global.home.as_deref());
     }
+    // `install` writes files under the Herdr app home, not a log, so it answers
+    // outside a repository too.
+    if let Some(Command::Install(args)) = &cli.command {
+        return install::run(args, cli.global.home.as_deref(), cli.global.json);
+    }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
         return doctor::run(args, cli.global.json, cli.global.home.as_deref());
@@ -110,6 +116,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             let root = settings_root(cli.global.repo.as_deref());
             settings::run(&cmd, ctx.json, cli.global.home.as_deref(), root.as_deref())
         }
+        // Unreachable in practice: `install` returns above.
+        Some(Command::Install(args)) => install::run(&args, None, ctx.json),
         // Unreachable in practice: `prompts` returns above.
         Some(Command::Prompts { cmd }) => prompts::run(&cmd, ctx.json, None),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),

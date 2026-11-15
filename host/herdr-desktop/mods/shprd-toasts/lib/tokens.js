@@ -1,0 +1,140 @@
+// shprd's UI tokens for the Herdr desktop: one size system, one red/green/amber,
+// and the words shprd's own status rules give a task.
+//
+// Ported from Shepherdr (MIT), whose window uses the same closed system:
+//
+// - Source: <https://github.com/eliasstravik/shepherdr>
+// - Paths: `lib/ui.js` (the size and colour tokens), `lib/dot.js` (the status
+//   glyphs) and `mods/tasks/main.js` (`STATUS`'s words)
+// - Commit: `a3f327a` (tag `v3.1.34`)
+// - License: MIT — Copyright (c) 2026 Elias Stravik
+//
+// The values are Shepherdr's; the status words are shprd's own, because shprd
+// derives a task's status from its ledger (`crates/shprd-views/src/derived.rs`)
+// and the service hands the eight words to a client as `derived.status`. A mod
+// never invents a ninth.
+//
+// Shared: the source is `mods/lib/tokens.js`; `bin/sync-shared` copies it into
+// every mod folder as `lib/tokens.js`, because a Herdr mod can only import files
+// inside its own folder. Edit the source, never a copy, then run `sync-shared`.
+
+/** Button heights: 20 only inside a row's second line, 24 in panels, 32 in dialogs. */
+export const H = { xs: 20, sm: 24, lg: 32 };
+
+/** Text sizes: 11 ids and times, 12 second lines and labels, 13 body and titles, 15 page titles. */
+export const TEXT = { id: 11, label: 12, body: 13, title: 15 };
+
+/** Corner radii: 6 on controls, 8 on cards and hovers, 10 on the panel and a pane, 12 on bubbles. */
+export const RADIUS = { control: 6, card: 8, panel: 10, bubble: 12 };
+
+/**
+ * The layout's own sizes, in px at Herdr zoom 1. The layout file repeats them;
+ * these are what a mod uses to draw inside them without measuring.
+ */
+export const SPACE = {
+  brand: 46,
+  sidebar: 391,
+  sidebarRow: 28,
+  sidebarFooter: 97,
+  tabs: 42,
+  status: 28,
+  panel: 510,
+  panelHeader: 42,
+  row: 32,
+  rowTwo: 44,
+  gap: 6,
+  cardGap: 8,
+  paneHeader: 30,
+};
+
+/** The one strong colour a space's avatar takes, light and dark alike. */
+export const MARK = ["#22a99a", "#e3814f", "#5b8def", "#8b7cf6", "#3fae6a", "#d9649a"];
+
+/** Whether the app is in its dark appearance; `settings().dark` is the app's own switch. */
+const dark_ = (settings) => settings?.dark !== false;
+
+/** *Needs you*, alerts, errors. */
+export const red = (settings) => (dark_(settings) ? "#ff6369" : "#e5484d");
+/** *Ready*, finished well. */
+export const green = (settings) => (dark_(settings) ? "#3dd68c" : "#30a46c");
+/** *Working*, and the time left under a working glyph. */
+export const amber = (settings) => (dark_(settings) ? "#f5b544" : "#e2a336");
+/** Text on a filled status colour (a count badge). */
+export const onStatus = (settings) => (dark_(settings) ? "#000000" : "#ffffff");
+
+/**
+ * The three status colours plus the text colour for a fill, resolved against the
+ * app's appearance. A mod draws with `tone(settings()).red` rather than a hex.
+ */
+export function tone(settings) {
+  return {
+    red: red(settings),
+    green: green(settings),
+    amber: amber(settings),
+    on: onStatus(settings),
+  };
+}
+
+/**
+ * The eight words shprd's rules give a task, keyed by the API's
+ * `derived.status` (serde `snake_case`), each with the tone it is drawn in and
+ * the glyph a row puts beside it.
+ *
+ * The glyphs are Shepherdr's shapes; `pie` takes the progress a working task
+ * reports, and a row draws it as a wedge, so a state change never moves the row.
+ */
+export const STATUS = {
+  to_do: { word: "To do", tone: "dim", glyph: "ring" },
+  scheduled: { word: "Scheduled", tone: "dim", glyph: "calendar" },
+  queued: { word: "Queued", tone: "dim", glyph: "clock" },
+  working: { word: "Working", tone: "amber", glyph: "pie" },
+  needs_you: { word: "Needs you", tone: "red", glyph: "dot" },
+  ready: { word: "Ready", tone: "green", glyph: "tick" },
+  merging: { word: "Merging", tone: "green", glyph: "spin" },
+  done: { word: "Done", tone: "dim", glyph: "tick" },
+};
+
+/**
+ * The same eight, in the order a panel groups them: what needs the person first,
+ * then what moves, then what waits, then what is over.
+ */
+export const STATUS_ORDER = [
+  "needs_you",
+  "ready",
+  "working",
+  "merging",
+  "queued",
+  "scheduled",
+  "to_do",
+  "done",
+];
+
+/** One status, or `to_do` for a word this build does not know. */
+export function status(name) {
+  return STATUS[name] ?? STATUS.to_do;
+}
+
+/**
+ * Why a task reads *Needs you*, keyed by the API's `derived.need`
+ * (`NeedKindDto`). It is the row's second line when the card has no better one.
+ */
+export const NEED = {
+  attention: "Only you can settle this",
+  asks: "Asks you something",
+  reply: "Waits for your reply",
+  stopped: "Agent stopped",
+  provider: "Its provider cut it off",
+};
+
+/** The count words a badge shows: *needs you* on the left, *ready* on the right. */
+export const COUNT = { needs: "Needs you", ready: "Ready" };
+
+/**
+ * A task reference as a person reads it: the id the service hands out, in the
+ * app's mono face. Short ids are left alone; a long one is capped so a row keeps
+ * its second line.
+ */
+export function ref(id, max = 14) {
+  const text = String(id ?? "");
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}

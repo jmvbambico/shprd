@@ -1,0 +1,63 @@
+#!/bin/sh
+# Checks the desktop host folder: the shared copies are in date, the client's
+# unit tests pass, and every mod loads in the Herdr app.
+#
+#   bin/check             everything (the app checks need `herdr-app` on PATH,
+#                         and are skipped when it is not there)
+#   bin/check --no-app     everything but the app checks: what CI can run
+#
+# It is what to run after editing a mod, and what a reviewer runs before handing
+# the folder in. `herdr-app check` loads a mod once and builds its description;
+# it needs no open window of anyone's, and it never touches the person's home:
+# `HERDR_APP_HOME` points at a scratch folder for the duration, because a check
+# that could reach their window is not one to run on a habit.
+
+set -eu
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here"
+
+app=1
+[ "${1:-}" = "--no-app" ] && app=0
+
+echo "== shared modules"
+./bin/sync-shared --check
+
+echo "== client unit tests"
+if command -v bun >/dev/null 2>&1; then
+  echo "   (bun)"
+  bun test --preload ./test/boot-bun.mjs test/
+elif command -v node >/dev/null 2>&1; then
+  echo "   (node)"
+  node --import ./test/boot.mjs --test test/
+else
+  echo "neither node nor bun is on PATH: the client's tests cannot run" >&2
+  exit 1
+fi
+
+if [ "$app" = 0 ]; then
+  exit 0
+fi
+
+if ! command -v herdr-app >/dev/null 2>&1; then
+  echo "== herdr-app check: skipped (no herdr-app on PATH)"
+  exit 0
+fi
+
+# A folder of our own for whatever the check writes, gone on exit. `herdr-app
+# check` writes `gpui-kit.d.ts` and `jsconfig.json` beside the mod it loads, so it
+# is run on a copy: the source tree stays exactly what a person would install.
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/shprd-desktop-check.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT INT TERM
+cp -R layouts mods "$scratch/"
+
+echo "== herdr-app check"
+# The app checks a mod folder, not a layout file: a layout is checked by the
+# window drawing it (`layout.switch`), which is what the hand-in's screenshot is
+# of. Every mod the layout names is checked here.
+count=0
+for mod in "$scratch"/mods/shprd-*; do
+  HERDR_APP_HOME="$scratch/app" herdr-app check "$mod"
+  count=$((count + 1))
+done
+echo "ok: $count mods pass herdr-app check"

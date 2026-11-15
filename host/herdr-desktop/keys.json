@@ -1,0 +1,6 @@
+{
+  "layout:shprd": {
+    "ctrl-shift-b": "layout.toggle:panel",
+    "ctrl-shift-a": "layout.show:asks"
+  }
+}
