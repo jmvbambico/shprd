@@ -1484,14 +1484,18 @@ fn decode_base64(text: &str) -> Result<String> {
             held = 0;
         }
     }
-    if held != 0 && held + padding != 4 {
+    // `=` only ever ends the last group: a whole group, two characters and
+    // `==`, or three and `=`. Anything else is not base64.
+    let whole = matches!((held, padding), (0, 0) | (2, 2) | (3, 1));
+    if !whole {
         return Err(MuxError::command(
             "reading a command's output",
             "base64 that does not end on a boundary".to_string(),
         ));
     }
     if held != 0 {
-        // The last group carries `held - 1` bytes plus the padding.
+        // The last group carries `held - 1` real bytes; the padding is what the
+        // `=` characters stood in for, and is not data.
         let mut triple = chunk[0] << 18;
         if held > 1 {
             triple |= chunk[1] << 12;
@@ -1504,7 +1508,6 @@ fn decode_base64(text: &str) -> Result<String> {
             bytes.push((triple >> 8) as u8);
         }
     }
-    let _ = padding;
     String::from_utf8(bytes).map_err(|error| {
         MuxError::command(
             "reading a command's output",
@@ -1550,6 +1553,35 @@ mod tests {
             "a label-made space's id is its label"
         );
         assert!(match_space(&spaces, "nobody").is_none());
+    }
+
+    #[test]
+    fn base64_output_decodes_whatever_its_padding() {
+        // The three shapes `machine.exec` can answer in: no padding, one `=`,
+        // two, and the empty case.
+        assert_eq!(super::decode_base64("").expect("empty"), "");
+        assert_eq!(super::decode_base64("aGk=").expect("padded once"), "hi");
+        assert_eq!(
+            super::decode_base64("ZXhlYyBvaw==").expect("padded twice"),
+            "exec ok"
+        );
+        assert_eq!(
+            super::decode_base64("ZXhlYw==").expect("one whole group"),
+            "exec"
+        );
+        assert!(
+            super::decode_base64("aGk").is_err(),
+            "a short group is refused"
+        );
+        assert!(
+            super::decode_base64("a===").is_err(),
+            "padding alone is nothing"
+        );
+        assert!(super::decode_base64("a*b=").is_err(), "not base64");
+        assert!(
+            super::decode_base64("/w==").is_err(),
+            "a byte that is not UTF-8 is refused rather than mangled"
+        );
     }
 
     #[test]
