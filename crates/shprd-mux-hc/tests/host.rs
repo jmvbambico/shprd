@@ -274,24 +274,50 @@ fn a_spawn_gives_its_tab_the_name_a_person_reads() {
 }
 
 #[test]
-fn an_environment_entry_that_unsets_a_variable_is_refused_not_dropped() {
+fn a_launch_that_drops_a_variable_goes_through_env() {
+    // herdr-core's `env` cannot unset a variable, so a launch that must drop one
+    // is wrapped in `/usr/bin/env`, which does. Nothing is re-parsed as a shell:
+    // the program is still the last element of a vector.
     let (fake, host) = host("normal");
-    let error = host
+    let tab = host
         .spawn(
             &SpaceId::new(SPACE),
             "pi·T1",
-            &["pi".to_string()],
-            &[("HERDR_PANE_ID".to_string(), None)],
+            &["pi".to_string(), "--model".to_string(), "a b".to_string()],
+            &[
+                ("HERDR_PANE_ID".to_string(), None),
+                ("SHPRD_TASK".to_string(), Some("T1".to_string())),
+            ],
             Path::new("/work/t1"),
         )
-        .expect_err("herdr-core's env is a map of strings");
-    assert!(matches!(error, MuxError::Unsupported(_)), "{error}");
-    assert!(
-        !requests(&fake)
-            .iter()
-            .any(|request| request["method"] == "terminal.run"),
-        "nothing was started"
+        .expect("the core starts it");
+    assert_eq!(tab.root_pane.as_str(), "t100");
+    let sent = request(&fake, "terminal.run");
+    let argv: Vec<&str> = sent["params"]["argv"]
+        .as_array()
+        .expect("an argv array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        argv,
+        vec![
+            "/usr/bin/env",
+            "-u",
+            "HERDR_PANE_ID",
+            "SHPRD_TASK=T1",
+            "pi",
+            "--model",
+            "a b"
+        ],
+        "the drop comes first, then the sets, then the program"
     );
+    assert!(
+        sent["params"].get("env").is_none(),
+        "the wrapper carries the environment: {sent}"
+    );
+    // The labels still place the terminal in the task's tab.
+    assert_eq!(sent["params"]["labels"]["herdr.tab"], "pi·T1");
 }
 
 #[test]

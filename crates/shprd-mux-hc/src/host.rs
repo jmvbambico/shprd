@@ -833,25 +833,15 @@ impl Host for HcHost {
     ) -> Result<Tab> {
         let label = tab_label(title);
         let placement = Placement::new(space.as_str(), &label);
+        let launch = launch_argv(argv, env);
         let mut params = json!({
-            "argv": argv,
+            "argv": launch.argv,
             "cwd": cwd.display().to_string(),
             "labels": placement.labels(),
             "keep": false,
         });
-        if !env.is_empty() {
-            let mut variables = Map::new();
-            for (key, value) in env {
-                let Some(value) = value else {
-                    // herdr-core's `env` is a map of strings: it can add or
-                    // change a variable and has no spelling for "unset".
-                    return Err(MuxError::unsupported(
-                        "removing a variable from a terminal's environment",
-                    ));
-                };
-                variables.insert(key.clone(), Value::String(value.clone()));
-            }
-            params["env"] = Value::Object(variables);
+        if !launch.variables.is_empty() {
+            params["env"] = Value::Object(launch.variables);
         }
         let started = self.call_object("terminal.run", params, "terminal", title)?;
         let address = started
@@ -1239,6 +1229,62 @@ impl HcHost {
             });
         }
         Ok(events)
+    }
+}
+
+/// What a launch's argv and environment become on herdr-core.
+struct Launch {
+    /// The argv the terminal runs: the caller's, or `/usr/bin/env` wrapping it
+    /// when the launch must drop a variable.
+    argv: Vec<String>,
+    /// The variables herdr-core is given, when it can carry all of them.
+    variables: Map<String, Value>,
+}
+
+/// Build the argv and environment variables one spawn sends.
+///
+/// herdr-core's `env` is a map of strings: it can add or change a variable and
+/// has no spelling for "unset". A launch that must drop one — a parent session's
+/// marker, a credential a worker may not hold (M3.5) — is therefore wrapped in
+/// `/usr/bin/env`, which does exactly that and nothing else. The argv stays a
+/// vector and the program is still the last element: nothing is re-parsed by a
+/// shell, and a branch name or a title can never become a command.
+fn launch_argv(argv: &[String], env: &[(String, Option<String>)]) -> Launch {
+    let drops = env.iter().any(|(_, value)| value.is_none());
+    if !drops {
+        let mut variables = Map::new();
+        for (key, value) in env {
+            if let Some(value) = value {
+                variables.insert(key.clone(), Value::String(value.clone()));
+            }
+        }
+        return Launch {
+            argv: argv.to_vec(),
+            variables,
+        };
+    }
+    let mut wrapped = vec!["/usr/bin/env".to_string()];
+    for (key, value) in env {
+        if value.is_none() {
+            // `env -u NAME`: the one spelling for "this variable is not set".
+            wrapped.push("-u".to_string());
+            wrapped.push(key.clone());
+        }
+    }
+    for (key, value) in env {
+        if let Some(value) = value {
+            wrapped.push(format!("{key}={value}"));
+        }
+    }
+    if let Some((program, rest)) = argv.split_first() {
+        // BSD `env` has no `--`, so the program follows the assignments: a
+        // variable assignment is the only thing `env` reads as a word of its own.
+        wrapped.push(program.clone());
+        wrapped.extend(rest.iter().cloned());
+    }
+    Launch {
+        argv: wrapped,
+        variables: Map::new(),
     }
 }
 
