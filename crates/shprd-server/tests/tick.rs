@@ -521,6 +521,90 @@ fn a_failed_step_is_readable_after_the_pass() {
 }
 
 #[test]
+fn a_step_that_fails_the_same_way_three_passes_asks_a_person_once() {
+    // Bug 3 of gate run #4: a `start` that failed every pass warned every pass
+    // and never reached a person, so the board showed an unchanged row while
+    // 99 identical lines went to a terminal nobody read. The third identical
+    // failure is a card, recorded once, naming the step and its error.
+    let fixture = Fixture::new(vec![started(), added(2, "C2")]);
+    let start: shprd_server::Starter = Arc::new(|_repo: &Path, _task: &str| {
+        Err(String::from(
+            "task \"C2\" path \"calc.py\" overlaps task \"C1\"",
+        ))
+    });
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    );
+
+    for pass in 1..=2 {
+        let report = worker.tick().expect("the pass ran");
+        assert!(!report.ok(), "pass {pass} failed as scripted");
+        let state = fixture.state();
+        assert!(
+            state.escalations.is_empty(),
+            "pass {pass} is a warning, not yet a card: {:?}",
+            state.escalations
+        );
+    }
+
+    worker.tick().expect("the third pass ran");
+    let state = fixture.state();
+    assert_eq!(state.escalations.len(), 1, "{:?}", state.escalations);
+    let card = &state.escalations[0];
+    assert_eq!(card.task.as_deref(), Some("C2"));
+    assert!(
+        card.body
+            .contains("its `start` step has failed the same way 3 passes in a row"),
+        "{}",
+        card.body
+    );
+    assert!(
+        card.body.contains("(attempt 0)"),
+        "the card is about the attempt the failure happened in, so a fix or a \
+         new attempt retires it: {}",
+        card.body
+    );
+    assert!(
+        card.body.contains("overlaps task"),
+        "the card names the error: {}",
+        card.body
+    );
+    assert!(
+        card.default_action.contains("retries `start`"),
+        "the card says what happens once it is fixed: {}",
+        card.default_action
+    );
+
+    // A fourth pass writes no second card for the same run of failures.
+    worker.tick().expect("the fourth pass ran");
+    assert_eq!(
+        fixture.state().escalations.len(),
+        1,
+        "one run of failures is one card"
+    );
+
+    // And the board reads the card as the person's: the row says Needs you,
+    // exactly as `needs` does.
+    let now = SystemClock.now_ms();
+    let board = shprd_server::dto::SnapshotDto::from_state(&fixture.state(), now);
+    assert_eq!(board.needs.len(), 1, "{:?}", board.needs);
+    let row = board
+        .tasks
+        .iter()
+        .find(|task| task.id == "C2")
+        .expect("C2's row");
+    assert_eq!(
+        row.derived.status,
+        shprd_server::dto::DerivedStatusDto::NeedsYou,
+        "{:?}",
+        row.derived
+    );
+}
+
+#[test]
 fn a_pass_that_cannot_read_the_run_is_recorded_too() {
     // The one failure that ends a pass before any step runs is the one a
     // person must hear about, because nothing else will move.

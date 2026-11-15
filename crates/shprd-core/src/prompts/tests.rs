@@ -303,6 +303,31 @@ fn an_untouched_proof_default_is_upgraded() {
 }
 
 #[test]
+fn the_worker_m10_proof_digest_is_the_listed_one() {
+    assert_eq!(digest(WORKER_M10_PROOF.as_bytes()), WORKER_M10_PROOF_DIGEST);
+    assert!(
+        worker().old.contains(&WORKER_M10_PROOF_DIGEST),
+        "the retired default is in the worker's list"
+    );
+    assert!(WORKER_M10_PROOF.as_bytes() != worker().text.as_bytes());
+}
+
+/// The wording which named `--proof` but not where the artifact lives upgrades
+/// too: a proof outside the worktree is one the reviewer cannot open.
+#[test]
+fn an_untouched_m10_proof_default_is_upgraded() {
+    let temp = dir();
+    std::fs::write(worker_path(temp.path()), WORKER_M10_PROOF).expect("an old install");
+    let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert!(
+        installed.text.contains("inside the task's worktree"),
+        "the artifact has a place to live in today's words: {}",
+        installed.text
+    );
+}
+
+#[test]
 fn the_reviewers_m9_asks_digest_is_the_listed_one() {
     let reviewer = shipped_prompt("reviewer").expect("the reviewer prompt is shipped");
     assert_eq!(digest(REVIEWER_M9_ASKS.as_bytes()), REVIEWER_M9_ASKS_DIGEST);

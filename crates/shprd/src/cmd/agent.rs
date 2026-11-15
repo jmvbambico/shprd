@@ -306,12 +306,18 @@ pub fn task_status(ctx: &Ctx, args: &TaskStatusArgs) -> Result<(), CliError> {
 }
 
 /// Records an agent's report for an attempt.
+///
+/// A proof is an artifact a person and the reviewer can look at, and the
+/// reviewer reads the packet from outside the worktree: a path outside the
+/// attempt's own worktree is refused, before anything is written, so a proof is
+/// always something the reviewer can open.
 fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
     let checks = args
         .checks
         .iter()
         .map(|spec| parse_check(spec))
         .collect::<Result<Vec<CheckReport>, CliError>>()?;
+    let proofs = proof_paths(ctx, args)?;
     let kind = EventKind::Reported {
         task: args.task.clone(),
         attempt: args.attempt,
@@ -322,10 +328,115 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         changed_paths: args.changed.clone(),
         commit: args.commit.clone(),
         skills_used: args.skills_used.clone(),
-        proofs: args.proofs.clone(),
+        proofs,
     };
     let event = ctx.commit(kind)?;
     emit(ctx, &event)
+}
+
+/// The proofs a hand-in records, refused when one is outside the worktree.
+///
+/// The attempt's worktree is the root a worker's relative paths are taken from
+/// and the one place the reviewer is told to look, so a proof has to be inside
+/// it. A path outside it — `/tmp/…`, another checkout, a home folder — is not
+/// one the reviewer can open, and recording it would hand the reviewer a proof
+/// it cannot check.
+fn proof_paths(ctx: &Ctx, args: &ReportArgs) -> Result<Vec<String>, CliError> {
+    if args.proofs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = proof_root(ctx, args)?;
+    for proof in &args.proofs {
+        let path = Path::new(proof);
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        if !inside(&root, &absolute) {
+            return Err(CliError::Invalid(anyhow!(
+                "refusing to record the proof {proof:?}: it is not inside the task's worktree {}\n\
+                 leave the artifact in the worktree and pass its path from there (e.g. \
+                 `--proof proof/tests.txt`), because that is the folder the reviewer is given",
+                root.display()
+            )));
+        }
+    }
+    Ok(args.proofs.clone())
+}
+
+/// The worktree the hand-in's proofs are read from.
+///
+/// It is the attempt's own worktree as the log recorded it, which is the folder
+/// the reviewer's packet names. A log that cannot say — or a report recorded
+/// without a worktree, as the record-only paths do — falls back to the
+/// repository root, so a plain directory still checks its proofs against the
+/// root a worker runs in.
+fn proof_root(ctx: &Ctx, args: &ReportArgs) -> Result<std::path::PathBuf, CliError> {
+    let state = ctx.state()?;
+    Ok(state
+        .tasks
+        .get(&args.task)
+        .and_then(|task| task.attempts.iter().find(|one| one.n == args.attempt))
+        .map(|attempt| std::path::PathBuf::from(&attempt.worktree))
+        .filter(|worktree| !worktree.as_os_str().is_empty() && worktree.is_dir())
+        .unwrap_or_else(|| ctx.root.clone()))
+}
+
+/// Whether `path` is `root` or inside it, once both are resolved.
+///
+/// Both sides are resolved through any symlink that exists, so a home reached
+/// by one — macOS keeps `/var` as a link to `/private/var`, and a worktree can
+/// be reached either way — cannot make a file look like it is outside the
+/// worktree it is in. A proof file the worker has not written yet still
+/// resolves: its deepest existing ancestor is, and the rest is appended.
+fn inside(root: &Path, path: &Path) -> bool {
+    let root = resolve(root);
+    let path = resolve(path);
+    path.starts_with(&root)
+}
+
+/// `path` with every symlink that leads to it resolved and the components that
+/// do not exist yet appended as written.
+fn resolve(path: &Path) -> std::path::PathBuf {
+    let normal = lexical_normal(path);
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut here = normal.clone();
+    loop {
+        if let Ok(resolved) = here.canonicalize() {
+            let mut out = resolved;
+            for part in missing.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (
+            here.file_name().map(|name| name.to_os_string()),
+            here.parent(),
+        ) {
+            (Some(name), Some(parent)) => {
+                missing.push(name);
+                here = parent.to_path_buf();
+            }
+            _ => return normal,
+        }
+    }
+}
+
+/// `path` with its `.` and `..` components resolved, for a file that is not
+/// there yet.
+fn lexical_normal(path: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Parses one `--check` value.
