@@ -77,9 +77,10 @@ SOFTWARE.
   comes from, the reserved built-in roles and the keyed role table, the
   per-repository entry and the "a value equal to the inherited one is stored
   nowhere" write rule — in `crates/shprd-core/src/settings/`; and the provider
-  fallback ladder — the error classes, the carry-on message and its waits, the
-  record-tail reading of a cut, the one backup handover and its chat-tail brief
-  — in
+  fallback ladder — the error classes (also read in
+  `crates/shprd-agents/src/exhausted.rs` to tell a spent account from a broken
+  harness), the carry-on message and its waits, the record-tail reading of a
+  cut, the one backup handover and its chat-tail brief — in
   `crates/shprd-watch/src/records/{mod,claude,codex,pi,sqlite}.rs`,
   `crates/shprd-watch/src/fallback.rs` and the events that record it in
   `crates/shprd-core/src/{event,state,rules}.rs`; and the role prompts — the
