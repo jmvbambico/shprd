@@ -9,6 +9,7 @@ pub mod deliver;
 pub mod doctor;
 pub mod drop;
 pub mod fullgate;
+pub mod graph;
 pub mod handoff;
 pub mod install;
 pub mod integrate;
@@ -37,7 +38,7 @@ use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
 use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, TaskVerb};
-use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
+use crate::ctx::{CliError, Ctx, resolve_actor, resolve_home, resolve_root};
 
 /// Runs whichever verb the command line asked for.
 pub fn dispatch(cli: Cli) -> Result<(), CliError> {
@@ -76,7 +77,13 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     }
     let root = resolve_root(cli.global.repo.as_deref())?;
     let actor = resolve_actor(cli.global.actor.as_deref())?;
-    let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr);
+    // The home is resolved once, here, and carried down: the dagr projection
+    // that follows every write reads `graph.dagr` from it and looks in the
+    // person's herdr plugin folder, and no verb should resolve `$HOME` for
+    // itself. A machine with no home at all still works: the graph falls back
+    // to `$SHPRD_DAGR_BIN` and `PATH`.
+    let home = resolve_home(cli.global.home.as_deref()).ok();
+    let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr).with_home(home);
 
     match cli.command {
         None => view::status(&ctx, cli.global.home.as_deref()),

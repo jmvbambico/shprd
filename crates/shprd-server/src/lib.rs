@@ -8,6 +8,7 @@
 //! | `GET /api/state` | the snapshot: the fold, projected for a board |
 //! | `GET /api/changes` | long-poll for events after a sequence, `204` on timeout |
 //! | `POST /api/action` | one tab-typed envelope, run against the same log the CLI writes |
+//! | `GET /api/graph` | where the graph's program is, and the command that draws the run |
 //! | `POST /api/tasks` | add one task, as `shprd agent task add` does |
 //! | `GET /api/tasks/:id/changes` | the task's branch against its base, with line counts |
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
@@ -41,6 +42,7 @@ pub mod chat;
 pub mod dto;
 pub mod engine;
 pub mod error;
+pub mod graph;
 pub mod pass;
 pub mod service;
 pub mod snapshot;
@@ -61,6 +63,7 @@ pub use changes::Touch;
 pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
 pub use engine::Engine;
 pub use error::{ApiReject, ServerError};
+pub use graph::{Dagr, Located, Missing, Origin};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
 pub use service::{

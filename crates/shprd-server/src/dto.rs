@@ -1501,6 +1501,9 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ModelChoiceDto>()?,
         one::<PermissionDto>()?,
         one::<ModelsSourceDto>()?,
+        one::<GraphDto>()?,
+        one::<DagrDto>()?,
+        one::<DagrOriginDto>()?,
     ])
 }
 
@@ -1642,6 +1645,119 @@ mod tests {
                 assert!(acceptance.is_empty());
             }
             other => panic!("expected a task.add, got {other:?}"),
+        }
+    }
+}
+
+/// What a graph block needs to draw the run, from `GET /api/graph`.
+///
+/// The block itself is a terminal running dagr (`dagr view <run_json>`), so this
+/// answer carries the command to run and where the program came from, not the
+/// document: dagr reads the file and follows it. `message` is set only when
+/// there is no program, and it names the setting a person has to fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "GraphDto.ts")]
+pub struct GraphDto {
+    /// The repository the service serves.
+    pub repo: String,
+    /// Where the projection lives: `<repo>/.dagr/run.json`.
+    pub run_json: String,
+    /// The run's identity, or `null` before `shprd run start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run: Option<String>,
+    /// The program that draws it, or `null` when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dagr: Option<DagrDto>,
+    /// The command the block runs, `[dagr, view, run_json]`; empty without a
+    /// program.
+    pub argv: Vec<String>,
+    /// The settings key that names the program, so a message can say which key
+    /// to change instead of "configure it somewhere".
+    pub setting: String,
+    /// Why there is no program, in one line, when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+}
+
+/// The program that draws the graph, and the probe that found it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "DagrDto.ts")]
+pub struct DagrDto {
+    /// The executable to run.
+    pub path: String,
+    /// Which probe named it: the setting, `PATH` or the herdr plugin folder.
+    pub origin: DagrOriginDto,
+}
+
+/// Where the graph program was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "DagrOriginDto.ts")]
+pub enum DagrOriginDto {
+    /// `$SHPRD_DAGR_BIN`.
+    Env,
+    /// The `graph.dagr` setting.
+    Setting,
+    /// A `dagr` on `PATH`.
+    Path,
+    /// The `herdr-dagr` herdr plugin's checkout.
+    Plugin,
+}
+
+impl From<crate::graph::Origin> for DagrOriginDto {
+    fn from(origin: crate::graph::Origin) -> Self {
+        match origin {
+            crate::graph::Origin::Env => Self::Env,
+            crate::graph::Origin::Setting => Self::Setting,
+            crate::graph::Origin::Path => Self::Path,
+            crate::graph::Origin::Plugin => Self::Plugin,
+        }
+    }
+}
+
+impl GraphDto {
+    /// The answer for `repo`, whose run is `run` (when one has started), with
+    /// what the binary found when it looked for dagr.
+    pub fn new(
+        repo: &std::path::Path,
+        run: Option<&str>,
+        dagr: Option<&crate::graph::Dagr>,
+    ) -> Self {
+        let run_json = crate::graph::run_json(repo);
+        let (details, argv, message) = match dagr {
+            Some(crate::graph::Dagr::Found(located)) => (
+                Some(DagrDto {
+                    path: located.path.display().to_string(),
+                    origin: DagrOriginDto::from(located.origin),
+                }),
+                located.command(&run_json),
+                None,
+            ),
+            Some(crate::graph::Dagr::Missing(missing)) => {
+                (None, Vec::new(), Some(missing.message()))
+            }
+            // A service nobody told reads nothing of the machine, so it says so
+            // rather than pretending the machine has no dagr.
+            None => (
+                None,
+                Vec::new(),
+                Some(format!(
+                    "this service was not told where dagr is: set `{}` and restart it",
+                    crate::graph::SETTING
+                )),
+            ),
+        };
+        Self {
+            repo: repo.display().to_string(),
+            run_json: run_json.display().to_string(),
+            run: run.map(str::to_owned),
+            dagr: details,
+            argv,
+            setting: crate::graph::SETTING.to_owned(),
+            message,
         }
     }
 }

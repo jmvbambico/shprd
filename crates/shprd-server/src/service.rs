@@ -418,6 +418,13 @@ pub struct Config {
     /// `None` leaves every listing off, so a service prepared by hand reads only
     /// the shipped catalogs.
     pub path_env: Option<String>,
+    /// Where the graph's program is, as the binary found it.
+    ///
+    /// The binary locates dagr once ([`crate::graph::locate`]) and passes the
+    /// answer across, so the service answers `GET /api/graph` without reading a
+    /// `PATH` or a settings file of its own. `None` is a service nobody told,
+    /// which the route says rather than pretending there is no dagr.
+    pub dagr: Option<crate::graph::Dagr>,
     /// The binary's spawn and close, so the person's start, retry and stop
     /// actions reach an agent.
     ///
@@ -485,6 +492,7 @@ impl Config {
             prompts_dir: None,
             data: None,
             path_env: None,
+            dagr: None,
             engine: None,
             chat: crate::chat::ChatHost::new(),
         }
@@ -529,6 +537,7 @@ impl Service {
                 prompts_dir: config.prompts_dir.clone(),
                 data: config.data.clone(),
                 path_env: config.path_env.clone(),
+                dagr: config.dagr.clone(),
             },
         )?
         // The spawn and the close are the binary's, wired exactly as the tick's

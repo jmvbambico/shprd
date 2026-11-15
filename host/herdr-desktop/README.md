@@ -18,7 +18,8 @@ mods/shprd-accept/      the Accept card            (M10.5)
 mods/shprd-task-pr/     the task's pull request    (M10.5)
 mods/shprd-asks/        the needs-you cards        (M10.6)
 mods/shprd-settings/    roles, agents, prompts     (M10.6)
-mods/shprd-graph/       dagr in a terminal block   (M10.7)
+mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
+                        where dagr is          (M10.7)
 mods/shprd-coordinator/ the coordinator's chat     (M10.8)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
 mods/lib/               the shared modules: tokens, panel parts, the board's
@@ -49,6 +50,43 @@ the `token` file beside it — and follows it with a long poll
 (`GET /api/changes`) plus the change file the service rewrites after every
 ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
 `mods/lib/watch.js`.
+
+## The graph block
+
+The side panel's last row is the run's graph: a stack with a terminal block
+running `dagr view <repo>/.dagr/run.json`, and the note (`mods/shprd-graph`) that
+explains it when there is nothing to draw. dagr draws the run's tasks, attempts and
+gates, and follows the file itself — the service rewrites it atomically after
+every ledger write (`crates/shprd-server/src/service.rs`'s after-write step,
+`shprd dagr sync`), so nothing relaunches it per write. The note is also what a
+person sees when there is no dagr: the message names `graph.dagr`, the setting
+that fixes it (`[graph] dagr = "/path/to/dagr"`, or
+`shprd settings set graph.dagr /path/to/dagr`). `shprd doctor` says which probe
+found it — the setting, `PATH` or the `herdr-dagr` plugin's checkout.
+
+`layouts/shprd.json` holds the block: the stack `graph` with `graph-note` (the
+mod) and `graph-term` (`{ "terminal": "shprd-graph" }`). The terminal is started
+**before the window loads that layout**, by `shprd serve`
+(`crates/shprd/src/cmd/graph.rs`): Herdr resolves a layout terminal block by name
+when the layout loads and **prunes the block from the file** when no such terminal
+exists (measured), so a block that had to start its own terminal would be gone
+before it could. The service is up before the window is, so it does it there —
+`hc run --bg`, one `shprd-graph` terminal per session, reusing a live one that
+already draws this run and forgetting finished ones that would shadow the name.
+The terminal runs a shell loop that waits for the document and restarts
+`dagr view` when it exits (herdr-core keeps a terminal's address for its
+lifetime, so the block's binding stays right). It is started only when the host
+probe found a Herdr desktop; a machine on the herdr TUI has no window to draw a
+block in, and asking a core anything starts one.
+
+The mod is the note and the fallback. It reads `GET /api/graph` for where dagr is
+and what to run, keeps its own `hc run` in case the service did not start one (a
+service started before the window's core, a terminal someone ended), and selects
+the terminal's child once it is live — a mod may not edit a layout's structure on
+this build, so it only ever selects a node the layout already holds. If Herdr
+pruned the block anyway (a window opened on a fresh install with no service
+running), the note says so and gives the one recovery: move `layouts/shprd.json`
+aside and run `shprd install herdr-desktop`.
 
 ## Tests
 

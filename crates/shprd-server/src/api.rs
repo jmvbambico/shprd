@@ -36,8 +36,8 @@ use crate::auth;
 use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
     Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto, ChatSendReply,
-    ClientMessage, ErrorCode, HealthDto, PromptDto, PromptListDto, RosterDto, SettingsDto,
-    SettingsWriteDto, SnapshotDto, WsMessage,
+    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto, RosterDto,
+    SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
@@ -156,6 +156,14 @@ pub(crate) struct AppState {
     /// read: a request never starts a program this service was not told how to
     /// find.
     pub(crate) path_env: Option<String>,
+    /// Where the graph's program is, as the binary found it.
+    ///
+    /// The binary is the one place that reads `graph.dagr`, `PATH` and the
+    /// herdr plugin folder ([`crate::graph::locate`]), so the service answers
+    /// `GET /api/graph` from a value rather than probing a machine it was not
+    /// pointed at. `None` is "nobody told this service", which the route says
+    /// out loud.
+    pub(crate) dagr: Option<crate::graph::Dagr>,
     /// What types a chat line into a space's agent, when the caller has a host.
     ///
     /// The service reads a transcript by itself (it is a file), but typing into
@@ -182,6 +190,8 @@ pub(crate) struct Paths {
     pub(crate) data: Option<DataDir>,
     /// The `PATH` a program's own model listing runs with, when there is one.
     pub(crate) path_env: Option<String>,
+    /// Where the graph's program is, as the binary found it.
+    pub(crate) dagr: Option<crate::graph::Dagr>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -278,6 +288,7 @@ impl App {
             engine: None,
             prompts_dir: paths.prompts_dir,
             path_env: paths.path_env,
+            dagr: paths.dagr,
             chat: ChatHost::new(),
         };
         let router = router(state.clone());
@@ -385,6 +396,16 @@ impl App {
         self
     }
 
+    /// Answer `GET /api/graph` with the program the binary found.
+    ///
+    /// A test passes its own answer, so the route is proven without probing the
+    /// machine the test runs on.
+    pub fn with_dagr(mut self, dagr: crate::graph::Dagr) -> Self {
+        self.state.dagr = Some(dagr);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Give the service the binary's spawn and close, so the person's start,
     /// retry and stop actions reach a host.
     ///
@@ -449,6 +470,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks/answer", post(answer))
         .route("/api/chat", get(chat_page).post(chat_send))
         .route("/api/action", post(action))
+        .route("/api/graph", get(graph))
         .route("/api/tasks", post(add_task))
         .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
@@ -496,6 +518,27 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
     snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
     Ok(Json(snapshot))
+}
+
+/// `GET /api/graph`: where the graph's program is, and the command that draws
+/// the run.
+///
+/// The block in the Herdr window is a terminal running dagr, so this answers the
+/// command and the reason when there is none; the run's identity is read from
+/// the same log the board is folded from, so a graph and a board never disagree
+/// about which run they show.
+async fn graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let dagr = state.dagr.clone();
+    let run = blocking(move || ledger::load(&repo).map(|(state, _)| state.run))
+        .await?
+        .map_err(|err| ApiReject::internal(err.to_string()))?
+        .map(|run| run.run_id);
+    Ok(Json(GraphDto::new(
+        &state.repo,
+        run.as_deref(),
+        dagr.as_ref(),
+    )))
 }
 
 /// `GET /api/asks`: every ask still waiting for the person.

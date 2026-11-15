@@ -6,6 +6,7 @@
 //! shows every problem. The verb exits 1 when any line is a [`Level::Fail`].
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -136,6 +137,7 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     host(&mut report, &facts);
     let specs = data(&mut report, &facts);
     let roles = config_section(&mut report, &facts);
+    graph_section(&mut report, &facts);
     let clean = worker_env(&facts);
     let detections = detect_every(&facts, &specs, &roles);
     agents(&mut report, &detections);
@@ -614,6 +616,63 @@ fn detect_every(facts: &Facts, specs: &[HarnessSpec], roles: &Roles) -> Vec<Dete
     let pairs = worker_env(facts).as_pairs();
     let models = pi_models(facts, specs, roles);
     detect_all(specs, &facts.path_env, &pairs, &models)
+}
+
+/// Section 3b: the graph's program and the document it draws.
+///
+/// Two questions a person cannot answer from anywhere else: which dagr shprd
+/// will run (the setting, `PATH` or the herdr plugin, and it matters because a
+/// projection is only checked when one is found), and whether the run's
+/// `run.json` is there and younger than the log it was projected from. A missing
+/// program is a warning and not a failure — a run without a graph still runs —
+/// but it is said in the words that name the key to set.
+fn graph_section(report: &mut Report, facts: &Facts) {
+    let section = report.section("Graph");
+    match crate::cmd::dagr::locate(facts.home.as_deref()) {
+        Ok(found) => section.add(
+            Level::Ok,
+            format!(
+                "dagr {} (from {})",
+                found.path.display(),
+                found.origin.label()
+            ),
+        ),
+        Err(missing) => section.add(Level::Warn, missing.message()),
+    }
+    let Some(root) = facts.repo.as_deref() else {
+        section.add(
+            Level::Info,
+            "no repository here, so there is no run to draw",
+        );
+        return;
+    };
+    let run_json = crate::cmd::dagr::run_json_path(root);
+    let log = root.join(".shprd").join("events.jsonl");
+    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    match (modified(&run_json), modified(&log)) {
+        (Some(document), Some(log)) if document >= log => section.add(
+            Level::Ok,
+            format!("{} is as new as the log", run_json.display()),
+        ),
+        (Some(_), _) => section.add(
+            Level::Warn,
+            format!(
+                "{} is older than the log: every ledger write rewrites it, so a service that is not running leaves it behind",
+                run_json.display()
+            ),
+        ),
+        (None, Some(_)) => section.add(
+            Level::Warn,
+            format!(
+                "{} is missing while the run has a log: `shprd dagr sync` writes it",
+                run_json.display()
+            ),
+        ),
+        (None, None) => section.add(
+            Level::Info,
+            "no run yet, so there is no graph to draw",
+        ),
+    }
 }
 
 /// Section 4: every harness CLI, as a worker would find it.

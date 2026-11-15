@@ -230,18 +230,20 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
-/// The `Data` section of a page, so a test about data sources never reads the
-/// quota or skills sections by accident.
-fn data_section(text: &str) -> String {
+/// One titled section of a page, so a test about one part never reads another
+/// by accident.
+fn section(text: &str, title: &str) -> String {
     let mut section = String::new();
     let mut inside = false;
     for line in text.lines() {
-        if line == "Data" {
+        if line == title {
             inside = true;
             continue;
         }
         if inside {
-            if line.trim().is_empty() {
+            // The next heading starts at the left edge; every line of a section
+            // is indented under its title.
+            if line.trim().is_empty() || !line.starts_with(' ') {
                 break;
             }
             section.push_str(line);
@@ -249,6 +251,47 @@ fn data_section(text: &str) -> String {
         }
     }
     section
+}
+
+/// The `Data` section of a page, so a test about data sources never reads the
+/// quota or skills sections by accident.
+fn data_section(text: &str) -> String {
+    section(text, "Data")
+}
+
+#[test]
+fn the_graph_section_says_which_probe_found_dagr() {
+    // A dagr on the fixture's PATH, which is the second probe: the message has
+    // to say which one answered, because that is what a person fixes.
+    let setup = Setup::new(
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
+    );
+    write_script(
+        &setup.tmp.path().join("bin"),
+        "dagr",
+        "case \"$1\" in\n  check) printf '[]\\n' ;;\nesac\nexit 0",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    let graph = section(&text, "Graph");
+    assert!(
+        graph.contains("dagr ") && graph.contains("(from PATH)"),
+        "the program and its probe: {graph}"
+    );
+    assert!(graph.contains("no run"), "no run is not an error: {graph}");
+}
+
+#[test]
+fn without_dagr_the_graph_section_names_the_setting() {
+    let setup = Setup::new(
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    let graph = section(&text, "Graph");
+    assert!(graph.contains('!'), "a missing graph is a warning: {graph}");
+    assert!(graph.contains("dagr was not found"), "{graph}");
+    assert!(graph.contains("graph.dagr"), "the key is named: {graph}");
 }
 
 #[test]
