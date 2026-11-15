@@ -1551,6 +1551,12 @@ fn verb_of(method: &str) -> &'static str {
 /// A tiny decoder rather than a dependency: this is the one place in the
 /// workspace that reads base64, and the alphabet is the standard one with `=`
 /// padding (herdr-core's own encoder).
+///
+/// The bytes become text lossily: a one-shot command may well write something
+/// that is not UTF-8 (a summarised binary, a locale's bytes), and its exit code
+/// and the rest of its output are still worth having. Refusing the whole
+/// [`shprd_mux::Host::exec`] over one undecodable byte would answer an error
+/// where the trait promises an outcome.
 fn decode_base64(text: &str) -> Result<String> {
     fn value(byte: u8) -> Option<u32> {
         Some(match byte {
@@ -1614,12 +1620,7 @@ fn decode_base64(text: &str) -> Result<String> {
             bytes.push((triple >> 8) as u8);
         }
     }
-    String::from_utf8(bytes).map_err(|error| {
-        MuxError::command(
-            "reading a command's output",
-            format!("its output is not UTF-8: {error}"),
-        )
-    })
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -1715,9 +1716,10 @@ mod tests {
             "padding alone is nothing"
         );
         assert!(super::decode_base64("a*b=").is_err(), "not base64");
-        assert!(
-            super::decode_base64("/w==").is_err(),
-            "a byte that is not UTF-8 is refused rather than mangled"
+        assert_eq!(
+            super::decode_base64("/w==").expect("a byte that is not UTF-8"),
+            "\u{fffd}",
+            "output that is not text is decoded lossily, not refused: its exit code still counts"
         );
     }
 

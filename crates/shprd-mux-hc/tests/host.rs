@@ -485,6 +485,28 @@ fn a_document_is_written_compare_and_set() {
 }
 
 #[test]
+fn a_one_shot_command_answers_even_when_its_output_is_not_text() {
+    // A one-shot command may write something that is not UTF-8; its exit code is
+    // still the answer, so the output is decoded lossily rather than the whole
+    // verb refused over one undecodable byte.
+    let (_fake, host) = host("normal");
+    let outcome = host
+        .exec(&["binary-output".to_string()], Path::new("/tmp"))
+        .expect("the core runs it");
+    assert!(outcome.exited);
+    assert_eq!(outcome.exit_code, Some(0));
+    let text = outcome.output.unwrap_or_default();
+    assert!(
+        text.contains("exec ok"),
+        "the rest of the output survives: {text:?}"
+    );
+    assert!(
+        text.contains('\u{fffd}'),
+        "the undecodable bytes are replaced: {text:?}"
+    );
+}
+
+#[test]
 fn a_one_shot_command_runs_in_the_core() {
     let (fake, host) = host("normal");
     let outcome = host

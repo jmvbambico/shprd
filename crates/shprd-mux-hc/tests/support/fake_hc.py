@@ -396,8 +396,12 @@ class Fake:
             return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
                                    "result": {"version": held + 1}})
         if method == "machine.exec":
+            # A command named `binary-output` writes bytes that are not text, as a
+            # real one summarizing a file may; everything else says `exec ok`.
+            argv = params.get("argv") or []
+            wrote = b"\xff\xfe exec ok" if argv[:1] == ["binary-output"] else b"exec ok"
             return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
-                "code": 0, "stdout": base64.b64encode(b"exec ok").decode(),
+                "code": 0, "stdout": base64.b64encode(wrote).decode(),
                 "stderr": "", "ms": 1, "truncated": False, "timed_out": False}})
         if method == "terminal.label":
             record, wanted = self.terminal_of(params)
