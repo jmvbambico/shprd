@@ -696,3 +696,65 @@ fn a_json_service_keeps_stdout_one_document_when_the_run_starts() {
     let value: Value = serde_json::from_str(&out).expect("stdout is still one JSON document");
     assert!(value["run"].is_null(), "{value}");
 }
+
+#[test]
+fn a_service_says_what_it_did_about_the_repositorys_workspace() {
+    // Bug 6 of the M9 gate: the workspace label is derived from the folder
+    // name, so leaving the workspace to a person is a run that refuses every
+    // pass until someone reads a refusal. The service prepares it at startup and
+    // says which it did. Here the socket names no host at all, so the banner
+    // says it could not, in one line that names the label it wanted.
+    let label = |repo: &Path| {
+        format!(
+            "shprd · {}",
+            repo.file_name().expect("a repo name").to_string_lossy()
+        )
+    };
+
+    let (repo, state, home) = repo_with_a_run();
+    let out_path = state.path().join("serve.out");
+    let err_path = state.path().join("serve.err");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        false,
+        Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
+        Stdio::from(fs::File::create(&err_path).expect("the stderr file")),
+    );
+    let banner = read_when(&out_path, "workspace:");
+    assert!(
+        banner.contains(&label(repo.path())),
+        "the banner names the label a run needs: {banner}"
+    );
+    assert!(
+        banner.contains("not ready"),
+        "and says the workspace is not there: {banner}"
+    );
+    let warning = read_when(&err_path, "not ready");
+    assert!(
+        warning.contains(&label(repo.path())),
+        "the warning names the label too: {warning}"
+    );
+    service.stop();
+
+    // The machine-readable banner carries the same news, as one document.
+    let (repo, state, home) = repo_with_a_run();
+    let out_path = state.path().join("serve.out");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        true,
+        Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
+        Stdio::null(),
+    );
+    let banner = read_when(&out_path, "\"serving\"");
+    let value: Value = serde_json::from_str(&banner).expect("the banner is one JSON document");
+    assert_eq!(value["workspace"]["state"], "unavailable", "{value}");
+    let reason = value["workspace"]["reason"]
+        .as_str()
+        .expect("the reason is a string");
+    assert!(reason.contains(&label(repo.path())), "{reason}");
+    service.stop();
+}

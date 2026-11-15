@@ -27,6 +27,8 @@ pub enum Call {
     Capabilities,
     /// `find_workspace(name)`.
     FindWorkspace(String),
+    /// `list_workspaces()`.
+    ListWorkspaces,
     /// `create_workspace(name, cwd)`.
     CreateWorkspace(String, PathBuf),
     /// `focus_workspace(workspace)`.
@@ -348,6 +350,12 @@ impl Mux for FakeMux {
         let mut inner = self.lock()?;
         inner.calls.push(Call::FindWorkspace(name.to_string()));
         Ok(inner.workspaces.iter().find(|ws| ws.name == name).cloned())
+    }
+
+    fn list_workspaces(&self) -> Result<Vec<Workspace>> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::ListWorkspaces);
+        Ok(inner.workspaces.clone())
     }
 
     fn create_workspace(&self, name: &str, cwd: &Path) -> Result<Workspace> {

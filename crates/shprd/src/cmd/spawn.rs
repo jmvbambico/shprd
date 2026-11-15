@@ -393,19 +393,119 @@ pub(crate) fn worker_title(agent: &str, task: &str) -> String {
     format!("{agent}·{task}")
 }
 
-/// The repository's workspace, or an error telling the human to create it.
+/// A repository's own name: the last component of its path.
+///
+/// It is the input to [`workspace_name`], so this is where the label's one
+/// derivation gets its input from, for a caller holding a path rather than a
+/// [`SpawnEnv`] (`shprd serve` does, before there is a run to spawn for).
+pub(crate) fn repo_name(repo: &Path) -> Result<String, CliError> {
+    repo.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))
+}
+
+/// The repository's workspace, or an error telling the human what to do.
 pub(crate) fn workspace_of(
     mux: &dyn Mux,
     env: &SpawnEnv<'_>,
 ) -> Result<shprd_mux::Workspace, CliError> {
-    let name = workspace_name(&env.repo_name);
-    mux.find_workspace(&name)
-        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
-        .ok_or_else(|| {
-            CliError::Invalid(anyhow!(
-                "no workspace {name:?} yet: create it in your multiplexer first"
-            ))
-        })
+    workspace_named(mux, &workspace_name(&env.repo_name))
+}
+
+/// The workspace labelled `name`, or the refusal a missing one earns.
+///
+/// The label is derived ([`workspace_name`]) and a host refuses a duplicate, so
+/// nothing is ever renamed or adopted here: the workspace shprd uses is the one
+/// whose label is exactly `name`. A refusal names that label and the ones the
+/// host does have, because the label is the one thing a person can fix.
+pub(crate) fn workspace_named(mux: &dyn Mux, name: &str) -> Result<shprd_mux::Workspace, CliError> {
+    let found = mux.find_workspace(name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the workspace {name:?}")))
+    })?;
+    if let Some(workspace) = found {
+        return Ok(workspace);
+    }
+    // A host that cannot list still gets the refusal; it just cannot name what
+    // it does have, and says so rather than guessing.
+    let existing = match mux.list_workspaces() {
+        Ok(workspaces) => workspaces
+            .into_iter()
+            .map(|workspace| workspace.name)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Err(CliError::Invalid(anyhow!(missing_workspace_message(
+        name, &existing
+    ))))
+}
+
+/// What a person reads when the workspace a run needs is not there.
+///
+/// The expected label comes first and the labels the host does have follow, so
+/// a workspace named almost right (`shprd · gate repo` for the folder `repo`)
+/// is visible as the difference it is. `shprd serve` creates the workspace at
+/// startup, which is why the refusal can point at it.
+pub(crate) fn missing_workspace_message(expected: &str, existing: &[String]) -> String {
+    let mut message = format!(
+        "no workspace {expected:?} yet: a run's tabs open in the workspace labelled \
+         `shprd · <repo folder name>`, and shprd leaves every other workspace alone. \
+         `shprd serve` creates it at startup; without a service, create it in your multiplexer \
+         with that exact label"
+    );
+    match existing.split_first() {
+        Some(_) => {
+            let listed: Vec<String> = existing.iter().map(|name| format!("{name:?}")).collect();
+            message.push_str(&format!(". The host has: {}", listed.join(", ")));
+        }
+        None => message.push_str(". The host has no workspace at all"),
+    }
+    message
+}
+
+/// A repository's workspace, made at the repository root when the host has none.
+///
+/// `shprd serve` calls this at startup: the label is derived from the folder
+/// name rather than chosen by a person, so leaving the workspace to be created
+/// by hand is a run that silently cannot start a task (M9 gate bug 6). Only the
+/// workspace with exactly that label is reused, and only that label is created;
+/// anything else on the host is left alone.
+pub(crate) struct PreparedWorkspace {
+    /// The workspace tabs open in.
+    pub(crate) workspace: shprd_mux::Workspace,
+    /// True when this call created it, false when it was already there.
+    pub(crate) created: bool,
+}
+
+/// [`PreparedWorkspace`]: find the repository's workspace, or create it.
+pub(crate) fn ensure_workspace(mux: &dyn Mux, repo: &Path) -> Result<PreparedWorkspace, CliError> {
+    let name = workspace_name(&repo_name(repo)?);
+    let found = mux.find_workspace(&name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the workspace {name:?}")))
+    })?;
+    if let Some(workspace) = found {
+        return Ok(PreparedWorkspace {
+            workspace,
+            created: false,
+        });
+    }
+    match mux.create_workspace(&name, repo) {
+        Ok(workspace) => Ok(PreparedWorkspace {
+            workspace,
+            created: true,
+        }),
+        // Two services can start at once; the loser of the race finds what the
+        // winner made rather than reporting a failure it can do nothing about.
+        Err(err) => match mux.find_workspace(&name) {
+            Ok(Some(workspace)) => Ok(PreparedWorkspace {
+                workspace,
+                created: false,
+            }),
+            _ => Err(CliError::other(anyhow!(err).context(format!(
+                "creating the workspace {name:?} at {}",
+                repo.display()
+            )))),
+        },
+    }
 }
 
 /// Opens the agent's tab and starts its CLI in it.
@@ -1537,11 +1637,7 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         .run
         .as_ref()
         .ok_or_else(|| CliError::other(anyhow!("no run yet: start one with `shprd run start`")))?;
-    let repo_name = ctx
-        .root
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", ctx.root.display())))?;
+    let repo_name = repo_name(&ctx.root)?;
     let base_env = std::env::vars().collect();
     Ok(SpawnEnv {
         ctx,
@@ -1605,19 +1701,7 @@ fn prompt_in(
 ) -> Result<(), CliError> {
     let run = active_run(ctx)?;
     let repo = &ctx.root;
-    let repo_name = repo
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))?;
-    let name = workspace_name(&repo_name);
-    let workspace = mux
-        .find_workspace(&name)
-        .map_err(|err| CliError::other(anyhow!(err).context("looking for the workspace")))?
-        .ok_or_else(|| {
-            CliError::Invalid(anyhow!(
-                "no workspace {name:?} yet: create it in your multiplexer first"
-            ))
-        })?;
+    let workspace = workspace_named(mux, &workspace_name(&repo_name(repo)?))?;
     let tabs = mux
         .list_tabs(&workspace.id)
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
@@ -3284,6 +3368,109 @@ project_dirs = []
             }
         };
         assert!(message.contains("no active run"), "{message}");
+    }
+
+    #[test]
+    fn a_missing_workspace_is_created_at_the_repository_root() {
+        // Bug 6 of the M9 gate: the label is derived from the folder name and
+        // the workspace was left to a person, so a run refused every pass until
+        // someone read the refusal. `serve` creates it instead, with exactly that
+        // label, at the repository root.
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let name = workspace_name(&scratch.repo_name());
+
+        let prepared = ensure_workspace(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(prepared.created, "the workspace was missing, so it is made");
+        assert_eq!(prepared.workspace.name, name);
+        assert_eq!(
+            mux.calls(),
+            vec![
+                Call::FindWorkspace(name.clone()),
+                Call::CreateWorkspace(name, scratch.root().to_path_buf()),
+            ],
+            "one lookup, one creation, and nothing else touched"
+        );
+    }
+
+    #[test]
+    fn an_existing_workspace_is_reused_and_no_other_is_created() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let human = mux
+            .create_workspace("my own work", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let ours = mux
+            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        let prepared = ensure_workspace(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!prepared.created, "the workspace was already there");
+        assert_eq!(prepared.workspace.id, ours.id, "the one with that label");
+        assert_eq!(
+            mux.calls(),
+            vec![Call::FindWorkspace(workspace_name(&scratch.repo_name()))],
+            "a lookup only: nothing is created, renamed or focused"
+        );
+        let workspaces = mux.list_workspaces().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            workspaces.iter().any(|found| found.id == human.id),
+            "the person's own workspace is untouched: {workspaces:?}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_names_the_expected_label_and_the_ones_the_host_has() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+        // The gate's attempt A: a workspace whose label is almost right.
+        mux.create_workspace("shprd · gate repo", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        mux.create_workspace("my own work", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let text = match workspace_of(&mux, &env) {
+            Ok(workspace) => panic!("the workspace {} was accepted", workspace.id),
+            Err(err) => err.to_string(),
+        };
+
+        let expected = workspace_name(&scratch.repo_name());
+        assert!(
+            text.contains(&format!("{expected:?}")),
+            "the expected label is named: {text}"
+        );
+        assert!(
+            text.contains("\"shprd · gate repo\""),
+            "the near miss is listed: {text}"
+        );
+        assert!(
+            text.contains("\"my own work\""),
+            "every workspace the host has is listed: {text}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_says_when_the_host_has_no_workspace_at_all() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+
+        let text = match workspace_of(&mux, &env) {
+            Ok(workspace) => panic!("the workspace {} was accepted", workspace.id),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(text.contains("no workspace at all"), "{text}");
+        assert!(
+            text.contains("shprd serve"),
+            "the verb that fixes it: {text}"
+        );
     }
 }
 

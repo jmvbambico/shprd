@@ -43,6 +43,17 @@ pub trait Mux: Send + Sync {
     /// is not an error — the caller will create it.
     fn find_workspace(&self, name: &str) -> Result<Option<Workspace>>;
 
+    /// Every workspace the host has, in the host's display order.
+    ///
+    /// Only where a name cannot be guessed: a refusal is worth reading when it
+    /// says which label shprd expected *and* which ones the host has, and there
+    /// is no other way to learn the latter. A host that cannot list answers
+    /// [`MuxError::Unsupported`], which is the trait's "cannot do that" signal;
+    /// callers then say only what they expected, rather than failing.
+    fn list_workspaces(&self) -> Result<Vec<Workspace>> {
+        Err(MuxError::Unsupported("list workspaces"))
+    }
+
     /// Create a workspace named `name`, with its first pane started in `cwd`.
     /// Fails with [`MuxError::Command`] if the host refuses (e.g. duplicate
     /// name) rather than silently returning the existing one.
