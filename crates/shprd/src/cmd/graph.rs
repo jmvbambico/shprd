@@ -44,6 +44,13 @@ pub enum Plan {
         /// Addresses to forget with `hc rm`, in list order.
         forget: Vec<String>,
     },
+    /// A live terminal carries the block's name, and what it runs has to be read
+    /// before it can be said whether that is this run: `hc ls` does not list a
+    /// terminal's argv on hc 0.1.21 (measured — `hc get` does).
+    Read {
+        /// Its address, to ask about.
+        address: String,
+    },
     /// A live terminal already draws this run.
     Reuse {
         /// Its address, for the log line.
@@ -65,27 +72,30 @@ pub enum Plan {
 /// Decides from `hc ls --all --json`'s terminals whether the block's terminal has
 /// to be started.
 ///
-/// `run_json` is the document the block should be drawing, as a path string: a
-/// terminal is running this run when its argv names it, which is the same rule
-/// the window's mod applies.
+/// The list is the cheap question — name and state, which every `hc` answers — and
+/// that is what most of this needs: a finished terminal to forget, no terminal at
+/// all, or nothing to draw. What a live one is *running* is the expensive
+/// question, and on hc 0.1.21 the list does not carry it (measured: a live
+/// terminal's record there is address, agent, cwd, name, state and turn, with no
+/// argv at all), so a live terminal with the block's name comes back as
+/// [`Plan::Read`] and [`decide`] settles it from `hc get`'s record.
 pub fn plan(terminals: &[Value], run_json: &str) -> Plan {
     let named: Vec<&Value> = terminals
         .iter()
         .filter(|terminal| terminal["name"].as_str() == Some(TERMINAL))
         .collect();
-    let live: Vec<&&Value> = named
+    if let Some(terminal) = named
         .iter()
-        .filter(|terminal| terminal["state"].as_str() != Some("finished"))
-        .collect();
-    if let Some(terminal) = live.iter().find(|terminal| names(terminal, run_json)) {
-        return Plan::Reuse {
-            address: terminal["address"].as_str().unwrap_or_default().to_string(),
-        };
-    }
-    if let Some(other) = live.first() {
-        let argv = other["argv"].to_string();
-        return Plan::Leave {
-            reason: format!("`{TERMINAL}` is already running {argv}"),
+        .find(|terminal| terminal["state"].as_str() != Some("finished"))
+    {
+        let address = terminal["address"].as_str().unwrap_or_default().to_string();
+        return match names(terminal, run_json) {
+            Some(true) => Plan::Reuse { address },
+            Some(false) => Plan::Leave {
+                reason: format!("`{TERMINAL}` is already running {}", terminal["argv"]),
+            },
+            // The list did not say, which is what hc 0.1.21's answer looks like.
+            None => Plan::Read { address },
         };
     }
     if run_json.trim().is_empty() {
@@ -102,15 +112,40 @@ pub fn plan(terminals: &[Value], run_json: &str) -> Plan {
     }
 }
 
-/// Whether a terminal's argv names `run_json`.
-fn names(terminal: &Value, run_json: &str) -> bool {
-    match terminal["argv"].as_array() {
-        Some(argv) => argv
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|part| part.contains(run_json)),
-        None => false,
+/// What one live terminal's own record (`hc get <address> --json`) says about it.
+///
+/// `Reuse` when its argv names this run's document, `Leave` when it draws another,
+/// and `Reuse` again when the record still carries no argv: the name is taken
+/// either way, so a second terminal could not have it, and the window's note —
+/// which reads the *app's* terminal list, argv included — is what tells a person
+/// when a graph is showing another repository.
+pub fn decide(address: &str, record: &Value, run_json: &str) -> Plan {
+    match names(record, run_json) {
+        Some(true) => Plan::Reuse {
+            address: address.to_string(),
+        },
+        Some(false) => Plan::Leave {
+            reason: format!("`{TERMINAL}` is already running {}", record["argv"]),
+        },
+        None => Plan::Reuse {
+            address: address.to_string(),
+        },
     }
+}
+
+/// Whether a terminal's argv names `run_json`, or `None` when the record carries
+/// no argv to read.
+///
+/// The third answer is what hc 0.1.21's `ls` gives for every terminal, so it is a
+/// fact about the tool and not an error: a caller that needs the answer asks
+/// `hc get`, which does carry it.
+fn names(record: &Value, run_json: &str) -> Option<bool> {
+    let argv = record.get("argv")?.as_array()?;
+    let parts: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.iter().any(|part| part.contains(run_json)))
 }
 
 /// The command that keeps the document on screen.
@@ -159,7 +194,25 @@ pub fn ensure(resolution: &Resolution, dagr: &Dagr, repo: &Path) {
         }
     };
     let terminals: Vec<Value> = listing["terminals"].as_array().cloned().unwrap_or_default();
-    match plan(&terminals, &document.display().to_string()) {
+    let decided = match plan(&terminals, &document.display().to_string()) {
+        // A live terminal has the name; `hc get` is the verb that says what it is
+        // running. Without it the service cannot tell its own graph from another
+        // run's, and starting a second terminal is not an option (the name is
+        // taken), so a read that fails leaves the terminal as it is.
+        Plan::Read { address } => match hc(&endpoint, &["get", &address, "--json"]) {
+            Ok(record) => decide(&address, &record, &document.display().to_string()),
+            Err(err) => {
+                tracing::warn!(
+                    %address,
+                    %err,
+                    "could not read the graph terminal's argv; leaving it as it is"
+                );
+                return;
+            }
+        },
+        decided => decided,
+    };
+    match decided {
         Plan::Start { forget } => {
             for address in forget {
                 if let Err(err) = hc(&endpoint, &["rm", &address]) {
@@ -185,9 +238,15 @@ pub fn ensure(resolution: &Resolution, dagr: &Dagr, repo: &Path) {
                 }
             }
         }
-        Plan::Reuse { address } => tracing::debug!(%address, "the graph's terminal is already up"),
-        Plan::Leave { reason } => tracing::warn!(%reason, "the graph block shows another run"),
+        Plan::Reuse { address } => {
+            tracing::debug!(%address, "the graph's terminal is already up");
+        }
+        Plan::Leave { reason } => tracing::info!(%reason, "the graph block shows another run"),
         Plan::Skip { reason } => tracing::debug!(%reason, "nothing to draw yet"),
+        // Settled above: a live terminal always comes back as Reuse or Leave.
+        Plan::Read { address } => {
+            tracing::debug!(%address, "the graph's terminal was not read");
+        }
     }
 }
 
@@ -240,28 +299,35 @@ mod tests {
     /// The document a run projects to, as the block names it.
     const DOC: &str = "/repo/.dagr/run.json";
 
-    /// One `hc ls` terminal.
-    fn terminal(address: &str, state: &str, argv: &[&str]) -> Value {
+    /// One `hc ls --all --json` terminal, exactly as hc 0.1.21 answers: address,
+    /// agent, cwd, name, state and turn — **no argv**, live or finished. A test
+    /// that invented one here would hide the reason [`Plan::Read`] exists.
+    fn listed(address: &str, state: &str) -> Value {
         json!({
             "address": address,
+            "agent": "sh",
+            "cwd": "/repo",
             "name": TERMINAL,
             "state": state,
-            "argv": argv,
+            "turn": 0,
         })
     }
 
-    /// The argv of a running graph terminal, for `document`.
-    fn drawing(document: &str) -> Vec<String> {
-        argv(Path::new("/opt/dagr"), Path::new(document))
+    /// The `hc get <address> --json` record of the block's terminal, running
+    /// `document`.
+    fn got(address: &str, document: &str) -> Value {
+        let command = argv(Path::new("/opt/dagr"), Path::new(document));
+        json!({
+            "address": address,
+            "name": TERMINAL,
+            "state": "live",
+            "argv": command,
+        })
     }
 
     #[test]
     fn nothing_running_starts_it() {
-        let terminals = vec![terminal(
-            "t3",
-            "finished",
-            &drawing(DOC).iter().map(String::as_str).collect::<Vec<_>>(),
-        )];
+        let terminals = vec![listed("t3", "finished")];
         assert_eq!(
             plan(&terminals, DOC),
             Plan::Start {
@@ -274,38 +340,69 @@ mod tests {
             Plan::Start { forget: Vec::new() },
             "nothing there at all is a plain start"
         );
-    }
-
-    #[test]
-    fn a_live_terminal_drawing_this_run_is_reused() {
-        let terminals = vec![terminal(
-            "t9",
-            "live",
-            &drawing(DOC).iter().map(String::as_str).collect::<Vec<_>>(),
-        )];
         assert_eq!(
-            plan(&terminals, DOC),
-            Plan::Reuse {
-                address: "t9".to_string()
+            plan(&terminals, "  "),
+            Plan::Skip {
+                reason: "there is no document to draw".to_string()
             },
-            "a service restarted beside its own terminal must not start a second"
+            "a finished one and nothing to draw is no start"
         );
     }
 
     #[test]
-    fn a_live_terminal_drawing_another_run_is_left_alone() {
-        let terminals = vec![terminal(
-            "t9",
-            "live",
-            &drawing("/elsewhere/.dagr/run.json")
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        )];
-        match plan(&terminals, DOC) {
+    fn a_live_terminal_the_list_does_not_describe_is_read() {
+        // The answer hc 0.1.21 gives: a live terminal with no argv in the list,
+        // so whether it is this run's is a second question.
+        let terminals = vec![listed("t9", "live")];
+        assert_eq!(
+            plan(&terminals, DOC),
+            Plan::Read {
+                address: "t9".to_string()
+            },
+            "hc ls carries no argv on this hc, so it cannot be decided from the list"
+        );
+    }
+
+    #[test]
+    fn a_list_that_carries_argv_settles_it_without_a_second_call() {
+        let ours = got("t9", DOC);
+        assert_eq!(
+            plan(&[ours], DOC),
+            Plan::Reuse {
+                address: "t9".to_string()
+            },
+            "a core that does list argv is answered from the list"
+        );
+        let theirs = got("t9", "/elsewhere/.dagr/run.json");
+        match plan(&[theirs], DOC) {
             Plan::Leave { reason } => assert!(reason.contains("elsewhere"), "{reason}"),
             other => panic!("expected Leave, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_get_record_says_whether_it_draws_this_run() {
+        assert_eq!(
+            decide("t9", &got("t9", DOC), DOC),
+            Plan::Reuse {
+                address: "t9".to_string()
+            },
+            "a restarted service beside its own terminal reuses it"
+        );
+        match decide("t9", &got("t9", "/elsewhere/.dagr/run.json"), DOC) {
+            Plan::Leave { reason } => assert!(reason.contains("elsewhere"), "{reason}"),
+            other => panic!("expected Leave, got {other:?}"),
+        }
+        // A record that still will not say: the name is taken either way, so a
+        // second terminal cannot start, and the window's note is what reports a
+        // graph showing another repository.
+        assert_eq!(
+            decide("t9", &listed("t9", "live"), DOC),
+            Plan::Reuse {
+                address: "t9".to_string()
+            },
+            "an unreadable argv is not a reason to call the block wrong"
+        );
     }
 
     #[test]
@@ -314,7 +411,6 @@ mod tests {
             "address": "t1",
             "name": "shprd-serve",
             "state": "live",
-            "argv": ["shprd", "serve"],
         })];
         assert_eq!(plan(&terminals, DOC), Plan::Start { forget: Vec::new() });
     }
