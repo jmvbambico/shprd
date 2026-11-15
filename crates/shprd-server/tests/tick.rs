@@ -876,6 +876,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
             changed_paths: vec![String::from("task-A.txt")],
             commit: Some(head),
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         },
     );
     append(
@@ -940,6 +941,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
         archive: None,
         prompt: None,
         ask: shprd_views::brief::AskRoute::Hook,
+        proof: true,
         settings: None,
         role: None,
         warnings: &[],
@@ -978,6 +980,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
             changed_paths: vec![String::from("task-A.txt")],
             commit: Some(fixed),
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         },
     );
     append(
@@ -1865,6 +1868,7 @@ fn a_review_verdict_that_spends_the_rounds_leaves_one_card() {
             changed_paths: Vec::new(),
             commit: Some(String::from("abc123")),
             skills_used: Vec::new(),
+            proofs: Vec::new(),
         },
         &SystemClock,
     )
