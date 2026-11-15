@@ -62,7 +62,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // leaving a pass to refuse (M9 gate bug 6). A host that cannot be reached is
     // a warning and not a refusal to serve: the board is still what a person
     // reads, and the next start can make the space.
-    let workspace = prepare_space(&crate::cmd::spawn::real_mux(), &ctx.root);
+    let workspace = prepare_space(&crate::cmd::spawn::real_mux(), &ctx.root, &home);
     if let SpaceNotice::Unavailable(reason) = &workspace {
         tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
     }
@@ -169,12 +169,10 @@ impl shprd_server::ChatWriter for HostChat {
         // line is theirs — the API never writes to the ledger for a chat turn,
         // so nothing here can be mistaken for an engine decision.
         let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
+        let home = resolve_home(None).map_err(|err| err.to_string())?;
         match space {
-            None => crate::cmd::spawn::prompt_coordinator(&mux, &ctx, text),
-            Some(task) => {
-                let home = resolve_home(None).map_err(|err| err.to_string())?;
-                crate::cmd::spawn::prompt_in(&mux, &home, &ctx, task, text)
-            }
+            None => crate::cmd::spawn::prompt_coordinator(&mux, &home, &ctx, text),
+            Some(task) => crate::cmd::spawn::prompt_in(&mux, &home, &ctx, task, text),
         }
         .map_err(|err| err.to_string())
     }
@@ -189,10 +187,12 @@ impl shprd_server::ChatWriter for HostChat {
 /// startup: they come and go with their tasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SpaceNotice {
-    /// The space was already there and is reused.
-    Reused(String),
-    /// The space was missing and is created at the repository root.
-    Created(String),
+    /// The space was already there and is reused, with the pane recorded for the
+    /// coordinator's chat when the space has a tab.
+    Reused(String, Option<String>),
+    /// The space was missing and is created at the repository root, with that
+    /// pane.
+    Created(String, Option<String>),
     /// It could not be found or made; the reason names the label it wanted.
     Unavailable(String),
 }
@@ -203,11 +203,28 @@ pub(crate) enum SpaceNotice {
 /// states the convention, but the folder name is load-bearing and a label that
 /// was almost right made every pass refuse). A host that cannot be asked at all
 /// is reported rather than fatal, because the API is useful without one.
-fn prepare_space(mux: &dyn Host, repo: &Path) -> SpaceNotice {
-    match crate::cmd::spawn::ensure_repo_space(mux, repo) {
-        Ok(prepared) if prepared.created => SpaceNotice::Created(prepared.space.name),
-        Ok(prepared) => SpaceNotice::Reused(prepared.space.name),
-        Err(err) => SpaceNotice::Unavailable(err.to_string()),
+fn prepare_space(mux: &dyn Host, repo: &Path, home: &Path) -> SpaceNotice {
+    let prepared = match crate::cmd::spawn::ensure_repo_space(mux, repo) {
+        Ok(prepared) => prepared,
+        Err(err) => return SpaceNotice::Unavailable(err.to_string()),
+    };
+    // The coordinator's chat types into this space, and nothing lists the space
+    // for it later, so the pane is recorded here — once, by the start that made
+    // or found the space. A space with no tab records nothing, and a chat then
+    // refuses rather than guessing at a pane.
+    let pane = match crate::cmd::spawn::record_coordinator_pane(home, mux, &prepared.space) {
+        Ok(pane) => pane.map(|pane| pane.as_str().to_string()),
+        // A record that cannot be written is not a reason to refuse to serve:
+        // the board is still what a person reads, and the chat says why it has
+        // nowhere to type.
+        Err(err) => {
+            tracing::warn!(%err, "the coordinator's pane could not be recorded");
+            None
+        }
+    };
+    match prepared.created {
+        true => SpaceNotice::Created(prepared.space.name, pane),
+        false => SpaceNotice::Reused(prepared.space.name, pane),
     }
 }
 
@@ -372,14 +389,19 @@ fn announce(
 /// banner a person can read, and the failure to prepare the space is in the
 /// place the rest of the setup is.
 fn space_line(notice: &SpaceNotice, root: &Path) -> String {
+    let coordinator = |pane: &Option<String>| match pane {
+        Some(pane) => format!(", the coordinator's pane {pane}"),
+        None => String::from(", no tab for the coordinator yet"),
+    };
     match notice {
-        SpaceNotice::Created(label) => {
-            format!(
-                "created {label:?} at the repository root {}",
-                root.display()
-            )
+        SpaceNotice::Created(label, pane) => format!(
+            "created {label:?} at the repository root {}{}",
+            root.display(),
+            coordinator(pane)
+        ),
+        SpaceNotice::Reused(label, pane) => {
+            format!("{label:?} (already there, reused){}", coordinator(pane))
         }
-        SpaceNotice::Reused(label) => format!("{label:?} (already there, reused)"),
         SpaceNotice::Unavailable(reason) => format!("not ready: {reason}"),
     }
 }
@@ -391,11 +413,11 @@ fn space_line(notice: &SpaceNotice, root: &Path) -> String {
 /// the only thing that says which label was wanted.
 fn space_json(notice: &SpaceNotice) -> Value {
     match notice {
-        SpaceNotice::Created(label) => {
-            serde_json::json!({ "label": label, "state": "created" })
+        SpaceNotice::Created(label, pane) => {
+            serde_json::json!({ "label": label, "state": "created", "pane": pane })
         }
-        SpaceNotice::Reused(label) => {
-            serde_json::json!({ "label": label, "state": "reused" })
+        SpaceNotice::Reused(label, pane) => {
+            serde_json::json!({ "label": label, "state": "reused", "pane": pane })
         }
         SpaceNotice::Unavailable(reason) => {
             serde_json::json!({ "label": Value::Null, "state": "unavailable", "reason": reason })
@@ -408,6 +430,14 @@ mod tests {
     use super::*;
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
+
+    /// The id of the space `label` names, for the calls that take one.
+    fn notice_space(mux: &FakeMux, label: &str) -> shprd_mux::SpaceId {
+        mux.find_space(label)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("{label:?} is there"))
+            .id
+    }
 
     /// The label a repository's own space carries, as the banner reports it.
     fn label_of(repo: &Path) -> String {
@@ -423,19 +453,30 @@ mod tests {
         // the space was left to a person, so a run refused every pass. The
         // service creates it, with exactly that label, where the repository is.
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_starter_tab();
         let label = label_of(repo.path());
 
-        let notice = prepare_space(&mux, repo.path());
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let notice = prepare_space(&mux, repo.path(), home.path());
 
-        assert_eq!(notice, SpaceNotice::Created(label.clone()));
+        let SpaceNotice::Created(reported, pane) = &notice else {
+            panic!("the space is created, not {notice:?}");
+        };
+        assert_eq!(reported, &label);
+        // The space's own first tab is the pane the chat may reach, and it is
+        // recorded once, here.
+        let recorded =
+            std::fs::read_to_string(crate::cmd::spawn::coordinator_pane_path(home.path()))
+                .unwrap_or_else(|err| panic!("the pane is recorded: {err}"));
+        assert_eq!(recorded.trim(), pane.clone().unwrap_or_default());
         assert_eq!(
             mux.calls(),
             vec![
                 Call::FindSpace(label.clone()),
                 Call::CreateSpace(label.clone(), repo.path().to_path_buf()),
+                Call::ListTabs(notice_space(&mux, &label)),
             ],
-            "one lookup, one creation, and nothing else touched"
+            "one lookup, one creation, one look at its tabs, and nothing else touched"
         );
         let line = space_line(&notice, repo.path());
         assert!(line.contains("created"), "{line}");
@@ -445,20 +486,31 @@ mod tests {
     #[test]
     fn a_service_reuses_the_space_that_is_already_there() {
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_starter_tab();
         let label = label_of(repo.path());
         let made = mux
             .create_space(&label, repo.path())
             .unwrap_or_else(|err| panic!("{err}"));
         let _ = mux.take_calls();
 
-        let notice = prepare_space(&mux, repo.path());
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let notice = prepare_space(&mux, repo.path(), home.path());
 
-        assert_eq!(notice, SpaceNotice::Reused(label.clone()));
+        let SpaceNotice::Reused(reported, pane) = &notice else {
+            panic!("the space is reused, not {notice:?}");
+        };
+        assert_eq!(reported, &label);
+        assert!(
+            pane.is_some(),
+            "the pane the chat may reach is recorded on a reused space too"
+        );
         assert_eq!(
             mux.calls(),
-            vec![Call::FindSpace(label)],
-            "a lookup only: nothing is created, renamed or focused"
+            vec![
+                Call::FindSpace(label.clone()),
+                Call::ListTabs(notice_space(&mux, &label)),
+            ],
+            "a lookup, then the tabs to find the pane: nothing created, renamed or focused"
         );
         let found = mux
             .find_space(&made.name)

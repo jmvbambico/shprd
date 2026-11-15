@@ -1911,14 +1911,85 @@ pub(crate) fn prompt_in(
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
 }
 
+/// Where the pane shprd prepared for the coordinator is written.
+///
+/// It is `<home>/.shprd/coordinator.pane`, beside the tab records: the service
+/// writes the pane it prepared when it made or found the repository's space,
+/// and a chat line is typed there. One line, the host's own pane id.
+pub(crate) fn coordinator_pane_path(home: &Path) -> PathBuf {
+    home.join(".shprd").join("coordinator.pane")
+}
+
+/// Records the pane the repository's own space holds for the coordinator.
+///
+/// `shprd serve` calls this once it has made or found the space: the pane is
+/// the space's own first tab, which is where a person starts the coordinator, so
+/// it is the one pane a chat line may reach. Returns the pane it recorded, or
+/// `None` when the space has no tab to name.
+pub(crate) fn record_coordinator_pane(
+    home: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Result<Option<PaneId>, CliError> {
+    let tabs = mux
+        .list_tabs(&space.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing the space's tabs")))?;
+    let Some(tab) = tabs.first() else {
+        return Ok(None);
+    };
+    let path = coordinator_pane_path(home);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!("making {}", dir.display())))
+        })?;
+    }
+    std::fs::write(&path, format!("{}\n", tab.root_pane.as_str())).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("writing {}", path.display())))
+    })?;
+    Ok(Some(tab.root_pane.clone()))
+}
+
+/// The pane recorded for the coordinator, when it is still one of the space's.
+///
+/// The record is only trusted while the pane is still a tab of the repository's
+/// own space: a person who closed that tab and left a shell in another one must
+/// not be typed into, so a stale record is a refusal rather than a fallback.
+fn recorded_coordinator_pane(
+    home: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Option<PaneId> {
+    let path = coordinator_pane_path(home);
+    let wanted = std::fs::read_to_string(path).ok()?;
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return None;
+    }
+    let tabs = mux.list_tabs(&space.id).ok()?;
+    tabs.into_iter()
+        .map(|tab| tab.root_pane)
+        .find(|pane| pane.as_str() == wanted)
+}
+
 /// Sends one turn of input to the run's coordinator, as the person.
 ///
-/// The coordinator is the one pane shprd types into that is not a task's: the
-/// pane the run recorded when it launched one (`OrchestratorLaunched`), and
-/// otherwise the first tab of the repository's own space
-/// (`shprd · <folder>`), which is where `shprd serve` puts it. Both are panes
-/// shprd itself opened, so a chat line can never land in a person's own tab.
-pub(crate) fn prompt_coordinator(mux: &dyn Host, ctx: &Ctx, text: &str) -> Result<(), CliError> {
+/// Two panes are reachable, and both are named rather than guessed:
+///
+/// 1. the pane the run recorded when it launched a coordinator
+///    (`OrchestratorLaunched`), and
+/// 2. the pane `shprd serve` recorded for the repository's own space
+///    ([`record_coordinator_pane`]), which is where a person starts the
+///    coordinator in the M10 flow.
+///
+/// A pane that is neither is a refusal: shprd never types into a tab it cannot
+/// name, so a chat line cannot land in whatever happens to be first on the
+/// host's bar.
+pub(crate) fn prompt_coordinator(
+    mux: &dyn Host,
+    home: &Path,
+    ctx: &Ctx,
+    text: &str,
+) -> Result<(), CliError> {
     let state = ctx.state()?;
     if let Some(orchestrator) = state.orchestrator.as_ref() {
         let pane = PaneId::new(orchestrator.pane.clone());
@@ -1927,25 +1998,25 @@ pub(crate) fn prompt_coordinator(mux: &dyn Host, ctx: &Ctx, text: &str) -> Resul
             .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")));
     }
     let name = repo_space_name(&repo_name(&ctx.root)?);
-    let Some(space) = mux.find_space(&name).map_err(|err| {
+    let space = mux.find_space(&name).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
-    })?
-    else {
-        return Err(no_coordinator());
+    })?;
+    let Some(space) = space else {
+        return Err(no_coordinator(&name));
     };
-    let tabs = mux
-        .list_tabs(&space.id)
-        .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
-    let tab = tabs.first().ok_or_else(no_coordinator)?;
-    mux.write(&tab.root_pane, text, true)
+    let Some(pane) = recorded_coordinator_pane(home, mux, &space) else {
+        return Err(no_coordinator(&name));
+    };
+    mux.write(&pane, text, true)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")))
 }
 
-/// The refusal a coordinator with no reachable pane earns.
-fn no_coordinator() -> CliError {
+/// The refusal a coordinator with no recorded pane earns.
+fn no_coordinator(space: &str) -> CliError {
     CliError::Invalid(anyhow!(
-        "no open pane for the coordinator: start the run's coordinator in the \
-         repository's space, or `shprd serve` to make the space first"
+        "no pane is recorded for the coordinator: `shprd serve` records the first tab of the \
+         space {space:?} when it starts, so run the coordinator there and start the service \
+         (or restart it), then send again — nothing was typed"
     ))
 }
 
@@ -2727,6 +2798,136 @@ project_dirs = []
         assert!(
             !brief.contains("- Permissions: read-only"),
             "the block does not claim a mode the program lacks: {brief}"
+        );
+    }
+
+    /// The repository's own space, made on `mux`, as `shprd serve` would: a
+    /// host that gives a new space its starter tab.
+    fn repo_space(mux: &FakeMux, scratch: &Scratch) -> shprd_mux::Space {
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Every write the fake saw, as `(pane, text)`.
+    fn writes(mux: &FakeMux) -> Vec<(String, String)> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Write(pane, text, _) => Some((pane.as_str().to_string(), text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pane the service records is the pane the chat types into: this is the
+    /// path every coordinator line in the M10 flow takes, since nothing launches
+    /// a coordinator for the run to record.
+    #[test]
+    fn a_coordinator_line_goes_to_the_pane_the_service_recorded() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let pane = record_coordinator_pane(scratch.home.path(), &mux, &space)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("the space has a pane to record"));
+        let _ = mux.take_calls();
+
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello coordinator")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            writes(&mux),
+            vec![(pane.as_str().to_string(), "hello coordinator".to_string())],
+            "one line, into the recorded pane, and nowhere else"
+        );
+    }
+
+    /// No record is no pane: shprd will not guess at one, so a chat line cannot
+    /// land in whatever tab happens to be first.
+    #[test]
+    fn a_coordinator_line_without_a_recorded_pane_is_refused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let _ = repo_space(&mux, &scratch);
+        let _ = mux.take_calls();
+
+        match prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello") {
+            Ok(()) => panic!("nothing recorded, so nothing may be typed into"),
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("no pane is recorded for the coordinator"),
+                "the refusal says what is missing: {err}"
+            ),
+        }
+        assert!(writes(&mux).is_empty(), "nothing was typed");
+    }
+
+    /// A record whose pane is no longer in the space is stale — the person
+    /// closed that tab — and a stale record is a refusal, never a fallback.
+    #[test]
+    fn a_stale_coordinator_record_is_not_typed_into() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let path = coordinator_pane_path(scratch.home.path());
+        let dir = path.parent().unwrap_or_else(|| panic!("a parent"));
+        std::fs::create_dir_all(dir).unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&path, "p-closed\n").unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        let refused = prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello").is_err();
+        assert!(refused, "a pane the space no longer has is refused");
+        assert!(writes(&mux).is_empty(), "nothing was typed");
+
+        // And the space's own tab is still fine once it is the one recorded.
+        let pane = record_coordinator_pane(scratch.home.path(), &mux, &space)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("a pane"));
+        let _ = mux.take_calls();
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            writes(&mux),
+            vec![(pane.as_str().to_string(), "hello".to_string())]
+        );
+    }
+
+    /// A run that recorded its own coordinator pane wins over the service's
+    /// record: it is the pane a launcher owns.
+    #[test]
+    fn the_runs_recorded_coordinator_pane_wins() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let _ = record_coordinator_pane(scratch.home.path(), &mux, &space).unwrap_or_default();
+        let launched = mux
+            .spawn(
+                &space.id,
+                "★ coordinator",
+                &[String::from("sh")],
+                &[],
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::OrchestratorLaunched {
+            title: launched.title.clone(),
+            pane: launched.root_pane.as_str().to_string(),
+            process_group: 1,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            writes(&mux),
+            vec![(launched.root_pane.as_str().to_string(), "hello".to_string())],
+            "the run's own pane is used, not the service's record"
         );
     }
 
