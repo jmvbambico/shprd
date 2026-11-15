@@ -216,6 +216,16 @@ fn report(report: &shprd_core::state::Report) -> ReportDto {
         status: report.status.into(),
         summary: report.summary.clone(),
         tests: report.tests.clone(),
+        checks: report
+            .checks
+            .iter()
+            .map(|check| crate::dto::CheckDto {
+                gate: check.gate.clone(),
+                command: check.command.clone(),
+                exit_code: check.exit_code,
+                output_tail: check.output_tail.clone(),
+            })
+            .collect(),
         changed_paths: report.changed_paths.clone(),
         commit: report.commit.clone(),
         skills_used: report.skills_used.clone(),

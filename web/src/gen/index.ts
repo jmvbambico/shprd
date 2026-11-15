@@ -10,6 +10,7 @@ export * from "./AskListDto";
 export * from "./AskReply";
 export * from "./AttemptDto";
 export * from "./ChangeDto";
+export * from "./CheckDto";
 export * from "./ClientMessage";
 export * from "./DerivedStatusDto";
 export * from "./ErrorBody";

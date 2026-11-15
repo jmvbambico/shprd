@@ -398,6 +398,13 @@ pub struct ReportDto {
     pub summary: String,
     /// Test commands the agent ran, with their result.
     pub tests: Vec<String>,
+    /// The gates the agent ran for the hand-in, with their result.
+    ///
+    /// This is what the accept card's Checks section reads: the commands the
+    /// worker really ran and what each said, which is the half of a hand-in a
+    /// person can check for themselves. Empty for a report recorded before
+    /// hand-ins carried checks.
+    pub checks: Vec<CheckDto>,
     /// Normalized paths the agent changed.
     pub changed_paths: Vec<String>,
     /// Commit the agent made, if any.
@@ -406,6 +413,26 @@ pub struct ReportDto {
     pub commit: Option<String>,
     /// Skills the agent used.
     pub skills_used: Vec<String>,
+}
+
+/// One gate the agent ran for its hand-in.
+///
+/// It is the worker's own record of a check — the gate's name, the command, its
+/// exit code and the tail of what it printed — so a person reading the accept
+/// card sees what ran rather than a claim that it passed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "CheckDto.ts")]
+pub struct CheckDto {
+    /// The gate's name, e.g. `tests` or `lint`.
+    pub gate: String,
+    /// The command, as the worker ran it.
+    pub command: String,
+    /// Its exit code, or `null` when a timeout killed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    /// The last lines it printed, capped.
+    pub output_tail: String,
 }
 
 /// The outcome of one gate against one attempt.
@@ -1225,6 +1252,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,
         one::<ReportDto>()?,
+        one::<CheckDto>()?,
         one::<GateDto>()?,
         one::<FindingDto>()?,
         one::<ReviewDto>()?,
