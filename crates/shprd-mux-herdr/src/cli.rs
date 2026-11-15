@@ -194,16 +194,50 @@ fn parse_object(text: &str) -> Option<std::result::Result<Value, Failure>> {
 }
 
 impl HerdrMux {
-    /// Run `herdr` with `args` and capture both streams.
-    fn answer(&self, args: &[&str]) -> std::result::Result<Answer, Failure> {
+    /// The environment variables a `herdr` call must not inherit.
+    ///
+    /// A herdr pane exports the pane it is in (`HERDR_ENV`, `HERDR_PANE_ID`,
+    /// `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERDR_SESSION`), and `herdr` uses
+    /// them as the *default target*: `pane split` with no target splits the
+    /// calling pane. An adapter explicitly pointed at a server therefore removes
+    /// them, so a sandbox or a live test that names a private server can only act
+    /// on that server — never on the pane it happened to be started from. An
+    /// adapter with no server of its own keeps them: that is the person's own
+    /// session, which is exactly what they asked for.
+    const PINNED_SESSION_VARS: [&'static str; 6] = [
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_SESSION",
+        "HC_SESSION",
+    ];
+
+    /// The `herdr` command this adapter runs for `args`, before it is started.
+    ///
+    /// Kept apart from [`HerdrMux::answer`] so the environment a command is
+    /// given can be asserted without a process: see the test at the bottom of
+    /// this file.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(&self.bin);
         command.args(args);
         if let Some(socket) = &self.socket {
             command.env("HERDR_SOCKET_PATH", socket);
+            // A named server means a named place to work; the pane that started
+            // this process is not in it.
+            for name in Self::PINNED_SESSION_VARS {
+                command.env_remove(name);
+            }
         }
         if let Some(home) = &self.home {
             command.env("HOME", home);
         }
+        command
+    }
+
+    /// Run `herdr` with `args` and capture both streams.
+    fn answer(&self, args: &[&str]) -> std::result::Result<Answer, Failure> {
+        let mut command = self.command(args);
         let output = output_retrying_busy(&mut command).map_err(|error| {
             Failure::new(format!("could not start {}: {error}", self.bin.display()))
         })?;
@@ -406,5 +440,52 @@ mod tests {
     fn details_never_span_lines() {
         let failure = Failure::new("first\nsecond");
         assert_eq!(failure.detail(), "first second");
+    }
+
+    /// An adapter that names its own server removes the pane variables a herdr
+    /// pane exported to this process: they are `herdr`'s own default target, so
+    /// keeping them would let one command act on the pane that started it even
+    /// though the adapter was told which server to work in.
+    #[test]
+    fn an_adapter_with_its_own_server_does_not_carry_the_callers_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let mux =
+            HerdrMux::with_bin(dir.path().join("herdr")).with_environment(&socket, dir.path());
+
+        let command = mux.command(&["version"]);
+        let value = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new(name))
+                .map(|(_, value)| value.map(std::borrow::ToOwned::to_owned))
+        };
+        for name in HerdrMux::PINNED_SESSION_VARS {
+            assert_eq!(
+                value(name),
+                Some(None),
+                "{name} is cleared, so herdr cannot default to the pane that started shprd"
+            );
+        }
+        assert_eq!(
+            value("HERDR_SOCKET_PATH").flatten().as_deref(),
+            Some(socket.as_os_str()),
+            "the server the adapter does name still reaches the child"
+        );
+    }
+
+    /// An adapter with no server of its own is the person's own session, so it
+    /// leaves the pane variables alone: that is exactly what they asked for.
+    #[test]
+    fn an_adapter_with_no_server_keeps_the_environment_it_was_given() {
+        let mux = HerdrMux::with_bin("/usr/bin/true");
+        let command = mux.command(&["version"]);
+        assert!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "HERDR_SOCKET_PATH")
+                .is_none(),
+            "nothing is overridden when the adapter was not told which host to use"
+        );
     }
 }
