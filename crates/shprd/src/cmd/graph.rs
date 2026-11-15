@@ -77,11 +77,7 @@ pub fn plan(terminals: &[Value], run_json: &str) -> Plan {
         .iter()
         .filter(|terminal| terminal["state"].as_str() != Some("finished"))
         .collect();
-    let ours = live
-        .iter()
-        .find(|terminal| names(terminal, run_json))
-        .map(|terminal| terminal);
-    if let Some(terminal) = ours {
+    if let Some(terminal) = live.iter().find(|terminal| names(terminal, run_json)) {
         return Plan::Reuse {
             address: terminal["address"].as_str().unwrap_or_default().to_string(),
         };
@@ -162,10 +158,7 @@ pub fn ensure(resolution: &Resolution, dagr: &Dagr, repo: &Path) {
             return;
         }
     };
-    let terminals: Vec<Value> = listing["terminals"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let terminals: Vec<Value> = listing["terminals"].as_array().cloned().unwrap_or_default();
     match plan(&terminals, &document.display().to_string()) {
         Plan::Start { forget } => {
             for address in forget {
@@ -232,7 +225,8 @@ fn hc(endpoint: &Endpoint, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<Value
     if text.is_empty() {
         return Ok(Value::Null);
     }
-    serde_json::from_str(&text).map_err(|err| format!("{} answered no JSON: {err}", endpoint.binary))
+    serde_json::from_str(&text)
+        .map_err(|err| format!("{} answered no JSON: {err}", endpoint.binary))
 }
 
 #[cfg(test)]
@@ -330,7 +324,11 @@ mod tests {
         let command = argv(Path::new("/opt/dagr"), Path::new(DOC));
         assert_eq!(command[0], "sh");
         assert_eq!(command[1], "-c");
-        assert!(command[2].contains("view"), "dagr's own view: {}", command[2]);
+        assert!(
+            command[2].contains("view"),
+            "dagr's own view: {}",
+            command[2]
+        );
         assert!(
             command[2].contains("[ ! -f"),
             "it waits for the document a run has not projected yet"
