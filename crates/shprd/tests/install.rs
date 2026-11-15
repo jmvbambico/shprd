@@ -418,6 +418,54 @@ fn a_dry_run_of_an_uninstall_writes_nothing() {
 }
 
 #[test]
+fn an_uninstall_leaves_the_app_home_as_empty_as_it_found_it() {
+    // The whole point of owning only what it wrote: a fresh app home is empty
+    // again after the install is taken back, `data/` included. A `data/` left
+    // behind is a folder the person has to wonder about.
+    let fixture = Fixture::new();
+    ok(&fixture.run(&[]));
+    assert!(fixture.app_path("data").is_dir());
+
+    ok(&fixture.run(&["--uninstall"]));
+    assert_eq!(
+        fixture.files(),
+        Vec::<String>::new(),
+        "nothing of the install is left"
+    );
+    assert!(
+        !fixture.app_path("data").exists(),
+        "the empty data/ goes too"
+    );
+    assert!(!fixture.app_path("mods").exists());
+    assert!(!fixture.app_path("layouts").exists());
+}
+
+#[test]
+fn an_uninstall_keeps_a_data_folder_that_holds_something_else() {
+    // Herdr keeps `data/shared.json` in the same folder the manifest lives in,
+    // so a `data/` that holds anything else is the app's and the person's.
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path("data")).expect("data");
+    fs::write(
+        fixture.app_path("data/shared.json"),
+        "{\"frame.welcomed\": \"skipped\"}\n",
+    )
+    .expect("the app's shared state");
+
+    ok(&fixture.run(&[]));
+    ok(&fixture.run(&["--uninstall"]));
+    assert_eq!(
+        fs::read_to_string(fixture.app_path("data/shared.json")).expect("the app's file"),
+        "{\"frame.welcomed\": \"skipped\"}\n"
+    );
+    assert!(fixture.app_path("data").is_dir(), "their data/ stays");
+    assert!(
+        !fixture.app_path("data/shprd-desktop").exists(),
+        "but the manifest's own folder is gone"
+    );
+}
+
+#[test]
 fn an_uninstall_with_nothing_installed_says_so() {
     let fixture = Fixture::new();
     let said = ok(&fixture.run(&["--uninstall"]));

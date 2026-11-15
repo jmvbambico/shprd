@@ -43,6 +43,10 @@ use crate::ctx::{CliError, resolve_root};
 
 /// Where the manifest lives, relative to the app home.
 const MANIFEST_DIR: &str = "data/shprd-desktop";
+/// The folder `data/` under the app home, which holds [`MANIFEST_DIR`] and which
+/// this verb removes on uninstall when it leaves it empty. Herdr writes its own
+/// `data/shared.json` beside it, so a `data/` that held something else is kept.
+const DATA_DIR: &str = "data";
 /// The manifest's file name inside [`MANIFEST_DIR`].
 const MANIFEST_FILE: &str = "manifest.json";
 /// The version of the manifest's shape.
@@ -374,6 +378,12 @@ fn plan(host: &Path, app_home: &Path, previous: &Manifest) -> Result<InstallPlan
         };
         for dir in parents(&source.rel) {
             // A directory already listed stays listed: uninstall still owns it.
+            // `data/` is never claimed, even though the manifest lives under it:
+            // Herdr keeps `data/shared.json` there, and a folder the app uses is
+            // not one this verb may take back.
+            if dir == DATA_DIR {
+                continue;
+            }
             if previous.dirs.contains(&dir) || !app_home.join(&dir).exists() {
                 manifest.dirs.insert(dir);
             }
@@ -675,13 +685,18 @@ fn uninstall(app_home: &Path, dry_run: bool, json: bool) -> Result<(), CliError>
                 CliError::other(anyhow!(err).context(format!("removing {}", path.display())))
             })?;
         }
-        // The manifest's own folder goes when it held nothing else.
-        let dir = app_home.join(MANIFEST_DIR);
-        let empty = fs::read_dir(&dir)
-            .map(|mut read| read.next().is_none())
-            .unwrap_or(false);
-        if empty {
-            let _ = fs::remove_dir(&dir);
+        // The manifest's own folder goes when it held nothing else, and so does
+        // the `data/` this verb made to put it in: an install into a fresh app
+        // home leaves no trace of itself behind, and a `data/` the person filled
+        // with their own files stays theirs.
+        for rel in [MANIFEST_DIR, DATA_DIR] {
+            let dir = app_home.join(rel);
+            let empty = fs::read_dir(&dir)
+                .map(|mut read| read.next().is_none())
+                .unwrap_or(false);
+            if empty {
+                let _ = fs::remove_dir(&dir);
+            }
         }
     }
 

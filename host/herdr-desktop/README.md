@@ -46,16 +46,28 @@ ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
 
 ## Tests
 
-The client and the change watcher have unit tests that need neither Herdr nor a
-service:
+The client, the change watcher and the footer's service start have unit tests
+that need neither Herdr nor a service:
 
 ```
 node --import ./test/boot.mjs --test test/
 bun test --preload ./test/boot-bun.mjs test/
 ```
 
-Both run the same file, `test/lib.test.mjs`; `test/stub-herdr.js` stands in for
-the app's `herdr` module.
+Both run the same files, `test/lib.test.mjs` and `test/chrome.test.mjs`;
+`test/stub-herdr.js` stands in for the app's `herdr` module and `test/stub-gpui.js`
+for its element builders (`gpui-kit`, `gpui-base`).
+
+## Starting the service
+
+The footer's third row starts it with **`hc run --bg`**, never the app's `exec`.
+`exec` is `machine.exec`, which the Herdr docs and the M7ef spike both describe as
+"no terminal, ≤600 s, everything it starts dies with it" — a server started
+through it would be gone when the call ended. `hc run --bg` starts a herdr-core
+terminal and returns at once, so the service outlives the click and keeps a
+terminal called `shprd-serve` where a person can read its output. Measured in a
+private session: the call returned in 0.3 s, and the service was still answering
+`GET /api/health` minutes later.
 
 `bin/check` runs all three. Every mod passes `herdr-app check` (the layout is
 checked by a window drawing it, which is what the screenshot is of). The check

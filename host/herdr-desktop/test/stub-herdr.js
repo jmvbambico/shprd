@@ -47,6 +47,10 @@ export function reset() {
   MISSING = null;
   WATCH = async () => [];
   RUN = async () => ({ code: 0, stdout: "", stderr: "" });
+  HC = async () => ({ code: 0, stdout: "", stderr: "" });
+  HC_CALLS.length = 0;
+  SPACES = [];
+  RUNS.length = 0;
 }
 
 /** What `exec` answers; a test replaces it. */
@@ -71,4 +75,56 @@ export function setWatch(next) {
 
 export async function watchFolder(dir) {
   return WATCH(dir);
+}
+
+/** What `hc` answers; a test replaces it and can read the calls it got. */
+export let HC = async () => ({ code: 0, stdout: "", stderr: "" });
+
+/** Every `hc` call, in order. */
+export const HC_CALLS = [];
+
+/** Sets what `hc` answers next. */
+export function setHc(next) {
+  HC = next;
+}
+
+export async function hc(args) {
+  HC_CALLS.push(args);
+  return HC(args);
+}
+
+/** Herdr's live space list; a test sets it. */
+export let SPACES = [];
+
+/** Sets what `spaces()` answers. */
+export function setSpaces(next) {
+  SPACES = next;
+}
+
+export function spaces() {
+  return SPACES;
+}
+
+/** Runs an app command; a test can read what was asked for. */
+export const RUNS = [];
+
+export function run(name, args) {
+  RUNS.push({ name, args });
+  return null;
+}
+
+/** The theme colours the footer draws with: one per name it uses. */
+export function theme() {
+  return {
+    foreground: "#eeeeee",
+    muted: "#999999",
+    dim: "#777777",
+    border: "#333333",
+    raised: "#222222",
+    hover: "#2a2a2a",
+    done: "#3dd68c",
+    working: "#f5b544",
+    blocked: "#ff6369",
+    accent: "#5b8def",
+  };
 }
