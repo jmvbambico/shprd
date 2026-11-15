@@ -23,11 +23,12 @@ check=0
 # module:space-separated mods that import it under `./lib/<module>`
 mods_for() {
   case "$1" in
-    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts" ;;
-    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts" ;;
-    board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-graph shprd-coordinator shprd-tabs shprd-pane" ;;
-    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts" ;;
-    watch.js) echo "shprd-tasks shprd-asks shprd-coordinator shprd-status shprd-graph" ;;
+    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
+    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
+    board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-spaces" ;;
+    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
+    watch.js) echo "shprd-tasks shprd-asks shprd-coordinator shprd-status shprd-graph shprd-spaces" ;;
+    spaces.js) echo "shprd-spaces" ;;
     *) echo "no mod list for $1" >&2; exit 2 ;;
   esac
 }
