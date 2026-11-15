@@ -285,7 +285,8 @@ impl shprd_server::FallbackSource for LiveFallback {
         to: &str,
         brief: &str,
     ) -> Result<String, String> {
-        let ctx = Ctx::new(self.repo.clone(), Actor::Engine, false, false);
+        let ctx = Ctx::new(self.repo.clone(), Actor::Engine, false, false)
+            .with_home(Some(self.home.clone()));
         let env = spawn::build_env(&ctx, Some(&self.home)).map_err(|err| err.to_string())?;
         let request = HandoffRequest {
             task: task.to_string(),

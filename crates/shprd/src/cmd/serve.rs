@@ -76,7 +76,15 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     let mut config = Config::new(ctx.root.clone(), shprd_server::state_dir(&state_home));
     config.port = args.port;
     config.actor = ctx.actor.clone();
-    config.after_write = Some(after_write(ctx));
+    // The context the service's own writes run with: the same repository, actor
+    // and flags, plus the home this start resolved. A write made through the
+    // API reaches the same dagr projection a CLI write does.
+    let write_ctx = ctx.clone().with_home(Some(home.clone()));
+    config.after_write = Some(after_write(&write_ctx));
+    // Where the graph's program is, found once here: the window's graph block
+    // asks the service rather than probing this machine itself, and the answer
+    // is the same one the projection is checked with.
+    config.dagr = Some(crate::cmd::dagr::dagr(&write_ctx));
     config.home = Some(home.clone());
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
         &home,
@@ -244,11 +252,13 @@ struct AnnouncedTick {
 fn after_write(ctx: &Ctx) -> AfterWrite {
     let actor = ctx.actor.clone();
     let no_dagr = ctx.no_dagr;
+    let home = ctx.home.clone();
     AfterWrite::new(move |repo| {
         if no_dagr {
             return;
         }
-        let write_ctx = Ctx::new(repo.to_path_buf(), actor.clone(), false, false);
+        let write_ctx =
+            Ctx::new(repo.to_path_buf(), actor.clone(), false, false).with_home(home.clone());
         crate::cmd::agent::sync_dagr(&write_ctx);
     })
 }

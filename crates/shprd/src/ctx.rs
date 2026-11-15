@@ -96,6 +96,16 @@ pub struct Ctx {
     pub json: bool,
     /// Whether to skip the dagr sync that follows every write.
     pub no_dagr: bool,
+    /// The home directory shprd's own files live under, as the binary resolved
+    /// it at the wiring edge.
+    ///
+    /// It is carried here because the dagr projection reads the person's
+    /// `graph.dagr` setting and looks in their herdr plugin folder, and the
+    /// writes that project happen deep inside verbs ([`crate::cmd::emit`]).
+    /// `None` is a verb that resolved no home: then only `$SHPRD_DAGR_BIN` and
+    /// `PATH` can name a program, because the two probes that need a home were
+    /// never given one.
+    pub home: Option<PathBuf>,
 }
 
 impl Ctx {
@@ -108,7 +118,17 @@ impl Ctx {
             actor,
             json,
             no_dagr,
+            home: None,
         }
+    }
+
+    /// The same context, carrying the home directory the binary resolved.
+    ///
+    /// The edge resolves `--home`, `$SHPRD_HOME`, then `$HOME` once and hands
+    /// the answer down this way, so no verb and no library reads it for itself.
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
     }
 
     /// The same context, acting as `actor`.

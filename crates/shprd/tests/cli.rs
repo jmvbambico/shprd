@@ -813,6 +813,170 @@ fn no_dagr_flag_skips_the_sync() {
     );
 }
 
+/// A stub checker that records the arguments it was run with, then passes.
+///
+/// It stands in for `dagr check`: the projection is only proof of anything if a
+/// program really ran on it, so the stub leaves a file naming the document it
+/// was asked about.
+#[cfg(unix)]
+fn stub_checker(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("stub-dagr");
+    let record = dir.join("called.txt");
+    if let Err(err) = std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '[]\\n'\nexit 0\n",
+            record.display()
+        ),
+    ) {
+        panic!("writing the stub failed: {err}");
+    }
+    if let Err(err) = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)) {
+        panic!("making the stub executable failed: {err}");
+    }
+    (script, record)
+}
+
+/// A temp home holding `settings.toml` with `text`.
+fn home_with_settings(text: &str) -> TempDir {
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(err) => panic!("temp home failed: {err}"),
+    };
+    let dir = home.path().join(".config").join("shprd");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        panic!("creating the config folder failed: {err}");
+    }
+    if let Err(err) = std::fs::write(dir.join("settings.toml"), text) {
+        panic!("writing the settings failed: {err}");
+    }
+    home
+}
+
+#[test]
+#[cfg(unix)]
+fn the_graph_dagr_setting_is_what_validates_the_projection() {
+    // M10.7's first rule: a person who names their dagr in `graph.dagr` gets
+    // their projections checked by it, and the value is read where the wiring
+    // reads every other file — from their home, not from a variable.
+    let dir = repo();
+    let root = dir.path();
+    let stubs = match TempDir::new() {
+        Ok(stubs) => stubs,
+        Err(err) => panic!("temp folder failed: {err}"),
+    };
+    let (checker, record) = stub_checker(stubs.path());
+    let home = home_with_settings(&format!(
+        "[graph]\ndagr = {:?}\n",
+        checker.display().to_string()
+    ));
+
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "--home",
+            &home.path().display().to_string(),
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ])
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_DAGR_BIN")
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("wrote unchecked"),
+        "the document must be checked when the setting names a dagr: {stderr}"
+    );
+    let called = match std::fs::read_to_string(&record) {
+        Ok(text) => text,
+        Err(err) => panic!("the stub was never run: {err}"),
+    };
+    assert!(
+        called.contains("check"),
+        "the stub is run as a checker: {called}"
+    );
+    assert!(
+        called.contains(".dagr/run.json.tmp") || called.contains(".tmp"),
+        "it is run on the temporary document, before the rename: {called}"
+    );
+    assert!(
+        root.join(".dagr").join("run.json").exists(),
+        "the document is written"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn without_dagr_the_note_names_the_setting_to_fix() {
+    // No `graph.dagr`, no `dagr` on PATH and no herdr plugin in this home: the
+    // write still happens, and the one line a person sees names the key.
+    let dir = repo();
+    let root = dir.path();
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(err) => panic!("temp home failed: {err}"),
+    };
+    let empty = home.path().join("bin");
+    if let Err(err) = std::fs::create_dir_all(&empty) {
+        panic!("creating the bin folder failed: {err}");
+    }
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "--home",
+            &home.path().display().to_string(),
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ])
+        .env("PATH", &empty)
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_DAGR_BIN")
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+    assert_eq!(output.status.code(), Some(0), "the write still succeeds");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("wrote unchecked"), "{stderr}");
+    assert!(stderr.contains("graph.dagr"), "the key is named: {stderr}");
+    assert!(
+        root.join(".dagr").join("run.json").exists(),
+        "a machine without dagr still leaves a document"
+    );
+}
+
 /// A throwaway repository, for verbs that drive real git.
 struct GitRepo {
     /// Keeps the temp directory alive.

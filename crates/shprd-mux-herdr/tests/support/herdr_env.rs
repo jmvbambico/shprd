@@ -25,7 +25,12 @@
 //!   because an unset `HC_SESSION` means the *default* session — the person's —
 //!   while a set one names a session that is nobody's;
 //! - `HERDR_APP_HOME` points into the temporary folder too, so `herdr-app` can
-//!   never find the person's window.
+//!   never find the person's window;
+//! - `SHPRD_HOME` points into the temporary folder as well, so a child that
+//!   resolves the home itself (the dagr projection reads `graph.dagr` from that
+//!   home and looks in its `herdr/plugins/` folder) reads the test's own files
+//!   and not the developer's. A test that passes `--home` still wins: the flag
+//!   is read before the variable.
 //!
 //! A fixture that needs a different value applies the rule first and overrides
 //! that one variable afterwards: an `.env` call after [`isolate`] wins, which is
@@ -94,6 +99,9 @@ pub fn isolate(command: &mut Command, anchor: &Path) {
     command
         .env("HERDR_SOCKET_PATH", absent_socket(anchor))
         .env("HERDR_APP_HOME", anchor.join("herdr-app"))
+        // The home shprd's own files live under, so `graph.dagr` and the herdr
+        // plugin folder a child probes are the test's, never the person's.
+        .env("SHPRD_HOME", anchor)
         .env("HC_SESSION", PRIVATE_HC_SESSION);
 }
 
