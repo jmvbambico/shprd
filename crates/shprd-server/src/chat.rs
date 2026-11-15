@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use shprd_agents::spec::{HarnessSpec, TranscriptFormat};
 use shprd_agents::transcript::Transcript;
-use shprd_core::settings::Loaded;
+use shprd_core::settings::{Loaded, RoleKind};
 use shprd_core::state::{RunState, Task};
 
 use crate::api::AppState;
@@ -34,8 +34,11 @@ use crate::ledger;
 /// The word a client uses for the coordinator's space.
 pub const COORDINATOR: &str = "coordinator";
 
-/// The role whose program is the coordinator.
-const COORDINATOR_ROLE: &str = "orchestrator";
+/// The built-in role a settings file names when nothing else is said: the
+/// coordinator's identity, which is a role of kind [`RoleKind::Coordinator`]
+/// (a custom role may be one too, and then it is the one the settings order
+/// puts first).
+const COORDINATOR_ID: &str = "coordinator";
 
 /// What the service needs to type a chat line into a space.
 ///
@@ -270,19 +273,28 @@ fn coordinator_place(state: &AppState) -> Result<Place, ApiReject> {
         }
     };
     let resolved = loaded.resolve(None);
-    match resolved.role(COORDINATOR_ROLE) {
-        Some(role) => match role.agent.map(|agent| agent.value) {
-            Some(program) if !program.trim().is_empty() => place.program = Some(program),
-            _ => {
-                place.note = Some(format!(
-                    "no coordinator program is set: pick one in the settings (roles.{COORDINATOR_ROLE}.agent)"
-                ))
-            }
-        },
-        None => {
+    // The coordinator is the first role of kind `coordinator`, read exactly as
+    // `shprd doctor` reads it (`kind_role(RoleKind::Coordinator)`): the built-in
+    // `coordinator` role is that kind, so `roles.coordinator.agent` is what a
+    // person's settings set, and a custom role takes the kind over by being
+    // ahead of it in `roles.order`.
+    let Some(role) = resolved
+        .roles()
+        .into_iter()
+        .find(|role| role.kind.value == RoleKind::Coordinator)
+    else {
+        place.note = Some(format!(
+            "no coordinator role is configured: pick one in the settings \
+             (roles.{COORDINATOR_ID}.agent)"
+        ));
+        return Ok(place);
+    };
+    match role.agent.map(|agent| agent.value) {
+        Some(program) if !program.trim().is_empty() => place.program = Some(program),
+        _ => {
             place.note = Some(format!(
-                "no {COORDINATOR_ROLE} role is configured: pick one in the settings \
-                 (roles.{COORDINATOR_ROLE}.agent)"
+                "no coordinator program is set: pick one in the settings (roles.{}.agent)",
+                role.id
             ))
         }
     }

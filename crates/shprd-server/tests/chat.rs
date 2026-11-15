@@ -16,6 +16,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use shprd_agents::spec::TranscriptFormat;
+use shprd_agents::transcript::cwd_slug;
 use shprd_core::event::{Actor, EventKind};
 use shprd_core::log::{EventLog, SystemClock};
 use shprd_server::{App, ChatWriter};
@@ -114,7 +116,7 @@ impl Fixture {
 
     /// Where the coordinator's recorded session lives for this repository.
     fn coordinator_record(&self) -> PathBuf {
-        let slug = self.repo.path().to_string_lossy().replace(['/', '.'], "-");
+        let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, self.repo.path());
         self.home
             .path()
             .join(".claude")
@@ -125,7 +127,10 @@ impl Fixture {
 
     /// Writes a claude session with `messages` for the directory `cwd`'s slug.
     fn write_session(&self, cwd: &Path, name: &str, messages: &[(bool, &str)]) {
-        let slug = cwd.to_string_lossy().replace(['/', '.'], "-");
+        // The session's folder is the slug the reader looks for, which is the
+        // one for the resolved directory: this is the same rule, so a fixture
+        // and a lookup cannot disagree about which folder a session is in.
+        let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, cwd);
         let dir = self.home.path().join(".claude").join("projects").join(slug);
         std::fs::create_dir_all(&dir).unwrap();
         let mut text = String::new();
@@ -334,14 +339,20 @@ fn start_run(repo: &Path) {
 }
 
 /// Writes the person's settings, naming `program` as the coordinator.
+///
+/// `roles.coordinator.agent` is the key the settings page and `shprd settings
+/// set roles.coordinator.agent <program>` write, so it is the one a chat has to
+/// read: a test that used another id would pass while a person's real file
+/// failed.
 fn write_settings(home: &Path, program: &str) {
+    write_settings_toml(home, &format!("[roles.coordinator]\nagent = {program:?}\n"));
+}
+
+/// Writes `settings.toml` exactly as given.
+fn write_settings_toml(home: &Path, text: &str) {
     let dir = home.join(".config").join("shprd");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("settings.toml"),
-        format!("[roles.orchestrator]\nagent = {program:?}\n"),
-    )
-    .unwrap();
+    std::fs::write(dir.join("settings.toml"), text).unwrap();
 }
 
 #[tokio::test]
@@ -507,10 +518,53 @@ async fn a_coordinator_with_no_program_says_which_key_to_set() {
     let fixture = Fixture::prepared(repo, home);
     let reply = fixture.chat("coordinator", "").await;
     assert!(
-        reply.note().contains("roles.orchestrator.agent"),
-        "{}",
+        reply.note().contains("roles.coordinator.agent"),
+        "the advice names the key the settings model uses: {}",
         reply.note()
     );
+}
+
+#[tokio::test]
+async fn a_role_that_is_not_the_coordinator_is_not_the_coordinators_agent() {
+    // `orchestrator` is not a role id the settings model uses: a person's
+    // custom helper by that name must not become the chat's agent, which is
+    // exactly what the first cut of this route did.
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings_toml(
+        home.path(),
+        "[roles.orchestrator]\nagent = \"claude\"\nkind = \"helper\"\n",
+    );
+    let fixture = Fixture::prepared(repo, home);
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], Value::Null);
+    assert!(
+        reply.note().contains("no coordinator program is set"),
+        "the helper role is not the coordinator: {}",
+        reply.note()
+    );
+}
+
+#[tokio::test]
+async fn a_custom_role_of_kind_coordinator_is_the_coordinators_agent() {
+    // A role of kind `coordinator` is the coordinator wherever it sits in the
+    // order, which is how `shprd doctor` reads it too.
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings_toml(
+        home.path(),
+        "[roles]\norder = [\"lead\", \"coordinator\", \"worker\", \"reviewer\", \"backup\"]\n\n\
+         [roles.lead]\nagent = \"claude\"\nkind = \"coordinator\"\n",
+    );
+    let fixture = Fixture::prepared(repo, home);
+    fixture.write_session(fixture.repo.path(), "s1.jsonl", &[(true, "hello")]);
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], "claude");
+    assert_eq!(reply.messages()[0]["text"], "hello");
 }
 
 #[tokio::test]
