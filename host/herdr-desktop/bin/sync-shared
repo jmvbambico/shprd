@@ -33,6 +33,8 @@ mods_for() {
     taskpr.js) echo "shprd-task-pr" ;;
     tabstrip.js) echo "shprd-tabs" ;;
     toasts.js) echo "shprd-toasts" ;;
+    settings.js) echo "shprd-settings" ;;
+    asks.js) echo "shprd-asks" ;;
     chat.js) echo "shprd-coordinator" ;;
     *) echo "no mod list for $1" >&2; exit 2 ;;
   esac

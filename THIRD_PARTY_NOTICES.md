@@ -73,8 +73,14 @@ SOFTWARE.
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
   two-line task rows and their second line from `mods/tasks/main.js` and
-  `core/tasks.js`, the Accept card's sections and folded Details, its summary
-  rule and its Changes count line from `mods/accept-card/main.js` and
+  `core/tasks.js`, the settings page's role rows, its picker button and its
+  write-with-no-Save-step rule from `mods/shepherdr-settings/main.js`,
+  `mods/shepherdr-settings/settings.js` and `core/settings.js`, the needs-you
+  cards — a question, permission or plan as one card with its choices and the
+  answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
+  `host/herdr-desktop/mods/{shprd-settings,shprd-asks}/main.js` and their
+  `lib/{settings,asks}.js`, the Accept card's sections and folded Details, its
+  summary rule and its Changes count line from `mods/accept-card/main.js` and
   `core/accept.js`, the task's pull-request card — the state word in a soft tint
   beside the number, and a quiet line when there is nothing — from
   `mods/task-pr/main.js`, and the task's head with its back link and switcher

@@ -1,0 +1,231 @@
+{
+  "programs": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "vendor": "anthropic",
+      "multi_model": false,
+      "needs_provider": false,
+      "models": [
+        {
+          "id": "fable",
+          "name": "Fable",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": false
+        },
+        {
+          "id": "opus",
+          "name": "Opus",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": false
+        },
+        {
+          "id": "sonnet",
+          "name": "Sonnet",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": false
+        }
+      ],
+      "models_source": "static",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "fast": true,
+      "permissions": [
+        {
+          "id": "manual",
+          "label": "Ask"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        },
+        {
+          "id": "acceptEdits",
+          "label": "Accept edits"
+        },
+        {
+          "id": "plan",
+          "label": "Plan"
+        },
+        {
+          "id": "bypassPermissions",
+          "label": "Full access"
+        }
+      ],
+      "default_permission": "manual"
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "vendor": "openai",
+      "multi_model": false,
+      "needs_provider": false,
+      "models": [],
+      "models_source": "command",
+      "models_note": "`codex debug models` gave no model list, so type a model id",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "read-only",
+          "label": "Read only"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        },
+        {
+          "id": "full",
+          "label": "Full access"
+        }
+      ],
+      "default_permission": "read-only"
+    },
+    {
+      "id": "kilo",
+      "name": "Kilo",
+      "vendor": "kilo",
+      "multi_model": true,
+      "needs_provider": false,
+      "models": [
+        {
+          "id": "kilo/~anthropic/claude-fable-latest",
+          "name": "kilo/~anthropic/claude-fable-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~anthropic/claude-haiku-latest",
+          "name": "kilo/~anthropic/claude-haiku-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~anthropic/claude-opus-latest",
+          "name": "kilo/~anthropic/claude-opus-latest",
+          "efforts": [],
+          "fast": false
+        }
+      ],
+      "models_source": "command",
+      "efforts": [],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "ask",
+          "label": "Ask"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        }
+      ],
+      "default_permission": "ask"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "vendor": "opencode",
+      "multi_model": true,
+      "needs_provider": false,
+      "models": [
+        {
+          "id": "opencode/big-pickle",
+          "name": "opencode/big-pickle",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/fledge-alpha-free",
+          "name": "opencode/fledge-alpha-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/ling-3.0-flash-fin-free",
+          "name": "opencode/ling-3.0-flash-fin-free",
+          "efforts": [],
+          "fast": false
+        }
+      ],
+      "models_source": "command",
+      "efforts": [],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "ask",
+          "label": "Ask"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        }
+      ],
+      "default_permission": "ask"
+    },
+    {
+      "id": "pi",
+      "name": "Pi",
+      "vendor": "pi",
+      "multi_model": true,
+      "needs_provider": true,
+      "models": [],
+      "models_source": "command",
+      "models_note": "`pi --list-models` gave no model list, so type a model id",
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "default",
+          "label": "As you set it up"
+        },
+        {
+          "id": "read-only",
+          "label": "Read only"
+        }
+      ],
+      "default_permission": "default"
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "seq": 8,
+  "run": {
+    "id": "m10c",
+    "repo": "/private/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-58/shprd58/live/repo",
+    "base_branch": "main",
+    "integration_branch": "integration/m10c"
+  },
+  "last_tick": {
+    "at_ms": 1794749545668,
+    "steps": 1,
+    "failed": [
+      {
+        "task": "T1",
+        "step": "start",
+        "error": "opening the space \"shprd · repo · m10c · T1\" for T1: list workspaces: server_not_running: no herdr server is running at /tmp/shs58/home/no-such-herdr.sock; run `herdr` to start or attach it"
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Docs writer",
+      "status": "queued",
+      "derived": {
+        "status": "needs_you",
+        "need": "asks",
+        "reason": "The README needs a quickstart. Should I…"
+      },
+      "scope": [
+        "README.md"
+      ],
+      "acceptance": [
+        "the README says how to run it"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [],
+      "attempts": []
+    },
+    {
+      "id": "T2",
+      "title": "Count badge",
+      "status": "queued",
+      "derived": {
+        "status": "needs_you",
+        "need": "attention",
+        "reason": "T2: its review of attempt 1 failed 2…"
+      },
+      "scope": [
+        "crates/shprd-views"
+      ],
+      "acceptance": [
+        "a count above nine reads 9+"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [
+        "T1"
+      ],
+      "attempts": []
+    },
+    {
+      "id": "T3",
+      "title": "Tab strip",
+      "status": "queued",
+      "derived": {
+        "status": "queued",
+        "reason": "after T1"
+      },
+      "scope": [
+        "host/herdr-desktop"
+      ],
+      "acceptance": [
+        "a pill names its role"
+      ],
+      "tags": [],
+      "skills": [],
+      "deps": [
+        "T1"
+      ],
+      "attempts": []
+    }
+  ],
+  "agents": [],
+  "needs": [
+    {
+      "task": "T2",
+      "body": "T2: its review of attempt 1 failed 2 time(s) and no round is left: one major finding — the count badge overflows its row at ten; you answered `take it as it is`, so run `shprd override --task T2 --rule integrate_after_failed_gate --reason …` then `shprd land T2`",
+      "default_action": "the task stays where it is",
+      "seq": 6
+    },
+    {
+      "task": "T1",
+      "body": "T1: its `start` step has failed the same way 3 passes in a row (attempt 0): opening the space \"shprd · repo · m10c · T1\" for T1: list workspaces: server_not_running: no herdr server is running at /tmp/shs58/home/no-such-herdr.sock; run `herdr` to start or attach it",
+      "default_action": "fix what the card names, then the engine retries `start` on its next pass",
+      "seq": 8
+    }
+  ],
+  "asks": [
+    {
+      "id": "1794749539249.90280.0",
+      "task": "T1",
+      "kind": "question",
+      "text": "The README needs a quickstart. Should I write one for the CLI only, or for the desktop too?",
+      "options": [
+        "CLI only",
+        "Both",
+        "Leave it to me"
+      ],
+      "created_at_ms": 1794749539250,
+      "expires_at_ms": 1794750139250
+    }
+  ],
+  "finished": false
+}

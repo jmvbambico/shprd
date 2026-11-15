@@ -39,6 +39,15 @@ export const HEALTH_WAIT = 1500;
 export const READ_WAIT = 4000;
 /** A write is one event, so it may take longer than a read. */
 export const WRITE_WAIT = 6000;
+/**
+ * How long the roster may take.
+ *
+ * It is the one read that can start a program — a program that lists its own
+ * models answers only when its CLI does — so it is bounded by four programs'
+ * listings, not by a file read. The service bounds each listing itself; this is
+ * the outer bound a page waits under.
+ */
+export const ROSTER_WAIT = 20_000;
 /** How long the long poll waits at the service before it answers `204`. */
 export const POLL_WAIT = 20;
 
@@ -375,6 +384,22 @@ export class Client {
     return this.call("PUT", "/api/settings", { body });
   }
 
+  /**
+   * `GET /api/roster`: the programs a role may run, with the models and effort
+   * levels each one's catalog and harness table say it takes.
+   *
+   * It reads the shipped data and may ask a program for its own model listing,
+   * so it can take a moment the first time; a page reads it once and keeps it.
+   */
+  roster() {
+    return this.call("GET", "/api/roster", { wait: ROSTER_WAIT });
+  }
+
+  /** `GET /api/prompts`: every template this machine has, without its words. */
+  prompts() {
+    return this.call("GET", "/api/prompts");
+  }
+
   /** `GET /api/prompts/:id`: one role prompt's words. */
   prompt(id) {
     return this.call("GET", `/api/prompts/${encodeURIComponent(id)}`);
@@ -385,6 +410,17 @@ export class Client {
     return this.call("PUT", `/api/prompts/${encodeURIComponent(id)}`, {
       body: { text },
     });
+  }
+
+  /**
+   * `DELETE /api/prompts/:id`: the shipped words put back over an edit.
+   *
+   * It is the only route that replaces the person's words, and it does so with
+   * the words this build ships (`shprd prompts reset`), never with text a page
+   * sends.
+   */
+  resetPrompt(id) {
+    return this.call("DELETE", `/api/prompts/${encodeURIComponent(id)}`);
   }
 
   /**

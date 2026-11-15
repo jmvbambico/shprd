@@ -13,8 +13,11 @@
 //! | `GET /api/tasks/:id/changes` | the task's branch against its base, with line counts |
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
+//! | `GET /api/roster` | the programs a role may run, with their models and levels |
+//! | `GET /api/prompts` | the templates this machine has, without their words |
 //! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
 //! | `PUT /api/prompts/:id` | the person's words, stored over that prompt's file |
+//! | `DELETE /api/prompts/:id` | the shipped words put back over an edit |
 //! | `GET /api/chat` | a space's conversation, read from its agent's own record, after a cursor |
 //! | `POST /api/chat` | one turn of the person's input, typed into that space's agent |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
@@ -52,6 +55,7 @@ pub mod hub;
 pub(crate) mod ledger;
 pub mod news;
 pub(crate) mod prompts;
+pub(crate) mod roster;
 pub(crate) mod settings;
 
 pub use api::{App, WsLimits};

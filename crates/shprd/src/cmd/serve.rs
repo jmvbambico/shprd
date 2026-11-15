@@ -104,6 +104,11 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         &home,
     )));
     config.data = Some(resolve_data_dir());
+    // The roster's pickers ask a program for the models it runs, so the service
+    // is given the `PATH` this process was started with rather than reading one
+    // of its own: what a request may start is the binary's decision, resolved
+    // once, here.
+    config.path_env = Some(std::env::var("PATH").unwrap_or_default());
     // The chat's writes go through the host, the same adapter every other verb
     // drives: one code path types into a pane, so a chat line lands where a
     // prompt does and never in a tab shprd did not open.

@@ -4,10 +4,12 @@
 //! a secret. Everything else is behind the gate in `auth`. Reads answer from the
 //! fold (a snapshot or a change notice), except `GET /api/settings`, which
 //! answers the settings files as they resolve (`crate::settings`), and
-//! `GET /api/tasks/{id}/changes`, which reads git (`crate::tasks`). The writes
-//! are `POST /api/action`, which hands one [`Action`] to `actions`,
-//! `POST /api/tasks`, which adds one task, and `PUT /api/settings`, which writes
-//! one settings key.
+//! `GET /api/roster`, which answers the programs a role may run
+//! (`crate::roster`), and `GET /api/tasks/{id}/changes`, which reads git
+//! (`crate::tasks`). The writes are `POST /api/action`, which hands one
+//! [`Action`] to `actions`, `POST /api/tasks`, which adds one task,
+//! `PUT /api/settings`, which writes one settings key, and the prompt routes,
+//! which store or reset one template's words.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,14 +36,15 @@ use crate::auth;
 use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
     Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto, ChatSendReply,
-    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, SettingsDto, SettingsWriteDto,
-    SnapshotDto, WsMessage,
+    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto, RosterDto,
+    SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
 use crate::prompts as prompts_api;
+use crate::roster as roster_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
 use crate::tasks;
@@ -144,6 +147,15 @@ pub(crate) struct AppState {
     /// test always sets it, so neither the service nor a test ever resolves a
     /// path from the process's own XDG settings.
     pub(crate) prompts_dir: Option<PathBuf>,
+    /// The `PATH` a program's own model listing runs with, when the caller
+    /// resolved one.
+    ///
+    /// The binary passes the `PATH` it was started with, because the roster's
+    /// pickers ask a program for the models it runs. A service built by hand — a
+    /// test, for one — leaves it unset, and then only the shipped catalogs are
+    /// read: a request never starts a program this service was not told how to
+    /// find.
+    pub(crate) path_env: Option<String>,
     /// Where the graph's program is, as the binary found it.
     ///
     /// The binary is the one place that reads `graph.dagr`, `PATH` and the
@@ -176,6 +188,8 @@ pub(crate) struct Paths {
     pub(crate) prompts_dir: Option<PathBuf>,
     /// The shipped data the harness table is read from, when there is one.
     pub(crate) data: Option<DataDir>,
+    /// The `PATH` a program's own model listing runs with, when there is one.
+    pub(crate) path_env: Option<String>,
     /// Where the graph's program is, as the binary found it.
     pub(crate) dagr: Option<crate::graph::Dagr>,
 }
@@ -273,6 +287,7 @@ impl App {
             data: paths.data,
             engine: None,
             prompts_dir: paths.prompts_dir,
+            path_env: paths.path_env,
             dagr: paths.dagr,
             chat: ChatHost::new(),
         };
@@ -370,6 +385,17 @@ impl App {
         self
     }
 
+    /// Read a program's own model listing with `path_env`, as `shprd serve`
+    /// does with the `PATH` it was started with.
+    ///
+    /// A test passes a directory of its own — or nothing at all, which keeps
+    /// every listing off the machine.
+    pub fn with_path_env(mut self, path_env: Option<String>) -> Self {
+        self.state.path_env = path_env;
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Answer `GET /api/graph` with the program the binary found.
     ///
     /// A test passes its own answer, so the route is proven without probing the
@@ -448,7 +474,12 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/tasks", post(add_task))
         .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
-        .route("/api/prompts/{id}", get(read_prompt).put(put_prompt))
+        .route("/api/roster", get(roster))
+        .route("/api/prompts", get(list_prompts))
+        .route(
+            "/api/prompts/{id}",
+            get(read_prompt).put(put_prompt).delete(reset_prompt),
+        )
         .route("/api/ws", get(socket))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
@@ -733,6 +764,23 @@ async fn put_settings(
     answer.map(Json)
 }
 
+/// `GET /api/roster`: the programs a role may run, with their models and levels.
+///
+/// It is a read of the shipped tables, except for a program that lists its own
+/// models: that listing is a process, so it runs on a blocking thread and with
+/// the `PATH` the binary passed in ([`AppState::path_env`]).
+async fn roster(State(state): State<AppState>) -> Result<Json<RosterDto>, ApiReject> {
+    let answer =
+        blocking(move || roster_api::read(state.data.as_ref(), state.path_env.as_deref())).await?;
+    Ok(Json(answer))
+}
+
+/// `GET /api/prompts`: every template this machine has, without its words.
+async fn list_prompts(State(state): State<AppState>) -> Result<Json<PromptListDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::list(&state)).await?;
+    answer.map(Json)
+}
+
 /// `GET /api/prompts/:id`: one prompt's words, its file and its state.
 async fn read_prompt(
     State(state): State<AppState>,
@@ -749,6 +797,19 @@ async fn put_prompt(
     body: Bytes,
 ) -> Result<Json<PromptDto>, ApiReject> {
     let answer = blocking(move || prompts_api::write(&state, &id, &body)).await?;
+    answer.map(Json)
+}
+
+/// `DELETE /api/prompts/:id`: put the shipped words back over an edit.
+///
+/// It is the templates page's Reset, and the command line's `shprd prompts
+/// reset`: the only route that replaces the person's words, and it does so with
+/// the words this build ships rather than with anything a client sent.
+async fn reset_prompt(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<PromptDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::reset(&state, &id)).await?;
     answer.map(Json)
 }
 
