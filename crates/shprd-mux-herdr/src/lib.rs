@@ -8,6 +8,25 @@
 //! test or a sandbox points them at a throwaway directory and the adapter can
 //! never reach the human's own herdr session.
 //!
+//! # No guard against the human's own session
+//!
+//! The adapter does not refuse a cwd outside some "safe" directory, nor a call
+//! against the default socket: there is no clean way to tell the human's own
+//! session from a private one — a person may legitimately run shprd against the
+//! session they are working in, and a temp cwd may legitimately be a task's
+//! worktree (a sandboxed agent builds one there). A rule keyed on
+//! `std::env::temp_dir()` or on "the socket looks default" would be real
+//! behaviour that only fires on guesses, and it would refuse the person's own
+//! work before it ever helped. Isolation is therefore the caller's rule, stated
+//! once in `tests/support/herdr_env.rs` (`isolate`): every test that spawns the
+//! binary starts from a socket that does not exist.
+//!
+//! What the adapter does do is refuse to carry the caller's pane into a server it
+//! was told to use: an adapter built with [`HerdrMux::with_environment`] removes
+//! `HERDR_PANE_ID` and the other pane variables from every command, because
+//! `herdr` treats them as the default target and a command aimed at a private
+//! server must never land in the pane that started shprd.
+//!
 //! Panes are process-shaped, not shell-shaped: [`shprd_mux::Mux::run`] takes an
 //! argv and this adapter quotes it element by element before handing it to the
 //! pane, so a branch name or a title is never re-parsed as shell syntax.
