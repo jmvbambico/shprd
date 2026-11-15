@@ -1,0 +1,36 @@
+{
+  "prompts": [
+    {
+      "id": "assistant",
+      "about": "Plans the work and starts a task for each part.",
+      "path": "/tmp/shs58/cfg/shprd/prompts/assistant.md",
+      "state": "default",
+      "shipped": true,
+      "problem": null
+    },
+    {
+      "id": "worker",
+      "about": "Does the work of one task on its own branch.",
+      "path": "/tmp/shs58/cfg/shprd/prompts/worker.md",
+      "state": "default",
+      "shipped": true,
+      "problem": null
+    },
+    {
+      "id": "reviewer",
+      "about": "Reads a finished attempt's diff and decides.",
+      "path": "/tmp/shs58/cfg/shprd/prompts/reviewer.md",
+      "state": "default",
+      "shipped": true,
+      "problem": null
+    },
+    {
+      "id": "backup",
+      "about": "Takes a task over once, when the worker's CLI cannot go on.",
+      "path": "/tmp/shs58/cfg/shprd/prompts/backup.md",
+      "state": "default",
+      "shipped": true,
+      "problem": null
+    }
+  ]
+}

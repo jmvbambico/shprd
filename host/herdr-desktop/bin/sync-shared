@@ -31,6 +31,8 @@ mods_for() {
     spaces.js) echo "shprd-spaces shprd-toasts" ;;
     tabstrip.js) echo "shprd-tabs" ;;
     toasts.js) echo "shprd-toasts" ;;
+    settings.js) echo "shprd-settings" ;;
+    asks.js) echo "shprd-asks" ;;
     *) echo "no mod list for $1" >&2; exit 2 ;;
   esac
 }

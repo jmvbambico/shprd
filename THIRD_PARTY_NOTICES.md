@@ -73,7 +73,13 @@ SOFTWARE.
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
   two-line task rows and their second line from `mods/tasks/main.js` and
-  `core/tasks.js`, the installer's
+  `core/tasks.js`, the settings page's role rows, its picker button and its
+  write-with-no-Save-step rule from `mods/shepherdr-settings/main.js`,
+  `mods/shepherdr-settings/settings.js` and `core/settings.js`, and the
+  needs-you cards — a question, permission or plan as one card with its choices
+  and the answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
+  `host/herdr-desktop/mods/{shprd-settings,shprd-asks}/main.js` and their
+  `lib/{settings,asks}.js`, the installer's
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house

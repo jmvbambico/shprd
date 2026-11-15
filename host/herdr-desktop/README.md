@@ -60,14 +60,21 @@ node --import ./test/boot.mjs --test test/
 bun test --preload ./test/boot-bun.mjs test/
 ```
 
-Both run the same files, `test/lib.test.mjs`, `test/chrome.test.mjs` and
-`test/mods.test.mjs`; `test/stub-herdr.js` stands in for the app's `herdr` module
-and `test/stub-gpui.js` for its element builders (`gpui-kit`, `gpui-base`).
+Both run the same files, `test/lib.test.mjs`, `test/chrome.test.mjs`,
+`test/mods.test.mjs`, `test/settings.test.mjs` and `test/asks.test.mjs`;
+`test/stub-herdr.js` stands in for the app's `herdr` module and
+`test/stub-gpui.js` for its element builders (`gpui-kit`, `gpui-base`).
 `test/mods.test.mjs` drives the four view models with fixtures captured from a
 real `shprd serve` (`test/fixtures/state.json`, `changes.json`) and a real
 `herdr-app ls` of the window that showed it (`spaces.json`): the sidebar's rows,
 the tab bar's pills, the toasts' news and the status bar's counts are all pure
 functions of those, so what a screenshot shows is what a test asserts.
+`test/settings.test.mjs` and `test/asks.test.mjs` do the same for the settings
+page and the needs-you cards, from the same service's `GET /api/settings`,
+`GET /api/roster`, `GET /api/prompts`, `GET /api/state` and `GET /api/asks`
+(`test/fixtures/settings.json`, `roster.json`, `prompts.json`, `needs-state.json`,
+`needs-asks.json`): the rows, the layers, the picker choices, a refusal's words
+and the cards are all read off those answers.
 
 ## Starting the service
 

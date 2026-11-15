@@ -1,0 +1,367 @@
+{
+  "repo": "repo",
+  "values": [
+    {
+      "key": "roles.order",
+      "value": [
+        "coordinator",
+        "worker",
+        "reviewer",
+        "backup",
+        "docs"
+      ],
+      "source": "you"
+    },
+    {
+      "key": "roles.coordinator.title",
+      "value": "Assistant",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.coordinator.about",
+      "value": "Plans the work and starts a task for each part.",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.coordinator.kind",
+      "value": "coordinator",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.coordinator.prompt",
+      "value": "prompt:assistant",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.coordinator.agent",
+      "value": "claude",
+      "source": "you"
+    },
+    {
+      "key": "roles.coordinator.model",
+      "value": "opus",
+      "source": "you"
+    },
+    {
+      "key": "roles.coordinator.effort",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.coordinator.fast",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.coordinator.perm",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.coordinator.fallback",
+      "value": [],
+      "source": "built_in"
+    },
+    {
+      "key": "roles.coordinator.readonly",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.title",
+      "value": "Worker",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.about",
+      "value": "Does the work of one task, on its own branch.",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.kind",
+      "value": "worker",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.prompt",
+      "value": "prompt:worker",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.agent",
+      "value": "pi",
+      "source": "you"
+    },
+    {
+      "key": "roles.worker.model",
+      "value": "commandcode/z-ai/glm-5.3-flash",
+      "source": "you"
+    },
+    {
+      "key": "roles.worker.effort",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.worker.fast",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.perm",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.worker.fallback",
+      "value": [],
+      "source": "built_in"
+    },
+    {
+      "key": "roles.worker.readonly",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.title",
+      "value": "Reviewer",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.about",
+      "value": "Reads a finished attempt's diff and decides.",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.kind",
+      "value": "reviewer",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.prompt",
+      "value": "prompt:reviewer",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.agent",
+      "value": "claude",
+      "source": "you"
+    },
+    {
+      "key": "roles.reviewer.model",
+      "value": "sonnet",
+      "source": "you"
+    },
+    {
+      "key": "roles.reviewer.effort",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.reviewer.fast",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.perm",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.reviewer.fallback",
+      "value": [],
+      "source": "built_in"
+    },
+    {
+      "key": "roles.reviewer.readonly",
+      "value": true,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.title",
+      "value": "Backup agent",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.about",
+      "value": "Takes a task over once, when the worker's CLI cannot go on.",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.kind",
+      "value": "worker",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.prompt",
+      "value": "prompt:backup",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.agent",
+      "value": "codex",
+      "source": "you"
+    },
+    {
+      "key": "roles.backup.model",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.backup.effort",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.backup.fast",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.perm",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.backup.fallback",
+      "value": [],
+      "source": "built_in"
+    },
+    {
+      "key": "roles.backup.readonly",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.title",
+      "value": "docs",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.about",
+      "value": "",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.kind",
+      "value": "helper",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.prompt",
+      "value": "prompt:docs",
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.agent",
+      "value": "claude",
+      "source": "you"
+    },
+    {
+      "key": "roles.docs.model",
+      "value": "sonnet",
+      "source": "you"
+    },
+    {
+      "key": "roles.docs.effort",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.docs.fast",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.perm",
+      "value": null,
+      "source": null
+    },
+    {
+      "key": "roles.docs.fallback",
+      "value": [],
+      "source": "built_in"
+    },
+    {
+      "key": "roles.docs.readonly",
+      "value": false,
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.merge",
+      "value": "ask",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.review_rounds",
+      "value": 2,
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.must_fix",
+      "value": "major",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.proof",
+      "value": true,
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.max_running",
+      "value": 1,
+      "source": "you"
+    },
+    {
+      "key": "tasks.archive_after",
+      "value": 14,
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.archive_namespace",
+      "value": "shprd/",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.worktrees",
+      "value": true,
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.base",
+      "value": "",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.branch",
+      "value": "task/{n}-{slug}",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.start_notes",
+      "value": "",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.finish_notes",
+      "value": "",
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.tick_secs",
+      "value": 15,
+      "source": "built_in"
+    },
+    {
+      "key": "tasks.news_settle_secs",
+      "value": 5,
+      "source": "built_in"
+    },
+    {
+      "key": "review.cross_vendor",
+      "value": true,
+      "source": "built_in"
+    }
+  ],
+  "problems": []
+}

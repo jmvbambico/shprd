@@ -1,0 +1,2679 @@
+{
+  "programs": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "vendor": "anthropic",
+      "multi_model": false,
+      "needs_provider": false,
+      "models": [
+        {
+          "id": "fable",
+          "name": "Fable",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": false
+        },
+        {
+          "id": "opus",
+          "name": "Opus",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": false
+        },
+        {
+          "id": "sonnet",
+          "name": "Sonnet",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": false
+        }
+      ],
+      "models_source": "static",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "fast": true,
+      "permissions": [
+        {
+          "id": "manual",
+          "label": "Ask"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        },
+        {
+          "id": "acceptEdits",
+          "label": "Accept edits"
+        },
+        {
+          "id": "plan",
+          "label": "Plan"
+        },
+        {
+          "id": "bypassPermissions",
+          "label": "Full access"
+        }
+      ],
+      "default_permission": "manual"
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "vendor": "openai",
+      "multi_model": false,
+      "needs_provider": false,
+      "models": [],
+      "models_source": "command",
+      "models_note": "`codex debug models` gave no model list, so type a model id",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "read-only",
+          "label": "Read only"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        },
+        {
+          "id": "full",
+          "label": "Full access"
+        }
+      ],
+      "default_permission": "read-only"
+    },
+    {
+      "id": "kilo",
+      "name": "Kilo",
+      "vendor": "kilo",
+      "multi_model": true,
+      "needs_provider": false,
+      "models": [
+        {
+          "id": "kilo/~anthropic/claude-fable-latest",
+          "name": "kilo/~anthropic/claude-fable-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~anthropic/claude-haiku-latest",
+          "name": "kilo/~anthropic/claude-haiku-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~anthropic/claude-opus-latest",
+          "name": "kilo/~anthropic/claude-opus-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~anthropic/claude-sonnet-latest",
+          "name": "kilo/~anthropic/claude-sonnet-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~deepseek/deepseek-flash-latest",
+          "name": "kilo/~deepseek/deepseek-flash-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~deepseek/deepseek-pro-latest",
+          "name": "kilo/~deepseek/deepseek-pro-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~deepseek/deepseek-v4-flash-latest",
+          "name": "kilo/~deepseek/deepseek-v4-flash-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~google/gemini-flash-latest",
+          "name": "kilo/~google/gemini-flash-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~google/gemini-pro-latest",
+          "name": "kilo/~google/gemini-pro-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~moonshotai/kimi-latest",
+          "name": "kilo/~moonshotai/kimi-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~openai/gpt-astra-latest",
+          "name": "kilo/~openai/gpt-astra-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~openai/gpt-luna-latest",
+          "name": "kilo/~openai/gpt-luna-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~openai/gpt-mini-latest",
+          "name": "kilo/~openai/gpt-mini-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~openai/gpt-sol-latest",
+          "name": "kilo/~openai/gpt-sol-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~openai/gpt-terra-latest",
+          "name": "kilo/~openai/gpt-terra-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~unbiased/pareto-latest",
+          "name": "kilo/~unbiased/pareto-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~x-ai/grok-latest",
+          "name": "kilo/~x-ai/grok-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~z-ai/glm-flash-latest",
+          "name": "kilo/~z-ai/glm-flash-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/~z-ai/glm-latest",
+          "name": "kilo/~z-ai/glm-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/aion-labs/aion-2.0",
+          "name": "kilo/aion-labs/aion-2.0",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/aion-labs/aion-3.0",
+          "name": "kilo/aion-labs/aion-3.0",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/aion-labs/aion-3.0-mini",
+          "name": "kilo/aion-labs/aion-3.0-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/aion-labs/aion-3.5",
+          "name": "kilo/aion-labs/aion-3.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/aion-labs/aion-3.5-mini",
+          "name": "kilo/aion-labs/aion-3.5-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-2-lite-v1",
+          "name": "kilo/amazon/nova-2-lite-v1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-lite",
+          "name": "kilo/amazon/nova-lite",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-lite-v1",
+          "name": "kilo/amazon/nova-lite-v1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-micro",
+          "name": "kilo/amazon/nova-micro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-micro-v1",
+          "name": "kilo/amazon/nova-micro-v1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-premier-v1",
+          "name": "kilo/amazon/nova-premier-v1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-pro",
+          "name": "kilo/amazon/nova-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/amazon/nova-pro-v1",
+          "name": "kilo/amazon/nova-pro-v1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-fable-5",
+          "name": "kilo/anthropic/claude-fable-5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-fable-5.1",
+          "name": "kilo/anthropic/claude-fable-5.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-fable-5.2",
+          "name": "kilo/anthropic/claude-fable-5.2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-haiku-4.5",
+          "name": "kilo/anthropic/claude-haiku-4.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-haiku-5.5",
+          "name": "kilo/anthropic/claude-haiku-5.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-4.1",
+          "name": "kilo/anthropic/claude-opus-4.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-4.5",
+          "name": "kilo/anthropic/claude-opus-4.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-4.6",
+          "name": "kilo/anthropic/claude-opus-4.6",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-4.7",
+          "name": "kilo/anthropic/claude-opus-4.7",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-4.8",
+          "name": "kilo/anthropic/claude-opus-4.8",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-5",
+          "name": "kilo/anthropic/claude-opus-5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-opus-5.5",
+          "name": "kilo/anthropic/claude-opus-5.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-sonnet-4.5",
+          "name": "kilo/anthropic/claude-sonnet-4.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-sonnet-4.6",
+          "name": "kilo/anthropic/claude-sonnet-4.6",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-sonnet-5",
+          "name": "kilo/anthropic/claude-sonnet-5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/anthropic/claude-sonnet-5.5",
+          "name": "kilo/anthropic/claude-sonnet-5.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/baidu/ernie-5.5-flash-preview:free",
+          "name": "kilo/baidu/ernie-5.5-flash-preview:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/baidu/ernie-light-dt-1.0-intl",
+          "name": "kilo/baidu/ernie-light-dt-1.0-intl",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/bytedance-seed/seed-2-1-turbo",
+          "name": "kilo/bytedance-seed/seed-2-1-turbo",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/bytedance-seed/seed-2.0-lite",
+          "name": "kilo/bytedance-seed/seed-2.0-lite",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/bytedance-seed/seed-2.0-mini",
+          "name": "kilo/bytedance-seed/seed-2.0-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/callstack/apex",
+          "name": "kilo/callstack/apex",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/cohere/command-a",
+          "name": "kilo/cohere/command-a",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/cohere/command-a-plus",
+          "name": "kilo/cohere/command-a-plus",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/cohere/command-r-08-2024",
+          "name": "kilo/cohere/command-r-08-2024",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/cohere/command-r-plus-08-2024",
+          "name": "kilo/cohere/command-r-plus-08-2024",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/cohere/command-r7b-12-2024",
+          "name": "kilo/cohere/command-r7b-12-2024",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/cohere/north-mini-code:free",
+          "name": "kilo/cohere/north-mini-code:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-chat",
+          "name": "kilo/deepseek/deepseek-chat",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-chat-v3-0324",
+          "name": "kilo/deepseek/deepseek-chat-v3-0324",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-chat-v3.1",
+          "name": "kilo/deepseek/deepseek-chat-v3.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-r1",
+          "name": "kilo/deepseek/deepseek-r1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-r1-0528",
+          "name": "kilo/deepseek/deepseek-r1-0528",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v3.1-terminus",
+          "name": "kilo/deepseek/deepseek-v3.1-terminus",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v3.2",
+          "name": "kilo/deepseek/deepseek-v3.2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v3.2-exp",
+          "name": "kilo/deepseek/deepseek-v3.2-exp",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v3.2-thinking",
+          "name": "kilo/deepseek/deepseek-v3.2-thinking",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4-flash",
+          "name": "kilo/deepseek/deepseek-v4-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4-flash-0731",
+          "name": "kilo/deepseek/deepseek-v4-flash-0731",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4-flash-vision-exp",
+          "name": "kilo/deepseek/deepseek-v4-flash-vision-exp",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4-pro",
+          "name": "kilo/deepseek/deepseek-v4-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4-pro-0813",
+          "name": "kilo/deepseek/deepseek-v4-pro-0813",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4.1-flash",
+          "name": "kilo/deepseek/deepseek-v4.1-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4.1-flash-1017",
+          "name": "kilo/deepseek/deepseek-v4.1-flash-1017",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4.1-flash-1017-fast",
+          "name": "kilo/deepseek/deepseek-v4.1-flash-1017-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4.1-flash-1017-ultrafast",
+          "name": "kilo/deepseek/deepseek-v4.1-flash-1017-ultrafast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/deepseek/deepseek-v4.1-flash-fast",
+          "name": "kilo/deepseek/deepseek-v4.1-flash-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/dots-studio/dots-3-note-preview:free",
+          "name": "kilo/dots-studio/dots-3-note-preview:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/elorian/glimpse",
+          "name": "kilo/elorian/glimpse",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/fireworks/ember-1",
+          "name": "kilo/fireworks/ember-1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-2.5-flash",
+          "name": "kilo/google/gemini-2.5-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-2.5-flash-lite",
+          "name": "kilo/google/gemini-2.5-flash-lite",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-2.5-pro",
+          "name": "kilo/google/gemini-2.5-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-2.5-pro-preview",
+          "name": "kilo/google/gemini-2.5-pro-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3-flash",
+          "name": "kilo/google/gemini-3-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3-flash-preview",
+          "name": "kilo/google/gemini-3-flash-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3-pro-image",
+          "name": "kilo/google/gemini-3-pro-image",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.1-flash-lite",
+          "name": "kilo/google/gemini-3.1-flash-lite",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.1-flash-lite-preview",
+          "name": "kilo/google/gemini-3.1-flash-lite-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.1-pro-preview",
+          "name": "kilo/google/gemini-3.1-pro-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.1-pro-preview-customtools",
+          "name": "kilo/google/gemini-3.1-pro-preview-customtools",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.5-flash",
+          "name": "kilo/google/gemini-3.5-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.5-flash-lite",
+          "name": "kilo/google/gemini-3.5-flash-lite",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.6-flash",
+          "name": "kilo/google/gemini-3.6-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.7-flash",
+          "name": "kilo/google/gemini-3.7-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-3.8-flash",
+          "name": "kilo/google/gemini-3.8-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-4-argon",
+          "name": "kilo/google/gemini-4-argon",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-4-carbon",
+          "name": "kilo/google/gemini-4-carbon",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-4-hydrogen",
+          "name": "kilo/google/gemini-4-hydrogen",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemini-nano-banana-2.1",
+          "name": "kilo/google/gemini-nano-banana-2.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemma-3-12b-it",
+          "name": "kilo/google/gemma-3-12b-it",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemma-3-27b-it",
+          "name": "kilo/google/gemma-3-27b-it",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemma-4-26b-a4b-it",
+          "name": "kilo/google/gemma-4-26b-a4b-it",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/google/gemma-4-31b-it",
+          "name": "kilo/google/gemma-4-31b-it",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/humansand/ampersand-v0.1",
+          "name": "kilo/humansand/ampersand-v0.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/ibm-granite/granite-4.2-8b",
+          "name": "kilo/ibm-granite/granite-4.2-8b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inception/mercury-3",
+          "name": "kilo/inception/mercury-3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.0-flash",
+          "name": "kilo/inclusionai/ling-3.0-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.0-flash-fin",
+          "name": "kilo/inclusionai/ling-3.0-flash-fin",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.0-flash-sante",
+          "name": "kilo/inclusionai/ling-3.0-flash-sante",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.0-flash-vl",
+          "name": "kilo/inclusionai/ling-3.0-flash-vl",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.0-tiny",
+          "name": "kilo/inclusionai/ling-3.0-tiny",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.1-flash",
+          "name": "kilo/inclusionai/ling-3.1-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.1-flash-1019",
+          "name": "kilo/inclusionai/ling-3.1-flash-1019",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/inclusionai/ling-3.2-flash:free",
+          "name": "kilo/inclusionai/ling-3.2-flash:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/interfaze/interfaze-beta",
+          "name": "kilo/interfaze/interfaze-beta",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/kilo-auto/balanced",
+          "name": "kilo/kilo-auto/balanced",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/kilo-auto/efficient",
+          "name": "kilo/kilo-auto/efficient",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/kilo-auto/free",
+          "name": "kilo/kilo-auto/free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/kilo-auto/frontier",
+          "name": "kilo/kilo-auto/frontier",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/kilo-auto/small",
+          "name": "kilo/kilo-auto/small",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/kt/midm-k-3.0-pro",
+          "name": "kilo/kt/midm-k-3.0-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/liquid/lfm-2.5-24b-a2b",
+          "name": "kilo/liquid/lfm-2.5-24b-a2b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/liquid/lfm-3-1.7b",
+          "name": "kilo/liquid/lfm-3-1.7b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/liquid/lfm-3-1.7b:free",
+          "name": "kilo/liquid/lfm-3-1.7b:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meituan/longcat-2.0",
+          "name": "kilo/meituan/longcat-2.0",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meituan/longcat-2.5",
+          "name": "kilo/meituan/longcat-2.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta-llama/llama-3.1-70b-instruct",
+          "name": "kilo/meta-llama/llama-3.1-70b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta-llama/llama-3.1-8b-instruct",
+          "name": "kilo/meta-llama/llama-3.1-8b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta-llama/llama-3.3-70b-instruct",
+          "name": "kilo/meta-llama/llama-3.3-70b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta-llama/llama-4-maverick",
+          "name": "kilo/meta-llama/llama-4-maverick",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta-llama/llama-4-scout",
+          "name": "kilo/meta-llama/llama-4-scout",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-ember",
+          "name": "kilo/meta/muse-ember",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-glimmer-30b",
+          "name": "kilo/meta/muse-glimmer-30b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-spark-1.1",
+          "name": "kilo/meta/muse-spark-1.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-spark-1.2",
+          "name": "kilo/meta/muse-spark-1.2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-spark-1.2-contributor",
+          "name": "kilo/meta/muse-spark-1.2-contributor",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-spark-1.3",
+          "name": "kilo/meta/muse-spark-1.3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-spark-1.3-contributor",
+          "name": "kilo/meta/muse-spark-1.3-contributor",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-spark-open",
+          "name": "kilo/meta/muse-spark-open",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/meta/muse-wonder",
+          "name": "kilo/meta/muse-wonder",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2",
+          "name": "kilo/minimax/minimax-m2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2.1",
+          "name": "kilo/minimax/minimax-m2.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2.1-lightning",
+          "name": "kilo/minimax/minimax-m2.1-lightning",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2.5",
+          "name": "kilo/minimax/minimax-m2.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2.5-highspeed",
+          "name": "kilo/minimax/minimax-m2.5-highspeed",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2.7",
+          "name": "kilo/minimax/minimax-m2.7",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m2.7-highspeed",
+          "name": "kilo/minimax/minimax-m2.7-highspeed",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m3",
+          "name": "kilo/minimax/minimax-m3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/minimax/minimax-m3.1-flash",
+          "name": "kilo/minimax/minimax-m3.1-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/codestral",
+          "name": "kilo/mistralai/codestral",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/codestral-2508",
+          "name": "kilo/mistralai/codestral-2508",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/devstral-2512",
+          "name": "kilo/mistralai/devstral-2512",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/ministral-14b",
+          "name": "kilo/mistralai/ministral-14b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/ministral-14b-2512",
+          "name": "kilo/mistralai/ministral-14b-2512",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/ministral-3b",
+          "name": "kilo/mistralai/ministral-3b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/ministral-3b-2512",
+          "name": "kilo/mistralai/ministral-3b-2512",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/ministral-8b",
+          "name": "kilo/mistralai/ministral-8b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/ministral-8b-2512",
+          "name": "kilo/mistralai/ministral-8b-2512",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-large",
+          "name": "kilo/mistralai/mistral-large",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-large-2407",
+          "name": "kilo/mistralai/mistral-large-2407",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-large-2512",
+          "name": "kilo/mistralai/mistral-large-2512",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-large-4-0",
+          "name": "kilo/mistralai/mistral-large-4-0",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-medium-3",
+          "name": "kilo/mistralai/mistral-medium-3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-medium-3-5",
+          "name": "kilo/mistralai/mistral-medium-3-5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-medium-3.1",
+          "name": "kilo/mistralai/mistral-medium-3.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-nemo",
+          "name": "kilo/mistralai/mistral-nemo",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-saba",
+          "name": "kilo/mistralai/mistral-saba",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-small",
+          "name": "kilo/mistralai/mistral-small",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-small-2603",
+          "name": "kilo/mistralai/mistral-small-2603",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-small-3.1-24b-instruct",
+          "name": "kilo/mistralai/mistral-small-3.1-24b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mistral-small-3.2-24b-instruct",
+          "name": "kilo/mistralai/mistral-small-3.2-24b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/mixtral-8x22b-instruct",
+          "name": "kilo/mistralai/mixtral-8x22b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mistralai/voxtral-small-24b-2507",
+          "name": "kilo/mistralai/voxtral-small-24b-2507",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/mixedbread/toast-1",
+          "name": "kilo/mixedbread/toast-1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2",
+          "name": "kilo/moonshotai/kimi-k2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2-0905",
+          "name": "kilo/moonshotai/kimi-k2-0905",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2-thinking",
+          "name": "kilo/moonshotai/kimi-k2-thinking",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2.5",
+          "name": "kilo/moonshotai/kimi-k2.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2.6",
+          "name": "kilo/moonshotai/kimi-k2.6",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2.7-code",
+          "name": "kilo/moonshotai/kimi-k2.7-code",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k2.7-code-highspeed",
+          "name": "kilo/moonshotai/kimi-k2.7-code-highspeed",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k3",
+          "name": "kilo/moonshotai/kimi-k3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k3-fast",
+          "name": "kilo/moonshotai/kimi-k3-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k3.1-pro",
+          "name": "kilo/moonshotai/kimi-k3.1-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/moonshotai/kimi-k3.1-pro-highspeed",
+          "name": "kilo/moonshotai/kimi-k3.1-pro-highspeed",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/motif-technologies/motif-3",
+          "name": "kilo/motif-technologies/motif-3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nex-agi/nex-n2.5-pro",
+          "name": "kilo/nex-agi/nex-n2.5-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nex-agi/nex-n2.6",
+          "name": "kilo/nex-agi/nex-n2.6",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3-nano-30b-a3b",
+          "name": "kilo/nvidia/nemotron-3-nano-30b-a3b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+          "name": "kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3-super-120b-a12b",
+          "name": "kilo/nvidia/nemotron-3-super-120b-a12b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3-ultra-550b-a55b",
+          "name": "kilo/nvidia/nemotron-3-ultra-550b-a55b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+          "name": "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3.5-lightning",
+          "name": "kilo/nvidia/nemotron-3.5-lightning",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3.5-lightning:free",
+          "name": "kilo/nvidia/nemotron-3.5-lightning:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3.5-super-vl",
+          "name": "kilo/nvidia/nemotron-3.5-super-vl",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-3.5-super-vl:free",
+          "name": "kilo/nvidia/nemotron-3.5-super-vl:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-nano-12b-v2-vl",
+          "name": "kilo/nvidia/nemotron-nano-12b-v2-vl",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/nemotron-nano-9b-v2",
+          "name": "kilo/nvidia/nemotron-nano-9b-v2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/nvidia/switchyard",
+          "name": "kilo/nvidia/switchyard",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-3.5-turbo-0613",
+          "name": "kilo/openai/gpt-3.5-turbo-0613",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-3.5-turbo-16k",
+          "name": "kilo/openai/gpt-3.5-turbo-16k",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4",
+          "name": "kilo/openai/gpt-4",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4.1",
+          "name": "kilo/openai/gpt-4.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4.1-fast",
+          "name": "kilo/openai/gpt-4.1-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4.1-mini",
+          "name": "kilo/openai/gpt-4.1-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4.1-mini-fast",
+          "name": "kilo/openai/gpt-4.1-mini-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4.1-nano",
+          "name": "kilo/openai/gpt-4.1-nano",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o",
+          "name": "kilo/openai/gpt-4o",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-2024-05-13",
+          "name": "kilo/openai/gpt-4o-2024-05-13",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-2024-08-06",
+          "name": "kilo/openai/gpt-4o-2024-08-06",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-2024-11-20",
+          "name": "kilo/openai/gpt-4o-2024-11-20",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-fast",
+          "name": "kilo/openai/gpt-4o-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-mini",
+          "name": "kilo/openai/gpt-4o-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-mini-2024-07-18",
+          "name": "kilo/openai/gpt-4o-mini-2024-07-18",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-4o-mini-fast",
+          "name": "kilo/openai/gpt-4o-mini-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5",
+          "name": "kilo/openai/gpt-5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5-codex",
+          "name": "kilo/openai/gpt-5-codex",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5-fast",
+          "name": "kilo/openai/gpt-5-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5-mini",
+          "name": "kilo/openai/gpt-5-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5-mini-fast",
+          "name": "kilo/openai/gpt-5-mini-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5-nano",
+          "name": "kilo/openai/gpt-5-nano",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5-pro",
+          "name": "kilo/openai/gpt-5-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.1",
+          "name": "kilo/openai/gpt-5.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.1-codex",
+          "name": "kilo/openai/gpt-5.1-codex",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.1-codex-max",
+          "name": "kilo/openai/gpt-5.1-codex-max",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.1-codex-mini",
+          "name": "kilo/openai/gpt-5.1-codex-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.1-thinking",
+          "name": "kilo/openai/gpt-5.1-thinking",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.1-thinking-fast",
+          "name": "kilo/openai/gpt-5.1-thinking-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.2",
+          "name": "kilo/openai/gpt-5.2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.2-codex",
+          "name": "kilo/openai/gpt-5.2-codex",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.2-fast",
+          "name": "kilo/openai/gpt-5.2-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.2-pro",
+          "name": "kilo/openai/gpt-5.2-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.3-codex",
+          "name": "kilo/openai/gpt-5.3-codex",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.3-codex-fast",
+          "name": "kilo/openai/gpt-5.3-codex-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.4",
+          "name": "kilo/openai/gpt-5.4",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.4-fast",
+          "name": "kilo/openai/gpt-5.4-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.4-mini",
+          "name": "kilo/openai/gpt-5.4-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.4-mini-fast",
+          "name": "kilo/openai/gpt-5.4-mini-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.4-nano",
+          "name": "kilo/openai/gpt-5.4-nano",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.4-pro",
+          "name": "kilo/openai/gpt-5.4-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.5",
+          "name": "kilo/openai/gpt-5.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.5-fast",
+          "name": "kilo/openai/gpt-5.5-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.5-pro",
+          "name": "kilo/openai/gpt-5.5-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-luna",
+          "name": "kilo/openai/gpt-5.6-luna",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-luna-fast",
+          "name": "kilo/openai/gpt-5.6-luna-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-luna-pro",
+          "name": "kilo/openai/gpt-5.6-luna-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-sol",
+          "name": "kilo/openai/gpt-5.6-sol",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-sol-fast",
+          "name": "kilo/openai/gpt-5.6-sol-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-sol-pro",
+          "name": "kilo/openai/gpt-5.6-sol-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-terra",
+          "name": "kilo/openai/gpt-5.6-terra",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-terra-fast",
+          "name": "kilo/openai/gpt-5.6-terra-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-5.6-terra-pro",
+          "name": "kilo/openai/gpt-5.6-terra-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-astra",
+          "name": "kilo/openai/gpt-6-astra",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-astra-fast",
+          "name": "kilo/openai/gpt-6-astra-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-astra-pro",
+          "name": "kilo/openai/gpt-6-astra-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-luna",
+          "name": "kilo/openai/gpt-6-luna",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-luna-fast",
+          "name": "kilo/openai/gpt-6-luna-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-luna-pro",
+          "name": "kilo/openai/gpt-6-luna-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-sol",
+          "name": "kilo/openai/gpt-6-sol",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-sol-fast",
+          "name": "kilo/openai/gpt-6-sol-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6-sol-pro",
+          "name": "kilo/openai/gpt-6-sol-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6.1-sol",
+          "name": "kilo/openai/gpt-6.1-sol",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6.1-sol-fast",
+          "name": "kilo/openai/gpt-6.1-sol-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6.1-sol-pro",
+          "name": "kilo/openai/gpt-6.1-sol-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6.1-terra",
+          "name": "kilo/openai/gpt-6.1-terra",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6.1-terra-fast",
+          "name": "kilo/openai/gpt-6.1-terra-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-6.1-terra-pro",
+          "name": "kilo/openai/gpt-6.1-terra-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-audio",
+          "name": "kilo/openai/gpt-audio",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-audio-mini",
+          "name": "kilo/openai/gpt-audio-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-chat-latest",
+          "name": "kilo/openai/gpt-chat-latest",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-oss-120b",
+          "name": "kilo/openai/gpt-oss-120b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-oss-20b",
+          "name": "kilo/openai/gpt-oss-20b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-oss-safeguard-120b",
+          "name": "kilo/openai/gpt-oss-safeguard-120b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/gpt-oss-safeguard-20b",
+          "name": "kilo/openai/gpt-oss-safeguard-20b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/o1",
+          "name": "kilo/openai/o1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/o3",
+          "name": "kilo/openai/o3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/o3-fast",
+          "name": "kilo/openai/o3-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/o3-mini",
+          "name": "kilo/openai/o3-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/o3-pro",
+          "name": "kilo/openai/o3-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openai/o4-mini",
+          "name": "kilo/openai/o4-mini",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/auto",
+          "name": "kilo/openrouter/auto",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/auto-beta",
+          "name": "kilo/openrouter/auto-beta",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/auto-code",
+          "name": "kilo/openrouter/auto-code",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/bodybuilder",
+          "name": "kilo/openrouter/bodybuilder",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/free",
+          "name": "kilo/openrouter/free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/fusion",
+          "name": "kilo/openrouter/fusion",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/openrouter/pareto-code",
+          "name": "kilo/openrouter/pareto-code",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/paperinstruments/ultramarine-1-flash",
+          "name": "kilo/paperinstruments/ultramarine-1-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/particle-ai/particle-1",
+          "name": "kilo/particle-ai/particle-1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/particle-ai/particle-1:free",
+          "name": "kilo/particle-ai/particle-1:free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/particle/particle-1",
+          "name": "kilo/particle/particle-1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/perceptron/perceptron-mk1.5",
+          "name": "kilo/perceptron/perceptron-mk1.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/prism-ml/ternary-bonsai-2-27b",
+          "name": "kilo/prism-ml/ternary-bonsai-2-27b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/prism-ml/ternary-bonsai-2-9b",
+          "name": "kilo/prism-ml/ternary-bonsai-2-9b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/quiverai/arrow-2",
+          "name": "kilo/quiverai/arrow-2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/quiverai/arrow-2-telos",
+          "name": "kilo/quiverai/arrow-2-telos",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen-2.5-72b-instruct",
+          "name": "kilo/qwen/qwen-2.5-72b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen-3-14b",
+          "name": "kilo/qwen/qwen-3-14b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen-plus",
+          "name": "kilo/qwen/qwen-plus",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-14b",
+          "name": "kilo/qwen/qwen3-14b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-235b-a22b-2507",
+          "name": "kilo/qwen/qwen3-235b-a22b-2507",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-235b-a22b-thinking-2507",
+          "name": "kilo/qwen/qwen3-235b-a22b-thinking-2507",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-30b-a3b",
+          "name": "kilo/qwen/qwen3-30b-a3b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-30b-a3b-instruct-2507",
+          "name": "kilo/qwen/qwen3-30b-a3b-instruct-2507",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-32b",
+          "name": "kilo/qwen/qwen3-32b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-coder",
+          "name": "kilo/qwen/qwen3-coder",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-coder-30b-a3b-instruct",
+          "name": "kilo/qwen/qwen3-coder-30b-a3b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-coder-flash",
+          "name": "kilo/qwen/qwen3-coder-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-coder-next",
+          "name": "kilo/qwen/qwen3-coder-next",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-max-thinking",
+          "name": "kilo/qwen/qwen3-max-thinking",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-next-80b-a3b-instruct",
+          "name": "kilo/qwen/qwen3-next-80b-a3b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-next-80b-a3b-thinking",
+          "name": "kilo/qwen/qwen3-next-80b-a3b-thinking",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-vl-235b-a22b-instruct",
+          "name": "kilo/qwen/qwen3-vl-235b-a22b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-vl-30b-a3b-instruct",
+          "name": "kilo/qwen/qwen3-vl-30b-a3b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3-vl-8b-instruct",
+          "name": "kilo/qwen/qwen3-vl-8b-instruct",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-122b-a10b",
+          "name": "kilo/qwen/qwen3.5-122b-a10b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-27b",
+          "name": "kilo/qwen/qwen3.5-27b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-35b-a3b",
+          "name": "kilo/qwen/qwen3.5-35b-a3b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-397b-a17b",
+          "name": "kilo/qwen/qwen3.5-397b-a17b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-9b",
+          "name": "kilo/qwen/qwen3.5-9b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-flash",
+          "name": "kilo/qwen/qwen3.5-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-flash-02-23",
+          "name": "kilo/qwen/qwen3.5-flash-02-23",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-plus",
+          "name": "kilo/qwen/qwen3.5-plus",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-plus-02-15",
+          "name": "kilo/qwen/qwen3.5-plus-02-15",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.5-plus-20260420",
+          "name": "kilo/qwen/qwen3.5-plus-20260420",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.6-27b",
+          "name": "kilo/qwen/qwen3.6-27b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.6-35b-a3b",
+          "name": "kilo/qwen/qwen3.6-35b-a3b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.6-flash",
+          "name": "kilo/qwen/qwen3.6-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.6-plus",
+          "name": "kilo/qwen/qwen3.6-plus",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.7-flash",
+          "name": "kilo/qwen/qwen3.7-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.7-max",
+          "name": "kilo/qwen/qwen3.7-max",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.7-plus",
+          "name": "kilo/qwen/qwen3.7-plus",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-2.4t-a95b",
+          "name": "kilo/qwen/qwen3.8-2.4t-a95b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-27b",
+          "name": "kilo/qwen/qwen3.8-27b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-flash",
+          "name": "kilo/qwen/qwen3.8-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-max",
+          "name": "kilo/qwen/qwen3.8-max",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-max-0902",
+          "name": "kilo/qwen/qwen3.8-max-0902",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-max-prime",
+          "name": "kilo/qwen/qwen3.8-max-prime",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/qwen/qwen3.8-omni-flash",
+          "name": "kilo/qwen/qwen3.8-omni-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/reflection/beam-1.0-501b-a23b",
+          "name": "kilo/reflection/beam-1.0-501b-a23b",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/reflection/beam-free",
+          "name": "kilo/reflection/beam-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/rekaai/reka-edge",
+          "name": "kilo/rekaai/reka-edge",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/relace/relace-search",
+          "name": "kilo/relace/relace-search",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/ricursiveai/ripple-65b-preview",
+          "name": "kilo/ricursiveai/ripple-65b-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/sakana/fugu-max",
+          "name": "kilo/sakana/fugu-max",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/sakana/fugu-ultra",
+          "name": "kilo/sakana/fugu-ultra",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/sakana/fugu-ultra-v2",
+          "name": "kilo/sakana/fugu-ultra-v2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/sakana/sakana-namazu",
+          "name": "kilo/sakana/sakana-namazu",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/stealth/glyph-cluster",
+          "name": "kilo/stealth/glyph-cluster",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/stepfun/step-3.7-flash",
+          "name": "kilo/stepfun/step-3.7-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/stepfun/step-5-preview",
+          "name": "kilo/stepfun/step-5-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/tencent/hy3",
+          "name": "kilo/tencent/hy3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/tencent/hy3-preview",
+          "name": "kilo/tencent/hy3-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/tencent/hy4",
+          "name": "kilo/tencent/hy4",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/tencent/hy4-preview",
+          "name": "kilo/tencent/hy4-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/thinkingmachines/inkling",
+          "name": "kilo/thinkingmachines/inkling",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/thinkingmachines/inkling-2-small",
+          "name": "kilo/thinkingmachines/inkling-2-small",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/thinkingmachines/inkling-small",
+          "name": "kilo/thinkingmachines/inkling-small",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/typesafe/jev-router",
+          "name": "kilo/typesafe/jev-router",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/unbiased/pareto-26.10",
+          "name": "kilo/unbiased/pareto-26.10",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/unbiased/pareto-26.10-preview",
+          "name": "kilo/unbiased/pareto-26.10-preview",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/unbiased/pareto-26.9",
+          "name": "kilo/unbiased/pareto-26.9",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/upstage/solar-mini4",
+          "name": "kilo/upstage/solar-mini4",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/upstage/solar-pro4",
+          "name": "kilo/upstage/solar-pro4",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.20",
+          "name": "kilo/x-ai/grok-4.20",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.20-multi-agent-beta",
+          "name": "kilo/x-ai/grok-4.20-multi-agent-beta",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.20-non-reasoning",
+          "name": "kilo/x-ai/grok-4.20-non-reasoning",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.20-non-reasoning-beta",
+          "name": "kilo/x-ai/grok-4.20-non-reasoning-beta",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.20-reasoning",
+          "name": "kilo/x-ai/grok-4.20-reasoning",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.20-reasoning-beta",
+          "name": "kilo/x-ai/grok-4.20-reasoning-beta",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.3",
+          "name": "kilo/x-ai/grok-4.3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.5",
+          "name": "kilo/x-ai/grok-4.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.6",
+          "name": "kilo/x-ai/grok-4.6",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-4.7",
+          "name": "kilo/x-ai/grok-4.7",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/x-ai/grok-build-0.1",
+          "name": "kilo/x-ai/grok-build-0.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/xiaomi/mimo-v2.5",
+          "name": "kilo/xiaomi/mimo-v2.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/xiaomi/mimo-v2.5-pro",
+          "name": "kilo/xiaomi/mimo-v2.5-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/xiaomi/mimo-v2.6-flash",
+          "name": "kilo/xiaomi/mimo-v2.6-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/xiaomi/mimo-v2.6-pro",
+          "name": "kilo/xiaomi/mimo-v2.6-pro",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/xiaomi/mimo-v2.6-pro-ultraspeed",
+          "name": "kilo/xiaomi/mimo-v2.6-pro-ultraspeed",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.5",
+          "name": "kilo/z-ai/glm-4.5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.5-air",
+          "name": "kilo/z-ai/glm-4.5-air",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.5v",
+          "name": "kilo/z-ai/glm-4.5v",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.6",
+          "name": "kilo/z-ai/glm-4.6",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.6v",
+          "name": "kilo/z-ai/glm-4.6v",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.7",
+          "name": "kilo/z-ai/glm-4.7",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.7-flash",
+          "name": "kilo/z-ai/glm-4.7-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-4.7-flashx",
+          "name": "kilo/z-ai/glm-4.7-flashx",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5",
+          "name": "kilo/z-ai/glm-5",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5-turbo",
+          "name": "kilo/z-ai/glm-5-turbo",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.1",
+          "name": "kilo/z-ai/glm-5.1",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.2",
+          "name": "kilo/z-ai/glm-5.2",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.2-fast",
+          "name": "kilo/z-ai/glm-5.2-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.3",
+          "name": "kilo/z-ai/glm-5.3",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.3-fast",
+          "name": "kilo/z-ai/glm-5.3-fast",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.3-flash",
+          "name": "kilo/z-ai/glm-5.3-flash",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.3-flashx",
+          "name": "kilo/z-ai/glm-5.3-flashx",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.3-flashx-legal",
+          "name": "kilo/z-ai/glm-5.3-flashx-legal",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5.3-prime",
+          "name": "kilo/z-ai/glm-5.3-prime",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "kilo/z-ai/glm-5v-turbo",
+          "name": "kilo/z-ai/glm-5v-turbo",
+          "efforts": [],
+          "fast": false
+        }
+      ],
+      "models_source": "command",
+      "efforts": [],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "ask",
+          "label": "Ask"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        }
+      ],
+      "default_permission": "ask"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "vendor": "opencode",
+      "multi_model": true,
+      "needs_provider": false,
+      "models": [
+        {
+          "id": "opencode/big-pickle",
+          "name": "opencode/big-pickle",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/fledge-alpha-free",
+          "name": "opencode/fledge-alpha-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/ling-3.0-flash-fin-free",
+          "name": "opencode/ling-3.0-flash-fin-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/ling-3.1-flash-free",
+          "name": "opencode/ling-3.1-flash-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/longcat-2.5-preview-free",
+          "name": "opencode/longcat-2.5-preview-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/mimo-v2.6-flash-free",
+          "name": "opencode/mimo-v2.6-flash-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/muse-spark-1.3-contributor-free",
+          "name": "opencode/muse-spark-1.3-contributor-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/nemotron-3-ultra-free",
+          "name": "opencode/nemotron-3-ultra-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/nemotron-3.5-lightning-free",
+          "name": "opencode/nemotron-3.5-lightning-free",
+          "efforts": [],
+          "fast": false
+        },
+        {
+          "id": "opencode/space-bunny-free",
+          "name": "opencode/space-bunny-free",
+          "efforts": [],
+          "fast": false
+        }
+      ],
+      "models_source": "command",
+      "efforts": [],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "ask",
+          "label": "Ask"
+        },
+        {
+          "id": "auto",
+          "label": "Auto"
+        }
+      ],
+      "default_permission": "ask"
+    },
+    {
+      "id": "pi",
+      "name": "Pi",
+      "vendor": "pi",
+      "multi_model": true,
+      "needs_provider": true,
+      "models": [],
+      "models_source": "command",
+      "models_note": "`pi --list-models` gave no model list, so type a model id",
+      "efforts": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "fast": false,
+      "permissions": [
+        {
+          "id": "default",
+          "label": "As you set it up"
+        },
+        {
+          "id": "read-only",
+          "label": "Read only"
+        }
+      ],
+      "default_permission": "default"
+    }
+  ]
+}

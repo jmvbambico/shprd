@@ -161,7 +161,9 @@ fn note_for(
                 .as_ref()
                 .map(|parts| parts.join(" "))
                 .unwrap_or_else(|| spec.id.clone());
-            Some(format!("`{command}` did not answer, so type a model id"))
+            Some(format!(
+                "`{command}` gave no model list, so type a model id"
+            ))
         }
         CatalogSource::None => Some(String::from("it names no model list, so type a model id")),
     }
