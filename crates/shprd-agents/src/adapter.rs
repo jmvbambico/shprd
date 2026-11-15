@@ -28,11 +28,12 @@
 //! pane (a kickoff when the brief went in its argv, the brief itself otherwise).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::data::DataDir;
 use crate::env::{self, EnvContext, LaunchEnv, Role as EnvRole};
 use crate::harness::Harness;
 use crate::models::{self, Catalog, ModelError};
@@ -220,30 +221,30 @@ pub fn catalog_from_output(harness: &Harness, output: &str) -> Result<Catalog, A
     Ok(models::parse_catalog(harness.spec(), output)?)
 }
 
-/// Read the static catalog a program names, from a `data/models` directory.
+/// Read the static catalog a program names, from the shipped data.
 ///
 /// [`None`] when the program has no static catalog.
 pub fn catalog_from_static(
     harness: &Harness,
-    models_dir: &Path,
+    data: &DataDir,
 ) -> Result<Option<Catalog>, AdapterError> {
-    Ok(models::static_catalog(harness.spec(), models_dir)?)
+    Ok(models::static_catalog(harness.spec(), data)?)
 }
 
 /// Read a program's catalog for a check that may not fail.
 ///
-/// The static list is read from `models_dir`; a program that lists its models
-/// itself is asked, with `timeout`. `None` when the program has no catalog or
-/// the call failed, because everything this feeds — a warning about an effort
-/// level — is a hint, never a refusal.
+/// The static list is read from the shipped data; a program that lists its
+/// models itself is asked, with `timeout`. `None` when the program has no
+/// catalog or the call failed, because everything this feeds — a warning about
+/// an effort level — is a hint, never a refusal.
 pub fn catalog(
     spec: &HarnessSpec,
-    models_dir: &Path,
+    data: &DataDir,
     path_env: &str,
     timeout: Duration,
 ) -> Option<Catalog> {
     match spec.models.catalog_source() {
-        CatalogSource::Static => models::static_catalog(spec, models_dir).ok().flatten(),
+        CatalogSource::Static => models::static_catalog(spec, data).ok().flatten(),
         CatalogSource::Command => models::load_catalog(spec, path_env, timeout).ok().flatten(),
         CatalogSource::None => None,
     }
@@ -394,6 +395,11 @@ mod tests {
             Ok(harness) => harness,
             Err(error) => panic!("{id} should load: {error}"),
         }
+    }
+
+    /// The shipped data, as the binary carries it.
+    fn shipped() -> DataDir {
+        DataDir::resolve(None, None)
     }
 
     fn brief() -> Brief {
@@ -945,9 +951,9 @@ project_dirs = []
 
     #[test]
     fn a_catalog_is_read_the_way_its_harness_says() {
-        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/models");
+        let data = shipped();
         let claude = harness("claude");
-        let catalog = match catalog_from_static(&claude, &models_dir) {
+        let catalog = match catalog_from_static(&claude, &data) {
             Ok(Some(catalog)) => catalog,
             other => panic!("claude should have a static catalog: {other:?}"),
         };
@@ -990,9 +996,8 @@ project_dirs = []
             Err(AdapterError::NoCatalog { .. })
         ));
         let opencode = harness("opencode");
-        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/models");
         assert!(matches!(
-            catalog_from_static(&opencode, &models_dir),
+            catalog_from_static(&opencode, &shipped()),
             Ok(None)
         ));
     }

@@ -150,8 +150,7 @@ impl LiveFallback {
             return check.clone();
         }
         let specs = crate::cmd::roster::resolve_data_dir()
-            .ok()
-            .and_then(|data| shprd_agents::spec::load_dir(&data.join("harness")).ok())
+            .harness_specs()
             .unwrap_or_default();
         let path_env = std::env::var("PATH").unwrap_or_default();
         let env: Vec<(String, Option<String>)> = std::env::vars()

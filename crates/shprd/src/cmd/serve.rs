@@ -82,7 +82,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
         &home,
     )));
-    config.data = resolve_data_dir(Some(&ctx.root)).ok();
+    config.data = Some(resolve_data_dir());
     // The chat's writes go through the host, the same adapter every other verb
     // drives: one code path types into a pane, so a chat line lands where a
     // prompt does and never in a tab shprd did not open.

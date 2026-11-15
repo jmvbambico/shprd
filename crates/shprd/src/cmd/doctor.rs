@@ -9,13 +9,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use shprd_agents::data::{DataDir, Kind};
 use shprd_agents::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_agents::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_agents::families::{Families, agent_vendor};
 use shprd_agents::models::AgentRef;
 use shprd_agents::quota::{self, ProbeContext, QuotaReport, QuotaState};
 use shprd_agents::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
-use shprd_agents::spec::{HarnessSpec, load_dir};
+use shprd_agents::spec::HarnessSpec;
 use shprd_core::config::{self, Config, Roster};
 use shprd_core::settings::{Loaded, Resolved, ResolvedRole, RoleKind, Source};
 
@@ -157,8 +158,9 @@ struct Facts {
     home: Option<PathBuf>,
     /// The repository root, when the verb runs inside one.
     repo: Option<PathBuf>,
-    /// The data directory holding `harness/` and `skills/`.
-    data: Option<PathBuf>,
+    /// The data the binary reads: `$SHPRD_DATA_DIR`, the person's overrides,
+    /// or the copy embedded in the binary.
+    data: DataDir,
 }
 
 impl Facts {
@@ -169,7 +171,7 @@ impl Facts {
             path_env: std::env::var("PATH").unwrap_or_default(),
             home: resolve_home(home_flag).ok(),
             repo: crate::ctx::resolve_root(None).ok(),
-            data: crate::cmd::roster::resolve_data_dir().ok(),
+            data: crate::cmd::roster::resolve_data_dir(),
         }
     }
 }
@@ -238,20 +240,26 @@ fn host(report: &mut Report, facts: &Facts) {
     }
 }
 
-/// Section 2: the harness table and the curated skills tables in `data/`.
+/// Section 2: where the shipped data came from, what it holds and whether it
+/// loads.
 ///
-/// Returns the specs it loaded, so the agent section does not load them again.
+/// Every kind is named with its own source, because a person's overrides are
+/// merged file by file: their `harness/` may hold one file while the rest still
+/// comes from the binary. Returns the specs it loaded, so the agent section
+/// does not load them again.
 fn data(report: &mut Report, facts: &Facts) -> Vec<HarnessSpec> {
     let section = report.section("Data");
-    let Some(dir) = &facts.data else {
-        section.add(
-            Level::Fail,
-            "no data directory: set SHPRD_DATA_DIR to a directory holding `harness/`",
-        );
-        return Vec::new();
-    };
-    section.add(Level::Info, format!("data directory {}", dir.display()));
-    let specs = match load_dir(&dir.join("harness")) {
+    section.add(Level::Info, format!("data from {}", facts.data.label()));
+    for kind in Kind::ALL {
+        let files = facts.data.summary(kind);
+        let level = if files.total == 0 {
+            Level::Warn
+        } else {
+            Level::Ok
+        };
+        section.add(level, files.describe(kind));
+    }
+    let specs = match facts.data.harness_specs() {
         Ok(specs) => {
             section.add(
                 Level::Ok,
@@ -264,15 +272,14 @@ fn data(report: &mut Report, facts: &Facts) -> Vec<HarnessSpec> {
             Vec::new()
         }
     };
-    let skills_dir = dir.join("skills");
-    match CompatList::load(&skills_dir.join("compat.toml")) {
+    match facts.data.compat() {
         Ok(list) => section.add(
             Level::Ok,
             format!("compat.toml: {} entries", list.skills.len()),
         ),
         Err(err) => section.add(Level::Fail, format!("compat.toml does not load: {err}")),
     }
-    match VisibilityRules::load(&skills_dir.join("visibility.toml")) {
+    match facts.data.visibility() {
         Ok(rules) => section.add(
             Level::Ok,
             format!("visibility.toml: {} rule(s)", rules.rules.len()),
@@ -552,7 +559,7 @@ fn worker_env(facts: &Facts) -> LaunchEnv {
         run: None,
         repo: std::env::current_dir().unwrap_or_default(),
         home: facts.home.clone(),
-        data: facts.data.clone(),
+        data: facts.data.env_value().map(Path::to_path_buf),
     };
     env::launch_env(&facts.current, Role::Worker, &ctx)
 }
@@ -656,10 +663,7 @@ fn vendor_or_reason(
 /// An empty table knows no family, so every line about a family is a warning
 /// rather than a pass.
 fn families_table(facts: &Facts) -> Families {
-    let Some(data) = &facts.data else {
-        return Families::default();
-    };
-    Families::load(&data.join("models").join("families.toml")).unwrap_or_default()
+    facts.data.families().unwrap_or_default()
 }
 
 /// Section 5: whether the reviewer comes from another vendor than every worker.
@@ -819,18 +823,11 @@ fn skills_section(
     detections: &[Detection],
 ) {
     let section = report.section("Skills");
-    let (Some(dir), Some(home)) = (facts.data.as_ref(), facts.home.as_ref()) else {
-        section.add(
-            Level::Warn,
-            "no data directory or home, so no skill was scanned",
-        );
+    let Some(home) = facts.home.as_ref() else {
+        section.add(Level::Warn, "no home directory, so no skill was scanned");
         return;
     };
-    let skills_dir = dir.join("skills");
-    let (Ok(compat), Ok(rules)) = (
-        CompatList::load(&skills_dir.join("compat.toml")),
-        VisibilityRules::load(&skills_dir.join("visibility.toml")),
-    ) else {
+    let (Ok(compat), Ok(rules)) = (facts.data.compat(), facts.data.visibility()) else {
         section.add(Level::Warn, "the skill tables do not load");
         return;
     };
@@ -1097,8 +1094,7 @@ mod tests {
 
     /// The shipped harness table, which names every program.
     fn harness_specs() -> Vec<HarnessSpec> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
-        match load_dir(&dir) {
+        match DataDir::resolve(None, None).harness_specs() {
             Ok(specs) => specs,
             Err(error) => panic!("the shipped harness table must load: {error}"),
         }
@@ -1133,7 +1129,7 @@ mod tests {
             path_env: String::new(),
             home: Some(home.path().to_path_buf()),
             repo: None,
-            data: None,
+            data: DataDir::resolve(None, None),
         };
         let mut report = Report::default();
         config_section(&mut report, &facts);

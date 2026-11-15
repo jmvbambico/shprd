@@ -22,6 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
+use shprd_agents::data::DataDir;
 use shprd_core::event::Actor;
 use shprd_core::log::{Clock, SystemClock};
 use tower_http::trace::TraceLayer;
@@ -122,9 +123,9 @@ pub(crate) struct AppState {
     /// The state directory holding `service.json`, the token and the last pass's
     /// outcome ([`crate::pass`]).
     pub(crate) state_dir: PathBuf,
-    /// The `data/` directory the harness table is read from, when this service
-    /// was given one. Only the settings checks need it.
-    pub(crate) data: Option<PathBuf>,
+    /// The shipped data the harness table is read from, when this service was
+    /// given one. Only the settings checks need it.
+    pub(crate) data: Option<DataDir>,
     /// The prompts directory, when the caller set one.
     ///
     /// The binary resolves the configuration root once (where `$XDG_CONFIG_HOME`
@@ -154,8 +155,8 @@ pub(crate) struct Paths {
     pub(crate) home: Option<PathBuf>,
     /// The prompts directory, when there is one.
     pub(crate) prompts_dir: Option<PathBuf>,
-    /// The `data/` directory the harness table is read from, when there is one.
-    pub(crate) data: Option<PathBuf>,
+    /// The shipped data the harness table is read from, when there is one.
+    pub(crate) data: Option<DataDir>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -320,7 +321,7 @@ impl App {
     /// keys; it refuses a role, because a role nothing looked at must not be
     /// stored.
     pub fn with_data(mut self, data: PathBuf) -> Self {
-        self.state.data = Some(data);
+        self.state.data = Some(DataDir::resolve(Some(&data), None));
         self.router = router(self.state.clone());
         self
     }

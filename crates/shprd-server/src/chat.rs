@@ -21,7 +21,6 @@
 
 use std::path::PathBuf;
 
-use shprd_agents::roles::Table;
 use shprd_agents::spec::{HarnessSpec, TranscriptFormat};
 use shprd_agents::transcript::Transcript;
 use shprd_core::settings::Loaded;
@@ -321,16 +320,17 @@ fn task_of<'a>(state: &'a RunState, task: &str) -> Option<&'a Task> {
     state.tasks.get(task)
 }
 
-/// The harness entry of `program`, from the service's data directory.
+/// The harness entry of `program`, from the data this build ships.
+///
+/// The table is the [`DataDir`](shprd_agents::data::DataDir) the binary
+/// resolved, so a harness read here is the same file a spawn reads, and a chat
+/// follows the embedded copy when the machine has no data directory at all.
 fn harness_spec(state: &AppState, program: &str) -> Result<Option<HarnessSpec>, ApiReject> {
-    let Some(data) = state.data.as_deref() else {
+    let Some(data) = state.data.as_ref() else {
         return Ok(None);
     };
-    let table = Table::load(data).map_err(|err| {
-        ApiReject::internal(format!(
-            "the harness table in {} could not be read: {err}",
-            data.display()
-        ))
+    let specs = data.harness_specs().map_err(|err| {
+        ApiReject::internal(format!("the harness table could not be read: {err}"))
     })?;
-    Ok(table.specs.into_iter().find(|spec| spec.id == program))
+    Ok(specs.into_iter().find(|spec| spec.id == program))
 }

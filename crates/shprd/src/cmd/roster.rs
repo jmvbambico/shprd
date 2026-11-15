@@ -5,11 +5,11 @@
 //! outside a repository.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use anyhow::anyhow;
+use shprd_agents::data::DataDir;
 use shprd_agents::detect::{Detection, SignIn, detect_all, vendor_name};
-use shprd_agents::spec::{HarnessSpec, load_dir};
+use shprd_agents::spec::HarnessSpec;
 
 use crate::cli::RosterArgs;
 use crate::ctx::CliError;
@@ -22,9 +22,11 @@ const PI_ID: &str = "pi";
 
 /// Runs `shprd roster`, printing one line per CLI or a JSON array.
 pub fn run(args: &RosterArgs, json: bool) -> Result<(), CliError> {
-    let dir = resolve_data_dir()?;
-    let specs = load_dir(&dir.join("harness")).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("loading {}", dir.display())))
+    let data = resolve_data_dir();
+    let specs = data.harness_specs().map_err(|err| {
+        CliError::other(
+            anyhow!(err).context(format!("loading the harness table from {}", data.label())),
+        )
     })?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     let detections = detect_all(&specs, &path_env, &[], &models(&specs));
@@ -50,18 +52,16 @@ fn models(specs: &[HarnessSpec]) -> BTreeMap<String, String> {
     models
 }
 
-/// The data directory for the checkout the caller is in.
+/// The data this machine reads: `$SHPRD_DATA_DIR`, else the person's overrides
+/// under the data home, else the copy embedded in the binary.
 ///
-/// `$SHPRD_DATA_DIR`, else `<git root>/data`, else the `../share/shprd/data` a
-/// packaged install puts next to the binary, else the data home's. The checkout
-/// the caller is in, not the run's repository: a linked worktree of shprd itself
-/// carries its own branch's `data/harness`, while a worker's task worktree is
-/// told the engine's table with `SHPRD_DATA_DIR`. The resolution itself is the
-/// binary's edge ([`crate::ctx::resolve_data_dir`]), so this verb reads no
-/// directory variable of its own.
-pub(crate) fn resolve_data_dir() -> Result<PathBuf, CliError> {
-    let root = crate::ctx::resolve_checkout(None).ok();
-    crate::ctx::resolve_data_dir(root.as_deref())
+/// A worker's task worktree is told the engine's table with `SHPRD_DATA_DIR`;
+/// a run outside any setting still has the shipped harnesses, because the
+/// binary carries them. The resolution itself is the binary's edge
+/// ([`crate::ctx::resolve_data_dir`]), so this verb reads no directory variable
+/// of its own.
+pub(crate) fn resolve_data_dir() -> DataDir {
+    crate::ctx::resolve_data_dir()
 }
 
 /// One detection as the aligned-ish human line the verb prints.

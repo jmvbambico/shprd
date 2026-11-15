@@ -140,6 +140,29 @@ impl Setup {
 
     /// Runs `shprd doctor --no-quota` and returns what it printed.
     fn run(&self, env: &[(&str, &str)]) -> Output {
+        let mut command = self.command();
+        apply(&mut command, env);
+        match command.output() {
+            Ok(output) => output,
+            Err(error) => panic!("running {BIN} failed: {error}"),
+        }
+    }
+
+    /// [`Setup::run`] with no data directory named: the binary has only the
+    /// copy of the shipped data it carries.
+    fn run_without_data(&self, env: &[(&str, &str)]) -> Output {
+        let mut command = self.command();
+        command.env_remove("SHPRD_DATA_DIR");
+        apply(&mut command, env);
+        match command.output() {
+            Ok(output) => output,
+            Err(error) => panic!("running {BIN} failed: {error}"),
+        }
+    }
+
+    /// The child every run starts from: the fixture's own `PATH`, home and XDG
+    /// directories, and the copied data directory.
+    fn command(&self) -> Command {
         let mut command = Command::new(BIN);
         // The temp home, not the machine: a diagnosis of this fixture, and a
         // child that cannot reach the person's herdr session or desktop.
@@ -180,19 +203,41 @@ impl Setup {
             // removed by `isolate` above, so a doctor run from a herdr pane
             // diagnoses the fixture and not the pane it started in.
             .env_remove("OPENCODE_DISABLE_EXTERNAL_SKILLS");
-        for (name, value) in env {
-            command.env(name, value);
-        }
-        match command.output() {
-            Ok(output) => output,
-            Err(error) => panic!("running {BIN} failed: {error}"),
-        }
+        command
+    }
+}
+
+/// Adds per-test environment on top of a fixture's own.
+fn apply(command: &mut Command, env: &[(&str, &str)]) {
+    for (name, value) in env {
+        command.env(name, value);
     }
 }
 
 /// The stdout of a finished run.
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// The `Data` section of a page, so a test about data sources never reads the
+/// quota or skills sections by accident.
+fn data_section(text: &str) -> String {
+    let mut section = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line == "Data" {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if line.trim().is_empty() {
+                break;
+            }
+            section.push_str(line);
+            section.push('\n');
+        }
+    }
+    section
 }
 
 #[test]
@@ -413,5 +458,91 @@ fn warns_when_this_shell_hides_a_skill_directory() {
     assert!(
         warn.contains("~/.agents/skills"),
         "the hidden directory should be named: {warn}"
+    );
+}
+
+#[test]
+fn the_data_section_names_the_source_of_every_kind() {
+    let setup = Setup::new("");
+    let text = data_section(&stdout(&setup.run(&[])));
+    assert!(
+        text.contains("data from SHPRD_DATA_DIR ("),
+        "a named directory is named with the variable: {text}"
+    );
+    for kind in ["harness", "models", "templates", "skills"] {
+        assert!(
+            text.contains(&format!("{kind}: ")),
+            "the {kind} kind has no line of its own: {text}"
+        );
+    }
+    assert!(
+        !text.contains("embedded"),
+        "a named directory is the whole table, with nothing merged in: {text}"
+    );
+}
+
+#[test]
+fn an_installed_binary_reads_the_data_it_ships() {
+    let setup = Setup::new("");
+    let output = setup.run_without_data(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = data_section(&stdout(&output));
+    assert!(
+        text.contains("data from embedded in the binary"),
+        "the source is the binary itself: {text}"
+    );
+    assert!(
+        text.contains("harness: 5 file(s), embedded"),
+        "the shipped harness table is named and counted: {text}"
+    );
+    for kind in ["models", "templates", "skills"] {
+        assert!(
+            text.contains(&format!("{kind}: ")) && text.contains("embedded"),
+            "the {kind} kind is embedded too: {text}"
+        );
+    }
+    assert!(
+        text.contains("5 harness spec(s) load and validate"),
+        "the embedded table loads: {text}"
+    );
+    assert!(text.contains("compat.toml:"), "{text}");
+}
+
+#[test]
+fn a_persons_own_harness_is_named_as_an_override() {
+    let setup = Setup::new("");
+    // A person's own harness for pi, layered over the shipped copy.
+    let overrides = setup.tmp.path().join("home/.local/share/shprd/harness");
+    if let Err(error) = fs::create_dir_all(&overrides) {
+        panic!("creating {} failed: {error}", overrides.display());
+    }
+    let source = data_source().join("harness").join("pi.toml");
+    let text = match fs::read_to_string(&source) {
+        Ok(text) => text.replace("name = \"Pi\"", "name = \"Mine\""),
+        Err(error) => panic!("reading {} failed: {error}", source.display()),
+    };
+    if let Err(error) = fs::write(overrides.join("pi.toml"), text) {
+        panic!("writing the override failed: {error}");
+    }
+
+    let output = setup.run_without_data(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = data_section(&stdout(&output));
+    assert!(text.contains("data from overrides ("), "{text}");
+    assert!(
+        text.contains("harness: 5 file(s): 1 overridden in"),
+        "one file is overridden and the rest are still embedded: {text}"
+    );
+    assert!(
+        text.contains("5 harness spec(s) load and validate"),
+        "the merged table loads: {text}"
     );
 }

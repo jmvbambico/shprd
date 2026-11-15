@@ -1507,34 +1507,49 @@ pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     }
     files.sort();
 
-    let mut specs = Vec::with_capacity(files.len());
-    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for file in &files {
-        let spec = load_file(file)?;
-        spec.validate().map_err(|source| SpecError::Invalid {
+    let mut loaded = Vec::with_capacity(files.len());
+    for file in files {
+        let text = fs::read_to_string(&file).map_err(|source| SpecError::ReadFile {
             path: file.clone(),
+            source,
+        })?;
+        loaded.push((file, text));
+    }
+    load_entries(loaded)
+}
+
+/// Check harness files already read in, each with the path it came from.
+///
+/// This is [`load_dir`] for data that is not a directory on this machine: the
+/// copy embedded in the binary, or a person's overrides, both of which
+/// [`crate::data::DataDir`] reads into text first. The entries are checked in
+/// the order given, so a caller that lists them sorted keeps the same order of
+/// refusals a directory read would give.
+pub(crate) fn load_entries(entries: Vec<(PathBuf, String)>) -> Result<Vec<HarnessSpec>, SpecError> {
+    let mut specs = Vec::with_capacity(entries.len());
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for (path, text) in entries {
+        let spec = parse(&path, &text)?;
+        spec.validate().map_err(|source| SpecError::Invalid {
+            path: path.clone(),
             source: Box::new(source),
         })?;
         if let Some(first) = seen.get(&spec.id) {
             return Err(SpecError::DuplicateId {
                 id: spec.id.clone(),
-                path: file.clone(),
+                path: path.clone(),
                 first: first.clone(),
             });
         }
-        seen.insert(spec.id.clone(), file.clone());
+        seen.insert(spec.id.clone(), path.clone());
         specs.push(spec);
     }
     Ok(specs)
 }
 
-/// Parse one harness file, without the checks [`HarnessSpec::validate`] runs.
-pub(crate) fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
-    let source = fs::read_to_string(path).map_err(|source| SpecError::ReadFile {
-        path: path.to_owned(),
-        source,
-    })?;
-    toml::from_str(&source).map_err(|source| SpecError::Parse {
+/// Parse one harness file's text, naming `path` in any error.
+pub(crate) fn parse(path: &Path, text: &str) -> Result<HarnessSpec, SpecError> {
+    toml::from_str(text).map_err(|source| SpecError::Parse {
         path: path.to_owned(),
         source,
     })
