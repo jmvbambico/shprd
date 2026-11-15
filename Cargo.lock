@@ -1201,6 +1201,7 @@ name = "shprd-agents"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
  "shprd-core",

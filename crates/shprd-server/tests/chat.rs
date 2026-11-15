@@ -87,6 +87,11 @@ impl Fixture {
         let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
             .expect("prepare")
             .with_home(home.path().to_path_buf())
+            // The agents' own records live under the home *they* ran with, which
+            // in this fixture is the same temp home the settings live in: a
+            // transcript a test wrote is found, and the developer's real
+            // `~/.claude` is never read.
+            .with_transcript_roots(shprd_agents::transcript::Roots::at(home.path()))
             .with_data(data)
             .with_prompts_dir(home.path().join(".config").join("shprd").join("prompts"))
             .with_chat_writer(writer);
@@ -487,6 +492,7 @@ async fn the_harness_table_is_read_from_the_copy_the_binary_ships() {
     let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
         .expect("prepare")
         .with_home(home.path().to_path_buf())
+        .with_transcript_roots(shprd_agents::transcript::Roots::at(home.path()))
         .with_data_dir(shprd_agents::data::DataDir::resolve(None, None));
     let token = std::fs::read_to_string(app.info().token_path)
         .expect("the token file")

@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 shprd-core = { path = "../shprd-core" }
 serde_json.workspace = true
@@ -19,4 +20,5 @@ toml.workspace = true
 workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile.workspace = true

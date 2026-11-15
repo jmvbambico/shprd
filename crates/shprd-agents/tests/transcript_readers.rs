@@ -268,17 +268,22 @@ fn codex_finds_the_rollout_that_names_this_directory() {
 }
 
 #[test]
-fn opencode_joins_a_session_of_message_files_and_its_parts() {
+fn opencode_joins_the_messages_and_parts_of_its_database() {
     let (_dir, home) = recorded("opencode");
     let transcript = locate("opencode", &home);
     assert_eq!(transcript.session(), "ses_fixture");
+    assert_eq!(transcript.format(), TranscriptFormat::OpencodeSqlite);
     let page = transcript.read("").expect("the fixture reads");
     assert_eq!(page.messages.len(), 2);
     assert_eq!(page.messages[0].role, Role::User);
     assert_eq!(page.messages[0].text, "Review the last commit.");
     assert_eq!(page.messages[1].role, Role::Assistant);
     assert_eq!(page.messages[1].text, "Reading the commit now.");
-    assert_eq!(page.messages[1].tools.len(), 1);
+    assert_eq!(
+        page.messages[1].tools.len(),
+        1,
+        "the reasoning part is bookkeeping, the tool is a row"
+    );
     assert_eq!(page.messages[1].tools[0].name, "bash");
     assert_eq!(page.messages[1].tools[0].summary, "git show --stat HEAD");
     assert!(page.messages[1].at_ms.is_some());
@@ -290,31 +295,65 @@ fn opencode_reads_on_from_the_message_index_and_only_finds_its_own_directory() {
     let (_dir, home) = recorded("opencode");
     let transcript = locate("opencode", &home);
     let first = transcript.read("").expect("the fixture reads");
-    let store = home.join(".local/share/opencode/storage");
-    // A newer session for another project must not be adopted.
-    fs::create_dir_all(store.join("session/other")).unwrap();
-    fs::write(
-        store.join("session/other/ses_other.json"),
-        r#"{"id":"ses_other","directory":"/work/other","time":{"created":1,"updated":9999999999999}}"#,
-    )
-    .unwrap();
-    let message = store.join("message/ses_fixture/msg_3.json");
-    fs::write(
-        &message,
-        r#"{"id":"msg_3","sessionID":"ses_fixture","role":"user","time":{"created":1768956700000}}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(store.join("part/msg_3")).unwrap();
-    fs::write(
-        store.join("part/msg_3/prt_5.json"),
-        r#"{"id":"prt_5","sessionID":"ses_fixture","messageID":"msg_3","type":"text","text":"Thanks."}"#,
-    )
-    .unwrap();
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    // A newer session for another directory must not be adopted.
+    connection
+        .execute(
+            "INSERT INTO project VALUES ('proj_other', '/work/other', 'git', 'other', 1, ?1)",
+            (9_999_999_999_999i64,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_other', 'proj_other', NULL, 'other', '/work/other', \
+             'Other', '1.18.35', 1, ?1)",
+            (9_999_999_999_999i64,),
+        )
+        .unwrap();
+    // A third message on this session, with one part: the page gains exactly one.
+    connection
+        .execute(
+            "INSERT INTO message VALUES ('msg_3', 'ses_fixture', 1768956700000, 1768956700000, ?1)",
+            (r#"{"role":"user","time":{"created":1768956700000}}"#,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_5', 'msg_3', 'ses_fixture', 1768956700000, \
+             1768956700000, ?1)",
+            (r#"{"type":"text","text":"Thanks."}"#,),
+        )
+        .unwrap();
+    drop(connection);
     let page = transcript.read(&first.cursor).expect("the fixture reads");
-    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages.len(), 1, "{:?}", page.messages);
     assert_eq!(page.messages[0].text, "Thanks.");
     assert_eq!(page.cursor, "ses_fixture@3");
     assert_eq!(locate("opencode", &home).session(), "ses_fixture");
+}
+
+/// An installation that still has the pre-1.18 folder store is read with the
+/// store format, and reads the same conversation the database holds: the two
+/// shapes are one store, and the harness table is the only thing that says
+/// which one a CLI wrote.
+#[test]
+fn the_older_folder_store_reads_the_same_conversation() {
+    let (_dir, home) = recorded("opencode-store");
+    let spec = shprd_agents::spec::TranscriptSpec {
+        format: Some(TranscriptFormat::OpencodeStorage),
+        location: Some("{data_home}/opencode/storage".to_string()),
+    };
+    let transcript =
+        Transcript::locate(&spec, &home, Path::new(CWD)).expect("the older fixture store is found");
+    assert_eq!(transcript.session(), "ses_fixture");
+    assert_eq!(transcript.format(), TranscriptFormat::OpencodeStorage);
+    let page = transcript.read("").expect("the fixture reads");
+    assert_eq!(page.messages.len(), 2);
+    assert_eq!(page.messages[0].text, "Review the last commit.");
+    assert_eq!(page.messages[1].text, "Reading the commit now.");
+    assert_eq!(page.messages[1].tools[0].name, "bash");
+    assert_eq!(page.cursor, "ses_fixture@2");
 }
 
 #[cfg(unix)]
@@ -328,13 +367,15 @@ fn a_record_is_matched_through_a_symlinked_directory() {
     fs::create_dir_all(&real).unwrap();
     let link = dir.path().join("linked");
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let session = home.join(".local/share/opencode/storage/session/proj_fixture/ses_fixture.json");
-    let text = fs::read_to_string(&session).unwrap();
-    fs::write(
-        &session,
-        text.replace("/work/repo", &real.display().to_string()),
-    )
-    .unwrap();
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE session SET directory = ?1 WHERE id = 'ses_fixture'",
+            (real.display().to_string(),),
+        )
+        .unwrap();
+    drop(connection);
     let transcript = Transcript::locate(harness("opencode").transcript(), &home, &link)
         .expect("the session is found through the symlink");
     assert_eq!(transcript.session(), "ses_fixture");
@@ -393,15 +434,40 @@ fn every_shipped_harness_that_names_a_format_names_its_location() {
     assert_eq!(readable, ["claude", "codex", "opencode", "pi"]);
 }
 
-/// A store whose session files are not JSON at all is no transcript rather than
-/// an error, so a half-written session file cannot break the panel.
+/// A folder store whose session files are not JSON at all is no transcript rather
+/// than an error, so a half-written session file cannot break the panel.
 #[test]
 fn an_unreadable_store_file_is_skipped() {
-    let (dir, home) = recorded("opencode");
+    let (dir, home) = recorded("opencode-store");
+    let spec = shprd_agents::spec::TranscriptSpec {
+        format: Some(TranscriptFormat::OpencodeStorage),
+        location: Some("{data_home}/opencode/storage".to_string()),
+    };
     let session = home.join(".local/share/opencode/storage/session/proj_fixture/ses_fixture.json");
     fs::write(&session, "{not json").unwrap();
-    assert!(Transcript::locate(harness("opencode").transcript(), &home, Path::new(CWD)).is_none());
+    assert!(Transcript::locate(&spec, &home, Path::new(CWD)).is_none());
     dir.close().unwrap();
+}
+
+/// A database whose session row names no directory at all is still adopted: an
+/// older OpenCode wrote the folder only into the message parts.
+#[test]
+fn a_database_session_with_no_directory_is_still_adopted() {
+    let (_dir, home) = recorded("opencode");
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE session SET directory = '' WHERE id = 'ses_fixture'",
+            (),
+        )
+        .unwrap();
+    drop(connection);
+    // An empty directory is not `cwd`, so this is *not* adopted... unless the
+    // reader treats "records nothing" as "belongs anywhere", which is the rule:
+    // a session that says nothing is not refused.
+    let transcript = locate("opencode", &home);
+    assert_eq!(transcript.session(), "ses_fixture");
 }
 
 /// A session that has just started has no conversation yet, which is an empty
@@ -410,19 +476,39 @@ fn an_unreadable_store_file_is_skipped() {
 fn a_session_with_no_messages_yet_is_an_empty_page() {
     let (dir, home) = recorded("opencode");
     let transcript = locate("opencode", &home);
-    fs::remove_dir_all(home.join(".local/share/opencode/storage/message")).unwrap();
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("DELETE FROM part", ()).unwrap();
+    connection.execute("DELETE FROM message", ()).unwrap();
+    drop(connection);
     let page = transcript.read("").expect("an empty store reads");
     assert!(page.messages.is_empty());
     assert!(!page.more);
     dir.close().unwrap();
 }
 
-/// A store whose message folder is not a folder at all answers
+/// A database that is not a database at all is no transcript rather than a
+/// panic, so a half-written file cannot break the panel.
+#[test]
+fn a_corrupt_database_is_no_transcript() {
+    let (dir, home) = recorded("opencode");
+    let db = home.join(".local/share/opencode/opencode.db");
+    fs::write(&db, "not a database").unwrap();
+    assert!(Transcript::locate(harness("opencode").transcript(), &home, Path::new(CWD)).is_none());
+    dir.close().unwrap();
+}
+
+/// A folder store whose message folder is not a folder at all answers
 /// [`TranscriptError::List`] rather than panicking.
 #[test]
 fn a_corrupt_store_is_an_error_not_a_panic() {
-    let (dir, home) = recorded("opencode");
-    let transcript = locate("opencode", &home);
+    let (dir, home) = recorded("opencode-store");
+    let spec = shprd_agents::spec::TranscriptSpec {
+        format: Some(TranscriptFormat::OpencodeStorage),
+        location: Some("{data_home}/opencode/storage".to_string()),
+    };
+    let transcript =
+        Transcript::locate(&spec, &home, Path::new(CWD)).expect("the older fixture store is found");
     let messages = home.join(".local/share/opencode/storage/message");
     fs::remove_dir_all(&messages).unwrap();
     fs::write(&messages, "not a folder").unwrap();

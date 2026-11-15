@@ -148,6 +148,8 @@ enum Source {
     /// OpenCode's storage folder, where a session is a folder of message files
     /// and each message a folder of parts.
     Store { root: PathBuf, session: String },
+    /// OpenCode's database, where a session's messages and their parts are rows.
+    Database { path: PathBuf, session: String },
 }
 
 /// A transcript that could not be read.
@@ -188,7 +190,7 @@ impl Transcript {
     pub fn path(&self) -> Option<&Path> {
         match &self.source {
             Source::File(path) => Some(path),
-            Source::Store { .. } => None,
+            Source::Store { .. } | Source::Database { .. } => None,
         }
     }
 
@@ -200,11 +202,24 @@ impl Transcript {
     /// tree shared by every directory, so each candidate is asked which
     /// directory it belongs to rather than trusted by its name.
     pub fn locate(spec: &TranscriptSpec, home: &Path, cwd: &Path) -> Option<Transcript> {
+        Self::locate_in(spec, &Roots::at(home), cwd)
+    }
+
+    /// [`Transcript::locate`], with the home *and* the data home the CLI ran
+    /// with handed in.
+    ///
+    /// A transcript is the CLI's own file, so it is looked for under the roots
+    /// that CLI had — the real `HOME` it inherits and its XDG data home — never
+    /// under the engine's home, which no CLI writes a session into.
+    pub fn locate_in(spec: &TranscriptSpec, roots: &Roots, cwd: &Path) -> Option<Transcript> {
         let format = spec.format?;
         let location = spec.location.as_deref()?;
         match format {
-            TranscriptFormat::OpencodeStorage => locate_store(&expand_path(location, home)?, cwd),
-            _ => locate_file(format, location, home, cwd),
+            TranscriptFormat::OpencodeStorage => locate_store(&expand_path(location, roots)?, cwd),
+            TranscriptFormat::OpencodeSqlite => {
+                locate_database(&expand_path(location, roots)?, cwd)
+            }
+            _ => locate_file(format, location, roots, cwd),
         }
     }
 
@@ -218,6 +233,7 @@ impl Transcript {
         match &self.source {
             Source::File(path) => self.read_file(path, from),
             Source::Store { root, session } => self.read_store(root, session, from),
+            Source::Database { path, session } => self.read_database(path, session, from),
         }
     }
 
@@ -309,6 +325,34 @@ impl Transcript {
             more: position < total,
         })
     }
+
+    /// OpenCode's database: the session's messages after `from`.
+    ///
+    /// The cursor is the same message index the store format uses (one
+    /// OpenCode's two shapes hold the same rows), so a session that moved from a
+    /// folder to the database keeps paging where it was.
+    fn read_database(
+        &self,
+        path: &Path,
+        session: &str,
+        from: usize,
+    ) -> Result<Page, TranscriptError> {
+        let rows = database_messages(path, session)?;
+        let total = rows.len();
+        let mut page = Vec::new();
+        let mut position = from.min(total);
+        while position < total && page.len() < MAX_MESSAGES {
+            if let Some(message) = database_message(&rows[position]) {
+                page.push(message);
+            }
+            position += 1;
+        }
+        Ok(Page {
+            messages: page,
+            cursor: self.cursor(position),
+            more: position < total,
+        })
+    }
 }
 
 /// The whole lines of `buffer`, and how many bytes they take.
@@ -345,7 +389,8 @@ fn parse_line(format: TranscriptFormat, line: &[u8]) -> Option<Message> {
         TranscriptFormat::ClaudeJsonl => claude_message(&value),
         TranscriptFormat::CodexJsonl => codex_message(&value),
         TranscriptFormat::PiJsonl => pi_message(&value),
-        TranscriptFormat::OpencodeStorage => None,
+        // OpenCode's two shapes are read from files of their own, not lines.
+        TranscriptFormat::OpencodeStorage | TranscriptFormat::OpencodeSqlite => None,
     }
 }
 
@@ -785,10 +830,10 @@ fn iso_ms(text: &str) -> Option<i64> {
 fn locate_file(
     format: TranscriptFormat,
     location: &str,
-    home: &Path,
+    roots: &Roots,
     cwd: &Path,
 ) -> Option<Transcript> {
-    let (root, components) = pattern_parts(location, home, cwd, format)?;
+    let (root, components) = pattern_parts(location, roots, cwd, format)?;
     let mut found: Option<(SystemTime, PathBuf)> = None;
     walk(&root, &components, 0, &mut |path| {
         if format == TranscriptFormat::CodexJsonl && !codex_belongs(path, cwd) {
@@ -838,9 +883,12 @@ fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
                 continue;
             };
             // A session that records no directory at all is not refused: an
-            // older OpenCode writes the folder only into the message parts.
+            // older OpenCode writes the folder only into the message parts, and
+            // an empty `directory` records nothing either.
             let directory = value.get("directory").and_then(Value::as_str);
-            if directory.is_some_and(|directory| !same_dir(Path::new(directory), cwd)) {
+            if directory.is_some_and(|directory| {
+                !directory.is_empty() && !same_dir(Path::new(directory), cwd)
+            }) {
                 continue;
             }
             let updated = value
@@ -936,10 +984,45 @@ fn store_messages(root: &Path, session: &str) -> Result<Vec<(PathBuf, String)>, 
     Ok(found.into_iter().map(|(_, id, path)| (path, id)).collect())
 }
 
-/// One OpenCode message, joined with the parts of which it is made.
-fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
-    let header = std::fs::read_to_string(path).ok()?;
-    let header: Value = serde_json::from_str(&header).ok()?;
+/// One OpenCode part, folded into the message it belongs to.
+///
+/// The two shapes of OpenCode's store hold the same part objects — the folder
+/// has one JSON file a part, the database a `data` column a part — so both read
+/// them through this one function, and a program that moved its store cannot
+/// start showing different words.
+fn apply_part(value: &Value, texts: &mut Vec<String>, tools: &mut Vec<ToolCall>) {
+    match value.get("type").and_then(Value::as_str) {
+        Some("text") => {
+            if let Some(text) = value.get("text").and_then(Value::as_str)
+                && !text.trim().is_empty()
+            {
+                texts.push(text.trim().to_owned());
+            }
+        }
+        Some("tool") => {
+            let name = value
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_owned();
+            let summary = value
+                .get("state")
+                .and_then(|state| state.get("input"))
+                .map(summary_of)
+                .unwrap_or_default();
+            tools.push(ToolCall { name, summary });
+        }
+        // Reasoning, step markers, patches and snapshots are bookkeeping.
+        _ => {}
+    }
+}
+
+/// One OpenCode message header and its parts, folded into a message.
+///
+/// The header is the object the folder store keeps in `message/<id>.json` and
+/// the database keeps in `message.data`; the parts are the objects the folder
+/// store keeps in `part/<id>/` and the database keeps in `part.data`.
+fn fold_opencode(header: &Value, parts: &[Value]) -> Option<Message> {
     let role = match header.get("role").and_then(Value::as_str)? {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -949,41 +1032,10 @@ fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
         .get("time")
         .and_then(|time| time.get("created"))
         .and_then(number_ms);
-    let parts = root.join("part").join(id);
     let mut texts = Vec::new();
     let mut tools = Vec::new();
-    for part in std::fs::read_dir(&parts).ok()?.flatten() {
-        let path = part.path();
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        match value.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = value.get("text").and_then(Value::as_str)
-                    && !text.trim().is_empty()
-                {
-                    texts.push(text.trim().to_owned());
-                }
-            }
-            Some("tool") => {
-                let name = value
-                    .get("tool")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_owned();
-                let summary = value
-                    .get("state")
-                    .and_then(|state| state.get("input"))
-                    .map(summary_of)
-                    .unwrap_or_default();
-                tools.push(ToolCall { name, summary });
-            }
-            // Reasoning, step markers, patches and snapshots are bookkeeping.
-            _ => {}
-        }
+    for part in parts {
+        apply_part(part, &mut texts, &mut tools);
     }
     let message = Message {
         role,
@@ -994,31 +1046,276 @@ fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
     (!message.is_empty()).then_some(message)
 }
 
+/// One OpenCode message, joined with the parts of which it is made.
+fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
+    let header = std::fs::read_to_string(path).ok()?;
+    let header: Value = serde_json::from_str(&header).ok()?;
+    let parts = root.join("part").join(id);
+    let mut values = Vec::new();
+    for part in std::fs::read_dir(&parts).ok()?.flatten() {
+        let path = part.path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            values.push(value);
+        }
+    }
+    fold_opencode(&header, &values)
+}
+
+/// The newest OpenCode session in `db` whose own `directory` is `cwd`.
+///
+/// OpenCode 1.18.35 writes the same `session`/`message`/`part` tables into a
+/// SQLite file rather than a folder of JSON files, and its `session` row names
+/// the directory the session belongs to. The database is opened read-only
+/// through a `mode=ro` URI, exactly as the watchdog reads it: a chat must never
+/// be the reason a live CLI's store is locked or migrated.
+fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
+    let connection = open_ro(db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT s.id, s.directory, s.time_updated FROM session s \
+             ORDER BY s.time_updated DESC",
+        )
+        .ok()?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .ok()?;
+    let mut candidates: Vec<(i64, String)> = Vec::new();
+    for row in rows.flatten() {
+        let (id, directory, updated) = row;
+        // A session that records no directory at all is not refused: an older
+        // OpenCode wrote the folder only into the message parts, and a row with
+        // an empty `directory` records nothing either.
+        if directory
+            .as_deref()
+            .is_some_and(|directory| !directory.is_empty() && !same_dir(Path::new(directory), cwd))
+        {
+            continue;
+        }
+        candidates.push((updated, id));
+    }
+    candidates.sort_by_key(|candidate| candidate.0);
+    let (_, session) = candidates.pop()?;
+    Some(Transcript {
+        format: TranscriptFormat::OpencodeSqlite,
+        source: Source::Database {
+            path: db.to_path_buf(),
+            session: session.clone(),
+        },
+        session,
+    })
+}
+
+/// One message row of OpenCode's database, with its parts, oldest first.
+struct DatabaseMessage {
+    /// The message's own id, which its parts name.
+    id: String,
+    /// When the message was created, in ms: the order the program wrote them.
+    created: i64,
+    /// The message header, as the folder store keeps it in a file.
+    header: Value,
+    /// The parts of which the message is made.
+    parts: Vec<Value>,
+}
+
+/// Every message of `session`, oldest first, with its parts.
+fn database_messages(db: &Path, session: &str) -> Result<Vec<DatabaseMessage>, TranscriptError> {
+    let list = |path: &Path, source: rusqlite::Error| TranscriptError::List {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(source),
+    };
+    let connection = open_ro(db).ok_or_else(|| TranscriptError::List {
+        path: db.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the database could not be opened for reading",
+        ),
+    })?;
+    // A database that predates the `part` table has no parts, not an error: its
+    // messages still show, with the words the row itself carries.
+    let mut parts: Vec<(String, Value)> = Vec::new();
+    if let Ok(mut statement) = connection.prepare(
+        "SELECT message_id, data FROM part WHERE session_id = ?1 \
+         ORDER BY time_created, id",
+    ) {
+        let rows = statement
+            .query_map((session,), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| list(db, error))?;
+        for row in rows {
+            let (message_id, data) = row.map_err(|error| list(db, error))?;
+            if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                parts.push((message_id, value));
+            }
+        }
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT id, time_created, data FROM message WHERE session_id = ?1 \
+             ORDER BY time_created, id",
+        )
+        .map_err(|error| list(db, error))?;
+    let rows = statement
+        .query_map((session,), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| list(db, error))?;
+    let mut messages = Vec::new();
+    for row in rows {
+        let (id, created, data) = row.map_err(|error| list(db, error))?;
+        let Ok(header) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let mine: Vec<Value> = parts
+            .iter()
+            .filter(|(message_id, _)| message_id == &id)
+            .map(|(_, value)| value.clone())
+            .collect();
+        messages.push(DatabaseMessage {
+            id,
+            created,
+            header,
+            parts: mine,
+        });
+    }
+    // The id breaks a tie, exactly as the folder store's own ordering does, so
+    // two messages created in the same millisecond keep the order the program
+    // wrote them in.
+    messages.sort_by(|left, right| (left.created, &left.id).cmp(&(right.created, &right.id)));
+    Ok(messages)
+}
+
+/// One database message as the chat shows it.
+fn database_message(row: &DatabaseMessage) -> Option<Message> {
+    fold_opencode(&row.header, &row.parts)
+}
+
+/// Open a SQLite database for reading only.
+///
+/// The `mode=ro` URI is the whole point: a chat is a reader of a file another
+/// process owns, and opening it any other way could lock a live CLI's store or
+/// create one that was never there.
+fn open_ro(path: &Path) -> Option<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
+    let uri = format!("file:{}?mode=ro", path.display());
+    rusqlite::Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()
+}
+
 // ---------------------------------------------------------------------------
 // The location pattern
 // ---------------------------------------------------------------------------
 
+/// The directories a `[transcript]` location may name, resolved by the caller.
+///
+/// A transcript is written by the agent CLI itself, so the roots are the ones
+/// *that* process had: the home it inherits (which shprd never rewrites —
+/// `HOME` is a protected variable, [`crate::env`]) and the XDG data home it
+/// resolves (`$XDG_DATA_HOME`, else `<home>/.local/share`). Neither is the
+/// engine's own home (`SHPRD_HOME`), which a CLI never writes a session under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Roots {
+    /// The home directory the CLI ran with, which `~` names.
+    pub home: PathBuf,
+    /// The data home it wrote under, which `{data_home}` names.
+    pub data_home: PathBuf,
+}
+
+impl Roots {
+    /// The roots for `home`, with the XDG data rule applied: `data_home` wins
+    /// when it is set and not empty, else `<home>/.local/share`.
+    pub fn new(home: &Path, data_home: Option<&Path>) -> Roots {
+        Roots {
+            home: home.to_path_buf(),
+            data_home: match data_home.filter(|dir| !dir.as_os_str().is_empty()) {
+                Some(dir) => dir.to_path_buf(),
+                None => home.join(".local").join("share"),
+            },
+        }
+    }
+
+    /// The roots for a machine with no `$XDG_DATA_HOME` of its own.
+    pub fn at(home: &Path) -> Roots {
+        Roots::new(home, None)
+    }
+
+    /// The roots of the environment an agent CLI is launched with.
+    ///
+    /// It is exactly what the CLI itself will resolve: its `HOME`
+    /// ([`crate::env::LaunchEnv`] never rewrites it, so it is the inherited one)
+    /// and its `$XDG_DATA_HOME` when the base environment carries one. A launch
+    /// that rewrote `HOME` in a later milestone would then move the reader with
+    /// it, which is what keeps this a fact about the CLI rather than about
+    /// shprd: a client that has no such variable answers `None`, and the caller
+    /// passes the home it resolved instead.
+    pub fn for_launch(base: &std::collections::BTreeMap<String, String>) -> Roots {
+        let home = base
+            .get("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let data_home = base
+            .get("XDG_DATA_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        match home {
+            Some(home) => Roots::new(&home, data_home.as_deref()),
+            // No `HOME` in the base environment at all is a launch nothing can
+            // read a record from; `""` makes every lookup miss rather than
+            // reaching some other directory.
+            None => Roots {
+                home: PathBuf::new(),
+                data_home: data_home.unwrap_or_default(),
+            },
+        }
+    }
+}
+
 /// A location pattern as a root and the components under it.
 ///
-/// `~` is the home directory and a leading `/` the filesystem's root; a pattern
-/// with neither names nothing this reader can look under, which is a table
-/// mistake rather than a missing session. `{cwd_slug}` becomes this format's
-/// name for `cwd`, and every other placeholder stays `*`: a chat looks for a
-/// session it was never told the id of.
+/// `~` is the home directory, `{data_home}` the data home and a leading `/` the
+/// filesystem's root; a pattern with none of them names nothing this reader can
+/// look under, which is a table mistake rather than a missing session.
+/// `{cwd_slug}` becomes this format's name for `cwd`, and every other
+/// placeholder stays `*`: a chat looks for a session it was never told the id
+/// of.
 fn pattern_parts(
     location: &str,
-    home: &Path,
+    roots: &Roots,
     cwd: &Path,
     format: TranscriptFormat,
 ) -> Option<(PathBuf, Vec<String>)> {
-    let (root, body) = match (location.strip_prefix("~/"), location.strip_prefix('/')) {
-        (Some(rest), _) => (home.to_path_buf(), rest),
-        (None, Some(rest)) => (PathBuf::from("/"), rest),
-        (None, None) => return None,
+    let (root, body) = if let Some(rest) = location
+        .strip_prefix("{data_home}/")
+        .or_else(|| (location == "{data_home}").then_some(""))
+    {
+        (roots.data_home.clone(), rest)
+    } else if let Some(rest) = location.strip_prefix("~/") {
+        (roots.home.clone(), rest)
+    } else if let Some(rest) = location.strip_prefix('/') {
+        (PathBuf::from("/"), rest)
+    } else {
+        return None;
     };
     let slug = cwd_slug(format, cwd);
     let components = body
         .split('/')
+        .filter(|raw| !raw.is_empty())
         .map(|raw| {
             let mut text = raw.replace("{cwd_slug}", &slug);
             text = text.replace("{session}", "*");
@@ -1031,20 +1328,38 @@ fn pattern_parts(
     Some((root, components))
 }
 
-/// A location with no wildcards as a path, for a store whose folder is named
-/// outright.
-fn expand_path(location: &str, home: &Path) -> Option<PathBuf> {
+/// A location with no wildcards as a path, for a store or a database whose file
+/// is named outright.
+fn expand_path(location: &str, roots: &Roots) -> Option<PathBuf> {
+    if let Some(rest) = location.strip_prefix("{data_home}/") {
+        return Some(roots.data_home.join(rest));
+    }
     if let Some(rest) = location.strip_prefix("~/") {
-        return Some(home.join(rest));
+        return Some(roots.home.join(rest));
     }
     location.starts_with('/').then(|| PathBuf::from(location))
 }
 
 /// The name `format`'s program gives `cwd` as one folder.
 ///
-/// The two JSONL programs fold a path differently: Claude Code keeps the
-/// leading separator and folds `/` and `.` into `-`, while pi drops the leading
-/// separator, folds `/`, `\` and `:` into `-` and wraps the result in `--…--`.
+/// Each program has its own folding rule, and a chat is only found when the
+/// rule is the program's rather than an approximation of it:
+///
+/// * Claude Code folds *every* character that is not an ASCII letter or digit
+///   into `-`, keeping the leading separator (`/work/my_repo.v2` becomes
+///   `-work-my-repo-v2`). A folded name longer than [`CLAUDE_SLUG_MAX`] is cut
+///   there and suffixed with `-<base36 hash of the whole path>`, so two deep
+///   paths that share a prefix do not collide.
+/// * pi drops the leading separator, folds `/`, `\` and `:` into `-` and wraps
+///   the result in `--…--` (`/work/my_repo.v2` becomes
+///   `--work-my_repo.v2--`: an underscore or a dot stays as it is).
+///
+/// Both rules are the programs' own: Claude Code's is `bD`/`k`/`Pe` in
+/// `/opt/homebrew/Caskroom/claude-code/2.1.311/claude` and pi's is
+/// `getDefaultSessionDirPath` in
+/// `@earendil-works/pi-coding-agent/dist/core/session-manager.js` (1.4.0), and
+/// the shapes they produce were checked against the folders both wrote on this
+/// machine.
 pub fn cwd_slug(format: TranscriptFormat, cwd: &Path) -> String {
     // A record names the directory the program saw, which on macOS is the
     // resolved `/private/var/…` form, while the service may hold the symlinked
@@ -1054,15 +1369,71 @@ pub fn cwd_slug(format: TranscriptFormat, cwd: &Path) -> String {
     let cwd: &Path = resolved.as_deref().unwrap_or(cwd);
     let text = cwd.to_string_lossy();
     match format {
-        TranscriptFormat::ClaudeJsonl => text.replace(['/', '.'], "-"),
+        TranscriptFormat::ClaudeJsonl => claude_slug(&text),
         TranscriptFormat::PiJsonl => format!(
             "--{}--",
             text.trim_start_matches(['/', '\\'])
                 .replace(['/', '\\', ':'], "-")
         ),
-        // Codex's date tree and OpenCode's store name no directory.
+        // Codex's date tree, OpenCode's store and its database name no
+        // directory; this is only ever fed to `{cwd_slug}` in a pattern, which
+        // none of them use.
         _ => text.replace(['/', '\\'], "-"),
     }
+}
+
+/// The length Claude Code folds a project name to before it hashes the path.
+///
+/// A shorter name is the fold alone; a longer one is the first this many
+/// characters of the fold, a `-`, and six base-36 digits of a hash of the whole
+/// path (see [`cwd_slug`]).
+const CLAUDE_SLUG_MAX: usize = 200;
+
+/// Claude Code's project folder name for a directory.
+///
+/// The fold is `replace(/[^a-zA-Z0-9]/g, "-")` over the path, which is why an
+/// underscore and a dot both become `-` (the gate's real session lived in
+/// `…-xm09k80000gn-T-hp-…`, not `…-xm09k80000gn_T_hp-…`).
+fn claude_slug(path: &str) -> String {
+    let folded: String = path
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    // JavaScript counts UTF-16 code units, not `char`s: the cut can differ for a
+    // path holding an astral character. A path that long is not a path a person
+    // has, and the hash keeps the name unique either way.
+    if folded.chars().count() <= CLAUDE_SLUG_MAX {
+        return folded;
+    }
+    let head: String = folded.chars().take(CLAUDE_SLUG_MAX).collect();
+    format!("{head}-{}", base36_hash(path))
+}
+
+/// The hash Claude Code puts on a folded name that was too long: its `Ome`
+/// function (`e = (e << 5) - e + c | 0`, i.e. a Java-style string hash) over the
+/// whole path, as the absolute value in base 36.
+fn base36_hash(path: &str) -> String {
+    let mut hash: i32 = 0;
+    for unit in path.encode_utf16() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(unit));
+    }
+    // The program takes the absolute value of the signed 32-bit result, which is
+    // why `i32::MIN` is widened before it is negated.
+    let magnitude = i64::from(hash).unsigned_abs();
+    let mut digits = String::new();
+    let mut rest = magnitude;
+    loop {
+        let digit = (rest % 36) as u32;
+        digits.push(std::char::from_digit(digit, 36).unwrap_or('0'));
+        rest /= 36;
+        if rest == 0 {
+            break;
+        }
+    }
+    digits.chars().rev().collect()
 }
 
 /// Run `visit` over every file `components` names under `root`.
@@ -1140,8 +1511,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        Role, TranscriptFormat, claude_person, clip, cwd_slug, matches_name, parse_line,
-        summary_of, whole_lines,
+        CLAUDE_SLUG_MAX, Role, TranscriptFormat, claude_person, clip, cwd_slug, matches_name,
+        parse_line, summary_of, whole_lines,
     };
 
     fn line(value: &serde_json::Value) -> Vec<u8> {
@@ -1167,6 +1538,92 @@ mod tests {
         assert_eq!(
             cwd_slug(TranscriptFormat::PiJsonl, cwd),
             "--Users-me-.herdr-worktrees-repo--"
+        );
+    }
+
+    /// The gate bug this fix is about: Claude Code folds `_` and every other
+    /// non-alphanumeric character too, so a transcript under
+    /// `…/hp-501/210041/SHP-60/repo2` is in `…-hp-501-…`, whose parent has an
+    /// underscore in it (`xm09k80000gn_T_hp`). These are real folder names from
+    /// this machine's `~/.claude/projects`, paired with the `cwd` their own
+    /// session records.
+    #[test]
+    fn claude_folds_everything_that_is_not_alphanumeric() {
+        for (cwd, folder) in [
+            (
+                "/private/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-60/repo2",
+                "-private-var-folders-kl-8t4rp31969n3ts1h9-xm09k80000gn-T-hp-501-210041-SHP-60-repo2",
+            ),
+            (
+                "/private/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-60/repo",
+                "-private-var-folders-kl-8t4rp31969n3ts1h9-xm09k80000gn-T-hp-501-210041-SHP-60-repo",
+            ),
+            (
+                "/private/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-26/claudemode.SqCv",
+                "-private-var-folders-kl-8t4rp31969n3ts1h9-xm09k80000gn-T-hp-501-210041-SHP-26-claudemode-SqCv",
+            ),
+            (
+                "/private/var/folders/kl/8t4rp31969n3ts1h9_xm09k80000gn/T/hp-501/210041/SHP-60/home/.shprd/reviews/m10h/zeta-a1",
+                "-private-var-folders-kl-8t4rp31969n3ts1h9-xm09k80000gn-T-hp-501-210041-SHP-60-home--shprd-reviews-m10h-zeta-a1",
+            ),
+        ] {
+            assert_eq!(
+                cwd_slug(TranscriptFormat::ClaudeJsonl, Path::new(cwd)),
+                folder,
+                "{cwd}"
+            );
+        }
+    }
+
+    /// The space a path has in it is folded like any other character, and a
+    /// path with no such characters folds to itself.
+    #[test]
+    fn claude_folds_spaces_and_keeps_alphanumerics() {
+        assert_eq!(
+            cwd_slug(TranscriptFormat::ClaudeJsonl, Path::new("/work/my repo")),
+            "-work-my-repo"
+        );
+        assert_eq!(
+            cwd_slug(TranscriptFormat::ClaudeJsonl, Path::new("/work/v2.1_repo")),
+            "-work-v2-1-repo"
+        );
+    }
+
+    /// A folded name Claude Code would cut gets the cut and the hash, exactly as
+    /// the CLI's own `bD` builds it (checked against the CLI's functions with
+    /// the same two paths).
+    #[test]
+    fn a_very_long_claude_path_is_cut_and_hashed() {
+        let long = format!("/Users/me/projects/{}", "a".repeat(200));
+        let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, Path::new(&long));
+        assert_eq!(slug.len(), CLAUDE_SLUG_MAX + 1 + 6, "{slug}");
+        assert!(slug.starts_with("-Users-me-projects-aaa"), "{slug}");
+        assert!(slug.ends_with("-6ihb7w"), "{slug}");
+        // Two paths that agree over the cut but differ after it are two folders,
+        // which is the whole reason for the hash.
+        let other = format!("{long}b");
+        assert_ne!(
+            cwd_slug(TranscriptFormat::ClaudeJsonl, Path::new(&other)),
+            slug
+        );
+        // A name exactly at the limit is not cut at all.
+        let at_limit = format!("/{}", "b".repeat(CLAUDE_SLUG_MAX - 1));
+        assert_eq!(at_limit.chars().count(), CLAUDE_SLUG_MAX);
+        let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, Path::new(&at_limit));
+        assert_eq!(slug, at_limit.replace('/', "-"));
+    }
+
+    /// pi leaves an underscore and a dot alone: its rule is separators only.
+    #[test]
+    fn pi_keeps_underscores_and_dots_and_folds_only_separators() {
+        assert_eq!(
+            cwd_slug(TranscriptFormat::PiJsonl, Path::new("/work/my_repo.v2/sub")),
+            "--work-my_repo.v2-sub--"
+        );
+        // A Windows-shaped path, which pi folds the same way.
+        assert_eq!(
+            cwd_slug(TranscriptFormat::PiJsonl, Path::new("C:\\work\\repo")),
+            "--C--work-repo--"
         );
     }
 

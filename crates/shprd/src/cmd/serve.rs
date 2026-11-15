@@ -44,7 +44,8 @@ use shprd_server::ServerError::AlreadyRunning;
 
 use crate::cli::ServeArgs;
 use crate::ctx::{
-    CliError, Ctx, resolve_config_home, resolve_data_dir, resolve_home, resolve_state_home,
+    CliError, Ctx, resolve_agent_data_home, resolve_agent_home, resolve_config_home,
+    resolve_data_dir, resolve_home, resolve_state_home,
 };
 
 /// The variable that sets how much the service logs.
@@ -104,6 +105,16 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         &home,
     )));
     config.data = Some(resolve_data_dir());
+    // A chat reads an agent CLI's own session record, and that file is written
+    // by the CLI under the home and data home *it* resolves — the `HOME` it
+    // inherits (shprd never rewrites it: it is a protected variable) and the
+    // `$XDG_DATA_HOME` this process was started with. The engine's own home is
+    // `SHPRD_HOME`, which no CLI writes a session under, so it is not the root a
+    // transcript is looked for in (M10 gate bug 2).
+    config.transcript_roots = Some(shprd_agents::transcript::Roots::new(
+        &resolve_agent_home(),
+        resolve_agent_data_home().as_deref(),
+    ));
     // The roster's pickers ask a program for the models it runs, so the service
     // is given the `PATH` this process was started with rather than reading one
     // of its own: what a request may start is the binary's decision, resolved

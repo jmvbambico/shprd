@@ -348,6 +348,27 @@ pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
     }
 }
 
+/// Resolves the home directory an agent CLI runs with, which is the one its
+/// session record is written under.
+///
+/// It is `$HOME` and nothing else: shprd never rewrites `HOME` for a launch (it
+/// is a protected variable, [`shprd_agents::env`]), so the CLI that a spawn
+/// starts writes its record under the same `$HOME` this process has. That is a
+/// different directory from the engine's home ([`resolve_home`]), which may be
+/// `SHPRD_HOME` or a `--home` flag and which no CLI writes a session under, and
+/// it is why a chat that looked under the engine's home never found one.
+pub fn resolve_agent_home() -> PathBuf {
+    env_value("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Resolves the XDG data home an agent CLI writes under: `$XDG_DATA_HOME` when
+/// it is set, else `None` and the caller's own `<home>/.local/share` rule.
+pub fn resolve_agent_data_home() -> Option<PathBuf> {
+    env_value(DATA_HOME_ENV).map(PathBuf::from)
+}
+
 /// One environment variable's value, with an empty one read as unset.
 ///
 /// This is the binary's only way of reading the variables below, so the rule —
