@@ -924,6 +924,137 @@ pub struct PromptPutDto {
     pub text: String,
 }
 
+/// One prompt in the templates page's list: its identity, its file and whether
+/// it is the person's own.
+///
+/// The words themselves are not in the list — four prompts' standing text is a
+/// lot to send for a page that shows one at a time — so a client reads the one
+/// it opens with [`PromptDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptSummaryDto.ts")]
+pub struct PromptSummaryDto {
+    /// The id it is stored under.
+    pub id: String,
+    /// One line about the role, when this build ships this prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub about: Option<String>,
+    /// The file it lives in.
+    pub path: String,
+    /// Whether the file is the shipped default or the person's own words, when
+    /// it could be read at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub state: Option<PromptStateDto>,
+    /// Whether this build ships a prompt under this id.
+    pub shipped: bool,
+    /// Why the file cannot be used, when it cannot: a person's own file is never
+    /// dropped from the list without a word about why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub problem: Option<String>,
+}
+
+/// What `GET /api/prompts` answers with: every prompt this machine has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptListDto.ts")]
+pub struct PromptListDto {
+    /// The prompts, the shipped ones first, then the person's own by id.
+    pub prompts: Vec<PromptSummaryDto>,
+}
+
+/// One program a role may run, with what its catalog and harness table say it
+/// takes.
+///
+/// It is the picker's data, served by the service for the same reason the
+/// settings are: the mod has no data directory of its own, and a picker that
+/// guessed at a program's models would offer ones it cannot run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ProgramDto.ts")]
+pub struct ProgramDto {
+    /// The harness id, e.g. `claude`.
+    pub id: String,
+    /// The words a person sees, e.g. Claude Code.
+    pub name: String,
+    /// The vendor that ships the CLI, e.g. `anthropic`.
+    pub vendor: String,
+    /// Whether the CLI runs other vendors' models, so a model names its own.
+    pub multi_model: bool,
+    /// Whether a model must name its provider too, as `pi` requires.
+    pub needs_provider: bool,
+    /// The models its catalog lists, in the catalog's order.
+    pub models: Vec<ModelChoiceDto>,
+    /// Where the models came from, so a picker can say why a list is short.
+    pub models_source: ModelsSourceDto,
+    /// Why there are no models, when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub models_note: Option<String>,
+    /// The effort levels the program takes overall, lowest first.
+    pub efforts: Vec<String>,
+    /// Whether the program has a fast (higher-priority) mode.
+    pub fast: bool,
+    /// The access modes it offers, in the order its harness table lists them.
+    pub permissions: Vec<PermissionDto>,
+    /// The access mode a role gets when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_permission: Option<String>,
+}
+
+/// One model a program's catalog lists, with the levels it takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ModelChoiceDto.ts")]
+pub struct ModelChoiceDto {
+    /// The name the program's model flag takes.
+    pub id: String,
+    /// The words a person sees; the id when the catalog names no other.
+    pub name: String,
+    /// The effort levels this model takes, lowest first.
+    pub efforts: Vec<String>,
+    /// The level it starts at when a role names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_effort: Option<String>,
+    /// Whether the model has a speed tier of its own.
+    pub fast: bool,
+}
+
+/// One access mode a program offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PermissionDto.ts")]
+pub struct PermissionDto {
+    /// The program's own word for the mode, e.g. `auto`.
+    pub id: String,
+    /// The words a person sees, e.g. `Auto`.
+    pub label: String,
+}
+
+/// Where a program's model list came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "ModelsSourceDto.ts")]
+pub enum ModelsSourceDto {
+    /// A static list in the shipped data, e.g. `data/models/claude.toml`.
+    Static,
+    /// The program's own list command, read for this answer.
+    Command,
+    /// The program names no model list at all.
+    None,
+}
+
+/// What `GET /api/roster` answers with: the programs a role may run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "RosterDto.ts")]
+pub struct RosterDto {
+    /// One entry per `data/harness/*.toml`.
+    pub programs: Vec<ProgramDto>,
+    /// Why there are no programs, when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+}
+
 /// What one write did, and the settings as they now resolve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "SettingsWriteDto.ts")]
@@ -1053,7 +1184,14 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<PromptDto>()?,
         one::<PromptStateDto>()?,
         one::<PromptPutDto>()?,
+        one::<PromptSummaryDto>()?,
+        one::<PromptListDto>()?,
         one::<SettingsOutcomeDto>()?,
+        one::<RosterDto>()?,
+        one::<ProgramDto>()?,
+        one::<ModelChoiceDto>()?,
+        one::<PermissionDto>()?,
+        one::<ModelsSourceDto>()?,
     ])
 }
 

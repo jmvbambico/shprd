@@ -194,3 +194,87 @@ async fn a_body_that_is_not_a_prompt_write_is_a_400() {
         "a refused write leaves no file"
     );
 }
+
+#[tokio::test]
+async fn the_list_names_every_template_without_its_words() {
+    let fixture = Fixture::new();
+    let (status, body) = fixture.send(Method::GET, "/api/prompts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompts = body["prompts"].as_array().expect("a list of prompts");
+    let ids: Vec<&str> = prompts
+        .iter()
+        .map(|prompt| prompt["id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(ids, ["assistant", "worker", "reviewer", "backup"]);
+    let worker = prompts
+        .iter()
+        .find(|prompt| prompt["id"] == "worker")
+        .expect("the worker's prompt");
+    assert_eq!(worker["state"], "default");
+    assert_eq!(worker["shipped"], true);
+    assert!(worker["about"].is_string(), "the list says what it is for");
+    assert!(
+        worker.get("text").is_none(),
+        "the words are read one at a time: {worker}"
+    );
+    assert_eq!(
+        Path::new(worker["path"].as_str().expect("a path")),
+        fixture.file("worker"),
+        "each entry names its file"
+    );
+}
+
+#[tokio::test]
+async fn a_reset_puts_the_shipped_words_back_over_an_edit() {
+    let fixture = Fixture::new();
+    let (status, body) = fixture
+        .put("worker", json!({"text": "my own words\n"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "PUT: {body}");
+    assert_eq!(body["state"], "edited");
+
+    let (status, body) = fixture
+        .send(Method::DELETE, "/api/prompts/worker", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "DELETE: {body}");
+    assert_eq!(body["state"], "default");
+    assert_eq!(body["text"], shipped_worker());
+    assert_eq!(
+        fs::read_to_string(fixture.file("worker")).expect("the file is there"),
+        shipped_worker(),
+        "reset writes the shipped words"
+    );
+
+    // Resetting a prompt that is already the default changes nothing and still
+    // answers with the prompt.
+    let (status, body) = fixture
+        .send(Method::DELETE, "/api/prompts/worker", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "default");
+}
+
+#[tokio::test]
+async fn a_reset_of_a_prompt_nothing_ships_is_a_404_and_needs_the_write_header() {
+    let fixture = Fixture::new();
+    let (status, body) = fixture
+        .send(Method::DELETE, "/api/prompts/nope", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // A DELETE is a write: without `x-shprd: 1` it is refused before the route.
+    let request = Request::builder()
+        .method(Method::DELETE)
+        .uri("/api/prompts/worker")
+        .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
+        .body(Body::empty())
+        .expect("the request");
+    let response = fixture
+        .app
+        .router()
+        .oneshot(request)
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!fixture.file("worker").exists(), "nothing was written");
+}

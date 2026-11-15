@@ -82,6 +82,11 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         &home,
     )));
     config.data = Some(resolve_data_dir());
+    // The roster's pickers ask a program for the models it runs, so the service
+    // is given the `PATH` this process was started with rather than reading one
+    // of its own: what a request may start is the binary's decision, resolved
+    // once, here.
+    config.path_env = Some(std::env::var("PATH").unwrap_or_default());
     let tick = tick_config(
         ctx,
         &home,

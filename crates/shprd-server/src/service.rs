@@ -409,6 +409,15 @@ pub struct Config {
     /// embedded copy into this once, so the service reads no directory variable
     /// of its own.
     pub data: Option<DataDir>,
+    /// The `PATH` a program's own model listing runs with, when the caller
+    /// resolved one.
+    ///
+    /// The roster's pickers ask a program for the models it runs, and a service
+    /// that read `$PATH` itself would start whatever the environment it was
+    /// launched with names. The binary passes the `PATH` it was started with;
+    /// `None` leaves every listing off, so a service prepared by hand reads only
+    /// the shipped catalogs.
+    pub path_env: Option<String>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -460,6 +469,7 @@ impl Config {
             home: None,
             prompts_dir: None,
             data: None,
+            path_env: None,
         }
     }
 }
@@ -501,6 +511,7 @@ impl Service {
                 home: config.home.clone(),
                 prompts_dir: config.prompts_dir.clone(),
                 data: config.data.clone(),
+                path_env: config.path_env.clone(),
             },
         )?;
         let info = app.info();
