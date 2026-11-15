@@ -1,0 +1,357 @@
+// The mod-to-service client: find `shprd serve`, prove it is the one the
+// discovery file names, and then talk to it with the token from the state
+// directory.
+//
+// This is Shepherdr's pattern (`lib/local.js`, `lib/bridge.js`, `lib/service.js`),
+// ported because the Herdr mod runtime leaves no other transport open:
+//
+// - Source: <https://github.com/eliasstravik/shepherdr>
+// - Paths: `lib/local.js` (port and token discovery, the `id` handshake),
+//   `lib/bridge.js` (its poll-and-reconcile shape), `service/main.ts` (the
+//   discovery files a window reads)
+// - Commit: `a3f327a` (tag `v3.1.34`)
+// - License: MIT — Copyright (c) 2026 Elias Stravik
+//
+// What is shprd's own here: the state directory is `$XDG_STATE_HOME/shprd`
+// (else `<home>/.local/state/shprd`), `GET /api/health` answers
+// `{ok, id, version}`, a write needs `x-shprd: 1` beside the bearer token, and
+// the service touches `<state>/shprd/changes` after every ledger write so a mod
+// can watch a file instead of guessing when to read again (`lib/watch.js`).
+//
+// A mod has no environment of its own (the M7ef spike measured it), so the state
+// directory is found by asking this computer's shell once (`probeStateDir`).
+// Until that answers, XDG's defaults are used, which is the same place unless
+// the person moved `$XDG_STATE_HOME`.
+//
+// **No timers.** A Herdr mod's `setTimeout` throws; the runtime's only clock is
+// `cx.timer`/`cx.sleep`, so every wait here is passed in as `io.wait(ms)`
+// (`cx.sleep` in a mod, a real timer in a test) and a missing one means "wait as
+// long as the call takes".
+//
+// Shared: the source is `mods/lib/client.js`; `bin/sync-shared` copies it into
+// every mod folder as `lib/client.js`. Edit the source, never a copy.
+
+import { home, readTextFile } from "herdr";
+
+/** The first look at a service gives up after this many ms. */
+export const HEALTH_WAIT = 1500;
+/** A read gives up after this many ms, so one slow call never wedges a panel. */
+export const READ_WAIT = 4000;
+/** A write is one event, so it may take longer than a read. */
+export const WRITE_WAIT = 6000;
+/** How long the long poll waits at the service before it answers `204`. */
+export const POLL_WAIT = 20;
+
+/** The error a failed call raises, carrying what the service said. */
+export class ServiceError extends Error {
+  /**
+   * @param {string} message what went wrong, in words a person can read
+   * @param {{status?: number, code?: string, detail?: unknown}} [info] the answer
+   */
+  constructor(message, info = {}) {
+    super(message);
+    this.name = "ServiceError";
+    this.status = info.status ?? 0;
+    this.code = info.code ?? "failed";
+    this.detail = info.detail ?? null;
+  }
+}
+
+/**
+ * The state directory a service's discovery files live in, from a home and the
+ * caller's XDG answers.
+ *
+ * `xdg` is what the shell said: `{state}` or `{}` when it said nothing usable.
+ * An empty `$XDG_STATE_HOME` is unset, which is what the XDG specification says.
+ */
+export function stateDir(homeDir, xdg = {}) {
+  const base = xdg?.state || `${homeDir}/.local/state`;
+  return `${base}/shprd`;
+}
+
+/** Where `service.json` is, under a state directory. */
+export function serviceFile(dir) {
+  return `${dir}/service.json`;
+}
+
+/** Where the bearer token is, under a state directory. */
+export function tokenFile(dir) {
+  return `${dir}/token`;
+}
+
+/**
+ * Where the service touches a file after every ledger write, under a state
+ * directory. A mod watches the *folder* and reads this file, because a Herdr
+ * mod only gets "something under this folder changed".
+ */
+export function changeFile(dir) {
+  return `${dir}/changes`;
+}
+
+/** The shell snippet that answers this computer's shprd paths, as one JSON line. */
+export const PROBE = 'printf \'{"state":"%s"}\\n\' "${XDG_STATE_HOME:-}"';
+
+/**
+ * Asks this computer's shell where its state directory is, or `{}` when the
+ * shell cannot say.
+ *
+ * `run` is `exec` from `herdr`; the last line of its stdout is the answer, so a
+ * shell profile that prints a greeting does not break the parse.
+ */
+export async function probeStateDir(run) {
+  const result = await run("sh", ["-c", PROBE]).catch(() => null);
+  const text = String(result?.stdout ?? "").trim();
+  const line = text === "" ? "" : text.split("\n").pop();
+  try {
+    const answer = JSON.parse(line || "null");
+    return answer && typeof answer === "object" ? answer : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Reads and checks `service.json`: `{port, id, pid, version}` or null.
+ *
+ * A file that names no usable port is not a service: a stale or half-written
+ * record must leave a mod looking rather than dialling whatever holds a port.
+ * `read` is injected so a test can drive it without Herdr (`readTextFile`
+ * otherwise).
+ */
+export async function readServiceRecord(path, read = readTextFile) {
+  const text = await read(path).catch(() => null);
+  if (typeof text !== "string" || text.trim() === "") return null;
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!record || typeof record !== "object") return null;
+  const port = record.port;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  if (typeof record.id !== "string" || record.id === "") return null;
+  return {
+    port,
+    id: record.id,
+    pid: Number.isInteger(record.pid) ? record.pid : 0,
+    version: typeof record.version === "string" ? record.version : "",
+  };
+}
+
+/**
+ * Reads the bearer token, or null when there is none.
+ *
+ * It is trimmed: the service writes it with a trailing newline, and a header
+ * with a newline in it is not the token.
+ */
+export async function readToken(path, read = readTextFile) {
+  const text = await read(path).catch(() => null);
+  if (typeof text !== "string") return null;
+  const token = text.trim();
+  return token === "" ? null : token;
+}
+
+/** The address a record names, as a base URL with no trailing slash. */
+export function baseUrl(record) {
+  return `http://127.0.0.1:${record.port}`;
+}
+
+/**
+ * One JSON GET, or null on a transport failure, a non-JSON answer, or a wait
+ * that ran out.
+ */
+async function getJson(doFetch, url, wait) {
+  const call = (async () => {
+    const answer = await doFetch(url);
+    if (!answer || !answer.ok) return null;
+    return await answer.json();
+  })().catch(() => null);
+  return wait ? guard(call, wait, HEALTH_WAIT) : call;
+}
+
+/**
+ * `work`, or null once `wait(ms)` resolves first.
+ *
+ * Inside a mod `wait` is `cx.sleep`, which is the only clock a mod has
+ * (`setTimeout` throws there); a test passes a real `setTimeout`. A `work` that
+ * rejects later must not become an unhandled rejection, so its failure is
+ * swallowed here: the call site says what to show.
+ */
+function guard(work, wait, ms) {
+  return Promise.race([work, wait(ms).then(() => null)]).catch(() => null);
+}
+
+/**
+ * Finds the service this computer is running: `{base, dir, record, token,
+ * health}` or null when there is none.
+ *
+ * The `id` check is the point of the handshake (Shepherdr's GitHub #635): a
+ * record left behind by a service that died names a port something else may now
+ * hold, and only the service that wrote the record answers its `id`. The token
+ * is read *after* that check, so a squatter never receives it.
+ *
+ * `io` is `{read, fetch, wait, dir}` when a caller supplies its own (a test);
+ * the defaults are Herdr's `readTextFile` and the mod runtime's `fetch`.
+ */
+export async function discover(io = {}) {
+  const read = io.read ?? readTextFile;
+  const doFetch = io.fetch ?? fetch;
+  const dir = io.dir ?? stateDir(home(), io.xdg ?? {});
+  const record = await readServiceRecord(serviceFile(dir), read);
+  if (!record) return null;
+  const base = baseUrl(record);
+  const health = await getJson(doFetch, `${base}/api/health`, io.wait ?? null);
+  if (!health || health.id !== record.id) return null;
+  const token = await readToken(tokenFile(dir), read);
+  if (!token) return null;
+  return { base, dir, record, token, health };
+}
+
+/**
+ * One service, as a mod uses it: reads, writes and the long poll.
+ *
+ * A client is made from a `discover()` result and reused. When the service
+ * restarts, its `id` changes and every call fails at the gate: the mod drops the
+ * client and calls `discover()` again rather than holding a dead port.
+ */
+export class Client {
+  /**
+   * @param {{base: string, dir: string, record: object, token: string}} found
+   *   what `discover` answered
+   * @param {{fetch?: Function, wait?: Function}} [io] the runtime's own `fetch`
+   *   and its "give up after" helper; a test passes its own
+   */
+  constructor(found, io = {}) {
+    this.base = found.base;
+    this.dir = found.dir;
+    this.record = found.record;
+    this.token = found.token;
+    this.fetch = io.fetch ?? fetch;
+    this.wait = io.wait ?? null;
+  }
+
+  /** The headers every call carries; a write adds `x-shprd: 1`. */
+  headers(write = false) {
+    const headers = { authorization: `Bearer ${this.token}` };
+    if (write) {
+      headers["content-type"] = "application/json";
+      headers["x-shprd"] = "1";
+    }
+    return headers;
+  }
+
+  /**
+   * One call, answered as JSON (or `null` when a read ran out of time).
+   *
+   * A refusal is a [`ServiceError`] carrying what the service said, because the
+   * person needs the words ("a transition rule refused this") and not a status
+   * code.
+   */
+  async call(method, path, { body = null, wait = READ_WAIT } = {}) {
+    const write = method !== "GET";
+    const url = `${this.base}${path}`;
+    const init = { method, headers: this.headers(write) };
+    if (body !== null) init.body = JSON.stringify(body);
+    const call = (async () => {
+      const answer = await this.fetch(url, init);
+      const text = await answer.text();
+      let parsed = null;
+      if (typeof text === "string" && text.trim() !== "") {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = null;
+        }
+      }
+      if (!answer.ok) {
+        throw new ServiceError(describe(parsed, answer.status), {
+          status: answer.status,
+          code: parsed?.code ?? "http",
+          detail: parsed,
+        });
+      }
+      return parsed;
+    })();
+    // A write is never given up on by the client: the person pressed a button and
+    // has to hear what happened, so it waits for the service's own answer.
+    if (write || !this.wait) return call;
+    return guard(call, this.wait, wait);
+  }
+
+  /** `GET /api/state`: the whole board, folded now. */
+  state() {
+    return this.call("GET", "/api/state");
+  }
+
+  /** `GET /api/asks`: every card still waiting for the person. */
+  asks() {
+    return this.call("GET", "/api/asks");
+  }
+
+  /** `POST /api/asks/answer`: answer one card, exactly once. */
+  answerAsk(task, ask, answer) {
+    return this.call("POST", "/api/asks/answer", { body: { task, ask, answer } });
+  }
+
+  /** `POST /api/action`: one of the person's actions on a task. */
+  action(payload) {
+    return this.call("POST", "/api/action", { body: payload });
+  }
+
+  /** `GET /api/settings`: every key, its value and the layer it came from. */
+  settings() {
+    return this.call("GET", "/api/settings");
+  }
+
+  /** `PUT /api/settings`: write one key, and answer the settings as they now are. */
+  putSetting(key, value, forRepo = null) {
+    const body = { key };
+    if (value !== null && value !== undefined) body.value = value;
+    if (forRepo) body.for_repo = forRepo;
+    return this.call("PUT", "/api/settings", { body });
+  }
+
+  /** `GET /api/prompts/:id`: one role prompt's words. */
+  prompt(id) {
+    return this.call("GET", `/api/prompts/${encodeURIComponent(id)}`);
+  }
+
+  /** `PUT /api/prompts/:id`: the person's words over that prompt's file. */
+  putPrompt(id, text) {
+    return this.call("PUT", `/api/prompts/${encodeURIComponent(id)}`, {
+      body: { text },
+    });
+  }
+
+  /**
+   * `GET /api/changes?since=<seq>`: the events after `seq`, or `null` when the
+   * wait ran out (`204`, which is not a failure: nothing happened yet).
+   *
+   * The wait is bounded at the service (`timeout` seconds, 30 at most) and the
+   * client waits a little longer than that for the answer.
+   */
+  changes(since = 0, timeout = POLL_WAIT) {
+    const bounded = Math.max(1, Math.min(30, Math.floor(timeout)));
+    const path = `/api/changes?since=${encodeURIComponent(since)}&timeout=${bounded}`;
+    return this.call("GET", path, { wait: (bounded + 5) * 1000 });
+  }
+}
+
+/** One sentence from a refusal body, for a toast or an inline error. */
+export function describe(body, status = 0) {
+  if (body && typeof body === "object") {
+    const message = body.message ?? body.error;
+    if (typeof message === "string" && message.trim() !== "") return message.trim();
+    if (typeof body.code === "string") return body.code;
+  }
+  if (typeof body === "string" && body.trim() !== "") return body.trim();
+  return status > 0 ? `the service answered ${status}` : "the service did not answer";
+}
+
+/** One sentence for whatever a failed call threw, so a panel can show it. */
+export function reason(err) {
+  if (err instanceof ServiceError) return err.message;
+  const text = err?.message ?? String(err ?? "");
+  return text.trim() === "" ? "the service did not answer" : text.trim();
+}

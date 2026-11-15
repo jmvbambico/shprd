@@ -1175,7 +1175,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
+ "sha2",
  "shprd-agents",
  "shprd-core",
  "shprd-git",

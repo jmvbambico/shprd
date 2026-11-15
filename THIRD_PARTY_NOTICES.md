@@ -60,6 +60,21 @@ SOFTWARE.
   the first-use write and the upgrade of an untouched default),
   `templates/assistant.md`, `templates/worker.md`, `templates/reviewer.md`
 - Commit: a3f327a (tag v3.1.34)
+- Also used for: the Herdr desktop host folder in `host/herdr-desktop/` — the
+  window's block tree and its measurements from `layouts/shepherdr.json`, the
+  visual tokens (the text, height and radius scales, the red/green/amber status
+  colours and the space marks) from `lib/ui.js`, the status glyph shapes from
+  `lib/dot.js`, the status-bar, tab-bar, pane-header and footer rows from
+  `mods/workspace-status-chat`, `mods/tabs-tasks`, `mods/pane-chat` and
+  `mods/workspace-chrome-shepherdr`, the grouped two-line task rows and their
+  second line from `mods/tasks/main.js` and `core/tasks.js`, the installer's
+  ownership rules — own only what we wrote, never overwrite a file that is not
+  ours, merge keys rather than replace them, back a change out on uninstall —
+  from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
+  rules, and the mod-to-service discovery — `service.json`'s port and id, the
+  `/api/health` id handshake before the token is sent, bearer auth — from
+  `lib/local.js`, `lib/bridge.js` and `service/main.ts` — in
+  `host/herdr-desktop/{layouts,mods,bin}/` and `crates/shprd/src/cmd/install.rs`
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
   the fresh start a new worktree branches from, the merge policy and

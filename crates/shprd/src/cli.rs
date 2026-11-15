@@ -155,6 +155,23 @@ pub enum Command {
     Drop(DropArgs),
     /// Serve this run over a loopback HTTP API, for every UI that calls it.
     Serve(ServeArgs),
+    /// Put shprd's layout and mods into the Herdr desktop's config folder, or
+    /// take them out again.
+    ///
+    /// The Herdr app draws itself from its home folder — `~/.config/herdr-app`,
+    /// or `$HERDR_APP_HOME` — so this copies `host/herdr-desktop/layouts/` into
+    /// its `layouts/`, its `mods/shprd-*` folders into its `mods/`, and merges
+    /// the keys the layout expects into its `keys.json`.
+    ///
+    /// It owns exactly the files it wrote: a manifest under
+    /// `<app home>/data/shprd-desktop/manifest.json` lists them with a SHA-256
+    /// of each, and `--uninstall` removes only those. A file already at one of
+    /// those paths that shprd did not write is a clash — the install refuses,
+    /// names every one, and writes nothing at all. A key the person already
+    /// bound to something else is kept, never overwritten. Running it twice
+    /// writes nothing the second time; `--dry-run` writes nothing and prints
+    /// the same plan.
+    Install(InstallArgs),
     /// Advance the run once, now: start what may start, land what may land.
     ///
     /// This is the same pass `shprd serve` runs every `tasks.tick_secs`
@@ -274,6 +291,43 @@ pub struct ServeArgs {
     /// as `shprd_server=debug`.
     #[arg(long, value_name = "PORT", default_value_t = 0)]
     pub port: u16,
+}
+
+/// Arguments for `install`.
+#[derive(Debug, Args)]
+pub struct InstallArgs {
+    /// Which host to install for; only the Herdr desktop exists so far.
+    #[arg(value_name = "HOST")]
+    pub host: InstallHost,
+    /// Print the plan without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Remove what a previous install wrote, and nothing else.
+    #[arg(long)]
+    pub uninstall: bool,
+    /// The Herdr app home to install into; defaults to `$HERDR_APP_HOME`, then
+    /// `~/.config/herdr-app`.
+    ///
+    /// A test points this at a temporary folder, so it can never write into the
+    /// person's own window.
+    #[arg(long = "app-home", value_name = "PATH")]
+    pub app_home: Option<PathBuf>,
+    /// The host tree to install from; defaults to `$SHPRD_HOST_DIR`, then
+    /// `host/herdr-desktop` in the repository this runs in.
+    #[arg(long, value_name = "PATH")]
+    pub from: Option<PathBuf>,
+    /// The repository whose `host/herdr-desktop` is installed; defaults to the
+    /// current directory's git top level.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<PathBuf>,
+}
+
+/// The hosts `shprd install` can set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InstallHost {
+    /// The Herdr desktop app: a layout, its mods and their keys.
+    #[value(name = "herdr-desktop")]
+    HerdrDesktop,
 }
 
 /// Arguments for `readmit`.

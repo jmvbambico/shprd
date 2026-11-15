@@ -1,0 +1,55 @@
+#!/bin/sh
+# Copies the shared modules in `mods/lib/` into every mod folder that uses them.
+#
+# A Herdr mod can only import files inside its own folder (`herdr-app check`
+# refuses a path outside it: measured, "module ... resolves outside the
+# application directory"), so each mod needs its own copy. `mods/lib/` is the one
+# source; a copy is never edited.
+#
+#   bin/sync-shared            write the copies
+#   bin/sync-shared --check    fail (exit 1) when any copy differs from its source
+#
+# The same idea as Shepherdr's `bin/sync-shared` (MIT, eliasstravik/shepherdr,
+# commit a3f327a, path `bin/sync-shared` plus `lib/COPIES`). The table is written
+# here rather than read from a `COPIES` file because there are only a few modules
+# and a mod list this small reads better inline.
+
+set -eu
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+check=0
+[ "${1:-}" = "--check" ] && check=1
+
+# module:space-separated mods that import it under `./lib/<module>`
+mods_for() {
+  case "$1" in
+    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts" ;;
+    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts" ;;
+    board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-graph shprd-coordinator shprd-tabs shprd-pane" ;;
+    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts" ;;
+    watch.js) echo "shprd-tasks shprd-asks shprd-coordinator shprd-status shprd-graph" ;;
+    *) echo "no mod list for $1" >&2; exit 2 ;;
+  esac
+}
+
+fail=0
+for path in "$here"/mods/lib/*.js; do
+  name=$(basename "$path")
+  for mod in $(mods_for "$name"); do
+    target="$here/mods/$mod/lib/$name"
+    mkdir -p "$(dirname "$target")"
+    if [ "$check" = 1 ]; then
+      if ! cmp -s "$path" "$target"; then
+        echo "out of date: mods/$mod/lib/$name" >&2
+        fail=1
+      fi
+    else
+      cp "$path" "$target"
+    fi
+  done
+done
+
+if [ "$check" = 1 ] && [ "$fail" = 0 ]; then
+  echo "shared modules are in date"
+fi
+exit "$fail"

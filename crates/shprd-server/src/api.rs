@@ -216,6 +216,10 @@ impl App {
     ) -> Result<Self, ServerError> {
         let files = ServiceFiles::prepare(state_dir)?;
         files.write_record(port)?;
+        // A mod that starts before the run moves has nothing to watch for: the
+        // change file is written once here, naming the log as it stands, so a
+        // panel's first look at it is a real answer rather than a missing file.
+        let _ = crate::changes::touch(state_dir, ledger::last_seq(repo).unwrap_or(0));
         let state = AppState {
             repo: repo.to_path_buf(),
             port,
