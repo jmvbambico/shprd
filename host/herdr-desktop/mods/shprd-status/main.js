@@ -94,7 +94,15 @@ export default class Status extends View {
     });
   }
 
-  /** The palette key as actually bound, not a hardcoded one. */
+  /**
+   * The palette key as actually bound, not a hardcoded one.
+   *
+   * `keys()` is the app's own answer, and on this build it lists the bindings the
+   * keymap file holds — never the palette's own default, which the app keeps
+   * inside itself. So the hint shows the key when a person bound one and the word
+   * alone when they did not: "Commands" is what the click does, and a guessed
+   * glyph would be a key that may not work.
+   */
   hint() {
     const mac = window()?.platform === "macos";
     const mod = {
