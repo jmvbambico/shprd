@@ -366,7 +366,14 @@ fn claude_message(value: &Value) -> Option<Message> {
         .and_then(|at| at.as_str())
         .and_then(iso_ms);
     let (role, text, tools) = match kind {
-        "user" => (Role::User, texts(content, &["text"]), Vec::new()),
+        // A user line is not always the person's: Claude Code writes a slash
+        // command, a system reminder and a local command's output there too, so
+        // the line has to be cleaned before it is shown as something said.
+        "user" => (
+            Role::User,
+            claude_person(&texts(content, &["text"]))?,
+            Vec::new(),
+        ),
         "assistant" => {
             let text = texts(content, &["text"]);
             let tools = tool_uses(content, "tool_use", "input");
@@ -438,7 +445,16 @@ fn codex_message(value: &Value) -> Option<Message> {
                 _ => return None,
             };
             let content = payload.get("content")?;
-            let text = texts(content, &["input_text", "output_text", "text"]);
+            // Codex records its own brief (the AGENTS.md text, the environment)
+            // in user-role blocks; a person's turn is the one that is neither.
+            let text = match role {
+                Role::User => {
+                    texts_where(content, &["input_text", "output_text", "text"], |text| {
+                        !codex_injected(text)
+                    })
+                }
+                Role::Assistant => texts(content, &["input_text", "output_text", "text"]),
+            };
             let message = Message {
                 role,
                 text,
@@ -481,6 +497,161 @@ fn tool_message(name: &str, arguments: Option<&str>, at_ms: Option<i64>) -> Mess
     }
 }
 
+// ---------------------------------------------------------------------------
+// What the CLI wrote, and what the person did
+// ---------------------------------------------------------------------------
+
+/// Prefixes of the lines Claude Code writes into a user turn that a person
+/// never typed.
+///
+/// Ported from Shepherdr's `INJECTED` (`core/chat-log.js:167`, MIT, `a3f327a`):
+/// a slash command's wrapper, a system reminder, a background task's notice, a
+/// local command's output and its caveat, and the "[Request interrupted" line.
+/// Every real Claude session carries these, so a chat that showed them would
+/// put the CLI's own bookkeeping in the person's mouth from the first open.
+const CLAUDE_INJECTED: [&str; 9] = [
+    "<local-command-",
+    "<system-reminder",
+    "<bash-",
+    "<task-notification",
+    "<user-memory-input",
+    "<user-prompt-submit-hook",
+    "<command-message",
+    "Caveat: The messages below",
+    "[Request interrupted",
+];
+
+/// Prefixes of the blocks Codex writes into a user turn for the program itself.
+///
+/// Ported from Shepherdr's `CODEX_INJECTED` (`core/chat-log.js:168`): the
+/// repository's instructions, the environment, a shell command it ran, and the
+/// markers of a turn or an agent it started.
+const CODEX_INJECTED: [&str; 8] = [
+    "# AGENTS.md instructions",
+    "<environment_context",
+    "<user_instructions",
+    "<user_shell_command",
+    "<turn_aborted",
+    "<subagent_notification",
+    "<skill",
+    "<INSTRUCTIONS",
+];
+
+/// Whether a Claude Code user line is the CLI's own text rather than the
+/// person's.
+fn claude_injected(text: &str) -> bool {
+    let text = text.trim_start();
+    CLAUDE_INJECTED
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+/// Whether one of Codex's user-role blocks is the program's own text.
+fn codex_injected(text: &str) -> bool {
+    let text = text.trim_start();
+    CODEX_INJECTED.iter().any(|prefix| text.starts_with(prefix))
+}
+
+/// The person's words out of a Claude Code user line, or `None` when the line
+/// holds none.
+///
+/// A slash command is the one wrapped line that *is* the person's: the CLI
+/// records `/login` as `<command-name>`/`<command-args>`, so it comes back as
+/// the command they typed. Everything else is filtered, and the wrappers Claude
+/// puts around a person's own words — a system reminder in the middle, a
+/// `<pasted_content>` around a paste — are removed rather than shown.
+fn claude_person(text: &str) -> Option<String> {
+    if let Some(name) = tagged(text, "command-name") {
+        let args = tagged(text, "command-args").unwrap_or_default();
+        let line = format!("{} {}", name.trim(), args.trim()).trim().to_owned();
+        return (!line.is_empty()).then_some(line);
+    }
+    if claude_injected(text) {
+        return None;
+    }
+    // A system reminder's *body* is the CLI's too, so it goes with its tags; a
+    // paste's tags are the CLI's wrapper around the person's own words, so only
+    // the tags go.
+    let cleaned = unwrap_tag(&strip_tag(text, "system-reminder"), "pasted_content");
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_owned())
+}
+
+/// The text between `<name>` and `</name>`, when both are on the line.
+fn tagged(text: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].to_owned())
+}
+
+/// `text` with every `<name …>…</name>` block taken out.
+///
+/// The opening tag may carry attributes (`<pasted_content id="6fd4">`), which is
+/// how the CLI wraps what a person pasted.
+fn strip_tag(text: &str, name: &str) -> String {
+    let open = format!("<{name}");
+    let close = format!("</{name}");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&open) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at..];
+        let Some(gt) = after.find('>') else {
+            out.push_str(after);
+            return out;
+        };
+        let body = &after[gt + 1..];
+        let Some(end) = body.find(&close) else {
+            out.push_str(after);
+            return out;
+        };
+        let tail = &body[end..];
+        let Some(tail_gt) = tail.find('>') else {
+            out.push_str(after);
+            return out;
+        };
+        rest = &tail[tail_gt + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `text` with the `<name …>` and `</name>` tags taken off and what they
+/// wrapped kept, which is how the CLI's wrapper around a paste is removed
+/// without removing the paste.
+fn unwrap_tag(text: &str, name: &str) -> String {
+    let open = format!("<{name}");
+    let close = format!("</{name}>");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix(close.as_str()) {
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix(open.as_str()) {
+            match after.find('>') {
+                Some(gt) => {
+                    rest = &after[gt + 1..];
+                    continue;
+                }
+                None => break,
+            }
+        }
+        // Copy up to the next '<', which is where a tag could start.
+        let next = rest
+            .char_indices()
+            .skip(1)
+            .find(|(_, ch)| *ch == '<')
+            .map_or(rest.len(), |(at, _)| at);
+        out.push_str(&rest[..next]);
+        rest = &rest[next..];
+    }
+    out
+}
+
 /// The text of a message's content, which a program writes as a string or as a
 /// list of typed blocks.
 ///
@@ -488,8 +659,20 @@ fn tool_message(name: &str, arguments: Option<&str>, at_ms: Option<i64>) -> Mess
 /// words; every other block (thinking, a tool's result, an image) is not text a
 /// chat row shows.
 fn texts(content: &Value, kinds: &[&str]) -> String {
+    texts_where(content, kinds, |_| true)
+}
+
+/// [`texts`], keeping only the blocks `keep` accepts.
+fn texts_where(content: &Value, kinds: &[&str], keep: impl Fn(&str) -> bool) -> String {
     match content {
-        Value::String(text) => text.trim().to_owned(),
+        Value::String(text) => {
+            let text = text.trim();
+            if keep(text) {
+                text.to_owned()
+            } else {
+                String::new()
+            }
+        }
         Value::Array(blocks) => {
             let parts: Vec<&str> = blocks
                 .iter()
@@ -501,7 +684,7 @@ fn texts(content: &Value, kinds: &[&str]) -> String {
                 })
                 .filter_map(|block| block.get("text").and_then(Value::as_str))
                 .map(str::trim)
-                .filter(|text| !text.is_empty())
+                .filter(|text| !text.is_empty() && keep(text))
                 .collect();
             parts.join("\n\n")
         }
@@ -863,6 +1046,12 @@ fn expand_path(location: &str, home: &Path) -> Option<PathBuf> {
 /// leading separator and folds `/` and `.` into `-`, while pi drops the leading
 /// separator, folds `/`, `\` and `:` into `-` and wraps the result in `--…--`.
 pub fn cwd_slug(format: TranscriptFormat, cwd: &Path) -> String {
+    // A record names the directory the program saw, which on macOS is the
+    // resolved `/private/var/…` form, while the service may hold the symlinked
+    // one (`/tmp/…`). The slug is built from the resolved path, so both spell
+    // the same folder.
+    let resolved = cwd.canonicalize();
+    let cwd: &Path = resolved.as_deref().unwrap_or(cwd);
     let text = cwd.to_string_lossy();
     match format {
         TranscriptFormat::ClaudeJsonl => text.replace(['/', '.'], "-"),
@@ -951,7 +1140,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        Role, TranscriptFormat, clip, cwd_slug, matches_name, parse_line, summary_of, whole_lines,
+        Role, TranscriptFormat, claude_person, clip, cwd_slug, matches_name, parse_line,
+        summary_of, whole_lines,
     };
 
     fn line(value: &serde_json::Value) -> Vec<u8> {
@@ -1098,6 +1288,68 @@ mod tests {
         let (body, consumed) = whole_lines(buffer, false);
         assert!(body.is_empty());
         assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn the_clis_own_lines_are_not_the_persons_words() {
+        // A local command's caveat, its slash command and its output: real
+        // lines from a session on this machine.
+        let caveat = "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>";
+        assert!(claude_person(caveat).is_none());
+        let output = "<local-command-stdout>Login successful</local-command-stdout>";
+        assert!(claude_person(output).is_none());
+        assert!(claude_person("[Request interrupted by user]").is_none());
+        // A slash command is the person's: the CLI's three tags become the
+        // command they typed.
+        let command = "<command-name>/login</command-name>\n            <command-message>login</command-message>\n            <command-args></command-args>";
+        assert_eq!(claude_person(command).as_deref(), Some("/login"));
+        let with_args = "<command-name>/model</command-name><command-args>opus</command-args>";
+        assert_eq!(claude_person(with_args).as_deref(), Some("/model opus"));
+    }
+
+    #[test]
+    fn a_wrapper_around_the_persons_words_is_removed_and_their_words_kept() {
+        // A paste the CLI wrapped: the tags are the CLI's, the text is theirs.
+        let pasted = "<pasted_content id=\"6fd4\">\nRead the run log.\n</pasted_content>";
+        assert_eq!(claude_person(pasted).as_deref(), Some("Read the run log."));
+        // A system reminder inside a real message: the reminder goes, the
+        // question stays.
+        let reminded = "What changed?\n<system-reminder>You are low on context.</system-reminder>";
+        assert_eq!(claude_person(reminded).as_deref(), Some("What changed?"));
+        // Nothing but a reminder is no message at all.
+        assert!(claude_person("<system-reminder>Context left: 1%</system-reminder>").is_none());
+    }
+
+    #[test]
+    fn codexs_own_user_blocks_are_skipped_but_a_mixed_turn_keeps_the_words() {
+        let brief =
+            "# AGENTS.md instructions for /work/repo\n\n<INSTRUCTIONS>Read it.</INSTRUCTIONS>";
+        assert!(super::codex_injected(brief));
+        assert!(super::codex_injected(
+            "<environment_context>\n  <cwd>/work/repo</cwd>\n</environment_context>"
+        ));
+        assert!(!super::codex_injected("Review the diff on branch work/12."));
+        let mixed = serde_json::json!([
+            {"type": "input_text", "text": "<environment_context><cwd>/work/repo</cwd></environment_context>"},
+            {"type": "input_text", "text": "Review the diff."}
+        ]);
+        assert_eq!(
+            super::texts_where(&mixed, &["input_text"], |text| !super::codex_injected(text)),
+            "Review the diff."
+        );
+    }
+
+    #[test]
+    fn a_codex_turn_of_only_injected_blocks_is_no_message() {
+        let value = serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-11-03T00:16:03.000Z",
+            "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "<environment_context><cwd>/work/repo</cwd></environment_context>"},
+                {"type": "input_text", "text": "# AGENTS.md instructions for /work/repo"}
+            ]}
+        });
+        assert!(parse_line(TranscriptFormat::CodexJsonl, &line(&value)).is_none());
     }
 
     #[test]

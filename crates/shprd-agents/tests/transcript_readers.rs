@@ -19,7 +19,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use shprd_agents::harness::Harness;
-use shprd_agents::transcript::{Role, Transcript, TranscriptError};
+use shprd_agents::spec::TranscriptFormat;
+use shprd_agents::transcript::{Role, Transcript, TranscriptError, cwd_slug};
 
 /// The working directory every fixture session records.
 const CWD: &str = "/work/repo";
@@ -84,28 +85,40 @@ fn claude_reads_the_persons_turn_the_agents_reply_and_its_tool_as_one_conversati
     assert_eq!(transcript.session(), "5f0c-session");
     let page = transcript.read("").expect("the fixture reads");
     assert!(!page.more, "one short session is one page");
-    assert_eq!(page.messages.len(), 3);
+    // The four lines of the file that are messages: the slash command the
+    // person ran, the question they pasted, and the agent's two replies.
+    assert_eq!(page.messages.len(), 4, "{:?}", page.messages);
     assert_eq!(page.messages[0].role, Role::User);
+    assert_eq!(page.messages[0].text, "/login");
+    assert_eq!(page.messages[1].role, Role::User);
     assert_eq!(
-        page.messages[0].text,
+        page.messages[1].text,
         "Read the run log and tell me what the last pass did."
     );
-    assert!(page.messages[0].tools.is_empty());
-    assert_eq!(page.messages[1].role, Role::Assistant);
-    assert_eq!(page.messages[1].text, "I will read the tail of the log.");
-    assert_eq!(page.messages[1].tools[0].name, "Bash");
-    assert_eq!(page.messages[1].tools[0].summary, "shprd tick --once");
+    assert!(page.messages[1].tools.is_empty());
     assert_eq!(page.messages[2].role, Role::Assistant);
+    assert_eq!(page.messages[2].text, "I will read the tail of the log.");
+    assert_eq!(page.messages[2].tools[0].name, "Bash");
+    assert_eq!(page.messages[2].tools[0].summary, "shprd tick --once");
+    assert_eq!(page.messages[3].role, Role::Assistant);
     assert_eq!(
-        page.messages[2].text,
+        page.messages[3].text,
         "The last pass started T2 and landed T1."
     );
-    assert!(page.messages[2].at_ms.is_some());
-    // The subagent's sidechain and the tool result are in the file and are not
-    // messages: a person did not read them and the agent did not say them.
+    assert!(page.messages[3].at_ms.is_some());
+    // The CLI's own lines and the subagent's sidechain are in the file and are
+    // not messages: the person did not say them and did not read them.
     let text = format!("{:?}", page.messages);
-    assert!(!text.contains("A subagent's own prompt."));
-    assert!(!text.contains("tool_result"));
+    for injected in [
+        "Caveat: The messages below",
+        "Login successful",
+        "command-message",
+        "pasted_content",
+        "A subagent's own prompt.",
+        "tool_result",
+    ] {
+        assert!(!text.contains(injected), "{injected:?} was shown: {text}");
+    }
 }
 
 #[test]
@@ -124,7 +137,7 @@ fn a_half_written_last_line_is_read_once_it_is_complete() {
     let half = last.len() / 2;
     fs::write(&path, format!("{}{}", &text[..start], &last[..half])).unwrap();
     let page = transcript.read("").expect("the fixture reads");
-    assert_eq!(page.messages.len(), 2, "the half-written line is not read");
+    assert_eq!(page.messages.len(), 3, "the half-written line is not read");
     // The program finishes writing it, and the page picks up the rest.
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(format!("{}\n", &last[half..]).as_bytes())
@@ -177,7 +190,7 @@ fn a_cursor_past_the_end_of_a_shorter_file_starts_again() {
         .expect("the fixture reads");
     assert_eq!(
         page.messages.len(),
-        3,
+        4,
         "a truncated record is read from its start"
     );
 }
@@ -210,6 +223,8 @@ fn codex_skips_its_own_brief_and_reads_the_review() {
     let (_dir, home) = recorded("codex");
     let transcript = locate("codex", &home);
     let page = transcript.read("").expect("the fixture reads");
+    // Three messages: the person's one turn (with the environment block beside
+    // their words dropped), the agent's reply, and its tool call.
     assert_eq!(page.messages.len(), 3, "{:?}", page.messages);
     assert_eq!(page.messages[0].role, Role::User);
     assert_eq!(page.messages[0].text, "Review the diff on branch work/12.");
@@ -217,10 +232,18 @@ fn codex_skips_its_own_brief_and_reads_the_review() {
     assert_eq!(page.messages[1].text, "I will read the diff first.");
     assert_eq!(page.messages[2].tools.len(), 1);
     assert_eq!(page.messages[2].tools[0].name, "exec");
-    assert!(
-        !format!("{:?}", page.messages).contains("You are Codex."),
-        "a developer message is the program's own brief, not the conversation"
-    );
+    let shown = format!("{:?}", page.messages);
+    for injected in [
+        "You are Codex.",
+        "AGENTS.md instructions",
+        "<environment_context>",
+        "<INSTRUCTIONS>",
+    ] {
+        assert!(
+            !shown.contains(injected),
+            "{injected:?} is the program's own brief, not the conversation: {shown}"
+        );
+    }
 }
 
 #[test]
@@ -315,6 +338,30 @@ fn a_record_is_matched_through_a_symlinked_directory() {
     let transcript = Transcript::locate(harness("opencode").transcript(), &home, &link)
         .expect("the session is found through the symlink");
     assert_eq!(transcript.session(), "ses_fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_claude_session_is_found_through_a_symlinked_directory() {
+    // The same case the OpenCode store has a test for: a session the CLI wrote
+    // under the resolved path belongs to the directory a person names by its
+    // symlink, so the slug is built from the resolved path too.
+    let (dir, home) = recorded("claude");
+    let real = dir.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("linked");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let from = home.join(".claude").join("projects").join("-work-repo");
+    let to = home
+        .join(".claude")
+        .join("projects")
+        .join(cwd_slug(TranscriptFormat::ClaudeJsonl, &real));
+    fs::rename(&from, &to).unwrap();
+    let transcript = Transcript::locate(harness("claude").transcript(), &home, &link)
+        .expect("the session is found through the symlink");
+    assert_eq!(transcript.session(), "5f0c-session");
+    let page = transcript.read("").expect("the fixture reads");
+    assert_eq!(page.messages.len(), 4);
 }
 
 #[test]
