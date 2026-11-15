@@ -329,6 +329,26 @@ export class Client {
     return this.call("POST", "/api/action", { body: payload });
   }
 
+  /**
+   * `POST /api/tasks`: add one task, as `shprd agent task add` does.
+   *
+   * The service names it from the title when `body.id` is left out, so a form
+   * that asks for a title, a scope and an acceptance line needs nothing else.
+   */
+  addTask(body) {
+    return this.call("POST", "/api/tasks", { body });
+  }
+
+  /**
+   * `GET /api/tasks/<id>/changes`: the task's branch against its base.
+   *
+   * It reads git rather than the fold, so it is slower than a snapshot read and
+   * asked for the one task a card is showing, never for the board.
+   */
+  taskChanges(id) {
+    return this.call("GET", `/api/tasks/${encodeURIComponent(id)}/changes`);
+  }
+
   /** `GET /api/settings`: every key, its value and the layer it came from. */
   settings() {
     return this.call("GET", "/api/settings");
