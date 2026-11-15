@@ -109,7 +109,13 @@ SOFTWARE.
   and the herdr-core client — the `hello` framing switch, the request ids and
   the per-call timeout, the pending-call cap, the method and version gate with
   its refusal wording, the stream credit protocol, and the terminal event fold
-  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`
+  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`,
+  and the chat's reading of an agent's own record — the line kinds each
+  CLI keeps, the fields a message and its tool calls are read from, and the
+  newest-page-then-what-it-gained shape — in
+  `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel —
+  the transcript's bubbles, the composer and the sidebar placement — in
+  `host/herdr-desktop/mods/shprd-coordinator/`
 - License: MIT
 
 MIT License

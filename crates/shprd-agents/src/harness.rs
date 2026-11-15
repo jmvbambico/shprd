@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::asks::{AskHookInstaller, HarnessAskHook};
 use crate::spec::{
     AskHookSpec, BriefSpec, CatalogSource, EffortSpec, FastSpec, HarnessSpec, ModelsSpec,
-    PermissionMode, PermissionsSpec, SpecError, StatusSource, Vendor,
+    PermissionMode, PermissionsSpec, SpecError, StatusSource, TranscriptSpec, Vendor,
 };
 
 /// One program's harness: its spec, checked, and the file it came from.
@@ -143,6 +143,14 @@ impl Harness {
     /// Whether and how this program accepts a hook for its asks.
     pub fn asks(&self) -> &AskHookSpec {
         &self.spec.asks
+    }
+
+    /// Where this program's conversation is read as a chat transcript.
+    ///
+    /// A program that names no format cannot be read: the chat says so in
+    /// words rather than showing an empty conversation.
+    pub fn transcript(&self) -> &TranscriptSpec {
+        &self.spec.transcript
     }
 
     /// The ask-hook installer for this program.

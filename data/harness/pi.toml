@@ -116,6 +116,12 @@ location = "~/.pi/agent/sessions/{cwd_slug}/*_{session}.jsonl"
 errors = "stopReason: \"error\" plus errorMessage; no reset time"
 verified = true
 
+[transcript]
+# pi keeps one folder a working directory, named `--<path with - for />--`, and
+# one file a session in it.
+format = "pi_jsonl"
+location = "~/.pi/agent/sessions/{cwd_slug}/*.jsonl"
+
 [quota]
 source = "none"
 retry_signal = "json auto_retry_start"

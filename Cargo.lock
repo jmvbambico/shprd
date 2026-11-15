@@ -1199,6 +1199,7 @@ dependencies = [
 name = "shprd-agents"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "shprd-core",

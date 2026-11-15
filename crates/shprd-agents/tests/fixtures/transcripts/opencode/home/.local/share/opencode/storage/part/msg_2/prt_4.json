@@ -1,0 +1,1 @@
+{"id":"prt_4","sessionID":"ses_fixture","messageID":"msg_2","type":"tool","callID":"call_prt_4","tool":"bash","state":{"status":"completed","input":{"command":"git show --stat HEAD"}}}

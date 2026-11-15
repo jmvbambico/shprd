@@ -16,3 +16,4 @@ pub mod roles;
 mod scripted;
 pub mod skills;
 pub mod spec;
+pub mod transcript;
