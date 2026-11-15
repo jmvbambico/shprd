@@ -101,6 +101,11 @@ impl Fixture {
         command
             .args(&all)
             .env("SHPRD_HOME", &self.home)
+            // The fixture's own XDG directories: no verb here may write into
+            // the machine's real config, state or data home.
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("XDG_STATE_HOME", self.home.join(".local").join("state"))
+            .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
             .env_remove("SHPRD_REPO")
             .env_remove("SHPRD_ACTOR");
         command
@@ -117,6 +122,9 @@ impl Fixture {
             .env("SHPRD_HOME", &self.home)
             .env("SHPRD_REPO", &self.worktree)
             .env("SHPRD_ACTOR", "agent:pi")
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("XDG_STATE_HOME", self.home.join(".local").join("state"))
+            .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
             .env_remove("SHPRD_DATA_DIR");
         command
     }
@@ -325,6 +333,9 @@ fn the_repository_root_still_works_the_way_it_did() {
         .current_dir(fixture._temp.path())
         .env("SHPRD_HOME", &fixture.home)
         .env("SHPRD_REPO", &fixture.root)
+        .env("XDG_CONFIG_HOME", fixture.home.join(".config"))
+        .env("XDG_STATE_HOME", fixture.home.join(".local").join("state"))
+        .env("XDG_DATA_HOME", fixture.home.join(".local").join("share"))
         .env_remove("SHPRD_ACTOR")
         .output();
     succeeded(&["task", "status", "T1"], output);

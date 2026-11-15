@@ -128,6 +128,12 @@ impl Fixture {
         command
             .args(&all)
             .env(RECORD_ONLY, "1")
+            // This fixture's own XDG directories: a pass's last record belongs
+            // in the temp home, never in the developer's or the runner's real
+            // state directory.
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("XDG_STATE_HOME", self.home.join(".local").join("state"))
+            .env("XDG_DATA_HOME", self.home.join(".local").join("share"))
             .env_remove(ACTOR_ENV);
         command
     }

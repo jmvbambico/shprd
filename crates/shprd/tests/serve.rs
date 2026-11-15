@@ -61,6 +61,10 @@ impl Service {
         }
         let child = command
             .env("XDG_STATE_HOME", state)
+            // The fixture's own config and data homes: a service that read the
+            // machine's real ones would see whatever the developer has installed.
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local").join("share"))
             .env("HERDR_SOCKET_PATH", state.join("no-herdr-server.sock"))
             .env_remove("SHPRD_TICK_RECORD_ONLY")
             .env_remove("SHPRD_ACTOR")
@@ -173,6 +177,8 @@ fn shprd(repo: &Path, home: &Path, state: &Path, args: &[&str]) -> String {
         .arg(home)
         .args(args)
         .env("XDG_STATE_HOME", state)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local").join("share"))
         .output()
         .expect("the verb runs");
     assert!(
@@ -257,6 +263,8 @@ fn a_second_serve_for_the_same_state_directory_is_refused() {
             "--json",
         ])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
         .output()
         .expect("the second serve runs");
     assert_eq!(
@@ -556,6 +564,8 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
         .arg(home.path())
         .args(["status", "--json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
         .output()
         .expect("status runs");
     assert!(
@@ -585,6 +595,8 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
         .arg(home.path())
         .arg("status")
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
         .output()
         .expect("status runs");
     assert!(finished.status.success());

@@ -141,6 +141,28 @@ impl Setup {
             .args(["doctor", "--no-quota"])
             .env("PATH", self.tmp.path().join("bin").display().to_string())
             .env("HOME", self.tmp.path().join("home").display().to_string())
+            // The temp home's own XDG directories, so the diagnosis is of this
+            // fixture and not of whatever the machine has installed.
+            .env(
+                "XDG_CONFIG_HOME",
+                self.tmp.path().join("home/.config").display().to_string(),
+            )
+            .env(
+                "XDG_STATE_HOME",
+                self.tmp
+                    .path()
+                    .join("home/.local/state")
+                    .display()
+                    .to_string(),
+            )
+            .env(
+                "XDG_DATA_HOME",
+                self.tmp
+                    .path()
+                    .join("home/.local/share")
+                    .display()
+                    .to_string(),
+            )
             .env(
                 "SHPRD_DATA_DIR",
                 self.tmp.path().join("data").display().to_string(),

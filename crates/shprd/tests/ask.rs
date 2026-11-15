@@ -90,6 +90,8 @@ impl Service {
                 "--json",
             ])
             .env("XDG_STATE_HOME", state)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local").join("share"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

@@ -50,6 +50,13 @@ impl Fixture {
             .arg(&self.repo)
             .env("SHPRD_HOME", self.home.path())
             .env("SHPRD_DATA_DIR", data_dir())
+            // The temp home's own XDG directories: a settings read must never
+            // look at the machine's real config or state dir.
+            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
+            .env(
+                "XDG_STATE_HOME",
+                self.home.path().join(".local").join("state"),
+            )
             .output()
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
@@ -67,6 +74,11 @@ impl Fixture {
             .env_remove("XDG_DATA_HOME")
             .env("SHPRD_HOME", self.home.path())
             .env("HOME", self.home.path())
+            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
+            .env(
+                "XDG_STATE_HOME",
+                self.home.path().join(".local").join("state"),
+            )
             .output()
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
@@ -80,6 +92,13 @@ impl Fixture {
             .arg("--no-dagr")
             .env("SHPRD_HOME", self.home.path())
             .env("SHPRD_DATA_DIR", data_dir())
+            // The temp home's own XDG directories: a settings read must never
+            // look at the machine's real config or state dir.
+            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
+            .env(
+                "XDG_STATE_HOME",
+                self.home.path().join(".local").join("state"),
+            )
             .output()
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
