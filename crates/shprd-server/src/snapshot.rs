@@ -10,7 +10,8 @@ use shprd_views::status;
 
 use crate::dto::{
     AgentDto, AskDto, AttemptDto, DerivedStatusDto, FindingDto, GateDto, NeedDto, NeedKindDto,
-    ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskProgressDto,
+    PrStateDto, ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskPrDto,
+    TaskProgressDto,
 };
 
 /// What `GET /api/state` answers with when the repository has no run yet.
@@ -151,6 +152,22 @@ pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: 
             seq: status.seq,
         }),
         attempts: task.attempts.iter().map(attempt).collect(),
+        pr: task.pr.as_ref().map(task_pr),
+    }
+}
+
+/// One task's pull request, as its card draws it.
+fn task_pr(pr: &shprd_core::state::PrInfo) -> TaskPrDto {
+    TaskPrDto {
+        number: pr.number,
+        url: pr.url.clone(),
+        head: pr.head.clone(),
+        state: if pr.merged {
+            PrStateDto::Merged
+        } else {
+            PrStateDto::Open
+        },
+        approved: pr.approved_head.is_some(),
     }
 }
 
@@ -265,6 +282,48 @@ mod tests {
             },
         ];
         RunState::fold(&events).expect("the fixture log folds")
+    }
+
+    #[test]
+    fn a_task_that_landed_through_a_pull_request_carries_it() {
+        // The task PR card reads this and nothing else: a number, a state and a
+        // link. A task that landed locally has none, and the board must be able
+        // to tell that apart from "a pull request nobody opened yet".
+        let mut state = run_with_a_task();
+        let pr = shprd_core::state::PrInfo {
+            number: 12,
+            url: "https://example.invalid/pr/12".to_string(),
+            head: "shprd/r1/T1".to_string(),
+            approved_head: None,
+            merged: false,
+        };
+        state.tasks.get_mut("T1").expect("the fixture's task").pr = Some(pr);
+        let open = snapshot(&state, NOW);
+        let task = &open.tasks[0];
+        let carried = task.pr.as_ref().expect("the pull request is carried");
+        assert_eq!(carried.number, 12);
+        assert_eq!(carried.state, crate::dto::PrStateDto::Open);
+        assert_eq!(carried.url, "https://example.invalid/pr/12");
+        assert!(!carried.approved, "nothing approved it yet");
+
+        let merged = state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .pr
+            .as_mut()
+            .expect("the pull request");
+        merged.merged = true;
+        merged.approved_head = Some("abc1234".to_string());
+        let landed = snapshot(&state, NOW);
+        let carried = landed.tasks[0].pr.as_ref().expect("still carried");
+        assert_eq!(carried.state, crate::dto::PrStateDto::Merged);
+        assert!(carried.approved);
+
+        // A local landing opens no pull request at all.
+        state.tasks.get_mut("T1").expect("the fixture's task").pr = None;
+        let local = snapshot(&state, NOW);
+        assert!(local.tasks[0].pr.is_none());
     }
 
     #[test]

@@ -279,6 +279,48 @@ pub struct TaskDto {
     pub last_status: Option<TaskProgressDto>,
     /// Attempts made so far, in order.
     pub attempts: Vec<AttemptDto>,
+    /// The task's own pull request, once a landing opened one.
+    ///
+    /// `null` is the normal answer for a repository with no forge: a local
+    /// landing merges the branch into its base and opens nothing, so a card
+    /// that drew a pull request row for it would be inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<TaskPrDto>,
+}
+
+/// Whether a task's pull request has been merged.
+///
+/// It is the fold's [`shprd_core::state::PrInfo::merged`] as a word: a board row
+/// has room for two states and a person decides by them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "PrStateDto.ts")]
+pub enum PrStateDto {
+    /// The forge has not merged it, and landing still waits on it.
+    Open,
+    /// It was merged: the task's work is in its base branch.
+    Merged,
+}
+
+/// A task's own pull request, as its card reads it.
+///
+/// The per-task workflow gives every task its own pull request into the run's
+/// base branch, so this is where a person goes to read, approve or merge the
+/// work. A task that landed locally has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskPrDto.ts")]
+pub struct TaskPrDto {
+    /// The forge's number for it, as a person writes it (`#12`).
+    pub number: u64,
+    /// The URL to open: the forge's page for it.
+    pub url: String,
+    /// The branch it proposes to merge.
+    pub head: String,
+    /// Whether it is open or merged.
+    pub state: PrStateDto,
+    /// Whether a human approved it in shprd, at the head the log recorded.
+    pub approved: bool,
 }
 
 /// One task as a person sees it: its derived word, and why it needs them.
@@ -578,6 +620,76 @@ pub struct HealthDto {
     pub version: String,
 }
 
+/// The body of `POST /api/tasks`.
+///
+/// It is the person's own `shprd agent task add`, minus the id: a form on a
+/// board asks for a title, a scope and an acceptance line, and the service names
+/// the task from the title (see [`crate::tasks::task_id`]). A caller that does
+/// have an id — a script porting a plan — sends it and the service keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "NewTaskDto.ts")]
+pub struct NewTaskDto {
+    /// The id to store it under, when the caller has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    /// One-line title.
+    pub title: String,
+    /// Repo-relative paths the task may change.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// What must be true when the task is done.
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    /// Free-form tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Skills the agent is told to load.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Tasks that must be integrated first.
+    #[serde(default)]
+    pub deps: Vec<String>,
+}
+
+/// One file a task's branch changed, with its line counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "FileChangeDto.ts")]
+pub struct FileChangeDto {
+    /// The path, repo-relative.
+    pub path: String,
+    /// Lines added.
+    pub added: u64,
+    /// Lines deleted.
+    pub deleted: u64,
+    /// True when git counted no lines: the file is binary.
+    pub binary: bool,
+}
+
+/// What `GET /api/tasks/{id}/changes` answers with.
+///
+/// It is the task's branch against its base, read from the merge base, so the
+/// numbers are the work the task did rather than everything its base moved
+/// since. The accept card draws it as a count line and a list of paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskChangesDto.ts")]
+pub struct TaskChangesDto {
+    /// The task the changes belong to.
+    pub task: String,
+    /// The branch its work lands on, as the run records it.
+    pub base: String,
+    /// The branch the task's attempt committed on.
+    pub branch: String,
+    /// The commit both branches meet at: what the diff is taken from.
+    pub merge_base: String,
+    /// Every changed file, in git's order.
+    pub files: Vec<FileChangeDto>,
+    /// Lines added across every file.
+    pub added: u64,
+    /// Lines deleted across every file.
+    pub deleted: u64,
+}
+
 /// One event's footprint, as change notifications carry it.
 ///
 /// The change channel carries only what tells a client whether it must refetch
@@ -663,6 +775,65 @@ pub enum Action {
         #[ts(optional)]
         progress: Option<u8>,
     },
+    /// Start a task's first attempt, as `shprd agent spawn --task` does.
+    ///
+    /// The spawn belongs to the binary — it writes a brief, makes a worktree
+    /// and opens a tab — so the service calls that same path. The transition
+    /// rules decide whether a start is allowed: only a queued or failed task
+    /// with its dependencies landed may have one.
+    #[serde(rename = "task.start")]
+    TaskStart {
+        /// The task to start.
+        task: String,
+    },
+    /// Start another attempt at a task, as a send-back does.
+    ///
+    /// It is the same spawn path a start uses, so the new attempt's brief
+    /// carries the failed review's findings exactly as the engine's own
+    /// send-back does. The rules refuse it while the task is not in a state
+    /// where a new attempt is the answer.
+    #[serde(rename = "task.retry")]
+    TaskRetry {
+        /// The task to try again.
+        task: String,
+    },
+    /// Stop the agent working on a task, by closing its space on the host.
+    ///
+    /// Nothing is written to the log: the agent going away is something the
+    /// engine reads from the host, and the task then reads *Needs you* until
+    /// somebody starts it again. A service started without a host refuses it.
+    #[serde(rename = "task.stop")]
+    TaskStop {
+        /// The task whose agent should stop.
+        task: String,
+    },
+    /// Drop a task, as `shprd drop` does.
+    ///
+    /// It is the person's decision that the task will not be done, and it is
+    /// what unblocks a run held by work nobody will finish. The reason is
+    /// required: it is what the run's pull request lists under `## Dropped`.
+    /// Nothing is deleted — the branch stays — and the rules refuse a task that
+    /// already landed or was already dropped.
+    #[serde(rename = "task.drop")]
+    TaskDrop {
+        /// The task to drop.
+        task: String,
+        /// Why the person decided against it.
+        reason: String,
+    },
+    /// Accept a task's work at the head its branch is at, as `shprd approve`
+    /// does for a task.
+    ///
+    /// A solo maintainer cannot approve their own pull request on a forge, so
+    /// the approval is recorded in the log, pinned to the commit it was given
+    /// for. It only means something where `tasks.merge` is `ask`: with `checks`
+    /// or `auto` the task lands without an approval, and the service refuses
+    /// this action rather than recording a decision nothing waits on.
+    #[serde(rename = "task.accept")]
+    TaskAccept {
+        /// The task to accept.
+        task: String,
+    },
 }
 
 impl Action {
@@ -671,14 +842,33 @@ impl Action {
     ///
     /// Keep it beside the enum: `every_action_kind_is_listed` fails when a
     /// variant is added without its kind.
-    pub const KINDS: &'static [&'static str] =
-        &["task.add", "task_add", "task.status", "task_status"];
+    pub const KINDS: &'static [&'static str] = &[
+        "task.add",
+        "task_add",
+        "task.status",
+        "task_status",
+        "task.start",
+        "task_start",
+        "task.retry",
+        "task_retry",
+        "task.stop",
+        "task_stop",
+        "task.drop",
+        "task_drop",
+        "task.accept",
+        "task_accept",
+    ];
 
     /// The action's kind, as the envelope spells it.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::TaskAdd { .. } => "task.add",
             Self::TaskStatus { .. } => "task.status",
+            Self::TaskStart { .. } => "task.start",
+            Self::TaskRetry { .. } => "task.retry",
+            Self::TaskStop { .. } => "task.stop",
+            Self::TaskDrop { .. } => "task.drop",
+            Self::TaskAccept { .. } => "task.accept",
         }
     }
 
@@ -693,6 +883,11 @@ impl Action {
             let canonical = match kind {
                 "task_add" => Some("task.add"),
                 "task_status" => Some("task.status"),
+                "task_start" => Some("task.start"),
+                "task_retry" => Some("task.retry"),
+                "task_stop" => Some("task.stop"),
+                "task_drop" => Some("task.drop"),
+                "task_accept" => Some("task.accept"),
                 _ => None,
             };
             if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {
@@ -1022,6 +1217,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<FailedStepDto>()?,
         one::<LastTickDto>()?,
         one::<TaskDto>()?,
+        one::<TaskPrDto>()?,
+        one::<PrStateDto>()?,
+        one::<NewTaskDto>()?,
+        one::<FileChangeDto>()?,
+        one::<TaskChangesDto>()?,
         one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,
         one::<ReportDto>()?,
@@ -1092,14 +1292,65 @@ mod tests {
 
     #[test]
     fn every_action_kind_is_listed() {
-        assert!(Action::KINDS.contains(&task_add().kind()));
-        let status = Action::TaskStatus {
-            task: "T1".to_string(),
-            msg: "halfway".to_string(),
-            progress: Some(50),
-        };
-        assert!(Action::KINDS.contains(&status.kind()));
-        assert_eq!(status.kind(), "task.status");
+        for action in [
+            task_add(),
+            Action::TaskStatus {
+                task: "T1".to_string(),
+                msg: "halfway".to_string(),
+                progress: Some(50),
+            },
+            Action::TaskStart {
+                task: "T1".to_string(),
+            },
+            Action::TaskRetry {
+                task: "T1".to_string(),
+            },
+            Action::TaskStop {
+                task: "T1".to_string(),
+            },
+            Action::TaskDrop {
+                task: "T1".to_string(),
+                reason: "not needed".to_string(),
+            },
+            Action::TaskAccept {
+                task: "T1".to_string(),
+            },
+        ] {
+            assert!(
+                Action::KINDS.contains(&action.kind()),
+                "{} is a kind nobody lists",
+                action.kind()
+            );
+            // And the snake spelling of it round-trips too.
+            let snake = action.kind().replace('.', "_");
+            assert!(Action::KINDS.contains(&snake.as_str()), "{snake}");
+        }
+    }
+
+    #[test]
+    fn the_persons_task_verbs_parse() {
+        let drop = Action::from_value(serde_json::json!({
+            "kind": "task_drop", "task": "T1", "reason": "not needed",
+        }))
+        .expect("a drop");
+        assert_eq!(
+            drop,
+            Action::TaskDrop {
+                task: "T1".to_string(),
+                reason: "not needed".to_string(),
+            }
+        );
+        assert_eq!(drop.kind(), "task.drop");
+        let accept = Action::from_value(serde_json::json!({
+            "kind": "task.accept", "task": "T1",
+        }))
+        .expect("an accept");
+        assert_eq!(accept.kind(), "task.accept");
+        let start = Action::from_value(serde_json::json!({
+            "kind": "task.start", "task": "T1",
+        }))
+        .expect("a start");
+        assert_eq!(start.kind(), "task.start");
     }
 
     #[test]
