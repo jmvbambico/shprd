@@ -29,7 +29,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, Textarea, TextareaState, h_flex, v_flex } from "gpui-base";
-import { theme } from "herdr";
+import { nextCommand, theme } from "herdr";
 
 import { Client, discover, reason } from "./lib/client.js";
 import {
@@ -83,8 +83,43 @@ export default class Settings extends View {
     this.newRole = null;
     /** The id a picker's typed value goes in. */
     this.typed = null;
+    this.loading = false;
+    this.loadedAt = 0;
+    this.looping = false;
     this.refresh();
-    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    this.ensureLoop();
+    // The keys.json commands a person (or a script) may send this page:
+    // `shprd-settings.roles`, `.templates`, `.save`, `.reset`.
+    cx.spawn(async () => {
+      for (;;) {
+        const command = await nextCommand();
+        this.command(command);
+        cx.notify();
+      }
+    });
+  }
+
+  /** What one of the page's own commands does. */
+  command(name) {
+    if (name === "roles") {
+      this.tab = "roles";
+      this.prompt = null;
+      this.saved = null;
+    } else if (name === "templates") {
+      this.tab = "templates";
+      const rows = promptRows(this.prompts);
+      if (this.prompt === null && rows.length > 0) {
+        this.openPrompt(rows[0]);
+      } else if (rows.length === 0) {
+        // The list has not been read yet: the next look opens its first prompt,
+        // so a key pressed while the service is still answering is not lost.
+        this.wantFirst = true;
+      }
+    } else if (name === "save") {
+      if (this.prompt !== null) this.savePrompt();
+    } else if (name === "reset") {
+      if (this.prompt !== null) this.resetPrompt();
+    }
   }
 
   /** Reads the settings, the roster and the template list. */
@@ -102,11 +137,24 @@ export default class Settings extends View {
       }
       const settings = await this.client.settings();
       if (settings) this.settings = settings;
-      const roster = await this.client.roster();
-      if (roster) this.roster = roster;
-      const prompts = await this.client.prompts();
-      if (prompts) this.prompts = prompts;
+      // The service answered, so the page is not down. The roles are drawn
+      // before the roster is asked: its pickers fill in when the programs
+      // answer, and a page that waited on four model listings to show a table it
+      // already had would look stuck.
       this.failure = null;
+      cx.notify();
+      // The roster and the template list are each the page's to do without: a
+      // listing that timed out leaves the pickers' menus empty and the tables
+      // drawn, never the whole page blank.
+      const roster = await this.client.roster().catch(() => null);
+      if (roster) this.roster = roster;
+      const prompts = await this.client.prompts().catch(() => null);
+      if (prompts) this.prompts = prompts;
+      if (this.wantFirst) {
+        this.wantFirst = false;
+        const rows = promptRows(this.prompts);
+        if (this.prompt === null && rows.length > 0) this.openPrompt(rows[0]);
+      }
     } catch (err) {
       // A restarted service answers with another id: forget the client so the
       // next look finds the new port instead of dialling a dead one.
@@ -255,7 +303,40 @@ export default class Settings extends View {
     this.cx.notify();
   }
 
+  /**
+   * Reads again when the panel is drawn with an old answer.
+   *
+   * A block that is hidden in a stack is not guaranteed to keep its timer, so a
+   * panel shown after a while must not sit on what it read before: the moment
+   * it is drawn is the moment to catch up. `loading` keeps one read in flight,
+   * and the floor keeps a repaint from becoming a poll.
+   */
+  revalidate() {
+    // A block hidden in a stack is not guaranteed to keep the timer `init`
+    // started, so being drawn is also when the poll is (re)started.
+    this.ensureLoop();
+    // No watcher here: a settings write is the service's own file, not a ledger
+    // write, so the change file says nothing about it. The floor is the read.
+    this.follow?.();
+    if (this.loading) return;
+    if (Date.now() - this.loadedAt < FLOOR_MS) return;
+    this.loading = true;
+    this.refresh().finally(() => {
+      this.loading = false;
+      this.loadedAt = Date.now();
+    });
+  }
+
+  /** Polls the service while this copy is alive, once. */
+  ensureLoop() {
+    if (this.looping) return;
+    this.looping = true;
+    const cx = this.cx;
+    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+  }
+
   render() {
+    this.revalidate();
     const t = theme();
     const colors = tone(t);
     const head = h_flex()
@@ -299,6 +380,8 @@ export default class Settings extends View {
         el.cursor_pointer().hover((style) => style.bg(t.hover)).on_click(() => {
           this.tab = tab.id;
           this.refusal = null;
+          // The line a save left is about the half it happened in.
+          this.saved = null;
           this.cx.notify();
         }),
       )
@@ -468,22 +551,21 @@ export default class Settings extends View {
           .child(pick.label),
       )
       .child(
-        v_flex()
+        div()
           .flex_1()
           .min_w(0)
-          .gap(0)
-          .child(
-            div()
-              .text_size(TEXT.label)
-              .text_color(refusedHere ? colors.red : pick.value === null ? t.muted : t.foreground)
-              .child(pick.display),
-          )
-          .child(
-            div()
-              .text_size(TEXT.id)
-              .text_color(writing ? colors.amber : t.dim)
-              .child(writing ? "saving…" : pick.layer),
-          ),
+          .truncate()
+          .text_size(TEXT.label)
+          .text_color(refusedHere ? colors.red : pick.value === null ? t.muted : t.foreground)
+          .child(pick.display),
+      )
+      .child(
+        div()
+          .w(96)
+          .flex_none()
+          .text_size(TEXT.id)
+          .text_color(writing ? colors.amber : t.dim)
+          .child(writing ? "saving…" : pick.layer),
       )
       .child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child(open ? "▴" : "▾"));
 

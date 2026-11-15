@@ -39,6 +39,15 @@ export const HEALTH_WAIT = 1500;
 export const READ_WAIT = 4000;
 /** A write is one event, so it may take longer than a read. */
 export const WRITE_WAIT = 6000;
+/**
+ * How long the roster may take.
+ *
+ * It is the one read that can start a program — a program that lists its own
+ * models answers only when its CLI does — so it is bounded by four programs'
+ * listings, not by a file read. The service bounds each listing itself; this is
+ * the outer bound a page waits under.
+ */
+export const ROSTER_WAIT = 20_000;
 /** How long the long poll waits at the service before it answers `204`. */
 export const POLL_WAIT = 20;
 
@@ -350,7 +359,7 @@ export class Client {
    * so it can take a moment the first time; a page reads it once and keeps it.
    */
   roster() {
-    return this.call("GET", "/api/roster", { wait: WRITE_WAIT });
+    return this.call("GET", "/api/roster", { wait: ROSTER_WAIT });
   }
 
   /** `GET /api/prompts`: every template this machine has, without its words. */

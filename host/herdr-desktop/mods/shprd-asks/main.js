@@ -49,8 +49,11 @@ export default class Asks extends View {
     /** The one input a typed answer goes in. It is made on the first click that
      * needs it: a retained text state needs the host, and `render` may not ask. */
     this.draft = null;
+    this.loading = false;
+    this.loadedAt = 0;
+    this.looping = false;
     this.refresh();
-    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    this.ensureLoop();
   }
 
   /** Reads the cards once; a service that went away is looked for again. */
@@ -146,7 +149,38 @@ export default class Asks extends View {
     this.cx.notify();
   }
 
+  /**
+   * Reads again when the panel is drawn with an old answer.
+   *
+   * A block that is hidden in a stack is not guaranteed to keep its timer, so a
+   * panel shown after a while must not sit on what it read before: the moment
+   * it is drawn is the moment to catch up. `loading` keeps one read in flight,
+   * and the floor keeps a repaint from becoming a poll.
+   */
+  revalidate() {
+    // A block hidden in a stack is not guaranteed to keep the timer `init`
+    // started, so being drawn is also when the poll is (re)started.
+    this.ensureLoop();
+    this.follow();
+    if (this.loading) return;
+    if (Date.now() - this.loadedAt < FLOOR_MS) return;
+    this.loading = true;
+    this.refresh().finally(() => {
+      this.loading = false;
+      this.loadedAt = Date.now();
+    });
+  }
+
+  /** Polls the service while this copy is alive, once. */
+  ensureLoop() {
+    if (this.looping) return;
+    this.looping = true;
+    const cx = this.cx;
+    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+  }
+
   render() {
+    this.revalidate();
     const t = theme();
     const colors = tone(t);
     const list = cards(this.state, this.asks);
