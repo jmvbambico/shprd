@@ -21,13 +21,14 @@
 //! person answers, and no hook invents a decision.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use serde_json::{Map, Value, json};
 use shprd_agents::asks::{AskHookInstall, AskHookInstaller, AskHookPaths};
+use shprd_agents::data::DataDir;
 use shprd_agents::harness::Harness;
 use shprd_core::ask::{Ask, AskAnswer, AskError, AskKind, AskQueue};
 use shprd_core::event::{Actor, EventKind};
@@ -413,8 +414,8 @@ fn wait_for_answer(queue: &AskQueue, task: &str, id: &str, timeout_secs: u64) ->
 /// A run with no data directory, or a program shprd has no harness for, says
 /// nothing, and the caller falls back to [`DEFAULT_TIMEOUT_SECS`].
 fn harness_timeout(program: &str) -> Option<u64> {
-    let dir = crate::cmd::roster::resolve_data_dir().ok()?;
-    let harness = Harness::load(&harness_file(&dir, program)).ok()?;
+    let data = crate::cmd::roster::resolve_data_dir();
+    let harness = data.harness(program).ok()?;
     harness
         .asks()
         .timeout_seconds
@@ -422,18 +423,13 @@ fn harness_timeout(program: &str) -> Option<u64> {
         .filter(|secs| *secs > 0)
 }
 
-/// One program's harness file under a data directory.
-fn harness_file(dir: &Path, program: &str) -> PathBuf {
-    dir.join("harness").join(format!("{program}.toml"))
-}
-
-/// The program's harness, loaded and checked, naming the file it came from.
-fn load_harness(dir: &Path, program: &str) -> Result<Harness, CliError> {
-    let path = harness_file(dir, program);
-    Harness::load(&path).map_err(|err| {
+/// The program's harness, loaded and checked, naming where it was looked for.
+fn load_harness(data: &DataDir, program: &str) -> Result<Harness, CliError> {
+    let rel = format!("harness/{program}.toml");
+    data.harness(program).map_err(|err| {
         CliError::other(anyhow!(err).context(format!(
             "no harness for {program:?} at {} (set SHPRD_DATA_DIR to a directory holding `harness/`)",
-            path.display()
+            data.path(&rel).display()
         )))
     })
 }
@@ -444,8 +440,8 @@ fn load_harness(dir: &Path, program: &str) -> Result<Harness, CliError> {
 /// (`.claude/settings.local.json`, `.codex/hooks.json`), never the person's
 /// global config; the installer refuses a harness that names a `~/...` target.
 pub fn install(args: &AskInstallArgs, repo: Option<&Path>) -> Result<(), CliError> {
-    let dir = crate::cmd::roster::resolve_data_dir()?;
-    let harness = load_harness(&dir, &args.program)?;
+    let data = crate::cmd::roster::resolve_data_dir();
+    let harness = load_harness(&data, &args.program)?;
     // The installer writes into the checkout it is pointed at, so a worktree
     // stays a worktree here: only the run's log follows the repository.
     let worktree = match &args.worktree {

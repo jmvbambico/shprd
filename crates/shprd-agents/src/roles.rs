@@ -32,14 +32,14 @@
 //! mechanism for naming the pair.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use shprd_core::settings::{Resolved, ResolvedRole};
 use thiserror::Error;
 
+use crate::data::DataDir;
 use crate::families::{Families, FamilyError, agent_vendor};
 use crate::models::{AgentRef, Catalog};
-use crate::spec::{HarnessSpec, SpecError, load_dir};
+use crate::spec::{HarnessSpec, SpecError};
 
 /// Which two roles a review compares.
 ///
@@ -77,9 +77,9 @@ pub struct Table {
 
 impl Table {
     /// Load a data directory: its `harness/` specs and its `models/families.toml`.
-    pub fn load(dir: &Path) -> Result<Table, TableError> {
-        let specs = load_dir(&dir.join("harness"))?;
-        let families = Families::load(&dir.join("models").join("families.toml"))?;
+    pub fn load(data: &DataDir) -> Result<Table, TableError> {
+        let specs = data.harness_specs()?;
+        let families = data.families()?;
         Ok(Table { specs, families })
     }
 }
@@ -155,10 +155,11 @@ impl Checker {
     /// Load `data`'s harness table and model families, keeping the reason when
     /// there is nothing to load.
     ///
-    /// `data` is [`crate::harness::data_dir`]'s answer for this machine and
-    /// repository.
-    pub fn load(data: Option<&Path>) -> Checker {
-        let Some(dir) = data else {
+    /// `data` is [`crate::data::DataDir::resolve`]'s answer for this machine:
+    /// the binary always has one, so [`None`] is a service or a test that was
+    /// deliberately given no table.
+    pub fn load(data: Option<&DataDir>) -> Checker {
+        let Some(data) = data else {
             return Checker {
                 table: Err(format!(
                     "no harness data directory: set {} to a directory holding `harness/` and \
@@ -169,7 +170,7 @@ impl Checker {
             };
         };
         Checker {
-            table: Table::load(dir).map_err(|error| format!("reading {}: {error}", dir.display())),
+            table: Table::load(data).map_err(|error| format!("reading {}: {error}", data.label())),
             catalogs: BTreeMap::new(),
         }
     }
@@ -515,19 +516,18 @@ pub fn vendor(role: &ResolvedRole, table: &Table) -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::path::Path;
-
     use shprd_core::settings::{File, Request, Resolved, resolve};
 
     use super::{Checker, Review, Table, check};
+    use crate::data::DataDir;
+    use std::path::Path;
 
-    /// The shipped `data/` directory, which the harness and family tables load
-    /// from: the roles are checked against exactly the table shprd ships.
+    /// The shipped data, which the harness and family tables load from: the
+    /// roles are checked against exactly the table shprd ships.
     fn table() -> Table {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
-        match Table::load(&dir) {
+        match Table::load(&DataDir::resolve(None, None)) {
             Ok(table) => table,
-            Err(error) => panic!("the shipped data directory must load: {error}"),
+            Err(error) => panic!("the shipped data must load: {error}"),
         }
     }
 

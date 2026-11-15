@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
+use shprd_agents::data::DataDir;
 use shprd_core::event::{Actor, Event, EventKind};
 use shprd_core::log::{AppendError, Clock, EventLog, SystemClock};
 use shprd_core::rules::RuleError;
@@ -360,23 +361,21 @@ pub fn resolve_data_home(home: &Path) -> PathBuf {
     shprd_agents::harness::data_home(home, env_value(DATA_HOME_ENV).as_deref())
 }
 
-/// Resolves the harness data directory for `root`: `$SHPRD_DATA_DIR`, else
-/// `<root>/data`, else the packaged install's copy, else the data home's.
+/// Resolves the data shprd ships: the harness table, the model catalogs, the
+/// role templates and the skills tables.
 ///
-/// `root` is the repository the caller works in, when it has one. Read here, at
-/// the edge, so a test that names its own home never finds the developer's
-/// install, and a run of the test suite can never depend on the machine's XDG
-/// directories.
-pub fn resolve_data_dir(root: Option<&Path>) -> Result<PathBuf, CliError> {
+/// `$SHPRD_DATA_DIR` when a person named it, else their own overrides under the
+/// data home (`<XDG_DATA_HOME or ~/.local/share>/shprd/`) when it holds a
+/// `harness/`, else the copy embedded in the binary at build time. That last
+/// answer is why an installed `shprd` needs no data directory at all.
+///
+/// Read here, at the edge: the variables are read once and the answer is
+/// carried in as a value, so no verb and no library looks one up, and a test
+/// that names its own home never finds the developer's install.
+pub fn resolve_data_dir() -> DataDir {
     let explicit = env_value(shprd_agents::harness::DATA_ENV).map(PathBuf::from);
-    let home = resolve_home(None)?;
-    let data_home = resolve_data_home(&home);
-    shprd_agents::harness::data_dir(root, explicit.as_deref(), &data_home).ok_or_else(|| {
-        CliError::other(anyhow!(
-            "no harness data directory: set {} to a directory holding `harness/`",
-            shprd_agents::harness::DATA_ENV
-        ))
-    })
+    let data_home = resolve_home(None).ok().map(|home| resolve_data_home(&home));
+    DataDir::resolve(explicit.as_deref(), data_home.as_deref())
 }
 
 /// Resolves the layout shprd's git state lives in, with `namespace` as the

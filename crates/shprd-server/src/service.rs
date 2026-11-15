@@ -12,6 +12,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use shprd_agents::data::DataDir;
 use tokio::net::TcpListener;
 
 use crate::api::{App, Paths};
@@ -401,8 +402,13 @@ pub struct Config {
     /// (`$XDG_CONFIG_HOME`, else `<home>/.config`) and a test passes its own, so
     /// the service never reads `$XDG_CONFIG_HOME` itself.
     pub prompts_dir: Option<PathBuf>,
-    /// The `data/` directory the settings checks read the harness table from.
-    pub data: Option<PathBuf>,
+    /// The shipped data the settings checks read the harness table from, when
+    /// the caller resolved one.
+    ///
+    /// The binary resolves `$SHPRD_DATA_DIR`, the person's overrides and the
+    /// embedded copy into this once, so the service reads no directory variable
+    /// of its own.
+    pub data: Option<DataDir>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.

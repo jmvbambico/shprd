@@ -817,10 +817,9 @@ pub fn choose_reviewer(
 /// must say so: a table that cannot be read may never make a reviewer look
 /// independent.
 fn families_table() -> Families {
-    let Ok(dir) = crate::cmd::roster::resolve_data_dir() else {
-        return Families::default();
-    };
-    Families::load(&dir.join("models").join("families.toml")).unwrap_or_default()
+    crate::cmd::roster::resolve_data_dir()
+        .families()
+        .unwrap_or_default()
 }
 
 /// The family of the model the author wrote the change with.
@@ -959,7 +958,7 @@ fn open_reviewer(
             run: Some(env.spawn.run.clone()),
             repo: dir.to_path_buf(),
             home: Some(env.spawn.home.clone()),
-            data: Some(env.spawn.data_dir.clone()),
+            data: env.spawn.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
     let tab = mux
@@ -1589,7 +1588,7 @@ project_dirs = []
                     skills: Skills::default(),
                     gates: Vec::new(),
                     catalogs: std::collections::BTreeMap::new(),
-                    data_dir: self.home.path().to_path_buf(),
+                    data_dir: shprd_agents::data::DataDir::resolve(Some(self.home.path()), None),
                     compat: Vec::new(),
                     base_env,
                     // No wait: a fake pane that never reports an agent would
