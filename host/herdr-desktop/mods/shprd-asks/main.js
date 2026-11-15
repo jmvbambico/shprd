@@ -51,9 +51,10 @@ export default class Asks extends View {
     this.draft = null;
     this.loading = false;
     this.loadedAt = 0;
-    this.looping = false;
+    this.scheduled = false;
+    this.armedAt = 0;
     this.refresh();
-    this.ensureLoop();
+    this.schedule();
   }
 
   /** Reads the cards once; a service that went away is looked for again. */
@@ -160,7 +161,7 @@ export default class Asks extends View {
   revalidate() {
     // A block hidden in a stack is not guaranteed to keep the timer `init`
     // started, so being drawn is also when the poll is (re)started.
-    this.ensureLoop();
+    this.schedule();
     this.follow();
     if (this.loading) return;
     if (Date.now() - this.loadedAt < FLOOR_MS) return;
@@ -171,12 +172,26 @@ export default class Asks extends View {
     });
   }
 
-  /** Polls the service while this copy is alive, once. */
-  ensureLoop() {
-    if (this.looping) return;
-    this.looping = true;
-    const cx = this.cx;
-    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+  /**
+   * Polls the service while this copy is drawn: one read, then the next.
+   *
+   * A `timer.every` made in `init` is not guaranteed to survive the block being
+   * hidden in a stack, and a poll that stopped is a panel that never updates
+   * again — the live pass showed exactly that, with an answered card still on
+   * the glass. So the next read is armed from whichever context is at hand (the
+   * draw, or the read before it), and a timer that should have fired by now and
+   * did not is treated as gone and armed again.
+   */
+  schedule(cx = this.cx) {
+    const now = Date.now();
+    if (this.scheduled && now - this.armedAt < FLOOR_MS * 2) return;
+    this.scheduled = true;
+    this.armedAt = now;
+    cx.timer.after(FLOOR_MS, (next) => {
+      this.scheduled = false;
+      this.loadedAt = Date.now();
+      this.refresh(next).finally(() => this.schedule(next));
+    });
   }
 
   render() {
