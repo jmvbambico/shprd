@@ -147,6 +147,19 @@ const ASSISTANT_ASKS_RAISE_DIGEST: &str =
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST, ASSISTANT_ASKS_RAISE_DIGEST];
 
+/// The reviewer wording M9.6 shipped, which did not name the asks the packet
+/// now carries. A criterion about asking is only checkable from those, so
+/// today's words say to use them.
+#[cfg(test)]
+const REVIEWER_M9_ASKS: &str = include_str!("../../../data/templates/history/reviewer-m9-asks.md");
+
+/// The SHA-256 of [`REVIEWER_M9_ASKS`], the reviewer's first retired default.
+const REVIEWER_M9_ASKS_DIGEST: &str =
+    "3d9ee44b1a18395e0463945ab0d34baed819d8ec7ad8fa3896491ec0120a517c";
+
+/// The reviewer's retired defaults.
+const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST];
+
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [
     ShippedPrompt {
@@ -168,7 +181,7 @@ pub const SHIPPED: [ShippedPrompt; 4] = [
         role: "reviewer",
         about: "Reads a finished attempt's diff and decides.",
         text: include_str!("../../../data/templates/reviewer.md"),
-        old: &[],
+        old: REVIEWER_OLD,
     },
     ShippedPrompt {
         id: "backup",

@@ -16,10 +16,11 @@ use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_agents::families::{Families, agent_vendor};
 use shprd_agents::models::AgentRef;
 use shprd_agents::spec::{BlockingPrompt, HarnessSpec, Values, render_args};
-use shprd_core::event::{EventKind, ReportStatus};
+use shprd_core::ask::AskId;
+use shprd_core::event::{EventKind, ReportStatus, TaskId};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::settings::{ResolvedRole, Source, Sourced};
-use shprd_core::state::{Attempt, Task, TaskStatus};
+use shprd_core::state::{AskRecord, Attempt, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_mux::Mux;
 
@@ -187,13 +188,24 @@ pub fn close_reviewer(
 pub struct ContractInput<'a> {
     /// The task that was attempted.
     pub task: &'a Task,
+    /// Every ask the run folded, from which this attempt's own are picked.
+    ///
+    /// The fold keeps one record per ask, task-wide, so the attempt whose spawn
+    /// came before a card and whose report came after is the attempt that
+    /// raised it. An attempt built by hand, with no `spawn_seq`, gets every ask
+    /// the task raised: there is nothing to tell them apart by, and showing too
+    /// much is never what hides an acceptance criterion.
+    pub asks: &'a [(TaskId, AskId, AskRecord)],
 }
 
 /// Renders the contract a reviewer checks the diff against.
 ///
 /// It carries what the diff cannot say: what the task was for, what "done"
-/// meant, what the attempt was allowed to touch, and what the agent claimed —
-/// including where its proof is.
+/// meant, what the attempt was allowed to touch, what it asked the person and
+/// what they answered, and what the agent claimed — including where its
+/// proof is. An acceptance criterion that says "ask first, then use the answer"
+/// is unverifiable from a diff alone, so the asks belong in the packet rather
+/// than only in the agent's summary.
 pub fn render_contract(input: &ContractInput<'_>) -> String {
     let task = input.task;
     let mut out = String::new();
@@ -219,6 +231,7 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     for path in &task.scope {
         out.push_str(&format!("- {path}\n"));
     }
+    out.push_str(&asks_section(attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
     let Some(report) = report else {
@@ -233,6 +246,65 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
         out.push_str(&format!("- commit: {commit}\n"));
     }
     out
+}
+
+/// The asks this attempt raised, and what the person answered.
+///
+/// The section is written even when the attempt asked nothing: a reviewer
+/// reading "none" knows a criterion about asking was never met, while a missing
+/// section reads like a packet that lost something.
+fn asks_section(attempt: Option<&Attempt>, asks: &[(TaskId, AskId, AskRecord)]) -> String {
+    let mut out = String::from("\n## Asks raised during this attempt\n\n");
+    let found: Vec<&AskRecord> = asks
+        .iter()
+        .filter(|(_, _, record)| raised_in(attempt, record))
+        .map(|(_, _, record)| record)
+        .collect();
+    if found.is_empty() {
+        out.push_str("- none: this attempt asked the person nothing\n");
+        return out;
+    }
+    for record in found {
+        out.push_str(&format!(
+            "- {} `{}`: {}\n",
+            record.kind.word(),
+            record.id,
+            record.text
+        ));
+        out.push_str(&format!(
+            "  - options: {}\n",
+            if record.options.is_empty() {
+                "none".to_owned()
+            } else {
+                record.options.join(", ")
+            }
+        ));
+        out.push_str(&format!(
+            "  - answer: {}\n",
+            match &record.answer {
+                Some(answer) => answer.text.as_str(),
+                None => "unanswered",
+            }
+        ));
+    }
+    out
+}
+
+/// Whether `record` was raised while `attempt` was the live one.
+///
+/// The attempt's spawn came first and its report came after, so an ask raised
+/// in that window belongs to this attempt. Without a recorded spawn — an
+/// attempt a test built, or one folded from a log written before the field
+/// existed — every ask counts, because a packet that shows too much is
+/// never the one that hides a criterion.
+fn raised_in(attempt: Option<&Attempt>, record: &AskRecord) -> bool {
+    let Some(attempt) = attempt else {
+        return true;
+    };
+    let Some(spawn) = attempt.spawn_seq else {
+        return true;
+    };
+    record.raised_seq > spawn
 }
 
 /// One reported list, saying so plainly when the agent claimed none.
@@ -304,9 +376,18 @@ fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<P
     let diff =
         diff_against_merge_base(&env.spawn.ctx.root, &env.spawn.base_branch, &attempt.branch)?;
     write_file(&dir.join("diff.patch"), &diff)?;
+    // The attempt's own asks come from the fold, which is the only place an
+    // answer is recorded: the reviewer reads the same answer the worker did.
+    let state = env.spawn.ctx.state()?;
+    let asks: Vec<(TaskId, AskId, AskRecord)> = state
+        .asks
+        .iter()
+        .filter(|((ask_task, _), _)| *ask_task == task.id)
+        .map(|((ask_task, ask), record)| (ask_task.clone(), ask.clone(), record.clone()))
+        .collect();
     write_file(
         &dir.join("contract.md"),
-        &render_contract(&ContractInput { task }),
+        &render_contract(&ContractInput { task, asks: &asks }),
     )?;
     write_file(&dir.join("findings.schema.json"), &schema_text()?)?;
     Ok(dir)
@@ -820,7 +901,10 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str(
         "- `diff.patch` — the whole change, against its merge base with the integration branch\n",
     );
-    out.push_str("- `contract.md` — the task, what \"done\" meant, and what the agent reported\n");
+    out.push_str(
+        "- `contract.md` — the task, what \"done\" meant, what the agent reported, and the \
+         asks it raised with the person's answers\n",
+    );
     out.push_str("- `findings.schema.json` — the shape of what you write\n\n");
     out.push_str("- Read those three files, in this folder, and nothing else.\n");
     out.push_str("- Never open or edit the repository or any worktree; the diff is the truth you judge. If the packet does not show something you need, record that as a finding.\n");
@@ -828,6 +912,7 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
     out.push_str("## What to write\n\n");
     out.push_str("Write `findings.json` in this folder, matching `findings.schema.json`: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write an empty array — `[]` — when nothing is wrong: an empty array is a clean review, and it is the answer to aim for.\n\n");
     out.push_str("Judge the diff against the acceptance criteria and the scope: what it does wrong, what it misses, what it changes that it may not touch. A critical or major finding blocks integration, so spend them on things that matter.\n\n");
+    out.push_str("A criterion that is about asking the person is checked from the contract's asks: their text, their options and the answer the person gave. An ask with `answer: unanswered` never got the person's word. The reported proofs are the artifacts to check a criterion about proof against; one the worker did not name is not there.\n\n");
     out.push_str("## Then\n\n");
     out.push_str(
         "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
@@ -1658,6 +1743,176 @@ project_dirs = []
         assert!(brief.contains("findings.json` and stop"), "{brief}");
         assert!(brief.contains("REVIEWER"), "{brief}");
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
+    }
+
+    /// The contract for a task with one completed attempt, as text.
+    ///
+    /// It goes through the real log: the asks are folded events, so a test that
+    /// built them by hand would not prove the packet reads what the run
+    /// recorded.
+    fn contract_text(scratch: &Scratch, answers: &[(&str, Option<&str>)]) -> String {
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "sh".to_string(),
+            model: None,
+            worktree: "/tmp/wt/T1".to_string(),
+            branch: "feature/t1".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        for (n, (ask, answer)) in answers.iter().enumerate() {
+            ctx.commit(EventKind::AskRaised {
+                task: "T1".to_string(),
+                ask: (*ask).to_string(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: format!("question {n}"),
+                options: vec!["add".to_string(), "sum".to_string()],
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+            if let Some(answer) = answer {
+                ctx.commit(EventKind::AskAnswered {
+                    task: "T1".to_string(),
+                    ask: (*ask).to_string(),
+                    answer: (*answer).to_string(),
+                })
+                .unwrap_or_else(|err| panic!("{err}"));
+            }
+        }
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "made it real".to_string(),
+            tests: vec!["cargo test".to_string()],
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: vec!["README.md".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: vec![".shprd/proof/test-run.txt".to_string()],
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        let task = spawn::task_of(&state, "T1").unwrap_or_else(|err| panic!("{err}"));
+        let asks: Vec<(TaskId, AskId, AskRecord)> = state
+            .asks
+            .iter()
+            .map(|((task, ask), record)| (task.clone(), ask.clone(), record.clone()))
+            .collect();
+        render_contract(&ContractInput { task, asks: &asks })
+    }
+
+    #[test]
+    fn the_contract_carries_the_attempts_asks_and_their_answers() {
+        let scratch = Scratch::new();
+        let contract = contract_text(&scratch, &[("c1", Some("add"))]);
+        let snapshot = "\n\
+## Asks raised during this attempt
+
+- question `c1`: question 0
+  - options: add, sum
+  - answer: add
+
+## What the agent reported
+";
+        let start = contract
+            .find("\n## Asks raised during this attempt")
+            .unwrap_or_else(|| panic!("the packet carries the asks: {contract}"));
+        assert!(
+            contract[start..].starts_with(snapshot),
+            "the ask section is the answered card: {contract}"
+        );
+        assert!(
+            contract.contains("- proof:\n  - .shprd/proof/test-run.txt\n"),
+            "the proof is in the packet: {contract}"
+        );
+    }
+
+    #[test]
+    fn the_contract_says_plainly_when_an_ask_is_unanswered() {
+        let scratch = Scratch::new();
+        let contract = contract_text(&scratch, &[("c1", None)]);
+        assert!(
+            contract.contains(
+                "- question `c1`: question 0\n  - options: add, sum\n  - answer: unanswered\n"
+            ),
+            "{contract}"
+        );
+    }
+
+    #[test]
+    fn the_contract_says_so_when_the_attempt_asked_nothing() {
+        let scratch = Scratch::new();
+        let contract = contract_text(&scratch, &[]);
+        assert!(
+            contract.contains(
+                "## Asks raised during this attempt\n\n- none: this attempt asked the person nothing\n"
+            ),
+            "{contract}"
+        );
+    }
+
+    /// The packet on disk, not just the renderer: `write_packet` reads the fold,
+    /// so a card raised and answered between the attempt's spawn and its report
+    /// reaches the reviewer.
+    #[test]
+    fn the_written_packet_carries_the_attempts_own_ask() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "sh".to_string(),
+            model: None,
+            worktree: "/tmp/wt/T1".to_string(),
+            branch: "feature/t1".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let raised = ctx
+            .commit(EventKind::AskRaised {
+                task: "T1".to_string(),
+                ask: "c1".to_string(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: "which name?".to_string(),
+                options: vec!["add".to_string(), "sum".to_string()],
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(raised.seq > 0, "the ask is in the log");
+        ctx.commit(EventKind::Reported {
+            task: "T1".to_string(),
+            attempt: 1,
+            status: ReportStatus::Completed,
+            summary: "made it real".to_string(),
+            tests: vec!["cargo test".to_string()],
+            checks: vec![shprd_core::event::CheckReport::passed(
+                "tests",
+                "cargo test",
+            )],
+            changed_paths: vec!["README.md".to_string()],
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let env = scratch.review_env(&ctx, Some("codex/m1"));
+
+        let report =
+            review(&scratch.mux(), &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+        let contract = std::fs::read_to_string(report.dir.join("contract.md"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            contract.contains(
+                "## Asks raised during this attempt\n\n- question `c1`: which name?\n  - options: add, sum\n  - answer: unanswered\n"
+            ),
+            "the packet on disk carries the ask: {contract}"
+        );
     }
 
     #[test]

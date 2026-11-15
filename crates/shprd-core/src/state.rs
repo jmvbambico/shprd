@@ -331,6 +331,14 @@ pub struct Attempt {
     pub gates: Vec<GateResult>,
     /// Reviews dispatched for this attempt, in order.
     pub reviews: Vec<ReviewRequest>,
+    /// The log sequence that started this attempt, or [`None`] for one the
+    /// fold was handed rather than grew.
+    ///
+    /// It is what tells this attempt's asks from the ones an earlier attempt
+    /// raised: an ask belongs to the attempt whose spawn came before it and
+    /// whose report came after, so a reviewer judging this attempt reads this
+    /// attempt's cards and no others.
+    pub spawn_seq: Option<u64>,
 }
 
 /// A review handed to a reviewer for an attempt.
@@ -573,6 +581,7 @@ impl RunState {
                         model: model.clone(),
                         worktree: worktree.clone(),
                         branch: branch.clone(),
+                        spawn_seq: Some(event.seq),
                         report: None,
                         gates: Vec::new(),
                         reviews: Vec::new(),

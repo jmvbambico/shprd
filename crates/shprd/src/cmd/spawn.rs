@@ -3779,6 +3779,7 @@ off = ["--no-fast"]
                 seq: 7,
             }],
             reviews: Vec::new(),
+            spawn_seq: None,
         });
         plan
     }

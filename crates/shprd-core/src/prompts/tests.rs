@@ -302,6 +302,33 @@ fn an_untouched_proof_default_is_upgraded() {
     assert_eq!(installed.text, worker().text, "today's words won");
 }
 
+#[test]
+fn the_reviewers_m9_asks_digest_is_the_listed_one() {
+    let reviewer = shipped_prompt("reviewer").expect("the reviewer prompt is shipped");
+    assert_eq!(digest(REVIEWER_M9_ASKS.as_bytes()), REVIEWER_M9_ASKS_DIGEST);
+    assert!(
+        reviewer.old.contains(&REVIEWER_M9_ASKS_DIGEST),
+        "the retired default is in the reviewer's list"
+    );
+    assert!(REVIEWER_M9_ASKS.as_bytes() != reviewer.text.as_bytes());
+}
+
+/// The reviewer's words now point at the asks the packet carries, so an
+/// install of the older wording is upgraded rather than left without them.
+#[test]
+fn an_untouched_reviewer_default_is_upgraded() {
+    let temp = dir();
+    let path = path_of(temp.path(), "reviewer");
+    std::fs::write(&path, REVIEWER_M9_ASKS).expect("an old install");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert_eq!(
+        installed.text,
+        shipped_prompt("reviewer").expect("shipped").text,
+        "today's words won"
+    );
+}
+
 /// A build that installed the wording which only knew the CLI's question tool
 /// upgrades it: the ask route is the program's, and the old words say otherwise.
 #[test]
