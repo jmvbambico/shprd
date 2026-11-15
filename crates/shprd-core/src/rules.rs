@@ -1573,11 +1573,29 @@ fn check_review_requested(
     Ok(())
 }
 
+/// Whether a person accepted the newest failure of `task`.
+///
+/// It is an `integrate_after_failed_gate` override recorded after the gate that
+/// failed, which is what the rule means: a human's word that this failure may
+/// land. A failed task is `Failed` rather than `Passed`, so the acceptance is
+/// also what lets a landing look at the work at all.
+fn accepted_after_failure(task: &Task) -> bool {
+    let Some(failed) = task
+        .latest_attempt()
+        .and_then(|attempt| attempt.gates.iter().rfind(|gate| !gate.passed))
+    else {
+        return false;
+    };
+    task.overrides
+        .iter()
+        .any(|record| record.rule == INTEGRATE_AFTER_FAILED_GATE && record.seq > failed.seq)
+}
+
 /// Rules for integrating a passed task: a failed gate needs a later override.
 fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Result<(), RuleError> {
     check_not_dropped(state, task, provenance)?;
     let found = task_in(state, task)?;
-    if found.status != TaskStatus::Passed {
+    if found.status != TaskStatus::Passed && !accepted_after_failure(found) {
         return Err(RuleError::NotPassed {
             task: task.to_string(),
             found: found.status,
@@ -1624,9 +1642,14 @@ fn check_integrated(state: &RunState, task: &str, provenance: Provenance) -> Res
 /// rather than a claim someone typed.
 ///
 /// The task also has to be `Passed`: a task that failed a gate after its
-/// review is not ready, however good the review was.
+/// review is not ready, however good the review was. The one exception is a
+/// person's acceptance of that failure — an `integrate_after_failed_gate`
+/// override recorded after it — because that is the decision the rule exists
+/// for: work a reviewer rejected lands on a human's recorded word and degrades
+/// the pull request's review marker.
 pub fn ready_to_land(task: &Task) -> Result<(), RuleError> {
-    if task.status != TaskStatus::Passed {
+    let accepted = accepted_after_failure(task);
+    if task.status != TaskStatus::Passed && !accepted {
         return Err(RuleError::NotPassed {
             task: task.id.clone(),
             found: task.status,
@@ -1669,6 +1692,11 @@ pub fn ready_to_land(task: &Task) -> Result<(), RuleError> {
                 attempt: attempt.n,
             });
         }
+    }
+    // A person who accepted the failure answered the review, so there is no
+    // review requirement left to check: the hand-in above is all that is left.
+    if accepted {
+        return Ok(());
     }
     let request = attempt
         .reviews
@@ -4182,6 +4210,59 @@ mod tests {
         assert!(matches!(
             ready_to_land(task),
             Err(RuleError::ReviewNotPassed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_human_who_accepted_a_failed_review_lets_it_land() {
+        // "Take it as it is", the second choice a spent review's card offers:
+        // the override is the person's recorded word that the failure may land,
+        // and it is what `shprd override --rule integrate_after_failed_gate`
+        // writes after the card names it.
+        let mut log = reviewable();
+        log.push(ev(
+            6,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        let state = folded(&log);
+        assert!(matches!(
+            ready_to_land(state.tasks.get("a").expect("task a")),
+            Err(RuleError::NotPassed { .. })
+        ));
+
+        log.push(by(
+            7,
+            Actor::Human,
+            EventKind::Override {
+                task: "a".to_string(),
+                rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: "the reviewer was wrong about the batch".to_string(),
+            },
+        ));
+        let state = folded(&log);
+        ready_to_land(state.tasks.get("a").expect("task a"))
+            .unwrap_or_else(|err| panic!("the person accepted it: {err}"));
+
+        // An override recorded before the failure accepts nothing: it was about
+        // a different one.
+        let mut early = reviewable();
+        early.push(by(
+            6,
+            Actor::Human,
+            EventKind::Override {
+                task: "a".to_string(),
+                rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),
+                reason: "an older word".to_string(),
+            },
+        ));
+        early.push(ev(
+            7,
+            review_gate(false, Some(provenance_for("codex/m1", 5))),
+        ));
+        let state = folded(&early);
+        assert!(matches!(
+            ready_to_land(state.tasks.get("a").expect("task a")),
+            Err(RuleError::NotPassed { .. })
         ));
     }
 
