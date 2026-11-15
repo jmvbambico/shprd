@@ -788,3 +788,74 @@ fn a_service_says_what_it_did_about_the_repositorys_workspace() {
     assert!(reason.contains(&label(repo.path())), "{reason}");
     service.stop();
 }
+
+#[test]
+fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
+    // A Herdr desktop mod cannot read a stream: its `fetch` is buffered and it
+    // has no WebSocket (M7ef §2.11). Its live arm is the long poll plus
+    // `watchFolder`, so the service keeps one small file that it rewrites after
+    // every ledger write, and the window reads that instead of guessing.
+    let (repo, state, home) = repo_with_a_run();
+    // Held for the whole test: its `Drop` is what stops the service.
+    let _service = Service::start(repo.path(), state.path(), home.path());
+    let change = state.path().join("shprd").join("changes");
+
+    // It is there as soon as the service is: a window that starts first has a
+    // real answer rather than a missing file.
+    let first: Value = serde_json::from_str(
+        &fs::read_to_string(&change).expect("the change file is written at start"),
+    )
+    .expect("the change file is JSON");
+    let start_seq = first["seq"].as_u64().expect("a sequence");
+    assert_eq!(start_seq, 1, "the run start is the log's first event");
+    assert!(first["at_ms"].as_u64().expect("a time") > 0);
+
+    // A write through the API moves it, ahead of the answer the caller reads.
+    let port = read_record(state.path())["port"].as_u64().expect("a port") as u16;
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+    let added = serde_json::json!({
+        "kind": "task.add",
+        "task": "T1",
+        "title": "a task",
+        "scope": ["crates/a"],
+        "acceptance": ["it works"],
+    });
+    assert_eq!(
+        post_action(&format!("{base}/api/action"), &token, true, &added),
+        Ok(200)
+    );
+    let second: Value =
+        serde_json::from_str(&fs::read_to_string(&change).expect("the change file is there"))
+            .expect("JSON");
+    assert_eq!(second["seq"].as_u64(), Some(2), "{second}");
+    assert!(
+        second["at_ms"].as_u64() >= first["at_ms"].as_u64(),
+        "the file moves forward"
+    );
+
+    // And a write made by another process — a worker's own verb — moves it too,
+    // because the service watches the log and publishes what it finds.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &["task", "status", "T1", "--msg", "from the command line"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut third = second.clone();
+    while Instant::now() < deadline {
+        third =
+            serde_json::from_str(&fs::read_to_string(&change).expect("the change file is there"))
+                .expect("JSON");
+        if third["seq"].as_u64() == Some(3) {
+            break;
+        }
+        sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        third["seq"].as_u64(),
+        Some(3),
+        "a write by another process reaches a watching mod: {third}"
+    );
+}

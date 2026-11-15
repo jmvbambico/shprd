@@ -1,0 +1,77 @@
+# shprd on the Herdr desktop
+
+The Herdr app draws its whole interface from files: `layouts/<name>.json`,
+`mods/<name>/` and `keys.json` in `~/.config/herdr-app` (or `$HERDR_APP_HOME`).
+This folder is shprd's set of them.
+
+```
+layouts/shprd.json      the window: sidebar, coordinator area, tab bar, pane, board
+mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
+mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
+mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons
+mods/shprd-tabs/        the tab bar and the side panel's buttons
+mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
+mods/shprd-accept/      the Accept card            (M10.5)
+mods/shprd-task-pr/     the task's pull request    (M10.5)
+mods/shprd-asks/        the needs-you cards        (M10.6)
+mods/shprd-settings/    roles, agents, prompts     (M10.6)
+mods/shprd-graph/       dagr in a terminal block   (M10.7)
+mods/shprd-coordinator/ the coordinator's chat     (M10.8)
+mods/shprd-toasts/      toasts over the work area  (M10.4)
+mods/lib/               the shared modules: tokens, panel parts, the board's
+                        reading, the service client, the change watcher, and
+                        sync-shared's source. Every mod carries a copy in its
+                        own `lib/` because a mod may only import files inside
+                        its own folder.
+keys.json               the keys the layout expects, merged by the installer
+bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
+bin/check               all of it: the copies, the unit tests, `herdr-app check`
+test/                   the client's unit tests (node or bun, see below)
+```
+
+Install it with `shprd install herdr-desktop` (and `--dry-run` to see the plan,
+`--uninstall` to take back exactly what it wrote), then pick the layout in Herdr
+with `ctrl-shift-l`.
+
+## The mods talk to `shprd serve`
+
+A mod has no Node, no `setTimeout`, no WebSocket, no `EventSource` and no stream
+reader: its `fetch` is buffered. So the client (`mods/lib/client.js`) finds the
+service the way Shepherdr's window does — read `service.json` from the state
+directory, confirm its `id` at `GET /api/health`, then send the bearer token from
+the `token` file beside it — and follows it with a long poll
+(`GET /api/changes`) plus the change file the service rewrites after every
+ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
+`mods/lib/watch.js`.
+
+## Tests
+
+The client, the change watcher and the footer's service start have unit tests
+that need neither Herdr nor a service:
+
+```
+node --import ./test/boot.mjs --test test/
+bun test --preload ./test/boot-bun.mjs test/
+```
+
+Both run the same files, `test/lib.test.mjs` and `test/chrome.test.mjs`;
+`test/stub-herdr.js` stands in for the app's `herdr` module and `test/stub-gpui.js`
+for its element builders (`gpui-kit`, `gpui-base`).
+
+## Starting the service
+
+The footer's third row starts it with **`hc run --bg`**, never the app's `exec`.
+`exec` is `machine.exec`, which the Herdr docs and the M7ef spike both describe as
+"no terminal, ≤600 s, everything it starts dies with it" — a server started
+through it would be gone when the call ended. `hc run --bg` starts a herdr-core
+terminal and returns at once, so the service outlives the click and keeps a
+terminal called `shprd-serve` where a person can read its output. Measured in a
+private session: the call returned in 0.3 s, and the service was still answering
+`GET /api/health` minutes later.
+
+`bin/check` runs all three. Every mod passes `herdr-app check` (the layout is
+checked by a window drawing it, which is what the screenshot is of). The check
+runs on a **copy** in a scratch folder — `herdr-app check` writes
+`gpui-kit.d.ts` and `jsconfig.json` beside the mod it loads, and those are the
+app's, not ours — and points `HERDR_APP_HOME` there too, so it never touches a
+real window or this tree. `.gitignore` keeps them out if one is ever written.

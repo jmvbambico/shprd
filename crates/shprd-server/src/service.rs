@@ -437,14 +437,19 @@ impl std::fmt::Debug for TickConfig {
 
 impl Config {
     /// A config for `repo`, with the discovery files in `state_dir`.
+    ///
+    /// The hub it starts with touches `<state_dir>/changes`, so everything this
+    /// service writes from then on is visible to a Herdr mod watching that
+    /// folder. A caller that builds its own hub keeps its own file (or none).
     pub fn new(repo: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> Self {
+        let state_dir = state_dir.into();
         Self {
             repo: repo.into(),
-            state_dir: state_dir.into(),
+            hub: crate::hub::Hub::touching(state_dir.clone()),
+            state_dir,
             port: 0,
             actor: shprd_core::event::Actor::Human,
             after_write: None,
-            hub: crate::hub::Hub::new(),
             tick: None,
             home: None,
             prompts_dir: None,

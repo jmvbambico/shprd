@@ -29,6 +29,7 @@
 
 pub mod api;
 pub mod bindings;
+pub mod changes;
 pub mod dto;
 pub mod error;
 pub mod pass;
@@ -45,6 +46,7 @@ pub(crate) mod prompts;
 pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
+pub use changes::Touch;
 pub use error::{ApiReject, ServerError};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
