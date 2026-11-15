@@ -78,7 +78,7 @@ use tokio::sync::watch;
 
 use crate::client::{Endpoint, HcClient};
 use crate::error::Error;
-use crate::events::{LAYOUT_DOCUMENT, State};
+use crate::events::State;
 use crate::model::{self, Terminal};
 use crate::placement::{self, Placement};
 
@@ -202,12 +202,6 @@ impl Window {
     /// Set one variable on the window's environment.
     pub fn with_variable(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.environment.push((key.into(), Some(value.into())));
-        self
-    }
-
-    /// Remove one variable from the window's environment.
-    pub fn with_removed(mut self, key: impl Into<String>) -> Self {
-        self.environment.push((key.into(), None));
         self
     }
 
@@ -1518,22 +1512,6 @@ fn decode_base64(text: &str) -> Result<String> {
         )
     })
 }
-
-/// One space's terminals, for a caller that wants them grouped.
-pub fn terminals_in<'a>(spaces: &'a [placement::Space], space: &str) -> Vec<&'a str> {
-    placement::find_space(spaces, space)
-        .map(|space| {
-            space
-                .tabs
-                .iter()
-                .flat_map(|tab| tab.terminals.iter().map(String::as_str))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The layout document's name, re-exported so a caller need not know it.
-pub const DOCUMENT: &str = LAYOUT_DOCUMENT;
 
 #[cfg(test)]
 mod tests {

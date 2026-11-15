@@ -148,7 +148,7 @@ impl Resolution {
 /// This is the whole selection rule, and it is pure: nothing here asks the
 /// machine anything, so a test can name the facts it wants to see decided.
 pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
-    let mut resolution = match setting {
+    match setting {
         HostChoice::HerdrDesktop => {
             if probe.desktop() {
                 Resolution {
@@ -216,6 +216,9 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                     probe,
                 }
             } else {
+                // `auto` never falls back: it asked the machine and was told.
+                // Only a named host the machine could not give is a fallback a
+                // person should hear about.
                 let kind = HostKind::Herdr;
                 Resolution {
                     setting,
@@ -226,13 +229,7 @@ pub fn choose(setting: HostChoice, probe: Probe) -> Resolution {
                 }
             }
         }
-    };
-    // `auto` never "fell back": it asked and was told. Only a named host the
-    // machine could not give is a fallback a person should hear about.
-    if resolution.setting.is_auto() {
-        resolution.fell_back = false;
     }
-    resolution
 }
 
 /// The evidence that picked Herdr desktop, in words.
@@ -330,10 +327,12 @@ fn load_setting(home: &Path, repo: Option<&Path>) -> HostChoice {
 /// settings, so a shprd verb on a TUI-only machine never starts a stray core.
 fn probe(setting: HostChoice) -> Probe {
     let window = window();
-    let attached = window.attached();
+    // One `herdr-app status` answers both "is a window there" and "why not".
+    let status = window.status();
+    let attached = status.is_ok();
     let mut probe = Probe {
         window: attached,
-        window_problem: (!attached).then(|| window_problem(&window)),
+        window_problem: status.err().map(|error| error.to_string()),
         core: None,
         core_problem: None,
         herdr: on_path("herdr"),
@@ -350,14 +349,6 @@ fn probe(setting: HostChoice) -> Probe {
             Some("no Herdr window is attached, so herdr-core was not asked".to_string());
     }
     probe
-}
-
-/// Why `herdr-app status` did not answer, in the window's own words.
-fn window_problem(window: &Window) -> String {
-    match window.status() {
-        Ok(_) => "it answered after all".to_string(),
-        Err(error) => error.to_string(),
-    }
 }
 
 /// Whether a program is on `PATH`.
