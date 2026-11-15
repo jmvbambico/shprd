@@ -120,7 +120,12 @@ SOFTWARE.
   and the herdr-core client — the `hello` framing switch, the request ids and
   the per-call timeout, the pending-call cap, the method and version gate with
   its refusal wording, the stream credit protocol, and the terminal event fold
-  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`
+  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`; and the
+  Herdr desktop host — terminal input sent with no `caller` so it arrives as the
+  person's, the split between herdr-core for terminals and the window's own
+  command line for spaces, tabs and panes, and making a space through the window
+  — from `service/hub.ts` and `service/spaces.ts`, in
+  `crates/shprd-mux-hc/src/host.rs`
 - License: MIT
 
 MIT License

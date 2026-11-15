@@ -578,11 +578,22 @@ impl HcClient {
 
     /// Read the layout document into the fold.
     pub async fn read_layout(&self) -> Result<()> {
+        self.layout().await.map(|_| ())
+    }
+
+    /// Read the layout document into the fold, and answer its value.
+    ///
+    /// A caller that needs a part of the layout the fold does not model — the
+    /// pane id behind a terminal, say — reads it here rather than asking the
+    /// core twice: the value and the fold come from the same `doc.get`, so they
+    /// cannot disagree.
+    pub async fn layout(&self) -> Result<Value> {
         let result = self
             .call("doc.get", json!({"name": crate::events::LAYOUT_DOCUMENT}))
             .await?;
+        let value = result.get("value").cloned().unwrap_or(Value::Null);
         self.take_document(crate::events::LAYOUT_DOCUMENT, &result);
-        Ok(())
+        Ok(value)
     }
 
     /// Every terminal the core has, from the core rather than the fold.

@@ -5,6 +5,13 @@
 //! The service is a real child process on a real loopback socket, which is the
 //! point: the router's own tests drive it in-process, and this one proves the
 //! subcommand wires the same thing up. Nothing here leaves the machine.
+//!
+//! Two of these tests run the service on the **Herdr desktop host**, over the
+//! fake `hc connect` the host crate's tests speak the protocol with and a fake
+//! window, and assert it stops with exit code 0 on `SIGTERM` and on `SIGINT`.
+//! That is a regression test with a history: the desktop host owns a tokio
+//! runtime, and a runtime dropped inside the service's async context panicked on
+//! every clean shutdown, so Ctrl-C used to exit 101.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -23,6 +30,12 @@ use support::herdr::{absent_socket, isolate};
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
+
+/// The fake `hc connect` the host crate's tests drive the client with.
+///
+/// Compiled in rather than read at run time, so there is one fake and not two,
+/// and so this test does not care where the other crate's test support sits.
+const FAKE_HC: &str = include_str!("../../shprd-mux-hc/tests/support/fake_hc.py");
 
 /// A child `shprd serve`, stopped on drop so a failing test leaves nothing
 /// running.
@@ -85,6 +98,44 @@ impl Service {
         service
     }
 
+    /// Starts a service on the Herdr desktop host: a fake `hc`, a fake window,
+    /// and this fixture's own homes.
+    ///
+    /// It is record-only off, because a record-only service drops the host where
+    /// it builds it; the host a real service keeps lives in the closures its
+    /// passes run, and that is the one whose drop has to be quiet.
+    fn start_on_desktop(repo: &Path, state: &Path, home: &Path) -> Self {
+        let (hc, window) = fake_desktop(state);
+        let mut command = Command::new(BIN);
+        isolate(&mut command, state);
+        let child = command
+            .args([
+                "--repo",
+                &repo.display().to_string(),
+                "--home",
+                &home.display().to_string(),
+                "serve",
+                "--port",
+                "0",
+            ])
+            .env("XDG_STATE_HOME", state)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local").join("share"))
+            .env("HERDR_APP_HOME", state.join("herdr-app"))
+            // The two programs the desktop host is made of, and this test's own.
+            .env("SHPRD_HC", &hc)
+            .env("SHPRD_HERDR_APP", &window)
+            .env_remove("SHPRD_TICK_RECORD_ONLY")
+            .env_remove("SHPRD_ACTOR")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the service starts");
+        let service = Self { child };
+        service.wait_for_record(state);
+        service
+    }
+
     /// Polls for `service.json`, which the service writes after it binds.
     fn wait_for_record(&self, state: &Path) {
         let path = record_path(state);
@@ -99,20 +150,26 @@ impl Service {
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
-    fn stop(mut self) {
+    fn stop(self) {
+        let _ = self.stop_with("-TERM");
+    }
+
+    /// Sends `signal` (a `kill` name such as `-TERM`) and answers how the
+    /// service ended.
+    fn stop_with(mut self, signal: &str) -> std::process::ExitStatus {
         let _ = Command::new("kill")
-            .arg("-TERM")
+            .arg(signal)
             .arg(self.child.id().to_string())
             .status();
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => return status,
                 Ok(None) => sleep(Duration::from_millis(50)),
                 Err(err) => panic!("waiting for the service failed: {err}"),
             }
         }
-        panic!("the service did not stop after SIGTERM");
+        panic!("the service did not stop after {signal}");
     }
 }
 
@@ -121,6 +178,55 @@ impl Drop for Service {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A fake herdr-core and a fake Herdr window, as the two binaries the desktop
+/// host runs.
+///
+/// The core is [`FAKE_HC`] behind a shell wrapper (the client spawns the binary
+/// with `connect` as its only argument, as a real `hc` takes it); the window is a
+/// script answering the `herdr-app do …` commands the host sends (M7ef §2.12).
+fn fake_desktop(dir: &Path) -> (PathBuf, PathBuf) {
+    let at = dir.join("desktop");
+    fs::create_dir_all(&at).expect("make the fake desktop's folder");
+    let script = at.join("fake_hc.py");
+    fs::write(&script, FAKE_HC).expect("write the fake core");
+    fs::write(at.join("mode"), "normal").expect("write the fake core's mode");
+    let hc = at.join("hc");
+    fs::write(
+        &hc,
+        format!(
+            "#!/bin/sh\nFAKE_HC_DIR='{}' exec python3 '{}' \"$@\"\n",
+            at.display(),
+            script.display()
+        ),
+    )
+    .expect("write the fake core's wrapper");
+    let window = at.join("herdr-app");
+    fs::write(
+        &window,
+        "#!/bin/sh
+if [ \"$1\" = \"status\" ]; then
+  echo '{\"layout\":\"main\"}'
+  exit 0
+fi
+case \"$2\" in
+  space.new) echo '{\"space\":\"spfake\",\"tab\":\"tbfake\",\"terminal\":\"t100\"}' ;;
+  *)         echo '{\"ok\":true}' ;;
+esac
+",
+    )
+    .expect("write the fake window");
+    for binary in [&hc, &window] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = fs::metadata(binary).expect("the fake exists").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(binary, permissions).expect("make the fake executable");
+        }
+    }
+    (hc, window)
 }
 
 /// Where the service writes its discovery file.
@@ -252,6 +358,32 @@ fn post_action(url: &str, token: &str, write_header: bool, body: &Value) -> Resu
         Err(ureq::Error::StatusCode(code)) => Err(code),
         Err(err) => panic!("the action failed: {err}"),
     }
+}
+
+#[test]
+fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigterm() {
+    // The Herdr desktop host owns a tokio runtime. A runtime shut down inside an
+    // async context used to panic — "Cannot drop a runtime in a context where
+    // blocking is not allowed" — so every Ctrl-C on Herdr desktop exited 101.
+    // This is the whole path a supervisor takes: start, then SIGTERM.
+    let (repo, state, home) = repo_with_a_run();
+    let service = Service::start_on_desktop(repo.path(), state.path(), home.path());
+    let status = service.stop_with("-TERM");
+    assert!(
+        status.success(),
+        "the service must stop quietly, and it stopped with {status}"
+    );
+}
+
+#[test]
+fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigint() {
+    let (repo, state, home) = repo_with_a_run();
+    let service = Service::start_on_desktop(repo.path(), state.path(), home.path());
+    let status = service.stop_with("-INT");
+    assert!(
+        status.success(),
+        "Ctrl-C must stop the service quietly too, and it stopped with {status}"
+    );
 }
 
 #[test]
