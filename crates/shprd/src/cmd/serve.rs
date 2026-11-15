@@ -88,7 +88,13 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // Where the graph's program is, found once here: the window's graph block
     // asks the service rather than probing this machine itself, and the answer
     // is the same one the projection is checked with.
-    config.dagr = Some(crate::cmd::dagr::dagr(&write_ctx));
+    let dagr = crate::cmd::dagr::dagr(&write_ctx);
+    // The window's graph block is a layout terminal block, and Herdr prunes such
+    // a block when its terminal does not exist when the layout loads. The service
+    // is up before the window is, so it starts the terminal; the mod in the
+    // window keeps its own start as a fallback (M10.7).
+    crate::cmd::graph::ensure(&resolution, &dagr, &ctx.root);
+    config.dagr = Some(dagr);
     config.home = Some(home.clone());
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
         &home,

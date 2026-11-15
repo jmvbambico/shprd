@@ -9,6 +9,7 @@ pub mod deliver;
 pub mod doctor;
 pub mod drop;
 pub mod fullgate;
+pub mod graph;
 pub mod handoff;
 pub mod install;
 pub mod integrate;
