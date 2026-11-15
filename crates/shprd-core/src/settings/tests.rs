@@ -663,6 +663,7 @@ fn keys_parse_from_their_names_and_their_old_names() {
         ("review.must_fix", "tasks.must_fix"),
         ("review.rounds", "tasks.review_rounds"),
         ("review.cross_vendor", "review.cross_vendor"),
+        ("graph.dagr", "graph.dagr"),
         ("roles.order", "roles.order"),
         ("roles.worker.agent", "roles.worker.agent"),
         ("roles.docs_writer.fallback", "roles.docs_writer.fallback"),
@@ -684,8 +685,34 @@ fn keys_parse_from_their_names_and_their_old_names() {
         "roles.docs/1.agent",
         "review",
         "agents.reactions",
+        "graph",
+        "graph.nope",
     ] {
         assert!(Key::parse(refused).is_err(), "`{refused}` must be refused");
+    }
+}
+
+#[test]
+fn the_graph_program_is_a_key_of_its_own_and_unset_by_default() {
+    // Unset is what makes the graph block look for dagr itself: a value nobody
+    // set must not be mistaken for a path.
+    let resolved = resolve(&File::default(), &Request::default());
+    assert_eq!(shown(&resolved, "graph.dagr"), "\"\"");
+    assert_eq!(source_of(&resolved, "graph.dagr"), Some(Source::BuiltIn));
+    assert_eq!(resolved.graph_dagr(), None, "an empty value is unset");
+
+    let file = you("[graph]\ndagr = \"/opt/dagr/bin/dagr\"\n");
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(shown(&resolved, "graph.dagr"), "\"/opt/dagr/bin/dagr\"");
+    assert_eq!(source_of(&resolved, "graph.dagr"), Some(Source::You));
+    assert_eq!(resolved.graph_dagr(), Some("/opt/dagr/bin/dagr"));
+
+    // A repository's committed file may not point the graph at a program: it is
+    // written by whoever works in the repository, and this key runs one.
+    let committed = "[graph]\ndagr = \"/tmp/dagr\"\n";
+    match parse_repo_committed(committed) {
+        Err(SettingsError::NotAllowed { key, .. }) => assert_eq!(key, "graph"),
+        other => panic!("expected a refusal, got {other:?}"),
     }
 }
 
