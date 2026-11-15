@@ -120,6 +120,20 @@ impl Setup {
         Self { tmp }
     }
 
+    /// The same machine, with the roles in `settings.toml` and no `config.toml`
+    /// at all: the M9 install the engine actually reads.
+    fn settings_only(roles: &str) -> Self {
+        let setup = Self::new("");
+        let config = setup.tmp.path().join("home").join(".config").join("shprd");
+        // A roster line with nothing in it is still a file the legacy layer
+        // reads, so it is removed rather than left empty.
+        let _ = fs::remove_file(config.join("config.toml"));
+        if let Err(error) = fs::write(config.join("settings.toml"), roles) {
+            panic!("writing the settings failed: {error}");
+        }
+        setup
+    }
+
     /// Runs `shprd doctor --no-quota` and returns what it printed.
     fn run(&self, env: &[(&str, &str)]) -> Output {
         let mut command = Command::new(BIN);
@@ -224,6 +238,63 @@ fn fails_when_the_reviewer_shares_a_vendor_with_a_worker() {
     assert!(
         fail.contains("claude"),
         "the reviewer should be named: {fail}"
+    );
+}
+
+/// A home holding only `settings.toml` is the M9 install, and the page must
+/// judge the roles the engine dispatches from: the reviewer it finds there, and
+/// the cross-vendor pair it makes with the worker.
+#[test]
+fn reads_the_roles_from_settings_when_there_is_no_legacy_config() {
+    let setup = Setup::settings_only(
+        "version = 1\n\n\
+         [roles.worker]\nagent = \"pi\"\nmodel = \"commandcode/deepseek/deepseek-v4.1-flash\"\n\n\
+         [roles.reviewer]\nagent = \"pi\"\nmodel = \"commandcode/z-ai/glm-5.3-flash\"\n",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "doctor should pass: {text}");
+    assert!(
+        text.contains("✓ reviewer pi/commandcode/z-ai/glm-5.3-flash (you)"),
+        "the reviewer comes from the settings: {text}"
+    );
+    assert!(
+        text.contains(
+            "✓ reviewer pi/commandcode/z-ai/glm-5.3-flash runs the zhipu family, independent of every worker"
+        ),
+        "the cross-vendor pair is judged: {text}"
+    );
+    assert!(
+        text.contains("✓ workers pi/commandcode/deepseek/deepseek-v4.1-flash"),
+        "the worker role is the first a spawn tries: {text}"
+    );
+    assert!(
+        !text.contains("reviewer not set"),
+        "a configured reviewer is never called unset: {text}"
+    );
+    assert!(
+        !text.contains("workers not set"),
+        "a configured worker is never called unset: {text}"
+    );
+}
+
+/// The legacy roster is still the layer under the settings: a home with only
+/// `config.toml` keeps the role lines it wrote.
+#[test]
+fn falls_back_to_the_legacy_roster_when_the_settings_name_no_role() {
+    let setup = Setup::settings_only("version = 1\n");
+    let config = setup.tmp.path().join("home").join(".config").join("shprd");
+    if let Err(error) = fs::write(
+        config.join("config.toml"),
+        "[roster]\nreviewer = \"pi/openrouter/anthropic/claude-opus-5-5\"\nworkers = [\"claude/opus\"]\n",
+    ) {
+        panic!("writing the config failed: {error}");
+    }
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(
+        text.contains("✓ reviewer pi/openrouter/anthropic/claude-opus-5-5 (your old config file)"),
+        "the roster layer answers when the settings do not: {text}"
     );
 }
 
