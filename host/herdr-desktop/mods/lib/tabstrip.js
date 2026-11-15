@@ -3,12 +3,16 @@
 //
 // Two facts meet here, and the module only joins them:
 //
-// - shprd's own tab titles, from the spawn (`shprd_mux`'s workers and
-//   reviewers): `<agent>·<task>` for a worker, `<agent>·<task>·review` for a
-//   reviewer, and `<agent>·<task>·backup` for a backup that took a task over
-//   (`crates/shprd/src/cmd/spawn.rs`, `worker_title`; `crates/shprd/src/cmd/
-//   review.rs`, `reviewer_title`). A tab whose title is not one of those is a
-//   person's own tab: it still gets a pill, with no agent and no task claimed.
+// - shprd's own tab titles: `<agent>·<task>` for the task's worker
+//   (`crates/shprd/src/cmd/spawn.rs`, `worker_title`) and
+//   `<agent>·<task>·review` for its reviewer (`crates/shprd/src/cmd/review.rs`,
+//   `reviewer_title`). Those are the only two titles shprd writes, and there are
+//   only two roles to read from them: a backup that takes a task over does it in
+//   the worker's own tab, through the same `open_agent` path with the same
+//   `<agent>·<task>` title (`handoff.rs`), so its tab reads as the worker's with
+//   the backup agent's name on it — which is what is running there. A tab whose
+//   title is neither shape is a person's own tab: it still gets a pill, with no
+//   agent and no task claimed.
 // - Herdr's live view of a tab: the most urgent agent status in it
 //   (`working | blocked | done | idle`), and its panes. That is the truth about
 //   the terminal; shprd's snapshot is the truth about the task, and it is what a
@@ -34,21 +38,22 @@ import { status as statusOf } from "./tokens.js";
 /** The separator shprd's tab titles are built from (`worker_title`). */
 export const SEP = "·";
 
-/** The words a role is called by, keyed by the title's last segment. */
+/** The words a role is called by. */
 export const ROLE = {
   worker: "Worker",
   reviewer: "Reviewer",
-  backup: "Backup",
 };
 
 /**
- * The role a title's last segment names: `review` is a reviewer's tab
- * (`reviewer_title`), `backup` a backup's, and anything else is the worker's.
+ * The role a title's last segment names.
  *
- * The segment is the short word the title uses, not the role's full name, so
- * this is the one place the two spellings meet.
+ * `review` is the one suffix shprd writes (`reviewer_title`, `·review`); the
+ * worker's title has no suffix at all (`worker_title`). A segment this build
+ * does not know is read as the worker's, because that is the title a worker
+ * tab — and a backup that took one over — really carries, and inventing a
+ * third role for a word nobody writes would be a claim the run does not back.
  */
-export const SUFFIX = { review: "reviewer", backup: "backup", worker: "worker" };
+export const SUFFIX = { review: "reviewer", worker: "worker" };
 
 /** Herdr's agent states, as a pill names and colours them. */
 export const LIVE = {
@@ -62,8 +67,9 @@ export const LIVE = {
  * What a tab's title says: the agent, the task and the role.
  *
  * `titled: false` means the title is not one shprd gives a tab, so the pill
- * shows the title alone. A reviewer's title ends in `review` and a backup's in
- * `backup` (`reviewer_title`); anything else is a worker's.
+ * shows the title alone. A reviewer's title ends in `review` (`reviewer_title`);
+ * anything else — the worker's own `<agent>·<task>`, and a backup's, which is
+ * the same title with another agent in it — is the worker's.
  */
 export function parseTabName(name) {
   const text = String(name ?? "").trim();

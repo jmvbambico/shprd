@@ -1,12 +1,13 @@
 // The tab bar: the shown space's tabs as pills — the agent that runs in each, its
 // role in shprd's loop, and the state it is in — then the side panel's buttons.
 //
-// In shprd the tabs of one space are one task's terminals: its worker, its
-// reviewer and, when a provider cut a worker off, the backup that took over
-// (`shprd_mux`'s one-space-per-task rule). The tab's title is what says which
-// (`<agent>·<task>`, `<agent>·<task>·review`), and Herdr's live status is what
-// says how it is doing; `lib/tabstrip.js` joins those with the service's own word
-// for the task, so a pill is never a guess.
+// In shprd the tabs of one space are one task's terminals: its worker and its
+// reviewer (`shprd_mux`'s one-space-per-task rule). The tab's title is what says
+// which (`<agent>·<task>`, `<agent>·<task>·review`), and Herdr's live status is
+// what says how it is doing; `lib/tabstrip.js` joins those with the service's
+// own word for the task, so a pill is never a guess. A backup that takes a task
+// over keeps the worker's own tab and title and only changes the agent on it,
+// so its pill reads as the worker it now is.
 //
 // Ported from Shepherdr's tab bar (MIT):
 //

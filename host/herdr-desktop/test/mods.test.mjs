@@ -251,7 +251,10 @@ test("a tab's title names its agent, its task and its role", () => {
   assert.equal(review.agent, "codex");
   assert.equal(review.task, "T2");
   assert.equal(ROLE[review.role], "Reviewer");
-  assert.equal(parseTabName("pi·T3·backup").role, "backup");
+  // The two titles shprd writes are the only roles there are: a third segment it
+  // does not write is read as the worker's, not invented as a role of its own.
+  assert.equal(parseTabName("pi·T3·backup").role, "worker");
+  assert.equal(parseTabName("claude·T3·extra").role, "worker");
   // A title shprd did not give a tab claims no agent and no task.
   const own = parseTabName("Assistant");
   assert.equal(own.titled, false);
