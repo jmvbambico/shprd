@@ -150,8 +150,8 @@ const REPO_LIMIT: &str = "a repository's committed settings file may only set `t
      widen its own guards";
 
 /// The hint an unknown key's error carries.
-const KEY_HINT: &str = "keys are `roles.order`, `roles.<id>.<field>`, `tasks.<key>` and \
-     `review.cross_vendor`";
+const KEY_HINT: &str = "keys are `roles.order`, `roles.<id>.<field>`, `tasks.<key>`, \
+     `review.cross_vendor` and `host`";
 
 /// Where one layer of settings sits in the resolution chain, nearest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -328,6 +328,68 @@ pub const MUST_FIX_WORDS: [&str; 4] = ["critical", "major", "minor", "trivial"];
 
 /// The kinds of role, which decide who may dispatch and who may review.
 pub const ROLE_KINDS: [&str; 4] = ["coordinator", "worker", "reviewer", "helper"];
+
+/// The hosts shprd can drive, in the words a settings file uses.
+///
+/// `auto` is the default and the only spelling that decides at run time: it
+/// picks Herdr desktop when a herdr-core answers for this session *and* a Herdr
+/// window is attached to it, and the herdr TUI otherwise. The other three name
+/// one host and leave no room for a guess.
+pub const HOST_WORDS: [&str; 4] = ["auto", "herdr-desktop", "herdr", "tuios"];
+
+/// Which terminal host shprd drives.
+///
+/// It is a machine setting, not a repository one: which multiplexer a person
+/// works in is a fact about their screen, so a repository's committed settings
+/// file may not set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum HostChoice {
+    /// Pick the host: Herdr desktop when its core and window answer, else the
+    /// TUI.
+    #[default]
+    Auto,
+    /// The Herdr window, driven through herdr-core and the window's own
+    /// command line.
+    HerdrDesktop,
+    /// The herdr TUI, driven through the `herdr` command line.
+    Herdr,
+    /// The tuios TUI, through its herdr-compatible shim.
+    Tuios,
+}
+
+impl HostChoice {
+    /// The word a settings file stores this choice as.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::HerdrDesktop => "herdr-desktop",
+            Self::Herdr => "herdr",
+            Self::Tuios => "tuios",
+        }
+    }
+
+    /// The choice a word names, or [`None`] when it names no host.
+    pub fn parse(word: &str) -> Option<HostChoice> {
+        match word {
+            "auto" => Some(Self::Auto),
+            "herdr-desktop" => Some(Self::HerdrDesktop),
+            "herdr" => Some(Self::Herdr),
+            "tuios" => Some(Self::Tuios),
+            _ => None,
+        }
+    }
+
+    /// Whether this choice is decided at run time rather than named.
+    pub fn is_auto(self) -> bool {
+        self == Self::Auto
+    }
+}
+
+impl std::fmt::Display for HostChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
 
 /// One field of a role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -536,6 +598,8 @@ pub enum Key {
     Task(TaskKey),
     /// `review.cross_vendor`: whether a reviewer must be another vendor.
     CrossVendor,
+    /// `host`: which terminal host shprd drives (`auto` picks one).
+    Host,
 }
 
 impl Key {
@@ -572,6 +636,7 @@ impl Key {
             }),
             ["tasks", name] => TaskKey::parse(name).map(Self::Task).ok_or_else(unknown),
             ["review", "cross_vendor"] => Ok(Self::CrossVendor),
+            ["host"] => Ok(Self::Host),
             ["land", "merge"] => Ok(Self::Task(TaskKey::Merge)),
             ["tick", "max_running"] => Ok(Self::Task(TaskKey::MaxRunning)),
             ["tick", "interval_secs"] => Ok(Self::Task(TaskKey::TickSecs)),
@@ -590,6 +655,7 @@ impl Key {
             Self::Role { id, field } => format!("roles.{id}.{}", field.name()),
             Self::Task(key) => format!("tasks.{}", key.name()),
             Self::CrossVendor => "review.cross_vendor".to_owned(),
+            Self::Host => "host".to_owned(),
         }
     }
 
@@ -617,6 +683,7 @@ impl Key {
                 _ => Kind::Text,
             },
             Self::CrossVendor => Kind::Switch,
+            Self::Host => Kind::OneOf(&HOST_WORDS),
         }
     }
 
@@ -1181,6 +1248,7 @@ fn parse_sections(table: &toml::Table, origin: &str, limit: Limit) -> Result<Lay
                     }
                 }
             }
+            "host" => store(&mut layer, Key::Host, item, origin, limit)?,
             other => {
                 return Err(SettingsError::UnknownKey {
                     key: named(origin, other),
@@ -1349,6 +1417,7 @@ pub fn builtin() -> Layer {
         Value::Number(i64::try_from(NEWS_SETTLE_SECS).unwrap_or(5)),
     );
     layer.set(Key::CrossVendor, Value::Switch(true));
+    layer.set(Key::Host, Value::Text(HostChoice::Auto.name().to_owned()));
     layer.set(
         Key::RolesOrder,
         Value::List(BUILTIN_ROLES.iter().map(|id| (*id).to_owned()).collect()),
@@ -1848,6 +1917,18 @@ impl Resolved {
         }
     }
 
+    /// Which terminal host shprd drives, as the setting names it.
+    ///
+    /// A value this build does not know resolves to [`HostChoice::Auto`]: a
+    /// settings file written by a newer shprd must not make every verb refuse,
+    /// and `auto` is the choice that asks the machine what it has.
+    pub fn host(&self) -> HostChoice {
+        self.get(&Key::Host)
+            .and_then(|sourced| sourced.value.text())
+            .and_then(HostChoice::parse)
+            .unwrap_or_default()
+    }
+
     /// Whether a reviewer must be another vendor than the worker.
     pub fn cross_vendor(&self) -> bool {
         self.get(&Key::CrossVendor)
@@ -1898,6 +1979,7 @@ impl Resolved {
             self.push_row(&mut rows, Key::Task(key));
         }
         self.push_row(&mut rows, Key::CrossVendor);
+        self.push_row(&mut rows, Key::Host);
         rows
     }
 

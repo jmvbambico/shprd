@@ -17,7 +17,10 @@
 //! - [`placement`] — `herdr.space` / `herdr.tab`: how a terminal lands in the
 //!   space and tab a task works in;
 //! - [`osc`] — the OSC 7501 status grammar a program uses to say what it is
-//!   doing, byte for byte.
+//!   doing, byte for byte;
+//! - [`host`] — [`HcHost`], the [`shprd_mux::Host`] every shprd verb drives on
+//!   Herdr desktop, built from the client and the fold above and from the
+//!   window's own `herdr-app` command line for the layout.
 //!
 //! Everything here was shaped by the live spikes in
 //! `_research/m7/M7ef-herdr-desktop-spikes.md` (herdr-core 0.1.21, Herdr.app
@@ -28,12 +31,17 @@
 //! (MIT, Copyright (c) 2026 Elias Stravik, tag `v3.1.34`, commit `a3f327a`); the
 //! notices and the fold are shprd's own code.
 //!
-//! The host trait this will sit behind is M10.2's; this crate deliberately
-//! exposes a client and a fold, not a [`shprd_mux`] adapter.
+//! The layout, methods, event fold and error taxonomy are ported from
+//! Shepherdr's `service/hc/{client,protocol}.ts` and `service/hub.ts`
+//! (MIT, Copyright (c) 2026 Elias Stravik, tag `v3.1.34`, commit `a3f327a`); the
+//! notices and the fold are shprd's own code. The host adapter's split — `hc`
+//! for terminals, `herdr-app` for the window's spaces and tabs — is Shepherdr's
+//! too (`service/spaces.ts`, `service/hub.ts`).
 
 pub mod client;
 pub mod error;
 pub mod events;
+pub mod host;
 pub mod model;
 pub mod osc;
 pub mod placement;
@@ -45,6 +53,7 @@ pub use client::{
 };
 pub use error::{CORE_GENERATION, CORE_MINIMUM, Error, Result};
 pub use events::{Fold, LAYOUT_DOCUMENT, State, Update};
+pub use host::{HcHost, Window};
 pub use model::{
     AgentState, AgentStateWord, AskKind, Change, ChangeKind, Foreground, Notice, Status, Terminal,
     notice_from_message, terminals_from,

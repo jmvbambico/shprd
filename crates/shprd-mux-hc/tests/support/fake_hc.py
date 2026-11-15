@@ -12,6 +12,9 @@ Behaviour is chosen per test with a small script directory:
     <dir>/mode          first line: what to do
     <dir>/child-marker  written when the child starts, so a test can count spawns
     <dir>/log           one line per request the fake answered
+    <dir>/requests.jsonl  every request, whole, so a test can read the params
+                          a verb sent (labels, environment, argv)
+    <dir>/screen        what `terminal.read` answers, so a test drives a screen
 
 Modes:
 
@@ -26,6 +29,10 @@ Modes:
               a subscriber that fell behind receives (M7ef §2.4)
     doc       answer normally, then send a `doc` event naming `herdr-app`, which
               carries a version and no value
+    status-later
+              answer normally; after a `terminal.get` for t20, report it `blocked`
+              through the event stream, so a test sees a change arrive after the
+              fold was already read
 """
 
 import base64
@@ -33,6 +40,7 @@ import json
 import os
 import struct
 import sys
+import time
 
 FRAME_DATA = 0
 FRAME_CREDIT = 1
@@ -101,7 +109,9 @@ class Fake:
             "t20": terminal("t20", {"herdr.space": SPACE, "herdr.tab": "tbprobe"}),
         }
         self.doc_version = 3
+        self.documents = {}
         self.list_calls = 0
+        self.next_terminal = 100
 
     def path(self, name):
         return os.path.join(self.dir, name)
@@ -113,11 +123,21 @@ class Fake:
         except OSError:
             return "normal"
 
-    def log(self, line):
+    def log(self, line, request=None):
         if not self.dir:
             return
         with open(self.path("log"), "a") as handle:
             handle.write(line + "\n")
+        if request is not None:
+            with open(self.path("requests.jsonl"), "a") as handle:
+                handle.write(json.dumps(request) + "\n")
+
+    def screen(self):
+        try:
+            with open(self.path("screen")) as handle:
+                return handle.read()
+        except OSError:
+            return ""
 
     def mark_spawn(self):
         if not self.dir:
@@ -234,7 +254,11 @@ class Fake:
             "terminals": list(self.terminals.values()),
             "channel": EVENT_CHANNEL,
         }})
-        # One event right after the snapshot, as a live core does.
+        # One event right after the snapshot, as a live core does. The record
+        # moves with it, because a real core keeps the status in the terminal.
+        self.terminals["t20"]["status"] = {"state": "working", "progress": 10,
+                                           "app": "shprd-probe"}
+        self.terminals["t20"]["reported"] = True
         self.write_event("event", {
             "seq": 301, "terminal": "t20", "type": "status",
             "data": {"state": "working", "app": "shprd-probe", "progress": 10,
@@ -255,10 +279,44 @@ class Fake:
         if self.mode == "die-mid":
             sys.exit(0)
 
+    def finish(self, address, reason="killed", exit_code=None, signal=1):
+        record = self.terminals.get(address)
+        if record is None:
+            return None
+        record["state"] = "finished"
+        # A program that exits takes its status with it (M7ef §2.5).
+        record["status"] = None
+        record["reported"] = False
+        record["reason"] = reason
+        record["exit_code"] = exit_code
+        record["signal"] = signal
+        try:
+            self.write_event("event", {
+                "seq": 400, "terminal": address, "type": "finished",
+                "data": {"exit_code": exit_code, "reason": reason,
+                         "signal": signal, "finished_ms": 1794618609228}})
+        except (BrokenPipeError, OSError):
+            pass
+        return record
+
+    def terminal_run(self, message, params):
+        address = f"t{self.next_terminal}"
+        self.next_terminal += 1
+        record = terminal(address, params.get("labels") or {})
+        record["argv"] = params.get("argv") or []
+        record["cwd"] = params.get("cwd") or "/tmp"
+        self.terminals[address] = record
+        return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
+                               "result": record})
+
+    def terminal_of(self, params):
+        wanted = params.get("terminal")
+        return self.terminals.get(wanted), wanted
+
     def answer(self, message):
         method = message.get("method")
         params = message.get("params") or {}
-        self.log(method)
+        self.log(method, message)
         if method == "hello":
             return self.hello(message)
         if method == "events.subscribe":
@@ -272,6 +330,92 @@ class Fake:
             return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "terminals": list(self.terminals.values()), "machines": [],
                 "hidden_finished": 0}})
+        if method == "terminal.run":
+            return self.terminal_run(message, params)
+        if method in ("terminal.get", "terminal.kill", "terminal.rm",
+                      "terminal.read", "terminal.send", "terminal.keys",
+                      "terminal.wait"):
+            record, wanted = self.terminal_of(params)
+            if record is None:
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32000, "message": f"no terminal {wanted!r}",
+                    "data": {"kind": "not_found", "hint": "see hc ls --all"}}})
+            if self.mode == "status-later" and method == "terminal.get" \
+                    and wanted == "t20":
+                record["status"] = {"state": "blocked", "kind": "question",
+                                    "msg": "What now?"}
+                record["turn"] = 2
+                self.write_event("event", {
+                    "seq": 320, "terminal": wanted, "type": "status",
+                    "data": {"state": "blocked", "reported": True, "records": {}}})
+            if method == "terminal.get":
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
+                                       "result": record})
+            if method == "terminal.kill":
+                self.finish(wanted)
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
+                                       "result": record})
+            if method == "terminal.rm":
+                self.terminals.pop(wanted, None)
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
+                                       "result": {"removed": wanted}})
+            if method == "terminal.read":
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "text": self.screen(), "complete": True, "how": "screen"}})
+            if method == "terminal.send":
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "status": None, "turn": 1, "started": None}})
+            if method == "terminal.keys":
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "status": None, "turn": 1}})
+            if method == "terminal.wait":
+                output = params.get("output")
+                if output and output in self.screen():
+                    return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                        "terminal": wanted, "ended": False, "reason": "output",
+                        "status": None, "turn": 1, "exit_code": None, "signal": None}})
+                if record.get("state") == "finished":
+                    return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                        "terminal": wanted, "ended": True, "reason": "exit",
+                        "status": None, "turn": 1,
+                        "exit_code": record.get("exit_code"), "signal": None}})
+                time.sleep(0.05)
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "terminal": wanted, "ended": False, "reason": "timeout",
+                    "status": None, "turn": 1, "exit_code": None, "signal": None}})
+        if method == "doc.set":
+            name = params.get("name")
+            held = self.documents.get(name, 0)
+            if params.get("version") != held:
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32000,
+                    "message": f"document {name!r} is at version {held}, not {params.get('version')}",
+                    "data": {"kind": "conflict",
+                             "hint": "read doc.get and retry with its version"}}})
+            self.documents[name] = held + 1
+            return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
+                                   "result": {"version": held + 1}})
+        if method == "machine.exec":
+            # A command named `binary-output` writes bytes that are not text, as a
+            # real one summarizing a file may; everything else says `exec ok`.
+            argv = params.get("argv") or []
+            wrote = b"\xff\xfe exec ok" if argv[:1] == ["binary-output"] else b"exec ok"
+            return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                "code": 0, "stdout": base64.b64encode(wrote).decode(),
+                "stderr": "", "ms": 1, "truncated": False, "timed_out": False}})
+        if method == "terminal.label":
+            record, wanted = self.terminal_of(params)
+            if record is None:
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32000, "message": "no terminal",
+                    "data": {"kind": "not_found"}}})
+            for key, value in (params.get("labels") or {}).items():
+                if value is None:
+                    record["labels"].pop(key, None)
+                else:
+                    record["labels"][key] = value
+            return self.write_rpc({"jsonrpc": "2.0", "id": message["id"],
+                                   "result": record})
         if method == "doc.get":
             name = params.get("name")
             if name == "herdr-app":

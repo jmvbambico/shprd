@@ -21,6 +21,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// How long `app.quit` gets while a test tears its window down.
+pub const TEARDOWN_QUIT: Duration = Duration::from_secs(10);
+
+/// How long the private core's own stop gets while a test tears down.
+pub const TEARDOWN_CORE: Duration = Duration::from_secs(20);
+
 /// A private core session and (when asked) a private window over it.
 #[derive(Debug)]
 pub struct Live {
@@ -175,14 +181,77 @@ impl Live {
     }
 
     /// Stop the core and the window this test made.
+    ///
+    /// The window is asked to quit and then killed, so a window that has stopped
+    /// answering can never hold a test's teardown: the quit is given
+    /// [`TEARDOWN_QUIT`] and the kill is unconditional. The core's own stop is
+    /// bounded the same way.
     pub fn stop(&mut self) {
         if let Some(mut window) = self.window.take() {
-            let _ = self.app_call(&["do", "app.quit"]);
-            std::thread::sleep(Duration::from_millis(300));
+            let _ = self.app_call_bounded(&["do", "app.quit"], TEARDOWN_QUIT);
             let _ = window.kill();
             let _ = window.wait();
         }
-        let _ = self.hc_call(&["server", "stop"]);
+        let _ = self.hc_call_bounded(&["server", "stop"], TEARDOWN_CORE);
+    }
+
+    /// [`Live::app_call`], giving up after `timeout` instead of blocking for
+    /// ever on a window that has wedged.
+    pub fn app_call_bounded(&self, args: &[&str], timeout: Duration) -> Result<String, String> {
+        let binary = std::env::var_os("SHPRD_HERDR_APP")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/Applications/Herdr.app/Contents/MacOS/Herdr"));
+        self.call_bounded(&binary, args, timeout)
+    }
+
+    /// [`Live::hc_call`], giving up after `timeout`.
+    pub fn hc_call_bounded(&self, args: &[&str], timeout: Duration) -> Result<String, String> {
+        self.call_bounded(&self.hc(), args, timeout)
+    }
+
+    /// Run one command in the private session, waiting at most `timeout` for it.
+    ///
+    /// The child is reaped on its own thread, so a command that hangs is
+    /// abandoned rather than blocking the caller: a test's teardown must finish.
+    fn call_bounded(
+        &self,
+        binary: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let mut command = Command::new(binary);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in self.environment() {
+            command.env(key, value);
+        }
+        let child = command
+            .spawn()
+            .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(child.wait_with_output());
+        });
+        match receiver.recv_timeout(timeout) {
+            Ok(Ok(output)) if output.status.success() => {
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
+            Ok(Ok(output)) => Err(format!(
+                "{} {} failed: {}",
+                binary.display(),
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Ok(Err(error)) => Err(format!("cannot read {}: {error}", binary.display())),
+            Err(_) => Err(format!(
+                "{} {} did not answer in {timeout:?}",
+                binary.display(),
+                args.join(" ")
+            )),
+        }
     }
 }
 
