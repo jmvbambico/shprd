@@ -58,8 +58,9 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
 ///
 /// A task that landed or was dropped has nobody left to ask: the escalation that
 /// held it back is history, and a card that kept it would ask a person to
-/// approve work that is already in. An escalation about no single task (a run's
-/// own) is always kept: the fold has nothing to resolve it against.
+/// approve work that is already in. So is a card about a failed review that a
+/// newer attempt has answered. An escalation about no single task (a run's own)
+/// is always kept: the fold has nothing to resolve it against.
 fn still_needs_a_person(state: &RunState, escalation: &shprd_core::state::Escalation) -> bool {
     let Some(task) = escalation.task.as_deref() else {
         return true;
@@ -68,8 +69,22 @@ fn still_needs_a_person(state: &RunState, escalation: &shprd_core::state::Escala
         !matches!(
             task.status,
             shprd_core::state::TaskStatus::Integrated | shprd_core::state::TaskStatus::Dropped
-        )
+        ) && card_is_current(task, &escalation.body)
     })
+}
+
+/// Whether the card `body` names is about the attempt the task is on.
+///
+/// A card for a review that spent its rounds names its attempt, and it is
+/// history once a newer attempt exists: the failure it named has been answered,
+/// by a person's "retry" or by a spawn someone ran by hand.
+fn card_is_current(task: &shprd_core::state::Task, body: &str) -> bool {
+    match shprd_core::gate::card_attempt(&task.id, body) {
+        Some(attempt) => task
+            .latest_attempt()
+            .is_none_or(|latest| latest.n <= attempt),
+        None => true,
+    }
 }
 
 /// Every ask still open at `now_ms`, oldest first.
@@ -82,6 +97,14 @@ fn open_asks(state: &RunState, now_ms: u64) -> Vec<AskDto> {
         .asks
         .values()
         .filter(|ask| ask.is_open_at(now_ms))
+        // A card about a failed review is answered by a newer attempt, exactly
+        // as its escalation is: one decision, one card on either list.
+        .filter(|ask| {
+            state
+                .tasks
+                .get(&ask.task)
+                .is_none_or(|task| card_is_current(task, &ask.text))
+        })
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms
@@ -288,6 +311,137 @@ mod tests {
         let run_wide = snapshot(&state, NOW);
         assert_eq!(run_wide.needs.len(), 1, "{:?}", run_wide.needs);
         assert!(run_wide.needs[0].task.is_none());
+    }
+
+    #[test]
+    fn a_card_about_an_attempt_a_newer_one_replaced_is_history() {
+        // A review that spent its rounds raises a card naming its attempt. Once
+        // a newer attempt exists — a person's "retry", or a spawn by hand — the
+        // failure it named has been answered, so both its lists drop it.
+        let mut state = run_with_a_task();
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(1),
+                report: None,
+                gates: Vec::new(),
+                reviews: Vec::new(),
+            });
+        let body = shprd_core::gate::rounds_spent_body(
+            state.tasks.get("T1").expect("the fixture's task"),
+            1,
+            2,
+        );
+        state.escalations.push(shprd_core::state::Escalation {
+            task: Some("T1".to_string()),
+            body: body.clone(),
+            default_action: String::from("retry, take it, or drop it"),
+            seq: 3,
+        });
+        state.asks.insert(
+            ("T1".to_string(), shprd_core::gate::rounds_spent_ask(1)),
+            AskRecord {
+                id: shprd_core::gate::rounds_spent_ask(1),
+                task: String::from("T1"),
+                kind: AskKind::Question,
+                text: body,
+                options: shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                    .iter()
+                    .map(|choice| (*choice).to_string())
+                    .collect(),
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+                raised_seq: 4,
+                answer: None,
+            },
+        );
+        let waiting = snapshot(&state, NOW);
+        assert_eq!(waiting.needs.len(), 1, "{:?}", waiting.needs);
+        assert_eq!(waiting.asks.len(), 1, "{:?}", waiting.asks);
+
+        // A newer attempt answers both: the card is about attempt 1, and the
+        // task is on attempt 2.
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 2,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(6),
+                report: None,
+                gates: Vec::new(),
+                reviews: Vec::new(),
+            });
+        let answered = snapshot(&state, NOW);
+        assert!(answered.needs.is_empty(), "{:?}", answered.needs);
+        assert!(answered.asks.is_empty(), "{:?}", answered.asks);
+    }
+
+    #[test]
+    fn a_card_about_a_send_back_that_did_not_start_is_history_too() {
+        // A card raised because a failed attempt could not be sent back names
+        // that attempt as well, so the same rule drops it once a newer attempt
+        // has answered it.
+        let mut state = run_with_a_task();
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(1),
+                report: None,
+                gates: Vec::new(),
+                reviews: Vec::new(),
+            });
+        state.escalations.push(shprd_core::state::Escalation {
+            task: Some("T1".to_string()),
+            body: format!(
+                "{}no workspace",
+                shprd_core::gate::send_back_failure_prefix("T1", 1)
+            ),
+            default_action: String::from("spawn it by hand"),
+            seq: 3,
+        });
+        let waiting = snapshot(&state, NOW);
+        assert_eq!(waiting.needs.len(), 1, "{:?}", waiting.needs);
+
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 2,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(6),
+                report: None,
+                gates: Vec::new(),
+                reviews: Vec::new(),
+            });
+        let answered = snapshot(&state, NOW);
+        assert!(answered.needs.is_empty(), "{:?}", answered.needs);
     }
 
     #[test]

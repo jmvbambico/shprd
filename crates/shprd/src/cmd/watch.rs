@@ -523,8 +523,11 @@ fn action_line(task: &str, kind: &EventKind, merge: MergePolicy) -> Option<Strin
                 merge_name(other)
             ),
         }),
+        // A failed review is the tick's to answer: another attempt while its
+        // rounds are left, and a card for the person once they are spent.
         EventKind::GateFailed { gate, .. } if gate == REVIEW_GATE => Some(format!(
-            "[{task}] start the next attempt: shprd agent spawn --task {task}"
+            "[{task}] review failed: the tick sends it back for another attempt while it has \
+             review rounds left, and asks you once they are spent"
         )),
         EventKind::Escalated {
             body,
@@ -3693,10 +3696,13 @@ project_dirs = []
         let failed = notices(&[plan.clone(), review(false, 2)], None, MergePolicy::Auto);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(
-            failed[0]
-                .line
-                .contains("start the next attempt: shprd agent spawn --task T1"),
-            "{}",
+            failed[0].line.contains("the tick sends it back"),
+            "the tick answers a failed review, not the person: {}",
+            failed[0].line
+        );
+        assert!(
+            !failed[0].line.contains("shprd agent spawn --task T1"),
+            "the pre-M9 hand work is gone: {}",
             failed[0].line
         );
         let integrated = notices(

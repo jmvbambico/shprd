@@ -188,7 +188,7 @@ pub trait FallbackSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepReport {
     /// The action's name: `start`, `review`, `verdict`, `land`, `mark_landed`,
-    /// `needs_you`, `nudge`, `backup` or `give_up`.
+    /// `needs_you`, `send_back`, `escalate`, `nudge`, `backup` or `give_up`.
     pub action: String,
     /// The task it was about.
     pub task: String,
@@ -458,6 +458,15 @@ impl Worker {
         }
         if named(TaskKey::MaxRunning) {
             config.tick.max_running = tasks.max_running;
+        }
+        // The review's policy is what the send-back and the out-of-rounds card
+        // are decided by, so the person's own answer to the brief's
+        // `Review rounds` line is what the pass must act on.
+        if named(TaskKey::ReviewRounds) {
+            config.review.rounds = tasks.review_rounds;
+        }
+        if named(TaskKey::MustFix) {
+            config.review.must_fix = tasks.must_fix;
         }
         config
     }
@@ -852,6 +861,12 @@ impl Worker {
                 number,
             } => self.mark_landed(state, task, *outcome, head.as_deref(), *number),
             Step::NeedsYou { task, body } => self.needs_you(task, body),
+            Step::SendBack { task, attempt } => self.send_back(state, task, *attempt),
+            Step::Escalate {
+                task,
+                body,
+                default_action,
+            } => self.escalate_review(state, task, body, default_action),
         };
         match result {
             Ok(report) => report,
@@ -866,14 +881,201 @@ impl Worker {
 
     /// Starts an agent on a queued task through the caller's spawn path.
     fn start_task(&self, task: &str) -> Result<StepReport, String> {
-        let detail = (self.start)(&self.repo, task)?;
-        let step = Step::Start {
+        self.spawn_attempt(
+            &Step::Start {
+                task: task.to_string(),
+            },
+            task,
+        )
+    }
+
+    /// Sends a task whose review failed back for another attempt.
+    ///
+    /// The attempt is started by the caller's spawn path, which is the one
+    /// `shprd agent spawn --task` and a start use: the failed attempt is
+    /// archived, and the new brief carries "why the previous attempt was sent
+    /// back" from the review gate the log holds, so nothing about spawning or
+    /// about the findings is written a second time here.
+    ///
+    /// A send-back that does not start is escalated once, in the task's name:
+    /// the planner stops planning the same failure, so without the card the
+    /// task would sit at `Failed` for ever with nothing in the ledger saying
+    /// why. The card names the one verb that recovers it.
+    fn send_back(&self, state: &RunState, task: &str, attempt: u32) -> Result<StepReport, String> {
+        let step = Step::SendBack {
             task: task.to_string(),
+            attempt,
         };
+        match (self.start)(&self.repo, task) {
+            Ok(detail) => self.report_spawn(&step, detail),
+            Err(reason) => {
+                let told = self.escalate_send_back_failure(state, task, attempt, &reason);
+                match told {
+                    Ok(()) => Err(reason),
+                    Err(escalation) => Err(format!(
+                        "{reason}; the escalation could not be recorded either: {escalation}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Puts a task whose review rounds are spent in front of a person, once.
+    ///
+    /// The verdict decision normally records this card as it decides the last
+    /// round; the planner plans this step for a failure that reached the log any
+    /// other way, so the run asks its person under the service's tick alone —
+    /// with no coordinator to tell and nothing typed into a terminal. The body
+    /// says what failed and names the verb behind each choice.
+    fn escalate_review(
+        &self,
+        state: &RunState,
+        task: &str,
+        body: &str,
+        default_action: &str,
+    ) -> Result<StepReport, String> {
+        let step = Step::Escalate {
+            task: task.to_string(),
+            body: body.to_string(),
+            default_action: default_action.to_string(),
+        };
+        let found = state
+            .tasks
+            .get(task)
+            .ok_or_else(|| format!("no task {task:?} in this run"))?;
+        let attempt = found
+            .latest_attempt()
+            .ok_or_else(|| format!("task {task:?} has no attempt to decide"))?
+            .n;
+        let mut last = None;
+        // One card per failure: the marker names the attempt and its failed
+        // rounds, and the verdict decision writes the same one, so the two
+        // never make two cards.
+        let marker = shprd_core::gate::rounds_spent_prefix(
+            task,
+            attempt,
+            shprd_core::gate::failed_review_rounds(found),
+        );
+        let told = state.escalations.iter().any(|escalation| {
+            escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)
+        });
+        if !told {
+            let seq = self.commit(EventKind::Escalated {
+                task: Some(task.to_string()),
+                body: body.to_string(),
+                default_action: default_action.to_string(),
+            })?;
+            self.notify(Some(seq));
+            last = Some(seq);
+        }
+        // The choices are a card the person answers through the API, which is
+        // what makes the escalation something a board can act on rather than
+        // read. It is raised once, by the id that names the attempt.
+        let ask = shprd_core::gate::rounds_spent_ask(attempt);
+        if !state.asks.contains_key(&(task.to_string(), ask.clone())) {
+            let seq = self.raise_rounds_card(task, &ask, body)?;
+            if seq.is_some() {
+                last = seq;
+            }
+        }
+        Ok(StepReport::done(&step, body.to_string(), last))
+    }
+
+    /// Writes the answerable card for a review that spent its rounds.
+    ///
+    /// Both halves are the ask machinery the CLI uses: the queue file, which is
+    /// what `POST /api/asks/answer` claims, and the `AskRaised` event, which is
+    /// what the fold, `/api/asks` and the derived status read. The card never
+    /// expires, because the decision is the person's to make when they get to
+    /// it, and its id names the failed attempt so one failure has one card.
+    fn raise_rounds_card(&self, task: &str, id: &str, text: &str) -> Result<Option<u64>, String> {
+        let now_ms = SystemClock.now_ms();
+        let options: Vec<String> = shprd_core::gate::ROUNDS_SPENT_OPTIONS
+            .iter()
+            .map(|choice| (*choice).to_string())
+            .collect();
+        let ask = shprd_core::ask::Ask::new(
+            id.to_string(),
+            task.to_string(),
+            shprd_core::ask::AskKind::Question,
+            text.to_string(),
+            now_ms,
+        )
+        .with_options(options.clone());
+        let queue = shprd_core::ask::AskQueue::for_repo(&self.repo);
+        match queue.raise(&ask) {
+            Ok(()) | Err(shprd_core::ask::AskError::AlreadyRaised { .. }) => {}
+            Err(err) => return Err(format!("writing the card: {err}")),
+        }
+        let event = match ledger::commit(
+            &self.repo,
+            &self.actor,
+            EventKind::AskRaised {
+                task: task.to_string(),
+                ask: id.to_string(),
+                ask_kind: shprd_core::ask::AskKind::Question,
+                text: text.to_string(),
+                options,
+                created_at_ms: now_ms,
+                expires_at_ms: None,
+            },
+        ) {
+            Ok(event) => Some(event.seq),
+            // Another writer raised it first: the card is there, which is what
+            // the step wanted.
+            Err(ledger::CommitError::Refused(RuleError::AskAlreadyRaised { .. })) => None,
+            Err(err) => return Err(format!("recording the card: {err}")),
+        };
+        after_write(&self.after_write, &self.repo);
+        Ok(event)
+    }
+
+    /// Runs the caller's spawn path for one attempt and reports what it did.
+    ///
+    /// The spawn records the attempt and its resources itself, so the step's
+    /// sequence is the log's newest line rather than one this executor wrote.
+    fn report_spawn(&self, step: &Step, detail: String) -> Result<StepReport, String> {
         let seq = self.last_seq();
         self.notify(seq);
         after_write(&self.after_write, &self.repo);
-        Ok(StepReport::done(&step, detail, seq))
+        Ok(StepReport::done(step, detail, seq))
+    }
+
+    /// Starts the attempt `step` names through the caller's spawn path.
+    fn spawn_attempt(&self, step: &Step, task: &str) -> Result<StepReport, String> {
+        let detail = (self.start)(&self.repo, task)?;
+        self.report_spawn(step, detail)
+    }
+
+    /// Records once that a send-back the pass planned did not start.
+    ///
+    /// The body begins with [`shprd_core::gate::send_back_failure_prefix`], which
+    /// the planner compares, so the same failed attempt costs one spawn attempt
+    /// and one card rather than one of each every pass.
+    fn escalate_send_back_failure(
+        &self,
+        state: &RunState,
+        task: &str,
+        attempt: u32,
+        reason: &str,
+    ) -> Result<(), String> {
+        let marker = shprd_core::gate::send_back_failure_prefix(task, attempt);
+        let already = state.escalations.iter().any(|escalation| {
+            escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)
+        });
+        if already {
+            return Ok(());
+        }
+        let seq = self.commit(EventKind::Escalated {
+            task: Some(task.to_string()),
+            body: format!("{marker}{reason}"),
+            default_action: format!(
+                "fix what the card names, then run `shprd agent spawn --task {task}`: the engine \
+                 plans no second send-back for this attempt"
+            ),
+        })?;
+        self.notify(Some(seq));
+        Ok(())
     }
 
     /// Starts the reviewer on a task that handed in, through the caller's
@@ -965,7 +1167,13 @@ impl Worker {
                 "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
             )
         })?;
-        let decided = gate::decide(found, attempt, findings, source, config.review);
+        // A round a person granted by answering the card is one more round the
+        // decision may use before it asks again.
+        let policy = shprd_core::config::Review {
+            rounds: gate::allowance(state, found, config.review.rounds),
+            must_fix: config.review.must_fix,
+        };
+        let decided = gate::decide(found, attempt, findings, source, policy);
         let mut last = None;
         for kind in decided.events {
             match self.commit_verdict(kind) {

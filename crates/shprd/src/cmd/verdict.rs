@@ -92,6 +92,12 @@ pub fn submit_verdict(
         .map_err(CliError::Invalid)?;
     let findings = parse_findings(&bytes, &findings_path)?;
     let reviewed = reviewed_task(ctx, task)?;
+    // One more round for every card a person answered with "retry", exactly as
+    // the service's own pass counts them.
+    let policy = Review {
+        rounds: gate::allowance(&ctx.state()?, &reviewed, policy.rounds),
+        must_fix: policy.must_fix,
+    };
     let source = gate::provenance(&reviewed, attempt, &bytes).ok_or_else(|| {
         CliError::Invalid(anyhow!(
             "no review was requested for {task} attempt {attempt}: a verdict needs a reviewer"
