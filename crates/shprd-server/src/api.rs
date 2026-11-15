@@ -326,6 +326,17 @@ impl App {
         self
     }
 
+    /// Read the harness table from `data`, however its origin resolved.
+    ///
+    /// [`App::with_data`] names a directory; this takes the
+    /// [`DataDir`](shprd_agents::data::DataDir) the binary resolved, which is
+    /// how a test drives a service with only the copy embedded in the binary.
+    pub fn with_data_dir(mut self, data: DataDir) -> Self {
+        self.state.data = Some(data);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Read and write the prompts in `dir` instead of under the home directory.
     ///
     /// A test passes its own directory, so it can never read or write the

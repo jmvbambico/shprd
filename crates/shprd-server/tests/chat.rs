@@ -464,6 +464,42 @@ async fn a_program_with_no_reader_says_so() {
 }
 
 #[tokio::test]
+async fn the_harness_table_is_read_from_the_copy_the_binary_ships() {
+    // An installed `shprd` has no data directory at all: the table comes from
+    // the copy embedded at build time. The chat has to find a program's
+    // transcript rule there, or a chat would only work in a checkout.
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    let state = tempfile::tempdir().expect("state dir");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_home(home.path().to_path_buf())
+        .with_data_dir(shprd_agents::data::DataDir::resolve(None, None));
+    let token = std::fs::read_to_string(app.info().token_path)
+        .expect("the token file")
+        .trim()
+        .to_string();
+    let fixture = Fixture {
+        app,
+        token,
+        repo,
+        home,
+        state,
+        recorder: Arc::new(Recorder::default()),
+    };
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], "claude");
+    assert!(
+        reply.note().contains("has not written a session"),
+        "the program's transcript rule was found, so the only thing missing is a session: {}",
+        reply.note()
+    );
+}
+
+#[tokio::test]
 async fn a_coordinator_with_no_program_says_which_key_to_set() {
     let repo = tempfile::tempdir().expect("repo dir");
     start_run(repo.path());
