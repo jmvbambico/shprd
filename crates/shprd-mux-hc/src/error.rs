@@ -84,7 +84,9 @@ pub enum Error {
 
     /// The call did not answer in time. The request may still be running in the
     /// core, so a mutating call must not be retried blind.
-    #[error("herdr-core did not answer `{method}` within {}s; check the state before retrying", after.as_secs())]
+    #[error(
+        "herdr-core did not answer `{method}` within {after:?}; check the state before retrying"
+    )]
     Timeout {
         /// The method that was called.
         method: String,

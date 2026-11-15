@@ -572,6 +572,64 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_placed_by_its_labels_is_found_in_the_space_and_tab() {
+        // The whole contract in one place: a placement's labels go on a
+        // terminal, and the fold finds that terminal in the space and tab the
+        // layout holds. Creating a space is this and nothing more — the window
+        // makes the space for the first terminal that names it (M7ef §2.8).
+        let placement = crate::placement::Placement::new("box/spc3f2a", "Worker");
+
+        let mut fold = Fold::new();
+        fold.apply(Notice::Synced {
+            seq: 1,
+            terminals: vec![
+                serde_json::from_value(json!({
+                    "address": "box/t7",
+                    "labels": placement.with_task("shprd-49#1"),
+                    "state": "live",
+                    "status": {"state": "working"}
+                }))
+                .unwrap(),
+                // The window's own terminal in the same space, in another tab.
+                terminal("t1y"),
+            ],
+        });
+        fold.set_document(
+            LAYOUT_DOCUMENT,
+            &json!({
+                "spaces": [{
+                    "id": "spc3f2a",
+                    "name": "shprd",
+                    "tabs": [
+                        {"id": "tbroot", "name": "", "root": {"type": "block", "content": {"terminal": "t1y"}}},
+                        {"id": "tbworker", "name": "Worker", "root": {"type": "block", "content": {"terminal": "t7"}}}
+                    ]
+                }]
+            }),
+            1,
+        );
+
+        let state = fold.state();
+        // Labels are bare on the wire, so a machine prefix does not get in the
+        // way of finding the space or the tab.
+        assert!(state.space("spc3f2a").is_some());
+        // The tab is found by the label, which matches the window's tab name
+        // case-insensitively; the label itself is compared exactly, because it
+        // is a string shprd wrote, not one a person typed.
+        assert_eq!(state.tab("spc3f2a", "worker").unwrap().id, "tbworker");
+        let placed = state.placed_in("spc3f2a", "Worker");
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].bare_address(), "t7");
+        assert_eq!(
+            placed[0]
+                .labels
+                .get(crate::placement::TASK_LABEL)
+                .map(String::as_str),
+            Some("shprd-49#1")
+        );
+    }
+
+    #[test]
     fn labels_events_move_a_terminal_between_tabs() {
         let mut fold = Fold::new();
         fold.apply(Notice::Synced {
