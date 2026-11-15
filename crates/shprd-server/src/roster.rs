@@ -38,7 +38,8 @@ use crate::dto::{ModelChoiceDto, ModelsSourceDto, PermissionDto, ProgramDto, Ros
 ///
 /// The catalogue feeds a menu, so a slow or hung CLI must not hold the page: a
 /// program that does not answer in this long is offered with a text box and the
-/// note saying so.
+/// note saying so. The listings run at once, so this is the whole answer's
+/// bound, not one program's share of it.
 const LIST_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Every program this machine's harness table defines, in the table's order.
@@ -67,25 +68,51 @@ pub(crate) fn read(data: Option<&DataDir>, path_env: Option<&str>) -> RosterDto 
             };
         }
     };
+    // A program that lists its own models is a process, and four of them in a
+    // row would make a picker wait four times over. They are started together
+    // and read in the table's order, so the answer takes the slowest listing's
+    // time rather than their sum.
+    let catalogs = listings(&specs, data, path_env);
     RosterDto {
         programs: specs
             .iter()
-            .map(|spec| program(spec, data, path_env))
+            .zip(catalogs)
+            .map(|(spec, catalog)| program(spec, catalog))
             .collect(),
         note: None,
     }
 }
 
+/// Every program's catalog, in the specs' order, listed at once.
+///
+/// The static ones are read here (a file each); the ones a program lists itself
+/// run together, each under [`LIST_TIMEOUT`]. `None` is "no list": a program
+/// with no catalog, or one whose list failed.
+fn listings(specs: &[HarnessSpec], data: &DataDir, path_env: Option<&str>) -> Vec<Option<Catalog>> {
+    std::thread::scope(|scope| {
+        let running: Vec<_> = specs
+            .iter()
+            .map(|spec| {
+                scope.spawn(move || match (spec.models.catalog_source(), path_env) {
+                    // A request may read the shipped data, but it starts a
+                    // program only when the binary said which `$PATH` to find it
+                    // with.
+                    (CatalogSource::Static, _) => models::static_catalog(spec, data).ok().flatten(),
+                    (CatalogSource::Command, Some(env)) => data.catalog(spec, env, LIST_TIMEOUT),
+                    (CatalogSource::Command, None) | (CatalogSource::None, _) => None,
+                })
+            })
+            .collect();
+        running
+            .into_iter()
+            .map(|handle| handle.join().ok().flatten())
+            .collect()
+    })
+}
+
 /// One program's entry: its identity and everything a picker offers for it.
-fn program(spec: &HarnessSpec, data: &DataDir, path_env: Option<&str>) -> ProgramDto {
+fn program(spec: &HarnessSpec, catalog: Option<Catalog>) -> ProgramDto {
     let source = spec.models.catalog_source();
-    let catalog = match (source, path_env) {
-        // A request may read the shipped data, but it starts a program only when
-        // the binary said which `$PATH` to start it with.
-        (CatalogSource::Static, _) => models::static_catalog(spec, data).ok().flatten(),
-        (CatalogSource::Command, Some(env)) => data.catalog(spec, env, LIST_TIMEOUT),
-        (CatalogSource::Command, None) | (CatalogSource::None, _) => None,
-    };
     let model_choices = catalog.as_ref().map(models_of).unwrap_or_default();
     let efforts = catalog
         .as_ref()
