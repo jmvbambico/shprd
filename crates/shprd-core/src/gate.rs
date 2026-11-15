@@ -164,15 +164,21 @@ pub fn rounds_spent_prefix(task: &str, attempt: u32, rounds: u32) -> String {
     format!("{task}: its review of attempt {attempt} failed {rounds} time(s) and no round is left")
 }
 
-/// The attempt a card's body names, when `body` is one for `task`.
+/// The attempt a card's body names, when `body` is one about `task`.
 ///
 /// It is how a board tells a card that still holds from the history of a
-/// failure a newer attempt has answered.
+/// failure a newer attempt has answered. Every card about an attempt names it,
+/// so one rule covers a review that spent its rounds and a send-back that did
+/// not start.
 pub fn card_attempt(task: &str, body: &str) -> Option<u32> {
-    let rest = body.strip_prefix(&format!("{task}: its review of attempt "))?;
-    let (digits, tail) = rest.split_once(' ')?;
-    let attempt: u32 = digits.parse().ok()?;
-    tail.starts_with("failed ").then_some(attempt)
+    let named = |prefix: &str, tail: &str| -> Option<u32> {
+        let rest = body.strip_prefix(prefix)?;
+        let (digits, rest) = rest.split_once(' ')?;
+        let attempt: u32 = digits.parse().ok()?;
+        rest.starts_with(tail).then_some(attempt)
+    };
+    named(&format!("{task}: its review of attempt "), "failed ")
+        .or_else(|| named(&format!("{task}: sending attempt "), "back did not start: "))
 }
 
 /// The card a review that spent its rounds puts in front of a person.
@@ -331,8 +337,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        ESCALATION_ACTION, Next, REVIEW_GATE, after_failure, decide, failed_review_rounds,
-        latest_failed_review, provenance, rounds_spent_body, rounds_spent_prefix, verdict,
+        ESCALATION_ACTION, Next, REVIEW_GATE, after_failure, card_attempt, decide,
+        failed_review_rounds, latest_failed_review, provenance, rounds_spent_body,
+        rounds_spent_prefix, send_back_failure_prefix, verdict,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
@@ -616,6 +623,25 @@ mod tests {
         assert!(latest_failed_review(&task(vec![passed])).is_none());
         let failed = attempt(1, vec![gate(REVIEW_GATE, false)]);
         assert!(latest_failed_review(&task(vec![failed])).is_some());
+    }
+
+    #[test]
+    fn a_card_names_the_attempt_every_kind_of_card_is_about() {
+        // The staleness rule a board reads is one rule for every card about an
+        // attempt: a review that spent its rounds, and a send-back that did not
+        // start.
+        let spent = rounds_spent_prefix("T1", 3, 2);
+        assert_eq!(card_attempt("T1", &spent), Some(3));
+        let failed = send_back_failure_prefix("T1", 4);
+        assert_eq!(card_attempt("T1", &failed), Some(4));
+        // Anything else is not a card about an attempt, and a card for another
+        // task is not this task's.
+        assert_eq!(card_attempt("T1", "T1 is ready to land"), None);
+        assert_eq!(card_attempt("T2", &spent), None);
+        assert_eq!(
+            card_attempt("T1", "T1: sending attempt x back did not start: "),
+            None
+        );
     }
 
     #[test]

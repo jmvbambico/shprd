@@ -391,6 +391,60 @@ mod tests {
     }
 
     #[test]
+    fn a_card_about_a_send_back_that_did_not_start_is_history_too() {
+        // A card raised because a failed attempt could not be sent back names
+        // that attempt as well, so the same rule drops it once a newer attempt
+        // has answered it.
+        let mut state = run_with_a_task();
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(1),
+                report: None,
+                gates: Vec::new(),
+                reviews: Vec::new(),
+            });
+        state.escalations.push(shprd_core::state::Escalation {
+            task: Some("T1".to_string()),
+            body: format!(
+                "{}no workspace",
+                shprd_core::gate::send_back_failure_prefix("T1", 1)
+            ),
+            default_action: String::from("spawn it by hand"),
+            seq: 3,
+        });
+        let waiting = snapshot(&state, NOW);
+        assert_eq!(waiting.needs.len(), 1, "{:?}", waiting.needs);
+
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 2,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(6),
+                report: None,
+                gates: Vec::new(),
+                reviews: Vec::new(),
+            });
+        let answered = snapshot(&state, NOW);
+        assert!(answered.needs.is_empty(), "{:?}", answered.needs);
+    }
+
+    #[test]
     fn a_timed_out_ask_is_not_in_the_snapshot() {
         // The endpoint lists what is still open at the moment it is read, so a
         // hook that timed out must drop out here just as it does from
