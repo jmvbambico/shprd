@@ -30,7 +30,6 @@ import {
   quoted,
   section,
   tally,
-  taskRef,
   verbOf,
 } from "../mods/lib/asks.js";
 
@@ -71,7 +70,6 @@ test("an open ask is one card: its question, its choices and its task", () => {
   assert.equal(shown.freeText, true, "a question always takes words");
   assert.equal(shown.verb, null);
   assert.equal(shown.action, null);
-  assert.equal(taskRef(shown), ask.task);
 });
 
 test("a card's footer says what happens if nobody answers", () => {
@@ -236,7 +234,6 @@ test("a card about no task names the run instead of a blank reference", () => {
     },
     { asks: [] },
   )[0];
-  assert.equal(shown.task, null);
-  assert.equal(taskRef(shown), "");
+  assert.equal(shown.task, null, "a card about no task names the run instead");
   assert.equal(shown.title, KIND.escalation);
 });

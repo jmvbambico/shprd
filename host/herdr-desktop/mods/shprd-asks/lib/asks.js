@@ -206,16 +206,6 @@ export function answerBody(card, answer) {
 }
 
 /**
- * The task a card is about, as a row reference, or "" for a run-wide card.
- *
- * A card about no task is the run's own ("no run started"), and a panel that drew
- * a blank reference beside it would look like a missing id.
- */
-export function taskRef(card) {
-  return card?.task ?? "";
-}
-
-/**
  * What a card says under its words: the default action of an escalation, or why
  * it is here.
  *

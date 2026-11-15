@@ -75,7 +75,7 @@ export function layerOf(source) {
 }
 
 /** Every settings row, by key, as the page reads it. */
-export function rowsOf(document) {
+function rowsOf(document) {
   const rows = new Map();
   for (const row of document?.values ?? []) rows.set(row.key, row);
   return rows;
@@ -251,14 +251,6 @@ export function roles(document, roster) {
       picks: PICKS.map((field) => pickOf(base, field, rows, roster)),
     };
   });
-}
-
-/** The body `PUT /api/settings` takes for one value, or for removing it. */
-export function putBody(key, value, forRepo = false) {
-  const body = { key };
-  if (value !== null && value !== undefined) body.value = value;
-  if (forRepo) body.for_repo = true;
-  return body;
 }
 
 /**

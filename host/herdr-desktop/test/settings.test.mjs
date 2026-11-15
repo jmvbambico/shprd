@@ -9,7 +9,9 @@
 // (`test/fixtures/settings.json`, `roster.json`, `prompts.json`): a person's own
 // file with picks for every role and one custom role, the shipped harness table
 // with its catalogs, and the four templates this build ships. Nothing here
-// invents a shape the service does not send.
+// invents a shape the service does not send; a program's catalog is cut to its
+// first few models, because one of them lists hundreds and this file is read by
+// tests, not by a picker.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -32,7 +34,6 @@ import {
   programOf,
   promptLine,
   promptRows,
-  putBody,
   refused,
   roleIds,
   roleOf,
@@ -221,21 +222,6 @@ test("a model that wants its provider says so", () => {
 });
 
 // -- writing ---------------------------------------------------------------
-
-test("a write names one key, and only sends a value when there is one", () => {
-  assert.deepEqual(putBody("roles.worker.agent", "pi"), {
-    key: "roles.worker.agent",
-    value: "pi",
-  });
-  assert.deepEqual(putBody("roles.worker.model", null, true), {
-    key: "roles.worker.model",
-    for_repo: true,
-  });
-  assert.deepEqual(putBody("roles.order", ["worker", "reviewer"]), {
-    key: "roles.order",
-    value: ["worker", "reviewer"],
-  });
-});
 
 test("a role is added and removed through the order alone", () => {
   assert.deepEqual(withRole(SETTINGS, "tester"), [
