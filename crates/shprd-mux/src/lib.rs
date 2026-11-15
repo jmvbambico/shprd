@@ -192,7 +192,10 @@ pub trait Host: Send + Sync {
     /// With `submit`, this is one turn of input for an agent and one line for a
     /// shell — which is why it takes a flag rather than a thinner verb: a host
     /// presses its own enter, so shprd never has to send a newline byte as text.
-    /// Without it the text lands at the cursor unsent, for keystroke-level work.
+    /// Without it the text lands at the cursor unsent, for keystroke-level work;
+    /// a host that cannot do that reports
+    /// [`Capabilities::type_without_submit`] false and answers
+    /// [`MuxError::Unsupported`] here.
     fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()>;
 
     /// Press `keys` in `pane`, in order.

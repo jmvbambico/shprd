@@ -407,6 +407,9 @@ impl HcHost {
             pane_grants: false,
             human_ask: false,
             keys: true,
+            // `terminal.send` pastes and then presses enter: the core has no
+            // spelling for text left at the cursor.
+            type_without_submit: false,
             // `terminal.wait` answers in one call.
             wait: true,
             kill: true,

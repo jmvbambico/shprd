@@ -335,7 +335,9 @@ fn text_is_sent_as_the_persons_own_typing() {
     );
 
     // herdr-core's send always presses enter, so typing without submitting is
-    // refused rather than quietly submitted.
+    // refused rather than quietly submitted — and the flags say so first, which
+    // is what a caller plans from.
+    assert!(!host.capabilities().type_without_submit);
     let error = host
         .write(&PaneId::new("t20"), "half a line", false)
         .expect_err("no half-sent text on this host");
