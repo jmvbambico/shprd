@@ -97,6 +97,12 @@ pub struct HarnessSpec {
     /// CLI raises no such prompt.
     #[serde(default)]
     pub blocking_prompts: Vec<BlockingPrompt>,
+    /// Where one session's record is read as a chat transcript.
+    ///
+    /// Absent means shprd shows no conversation for this program: the chat
+    /// panel says so rather than reading a record whose shape it does not know.
+    #[serde(default)]
+    pub transcript: TranscriptSpec,
 }
 
 /// One question the CLI asks its own user and blocks on until they answer.
@@ -126,6 +132,7 @@ impl HarnessSpec {
     /// how a hook is installed or say the program takes none.
     pub fn validate(&self) -> Result<(), SpecError> {
         validate_location(&self.records.location)?;
+        self.transcript.validate()?;
 
         for dir in &self.skills.home_dirs {
             match dir.strip_prefix("~/") {
@@ -427,6 +434,65 @@ pub struct RecordsSpec {
     pub errors: String,
     /// Whether these facts are stated in `docs/agents.md`.
     pub verified: bool,
+}
+
+/// Where one session's record is read as a conversation, and how.
+///
+/// [`RecordsSpec`] says where a CLI writes its record so a reader can find it
+/// again; this says how to turn that record into messages, which is a different
+/// question: the watchdog only needs the newest error out of a record, while a
+/// chat needs the person's words, the agent's words and a summary of its tools.
+///
+/// The location is a pattern with the same placeholders [`RecordsSpec`] allows,
+/// plus `*` for any run of characters inside one component, so one session's
+/// file can be named by the search rather than by a pid the service does not
+/// have. A CLI that changes where it writes is a table change, not a code
+/// change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSpec {
+    /// How the record is read; absent means no reader, and no chat.
+    pub format: Option<TranscriptFormat>,
+    /// Where one session lives, as a path pattern.
+    ///
+    /// A file format names the session's file
+    /// (`~/.claude/projects/{cwd_slug}/*.jsonl`); a store format names the
+    /// directory the session's parts are kept under
+    /// (`~/.local/share/opencode/storage`).
+    pub location: Option<String>,
+}
+
+impl TranscriptSpec {
+    /// Whether this program's conversation can be read at all.
+    pub fn readable(&self) -> bool {
+        self.format.is_some()
+    }
+
+    /// Check that a format and its location are stated together, and that the
+    /// location uses only the placeholders [`RecordsSpec::location`] allows.
+    pub fn validate(&self) -> Result<(), SpecError> {
+        match (&self.format, &self.location) {
+            (Some(_), Some(location)) => validate_location(location),
+            (Some(_), None) => Err(SpecError::TranscriptWithoutLocation),
+            (None, Some(_)) => Err(SpecError::LocationWithoutTranscript),
+            (None, None) => Ok(()),
+        }
+    }
+}
+
+/// The on-disk shape of one session's record, as a chat reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptFormat {
+    /// Claude Code's `~/.claude/projects/<slug>/<session>.jsonl`.
+    ClaudeJsonl,
+    /// Codex's `~/.codex/sessions/<date>/rollout-*.jsonl`.
+    CodexJsonl,
+    /// Pi's `~/.pi/agent/sessions/<slug>/<date>_<session>.jsonl`.
+    PiJsonl,
+    /// OpenCode's storage folder: one JSON file a session, one a message, and a
+    /// folder of parts for each message.
+    OpencodeStorage,
 }
 
 /// Placeholders allowed in a [`RecordsSpec::location`] pattern.
@@ -1105,6 +1171,12 @@ pub enum SpecError {
         /// The template token that failed.
         token: String,
     },
+    /// A transcript format is stated without a location to read.
+    #[error("transcript.format is set but transcript.location is not")]
+    TranscriptWithoutLocation,
+    /// A transcript location is stated without a format to read it with.
+    #[error("transcript.location is set but transcript.format is not")]
+    LocationWithoutTranscript,
     /// A record location is empty or whitespace only.
     #[error("location pattern is empty")]
     EmptyLocation,

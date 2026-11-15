@@ -7,6 +7,7 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 shprd-core = { path = "../shprd-core" }
 serde_json.workspace = true

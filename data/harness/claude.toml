@@ -152,6 +152,15 @@ location = "~/.claude/projects/{cwd_slug}/{session}.jsonl"
 errors = "isApiErrorMessage: true, error: \"rate_limit\", text with the reset time"
 verified = true
 
+[transcript]
+# A chat reads the newest session's record for a working directory: the
+# `user` and `assistant` lines of the main chain (`isSidechain: false`), with the
+# agent's tool calls summarised beside its words. Claude Code folds the working
+# directory into the project folder name (`.` and `/` become `-`), which is what
+# `{cwd_slug}` means here.
+format = "claude_jsonl"
+location = "~/.claude/projects/{cwd_slug}/*.jsonl"
+
 [quota]
 source = "anthropic_oauth"
 

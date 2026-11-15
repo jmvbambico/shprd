@@ -131,7 +131,12 @@ SOFTWARE.
   person's, the split between herdr-core for terminals and the window's own
   command line for spaces, tabs and panes, and making a space through the window
   — from `service/hub.ts` and `service/spaces.ts`, in
-  `crates/shprd-mux-hc/src/host.rs`
+  `crates/shprd-mux-hc/src/host.rs`; and the chat's reading of an agent's own
+  record — the line kinds each CLI keeps, the fields a message and its tool calls
+  are read from, and the newest-page-then-what-it-gained shape — in
+  `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel — the
+  transcript's bubbles, the composer and the sidebar placement — in
+  `host/herdr-desktop/mods/shprd-coordinator/`
 - License: MIT
 
 MIT License

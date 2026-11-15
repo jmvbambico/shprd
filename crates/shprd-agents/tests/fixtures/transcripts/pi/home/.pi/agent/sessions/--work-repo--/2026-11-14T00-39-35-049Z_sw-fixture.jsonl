@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"sw-fixture","timestamp":"2026-11-14T00:39:35.049Z","cwd":"/work/repo"}
+{"type":"model_change","id":"m1","parentId":null,"timestamp":"2026-11-14T00:39:35.100Z","modelId":"deepseek-v4.1","provider":"deepseek"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-11-14T00:39:40.000Z","message":{"role":"user","timestamp":1794616780000,"content":[{"type":"text","text":"Start task T3 and tell me how it goes."}]}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-11-14T00:39:45.000Z","message":{"role":"assistant","timestamp":1794616785000,"model":"deepseek-v4.1","provider":"deepseek","content":[{"type":"thinking","thinking":"The task is in the queue."},{"type":"text","text":"Starting T3 now."},{"type":"toolCall","id":"call_00_1","name":"bash","arguments":{"command":"shprd agent spawn --task T3"}}]}}
+{"type":"message","id":"t1","parentId":"a1","timestamp":"2026-11-14T00:39:46.000Z","message":{"role":"toolResult","toolCallId":"call_00_1","toolName":"bash","isError":false,"content":[{"type":"text","text":"T3 started on worker 1"}],"timestamp":1794616786000}}

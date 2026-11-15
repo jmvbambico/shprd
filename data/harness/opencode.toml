@@ -102,6 +102,14 @@ location = "~/.local/share/opencode/opencode.db"
 errors = "message.data.error holds final errors; retries are not persisted"
 verified = true
 
+[transcript]
+# OpenCode's store: `session/<project>/<id>.json` names a session and the
+# directory it belongs to, `message/<session>/` holds one file a message and
+# `part/<message>/` the text and tool blocks of each. There is no single file a
+# session lives in, so the location names the store itself.
+format = "opencode_storage"
+location = "~/.local/share/opencode/storage"
+
 [quota]
 source = "none"
 retry_signal = "serve session.status"
