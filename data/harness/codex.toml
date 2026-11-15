@@ -156,6 +156,13 @@ location = "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl"
 errors = "provider errors in the rollout; quota on every turn via event_msg/token_count.rate_limits"
 verified = true
 
+[transcript]
+# Codex's rollouts live in one date tree for every directory, so the newest one
+# whose own `session_meta` names this working directory is the session. The date
+# placeholders are matched as wildcards: a session can cross midnight.
+format = "codex_jsonl"
+location = "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl"
+
 [quota]
 source = "codex_wham"
 

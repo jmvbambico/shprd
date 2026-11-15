@@ -10,6 +10,7 @@
 //! one settings key.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -30,9 +31,11 @@ use tower_http::trace::TraceLayer;
 
 use crate::actions;
 use crate::auth;
+use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
-    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ClientMessage, ErrorCode,
-    GraphDto, HealthDto, PromptDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto, ChatSendReply,
+    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, SettingsDto, SettingsWriteDto,
+    SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
@@ -149,6 +152,14 @@ pub(crate) struct AppState {
     /// pointed at. `None` is "nobody told this service", which the route says
     /// out loud.
     pub(crate) dagr: Option<crate::graph::Dagr>,
+    /// What types a chat line into a space's agent, when the caller has a host.
+    ///
+    /// The service reads a transcript by itself (it is a file), but typing into
+    /// a pane is the host's verb, so the binary passes it in
+    /// ([`App::with_chat_writer`]) exactly as it passes the tick's spawn path.
+    /// A service without one answers `POST /api/chat` with a refusal rather
+    /// than pretending the line went somewhere.
+    pub(crate) chat: ChatHost,
 }
 
 /// The directories the binary resolved for the service.
@@ -263,6 +274,7 @@ impl App {
             engine: None,
             prompts_dir: paths.prompts_dir,
             dagr: paths.dagr,
+            chat: ChatHost::new(),
         };
         let router = router(state.clone());
         Ok(Self {
@@ -337,6 +349,17 @@ impl App {
         self
     }
 
+    /// Read the harness table from `data`, however its origin resolved.
+    ///
+    /// [`App::with_data`] names a directory; this takes the
+    /// [`DataDir`](shprd_agents::data::DataDir) the binary resolved, which is
+    /// how a test drives a service with only the copy embedded in the binary.
+    pub fn with_data_dir(mut self, data: DataDir) -> Self {
+        self.state.data = Some(data);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Read and write the prompts in `dir` instead of under the home directory.
     ///
     /// A test passes its own directory, so it can never read or write the
@@ -363,10 +386,8 @@ impl App {
     /// The service cannot make either itself — a spawn writes a brief and opens
     /// a tab, a stop closes a space — so they are passed in exactly as the
     /// tick's own steps are.
-    pub fn with_engine(mut self, engine: Engine) -> Self {
-        self.state.engine = Some(engine);
-        self.router = router(self.state.clone());
-        self
+    pub fn with_engine(self, engine: Engine) -> Self {
+        self.with_engine_opt(Some(engine))
     }
 
     /// [`App::with_engine`], for a caller that may not have one.
@@ -376,6 +397,29 @@ impl App {
     /// keep in step.
     pub(crate) fn with_engine_opt(mut self, engine: Option<Engine>) -> Self {
         self.state.engine = engine;
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Type chat lines into a space's agent through `writer`.
+    ///
+    /// The binary passes the host it drives; a test passes a recorder, so the
+    /// API is proved without a terminal and a person's window is never written
+    /// to by a test.
+    pub fn with_chat_writer(self, writer: Arc<dyn ChatWriter>) -> Self {
+        self.with_chat_opt(Some(writer))
+    }
+
+    /// [`App::with_chat_writer`], for a caller that may not have one.
+    ///
+    /// The service's config carries an `Option`, and this is the same shape as
+    /// [`App::with_engine_opt`]: a service started with no host still reads a
+    /// conversation, and refuses only the send.
+    pub(crate) fn with_chat_opt(mut self, writer: Option<Arc<dyn ChatWriter>>) -> Self {
+        self.state.chat = match writer {
+            Some(writer) => ChatHost::with(writer),
+            None => ChatHost::new(),
+        };
         self.router = router(self.state.clone());
         self
     }
@@ -398,6 +442,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/changes", get(changes))
         .route("/api/asks", get(asks))
         .route("/api/asks/answer", post(answer))
+        .route("/api/chat", get(chat_page).post(chat_send))
         .route("/api/action", post(action))
         .route("/api/graph", get(graph))
         .route("/api/tasks", post(add_task))
@@ -494,6 +539,42 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     })
     .await?;
     Ok(Json(reply?))
+}
+
+/// The query `GET /api/chat` takes.
+#[derive(Debug, Deserialize)]
+struct ChatQuery {
+    /// `coordinator`, or a task's id. Absent means the coordinator.
+    space: Option<String>,
+    /// The cursor the client already has.
+    since: Option<String>,
+}
+
+/// `GET /api/chat`: what a space's agent record gained since `since`.
+///
+/// The answer is a page and a cursor; a client that asks again with the cursor
+/// sees only what was added. Nothing is written, and the agent's own file is the
+/// only copy read.
+async fn chat_page(
+    State(state): State<AppState>,
+    Query(query): Query<ChatQuery>,
+) -> Result<Json<ChatDto>, ApiReject> {
+    let space = Space::parse(query.space.as_deref());
+    let since = query.since.unwrap_or_default();
+    let answer = blocking(move || chat::page(&state, &space, &since)).await?;
+    Ok(Json(answer?))
+}
+
+/// `POST /api/chat`: type one turn into a space's agent, as the person.
+///
+/// The write needs the custom header every other write needs (`auth`), because
+/// it reaches a terminal rather than the ledger.
+async fn chat_send(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ChatSendReply>, ApiReject> {
+    let answer = blocking(move || chat::send(&state, &body)).await?;
+    Ok(Json(answer?))
 }
 
 /// The query `GET /api/changes` takes.

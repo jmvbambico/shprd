@@ -51,6 +51,7 @@ export function reset() {
   HC_CALLS.length = 0;
   SPACES = [];
   RUNS.length = 0;
+  PROPS = {};
 }
 
 /** What `exec` answers; a test replaces it. */
@@ -91,6 +92,18 @@ export function setHc(next) {
 export async function hc(args) {
   HC_CALLS.push(args);
   return HC(args);
+}
+
+/** What `props()` answers; a test sets it. */
+export let PROPS = {};
+
+/** Sets what `props()` answers next: the layout's own props for a copy. */
+export function setProps(next) {
+  PROPS = next ?? {};
+}
+
+export function props() {
+  return PROPS;
 }
 
 /** Herdr's live space list; a test sets it. */

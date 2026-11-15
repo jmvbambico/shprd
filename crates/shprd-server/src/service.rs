@@ -424,6 +424,13 @@ pub struct Config {
     /// in. A service started without them — every test that only drives the
     /// router — refuses those three actions and reads the log exactly the same.
     pub engine: Option<crate::engine::Engine>,
+    /// What types a chat line into a space's agent, when the binary has a host.
+    ///
+    /// Typing into a pane is the host's verb, so the binary passes the same
+    /// adapter it drives everywhere else ([`crate::ChatWriter`]). A service
+    /// started without one answers `POST /api/chat` with a refusal rather than
+    /// pretending the line went somewhere.
+    pub chat: crate::chat::ChatHost,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -477,6 +484,7 @@ impl Config {
             data: None,
             dagr: None,
             engine: None,
+            chat: crate::chat::ChatHost::new(),
         }
     }
 }
@@ -524,7 +532,11 @@ impl Service {
         // The spawn and the close are the binary's, wired exactly as the tick's
         // steps are; a service without them refuses the three actions that need
         // a host.
-        .with_engine_opt(config.engine.clone());
+        .with_engine_opt(config.engine.clone())
+        // The chat's writer is that same host. Attaching it rebuilds the router,
+        // which a client never sees: the record is written before either is
+        // wired, and a request cannot arrive until the listener is serving.
+        .with_chat_opt(config.chat.get().cloned());
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");
