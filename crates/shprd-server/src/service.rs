@@ -403,6 +403,13 @@ pub struct Config {
     pub prompts_dir: Option<PathBuf>,
     /// The `data/` directory the settings checks read the harness table from.
     pub data: Option<PathBuf>,
+    /// What types a chat line into a space's agent, when the binary has a host.
+    ///
+    /// Typing into a pane is the host's verb, so the binary passes the same
+    /// adapter it drives everywhere else ([`crate::ChatWriter`]). A service
+    /// started without one answers `POST /api/chat` with a refusal rather than
+    /// pretending the line went somewhere.
+    pub chat: crate::chat::ChatHost,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -454,6 +461,7 @@ impl Config {
             home: None,
             prompts_dir: None,
             data: None,
+            chat: crate::chat::ChatHost::new(),
         }
     }
 }
@@ -497,6 +505,13 @@ impl Service {
                 data: config.data.clone(),
             },
         )?;
+        // The writer is attached after the router is built, which rebuilds it:
+        // the two orders are the same service, and this one keeps the chat out
+        // of the path a test's `App::prepare` walks.
+        let app = match config.chat.get() {
+            Some(writer) => app.with_chat_writer(writer.clone()),
+            None => app,
+        };
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");

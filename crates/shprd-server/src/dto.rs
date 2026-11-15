@@ -934,6 +934,82 @@ pub struct SettingsWriteDto {
     pub settings: SettingsDto,
 }
 
+/// One message of a space's conversation, as a panel draws it.
+///
+/// It is [`shprd_agents::transcript::Message`] with a JSON spelling: the role is
+/// the word `user` or `assistant`, and each tool the agent ran is beside its
+/// words rather than a row of its own, because a person reads what the agent
+/// said and only glances at what it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatMessageDto.ts")]
+pub struct ChatMessageDto {
+    /// Who said it: `user` or `assistant`.
+    pub role: String,
+    /// The words, with a program's own markup removed. Empty for a message that
+    /// is tool calls only, which is what Codex records for a call.
+    pub text: String,
+    /// The tools the agent ran as part of this reply, in order.
+    pub tools: Vec<ChatToolDto>,
+    /// When the program recorded it, in ms since the epoch, when it did.
+    pub at_ms: Option<i64>,
+}
+
+/// One tool call, summarised to what a chat row shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatToolDto.ts")]
+pub struct ChatToolDto {
+    /// The program's own name for the tool, e.g. `Bash`.
+    pub name: String,
+    /// One line of what it ran or read, already cut short.
+    pub summary: String,
+}
+
+/// One page of a space's conversation, and where to ask from next.
+///
+/// `cursor` is opaque to a client: it names the session and how far into it the
+/// page reached, so a client that polls with the last cursor it was given sees
+/// each message once. A cursor from another session (the agent started a new
+/// one) reads that session from its start, which is what a panel wants to show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatDto.ts")]
+pub struct ChatDto {
+    /// The space asked about: `coordinator`, or a task's id.
+    pub space: String,
+    /// The program whose record was read, when the service knows it.
+    pub program: Option<String>,
+    /// The session that was read, when there was one.
+    pub session: Option<String>,
+    /// The messages after the client's cursor, oldest first.
+    pub messages: Vec<ChatMessageDto>,
+    /// Where to ask from next.
+    pub cursor: String,
+    /// Whether the record has more to give: ask again at once with `cursor`.
+    pub more: bool,
+    /// Why the page is empty, in words a panel shows, when it is.
+    pub note: Option<String>,
+}
+
+/// One chat line to type into a space's agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatSendDto.ts")]
+pub struct ChatSendDto {
+    /// The space to type into: `coordinator`, or a task's id.
+    pub space: String,
+    /// The words to send, as one turn of the person's input.
+    pub text: String,
+}
+
+/// What one send did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatSendReply.ts")]
+pub struct ChatSendReply {
+    /// The space the line went to.
+    pub space: String,
+    /// True when the line was typed into the agent's pane. A refusal is an
+    /// error answer instead, so a `true` here means the host took it.
+    pub sent: bool,
+}
+
 /// What one write did to the key it named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -1035,6 +1111,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<AskListDto>()?,
         one::<AnswerAsk>()?,
         one::<AskReply>()?,
+        one::<ChatMessageDto>()?,
+        one::<ChatToolDto>()?,
+        one::<ChatDto>()?,
+        one::<ChatSendDto>()?,
+        one::<ChatSendReply>()?,
         one::<SnapshotDto>()?,
         one::<HealthDto>()?,
         one::<EventNoticeDto>()?,
