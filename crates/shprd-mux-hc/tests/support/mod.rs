@@ -97,6 +97,26 @@ impl Fake {
             .unwrap_or_default()
     }
 
+    /// Whether the fake's last child has ended.
+    ///
+    /// The fake writes a line when it starts and one when it stops, so a test
+    /// can tell "killed" from "still there" without reading the process table.
+    pub fn children_finished(&self) -> bool {
+        let events = self.events();
+        events
+            .last()
+            .is_some_and(|last| last.starts_with("stopped"))
+    }
+
+    /// Every start and stop the fake recorded.
+    pub fn events(&self) -> Vec<String> {
+        std::fs::read_to_string(self.path("life"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Whether the fake is still running, by its spawn marker only: the fake
     /// exits when its stdin ends, so a test must not assume it lives.
     pub fn exists(&self) -> bool {

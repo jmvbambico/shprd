@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -690,7 +690,9 @@ impl HcClient {
     /// Start the keeper: it waits for the current link to die (if there is
     /// one), forgets the fold, and reconnects until the endpoint says stop.
     fn spawn_keeper(&self, first: Option<Arc<Link>>) {
-        let inner = Arc::clone(&self.inner);
+        // A weak handle, so the keeper stops when the last client is dropped:
+        // a strong one would keep the child alive forever.
+        let shared = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             let mut current = first;
             loop {
@@ -700,6 +702,9 @@ impl HcClient {
                         let _ = dead.wait_for(|dead| *dead).await;
                     }
                     drop(dead);
+                    let Some(inner) = shared.upgrade() else {
+                        return;
+                    };
                     {
                         let mut slot = inner.link.lock().await;
                         if slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, &link)) {
@@ -707,16 +712,10 @@ impl HcClient {
                         }
                     }
                     // Nothing the old connection said is trusted any more.
-                    HcClient {
-                        inner: Arc::clone(&inner),
-                    }
-                    .forget();
+                    HcClient { inner }.forget();
                 }
-                if inner.closed.load(Ordering::SeqCst) || !inner.endpoint.reconnect {
-                    return;
-                }
-                match reconnect(&inner).await {
-                    Some(link) => {
+                match reconnect(&shared).await {
+                    Some((inner, link)) => {
                         let client = HcClient {
                             inner: Arc::clone(&inner),
                         };
@@ -740,8 +739,9 @@ impl HcClient {
 ///
 /// The first attempt is immediate — the child that just died may be replaced in
 /// milliseconds — and the rest follow [`RECONNECT_DELAYS`] and then
-/// [`RECONNECT_CEILING`] forever.
-async fn reconnect(inner: &Arc<Shared>) -> Option<Arc<Link>> {
+/// [`RECONNECT_CEILING`] forever. Waiting on a `Weak` is what lets a dropped
+/// client stop the retries: a shared state nobody holds is a link nobody wants.
+async fn reconnect(shared: &Weak<Shared>) -> Option<(Arc<Shared>, Arc<Link>)> {
     let mut attempt = 0usize;
     loop {
         if attempt > 0 {
@@ -752,11 +752,12 @@ async fn reconnect(inner: &Arc<Shared>) -> Option<Arc<Link>> {
             tokio::time::sleep(delay).await;
         }
         attempt += 1;
+        let inner = shared.upgrade()?;
         if inner.closed.load(Ordering::SeqCst) {
             return None;
         }
-        match open(inner).await {
-            Ok(link) => return Some(link),
+        match open(&inner).await {
+            Ok(link) => return Some((inner, link)),
             Err(error) => {
                 tracing::debug!(%error, "herdr-core reconnect failed");
                 if !inner.endpoint.reconnect {
@@ -845,7 +846,7 @@ async fn open(inner: &Arc<Shared>) -> Result<Arc<Link>> {
         );
     }
 
-    let reader = Arc::clone(inner);
+    let reader = Arc::downgrade(inner);
     let reader_pending = Arc::clone(&pending);
     let reader_events = Arc::clone(&event_channel);
     let reader_buffer = Arc::clone(&event_buffer);
@@ -959,7 +960,7 @@ async fn read_loop(
     mut stdout: tokio::process::ChildStdout,
     hello_id: u64,
     subscribe_id: u64,
-    shared: Arc<Shared>,
+    shared: Weak<Shared>,
     pending: Arc<Mutex<BTreeMap<u64, Pending>>>,
     event_channel: Arc<Mutex<Option<u32>>>,
     event_buffer: Arc<Mutex<Vec<u8>>>,
@@ -987,7 +988,9 @@ async fn read_loop(
                     if value.get("id").is_none() {
                         // A notification with no id rides on channel 0 only
                         // before the event stream exists; treat it as an event.
-                        handle_line(&shared, value.to_string().as_bytes());
+                        if let Some(inner) = shared.upgrade() {
+                            handle_line(&inner, value.to_string().as_bytes());
+                        }
                     } else {
                         if value.get("id").and_then(Value::as_u64) == Some(subscribe_id) {
                             // Learn the event channel and fold the snapshot
@@ -1004,9 +1007,10 @@ async fn read_loop(
                                 {
                                     *slot = Some(channel);
                                 }
-                                let client = HcClient {
-                                    inner: Arc::clone(&shared),
+                                let Some(inner) = shared.upgrade() else {
+                                    break;
                                 };
+                                let client = HcClient { inner };
                                 client.apply(Notice::Synced {
                                     seq: result
                                         .get("seq")
@@ -1027,7 +1031,9 @@ async fn read_loop(
                 } => {
                     let channel = event_channel.lock().ok().and_then(|slot| *slot);
                     if Some(stream) == channel {
-                        split_events(&shared, &event_buffer, &payload);
+                        if let Some(inner) = shared.upgrade() {
+                            split_events(&inner, &event_buffer, &payload);
+                        }
                     } else {
                         // A stream nobody reads still has to be credited, or
                         // the core stops sending on it (M7ef §2.6).

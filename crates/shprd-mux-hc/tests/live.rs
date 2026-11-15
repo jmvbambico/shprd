@@ -8,9 +8,11 @@
 //!
 //! Its case is the one M7ef proved by hand (§2.8): a terminal labelled
 //! `herdr.space` / `herdr.tab` started outside the window appears in that space
-//! and tab. So the test lists the real spaces, takes one terminal carrying the
-//! shprd labels and reads the layout the window keeps, which is what M10.2's
-//! placement needs before it can trust the labels.
+//! and tab. So the test makes a space through the window, starts a labelled
+//! terminal that the window must place in it, reads both back — the terminal
+//! from the core, the space from the layout document — and removes the space
+//! again. Those are exactly the two halves M10.2's placement needs before it
+//! can trust a label: the core carries it, and the window honours it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -59,9 +61,27 @@ async fn a_private_core_lists_its_spaces_and_places_a_labelled_terminal() {
         .expect("server.status");
     assert!(status.get("pid").is_some(), "the core answers: {status}");
 
-    // A terminal in a space and tab this test made up, exactly as shprd places
-    // a task's agent.
-    let space = format!("shprd-m10-1-{}", std::process::id());
+    // A space the window itself makes, so the labels this test writes are the
+    // ones a real layout reads. `space.new` prints `{space, tab, terminal}`.
+    let named = format!("shprd m10.1 {}", std::process::id());
+    let made = live
+        .app_call(&[
+            "do",
+            "space.new",
+            "--name",
+            &named,
+            "--folder",
+            &live.root().to_string_lossy(),
+        ])
+        .expect("the private window makes a space");
+    let made: serde_json::Value = serde_json::from_str(&made).expect("space.new answers JSON");
+    let space = made
+        .get("space")
+        .and_then(|space| space.as_str())
+        .expect("the new space's id")
+        .to_string();
+
+    // A terminal in that space and tab, exactly as shprd places a task's agent.
     let placement = Placement::new(&space, "worker");
     let labels = placement.labels();
     let run = client
@@ -111,14 +131,41 @@ async fn a_private_core_lists_its_spaces_and_places_a_labelled_terminal() {
             .is_some_and(|terminal| terminal.space_label() == Some(placement.space.as_str()))
     })
     .await;
-    let space_terminals = state
-        .terminals()
-        .filter(|terminal| terminal.space_label() == Some(placement.space.as_str()))
-        .count();
-    assert_eq!(space_terminals, 1);
+    // The window's own first terminal for the space carries `herdr.space` too
+    // (M7ef §2.8), so the tab is what tells shprd's terminal apart from it.
+    let workers = state.placed_in(&placement.space, &placement.tab);
+    assert_eq!(workers.len(), 1, "exactly the terminal this test placed");
+    assert_eq!(
+        workers[0].bare_address(),
+        terminal["address"]
+            .as_str()
+            .unwrap_or_default()
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+    );
 
-    // The layout document is readable, and a space the window made is in it.
-    client.read_layout().await.expect("doc.get herdr-app");
+    // The layout document is readable, and the space the window made is in it,
+    // which is how shprd finds a task's space without inventing an id.
+    //
+    // The window writes `herdr-app` asynchronously, so the document lags the
+    // call that changed it: read it until the space appears. This is the
+    // discipline M10.2 needs too — a `doc` event says only *that* the layout
+    // moved, never what it now holds.
+    let mut found = None;
+    for _ in 0..100 {
+        client.read_layout().await.expect("doc.get herdr-app");
+        if let Some(space) = client.state().space(&space) {
+            found = Some(space.name.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        found.as_deref(),
+        Some(named.as_str()),
+        "the layout names the space the window made"
+    );
     let state = client.state();
     assert!(!state.is_stale(), "the layout has been read");
     assert!(
@@ -126,7 +173,7 @@ async fn a_private_core_lists_its_spaces_and_places_a_labelled_terminal() {
         "the layout's version is known"
     );
 
-    // Clean up: kill and remove the terminal this test made.
+    // Clean up: kill and remove the terminal this test made, then the space.
     let _ = client
         .call("terminal.kill", serde_json::json!({"terminal": address}))
         .await;
@@ -135,6 +182,8 @@ async fn a_private_core_lists_its_spaces_and_places_a_labelled_terminal() {
         .await;
     assert!(removed.is_ok(), "the terminal is removed: {removed:?}");
     client.close().await;
+    live.app_call(&["do", "space.close", "--id", &space, "--confirmed", "true"])
+        .expect("the space is closed again");
 }
 
 /// Wait for the fold, or give up after a few seconds.

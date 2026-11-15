@@ -300,3 +300,23 @@ async fn the_endpoint_never_hands_the_child_a_stray_core() {
     let client = HcClient::connect(endpoint).await.expect("connects");
     assert_eq!(client.endpoint().session.as_deref(), Some("shprd-test"));
 }
+
+#[tokio::test]
+async fn dropping_the_client_kills_its_child_and_stops_the_keeper() {
+    let fake = Fake::new("normal");
+    let endpoint = endpoint(&fake).with_reconnect(true);
+    let client = HcClient::connect(endpoint).await.expect("connects");
+    assert_eq!(fake.spawns(), 1);
+    drop(client);
+
+    // The child is killed with the link, so the fake sees its stdin close and
+    // exits; the keeper holds only a weak handle and so stops retrying.
+    for _ in 0..60 {
+        if fake.children_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(fake.spawns(), 1, "no reconnect after the last client went");
+}

@@ -129,6 +129,14 @@ class Fake:
                 count = int(handle.read().strip() or "0")
         with open(marker, "w") as handle:
             handle.write(str(count + 1))
+        with open(self.path("life"), "a") as handle:
+            handle.write(f"started {count + 1}\n")
+
+    def mark_stop(self):
+        if not self.dir:
+            return
+        with open(self.path("life"), "a") as handle:
+            handle.write("stopped\n")
 
     def write_plain(self, message):
         sys.stdout.buffer.write(json.dumps(message).encode() + b"\n")
@@ -298,7 +306,10 @@ class Fake:
 
 
 if __name__ == "__main__":
+    fake = Fake()
     try:
-        Fake().run()
+        fake.run()
     except BrokenPipeError:
         pass
+    finally:
+        fake.mark_stop()
