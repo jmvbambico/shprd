@@ -105,7 +105,11 @@ SOFTWARE.
   takeover brief — in `data/templates/` and `crates/shprd-core/src/prompts.rs`;
   and the news a space's coordinator is told — the settle window, one line per
   change, one message per space and the re-check before sending — in
-  `crates/shprd-views/src/news.rs` and `crates/shprd-server/src/news.rs`
+  `crates/shprd-views/src/news.rs` and `crates/shprd-server/src/news.rs`;
+  and the herdr-core client — the `hello` framing switch, the request ids and
+  the per-call timeout, the pending-call cap, the method and version gate with
+  its refusal wording, the stream credit protocol, and the terminal event fold
+  with its reset-on-`missed` discipline — in `crates/shprd-mux-hc/src/`
 - License: MIT
 
 MIT License

@@ -8,6 +8,7 @@ members = [
     "crates/shprd-watch",
     "crates/shprd-mux",
     "crates/shprd-mux-herdr",
+    "crates/shprd-mux-hc",
     "crates/shprd-server",
     "crates/shprd",
 ]

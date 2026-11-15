@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::{absent_socket, isolate};
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -35,9 +39,10 @@ impl Service {
     /// Starts the service with its output going where the test can read it.
     ///
     /// `json` picks the banner's shape. Every service these tests start is
-    /// pointed at a multiplexer socket that does not exist: a pass must never
-    /// reach the person's own herdr session, and a start that cannot find a host
-    /// is exactly the failure the tests about visible failures are about.
+    /// pointed at a multiplexer socket that does not exist (see [`isolate`]): a
+    /// pass must never reach the person's own herdr session, and a start that
+    /// cannot find a host is exactly the failure the tests about visible
+    /// failures are about.
     fn start_with(
         repo: &Path,
         state: &Path,
@@ -47,6 +52,7 @@ impl Service {
         stderr: Stdio,
     ) -> Self {
         let mut command = Command::new(BIN);
+        isolate(&mut command, state);
         command.args([
             "--repo",
             &repo.display().to_string(),
@@ -65,7 +71,9 @@ impl Service {
             // machine's real ones would see whatever the developer has installed.
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", home.join(".local").join("share"))
-            .env("HERDR_SOCKET_PATH", state.join("no-herdr-server.sock"))
+            // `isolate` already put `HERDR_SOCKET_PATH` at an absent socket in
+            // `state`; this states the fact the failure tests below rely on.
+            .env("HERDR_SOCKET_PATH", absent_socket(state))
             .env_remove("SHPRD_TICK_RECORD_ONLY")
             .env_remove("SHPRD_ACTOR")
             .stdout(stdout)
@@ -125,7 +133,9 @@ fn repo_with_a_run() -> (TempDir, TempDir, TempDir) {
     let repo = TempDir::new().expect("repo dir");
     let state = TempDir::new().expect("state dir");
     let home = TempDir::new().expect("home dir");
-    let started = Command::new(BIN)
+    let mut start = Command::new(BIN);
+    isolate(&mut start, state.path());
+    let started = start
         .args([
             "--repo",
             &repo.path().display().to_string(),
@@ -170,7 +180,9 @@ fn fast_tick(repo: &Path) {
 
 /// Runs one `shprd` verb in `repo`, asserting it worked.
 fn shprd(repo: &Path, home: &Path, state: &Path, args: &[&str]) -> String {
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, state);
+    let output = command
         .arg("--repo")
         .arg(repo)
         .arg("--home")
@@ -251,7 +263,9 @@ fn a_second_serve_for_the_same_state_directory_is_refused() {
     // A second service would take the record over and leave the first one
     // running with no way to find it, so it is refused — and the refusal names
     // the service that already holds the directory.
-    let second = Command::new(BIN)
+    let mut second_serve = Command::new(BIN);
+    isolate(&mut second_serve, state.path());
+    let second = second_serve
         .args([
             "--repo",
             &repo.path().display().to_string(),
@@ -557,7 +571,9 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
 
     // `shprd status` says the same thing in one line on stderr, so the board on
     // stdout is untouched — a `--json` caller still gets one document.
-    let status = Command::new(BIN)
+    let mut status_command = Command::new(BIN);
+    isolate(&mut status_command, state.path());
+    let status = status_command
         .arg("--repo")
         .arg(repo.path())
         .arg("--home")
@@ -588,7 +604,9 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
         state.path(),
         &["run", "finish", "--abandon", "--yes"],
     );
-    let finished = Command::new(BIN)
+    let mut finished_command = Command::new(BIN);
+    isolate(&mut finished_command, state.path());
+    let finished = finished_command
         .arg("--repo")
         .arg(repo.path())
         .arg("--home")

@@ -13,6 +13,10 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -34,7 +38,9 @@ impl Fixture {
     /// Runs `shprd prompts <args>` with `XDG_CONFIG_HOME` pointing at the
     /// fixture.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .arg("prompts")
             .args(args)
             .env("SHPRD_HOME", self.home.path())
@@ -107,7 +113,9 @@ fn the_prompts_follow_the_xdg_config_home() {
 #[test]
 fn without_xdg_the_prompts_live_under_the_home_directory() {
     let home = TempDir::new().expect("a temp home");
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, home.path());
+    let output = command
         .args(["prompts", "path", "worker"])
         .env("SHPRD_HOME", home.path())
         .env("HOME", home.path())

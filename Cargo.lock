@@ -1239,6 +1239,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shprd-mux-hc"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "shprd-mux-herdr"
 version = "0.0.0"
 dependencies = [
