@@ -128,7 +128,10 @@ describe("GraphScreen", () => {
           }),
     );
     render(<GraphScreen client={api} />);
-    const note = await screen.findByText(/has not been written yet/);
+    expect(
+      await screen.findByRole("heading", { name: "The graph is not written yet" }),
+    ).toBeDefined();
+    const note = screen.getByText(/has not been written/);
     expect(note.textContent).toContain("/repo/.dagr/run.json");
   });
 

@@ -35,7 +35,7 @@ const SETTLE_MS = 200;
 /** What the screen is showing. */
 type GraphState =
   | { phase: "loading" }
-  | { phase: "empty"; message: string }
+  | { phase: "empty"; lead: string; message: string }
   | { phase: "error"; message: string }
   | { phase: "ready"; document: RunDocument; problem?: string };
 
@@ -113,7 +113,7 @@ export function GraphScreen({ client }: { client: ApiClient }) {
       <section className="card graph-card placeholder" data-phase={state.phase}>
         <p className="placeholder-kicker">Graph</p>
         <h1 className="placeholder-lead" id="screen-heading">
-          {state.phase === "empty" ? "No run to draw yet" : "The graph could not be read"}
+          {state.phase === "empty" ? state.lead : "The graph could not be read"}
         </h1>
         <p className="placeholder-note">{state.message}</p>
         {state.phase === "error" ? (
@@ -138,8 +138,11 @@ export function GraphScreen({ client }: { client: ApiClient }) {
             {document.run.title}
           </h1>
           <p className="graph-sub">
-            {count(document.tasks.length, "task")} · {count(layout.edges.length, "dependency", "dependencies")} ·{" "}
-            {document.generated_at === "" ? "no timestamp" : `written ${when(document.generated_at)}`}
+            {count(document.tasks.length, "task")} ·{" "}
+            {count(layout.edges.length, "dependency", "dependencies")} ·{" "}
+            {document.generated_at === ""
+              ? "no timestamp"
+              : `written ${when(document.generated_at)}`}
             {state.problem === undefined ? null : (
               <span className="graph-problem"> · {state.problem}</span>
             )}
@@ -211,30 +214,35 @@ async function read(client: ApiClient, previous: GraphState): Promise<GraphState
     const raw = await client.graphRun();
     const parsed = parseRunDocument(raw);
     if (!parsed.ok) {
-      return {
-        phase: "error",
-        message: `The run document could not be read: ${parsed.problem}.`,
-      };
+      return keep(`The run document could not be read: ${parsed.problem}.`);
     }
     return { phase: "ready", document: parsed.document };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
-      return { phase: "empty", message: await emptyMessage(client) };
+      return empty(client);
     }
     return keep(describe(error));
   }
 }
 
 /** What an empty graph says: no run at all, or a run with no document yet. */
-async function emptyMessage(client: ApiClient): Promise<string> {
+async function empty(client: ApiClient): Promise<GraphState> {
+  const none = { phase: "empty", lead: "No run to draw yet" } as const;
   try {
     const where = await client.graph();
     if (where.run === undefined || where.run === null) {
-      return "The graph draws a run's tasks, attempts and gates. `shprd run start` begins one.";
+      return {
+        ...none,
+        message: "The graph draws a run's tasks, attempts and gates. `shprd run start` begins one.",
+      };
     }
-    return `The run's document has not been written yet (${where.run_json}). It is rewritten after the run's next ledger write.`;
+    return {
+      phase: "empty",
+      lead: "The graph is not written yet",
+      message: `The run's document has not been written (${where.run_json}). It is rewritten after the run's next ledger write.`,
+    };
   } catch {
-    return "The run's document has not been written yet.";
+    return { ...none, message: "The run's document has not been written yet." };
   }
 }
 
