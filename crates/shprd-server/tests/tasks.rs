@@ -223,11 +223,15 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// A repository with `main`, one commit, and `shprd/r1/T1` two commits ahead,
-/// plus the run and task the service reads.
+/// A repository with `main`, an `integration/m10` cut from it, and
+/// `shprd/r1/T1` cut from the integration branch, plus the run and task the
+/// service reads.
 ///
-/// It is the shape the changes endpoint is about: a base a task branched from
-/// and work on its own branch, with one file added and one changed.
+/// It is the shape the changes endpoint is about: the branch a task branched
+/// from (the run's integration branch, not its base branch) and work on its own
+/// branch, with one file added and one changed. Another task lands ahead of T1
+/// while its card waits, so a diff against the wrong base is visible as files
+/// that are not T1's.
 fn with_a_task_branch() -> Fixture {
     let repo = TempDir::new().expect("repo dir");
     let root = repo.path().to_path_buf();
@@ -238,12 +242,18 @@ fn with_a_task_branch() -> Fixture {
     fs::write(root.join("kept.txt"), "one\ntwo\nthree\n").expect("a seed file");
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "seed"]);
+    git(&root, &["checkout", "-q", "-b", "integration/m10"]);
     git(&root, &["checkout", "-q", "-b", "shprd/r1/T1"]);
     fs::write(root.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("the change");
     fs::write(root.join("new.txt"), "hello\n").expect("a new file");
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "the task's work"]);
-    git(&root, &["checkout", "-q", "main"]);
+    git(&root, &["checkout", "-q", "integration/m10"]);
+    // Another task lands after T1 was cut: its file is on the integration branch
+    // but is not T1's work.
+    fs::write(root.join("landed.txt"), "another task's work\n").expect("a landed file");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "another task landed"]);
 
     start_run(&root);
     let fixture = Fixture::prepared(repo);
@@ -461,12 +471,15 @@ async fn the_changes_of_a_task_are_its_branch_against_its_base() {
     assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
     let body = reply.json();
     assert_eq!(body["task"], json!("T1"));
-    assert_eq!(body["base"], json!("main"));
+    // The base is where the attempt was cut from — the run's integration branch,
+    // not the branch the integration branch itself came from.
+    assert_eq!(body["base"], json!("integration/m10"));
     assert_eq!(body["branch"], json!("shprd/r1/T1"));
-    // The merge base is main's seed commit: the diff is the task's own work.
+    // The merge base is the seed commit both branches start at: the diff is the
+    // task's own work, not everything that landed while it worked.
     let seed = {
         let out = std::process::Command::new("git")
-            .args(["rev-parse", "main"])
+            .args(["rev-parse", "integration/m10~1"])
             .current_dir(fixture.repo.path())
             .env("HOME", fixture.repo.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -493,6 +506,45 @@ async fn the_changes_of_a_task_are_its_branch_against_its_base() {
     assert_eq!(kept["deleted"], json!(1), "two");
     assert_eq!(body["added"], json!(3));
     assert_eq!(body["deleted"], json!(1));
+}
+
+/// Bug 8 of the M10 gate: another task lands on the integration branch after
+/// this one branched, and the card must still list only this task's files.
+#[tokio::test]
+async fn changes_after_another_task_landed_list_only_this_tasks_files() {
+    let fixture = with_a_task_branch();
+    // The integration branch has moved ahead of T1's cut point.
+    let landed = {
+        let out = std::process::Command::new("git")
+            .args(["show", "--name-only", "--format=", "integration/m10"])
+            .current_dir(fixture.repo.path())
+            .env("HOME", fixture.repo.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(
+        landed, "landed.txt",
+        "another task's file is ahead on the base"
+    );
+
+    let reply = fixture
+        .send(Method::GET, "/api/tasks/T1/changes", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let body = reply.json();
+    let paths: Vec<&str> = body["files"]
+        .as_array()
+        .expect("the files")
+        .iter()
+        .map(|file| file["path"].as_str().expect("a path"))
+        .collect();
+    assert_eq!(paths, vec!["kept.txt", "new.txt"], "{body}");
+    assert!(
+        !paths.contains(&"landed.txt"),
+        "the card lists the other task's file: {body}"
+    );
 }
 
 #[tokio::test]
