@@ -315,6 +315,7 @@ mod tests {
                 },
             ],
             news: Vec::new(),
+            interval_secs: None,
         }
     }
 
@@ -376,6 +377,7 @@ mod tests {
                 seq: None,
             }],
             news: Vec::new(),
+            interval_secs: None,
         }
     }
 

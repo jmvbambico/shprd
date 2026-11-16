@@ -1421,6 +1421,46 @@ fn two_passes_never_overlap() {
     );
 }
 
+#[test]
+fn the_running_loop_takes_a_new_tick_interval_without_a_restart() {
+    // Bug 4 of the M10 gate at the loop, not just the pass: the loop sleeps what
+    // the last pass answered, so a `tasks.tick_secs` written while the service
+    // is up changes how soon the next pass comes. The fixture's first passes are
+    // a second apart; the settings then name one second, and the count over a
+    // fixed wall-clock window has to fall.
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    let forge: SharedForge = Arc::new(NoForge);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let start: shprd_server::Starter = Arc::new(move |_repo: &Path, _task: &str| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Err(String::from("no agent CLI is installed"))
+    });
+    let worker = Arc::new(fixture.worker(
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    ));
+    // The person's answer, written before the loop starts: one second, not the
+    // fifteen the service would have started with.
+    fixture.settings("version = 1\n\n[tasks]\ntick_secs = 1\n");
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(async {
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+        };
+        // Started with a minute between passes: without reading the setting the
+        // loop would run once and stop, so a count above one is the proof.
+        tick::run(worker, Duration::from_secs(60), None, stop).await;
+    });
+    assert!(
+        attempts.load(Ordering::SeqCst) > 1,
+        "the loop kept the interval it started with instead of the setting: {} pass(es)",
+        attempts.load(Ordering::SeqCst)
+    );
+}
+
 /// A fallback host a test scripts: the facts it hands in and the calls it saw.
 #[derive(Default)]
 struct ScriptedFallback {
@@ -2289,6 +2329,72 @@ fn the_concurrency_cap_is_read_from_the_settings_on_every_pass() {
     fixture.settings("version = 1\n\n[tasks]\nmax_running = 2\n");
     let second = worker.tick().expect("the second pass ran");
     assert_eq!(second.steps.len(), 2, "{second:?}");
+}
+
+#[test]
+fn the_tick_interval_is_read_from_the_settings_on_every_pass() {
+    // Bug 4 of the M10 gate: `settings set tasks.tick_secs 10` was written and
+    // shown, and the running service kept its 15 s. The settings are re-read per
+    // pass and the pass answers the interval it read, so the loop sleeps the new
+    // one with no restart.
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    let forge: SharedForge = Arc::new(NoForge);
+    let worker = Fixture::worker(
+        &fixture,
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let started_with = Duration::from_secs(20);
+
+    // Nothing names the key: the pass answers none, so the loop keeps the
+    // interval it was started with.
+    let unset = worker.tick().expect("the pass ran");
+    assert_eq!(unset.interval_secs, None, "nobody set it: {unset:?}");
+    assert_eq!(unset.next_interval(started_with), started_with);
+
+    // The person's setting is picked up by the same worker's next pass.
+    fixture.settings("version = 1\n\n[tasks]\ntick_secs = 10\n");
+    let ten = worker.tick().expect("the second pass ran");
+    assert_eq!(
+        ten.interval_secs,
+        Some(10),
+        "the setting is read per pass: {ten:?}"
+    );
+    assert_eq!(ten.next_interval(started_with), Duration::from_secs(10));
+
+    // And a second change is picked up the same way.
+    fixture.settings("version = 1\n\n[tasks]\ntick_secs = 3\n");
+    let three = worker.tick().expect("the third pass ran");
+    assert_eq!(three.next_interval(started_with), Duration::from_secs(3));
+
+    // The older `[tick] interval_secs` spelling reaches the same key through
+    // the settings' legacy layer, read from the person's pre-M9 `config.toml`
+    // rather than `settings.toml`, so a run that never migrated still moves.
+    std::fs::remove_file(
+        fixture
+            .home
+            .join(".config")
+            .join("shprd")
+            .join("settings.toml"),
+    )
+    .expect("the settings file goes");
+    std::fs::write(
+        fixture
+            .home
+            .join(".config")
+            .join("shprd")
+            .join("config.toml"),
+        "[tick]\ninterval_secs = 7\n",
+    )
+    .expect("write the old config");
+    let seven = worker.tick().expect("the fourth pass ran");
+    assert_eq!(
+        seven.next_interval(started_with),
+        Duration::from_secs(7),
+        "the old config key is read too"
+    );
 }
 
 /// A facts source that lets another decider win the race for the verdict.

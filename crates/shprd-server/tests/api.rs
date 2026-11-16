@@ -338,6 +338,7 @@ async fn a_failed_pass_is_on_the_board() {
             },
         ],
         news: Vec::new(),
+        interval_secs: None,
     };
     let last = shprd_server::LastPass::of(&report, fixture.repo.path(), 1_700_000_000_000);
     last.write(fixture.state.path())
