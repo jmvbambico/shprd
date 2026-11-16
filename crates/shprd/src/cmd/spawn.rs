@@ -2144,12 +2144,12 @@ pub(crate) struct SpawnRecord {
 impl SpawnRecord {
     /// Whether the host can report this attempt's program at all.
     ///
-    /// A delivered brief that was read off the ready line (or off a painted
-    /// pane) is proof the host could not report the program: it stayed
-    /// `Unknown` while the program was plainly running. That is the one fact a
-    /// later reader needs to stop asking the host a question it cannot answer.
+    /// A brief that was read off the ready line is proof the host could not
+    /// report the program: it stayed `Unknown` while the program was plainly
+    /// running. That is the one fact a later reader needs to stop asking the
+    /// host a question it cannot answer.
     pub(crate) fn host_cannot_report(&self) -> bool {
-        matches!(self.ready.as_str(), "ready-line" | "screen-painted")
+        self.ready == "ready-line"
     }
 }
 
@@ -2195,15 +2195,13 @@ pub(crate) fn read_spawn_record(path: &Path) -> Option<SpawnRecord> {
 /// status=osc7501,hook,screen
 /// ```
 ///
-/// `ready` is `host-status` when the host reported the program's own agent
-/// state, `ready-line` when its harness's line was read off the screen because
-/// the host could not report it, `screen-painted` when the harness named no line
-/// and a painted pane was enough, and `not-delivered` when the brief never
-/// arrived at all.
+/// `ready` is `host-status` when the host reported the agent, `ready-line` when
+/// its harness's line was read off the screen because the host could not report
+/// it, and `not-delivered` when the brief never arrived at all.
 ///
-/// A failure to write is a warning, never a failed spawn: the agent is running
+/// A failure to write is a warning, never a failed launch: the agent is running
 /// either way, and this record is how a person reads afterwards what happened.
-fn write_spawn_record(path: &Path, pick: &Pick, ready: Option<super::deliver::ReadyBy>) {
+pub(crate) fn write_spawn_record(path: &Path, pick: &Pick, ready: Option<super::deliver::ReadyBy>) {
     let ready = ready.map_or("not-delivered", super::deliver::ReadyBy::as_str);
     let line = format!(
         "agent={}\nready={}\nstatus={}\n",

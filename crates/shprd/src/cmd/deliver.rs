@@ -39,13 +39,6 @@ const READY_LINES: usize = 40;
 /// How often the wait re-asks the host whether the agent is up yet.
 const READY_POLL: Duration = Duration::from_millis(250);
 
-/// How many polls a program that names no ready line gets before a pane with
-/// anything on it counts as ready.
-///
-/// A TUI that has painted is a TUI that can take a turn, so the wait only has to
-/// outlast the paint itself. That is a few [`READY_POLL`]s at most.
-const READY_SETTLE_POLLS: usize = 6;
-
 /// How long a launched CLI gets to be detected as an agent before shprd gives
 /// up on delivering its brief.
 const DEFAULT_READY_WAIT: Duration = Duration::from_secs(60);
@@ -94,9 +87,6 @@ pub enum ReadyBy {
     /// The host cannot report this program, so the line its harness names was
     /// read off the bottom of its pane.
     ReadyLine,
-    /// The host cannot report this program and its harness names no line, so a
-    /// pane that had painted anything at all was taken as ready.
-    ScreenPainted,
 }
 
 impl ReadyBy {
@@ -105,7 +95,6 @@ impl ReadyBy {
         match self {
             Self::HostStatus => "host-status",
             Self::ReadyLine => "ready-line",
-            Self::ScreenPainted => "screen-painted",
         }
     }
 }
@@ -187,9 +176,11 @@ pub struct Readiness<'a> {
 ///    `claude`'s hooks): the host's status is the *host's* reading of a process
 ///    it merely recognised, so the program's own ready line is asked for first
 ///    ([`ReadyBy::ReadyLine`]) — the only evidence its TUI has finished starting;
-/// 3. a program that names no ready line is ready when the host reports its
-///    agent state, or, when the host cannot, once its pane has painted anything
-///    ([`ReadyBy::ScreenPainted`]);
+/// 3. **a program that names no ready line**: the host's status, and nothing
+///    else. A pane with text on it is not evidence — a CLI that crashed on
+///    start-up leaves its error message there, and typing a brief into it would
+///    be reported as delivered. A file that names no line is one shprd cannot
+///    check on a host that cannot report, and the launch says so;
 /// 4. a named ready line that never appeared is still answered by the host's
 ///    own word once the wait runs out on a painted pane: a prompt whose wording
 ///    changed in a newer build must not cost the run its agent.
@@ -257,7 +248,6 @@ fn await_ready(
     let own_word = host_reports && readiness.own_status;
     let named = !readiness.lines.is_empty();
     let start = Instant::now();
-    let mut polls: usize = 0;
     loop {
         // The CLI may ask its own user something before it ever becomes an
         // agent, and wait there silently: report that instead of timing out.
@@ -273,23 +263,18 @@ fn await_ready(
             // A program that reports itself and does not, on a host that can
             // hear it, is still given the chance its screen offers: a build that
             // stops reporting must not lose its brief.
-            if let Some(ready) = screen_ready(mux, pane, readiness.lines, polls) {
+            if let Some(ready) = screen_ready(mux, pane, readiness.lines) {
                 return Ok(Ready::Ready(ready));
             }
         } else if named {
             // A plugin-only program: its own line is the only evidence that its
             // TUI has finished starting, so it is asked for on every poll.
-            if let Some(ready) = screen_ready(mux, pane, readiness.lines, polls) {
+            if let Some(ready) = screen_ready(mux, pane, readiness.lines) {
                 return Ok(Ready::Ready(ready));
             }
         } else if host_reports && host_is_up(mux, pane) {
             return Ok(Ready::Ready(ReadyBy::HostStatus));
-        } else if let Some(ready) = screen_ready(mux, pane, readiness.lines, polls) {
-            // No named line, and no host report: a painted pane after the
-            // settle is the last resort.
-            return Ok(Ready::Ready(ready));
         }
-        polls += 1;
         let waited = start.elapsed();
         if waited >= wait {
             // The wait ran out. A named line that never appeared is answered by
@@ -319,19 +304,19 @@ fn host_is_up(mux: &dyn Host, pane: &PaneId) -> bool {
     )
 }
 
-/// What the pane's screen says about readiness, when a ready line is asked for.
+/// What the pane's screen says about readiness: the program's own ready line.
 ///
 /// `Some(ReadyBy::ReadyLine)` the first time one of the harness's lines is on
-/// the screen. A program that names no line at all is ready once the pane has
-/// painted anything, but only after [`READY_SETTLE_POLLS`], so a pane whose text
-/// is still the shell's `$ ` line is not mistaken for a TUI.
-fn screen_ready(mux: &dyn Host, pane: &PaneId, lines: &[String], polls: usize) -> Option<ReadyBy> {
-    let screen = mux.read(pane, READY_LINES).ok()?;
+/// the screen. A file that names no line has no screen evidence to give, so the
+/// answer is `None` on every poll — a pane with text on it is not a claim that
+/// its program is taking turns, and the empty screen of a program that has not
+/// started and the error message of one that crashed look the same to a screen
+/// read.
+fn screen_ready(mux: &dyn Host, pane: &PaneId, lines: &[String]) -> Option<ReadyBy> {
     if lines.is_empty() {
-        return (polls >= READY_SETTLE_POLLS && !screen.trim().is_empty())
-            .then_some(ReadyBy::ScreenPainted);
+        return None;
     }
-    let screen = screen.to_lowercase();
+    let screen = mux.read(pane, READY_LINES).ok()?.to_lowercase();
     lines
         .iter()
         .any(|line| screen.contains(&line.to_lowercase()))
@@ -363,7 +348,10 @@ fn not_ready_reason(
         return format!("the program drew nothing within {millis} ms: it may not have started");
     }
     if readiness.lines.is_empty() {
-        return format!("the program never drew a ready screen within {millis} ms");
+        return format!(
+            "the host cannot report this program and its harness names no ready line, so \
+             nothing could say it was up within {millis} ms"
+        );
     }
     let what = readiness.lines.first().map_or_else(
         || "the ready line".to_string(),
@@ -730,12 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn a_program_with_no_ready_line_is_ready_once_its_pane_has_painted() {
-        // The harness names no line, so after the settle a painted pane is a TUI
-        // that can take a turn.
+    fn a_harness_that_names_no_ready_line_is_never_rushed_into_a_painted_pane() {
+        // A pane with text on it is not evidence that a program is taking
+        // turns: a CLI that crashed on start-up leaves its error message there,
+        // and typing a brief into it would be reported as delivered with no
+        // warning. A file that names no ready line says nothing shprd can check
+        // on a host that cannot report, so nothing is typed and the launch says
+        // why.
         let mux = no_plugin_reports();
         let (mux, pane) = with_pane(mux);
-        mux.set_screen(&pane, painting_screen());
+        // Something painted: a crash's error line looks just like a TUI.
+        mux.set_screen(&pane, "Error: could not read config.json");
         let delivery = deliver_brief(
             &mux,
             &pane,
@@ -745,22 +738,26 @@ mod tests {
                 prompts: &[],
                 own_status: false,
             },
-            Duration::from_secs(10),
+            Duration::from_millis(700),
+        );
+        assert!(
+            matches!(delivery, Delivery::NotDelivered(_)),
+            "a painted pane with no named line must never be delivered into: {delivery:?}"
         );
         assert_eq!(
-            delivery,
-            Delivery::Delivered {
-                ready: ReadyBy::ScreenPainted
-            }
+            delivery.reason().as_deref(),
+            Some(
+                "the host cannot report this program and its harness names no ready line, so \
+                 nothing could say it was up within 700 ms"
+            )
         );
-        assert_eq!(prompts(&mux), ["the brief".to_string()]);
+        assert!(prompts(&mux).is_empty(), "nothing may be typed in");
     }
 
     #[test]
     fn a_pane_that_never_painted_anything_is_a_start_failure_not_a_ready_screen() {
-        // The real "the CLI did not start": no host status, no ready line and an
-        // empty screen. That stays a warning, and its wording says which of the
-        // three failed.
+        // Nothing on the screen at all: the real "the CLI did not start", and the
+        // reason says that rather than naming a line the file does not have.
         let mux = no_plugin_reports();
         let (mux, pane) = with_pane(mux);
         let delivery = deliver_brief(
