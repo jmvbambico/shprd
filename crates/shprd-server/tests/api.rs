@@ -766,6 +766,105 @@ async fn a_service_write_rewrites_the_graph_document_atomically() {
     assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
 }
 
+#[tokio::test]
+async fn the_graph_run_route_answers_the_document_the_block_draws() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let state = tempfile::tempdir().expect("state dir");
+    let app = App::prepare(
+        repo.path(),
+        PORT,
+        &Actor::Human,
+        state.path(),
+        Some(shprd_server::AfterWrite::new(|repo: &std::path::Path| {
+            project_and_write(repo);
+        })),
+    )
+    .expect("prepare");
+    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+    let token = token.trim().to_string();
+
+    // One task, with a dependency, so the answer carries an edge as well as a
+    // node: the drawing is the page's, but the facts have to be there.
+    let mut second = task_add("T2");
+    second["deps"] = json!(["T1"]);
+    for body in [task_add("T1"), second] {
+        let response = app
+            .router()
+            .oneshot(
+                Call::post("/api/action", body)
+                    .with_token(&token)
+                    .with_write_header()
+                    .request(),
+            )
+            .await
+            .expect("answers");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // The gate is in front of it, like every other read.
+    let refused = app
+        .router()
+        .oneshot(Call::get("/api/graph/run").request())
+        .await
+        .expect("answers");
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .router()
+        .oneshot(Call::get("/api/graph/run").with_token(&token).request())
+        .await
+        .expect("answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the body reads")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("the body is JSON");
+
+    let on_disk = read_json(&shprd_server::graph::run_json(repo.path()));
+    assert_eq!(body, on_disk, "the answer is the file, byte for byte");
+    assert_eq!(body["run"]["id"], json!("r1"));
+    let tasks = body["tasks"].as_array().expect("tasks");
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[1]["deps"],
+        json!(["T1"]),
+        "the edge is in the document"
+    );
+}
+
+#[tokio::test]
+async fn a_graph_run_with_no_document_is_a_typed_404() {
+    let fixture = Fixture::new();
+    let reply = fixture
+        .send(Call::get("/api/graph/run").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.code(), "not_found");
+    let message = reply.json()["message"].as_str().expect("a message");
+    assert!(message.contains("run.json"), "{message}");
+    assert!(message.contains("no run document"), "{message}");
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_a_run_document_is_refused_not_drawn() {
+    let fixture = Fixture::new();
+    let graph = fixture.repo.path().join(".dagr");
+    std::fs::create_dir_all(&graph).expect("the graph folder");
+    std::fs::write(graph.join("run.json"), "{\"hello\": 1}").expect("the file");
+
+    let reply = fixture
+        .send(Call::get("/api/graph/run").with_token(&fixture.token))
+        .await;
+    assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reply.code(), "internal");
+    let message = reply.json()["message"].as_str().expect("a message");
+    assert!(message.contains("not a dagr run document"), "{message}");
+}
+
 /// What `shprd dagr sync` does after a write: fold the log, project it and write
 /// the document through the one atomic writer.
 fn project_and_write(repo: &std::path::Path) {

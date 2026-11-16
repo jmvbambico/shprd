@@ -562,3 +562,511 @@ input {
     }
   }
 }
+
+/* --- the graph screen ---------------------------------------------------- */
+
+/*
+ * The drawing is the run document: a node per task, an edge per dependency.
+ * The tones are the same three the mods use (red, green, amber) plus their
+ * neutral, so a graph in a browser and a board in the window read alike.
+ */
+.tone-amber {
+  color: var(--h-amber);
+}
+
+.tone-green {
+  color: var(--h-green);
+}
+
+.tone-red {
+  color: var(--h-red);
+}
+
+.tone-accent {
+  color: var(--h-accent);
+}
+
+.tone-neutral {
+  color: var(--h-dim);
+}
+
+.graph-screen {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.graph-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--h-background);
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-panel);
+}
+
+.graph-title-block {
+  min-width: 0;
+}
+
+.graph-kicker {
+  margin: 0;
+  color: var(--h-mark-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-id);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.graph-title {
+  margin: 2px 0 0;
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.graph-sub {
+  margin: 2px 0 0;
+  color: var(--h-muted);
+  font-size: var(--text-label);
+}
+
+.graph-problem {
+  color: var(--h-red);
+}
+
+.graph-legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  justify-content: flex-end;
+  font-size: var(--text-id);
+}
+
+.graph-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.graph-legend-badges {
+  font-family: var(--font-mono);
+  color: var(--h-dim);
+}
+
+.graph-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: var(--gap);
+}
+
+.graph-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background-color: var(--h-background);
+  background-image: radial-gradient(circle, rgb(255 255 255 / 6%) 1px, transparent 1px);
+  background-size: 22px 22px;
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-panel);
+  /* The drawing takes the finger: a pan must not scroll the page under it. */
+  touch-action: none;
+}
+
+.graph-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.graph-svg:active {
+  cursor: grabbing;
+}
+
+.graph-edge {
+  fill: none;
+  stroke: var(--h-dim);
+  stroke-width: 1.5;
+  transition:
+    stroke 120ms ease,
+    opacity 120ms ease;
+}
+
+.graph-edge.into-selected,
+.graph-edge.from-selected {
+  stroke: var(--h-accent);
+}
+
+.graph-edge.faded {
+  opacity: 0.4;
+}
+
+.graph-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.graph-node-box {
+  fill: var(--h-surface);
+  stroke: var(--h-border);
+  stroke-width: 1;
+  transition:
+    fill 120ms ease,
+    stroke 120ms ease;
+}
+
+.graph-node:hover .graph-node-box {
+  fill: var(--h-raised);
+}
+
+.graph-node.selected .graph-node-box,
+.graph-node:focus-visible .graph-node-box {
+  stroke: var(--h-accent);
+  stroke-width: 2;
+}
+
+.graph-node.dimmed {
+  opacity: 0.55;
+}
+
+.graph-node-id {
+  fill: var(--h-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.graph-node-title {
+  fill: var(--h-foreground);
+  font-size: 13px;
+}
+
+.graph-node-state {
+  fill: var(--h-muted);
+  font-size: 11px;
+}
+
+.graph-node-badge {
+  fill: var(--h-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.graph-node-foot {
+  fill: var(--h-dim);
+  font-size: 11px;
+}
+
+/* The glyph takes the tone of the box it is in; the words stay neutral. */
+.graph-dot {
+  fill: currentColor;
+  font-size: 9px;
+}
+
+.graph-controls {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.graph-fit,
+.graph-retry {
+  height: 32px;
+  padding: 0 12px;
+  background: var(--h-popover);
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-control);
+  color: var(--h-foreground);
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
+}
+
+.graph-fit:hover,
+.graph-retry:hover {
+  background: var(--h-hover);
+}
+
+.graph-retry {
+  align-self: flex-start;
+  margin-top: 6px;
+  box-shadow: none;
+}
+
+.graph-card {
+  flex: 1;
+}
+
+/* --- a task, opened from its node ---------------------------------------- */
+
+/*
+ * On a desktop the detail floats over the drawing rather than taking a column:
+ * a card that resized the canvas would move every node under the person's
+ * pointer, and opening a task should not redraw the graph.
+ */
+.task-detail.card {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 340px;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--h-surface);
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
+}
+
+/* The fit control moves out from under the detail when one is open. */
+@media (min-width: 1024px) {
+  .graph-body[data-detail="true"] .graph-controls {
+    right: 364px;
+  }
+}
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  background: rgb(0 0 0 / 55%);
+}
+
+.task-detail.sheet {
+  width: 100%;
+  max-height: 78vh;
+  overflow-y: auto;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  background: var(--h-popover);
+  border-top: 1px solid var(--h-border);
+  border-radius: 14px 14px 0 0;
+}
+
+.task-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-detail-what {
+  min-width: 0;
+}
+
+.task-detail-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--h-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-id);
+}
+
+.task-detail-kind {
+  color: var(--h-dim);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.task-detail-title {
+  margin: 4px 0 0;
+  font-size: var(--text-title);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.task-detail-close {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+
+.task-detail-state {
+  margin: 12px 0 0;
+  font-size: var(--text-label);
+}
+
+.task-detail-note {
+  color: var(--h-muted);
+}
+
+.task-detail-facts {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 14px 0 0;
+  font-size: var(--text-label);
+}
+
+.task-detail-facts dt {
+  color: var(--h-dim);
+}
+
+.task-detail-facts dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.task-detail-deps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-detail-dep {
+  padding: 1px 7px;
+  background: var(--h-raised);
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-control);
+  color: var(--h-foreground);
+  font-family: var(--font-mono);
+  font-size: var(--text-id);
+  cursor: pointer;
+}
+
+.task-detail-dep:hover {
+  background: var(--h-hover);
+}
+
+.task-detail-missing {
+  padding: 1px 7px;
+  color: var(--h-red);
+  font-family: var(--font-mono);
+  font-size: var(--text-id);
+}
+
+.task-detail-section {
+  margin-top: 16px;
+}
+
+.task-detail-heading {
+  margin: 0 0 6px;
+  color: var(--h-dim);
+  font-size: var(--text-id);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.task-detail-empty {
+  margin: 0;
+  color: var(--h-dim);
+  font-size: var(--text-label);
+}
+
+.attempt-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attempt {
+  padding: 8px 10px;
+  background: var(--h-background);
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-card);
+}
+
+.attempt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--text-label);
+}
+
+.attempt-id {
+  color: var(--h-muted);
+  font-family: var(--font-mono);
+}
+
+.attempt-actor {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.attempt-state {
+  margin-left: auto;
+  font-size: var(--text-id);
+  white-space: nowrap;
+}
+
+.attempt-when,
+.attempt-evidence {
+  margin: 4px 0 0;
+  color: var(--h-dim);
+  font-size: var(--text-id);
+}
+
+.task-detail-criteria {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--h-muted);
+  font-size: var(--text-label);
+}
+
+@media (max-width: 799px) {
+  .graph-screen {
+    gap: 0;
+  }
+
+  .graph-head {
+    padding: 10px 14px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+  }
+
+  .graph-legend {
+    display: none;
+  }
+
+  .graph-canvas {
+    border-width: 0;
+    border-radius: 0;
+  }
+
+  .graph-fit {
+    /* A thumb's target on a phone, not a pointer's. */
+    height: 44px;
+    padding: 0 16px;
+  }
+
+  .graph-body {
+    gap: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .task-detail.sheet {
+    animation: sheet-up 160ms ease-out;
+  }
+
+  @keyframes sheet-up {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+  }
+}

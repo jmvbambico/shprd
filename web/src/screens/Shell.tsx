@@ -8,6 +8,7 @@ import { useState } from "react";
 import type { ApiClient } from "../api/client";
 import { SCREENS, SCREEN_LABEL, type Screen } from "../layout/layout";
 import { useLayout } from "../layout/useLayout";
+import { GraphScreen } from "../graph/GraphScreen";
 import { Login } from "./Login";
 
 /** What one screen's placeholder says: which milestone fills it. */
@@ -19,8 +20,7 @@ const PLACEHOLDER: Record<Screen, { lead: string; note: string }> = {
   graph: {
     lead: "The graph lands here.",
     note: "M11.5: the run document the dagr block draws, as a graph.",
-  },
-  terminal: {
+  },  terminal: {
     lead: "The terminal lands here.",
     note: "M11.6: watch a task's agent by default, type on demand.",
   },
@@ -80,16 +80,20 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
       ) : null}
 
       <main className="board" aria-labelledby="screen-heading">
-        <section className="card placeholder" data-screen={screen}>
-          <p className="placeholder-kicker">{SCREEN_LABEL[screen]}</p>
-          <h1 id="screen-heading" className="placeholder-lead">
-            {placeholder.lead}
-          </h1>
-          <p className="placeholder-note">{placeholder.note}</p>
-          <p className="placeholder-empty">
-            Nothing to show yet — this build has no run to draw here.
-          </p>
-        </section>
+        {screen === "graph" ? (
+          <GraphScreen client={client} />
+        ) : (
+          <section className="card placeholder" data-screen={screen}>
+            <p className="placeholder-kicker">{SCREEN_LABEL[screen]}</p>
+            <h1 id="screen-heading" className="placeholder-lead">
+              {placeholder.lead}
+            </h1>
+            <p className="placeholder-note">{placeholder.note}</p>
+            <p className="placeholder-empty">
+              Nothing to show yet — this build has no run to draw here.
+            </p>
+          </section>
+        )}
       </main>
 
       {layout === "desktop" ? (

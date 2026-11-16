@@ -579,6 +579,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/chat", get(chat_page).post(chat_send))
         .route("/api/action", post(action))
         .route("/api/graph", get(graph))
+        .route("/api/graph/run", get(graph_run))
         .route("/api/tasks", post(add_task))
         .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
@@ -667,6 +668,20 @@ async fn graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiRejec
         run.as_deref(),
         dagr.as_ref(),
     )))
+}
+
+/// `GET /api/graph/run`: the run document the window's graph block draws.
+///
+/// The desktop's block is a terminal running `dagr view <repo>/.dagr/run.json`,
+/// which the service rewrites after every ledger write. The web cannot run dagr,
+/// so it draws that same file itself: this answers the file, verbatim, so a graph
+/// in a browser and a graph in the window can never show different runs. A run
+/// that has not written a document yet is a `404` with the words that say so,
+/// and a file that is not a run document is a `500`: the page draws neither.
+async fn graph_run(State(state): State<AppState>) -> Result<Json<Value>, ApiReject> {
+    let repo = state.repo.clone();
+    let document = blocking(move || crate::graph::read_document(&repo)).await?;
+    Ok(Json(document?))
 }
 
 /// `GET /api/asks`: every ask still waiting for the person.
