@@ -1,14 +1,31 @@
-//! The gate every route behind `/api/health` passes through.
+//! The gate every route but health and login passes through, and the two checks
+//! that come before it.
 //!
-//! It is deliberately the same shape as Shepherdr's local door, minus the
-//! tailnet: a bearer token from the state directory, `x-shprd: 1` on writes so a
-//! cross-site form cannot post one, and an `Origin` check so a browser page
-//! served from anywhere else cannot read this service either.
+//! Three middlewares, outermost first:
+//!
+//! | | what it does |
+//! |---|---|
+//! | [`peer`] | records the address the request came from, which is what a rate limit is keyed on |
+//! | [`host`] | refuses a request addressed to a name this service does not answer to, with `421` |
+//! | [`require`] | the gate itself: the token door or a session, `Origin` and `x-shprd` on a write, the limits |
+//!
+//! The decision is [`shprd_remote::Gateway::decide`], a plain function over a
+//! [`shprd_remote::GateRequest`], so the table is a unit test in that crate and
+//! this file only fills it in and turns the answer into an HTTP response.
+//!
+//! `peer` and `host` run for health and login too. Health is the handshake and
+//! stays unauthenticated, but it is still answered only under a name this
+//! service knows — an unknown `Host` is the DNS-rebinding attempt, whichever
+//! route it is aimed at.
 
-use axum::extract::{Request, State};
-use axum::http::{Method, header};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{HeaderMap, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+
+use shprd_remote::GateRequest;
 
 use crate::api::AppState;
 use crate::error::ApiReject;
@@ -16,59 +33,117 @@ use crate::error::ApiReject;
 /// The header a write must carry.
 pub const WRITE_HEADER: &str = "x-shprd";
 
-/// Refuses a request without a valid token, from another origin, or a write
-/// without the custom header.
+/// The peer address, inserted by [`peer`] for everything behind it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Peer(pub IpAddr);
+
+/// Records the address the request came from.
+///
+/// The listener is served with `into_make_service_with_connect_info`, so the
+/// address is the kernel's, not a header's: `X-Forwarded-For` is ignored until
+/// the tunnel task decides when it may be trusted. A router driven without a
+/// socket — every test that uses `tower::ServiceExt` — has no peer, and is
+/// treated as loopback, which is what it is.
+pub(crate) async fn peer(mut request: Request, next: Next) -> Response {
+    let address = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    request.extensions_mut().insert(Peer(address));
+    next.run(request).await
+}
+
+/// Refuses a request addressed to a name this service does not answer to.
+///
+/// The loopback names are always allowed and a tunnel adds its own through
+/// [`crate::App::allowed_hosts`]. A `421` and not a redirect: telling an unknown
+/// caller which name would work is exactly what a rebinding attack needs.
+pub(crate) async fn host(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let host = host_of(request.headers());
+    if !state.remote.host_allowed(host) {
+        return ApiReject::wrong_host(host).into_response();
+    }
+    next.run(request).await
+}
+
+/// The gate: allow the request through one door, or refuse it.
 pub(crate) async fn require(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    if let Some(origin) = request
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        && !is_own_origin(&state, origin)
-    {
-        return ApiReject::cross_origin(origin).into_response();
+    let gate = gate_request(&request);
+    let decision = state.remote.decide(&gate);
+    match decision {
+        Ok(door) => {
+            let mut request = request;
+            request.extensions_mut().insert(door);
+            next.run(request).await
+        }
+        Err(err) => crate::remote::reject(err).into_response(),
     }
-
-    match presented_token(&request) {
-        Some(token) if secret_eq(&token, &state.token) => {}
-        _ => return ApiReject::unauthorized().into_response(),
-    }
-
-    if is_write(request.method()) && !carries_write_header(&request) {
-        return ApiReject::missing_header().into_response();
-    }
-
-    next.run(request).await
 }
 
-/// Whether `origin` is this service's own page origin.
+/// What one request looks like to the gate.
+fn gate_request(request: &Request) -> GateRequest<'_> {
+    GateRequest {
+        host: host_of(request.headers()),
+        method: request.method().as_str(),
+        origin: header_str(request.headers(), header::ORIGIN),
+        bearer: presented_token(request),
+        cookies: header_str(request.headers(), header::COOKIE),
+        write_header: carries_write_header(request),
+        upgrade: is_socket_upgrade(request.headers()),
+        peer: request
+            .extensions()
+            .get::<Peer>()
+            .map(|peer| peer.0)
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+    }
+}
+
+/// One header as a string, when it is one.
+pub(crate) fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// The `Host` the request was addressed to.
 ///
-/// The listener is loopback only, so a page that may call it is one served from
-/// the same loopback port. A browser always sends `Origin` on a cross-origin
-/// request and on every write, which is what makes this check worth something:
-/// no page can drive the service from another site, whatever the token.
-pub(crate) fn is_own_origin(state: &AppState, origin: &str) -> bool {
-    let port = state.port;
-    origin == format!("http://127.0.0.1:{port}") || origin == format!("http://localhost:{port}")
+/// HTTP/1.1 requires one, so a request without it is refused by the gate rather
+/// than guessed at.
+pub(crate) fn host_of(headers: &HeaderMap) -> Option<&str> {
+    header_str(headers, header::HOST)
+}
+
+/// Whether the request asks to become a WebSocket.
+///
+/// A socket is a write: the page types into a terminal through one, so the same
+/// `Origin` and `x-shprd` rules apply (threat row 12).
+pub(crate) fn is_socket_upgrade(headers: &HeaderMap) -> bool {
+    let connection = headers
+        .get(header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let upgrade = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    connection.split(',').any(|part| part.trim() == "upgrade") && upgrade == "websocket"
 }
 
 /// The token a request presented, from its header or, on a socket, its query.
 ///
 /// A browser cannot set headers on a WebSocket handshake, so `?token=` is
 /// accepted there and only there — a loopback listener whose query strings never
-/// leave this machine.
-fn presented_token(request: &Request) -> Option<String> {
-    if let Some(value) = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-    {
+/// leave this machine. A browser page never sees the token at all.
+fn presented_token(request: &Request) -> Option<&str> {
+    if let Some(value) = header_str(request.headers(), header::AUTHORIZATION) {
         let (scheme, token) = value.split_once(' ')?;
         if scheme.eq_ignore_ascii_case("bearer") {
-            return Some(token.trim().to_string());
+            return Some(token.trim());
         }
     }
     if request.uri().path() != "/api/ws" {
@@ -77,37 +152,18 @@ fn presented_token(request: &Request) -> Option<String> {
     let query = request.uri().query()?;
     query.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=')?;
-        (name == "token").then(|| value.to_string())
+        (name == "token").then_some(value)
     })
-}
-
-/// Whether the request changes anything.
-fn is_write(method: &Method) -> bool {
-    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
 /// Whether a write carries `x-shprd: 1`.
 fn carries_write_header(request: &Request) -> bool {
-    request
-        .headers()
-        .get(WRITE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim() == "1")
-        .unwrap_or(false)
-}
-
-/// Compares two secrets without letting the comparison time say how much of the
-/// token was right.
-pub(crate) fn secret_eq(left: &str, right: &str) -> bool {
-    let left = left.as_bytes();
-    let right = right.as_bytes();
-    let mut difference = left.len() ^ right.len();
-    for index in 0..left.len().max(right.len()) {
-        let a = left.get(index).copied().unwrap_or(0);
-        let b = right.get(index).copied().unwrap_or(0);
-        difference |= usize::from(a ^ b);
-    }
-    difference == 0
+    header_str(
+        request.headers(),
+        header::HeaderName::from_static(WRITE_HEADER),
+    )
+    .map(|value| value.trim() == "1")
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -128,7 +184,8 @@ mod tests {
         assert_eq!(presented_token(&request("/api/state?token=abc")), None);
         assert_eq!(
             presented_token(&request("/api/ws?token=abc")),
-            Some("abc".to_string())
+            Some("abc"),
+            "a browser cannot set headers on a handshake"
         );
         assert_eq!(presented_token(&request("/api/ws?since=1")), None);
     }
@@ -140,7 +197,7 @@ mod tests {
             .header(header::AUTHORIZATION, "bearer header-token")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(presented_token(&bearer), Some("header-token".to_string()));
+        assert_eq!(presented_token(&bearer), Some("header-token"));
 
         let basic = Request::builder()
             .uri("/api/state")
@@ -163,20 +220,41 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_compares_exactly() {
-        assert!(secret_eq("abc", "abc"));
-        assert!(!secret_eq("abc", "abd"));
-        assert!(!secret_eq("abc", "ab"));
-        assert!(!secret_eq("", "a"));
-        assert!(secret_eq("", ""));
+    fn a_socket_upgrade_is_told_apart_from_a_plain_get() {
+        let upgrade = Request::builder()
+            .uri("/api/ws")
+            .header(header::CONNECTION, "keep-alive, Upgrade")
+            .header(header::UPGRADE, "websocket")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_socket_upgrade(upgrade.headers()));
+
+        let plain = Request::builder()
+            .uri("/api/state")
+            .header(header::CONNECTION, "keep-alive")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_socket_upgrade(plain.headers()));
+
+        let header_only = Request::builder()
+            .uri("/api/state")
+            .header(header::UPGRADE, "websocket")
+            .body(Body::empty())
+            .unwrap();
+        assert!(
+            !is_socket_upgrade(header_only.headers()),
+            "both headers count"
+        );
     }
 
     #[test]
-    fn a_write_is_anything_but_a_read() {
-        assert!(is_write(&Method::POST));
-        assert!(is_write(&Method::DELETE));
-        assert!(!is_write(&Method::GET));
-        assert!(!is_write(&Method::HEAD));
-        assert!(!is_write(&Method::OPTIONS));
+    fn the_gate_sees_a_host_only_when_the_request_has_one() {
+        let with = Request::builder()
+            .uri("/api/state")
+            .header(header::HOST, "127.0.0.1:18080")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(host_of(with.headers()), Some("127.0.0.1:18080"));
+        assert_eq!(host_of(request("/api/state").headers()), None);
     }
 }

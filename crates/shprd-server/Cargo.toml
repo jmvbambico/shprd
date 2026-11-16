@@ -14,6 +14,7 @@ serde_json.workspace = true
 shprd-agents = { path = "../shprd-agents" }
 shprd-core = { path = "../shprd-core" }
 shprd-git = { path = "../shprd-git" }
+shprd-remote = { path = "../shprd-remote" }
 shprd-views = { path = "../shprd-views" }
 shprd-watch = { path = "../shprd-watch" }
 thiserror.workspace = true

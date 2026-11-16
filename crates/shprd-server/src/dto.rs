@@ -890,6 +890,16 @@ impl Action {
         "task_accept",
     ];
 
+    /// Whether this action undoes something a person cannot get back.
+    ///
+    /// Through the session door these need a password entered in the last five
+    /// minutes ([`crate::remote`]); the loopback token door is exempt because the
+    /// token is already local. Landing, merging and "stop everything" join this
+    /// list when their actions exist; it is one place so the rule cannot drift.
+    pub fn is_destructive(&self) -> bool {
+        matches!(self, Self::TaskDrop { .. })
+    }
+
     /// The action's kind, as the envelope spells it.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -955,6 +965,12 @@ pub enum ErrorCode {
     Unauthorized,
     /// The request came from another origin.
     CrossOrigin,
+    /// The request was addressed to a name this service does not answer to.
+    WrongHost,
+    /// A rate limit refused the request; `Retry-After` says when to try again.
+    TooManyRequests,
+    /// A destructive action needs the password entered again.
+    Reauth,
     /// A write did not carry `x-shprd: 1`.
     MissingHeader,
     /// The body was not a well-formed request.
@@ -1486,6 +1502,14 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<Action>()?,
         one::<ActionReply>()?,
         one::<ErrorCode>()?,
+        one::<shprd_remote::dto::LoginRequest>()?,
+        one::<shprd_remote::dto::LoginReply>()?,
+        one::<shprd_remote::dto::LoginFailure>()?,
+        one::<shprd_remote::dto::LogoutReply>()?,
+        one::<shprd_remote::dto::ViaDto>()?,
+        one::<shprd_remote::dto::SessionInfoDto>()?,
+        one::<shprd_remote::dto::SessionDto>()?,
+        one::<shprd_remote::UaClass>()?,
         one::<ErrorBody>()?,
         one::<WsMessage>()?,
         one::<ClientMessage>()?,

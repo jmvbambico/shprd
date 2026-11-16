@@ -19,11 +19,11 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
-use axum::extract::{Path as UrlPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, middleware};
+use axum::{Extension, Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
 use shprd_agents::data::DataDir;
@@ -44,10 +44,19 @@ use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
 use crate::prompts as prompts_api;
+use crate::remote as login;
 use crate::roster as roster_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
 use crate::tasks;
+
+/// The largest body any route accepts, in bytes.
+///
+/// A JSON request is small; a file upload will get its own, larger limit when it
+/// exists. The bound is here because the same listener may be on a tunnel: a
+/// request with no limit is a request that can fill memory (M7d §4.4, "body
+/// size").
+pub const BODY_LIMIT: usize = 1024 * 1024;
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -172,6 +181,13 @@ pub(crate) struct AppState {
     /// A service without one answers `POST /api/chat` with a refusal rather
     /// than pretending the line went somewhere.
     pub(crate) chat: ChatHost,
+    /// The login, the sessions and the gate that stands in front of a tunnel.
+    ///
+    /// It is always present: the gate is what decides whether a request has a
+    /// credential at all, and a service with no [`shprd_remote::Gateway`] would
+    /// be one with no rule. A test that wants a fake clock replaces it
+    /// ([`App::with_clock`]).
+    pub(crate) remote: Arc<shprd_remote::Gateway>,
     /// The home and data home the agent CLIs run with, when the caller resolved
     /// them.
     ///
@@ -204,6 +220,11 @@ pub(crate) struct Paths {
     pub(crate) dagr: Option<crate::graph::Dagr>,
     /// The home and data home the agent CLIs run with, when there is one.
     pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
+    /// The hostnames this service answers to besides loopback.
+    ///
+    /// The binary passes the set a tunnel added; a test passes its own. The
+    /// empty set is loopback only, which is a service nobody put on the internet.
+    pub(crate) allowed_hosts: shprd_remote::AllowedHosts,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -280,6 +301,16 @@ impl App {
         // It goes before the record, so a client that polls for `service.json`
         // never finds a record whose change file is still missing.
         let _ = crate::changes::touch(state_dir, ledger::last_seq(repo).unwrap_or(0));
+        // The gate is prepared before the record, so a client that finds the
+        // record finds a service that can already answer it.
+        let gateway = shprd_remote::Gateway::new(state_dir, Arc::new(SystemClock))
+            .with_token(files.token())
+            .with_hosts(paths.allowed_hosts.clone());
+        // A session that has expired is not found whatever happens, so this is
+        // tidying: the file a start leaves behind never holds dead rows.
+        if let Err(err) = gateway.sessions().purge() {
+            tracing::warn!(%err, "could not tidy the expired sessions");
+        }
         files.write_record(port)?;
         let state = AppState {
             repo: repo.to_path_buf(),
@@ -294,6 +325,7 @@ impl App {
             // Everything the service reads from the machine is resolved by the
             // binary and carried in ([`crate::service::Config`]); a service
             // prepared by hand reads nothing of the process's environment.
+            remote: Arc::new(gateway),
             home: paths.home,
             state_dir: state_dir.to_path_buf(),
             data: paths.data,
@@ -476,6 +508,31 @@ impl App {
         self
     }
 
+    /// Count the login's rate limits and session clocks against `clock`.
+    ///
+    /// A test moves time rather than waiting for it; the service itself always
+    /// uses [`shprd_core::log::SystemClock`]. The gateway is rebuilt, so the
+    /// password, sessions and hostnames this service already had are kept.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+        let hosts = self.state.remote.hosts();
+        self.state.remote = Arc::new(
+            shprd_remote::Gateway::new(&self.state.state_dir, clock)
+                .with_token(self.state.token.clone())
+                .with_hosts(hosts),
+        );
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// The names this service answers to, as a shared handle.
+    ///
+    /// A tunnel task adds its hostname here when it starts and removes it when it
+    /// stops ([`shprd_remote::AllowedHosts`]); the gate sees the change at once,
+    /// and an unknown `Host` is a `421` either way.
+    pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
+        self.state.remote.hosts()
+    }
+
     /// Serve with no harness table at all, whatever the environment would find.
     ///
     /// A test uses it to prove what a machine without a data directory does,
@@ -487,7 +544,12 @@ impl App {
     }
 }
 
-/// The whole API, with the gate in front of everything but health.
+/// The whole API, with the gate in front of everything but health and login.
+///
+/// The layers, innermost first: the body limit every route shares, the trace,
+/// the `Host` allowlist, and the peer address the rate limits are keyed on. The
+/// gate itself is a layer on the guarded routes only, because a login is how a
+/// session comes to exist and health is the handshake.
 pub(crate) fn router(state: AppState) -> Router {
     let guarded = Router::new()
         .route("/api/state", get(snapshot_handler))
@@ -507,12 +569,18 @@ pub(crate) fn router(state: AppState) -> Router {
             get(read_prompt).put(put_prompt).delete(reset_prompt),
         )
         .route("/api/ws", get(socket))
+        .route("/api/session", get(login::session))
+        .route("/api/logout", post(login::logout))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/login", post(login::login))
         .merge(guarded)
         .fallback(not_found)
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(state.clone(), auth::host))
+        .layer(middleware::from_fn(auth::peer))
         .with_state(state)
 }
 
@@ -704,6 +772,7 @@ async fn changes(
 /// `POST /api/action`: one envelope, run against the same log the CLI writes.
 async fn action(
     State(state): State<AppState>,
+    Extension(door): Extension<shprd_remote::Door>,
     body: Bytes,
 ) -> Result<Json<ActionReply>, ApiReject> {
     let value: Value = serde_json::from_slice(&body)
@@ -723,6 +792,13 @@ async fn action(
     }
     let action: Action = Action::from_value(value)
         .map_err(|err| ApiReject::bad_request(format!("a {kind:?} action is malformed: {err}")))?;
+
+    // A destructive action needs a password entered in the last five minutes
+    // through a session. The loopback token door is exempt: the token is already
+    // local, and the researched design says so (M7d §4.4 rule 6).
+    if action.is_destructive() {
+        state.remote.require_fresh(&door).map_err(login::reject)?;
+    }
 
     // The context borrows the service, and the work runs on a blocking thread,
     // so the pieces it needs are moved in and rebuilt there.

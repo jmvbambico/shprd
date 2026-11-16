@@ -24,6 +24,12 @@ use shprd_server::{App, ChatWriter};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixtures claim in their `Origin` and `service.json`.
 const PORT: u16 = 18_082;
 
@@ -277,7 +283,8 @@ impl Call {
     fn request(&self) -> Request<Body> {
         let mut builder = Request::builder()
             .method(self.method.clone())
-            .uri(&self.uri);
+            .uri(&self.uri)
+            .header(header::HOST, HOST);
         if let Some(token) = &self.token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }

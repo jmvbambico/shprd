@@ -21,12 +21,25 @@
 //! | `GET /api/chat` | a space's conversation, read from its agent's own record, after a cursor |
 //! | `POST /api/chat` | one turn of the person's input, typed into that space's agent |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
+//! | `POST /api/login` | the login password, exchanged for a session cookie |
+//! | `POST /api/logout` | ends the session the cookie names |
+//! | `GET /api/session` | who is asking, through which door, and how fresh |
 //!
-//! Everything but health needs `Authorization: Bearer <token>` from the state
-//! directory; writes also need `x-shprd: 1`; a request whose `Origin` is not
-//! this service's own loopback origin is refused. A Herdr mod can only `fetch`
-//! (no streaming, no WebSocket), which is why the change channel is a long poll
-//! first and a socket second.
+//! Every route but health and login passes the gate (`crate::auth`): a request
+//! is allowed by **either** `Authorization: Bearer <token>` from the state
+//! directory — the door the CLI and the Herdr mods use — **or** a valid session
+//! cookie from `POST /api/login`. A write also needs `x-shprd: 1`, and its
+//! `Origin`, when it sends one, must be this service's own page origin; a socket
+//! upgrade needs that `Origin` and no header (a browser cannot set one on a
+//! handshake). A `Host` that is neither loopback nor a hostname a tunnel added
+//! is a `421`, and the login is rate limited with `429` and `Retry-After`.
+//!
+//! A destructive action — dropping a task, and later landing or merging one —
+//! needs a session whose password was entered in the last five minutes; the token
+//! door is exempt, because the token is already local.
+//!
+//! A Herdr mod can only `fetch` (no streaming, no WebSocket), which is why the
+//! change channel is a long poll first and a socket second.
 //!
 //! Every socket is bounded and a request that is not an upgrade is refused with
 //! a typed body, so no client — a page, a probe, or a connection nobody closed —
@@ -55,10 +68,11 @@ pub mod hub;
 pub(crate) mod ledger;
 pub mod news;
 pub(crate) mod prompts;
+pub mod remote;
 pub(crate) mod roster;
 pub(crate) mod settings;
 
-pub use api::{App, WsLimits};
+pub use api::{App, BODY_LIMIT, WsLimits};
 pub use changes::Touch;
 pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
 pub use engine::Engine;
@@ -70,6 +84,7 @@ pub use service::{
     AfterWrite, Config, PassNotice, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig,
     VERSION, serve, shutdown_signal, state_dir, state_home,
 };
+pub use shprd_remote::AllowedHosts;
 pub use snapshot::NO_RUN_HINT;
 pub use tick::{
     FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, ReviewCloser, Reviewer,
