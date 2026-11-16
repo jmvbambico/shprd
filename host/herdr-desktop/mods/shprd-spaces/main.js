@@ -25,7 +25,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { run, spaces, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import { rowBadge, rowCounts, sidebarRows } from "./lib/spaces.js";
 import { badge, countBadge, note, statusGlyph } from "./lib/panel.js";
 import { SPACE, TEXT, tone } from "./lib/tokens.js";
@@ -47,22 +47,28 @@ export default class Spaces extends View {
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** Reads the board once; a service that went away is looked for again. */
+  /**
+   * Reads the board once; a service that restarted or went away is looked for
+   * again.
+   *
+   * `attach` is what notices a restart: it compares the `id` in `service.json`
+   * with the one this sidebar's client was made from, so a new `shprd serve` on
+   * the same port is a new client and a whole re-read rather than a sidebar that
+   * keeps painting old rows while the run has moved on (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.state = null;
-          this.failure = "shprd serve is not running";
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.state = null;
+        this.failure = "shprd serve is not running";
+        cx.notify();
+        return;
       }
-      const state = await this.client.state();
-      if (state) this.state = state;
+      this.client = next.client;
+      this.follow();
+      this.state = await this.client.state();
       this.failure = null;
     } catch (err) {
       // A service that restarted answers with another id: forget the client so

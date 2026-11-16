@@ -22,7 +22,7 @@ import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { keys, run, theme, window } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import { lastFailure, runShort, since, statusCounts } from "./lib/board.js";
 import { badge, countBadge } from "./lib/panel.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
@@ -54,28 +54,33 @@ export default class Status extends View {
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** Reads the board once, or records why it could not. */
+  /**
+   * Reads the board once, or records why it could not.
+   *
+   * A service that restarted is noticed before the read (`attach` compares the
+   * id in `service.json` with this bar's client) and the bar re-reads the whole
+   * board rather than keeping the old counts; a read that answers nothing is a
+   * failure, not a board to keep painting (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.service = null;
-          this.state = null;
-          this.failure = "shprd serve is not running";
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.service = null;
+        this.state = null;
+        this.failure = "shprd serve is not running";
+        cx.notify();
+        return;
       }
+      this.client = next.client;
+      this.follow();
       this.service = this.client.record;
-      const state = await this.client.state();
-      if (state) this.state = state;
+      this.state = await this.client.state();
       this.failure = null;
     } catch (err) {
-      // A service that restarted answers with another id: forget the client so
-      // the next look finds the new port instead of dialling a dead one.
+      // A service that restarted or went away: forget the client so the next
+      // look finds the new one instead of dialling a dead port.
       this.client = null;
       this.service = null;
       this.failure = reason(err);

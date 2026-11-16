@@ -300,7 +300,7 @@ test("a refusal is a ServiceError carrying the service's words", async () => {
   );
 });
 
-test("a read gives up after its bound; a write waits for the answer", async () => {
+test("a read that runs out of time is no answer, and a strict read says so", async () => {
   const never = async () => new Promise(() => {});
   const bounds = [];
   // The runtime's own "give up after" helper, shortened for the test: what is
@@ -319,19 +319,34 @@ test("a read gives up after its bound; a write waits for the answer", async () =
     { fetch: never, wait },
   );
 
-  // A read is bounded at 4 s (`READ_WAIT`) and answers null.
-  assert.equal(await client.state(), null);
+  // A plain read is bounded at 4 s (`READ_WAIT`) and answers null.
+  assert.equal(await client.call("GET", "/api/state"), null);
   assert.deepEqual(bounds, [4000], "a read asks for READ_WAIT");
+
+  // The board is not a plain read: a panel paints it, so no answer at all is a
+  // failure (the M10 gate's bug 5 — a `null` board looked like "nothing new"
+  // and froze the panels for ever). It throws, and the panel's `catch` drops the
+  // client and looks for the service again.
+  await assert.rejects(
+    () => client.state(),
+    (err) => {
+      assert.equal(err.name, "ServiceError");
+      assert.equal(err.code, "no-answer");
+      assert.equal(err.status, 0);
+      return true;
+    },
+  );
 
   // A write is not bounded by the client at all: the person pressed a button,
   // so it waits for whatever the service says.
+  const before = bounds.length;
   let settled = false;
   const write = client.action({ kind: "task.status", task: "T1", msg: "x" }).then(() => {
     settled = true;
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(settled, false, "the write is still waiting, as it must be");
-  assert.equal(bounds.length, 1, "and it was never handed to the wait");
+  assert.equal(bounds.length, before, "and it was never handed to the wait");
   void write;
 });
 

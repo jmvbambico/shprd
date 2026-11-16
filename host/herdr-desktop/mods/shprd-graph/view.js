@@ -210,7 +210,7 @@ export function graphView(facts = {}) {
   if (blockGone) {
     return stop(
       "The graph block is gone from the layout",
-      "Herdr removes a terminal block whose terminal it cannot find, and writes the shortened layout back. Move `layouts/shprd.json` aside and run `shprd install herdr-desktop`: the installer never overwrites a layout Herdr has edited, and the next window starts the block again.",
+      "Herdr removes a terminal block whose terminal it cannot find, and writes the shortened layout back. Run `shprd install herdr-desktop`: the installer knows its own layout from the app's prune, puts the block back, and the next window starts the terminal again.",
       "shprd install herdr-desktop",
     );
   }

@@ -29,7 +29,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { run, spaces, theme } from "herdr";
 
-import { Client, discover, POLL_WAIT } from "./lib/client.js";
+import { attach, alive, POLL_WAIT } from "./lib/client.js";
 import { spaceIndex } from "./lib/spaces.js";
 import {
   BODY_MAX,
@@ -71,44 +71,55 @@ export default class Toasts extends View {
    * Follows the service for as long as this copy lives: one read of the board,
    * then the long poll, with the change file as the arm that wakes a poll the
    * service restarted under.
+   *
+   * A restart is noticed before anything is read (`attach` compares the id in
+   * `service.json`), and the `since` cursor starts again from the new service's
+   * board: a sequence from another run's log names nothing this one wrote (M10
+   * gate bug 5).
    */
   run() {
     const cx = this.cx;
     cx.spawn(async () => {
       for (;;) {
         try {
-          if (!this.client) {
-            const found = await discover({ wait: (ms) => cx.sleep(ms) });
-            if (!found) {
-              await cx.sleep(RETRY_MS);
-              continue;
-            }
-            this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-            // The change file is watched only once there is a directory to
-            // watch: a service that is not there writes nothing to follow.
-            this.follow();
+          const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+          if (!next.client) {
+            this.client = null;
+            this.since = null;
+            await cx.sleep(RETRY_MS);
+            continue;
           }
+          if (next.restarted) this.forget();
+          this.client = next.client;
+          // The change file is watched only once there is a client to follow.
+          this.follow();
           if (this.since === null) {
             // What happened before the window opened is the board's to tell, not
             // a toast's: the list starts at the sequence this reading is at.
             const first = await this.client.state();
-            if (first) this.state = first;
+            this.state = first;
             this.since = Number.isInteger(first?.seq) ? first.seq : 0;
             this.absorb([], this.state);
             cx.notify();
           }
           const change = await this.client.changes(this.since, POLL_WAIT);
           if (change) {
-            const next = Number.isInteger(change.seq) ? change.seq : this.since;
-            this.since = Math.max(this.since, next);
+            const ahead = Number.isInteger(change.seq) ? change.seq : this.since;
+            this.since = Math.max(this.since, ahead);
             const events = change.events ?? [];
             if (events.length > 0) {
               // The events say what happened; the snapshot says in whose words.
-              const state = await this.client.state();
-              if (state) this.state = state;
+              this.state = await this.client.state();
               this.absorb(events, this.state);
               cx.notify();
             }
+          } else if (!(await alive(this.client))) {
+            // A long poll that answers nothing is either "nothing happened yet"
+            // or a port that has gone away, and only one of those is worth
+            // waiting on: ask the handshake, and start again when it fails.
+            this.client = null;
+            this.since = null;
+            await cx.sleep(RETRY_MS);
           }
         } catch {
           // A service that restarted answers with another id, so the next look
@@ -119,6 +130,18 @@ export default class Toasts extends View {
         }
       }
     });
+  }
+
+  /**
+   * Forgets the old service's board and cursor.
+   *
+   * The toasts already shown stay: they are what the person has been told, and a
+   * restart is not a reason to say it again. The ones still waiting to be drawn
+   * are kept by `mergeNews`' seq, so no line arrives twice.
+   */
+  forget() {
+    this.state = null;
+    this.since = null;
   }
 
   /** Follows the service's change file, so a poll that died is woken anyway. */
@@ -140,13 +163,13 @@ export default class Toasts extends View {
     cx.spawn(async (cx) => {
       try {
         if (!this.client) return;
-        const state = await this.client.state();
-        if (state) this.state = state;
+        this.state = await this.client.state();
         this.absorb([], this.state);
         cx.notify();
         this.follow();
       } catch {
         this.client = null;
+        this.since = null;
       }
     });
   }
