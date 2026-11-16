@@ -984,11 +984,6 @@ pub struct ReadySpec {
 }
 
 impl ReadySpec {
-    /// Whether the program names no ready line at all.
-    pub fn is_empty(&self) -> bool {
-        self.screen.is_empty()
-    }
-
     /// Check that every pattern is a non-empty phrase.
     fn validate(&self) -> Result<(), SpecError> {
         for pattern in &self.screen {

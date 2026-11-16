@@ -365,15 +365,11 @@ fn not_ready_reason(
     if readiness.lines.is_empty() {
         return format!("the program never drew a ready screen within {millis} ms");
     }
-    format!(
-        "{} never showed within {millis} ms: look at the tab, it may be asking something",
-        readiness
-            .lines
-            .first()
-            .map_or("the ready line".to_string(), |line| format!(
-                "its \"{line}\" line"
-            ))
-    )
+    let what = readiness.lines.first().map_or_else(
+        || "the ready line".to_string(),
+        |line| format!("its \"{line}\" line"),
+    );
+    format!("{what} never showed within {millis} ms: look at the tab, it may be asking something")
 }
 
 /// The name of the first blocking prompt the pane's screen is showing, if any.

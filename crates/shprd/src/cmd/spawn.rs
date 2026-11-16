@@ -356,20 +356,22 @@ pub fn spawn(
         &tab_path(&env.briefs_dir, &env.run, &task.id, attempt),
         &tab_id,
     );
-    // What said the program was ready goes beside it, so a person reading the
-    // run can tell a host that reported the agent from a program read off its
-    // own screen — and a lost delivery from a delivered one.
-    write_spawn_record(
-        &spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt),
-        &pick,
-        ready,
-    );
     if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
         close_tab(mux, &tab_id);
         discard_worktree(env, &created);
         discard_empty_space(mux, &space);
         return Err(err);
     }
+    // What said the program was ready goes beside the tab record, so a person
+    // reading the run can tell a host that reported the agent from a program
+    // read off its own screen — and a lost delivery from a delivered one. It is
+    // written last: a spawn that did not land an attempt is one no reader should
+    // find a record for.
+    write_spawn_record(
+        &spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt),
+        &pick,
+        ready,
+    );
     Ok(SpawnReport {
         task: task.id.clone(),
         attempt,
@@ -2317,17 +2319,13 @@ pub(crate) fn unreadable_by_host(briefs: &Path, run: &str, task: &str) -> bool {
 
 /// The number of a task's newest attempt in one run, from its tab records.
 pub(crate) fn latest_attempt(briefs: &Path, run: &str, task: &str) -> Option<u32> {
-    let prefix = format!("{task}-a");
-    std::fs::read_dir(briefs.join(run))
-        .ok()?
-        .flatten()
-        .filter_map(|file| {
-            let name = file.file_name().to_string_lossy().to_string();
-            name.strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix(".tab"))
-                .and_then(|digits| digits.parse::<u32>().ok())
-        })
-        .max()
+    latest_tab_record(briefs, run, task).and_then(|path| {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let prefix = format!("{task}-a");
+        name.strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tab"))
+            .and_then(|digits| digits.parse::<u32>().ok())
+    })
 }
 
 /// The tab record of a task's latest attempt in one run.
