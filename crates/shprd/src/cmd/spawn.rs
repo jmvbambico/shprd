@@ -597,6 +597,64 @@ pub(crate) fn ensure_repo_space(mux: &dyn Host, repo: &Path) -> Result<PreparedS
     }
 }
 
+/// One program the "+" menu started, as `POST /api/agents` answers it.
+pub(crate) struct OpenedProgram {
+    /// The harness id that was started.
+    pub(crate) program: String,
+    /// The words the tab is named with, from the harness table.
+    pub(crate) name: String,
+    /// The host's id for the new tab.
+    pub(crate) tab: String,
+}
+
+/// Starts a harness's CLI in a new tab in the repository's own space.
+///
+/// This is *not* a spawn: there is no task, no brief, no worktree and no event.
+/// It is Shepherdr's "+" menu row *Start an agent* — `run("tab.new", {name,
+/// space, argv})` with the plain launch line (`mods/new-menu-tasks/main.js:70`)
+/// — which is a person starting a conversation, not a task's attempt. So the
+/// argv is the harness table's own `[launch] interactive` and nothing is
+/// appended to it: no access mode, no model, no fast switch. Those belong to a
+/// role, and a role belongs to a task.
+///
+/// The tab opens in the space `shprd serve` prepared for the repository, at the
+/// repository root, named with the program's own name (`Claude Code`), which is
+/// what Shepherdr names it.
+pub(crate) fn open_program(
+    mux: &dyn Host,
+    data: &DataDir,
+    repo: &Path,
+    program: &str,
+) -> Result<OpenedProgram, CliError> {
+    let specs = data.harness_specs().map_err(|err| {
+        CliError::other(
+            anyhow!(err).context(format!("loading the harness table from {}", data.label())),
+        )
+    })?;
+    let Some(spec) = specs.iter().find(|spec| spec.id == program) else {
+        let known: Vec<&str> = specs.iter().map(|spec| spec.id.as_str()).collect();
+        return Err(CliError::Invalid(anyhow!(
+            "no harness spec for {program:?} in the data directory; it names {}",
+            known.join(", ")
+        )));
+    };
+    let prepared = ensure_repo_space(mux, repo)?;
+    let tab = mux
+        .spawn(
+            &prepared.space.id,
+            &spec.name,
+            &spec.launch.interactive,
+            &[],
+            repo,
+        )
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the agent's tab")))?;
+    Ok(OpenedProgram {
+        program: spec.id.clone(),
+        name: spec.name.clone(),
+        tab: tab.id.as_str().to_string(),
+    })
+}
+
 /// Opens the agent's tab and starts its CLI in it.
 ///
 /// Returns the tab's id and title. A host that has no `system_prompt_args`
@@ -4354,6 +4412,78 @@ project_dirs = []
             mux.calls()
         );
     }
+
+    /// The shipped harness table, as `DataDir` reads it.
+    fn shipped_data() -> DataDir {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data")
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("{err}"));
+        DataDir::resolve(Some(&path), None)
+    }
+
+    #[test]
+    fn starting_an_agent_opens_its_plain_launch_line_in_the_repositorys_space() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let opened = open_program(&mux, &shipped_data(), scratch.root(), "claude")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(opened.program, "claude");
+        assert_eq!(opened.name, "Claude Code");
+        let calls = mux.calls();
+        let (title, argv, env, cwd) = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Spawn(_, title, argv, env, cwd) => {
+                    Some((title.clone(), argv.clone(), env.clone(), cwd.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no spawn in {calls:?}"));
+        assert_eq!(title, "Claude Code", "the tab is named after the program");
+        assert_eq!(
+            argv,
+            ["claude"],
+            "the plain launch line, with no mode, model or brief flag on it"
+        );
+        assert!(
+            env.is_empty(),
+            "a person's own agent gets no shprd variables: {env:?}"
+        );
+        assert_eq!(cwd, scratch.root());
+        assert!(
+            calls.iter().any(|call| matches!(call, Call::FindSpace(..))),
+            "the repository's own space is looked for first: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, Call::CreateSpace(..)))
+                .count(),
+            1,
+            "one space, made once: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_program_the_harness_table_lacks_is_refused_with_the_ones_it_has() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let refused = open_program(&mux, &shipped_data(), scratch.root(), "not-a-cli")
+            .err()
+            .unwrap_or_else(|| panic!("an unknown program was accepted"));
+        let message = refused.to_string();
+        assert!(message.contains("not-a-cli"), "{message}");
+        assert!(
+            message.contains("claude, codex, kilo, opencode, pi"),
+            "{message}"
+        );
+        assert!(
+            mux.calls().is_empty(),
+            "nothing was opened for a program that does not exist: {:?}",
+            mux.calls()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4825,6 +4955,7 @@ off = ["--no-fast"]
         assert!(!brief_for(1).contains("sent back"));
         assert!(brief_for(2).contains("sent back"));
     }
+
     /// A task whose first attempt failed its review, with one major finding.
     fn task_sent_back() -> Task {
         let mut plan = task("M4.4", &[]);

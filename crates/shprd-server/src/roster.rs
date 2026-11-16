@@ -28,7 +28,7 @@
 use std::time::Duration;
 
 use shprd_agents::data::DataDir;
-use shprd_agents::detect::vendor_name;
+use shprd_agents::detect::{find_binary, vendor_name};
 use shprd_agents::models::{self, Catalog};
 use shprd_agents::spec::{CatalogSource, HarnessSpec};
 
@@ -77,10 +77,20 @@ pub(crate) fn read(data: Option<&DataDir>, path_env: Option<&str>) -> RosterDto 
         programs: specs
             .iter()
             .zip(catalogs)
-            .map(|(spec, catalog)| program(spec, catalog))
+            .map(|(spec, catalog)| program(spec, catalog, installed(spec, path_env)))
             .collect(),
         note: None,
     }
+}
+
+/// Whether `spec`'s CLI is on the `PATH` the binary resolved.
+///
+/// It is a path lookup, not a probe: the tab bar's "+" menu dims a program it
+/// cannot start and nothing else here needs the version or the sign-in (that is
+/// `shprd roster`'s job, which runs the CLIs). A service that was told no `PATH`
+/// was built by hand, so nothing is claimed to be installed.
+fn installed(spec: &HarnessSpec, path_env: Option<&str>) -> bool {
+    path_env.is_some_and(|env| find_binary(&spec.detect.binary, env).is_some())
 }
 
 /// Every program's catalog, in the specs' order, listed at once.
@@ -111,7 +121,7 @@ fn listings(specs: &[HarnessSpec], data: &DataDir, path_env: Option<&str>) -> Ve
 }
 
 /// One program's entry: its identity and everything a picker offers for it.
-fn program(spec: &HarnessSpec, catalog: Option<Catalog>) -> ProgramDto {
+fn program(spec: &HarnessSpec, catalog: Option<Catalog>, installed: bool) -> ProgramDto {
     let source = spec.models.catalog_source();
     let model_choices = catalog.as_ref().map(models_of).unwrap_or_default();
     let efforts = catalog
@@ -125,6 +135,7 @@ fn program(spec: &HarnessSpec, catalog: Option<Catalog>) -> ProgramDto {
     ProgramDto {
         id: spec.id.clone(),
         name: spec.name.clone(),
+        installed,
         vendor: vendor_name(spec.vendor).to_string(),
         multi_model: spec.multi_model,
         needs_provider: spec.models.provider_qualified,
