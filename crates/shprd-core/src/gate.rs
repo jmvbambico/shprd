@@ -483,6 +483,7 @@ mod tests {
             gates,
             reviews: Vec::new(),
             spawn_seq: None,
+            stopped: false,
         }
     }
 

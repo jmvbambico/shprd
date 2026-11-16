@@ -445,6 +445,13 @@ fn after_failed_review(
     if task.status != TaskStatus::Failed {
         return None;
     }
+    // A task a person stopped is the person's to pick up again: the stop is the
+    // last word on the attempt, so the engine does not send it back one pass
+    // later behind their back. Shepherdr's rule is the same — a stopped agent
+    // reads Needs you and waits (`agents.py:170`, M7a §5).
+    if task.latest_attempt().is_some_and(|attempt| attempt.stopped) {
+        return None;
+    }
     gate::latest_failed_review(task)?;
     let attempt = task.latest_attempt()?.n;
     // The allowance is the configured one plus every round a person granted by
@@ -1538,6 +1545,35 @@ mod tests {
             }],
             "{steps:?}"
         );
+    }
+
+    #[test]
+    fn a_stopped_task_is_not_sent_back_behind_the_persons_back() {
+        // A person's stop is the last word on the attempt: the engine's own
+        // send-back does not run a pass later under it, or the stop would undo
+        // itself (M10 gate bug 1, `agents.py:170`).
+        let log = {
+            let mut log = review_failed_log("A");
+            let task_stopped = EventKind::TaskStopped {
+                task: String::from("A"),
+                attempt: 1,
+            };
+            let seq = log.len() as u64 + 1;
+            log.push(Event {
+                seq,
+                at_ms: seq * 1_000,
+                actor: Actor::Human,
+                kind: task_stopped,
+            });
+            log
+        };
+        let state = folded(&log);
+        assert_eq!(
+            state.tasks.get("A").map(|task| task.status),
+            Some(TaskStatus::Failed)
+        );
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
+        assert!(steps.is_empty(), "the stop is respected: {steps:?}");
     }
 
     #[test]

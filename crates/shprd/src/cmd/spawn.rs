@@ -3362,6 +3362,53 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
     }
 
+    /// A person's stop leaves the attempt replaceable: the retry archives it,
+    /// removes its worktree and branch, and starts attempt 2 in a fresh one.
+    ///
+    /// It is the half of M10 gate bug 1 the service test cannot see: the API
+    /// refuses a retry only when the spawn path refuses it, and the spawn path
+    /// refuses one only while the attempt is still in flight.
+    #[test]
+    fn a_stop_leaves_the_attempt_replaceable_and_a_retry_starts() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let tip = commit_in(&first.worktree, "stopped.txt", "attempt one\n");
+        ctx.commit(EventKind::TaskStopped {
+            task: "T1".to_string(),
+            attempt: 1,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2, "the retry is a new attempt");
+        let replaced = second
+            .replaced
+            .clone()
+            .unwrap_or_else(|| panic!("the retry must name the ref it archived"));
+        assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1-a1");
+        // The stopped attempt's commits are kept, reachable from its ref.
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
+            ),
+            tip
+        );
+        // The space the stop closed is made again by the retry, so the person
+        // gets one group per task rather than a tab with nowhere to live.
+        let name = task_space_name(&env.repo_name, &env.run, "T1");
+        assert!(
+            mux.find_space(&name)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .is_some(),
+            "the retry reopens the task's space"
+        );
+    }
+
     /// Every resource event the log holds, in order.
     fn resource_events(ctx: &Ctx) -> Vec<(ResourceAction, ResourceKind, String)> {
         let (_, events) = ctx.load().unwrap_or_else(|err| panic!("{err}"));
@@ -4787,6 +4834,7 @@ off = ["--no-fast"]
             }],
             reviews: Vec::new(),
             spawn_seq: None,
+            stopped: false,
         });
         plan
     }

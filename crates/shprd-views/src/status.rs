@@ -300,6 +300,28 @@ mod tests {
     }
 
     #[test]
+    fn a_task_whose_agent_was_stopped_reads_agent_stopped() {
+        // M10 gate bug 1: the person's own Stop closed the space and left the
+        // task Working for ever. Now the attempt carries the fact, so the CLI's
+        // reader — which has no terminals — says what Shepherdr says for a task
+        // with no agent left (M7a §5, `agents.py:170`).
+        let mut state = fixture::state();
+        match state.tasks.get_mut("M1.2") {
+            Some(task) => {
+                task.status = TaskStatus::Failed;
+                if let Some(attempt) = task.attempts.last_mut() {
+                    attempt.stopped = true;
+                }
+            }
+            None => panic!("the fixture has M1.2"),
+        }
+        assert_eq!(
+            line_of(&status(&state, fixture::NOW), "M1.2"),
+            "● M1.2 Needs you · Agent stopped · views"
+        );
+    }
+
+    #[test]
     fn an_open_ask_is_visible_as_needs_you() {
         // The bug the M9 gate found: a card an agent is waiting on changed
         // nothing a person reading `shprd status` could see.

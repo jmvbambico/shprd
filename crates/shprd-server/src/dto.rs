@@ -826,9 +826,13 @@ pub enum Action {
     },
     /// Stop the agent working on a task, by closing its space on the host.
     ///
-    /// Nothing is written to the log: the agent going away is something the
-    /// engine reads from the host, and the task then reads *Needs you* until
-    /// somebody starts it again. A service started without a host refuses it.
+    /// The space is closed first — a host that refuses refuses the whole stop,
+    /// and nothing is written — and then the attempt is recorded as stopped. The
+    /// task reads *Needs you · Agent stopped* and `task.retry` starts a new
+    /// attempt, which is Shepherdr's rule for a task whose agent went away (M7a
+    /// §5). A stop of a task nobody started, or a second stop of the same
+    /// attempt, is refused with its reason. A service started without a host
+    /// refuses it.
     #[serde(rename = "task.stop")]
     TaskStop {
         /// The task whose agent should stop.

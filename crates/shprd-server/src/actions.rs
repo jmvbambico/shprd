@@ -9,10 +9,12 @@
 //! [`crate::service::AfterWrite`] step runs (the CLI's dagr projection), so the
 //! two write paths also leave the same files behind.
 //!
-//! Three of the verbs are not an event: starting an attempt, starting another one
-//! and stopping an agent are the binary's spawn path and the host's close, passed
-//! in as an [`Engine`]. A service without one refuses them, which is what a test
-//! that only drives the router sees.
+//! Three of the verbs are not an event alone: starting an attempt, starting
+//! another one and stopping an agent are the binary's spawn path and the host's
+//! close, passed in as an [`Engine`], and the stop also appends the
+//! [`EventKind::TaskStopped`] the fold needs to know the attempt has no agent
+//! any more. A service without an engine refuses them, which is what a test that
+//! only drives the router sees.
 
 use std::path::Path;
 
@@ -134,11 +136,16 @@ fn spawn(ctx: &Context<'_>, task: &str, verb: &str) -> Result<ActionReply, ApiRe
     folded_task(ctx.repo, task, seq)
 }
 
-/// Stops whatever is running on `task`, by closing its space on the host.
+/// Stops whatever is running on `task`: closes its space on the host, then
+/// records that the attempt's agent is gone.
 ///
-/// Nothing is appended: an agent that went away is a fact the engine reads from
-/// the host, not an event, and the task then reads *Needs you* until somebody
-/// starts it again.
+/// Closing the space is only half of it. The host forgets a closed space, so a
+/// stop that wrote nothing left the fold saying `working` for ever and every
+/// retry refused (M10 gate bug 1). The event is what makes the task read
+/// *Needs you · Agent stopped* and what makes `task.retry` allowed (Shepherdr's
+/// rule, M7a §5). A task that already handed in keeps its status: the hand-in is
+/// still the engine's to review and land, and closing its tab takes nothing away
+/// from it.
 fn stop(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
     let engine = ctx.engine.ok_or_else(|| {
         ApiReject::refused(
@@ -148,12 +155,30 @@ fn stop(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
     // A stop names a task the run holds: closing the space of a task nobody
     // added would be closing whatever else happens to be labelled that way.
     let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
-    if !folded.tasks.contains_key(task) {
-        return Err(ApiReject::unknown_task(task));
-    }
+    let found = folded
+        .tasks
+        .get(task)
+        .ok_or_else(|| ApiReject::unknown_task(task))?;
+    let attempt = found
+        .latest_attempt()
+        .map(|attempt| attempt.n)
+        .ok_or_else(|| {
+            ApiReject::refused(format!(
+                "{task} has no agent to stop: nothing has been started on it"
+            ))
+        })?;
+    // The rules are asked before the host is: a stop they would refuse must not
+    // close a space first and then leave the log saying the agent is still
+    // working.
+    let kind = EventKind::TaskStopped {
+        task: task.to_string(),
+        attempt,
+    };
+    folded
+        .check_as(ctx.actor, &kind, SystemClock.now_ms())
+        .map_err(|err| ApiReject::refused(err.to_string()))?;
     engine.stop(ctx.repo, task).map_err(ApiReject::refused)?;
-    let seq = folded.last_seq;
-    folded_task(ctx.repo, task, seq)
+    commit(ctx, kind)
 }
 
 /// Accepts a task's work at the head its branch is at, as `shprd approve` does.
@@ -352,6 +377,7 @@ fn event_task(kind: &EventKind) -> Option<String> {
         EventKind::TaskAdded { task, .. }
         | EventKind::TaskStatus { task, .. }
         | EventKind::TaskDropped { task, .. }
+        | EventKind::TaskStopped { task, .. }
         | EventKind::TaskApproved { task, .. } => Some(task.clone()),
         _ => None,
     }

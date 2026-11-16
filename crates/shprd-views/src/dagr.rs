@@ -179,6 +179,12 @@ fn times_by_attempt(events: &[Event]) -> (TimesByAttempt<'_>, BTreeMap<&str, u64
             | EventKind::GateFailed { task, attempt, .. } => {
                 times.entry((task.as_str(), *attempt)).or_default().end = Some(event.at_ms);
             }
+            // A stop settles the attempt's terminal, so it is when that
+            // attempt ended: a person's stop is the last thing that happened to
+            // it, and dagr draws a finished attempt with an `ended_at`.
+            EventKind::TaskStopped { task, attempt } => {
+                times.entry((task.as_str(), *attempt)).or_default().end = Some(event.at_ms);
+            }
             EventKind::TaskDropped { task, .. } => {
                 dropped.insert(task.as_str(), event.at_ms);
             }
@@ -278,7 +284,20 @@ fn task_state(task: &Task) -> (&'static str, Option<&'static str>, Option<String
             None,
             Some("passed, awaiting integration".to_string()),
         ),
-        TaskStatus::Failed => ("blocked", Some("orchestrator"), Some(failed_note(task))),
+        TaskStatus::Failed => {
+            // A person's stop is the reason the attempt ended, so the note says
+            // so and the owner is the person who may retry it, rather than "gate
+            // failed" about a gate that never ran.
+            if task.latest_attempt().is_some_and(|attempt| attempt.stopped) {
+                (
+                    "blocked",
+                    Some("human"),
+                    Some("stopped: no agent".to_string()),
+                )
+            } else {
+                ("blocked", Some("orchestrator"), Some(failed_note(task)))
+            }
+        }
         TaskStatus::Integrated => ("done", None, None),
         // dagr's states have no word for work that will not happen, and `done`
         // would say the work is on the branch. It reads `blocked` with the
@@ -479,6 +498,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::TaskDropped { .. } => "task_dropped",
+        EventKind::TaskStopped { .. } => "task_stopped",
         EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",

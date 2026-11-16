@@ -250,6 +250,16 @@ pub struct TickReport {
     /// What the pass told each space's coordinator, when a news desk is wired.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub news: Vec<NewsSent>,
+    /// How long the loop should wait before the next pass, in seconds.
+    ///
+    /// It is the interval this pass actually read from the settings, so
+    /// `tasks.tick_secs` (and the old `[tick] interval_secs`) takes effect on a
+    /// running service with no restart: the loop sleeps what the last pass
+    /// answered rather than the interval the service started with (M10 gate bug
+    /// 4). `None` on a pass that did not resolve one, which leaves the loop's
+    /// own interval standing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
 }
 
 impl TickReport {
@@ -261,6 +271,17 @@ impl TickReport {
     /// True when every step that ran also worked.
     pub fn ok(&self) -> bool {
         self.steps.iter().all(|step| step.ok)
+    }
+
+    /// How long the loop should wait before the next pass.
+    ///
+    /// The interval from this pass's settings when it resolved one, else
+    /// `fallback` (the interval the loop was started with).
+    pub fn next_interval(&self, fallback: Duration) -> Duration {
+        match self.interval_secs {
+            Some(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => fallback,
+        }
     }
 }
 
@@ -392,7 +413,7 @@ impl Worker {
         // who changes the merge policy or the concurrency cap while the service
         // runs gets it on the next pass, exactly as the roles and the fallbacks
         // already do.
-        let config = self.pass_config();
+        let (config, interval) = self.pass_config();
         let facts = Facts {
             prs: self.state_prs(&state),
             live: self.facts.live(&state),
@@ -412,6 +433,7 @@ impl Worker {
         });
         let mut report = TickReport {
             run: state.run.as_ref().map(|run| run.run_id.clone()),
+            interval_secs: interval,
             ..TickReport::default()
         };
         // A task whose step has failed the same way often enough has been put in
@@ -585,51 +607,12 @@ impl Worker {
         }
     }
 
-    /// The config this pass runs under: the file layers, with the settings
-    /// resolution applied on top.
+    /// The config this pass runs under, and how long the loop should wait before
+    /// the next one.
     ///
-    /// `tasks.merge` and `tasks.max_running` are what the person sees in the
-    /// brief's Settings block and in `shprd settings show`, so they are what the
-    /// pass must act on. Only a key a layer actually names wins: a settings file
-    /// that says nothing about the merge policy leaves the resolved config's own
-    /// answer standing, which is what a test that hands a pass its config
-    /// directly expects. The settings resolution already reads the old
-    /// `config.toml` keys as its lowest named layer, so a run whose person has
-    /// not migrated keeps the values its config file asks for. A settings file
-    /// that cannot be read is not a reason to stop the pass: the resolved
-    /// config's own values stand, and the next pass reads the file again.
-    fn pass_config(&self) -> Config {
-        use shprd_core::settings::{Key, Source, TaskKey};
-
-        let Ok(loaded) = shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) else {
-            return self.config.clone();
-        };
-        let resolved = loaded.resolve(None);
-        let tasks = resolved.tasks();
-        // Every key resolves, because the built-in layer sets them all: a key is
-        // "set" only when a layer other than the defaults named it.
-        let named = |key: TaskKey| {
-            resolved
-                .get(&Key::Task(key))
-                .is_some_and(|sourced| sourced.source != Source::BuiltIn)
-        };
-        let mut config = self.config.clone();
-        if named(TaskKey::Merge) {
-            config.land.merge = tasks.merge;
-        }
-        if named(TaskKey::MaxRunning) {
-            config.tick.max_running = tasks.max_running;
-        }
-        // The review's policy is what the send-back and the out-of-rounds card
-        // are decided by, so the person's own answer to the brief's
-        // `Review rounds` line is what the pass must act on.
-        if named(TaskKey::ReviewRounds) {
-            config.review.rounds = tasks.review_rounds;
-        }
-        if named(TaskKey::MustFix) {
-            config.review.must_fix = tasks.must_fix;
-        }
-        config
+    /// See [`pass_config`] for what is read and why, and what the interval means.
+    fn pass_config(&self) -> (Config, Option<u64>) {
+        pass_config(&self.home, &self.repo, &self.config)
     }
 
     /// The tasks whose reviewer's findings file has settled and may be decided.
@@ -2068,6 +2051,66 @@ fn describe_land_error(err: LandError, task: &str) -> String {
     }
 }
 
+/// The config a pass runs under, and how long the loop should wait before the
+/// next one.
+///
+/// `tasks.merge`, `tasks.max_running`, the review rounds and must-fix are what
+/// the person sees in the brief's Settings block and in `shprd settings show`,
+/// so they are what the pass must act on. Only a key a layer actually names
+/// wins: a settings file that says nothing about the merge policy leaves the
+/// resolved config's own answer standing, which is what a test that hands a pass
+/// its config directly expects. The settings resolution already reads the old
+/// `config.toml` keys as its lowest named layer, so a run whose person has not
+/// migrated keeps the values its config file asks for. A settings file that
+/// cannot be read is not a reason to stop the pass: the resolved config's own
+/// values stand, and the next pass reads the file again.
+///
+/// The interval is returned beside the config because it is the one workflow
+/// value that is not the pass's own business: `tasks.tick_secs` decides how long
+/// the *loop* waits, so the loop has to be told what this pass read (M10 gate bug
+/// 4). It comes back `None` when no settings layer names it, so a service started
+/// with a `[tick] interval_secs` keeps that value. `shprd serve` calls this too,
+/// so the banner prints the interval the first pass will act on rather than only
+/// the one its config file named.
+pub fn pass_config(home: &Path, repo: &Path, base: &Config) -> (Config, Option<u64>) {
+    use shprd_core::settings::{Key, Source, TaskKey};
+
+    let Ok(loaded) = shprd_core::settings::Loaded::read(home, Some(repo)) else {
+        return (base.clone(), None);
+    };
+    let resolved = loaded.resolve(None);
+    let tasks = resolved.tasks();
+    // Every key resolves, because the built-in layer sets them all: a key is
+    // "set" only when a layer other than the defaults named it.
+    let named = |key: TaskKey| {
+        resolved
+            .get(&Key::Task(key))
+            .is_some_and(|sourced| sourced.source != Source::BuiltIn)
+    };
+    let mut config = base.clone();
+    let mut interval = None;
+    if named(TaskKey::Merge) {
+        config.land.merge = tasks.merge;
+    }
+    if named(TaskKey::MaxRunning) {
+        config.tick.max_running = tasks.max_running;
+    }
+    // The review's policy is what the send-back and the out-of-rounds card are
+    // decided by, so the person's own answer to the brief's `Review rounds` line
+    // is what the pass must act on.
+    if named(TaskKey::ReviewRounds) {
+        config.review.rounds = tasks.review_rounds;
+    }
+    if named(TaskKey::MustFix) {
+        config.review.must_fix = tasks.must_fix;
+    }
+    if named(TaskKey::TickSecs) {
+        config.tick.interval_secs = tasks.tick_secs;
+        interval = Some(tasks.tick_secs);
+    }
+    (config, interval)
+}
+
 /// Maps the eight derived words onto the planner's phase.
 fn phase_of(status: DerivedStatus) -> Phase {
     match status {
@@ -2088,6 +2131,13 @@ fn phase_of(status: DerivedStatus) -> Phase {
 /// that is slow — a landing that waits on a push — delays the next one instead
 /// of running beside it. A pass that fails to read the log is logged and the
 /// loop carries on: the run is still there when the next one looks.
+///
+/// `interval` is only the starting wait: the settings are read on every pass, so
+/// a person who sets `tasks.tick_secs` (or the older `[tick] interval_secs`) gets
+/// it on the wait after the next pass with no restart (M10 gate bug 4). Each
+/// pass answers the interval it read in
+/// [`TickReport::interval_secs`](crate::tick::TickReport::interval_secs), and the
+/// loop sleeps that, falling back to `interval` when the pass named none.
 pub async fn run(
     worker: Arc<Worker>,
     interval: Duration,
@@ -2095,6 +2145,7 @@ pub async fn run(
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
     let permit = Arc::new(tokio::sync::Mutex::new(()));
+    let mut wait = interval;
     tokio::pin!(shutdown);
     loop {
         let running = Arc::clone(&worker);
@@ -2112,6 +2163,7 @@ pub async fn run(
                         ok = report.ok(),
                         "tick pass finished"
                     );
+                    wait = report.next_interval(interval);
                     if let Some(notice) = &notice {
                         notice(&report);
                     }
@@ -2128,7 +2180,7 @@ pub async fn run(
             }
         }
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = &mut shutdown => return,
         }
     }

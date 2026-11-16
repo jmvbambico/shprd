@@ -221,11 +221,31 @@ impl ServiceFiles {
     }
 }
 
+/// How long a start waits for a dying service to drop its lock, before it
+/// decides the lock is not going anywhere.
+///
+/// It has to be long enough for the kernel to reap a killed process and release
+/// its flock, which is usually milliseconds and, on a busy machine, can be a
+/// second or two. The wait only ever costs a start that finds a lock nobody can
+/// explain; a live service's record names a live pid, so that refusal is
+/// immediate.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often that wait looks at the lock again.
+const SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Takes this state directory's exclusive lock, or says who holds it.
 ///
 /// The lock lives as long as the [`File`] does — for the service's whole
 /// lifetime — and the kernel drops it when the process ends, however it ends,
 /// so a crashed service never leaves the directory locked against its successor.
+///
+/// A kill is not instant: the kernel drops the lock when the process is reaped,
+/// which can be a few hundred milliseconds after `SIGTERM`/`SIGKILL`, and a
+/// `service.json` still naming that process makes a start in that window refuse
+/// with "already running" about a service nobody can reach (M10 gate bug 7). So
+/// a held lock whose recorded pid is gone is waited out briefly and the lock
+/// retried; only a lock a live process still holds is [`ServerError::AlreadyRunning`].
 fn take_lock(dir: &Path) -> Result<fs::File, ServerError> {
     let path = dir.join("service.lock");
     let mut options = OpenOptions::new();
@@ -238,26 +258,99 @@ fn take_lock(dir: &Path) -> Result<fs::File, ServerError> {
     let file = options
         .open(&path)
         .map_err(|err| ServerError::io(&path, err))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(fs::TryLockError::WouldBlock) => {
-            let running = fs::read_to_string(dir.join("service.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<ServiceRecord>(&text).ok());
-            Err(match running {
-                Some(record) => ServerError::AlreadyRunning {
-                    dir: dir.to_path_buf(),
-                    port: Some(record.port),
-                    pid: Some(record.pid),
-                },
-                None => ServerError::AlreadyRunning {
-                    dir: dir.to_path_buf(),
-                    port: None,
-                    pid: None,
-                },
-            })
+    let deadline = std::time::Instant::now() + SHUTDOWN_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                let running = read_record(dir);
+                // Two cases are worth waiting out, and both are bounded by
+                // `SHUTDOWN_WAIT`:
+                //
+                // * the record names a process that is gone, which is a service
+                //   that was just killed and whose flock the kernel has not
+                //   released yet (M10 gate bug 7);
+                // * there is no record at all. Either the holder has taken the
+                //   lock and not yet written its record, or this process has just
+                //   released the same lock and macOS is still cleaning the vnode
+                //   up — which reads as held for a moment although nobody holds
+                //   it.
+                //
+                // The retry happens on the handle already open rather than by
+                // reopening the file, so the wait cannot be defeated by a fresh
+                // handle racing the same cleanup.
+                let unclear = running
+                    .as_ref()
+                    .is_none_or(|record| !process_alive(record.pid));
+                if unclear && std::time::Instant::now() < deadline {
+                    std::thread::sleep(SHUTDOWN_POLL);
+                    continue;
+                }
+                return Err(match running {
+                    Some(record) if !process_alive(record.pid) => ServerError::ShuttingDown {
+                        dir: dir.to_path_buf(),
+                        port: Some(record.port),
+                        pid: Some(record.pid),
+                    },
+                    Some(record) => ServerError::AlreadyRunning {
+                        dir: dir.to_path_buf(),
+                        port: Some(record.port),
+                        pid: Some(record.pid),
+                    },
+                    // A lock nobody's record names and that nothing explains:
+                    // it is either a service still starting or one whose record
+                    // went away, and either way "try again in a moment" is the
+                    // truth and "already running (pid ?)" is not.
+                    None => ServerError::ShuttingDown {
+                        dir: dir.to_path_buf(),
+                        port: None,
+                        pid: None,
+                    },
+                });
+            }
+            Err(fs::TryLockError::Error(err)) => return Err(ServerError::io(&path, err)),
         }
-        Err(fs::TryLockError::Error(err)) => Err(ServerError::io(&path, err)),
+    }
+}
+
+/// The discovery record in `dir`, when one is there and parses.
+///
+/// A half-written or unreadable record is no record: the next start overwrites
+/// it, and a reader that could not parse it cannot name a port anyway.
+fn read_record(dir: &Path) -> Option<ServiceRecord> {
+    let text = fs::read_to_string(dir.join("service.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Whether the process `pid` is still there.
+///
+/// It is asked of the kernel with signal `0`, which checks for the process
+/// without sending it anything. `libc` is not a dependency — the same reason
+/// [`crate::service`] waves `fs::File::try_lock` instead of `flock` — so this
+/// goes through the system `kill(1)`, at an absolute path so nothing planted on
+/// `PATH` can decide whether a service is running. A machine with no `kill`, or
+/// a `kill` that cannot tell, answers "still alive": a start that refused when
+/// it could have taken over is a retry, while one that took over a live
+/// service's directory is two services over one log.
+fn process_alive(pid: u32) -> bool {
+    let Some(program) = ["/bin/kill", "/usr/bin/kill"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+    else {
+        return true;
+    };
+    // `kill -0 -- <pid>`: the `--` ends option parsing, so a pid is never read as
+    // a signal, and the status says whether the process exists.
+    match std::process::Command::new(program)
+        .args(["-0", "--", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => true,
     }
 }
 
@@ -747,6 +840,9 @@ mod tests {
     fn a_second_service_cannot_share_a_state_directory() {
         let dir = tempfile::tempdir().expect("temp dir");
         let first = ServiceFiles::prepare(dir.path()).expect("the first start takes the lock");
+        // The lock-holder writes its record, as a start does after it binds: the
+        // record is what names the process the second start refuses on.
+        first.write_record(1234).expect("write the record");
         match ServiceFiles::prepare(dir.path()) {
             Err(ServerError::AlreadyRunning { dir: reported, .. }) => {
                 assert_eq!(reported, dir.path());
@@ -758,6 +854,121 @@ mod tests {
         assert!(first.owns_record() || !first.service_json_path().exists());
         drop(first);
         ServiceFiles::prepare(dir.path()).expect("the lock is released when the service ends");
+    }
+
+    #[test]
+    fn a_record_naming_a_dead_process_is_not_a_reason_to_refuse_a_start() {
+        // Bug 7 of the M10 gate: after `pkill -f "shprd serve"` a start within a
+        // second or two was refused with "already running (pid 57685)" — the
+        // flock is still held by the dying process, and `service.json` still
+        // names it. The rule is to look at the process, not just the lock.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dead = dead_pid();
+        let record = ServiceRecord {
+            port: 59229,
+            id: String::from("a-start-that-died"),
+            pid: dead,
+            version: VERSION.to_string(),
+        };
+        let path = dir.path().join("service.json");
+        fs::write(
+            &path,
+            serde_json::to_string(&record).expect("serialize the record"),
+        )
+        .expect("write the stale record");
+
+        // The lock the dying process still holds is modelled by holding it here
+        // in the same process: the record is what says whose it is, and that pid
+        // is gone, so the start waits the lock out instead of believing it.
+        let held = take_lock_holding(dir.path());
+        let started = std::thread::spawn({
+            let dir = dir.path().to_path_buf();
+            move || ServiceFiles::prepare(&dir)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        drop(held);
+        let taken = started.join().expect("the start finished");
+        let taken = taken.expect("a start takes a directory whose service died");
+        assert!(!taken.owns_record(), "the stale record is not this start's");
+    }
+
+    #[test]
+    fn a_start_whose_service_is_still_shutting_down_says_so() {
+        // The other half of bug 7: the process is gone and the lock has not been
+        // released yet, so the message must say a stop is in flight rather than
+        // claim a service is running. The wait is bounded, so the refusal comes.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let record = ServiceRecord {
+            port: 59229,
+            id: String::from("a-start-that-is-dying"),
+            pid: dead_pid(),
+            version: VERSION.to_string(),
+        };
+        fs::write(
+            dir.path().join("service.json"),
+            serde_json::to_string(&record).expect("serialize the record"),
+        )
+        .expect("write the record");
+        let held = take_lock_holding(dir.path());
+        match ServiceFiles::prepare(dir.path()) {
+            Err(ServerError::ShuttingDown {
+                dir: reported, pid, ..
+            }) => {
+                assert_eq!(reported, dir.path());
+                assert_eq!(pid, Some(record.pid));
+            }
+            Err(other) => panic!("expected ShuttingDown, got {other}"),
+            Ok(_) => panic!("a held lock is not a free directory"),
+        }
+        drop(held);
+        ServiceFiles::prepare(dir.path()).expect("once the lock is gone the start works");
+    }
+
+    #[test]
+    fn a_record_naming_a_live_process_still_refuses_a_start() {
+        // The guard on the takeover: a live pid is a service that is running, and
+        // a start must not take its directory out from under it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let record = ServiceRecord {
+            port: 4321,
+            id: String::from("a-live-start"),
+            pid: std::process::id(),
+            version: VERSION.to_string(),
+        };
+        fs::write(
+            dir.path().join("service.json"),
+            serde_json::to_string(&record).expect("serialize the record"),
+        )
+        .expect("write the record");
+        let held = take_lock_holding(dir.path());
+        match ServiceFiles::prepare(dir.path()) {
+            Err(ServerError::AlreadyRunning { pid, .. }) => {
+                assert_eq!(pid, Some(record.pid), "the refusal names the live pid");
+            }
+            Err(other) => panic!("expected AlreadyRunning, got {other}"),
+            Ok(_) => panic!("a live service's directory must not be taken"),
+        }
+        drop(held);
+    }
+
+    /// A pid no process has: the largest one plus one is not one the kernel
+    /// hands out, and asking the kernel about it says so.
+    fn dead_pid() -> u32 {
+        // A pid this process cannot have (it is one process), so nothing here can
+        // be mistaken for the live case.
+        let candidate = std::process::id().wrapping_add(1_000_000) | 1;
+        assert!(!process_alive(candidate), "{candidate} must look dead");
+        candidate
+    }
+
+    /// Takes the state directory's lock, and answers the file holding it.
+    fn take_lock_holding(dir: &Path) -> fs::File {
+        let path = dir.join("service.lock");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        let file = options.open(&path).expect("open the lock file");
+        file.try_lock().expect("take the lock");
+        file
     }
 
     #[test]

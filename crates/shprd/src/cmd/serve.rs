@@ -40,7 +40,7 @@ use shprd_server::{
     shutdown_signal,
 };
 
-use shprd_server::ServerError::AlreadyRunning;
+use shprd_server::ServerError::{AlreadyRunning, ShuttingDown};
 
 use crate::cli::ServeArgs;
 use crate::ctx::{
@@ -159,7 +159,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         // over and leave the running one undiscoverable, so it is refused with
         // the exit code a refused verb uses rather than an error's.
         let service = Service::start(config).await.map_err(|err| match err {
-            AlreadyRunning { .. } => CliError::Invalid(anyhow!(err)),
+            // A service that is up, or one whose stop is still in flight, is a
+            // person's verb that did not happen rather than a fault: the message
+            // says which, and the retry fixes the second.
+            AlreadyRunning { .. } | ShuttingDown { .. } => CliError::Invalid(anyhow!(err)),
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
         let info = service.info().clone();
@@ -334,8 +337,13 @@ fn tick_config(
     host: Arc<dyn Host>,
 ) -> Result<TickConfig, CliError> {
     let config = crate::cmd::tick::load_config(ctx, home)?;
+    // The interval the banner prints is the one the first pass will act on, not
+    // only the one the config file named: `tasks.tick_secs` is read per pass, and
+    // a banner that disagreed with the first pass would be the very confusion
+    // M10 gate bug 4 was.
+    let (config, settings_interval) = shprd_server::tick::pass_config(home, &ctx.root, &config);
     let max_running = config.tick.max_running;
-    let interval = Duration::from_secs(config.tick.interval_secs);
+    let interval = Duration::from_secs(settings_interval.unwrap_or(config.tick.interval_secs));
     let worker = crate::cmd::tick::worker_with_hub(ctx, home, config, hub, host)?;
     Ok(TickConfig {
         worker: std::sync::Arc::new(worker),
