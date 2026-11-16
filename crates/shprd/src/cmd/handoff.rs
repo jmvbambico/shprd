@@ -99,6 +99,9 @@ fn pick_to(
         model: parsed.model,
         launch: program.spec.launch.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
+        ready_lines: program.spec.ready.screen.clone(),
+        own_status: !program.spec.status.needs_the_host(),
+        status_words: program.spec.status.words(),
     }))
 }
 
@@ -144,6 +147,9 @@ fn next_worker(
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
                 blocking_prompts: program.spec.blocking_prompts.clone(),
+                ready_lines: program.spec.ready.screen.clone(),
+                own_status: !program.spec.status.needs_the_host(),
+                status_words: program.spec.status.words(),
             });
         }
     }
@@ -511,7 +517,7 @@ pub fn handoff(
             worktree: &continuing,
         },
     );
-    let (tab_id, title) = match opened {
+    let (tab_id, title, _ready) = match opened {
         Ok(opened) => opened,
         Err(err) => {
             escalate(

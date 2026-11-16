@@ -679,10 +679,25 @@ pub struct Reviewer {
     pub spec: HarnessSpec,
     /// The prompts the CLI waits on a human to answer before it reads anything.
     pub blocking_prompts: Vec<BlockingPrompt>,
+    /// The lines the program's TUI prints once it can take its turn.
+    pub ready_lines: Vec<String>,
+    /// Whether the host can be expected to report this program's status.
+    pub own_status: bool,
     /// Whether this review is cross-vendor or degraded.
     pub degraded: bool,
     /// A one-line note to show the human when a flag had no effect.
     pub note: Option<String>,
+}
+
+impl Reviewer {
+    /// The readiness this reviewer's program has, as the delivery needs it.
+    fn readiness(&self) -> deliver::Readiness<'_> {
+        deliver::Readiness {
+            lines: &self.ready_lines,
+            prompts: &self.blocking_prompts,
+            own_status: self.own_status,
+        }
+    }
 }
 
 /// Picks the reviewer for one attempt.
@@ -754,6 +769,8 @@ pub fn choose_reviewer(
             .map(str::to_owned),
         spec: program.spec.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
+        ready_lines: program.spec.ready.screen.clone(),
+        own_status: !program.spec.status.needs_the_host(),
         // `--degraded` is only recorded where the review needs the label: the
         // branches below set it, and it stays false for an independent review.
         degraded: false,
@@ -1044,12 +1061,18 @@ fn deliver_review_brief(
     text: &str,
 ) -> deliver::Delivery {
     let wait = env.spawn.ready_wait;
-    let first = deliver::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait);
-    if matches!(first, deliver::Delivery::Delivered) {
+    let readiness = reviewer.readiness();
+    let first = deliver::deliver_brief(mux, &tab.root_pane, text, &readiness, wait);
+    if first.ready().is_some() {
+        return first;
+    }
+    // A prompt waiting on a human is not a start-up race: the second attempt
+    // would type the brief over the question the person has to answer.
+    if matches!(first, deliver::Delivery::Blocked { .. }) {
         return first;
     }
     std::thread::sleep(env.brief_retry_wait);
-    deliver::deliver_brief(mux, &tab.root_pane, text, &reviewer.blocking_prompts, wait)
+    deliver::deliver_brief(mux, &tab.root_pane, text, &readiness, wait)
 }
 
 /// The argv a reviewer's CLI starts with.
