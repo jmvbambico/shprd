@@ -294,6 +294,17 @@ export class ApiClient {
     return this.#get<GraphDto>("/api/graph");
   }
 
+  /**
+   * `GET /api/graph/run`: the run document dagr draws, verbatim.
+   *
+   * It is the same `<repo>/.dagr/run.json` the Herdr window's graph block hands
+   * to `dagr view`, not one of the service's DTOs, so the answer is read with
+   * `parseRunDocument` (`./rundoc`) rather than trusted to be one shape.
+   */
+  graphRun(): Promise<unknown> {
+    return this.#get<unknown>("/api/graph/run");
+  }
+
   /** `GET /api/settings`: every setting, its value and where it came from. */
   settings(): Promise<SettingsDto> {
     return this.#get<SettingsDto>("/api/settings");

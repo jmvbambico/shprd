@@ -9,6 +9,7 @@
 //! | `GET /api/changes` | long-poll for events after a sequence, `204` on timeout |
 //! | `POST /api/action` | one tab-typed envelope, run against the same log the CLI writes |
 //! | `GET /api/graph` | where the graph's program is, and the command that draws the run |
+//! | `GET /api/graph/run` | the run document dagr draws, verbatim, for a client that draws it itself |
 //! | `POST /api/tasks` | add one task, as `shprd agent task add` does |
 //! | `GET /api/tasks/:id/changes` | the task's branch against its base, with line counts |
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
