@@ -914,6 +914,37 @@ fn a_json_service_keeps_stdout_one_document_when_the_run_starts() {
 }
 
 #[test]
+fn the_banner_prints_the_tick_interval_the_settings_name() {
+    // M10 gate bug 4: `settings set tasks.tick_secs 10` was written and shown,
+    // and the service kept 15 s — in the banner and in every pass. The passes
+    // read the setting per pass now, and the banner prints the same one so a
+    // reader is not told an interval no pass will use.
+    let (repo, state, home) = repo_with_a_run();
+    let settings = home.path().join(".config").join("shprd");
+    fs::create_dir_all(&settings).expect("the settings dir");
+    fs::write(
+        settings.join("settings.toml"),
+        "version = 1\n\n[tasks]\ntick_secs = 4\n",
+    )
+    .expect("write the settings");
+    let out_path = state.path().join("serve.out");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        false,
+        Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
+        Stdio::null(),
+    );
+    let banner = read_when(&out_path, "tick:");
+    assert!(
+        banner.contains("every 4s"),
+        "the banner uses the person's setting: {banner}"
+    );
+    service.stop();
+}
+
+#[test]
 fn a_service_says_what_it_did_about_the_repositorys_space() {
     // Bug 6 of the M9 gate: the space label is derived from the folder name, so
     // leaving the space to a person is a run that refuses every pass until

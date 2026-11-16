@@ -325,8 +325,13 @@ fn tick_config(
     host: Arc<dyn Host>,
 ) -> Result<TickConfig, CliError> {
     let config = crate::cmd::tick::load_config(ctx, home)?;
+    // The interval the banner prints is the one the first pass will act on, not
+    // only the one the config file named: `tasks.tick_secs` is read per pass, and
+    // a banner that disagreed with the first pass would be the very confusion
+    // M10 gate bug 4 was.
+    let (config, settings_interval) = shprd_server::tick::pass_config(home, &ctx.root, &config);
     let max_running = config.tick.max_running;
-    let interval = Duration::from_secs(config.tick.interval_secs);
+    let interval = Duration::from_secs(settings_interval.unwrap_or(config.tick.interval_secs));
     let worker = crate::cmd::tick::worker_with_hub(ctx, home, config, hub, host)?;
     Ok(TickConfig {
         worker: std::sync::Arc::new(worker),

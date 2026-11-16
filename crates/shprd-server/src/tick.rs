@@ -610,59 +610,9 @@ impl Worker {
     /// The config this pass runs under, and how long the loop should wait before
     /// the next one.
     ///
-    /// `tasks.merge` and `tasks.max_running` are what the person sees in the
-    /// brief's Settings block and in `shprd settings show`, so they are what the
-    /// pass must act on. Only a key a layer actually names wins: a settings file
-    /// that says nothing about the merge policy leaves the resolved config's own
-    /// answer standing, which is what a test that hands a pass its config
-    /// directly expects. The settings resolution already reads the old
-    /// `config.toml` keys as its lowest named layer, so a run whose person has
-    /// not migrated keeps the values its config file asks for. A settings file
-    /// that cannot be read is not a reason to stop the pass: the resolved
-    /// config's own values stand, and the next pass reads the file again.
-    ///
-    /// The interval is returned beside the config because it is the one workflow
-    /// value that is not the pass's own business: `tasks.tick_secs` decides how
-    /// long the *loop* waits, so the loop has to be told what this pass read
-    /// (M10 gate bug 4). It comes back `None` when no settings layer names it, so
-    /// a service started with a `[tick] interval_secs` keeps that value.
+    /// See [`pass_config`] for what is read and why, and what the interval means.
     fn pass_config(&self) -> (Config, Option<u64>) {
-        use shprd_core::settings::{Key, Source, TaskKey};
-
-        let Ok(loaded) = shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) else {
-            return (self.config.clone(), None);
-        };
-        let resolved = loaded.resolve(None);
-        let tasks = resolved.tasks();
-        // Every key resolves, because the built-in layer sets them all: a key is
-        // "set" only when a layer other than the defaults named it.
-        let named = |key: TaskKey| {
-            resolved
-                .get(&Key::Task(key))
-                .is_some_and(|sourced| sourced.source != Source::BuiltIn)
-        };
-        let mut config = self.config.clone();
-        let mut interval = None;
-        if named(TaskKey::Merge) {
-            config.land.merge = tasks.merge;
-        }
-        if named(TaskKey::MaxRunning) {
-            config.tick.max_running = tasks.max_running;
-        }
-        // The review's policy is what the send-back and the out-of-rounds card
-        // are decided by, so the person's own answer to the brief's
-        // `Review rounds` line is what the pass must act on.
-        if named(TaskKey::ReviewRounds) {
-            config.review.rounds = tasks.review_rounds;
-        }
-        if named(TaskKey::MustFix) {
-            config.review.must_fix = tasks.must_fix;
-        }
-        if named(TaskKey::TickSecs) {
-            config.tick.interval_secs = tasks.tick_secs;
-            interval = Some(tasks.tick_secs);
-        }
-        (config, interval)
+        pass_config(&self.home, &self.repo, &self.config)
     }
 
     /// The tasks whose reviewer's findings file has settled and may be decided.
@@ -2099,6 +2049,66 @@ fn describe_land_error(err: LandError, task: &str) -> String {
         ),
         other => format!("landing task {task:?}: {other}"),
     }
+}
+
+/// The config a pass runs under, and how long the loop should wait before the
+/// next one.
+///
+/// `tasks.merge`, `tasks.max_running`, the review rounds and must-fix are what
+/// the person sees in the brief's Settings block and in `shprd settings show`,
+/// so they are what the pass must act on. Only a key a layer actually names
+/// wins: a settings file that says nothing about the merge policy leaves the
+/// resolved config's own answer standing, which is what a test that hands a pass
+/// its config directly expects. The settings resolution already reads the old
+/// `config.toml` keys as its lowest named layer, so a run whose person has not
+/// migrated keeps the values its config file asks for. A settings file that
+/// cannot be read is not a reason to stop the pass: the resolved config's own
+/// values stand, and the next pass reads the file again.
+///
+/// The interval is returned beside the config because it is the one workflow
+/// value that is not the pass's own business: `tasks.tick_secs` decides how long
+/// the *loop* waits, so the loop has to be told what this pass read (M10 gate bug
+/// 4). It comes back `None` when no settings layer names it, so a service started
+/// with a `[tick] interval_secs` keeps that value. `shprd serve` calls this too,
+/// so the banner prints the interval the first pass will act on rather than only
+/// the one its config file named.
+pub fn pass_config(home: &Path, repo: &Path, base: &Config) -> (Config, Option<u64>) {
+    use shprd_core::settings::{Key, Source, TaskKey};
+
+    let Ok(loaded) = shprd_core::settings::Loaded::read(home, Some(repo)) else {
+        return (base.clone(), None);
+    };
+    let resolved = loaded.resolve(None);
+    let tasks = resolved.tasks();
+    // Every key resolves, because the built-in layer sets them all: a key is
+    // "set" only when a layer other than the defaults named it.
+    let named = |key: TaskKey| {
+        resolved
+            .get(&Key::Task(key))
+            .is_some_and(|sourced| sourced.source != Source::BuiltIn)
+    };
+    let mut config = base.clone();
+    let mut interval = None;
+    if named(TaskKey::Merge) {
+        config.land.merge = tasks.merge;
+    }
+    if named(TaskKey::MaxRunning) {
+        config.tick.max_running = tasks.max_running;
+    }
+    // The review's policy is what the send-back and the out-of-rounds card are
+    // decided by, so the person's own answer to the brief's `Review rounds` line
+    // is what the pass must act on.
+    if named(TaskKey::ReviewRounds) {
+        config.review.rounds = tasks.review_rounds;
+    }
+    if named(TaskKey::MustFix) {
+        config.review.must_fix = tasks.must_fix;
+    }
+    if named(TaskKey::TickSecs) {
+        config.tick.interval_secs = tasks.tick_secs;
+        interval = Some(tasks.tick_secs);
+    }
+    (config, interval)
 }
 
 /// Maps the eight derived words onto the planner's phase.
