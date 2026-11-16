@@ -6,11 +6,17 @@
 # A fresh `HERDR_APP_HOME` shows Herdr's first-run welcome over whatever layout is
 # shown, and a `layout.switch` does not clear it (the M10 gate saw exactly that:
 # its screenshots needed the welcome put away first). The welcome records its own
-# answer in the window's shared state, `data/shared.json`, under `frame.welcomed`,
-# and the "What's new" screen opens by itself after an update unless
-# `frame.whatsnew` names the version already seen. Writing those two keys before
-# the window starts is the whole of it: the window reads them at start and draws
-# the layout.
+# answer in the window's shared state, `<app home>/shared.json`, under
+# `frame.welcomed`, and the "What's new" screen opens by itself after an update
+# unless `frame.whatsnew` names the version already seen. Writing those two keys
+# before the window starts is the whole of it: the window reads them at start and
+# draws the layout.
+#
+# It is `<app home>/shared.json` and not `<app home>/data/shared.json`: `data/` is
+# where each mod keeps its own files (`data/shprd-tasks/`, `data/spaces/`), and the
+# shared key/value space Herdr's mods see through `shared()`/`setShared()` is the
+# one file beside `keys.json` and `layouts/`. Measured on 0.1.16: writing the keys
+# into `data/` leaves the welcome on screen.
 #
 # **This is for a private app home only.** Every command here refuses to run
 # against Herdr's own home (`~/.config/herdr-app`), because writing those keys
@@ -91,8 +97,8 @@ if [ "$mode" = print ]; then
   exit 0
 fi
 
-mkdir -p "$home/data"
-shared="$home/data/shared.json"
+mkdir -p "$home"
+shared="$home/shared.json"
 
 # The merge is done with `node` when it is there and a plain write when it is
 # not: the two keys are all this file is for on a fresh home, and a file that

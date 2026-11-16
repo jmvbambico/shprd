@@ -29,12 +29,12 @@ echo "== gate-env"
 # break. The check runs it against a folder of its own and reads the result back.
 gate=$(mktemp -d "${TMPDIR:-/tmp}/shprd-gate-env-check.XXXXXX")
 HERDR_APP_HOME="$gate/app" ./bin/gate-env --version 0.0.1 >/dev/null
-if ! grep -q '"frame.welcomed": "finished"' "$gate/app/data/shared.json"; then
+if ! grep -q '"frame.welcomed": "finished"' "$gate/app/shared.json"; then
   echo "gate-env did not write the welcome key" >&2
   rm -rf "$gate"
   exit 1
 fi
-if ! grep -q '"frame.whatsnew": "0.0.1"' "$gate/app/data/shared.json"; then
+if ! grep -q '"frame.whatsnew": "0.0.1"' "$gate/app/shared.json"; then
   echo "gate-env did not write the what's-new key" >&2
   rm -rf "$gate"
   exit 1

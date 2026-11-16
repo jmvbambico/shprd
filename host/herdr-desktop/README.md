@@ -154,7 +154,9 @@ in 103 bytes, so the scratch folder is usually reached through a short symlink.
 A fresh `HERDR_APP_HOME` opens with Herdr's first-run welcome over the layout, and
 a `layout.switch` does not clear it. `bin/gate-env` writes the two keys the
 welcome and the "What's new" screen read before the window starts, into a home
-of your own:
+of your own. They live in the window's shared state, `<app home>/shared.json` —
+beside `keys.json` and `layouts/`, *not* in `data/`, which is each mod's own
+folder:
 
 ```sh
 # a private app home, with the first-run screens already answered
