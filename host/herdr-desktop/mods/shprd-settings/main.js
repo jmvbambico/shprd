@@ -163,6 +163,11 @@ export default class Settings extends View {
    * gate bug 5).
    */
   async refresh(cx = this.cx) {
+    // The window says it is up before it asks anything: its place is kept by being
+    // renewed on every read, and a service that is down must not let the record go
+    // stale — a window that says "shprd serve is not running" is still a window,
+    // and the footer's next click must keep it rather than stack another.
+    settingsWindowOpened(this.window_, this.page);
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
@@ -180,7 +185,6 @@ export default class Settings extends View {
       // answer, and a page that waited on four model listings to show a table it
       // already had would look stuck.
       this.failure = null;
-      settingsWindowOpened(this.window_, this.page);
       this.resetBoxes();
       cx.notify();
       // The roster and the template list are each the window's to do without: a
