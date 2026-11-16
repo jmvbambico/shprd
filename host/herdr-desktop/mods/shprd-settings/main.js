@@ -78,6 +78,14 @@ const SAVED_MS = 2100;
 const NOTE_MS = 500;
 /** How long an edited prompt waits before it saves itself. */
 const PROMPT_MS = 700;
+/**
+ * How long closing waits for the last words to be stored, in ms.
+ *
+ * A write on loopback is milliseconds and a service that is not there refuses at
+ * once, so this is only the bound that keeps `Esc` from hanging on a service that
+ * stopped answering.
+ */
+const CLOSE_WAIT_MS = 1500;
 
 export default class Settings extends View {
   init(_props, cx) {
@@ -108,7 +116,10 @@ export default class Settings extends View {
     /** The words the editor last read from the service, so a save knows what moved. */
     this.editorSaved = "";
     this.editorGen = 0;
+    this.promptWrite = null;
     this.promptSavedAt = 0;
+    /** Whether the last leave could not store the words, so `Esc` may close instead. */
+    this.promptSaveFailed = false;
     /** The id a new role gets, typed into a box made on the first Add. */
     this.newRole = null;
     /** The boxes under rows: `key -> { state, saved, gen, savedAt, rows }`. */
@@ -163,10 +174,10 @@ export default class Settings extends View {
    * gate bug 5).
    */
   async refresh(cx = this.cx) {
-    // The window says it is up before it asks anything: its place is kept by being
-    // renewed on every read, and a service that is down must not let the record go
-    // stale — a window that says "shprd serve is not running" is still a window,
-    // and the footer's next click must keep it rather than stack another.
+    // The window says it is up before it asks anything: the copy's place is kept
+    // by being renewed on every read, and a service that is down must not let the
+    // record go stale — a window that says "shprd serve is not running" is still a
+    // window, and the footer's next click must keep it rather than stack another.
     settingsWindowOpened(this.window_, this.page);
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
@@ -427,8 +438,23 @@ export default class Settings extends View {
     this.cx.notify();
   }
 
-  /** Stores the editor's words over the open prompt, if they changed. */
-  async savePrompt(cx = this.cx) {
+  /**
+   * Stores the editor's words over the open prompt, if they changed.
+   *
+   * One write at a time: a caller that asks again while one is in flight gets
+   * that write's promise, so `leavePrompt()` and a debounce firing together
+   * cannot store the same words twice.
+   */
+  savePrompt(cx = this.cx) {
+    if (this.promptWrite) return this.promptWrite;
+    this.promptWrite = this.writePrompt(cx).finally(() => {
+      this.promptWrite = null;
+    });
+    return this.promptWrite;
+  }
+
+  /** The write behind [`savePrompt`]: the words, over the prompt that is open. */
+  async writePrompt(cx = this.cx) {
     const prompt = this.prompt;
     if (!this.client || !prompt || this.writing !== null) return;
     const text = this.editor?.value?.() ?? "";
@@ -455,6 +481,42 @@ export default class Settings extends View {
     }
     this.writing = null;
     this.cx.notify();
+  }
+
+  /**
+   * Leaves the prompt editor, storing the words typed since the last pause.
+   *
+   * The editor is closed only once the write has landed, so its own answer
+   * cannot put the editor back (`Back` used to do that: the save resolved after
+   * the list was asked for, and the editor with it). A save that a write in
+   * flight swallowed is retried, a few times, because leaving is the one moment
+   * a note's last keystrokes have nowhere else to go.
+   */
+  async leavePrompt() {
+    const prompt = this.prompt;
+    if (prompt === null) return;
+    this.promptSaveFailed = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.savePrompt();
+      if ((this.editor?.value?.() ?? "") === this.editorSaved) break;
+    }
+    // A prompt opened meanwhile is the person's to look at, not this leaving's to
+    // close. (The save's own answer replaces the prompt it wrote, so the two are
+    // compared by id and not by identity.)
+    if (this.prompt?.id !== prompt.id) return;
+    const refusedHere =
+      this.refusal !== null && String(this.refusal.key ?? "") === `prompts.${prompt.id}`;
+    if (refusedHere) {
+      // The words are still only in the box: the editor stays with the service's
+      // reason over it, and the next `Esc` closes the window instead (see
+      // `escape()`), so a broken service can never trap a person in the editor.
+      this.promptSaveFailed = true;
+      this.cx.notify();
+      return;
+    }
+    this.prompt = null;
+    this.refusal = null;
+    this.keepKeyboard();
   }
 
   /** Puts the shipped words back over the open prompt. */
@@ -501,16 +563,20 @@ export default class Settings extends View {
       this.open = null;
       this.typedKey = null;
       this.cx.notify();
-      return;
+      return Promise.resolve();
     }
     if (this.page === "prompts" && this.prompt !== null) {
-      this.prompt = null;
-      this.refusal = null;
-      this.saved = null;
-      this.cx.notify();
-      return;
+      // The words typed since the last pause are saved before the editor goes,
+      // exactly as `Back` and closing the window save them. A save the service
+      // refused keeps the editor — with its reason — and leaves the next `Esc` to
+      // close the window.
+      if (this.promptSaveFailed) {
+        this.promptSaveFailed = false;
+        return this.dismiss();
+      }
+      return this.leavePrompt();
     }
-    this.dismiss();
+    return this.dismiss();
   }
 
   /**
@@ -520,11 +586,33 @@ export default class Settings extends View {
    * be waiting when the window goes: leaving is one of the moments Shepherdr
    * saves at, and this is that moment.
    */
-  dismiss() {
-    this.savePrompt();
-    for (const key of this.boxes.keys()) this.writeBox(key);
+  async dismiss() {
+    await this.flush();
     settingsWindowClosed(this.window_);
     closeOverlay(props()?.overlay);
+  }
+
+  /**
+   * Stores everything typed since the last pause, and answers when it has been
+   * stored — or when the service has had [`CLOSE_WAIT_MS`] to answer.
+   *
+   * Awaiting this is what makes the last keystrokes reach the service before the
+   * window goes: a mod's `fetch` does not outlive the copy that made it, so
+   * closing first and writing afterwards is how a note gets lost.
+   */
+  async flush(cx = this.cx) {
+    const writing = (async () => {
+      if (this.prompt !== null) await this.savePrompt();
+      for (const key of this.boxes.keys()) await this.writeBox(key);
+    })();
+    let wait = Promise.resolve();
+    try {
+      if (typeof cx?.sleep === "function") wait = cx.sleep(CLOSE_WAIT_MS);
+    } catch {
+      // A context that cannot give a clock closes at once; the writes go on
+      // best-effort either way.
+    }
+    await Promise.race([writing.catch(() => {}), wait]);
   }
 
   /**
@@ -534,9 +622,8 @@ export default class Settings extends View {
    * beside it, `overlay.close` from the command line — and this is where the
    * window stops claiming its place, so the footer's next click opens it again.
    */
-  async close(_cx) {
-    if (this.prompt !== null) await this.savePrompt();
-    for (const key of this.boxes.keys()) await this.writeBox(key);
+  async close(cx = this.cx) {
+    await this.flush(cx);
     settingsWindowClosed(this.window_);
   }
 
@@ -1288,13 +1375,7 @@ export default class Settings extends View {
                 .child(writing ? "saving…" : "Saved"),
             ),
           )
-          .child(link(t, "prompt-back", "Back", () => {
-            this.savePrompt();
-            this.prompt = null;
-            this.refusal = null;
-            this.saved = null;
-            this.keepKeyboard();
-          })),
+          .child(link(t, "prompt-back", "Back", () => this.leavePrompt())),
       )
       .child(div().font_family("JetBrains Mono").text_size(TEXT.id).text_color(t.dim).child(prompt.path))
       .child(div().text_size(TEXT.id).text_color(t.dim).child(promptLine(prompt)))
