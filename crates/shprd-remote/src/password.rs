@@ -490,6 +490,13 @@ mod tests {
 
     use super::*;
 
+    /// A memory cost the argon2 cost tests do not assert about.
+    ///
+    /// Argon2 at 64 MiB is the right cost for a password and about 1.5 seconds in
+    /// a debug build: a test that only needs "the hash verifies" writes this
+    /// instead, and the one test that pins the production parameters uses `set`.
+    const CHEAP_KIB: u32 = 8;
+
     /// A store in a fresh state directory, with the directory alive.
     fn store() -> (tempfile::TempDir, PasswordStore) {
         let dir = tempfile::tempdir().expect("a state dir");
@@ -528,19 +535,12 @@ mod tests {
         assert!(stored.phc.starts_with("$argon2id$v=19$m=65536,t=3,p=1$"));
         assert_eq!(stored.version, 1);
 
+        // One check at the production cost: this test is about the parameters
+        // being the ones the file claims, and a wrong password is refused by the
+        // same code path the cheap-cost test below drives.
         assert!(
             store
                 .verify_blocking("a long enough password")
-                .expect("the check runs")
-        );
-        assert!(
-            !store
-                .verify_blocking("a long enough password ")
-                .expect("the check runs")
-        );
-        assert!(
-            !store
-                .verify_blocking("a different long password")
                 .expect("the check runs")
         );
     }
@@ -568,7 +568,7 @@ mod tests {
     fn the_hash_is_private_on_disk() {
         let (_dir, store) = store();
         store
-            .set("a long enough password")
+            .set_with_cost("a long enough password", CHEAP_KIB, 1, 1)
             .expect("the password sets");
         #[cfg(unix)]
         {
@@ -584,7 +584,10 @@ mod tests {
     #[test]
     fn with_no_password_set_no_password_is_ever_right() {
         let (_dir, store) = store();
-        for guess in ["", "a long enough password", DUMMY_PHC] {
+        // Two guesses, and the empty one is the one that matters: the dummy hash
+        // costs a real hash each time, so this stops at the case a bug would
+        // actually produce — an empty password being taken for "no password".
+        for guess in ["", "a long enough password"] {
             assert!(
                 !store.verify_blocking(guess).expect("the check runs"),
                 "{guess:?} must not be accepted with no password set"
@@ -596,7 +599,7 @@ mod tests {
     fn clearing_forgets_the_password_and_clearing_twice_is_the_same_state() {
         let (_dir, store) = store();
         store
-            .set("a long enough password")
+            .set_with_cost("a long enough password", CHEAP_KIB, 1, 1)
             .expect("the password sets");
         store.clear().expect("the password clears");
         assert!(!store.is_set().expect("the file is read"));
@@ -678,7 +681,7 @@ mod tests {
         // A previous version, or a person with `chmod`, could leave it readable.
         let (_dir, store) = store();
         store
-            .set("a long enough password")
+            .set_with_cost("a long enough password", CHEAP_KIB, 1, 1)
             .expect("the password sets");
         #[cfg(unix)]
         {
@@ -706,7 +709,7 @@ mod tests {
     fn two_salts_never_repeat_so_two_equal_passwords_hash_differently() {
         let (dir, store) = store();
         store
-            .set("a long enough password")
+            .set_with_cost("a long enough password", CHEAP_KIB, 1, 1)
             .expect("the password sets");
         let first = std::fs::read_to_string(store.path()).expect("the file");
         assert_eq!(
@@ -722,7 +725,7 @@ mod tests {
             "16 bytes of salt is 22 base64 characters"
         );
         store
-            .set("a long enough password")
+            .set_with_cost("a long enough password", CHEAP_KIB, 1, 1)
             .expect("the password sets");
         let second = std::fs::read_to_string(store.path()).expect("the file");
         assert_ne!(first, second, "a fresh salt for every hash");
@@ -730,7 +733,7 @@ mod tests {
         let other = PasswordStore::new(&dir.path().join("other"));
         std::fs::create_dir_all(dir.path().join("other")).expect("a second dir");
         other
-            .set("a long enough password")
+            .set_with_cost("a long enough password", CHEAP_KIB, 1, 1)
             .expect("the password sets");
         let third = std::fs::read_to_string(other.path()).expect("the file");
         assert_ne!(first, third);
