@@ -41,7 +41,7 @@ import { closeOverlay, layout, openOverlay, props, run, setShared, spaces, theme
 
 import { attach, reason } from "./lib/client.js";
 import { KIND, MENU, attention, closeWords, menuHeight, menuItems, narrowSidebar, sidebarRows } from "./lib/spaces.js";
-import { attentionBadge, note, statusGlyph } from "./lib/panel.js";
+import { note, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -61,6 +61,39 @@ const RAIL_H = 26;
 const MONO = "JetBrains Mono";
 /** The close confirm's size: Shepherdr's `closeSpace` asks in a 400×168 dialog. */
 const CONFIRM = { width: 400, height: 168 };
+
+/**
+ * The one badge a row ends with: *Needs you* red at the left, *Ready* green at
+ * the right — Shepherdr's `AttentionBadge` (`lib/ui.js:167-176`).
+ *
+ * One count is a single rounded pill in that count's colour; both are one oval
+ * split down the middle by a 1 px line in `line`, the colour behind the badge, so
+ * a row never jumps when the second count appears. It is always 16 tall, each
+ * count stops at `9+`, and the digits sit on the fill in `colors.on`.
+ *
+ * It is drawn here rather than in `lib/panel.js` on purpose: the badge is the
+ * sidebar row's own part, and a shared module is copied into every mod by
+ * `bin/sync-shared` — twelve of which would carry a function none of them draws.
+ */
+function rowBadge(t, counts, colors, line) {
+  const num = (n) =>
+    div()
+      .line_height("16px")
+      .when(n === 1, (el) => el.ml(1))
+      .child(n > 9 ? "9+" : String(n));
+  const part = (n, fill) => div().h(16).flex().items_center().justify_center().bg(fill).child(num(n));
+  const shape = h_flex().h(16).flex_none().text_color(colors.on).text_size(TEXT.id).font_semibold();
+  const need = Math.max(0, Math.floor(counts.need ?? 0));
+  const ready = Math.max(0, Math.floor(counts.ready ?? 0));
+  if (need > 0 && ready > 0) {
+    return shape
+      .child(part(need, colors.red).w(need > 9 ? 19 : 15).rounded_l(8))
+      .child(div().w(1).h(16).bg(line))
+      .child(part(ready, colors.green).w(ready > 9 ? 19 : 15).rounded_r(8));
+  }
+  const only = need || ready;
+  return shape.child(part(only, need ? colors.red : colors.green).min_w(16).px(only > 9 ? 4 : 0).rounded(8));
+}
 
 export default class Spaces extends View {
   init(p, cx) {
@@ -364,7 +397,7 @@ export default class Spaces extends View {
         el.child(div().flex_none().text_size(TEXT.label).text_color(t.dim).child(entry.tail)),
       )
       .when(counts.need > 0 || counts.ready > 0, (el) =>
-        el.child(attentionBadge(t, counts.need, counts.ready, colors, entry.active ? t.selected : t.chrome)),
+        el.child(rowBadge(t, counts, colors, entry.active ? t.selected : t.chrome)),
       );
   }
 
