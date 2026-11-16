@@ -769,3 +769,193 @@ test("a window whose service is down still renews its place", async () => {
   openSettings();
   assert.equal(herdr.OVERLAYS.length, 0, "so a click keeps the one copy instead of stacking one");
 });
+
+// -- words typed while the window cannot write -----------------------------
+//
+// The save paths used to give up when the window had no client (a transient read
+// timeout drops it while the stale page stays drawn) or when another write was in
+// flight, and the next re-read then replaced the box's text with the service's
+// value: the person's words were gone, with no refusal and nothing to retry. Every
+// change is now queued and written when the service answers, and a re-read leaves a
+// changed box alone.
+
+/** A window on the Tasks page with the notes boxes drawn (as rendering makes them). */
+async function tasksWindow() {
+  const { view } = await settled({ page: "tasks" });
+  view.settings = SETTINGS;
+  view.client = client();
+  view.resetBoxes();
+  return view;
+}
+
+test("a note typed while the window has no client is written once one answers", async () => {
+  const view = await tasksWindow();
+  const box = view.boxes.get("tasks.start_notes");
+  assert.ok(box, "the notes box exists");
+  box.state.set_value("read the README first");
+
+  // The service went away under the page: `refresh()` drops the client on a
+  // timeout and leaves the page as it was.
+  view.client = null;
+  await view.writeBox("tasks.start_notes");
+  assert.deepEqual(view.client?.calls ?? [], [], "nothing could be written");
+  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.start_notes"], "the words wait their turn");
+
+  // A re-read that finds the service again writes them, instead of replacing them
+  // with the value the service still holds.
+  const live = client();
+  view.client = live;
+  view.resetBoxes();
+  assert.equal(view.boxes.get("tasks.start_notes").state.value(), "read the README first");
+  await view.pump();
+  assert.deepEqual(live.calls, [
+    { key: "tasks.start_notes", value: "read the README first", forRepo: false },
+  ]);
+  assert.equal(view.boxes.get("tasks.start_notes").saved, "read the README first");
+});
+
+test("a note typed while another write is in flight is queued, not dropped", async () => {
+  const view = await tasksWindow();
+  let release = null;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const live = client();
+  const putSetting = live.putSetting;
+  let started = null;
+  const began = new Promise((resolve) => {
+    started = resolve;
+  });
+  live.putSetting = async (key, value, forRepo_) => {
+    if (key !== "tasks.max_running") return putSetting(key, value, forRepo_);
+    // A write that takes its time: the first one has begun but not answered.
+    started();
+    await held;
+    return putSetting(key, value, forRepo_);
+  };
+  view.client = live;
+
+  const first = view.apply("tasks.max_running", 2);
+  await began;
+  view.boxes.get("tasks.start_notes").state.set_value("second, and not lost");
+  // Not awaited: a box writes through the queue, and the queue is busy until the
+  // write in front of it lands.
+  const second = view.writeBox("tasks.start_notes");
+  assert.equal(view.writing, "tasks.max_running", "the first write is the one in flight");
+  assert.equal(live.calls.length, 0, "and it has not answered yet");
+  assert.deepEqual(
+    view.queue.map((write) => write.key),
+    ["tasks.start_notes"],
+    "the note is queued, not dropped",
+  );
+
+  release();
+  await first;
+  await second;
+  assert.deepEqual(
+    live.calls.map((call) => `${call.key}=${call.value}`),
+    ["tasks.max_running=2", "tasks.start_notes=second, and not lost"],
+    "and goes out as soon as the first one lands",
+  );
+});
+
+test("a re-read never replaces words the service does not have yet", async () => {
+  const view = await tasksWindow();
+  const box = view.boxes.get("tasks.start_notes");
+  box.state.set_value("typed, not stored");
+  // The service's answer has moved on for other keys, but this box's words are
+  // still only in the box: the re-read must leave them, and queue them.
+  view.client = null;
+  view.resetBoxes();
+  assert.equal(box.state.value(), "typed, not stored", "the words are still there");
+  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.start_notes"]);
+  // A box the service owns and the person has not touched does take its value.
+  const archive = view.boxes.get("tasks.archive_namespace");
+  assert.equal(archive.state.value(), "shprd/");
+});
+
+test("Esc on the Prompts page says so when the words could not be stored", async () => {
+  const view = await editing();
+  view.editor.set_value("words typed while the service was away");
+  // The client is dropped, as one timed-out read does.
+  view.client = null;
+  await view.escape();
+  assert.ok(view.prompt, "the editor stays with the words in it");
+  assert.match(view.refusal.text, /did not answer/);
+  assert.equal(view.editor.value(), "words typed while the service was away");
+  // And the next Esc closes the window rather than trapping the person.
+  await view.escape();
+  assert.deepEqual(herdr.CLOSED, ["ov-1"]);
+});
+
+test("a write whose service is back writes the queue before the page is redrawn", async () => {
+  const view = await tasksWindow();
+  view.boxes.get("tasks.finish_notes").state.set_value("say what you tested");
+  view.client = null;
+  await view.writeBox("tasks.finish_notes");
+  const live = client();
+  view.client = live;
+  // What a successful read does before it resets the boxes.
+  if (view.queue.length > 0) view.pump();
+  await view.pump();
+  assert.deepEqual(live.calls, [
+    { key: "tasks.finish_notes", value: "say what you tested", forRepo: false },
+  ]);
+});
+
+test("a second change is queued behind the first instead of being dropped", async () => {
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  const live = client();
+  view.client = live;
+  await Promise.all([view.apply("tasks.max_running", 2), view.apply("tasks.max_running", 3)]);
+  assert.deepEqual(live.calls, [
+    { key: "tasks.max_running", value: 2, forRepo: false },
+    { key: "tasks.max_running", value: 3, forRepo: false },
+  ]);
+});
+
+test("a restarted service does not throw the editor's words away", async () => {
+  // `forget()` runs when `attach` sees a new id in service.json. A prompt is a file
+  // in the config directory, so the words typed over it are not that run's to drop:
+  // the editor stays, and the next read — from the service that is back — stores
+  // them.
+  const view = await editing();
+  view.editor.set_value("words from the run that went away");
+  view.forget();
+  assert.equal(view.prompt?.id, "worker", "the editor stays with its words");
+  // What a read that answers does with them (a unit test has no service for
+  // `refresh()` to find, so it drives the same branch the read runs).
+  const live = client();
+  view.client = live;
+  view.forget();
+  await view.retryWrites();
+  assert.deepEqual(live.promptWrites, [
+    { id: "worker", text: "words from the run that went away" },
+  ]);
+});
+
+test("a restarted service closes an editor with nothing typed in it", async () => {
+  const view = await editing();
+  view.forget();
+  assert.equal(view.prompt, null, "nothing typed, nothing kept");
+});
+
+test("a refusal is the person's to read, not retried behind their back", async () => {
+  const service = new ServiceError("`prompts.worker` could not be stored: read-only file", {
+    status: 500,
+    code: "io",
+  });
+  const view = await editing();
+  view.client = client(null, service);
+  view.editor.set_value("words the service refused");
+  await view.escape();
+  assert.ok(view.prompt, "the editor keeps them");
+  assert.ok(view.client.promptWrites.length > 0, "leaving tried to store them");
+  // The next read that answers must leave a refused prompt alone: only a transport
+  // failure is the window's to retry behind the person.
+  const live = client();
+  view.client = live;
+  await view.retryWrites();
+  assert.equal(live.promptWrites.length, 0, "a refusal is not re-sent by a read");
+});
