@@ -187,9 +187,11 @@ pub(crate) fn worker_with_hub(
         None
     } else {
         Some(NewsDesk {
-            coordinator: Arc::new(crate::cmd::live_news::LiveNews::new(Box::new(
-                std::sync::Arc::clone(&host),
-            ))),
+            coordinator: Arc::new(crate::cmd::live_news::LiveNews::new(
+                Box::new(std::sync::Arc::clone(&host)),
+                home,
+                &repo,
+            )),
             settle_ms: settle_ms(home, &repo),
             clock: Arc::new(shprd_core::log::SystemClock),
         })

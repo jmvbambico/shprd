@@ -9,9 +9,9 @@
 //! id is made from the title and never collides with a task the run holds.
 //!
 //! `GET /api/tasks/{id}/changes` is what the accept card shows beside the
-//! hand-in: the files the task's branch changed under its base, with line
-//! counts. It reads git, not the log — the log says an attempt exists, and only
-//! the repository says what it did.
+//! hand-in: the files the task's branch changed under the branch its attempt was
+//! cut from, with line counts. It reads git, not the log — the log says an
+//! attempt exists, and only the repository says what it did.
 //!
 //! Both are read-only against the machine except for the one append, so both are
 //! safe to ask often.
@@ -136,6 +136,12 @@ pub(crate) fn add(
 
 /// `GET /api/tasks/{id}/changes`: the task's branch against its base.
 ///
+/// The base is the run's integration branch, which is the branch every attempt
+/// is cut from and the branch the task lands on — not the run's base branch,
+/// which is where the integration branch itself came from. Diffing against the
+/// latter lists every file the other tasks landed while this one worked (M10
+/// gate bug 8).
+///
 /// The diff runs from the merge base, so it is the task's own work and not
 /// everything its base branch moved while the agent worked. A task with no
 /// attempt has no branch to compare and is refused as a wrong state — not found
@@ -164,7 +170,12 @@ pub(crate) fn changes_in(
             "{task_id} has no attempt yet: nothing has been written on its branch"
         ))
     })?;
-    let base = run.base_branch.clone();
+    // The attempt was cut from the run's integration branch (`SpawnEnv::base_branch`
+    // in `spawn.rs`), and that is also where a landing puts its commits. The
+    // integration branch's name is fixed for the run, so merge-basing against its
+    // current tip still gives the commit this attempt branched from, even after
+    // other tasks landed ahead of it.
+    let base = run.integration_branch.clone();
     let branch = attempt.branch.clone();
     let git = Git::new(repo);
     let merge_base = git

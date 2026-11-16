@@ -2033,17 +2033,44 @@ fn recorded_coordinator_pane(
         .find(|pane| pane.as_str() == wanted)
 }
 
-/// Sends one turn of input to the run's coordinator, as the person.
+/// The pane a run's coordinator may be typed into, when one is reachable.
 ///
 /// Two panes are reachable, and both are named rather than guessed:
 ///
 /// 1. the pane the run recorded when it launched a coordinator
-///    (`OrchestratorLaunched`), and
+///    (`OrchestratorLaunched`), which its launcher owns; and
 /// 2. the pane `shprd serve` recorded for the repository's own space
 ///    ([`record_coordinator_pane`]), which is where a person starts the
-///    coordinator in the M10 flow.
+///    coordinator in the M10 flow. The space is found by its derived label, and
+///    the record is trusted only while its pane is still one of that space's
+///    tabs.
 ///
-/// A pane that is neither is a refusal: shprd never types into a tab it cannot
+/// `Ok(None)` is "nobody to tell right now": no such space, or no tab recorded
+/// in it. It is not an error, because both chats and the news keep their words
+/// for a later call rather than refusing outright.
+pub(crate) fn coordinator_pane_for(
+    mux: &dyn Host,
+    home: &Path,
+    state: &RunState,
+    space_name: &str,
+) -> Result<Option<PaneId>, CliError> {
+    if let Some(orchestrator) = state.orchestrator.as_ref() {
+        return Ok(Some(PaneId::new(orchestrator.pane.clone())));
+    }
+    let space = mux.find_space(space_name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {space_name:?}")))
+    })?;
+    let Some(space) = space else {
+        return Ok(None);
+    };
+    Ok(recorded_coordinator_pane(home, mux, &space))
+}
+
+/// Sends one turn of input to the run's coordinator, as the person.
+///
+/// The pane is [`coordinator_pane_for`]'s: the run's own record when it
+/// launched one, otherwise the repository space's recorded coordinator tab. A
+/// pane that is neither is a refusal: shprd never types into a tab it cannot
 /// name, so a chat line cannot land in whatever happens to be first on the
 /// host's bar.
 pub(crate) fn prompt_coordinator(
@@ -2053,20 +2080,8 @@ pub(crate) fn prompt_coordinator(
     text: &str,
 ) -> Result<(), CliError> {
     let state = ctx.state()?;
-    if let Some(orchestrator) = state.orchestrator.as_ref() {
-        let pane = PaneId::new(orchestrator.pane.clone());
-        return mux
-            .write(&pane, text, true)
-            .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")));
-    }
     let name = repo_space_name(&repo_name(&ctx.root)?);
-    let space = mux.find_space(&name).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
-    })?;
-    let Some(space) = space else {
-        return Err(no_coordinator(&name));
-    };
-    let Some(pane) = recorded_coordinator_pane(home, mux, &space) else {
+    let Some(pane) = coordinator_pane_for(mux, home, &state, &name)? else {
         return Err(no_coordinator(&name));
     };
     mux.write(&pane, text, true)

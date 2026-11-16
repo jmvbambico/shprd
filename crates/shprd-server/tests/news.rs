@@ -252,6 +252,61 @@ impl Coordinator for FakeHost {
     }
 }
 
+/// A coordinator whose pane the host finds, rather than one the run recorded.
+///
+/// It is the seam's answer for the M10 flow: the person starts the coordinator
+/// in the repository's own space, no `OrchestratorLaunched` is ever written,
+/// and the binary still finds the tab by its space's label. The fake stands in
+/// for that lookup so the service's delivery and its memory are testable
+/// without a multiplexer.
+#[derive(Default)]
+struct FoundHost {
+    /// The pane the lookup answers, or `None` when there is no coordinator tab.
+    pane: Mutex<Option<String>>,
+    /// Every message, in order: the pane and the text.
+    told: Mutex<Vec<(String, String)>>,
+}
+
+impl FoundHost {
+    /// A lookup that finds `pane`.
+    fn at(pane: &str) -> Arc<FoundHost> {
+        Arc::new(FoundHost {
+            pane: Mutex::new(Some(pane.to_owned())),
+            told: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A lookup that finds no coordinator tab.
+    fn missing() -> Arc<FoundHost> {
+        Arc::new(FoundHost::default())
+    }
+
+    /// Everything it was told, oldest first.
+    fn told(&self) -> Vec<(String, String)> {
+        self.told
+            .lock()
+            .expect("the host's log is not poisoned")
+            .clone()
+    }
+}
+
+impl Coordinator for FoundHost {
+    fn pane(&self, _state: &RunState) -> Option<String> {
+        self.pane
+            .lock()
+            .expect("the pane lookup is not poisoned")
+            .clone()
+    }
+
+    fn tell(&self, pane: &str, text: &str) -> Result<(), String> {
+        self.told
+            .lock()
+            .map_err(|_| String::from("the host's log is poisoned"))?
+            .push((pane.to_owned(), text.to_owned()));
+        Ok(())
+    }
+}
+
 /// A clock a test moves by hand, so the settle window is not a race.
 struct HandClock(AtomicU64);
 
@@ -278,6 +333,15 @@ const NOW: u64 = 1_700_000_000_000;
 
 /// A news desk over `host`, settling after `settle_ms` on `clock`.
 fn desk(host: Arc<FakeHost>, clock: Arc<HandClock>, settle_ms: u64) -> NewsDesk {
+    NewsDesk {
+        coordinator: host,
+        settle_ms,
+        clock,
+    }
+}
+
+/// A news desk over a coordinator the host finds rather than the log.
+fn found_desk(host: Arc<FoundHost>, clock: Arc<HandClock>, settle_ms: u64) -> NewsDesk {
     NewsDesk {
         coordinator: host,
         settle_ms,
@@ -391,6 +455,93 @@ fn a_change_is_told_once_across_passes_and_restarts() {
     assert!(
         memory_path(&fixture.repo).exists(),
         "the news' memory is kept in the repository's .shprd"
+    );
+}
+
+/// Bug 9 of the M10 gate: the person starts the coordinator themselves, so no
+/// `OrchestratorLaunched` is recorded. The host still finds the repository
+/// space's coordinator tab, and the news goes there once — including after a
+/// service restart, because the memory says what was told.
+#[test]
+fn news_reaches_a_coordinator_the_host_finds_once_across_a_restart() {
+    let fixture = Fixture::new();
+    fixture.plan(&["A", "B"]);
+    let host = FoundHost::at("found-pane");
+    let clock = HandClock::at(NOW);
+    let worker = fixture.worker(
+        &["A", "B"],
+        Some(found_desk(host.clone(), clock.clone(), 0)),
+    );
+
+    // The first look only notes how the tasks read: old news is not news.
+    fixture.pass(&worker);
+    fixture.spawn("A");
+    fixture.spawn("B");
+    clock.set(NOW + 1_000);
+
+    let report = worker.tick().expect("the pass ran");
+    let told = host.told();
+    assert_eq!(told.len(), 1, "exactly one message: {told:?}");
+    assert_eq!(told[0].0, "found-pane", "the pane the host found");
+    assert!(
+        told[0].1.contains("A started") && told[0].1.contains("B started"),
+        "both lines go to the found coordinator: {:?}",
+        told[0].1
+    );
+    assert_eq!(report.news.len(), 1, "the report says who was told");
+
+    // A restarted service over the same repository and the same panes must not
+    // tell the same lines again.
+    let restarted_host = FoundHost::at("found-pane");
+    let restarted = fixture.worker(
+        &["A", "B"],
+        Some(found_desk(
+            restarted_host.clone(),
+            HandClock::at(NOW + 20_000),
+            0,
+        )),
+    );
+    restarted.tick().expect("the restarted pass ran");
+    assert!(
+        restarted_host.told().is_empty(),
+        "a restart told the news again: {:?}",
+        restarted_host.told()
+    );
+}
+
+/// With no coordinator tab in the repository's space, nothing is typed and the
+/// lines are kept: a coordinator that starts later hears them, once.
+#[test]
+fn news_with_no_coordinator_pane_is_kept_until_one_is_found() {
+    let fixture = Fixture::new();
+    fixture.plan(&["A"]);
+    let missing = FoundHost::missing();
+    let clock = HandClock::at(NOW);
+    let worker = fixture.worker(&["A"], Some(found_desk(missing.clone(), clock.clone(), 0)));
+
+    fixture.pass(&worker);
+    fixture.spawn("A");
+    clock.set(NOW + 1_000);
+    let report = worker.tick().expect("the pass with no coordinator ran");
+    assert!(
+        missing.told().is_empty(),
+        "there was no pane to type into: {:?}",
+        missing.told()
+    );
+    assert!(report.news.is_empty(), "nothing was delivered");
+
+    // A coordinator starts in the repository's space after the change.
+    let host = FoundHost::at("found-pane");
+    let later = fixture.worker(&["A"], Some(found_desk(host.clone(), clock.clone(), 0)));
+    clock.set(NOW + 10_000);
+    later.tick().expect("the pass with a coordinator ran");
+    let told = host.told();
+    assert_eq!(told.len(), 1, "the kept line went once: {told:?}");
+    assert_eq!(told[0].0, "found-pane");
+    assert!(
+        told[0].1.contains("A started"),
+        "and it is the old line: {:?}",
+        told[0].1
     );
 }
 
