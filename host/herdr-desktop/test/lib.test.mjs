@@ -270,6 +270,30 @@ test("every call carries the token, and a write carries x-shprd too", async () =
   });
 });
 
+test("starting an agent is one write to the service, with the program in it", async () => {
+  const doFetch = fakeFetch({
+    "/api/agents": { body: { program: "claude", name: "Claude Code", tab: "t7" } },
+  });
+  const client = new Client(
+    {
+      base: "http://127.0.0.1:7788",
+      dir: "/state/shprd",
+      record: { port: 7788, id: "abc" },
+      token: "token-1",
+    },
+    { fetch: doFetch },
+  );
+  const opened = await client.openAgent("claude");
+  assert.deepEqual(opened, { program: "claude", name: "Claude Code", tab: "t7" });
+  const call = doFetch.calls[0];
+  assert.equal(new URL(call.url).pathname, "/api/agents");
+  assert.equal(call.init.method, "POST");
+  // It is a write: the app's own header, and the token.
+  assert.equal(call.init.headers["x-shprd"], "1");
+  assert.equal(call.init.headers.authorization, "Bearer token-1");
+  assert.deepEqual(JSON.parse(call.init.body), { program: "claude" });
+});
+
 test("a refusal is a ServiceError carrying the service's words", async () => {
   const doFetch = fakeFetch({
     "/api/action": {

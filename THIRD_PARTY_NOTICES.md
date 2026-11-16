@@ -100,7 +100,13 @@ SOFTWARE.
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
-  rules, and the mod-to-service discovery — `service.json`'s port and id, the
+  rules, the window's own glyphs — the tab bar's spinner and close mark, the side
+  panel's four icons and the tab, app and pane menus' row icons — copied whole
+  from `mods/workspace-chrome-shepherdr/*.svg`, `mods/tasks/tasks.svg`,
+  `mods/pane-chat/{split-right,split-down,zoom}.svg`,
+  `mods/coordinator/rotate-ccw.svg` and `mods/keybinds/keyboard.svg` into
+  `host/herdr-desktop/mods/{shprd-tabs,shprd-menu,shprd-new-menu}/icons/`, and the
+  mod-to-service discovery — `service.json`'s port and id, the
   `/api/health` id handshake before the token is sent, bearer auth — from
   `lib/local.js`, `lib/bridge.js` and `service/main.ts` — in
   `host/herdr-desktop/{layouts,mods,bin}/` and `crates/shprd/src/cmd/install.rs`
