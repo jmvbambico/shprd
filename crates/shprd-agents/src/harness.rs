@@ -153,6 +153,25 @@ impl Harness {
         &self.spec.status.sources
     }
 
+    /// Whether this program's status needs a host method not every host has.
+    ///
+    /// True for a program whose only real source is its plugin (`hook`), which
+    /// reports through `pane.report_agent`: herdr-core 0.1.21 has no such
+    /// method, so its plugin silently does nothing and the program never
+    /// reports. [Self::ready_lines] is what such a program is waited for
+    /// instead.
+    pub fn status_needs_the_host(&self) -> bool {
+        self.spec.status.needs_the_host()
+    }
+
+    /// The lines this program prints once its TUI can take a turn.
+    ///
+    /// Empty when the file names none, which means the program has no
+    /// screen-read readiness and only the host's own status can say it is up.
+    pub fn ready_lines(&self) -> &[String] {
+        &self.spec.ready.screen
+    }
+
     /// Whether and how this program accepts a hook for its asks.
     pub fn asks(&self) -> &AskHookSpec {
         &self.spec.asks
@@ -208,6 +227,7 @@ mod tests {
     use crate::asks::AskHookInstaller;
     use crate::spec::{
         AskHookConfig, BriefDelivery, BriefFileMode, CatalogParser, CatalogSource, StatusSource,
+        StatusSpec,
     };
 
     /// The production rule with the environment's value handed in: a set
@@ -313,13 +333,123 @@ mod tests {
     fn every_harness_names_its_status_sources_in_order() {
         for id in ["claude", "codex", "kilo", "opencode", "pi"] {
             let harness = load(id);
-            assert_eq!(
-                harness.status_sources().first(),
-                Some(&StatusSource::Osc7501),
-                "{id} should trust the agent's own report first"
+            assert!(
+                harness.status_sources().len() >= 2,
+                "{id} should name more than one source"
             );
-            assert!(harness.status_sources().len() >= 2, "{id}");
+            assert!(
+                harness.status_sources().contains(&StatusSource::Screen),
+                "{id} should keep the screen as its last resort"
+            );
         }
+    }
+
+    #[test]
+    fn only_the_program_that_reports_for_itself_says_so() {
+        // The sources are a claim about what the program does, verified against
+        // a live pane at the version each file names. Listing `osc7501` for a
+        // program that never answers it would make shprd wait on a status that
+        // cannot arrive; that wait is exactly the M10 gate's bug 3.
+        assert!(
+            load("pi").status_sources().contains(&StatusSource::Osc7501),
+            "pi answers the 7501 query with `state=idle` on its own"
+        );
+        assert!(!load("pi").status_needs_the_host());
+        for id in ["claude", "codex", "kilo", "opencode"] {
+            assert!(
+                !load(id).status_sources().contains(&StatusSource::Osc7501),
+                "{id} emits no 7501 report (verified live), so it must not claim one"
+            );
+            assert!(
+                load(id).status_needs_the_host(),
+                "{id} has no status of its own, so its ready line is what says it is up"
+            );
+        }
+    }
+
+    /// The programs whose every status source is a plugin or hook, which a core
+    /// without `pane.report_agent` cannot hear from (M10 gate, bug 3).
+    const PLUGIN_ONLY: [&str; 5] = ["claude", "codex", "kilo", "opencode", "pi"];
+
+    #[test]
+    fn every_harness_names_the_line_its_tui_prints_when_it_can_take_a_turn() {
+        // The readiness fallback is per program, not per code path: without it a
+        // program the host cannot report has no way at all to be seen as up, and
+        // its brief waits out the whole timeout and is then reported missing.
+        for id in ["claude", "codex", "kilo", "opencode", "pi"] {
+            let harness = load(id);
+            assert!(
+                !harness.ready_lines().is_empty(),
+                "{id} names no ready line, so a host that cannot report its status can never \
+                 hand it a brief"
+            );
+            for line in harness.ready_lines() {
+                assert!(!line.trim().is_empty(), "{id} has an empty ready line");
+                assert!(
+                    line.split_whitespace().count() >= 1 && line.len() > 4,
+                    "{id}'s ready line {line:?} is too short to be a phrase a person would \
+                     recognise on the screen"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ready_lines_are_the_programs_own_wording() {
+        // Each line was taken from a live pane at the version the file names.
+        // A pattern that is somebody else's wording would match nothing.
+        assert_eq!(load("opencode").ready_lines(), ["Ask anything"]);
+        assert_eq!(load("kilo").ready_lines(), ["Ask anything"]);
+        assert_eq!(load("codex").ready_lines(), ["Ask Codex to do anything"]);
+        assert!(load("pi").ready_lines().iter().any(|line| line == "0.0%/"));
+        assert!(
+            load("claude")
+                .ready_lines()
+                .iter()
+                .any(|line| line.contains("how do I log an error"))
+        );
+    }
+
+    #[test]
+    fn only_a_program_that_reports_itself_has_a_status_it_does_not_need_the_host_for() {
+        // `choice` is the whole point of the split: a program whose sources are
+        // all plugins has no status on a core without `pane.report_agent`, so its
+        // readiness has to come from its screen (or from the core having the
+        // method after all).
+        //
+        // Every shipped harness lists `osc7501` first, so on a core *with* OSC
+        // 7501 none of them is plugin-only in principle. What makes the split
+        // real is a core where OSC 7501 has no reporter — the report method and
+        // the sequence are how a program says it is there, and a program that
+        // does neither is invisible. `pi` is the one shipped program that always
+        // answers for itself, so it is the one whose `own_status` remains true
+        // whatever the core.
+        for id in PLUGIN_ONLY {
+            let harness = load(id);
+            let sources = harness.status_sources();
+            assert!(
+                sources.contains(&StatusSource::Hook),
+                "{id} should keep the plugin path for a core that carries it"
+            );
+            assert!(
+                sources.contains(&StatusSource::Screen),
+                "{id} should keep the screen as its last resort"
+            );
+        }
+        // The split is a property of the sources, not of the program's name.
+        let hook_and_screen = [StatusSource::Hook, StatusSource::Screen];
+        let spec = StatusSpec {
+            sources: hook_and_screen.to_vec(),
+        };
+        assert!(
+            spec.needs_the_host(),
+            "a plugin-only program needs the core"
+        );
+        let with_own = StatusSpec {
+            sources: vec![StatusSource::Osc7501, StatusSource::Screen],
+        };
+        assert!(!with_own.needs_the_host(), "its own report needs nothing");
+        assert_eq!(with_own.words(), "osc7501, screen");
     }
 
     #[test]
