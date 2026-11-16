@@ -679,6 +679,31 @@ pub struct NewTaskDto {
     pub deps: Vec<String>,
 }
 
+/// The body of `POST /api/agents`: the program to start in a new tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AgentOpenDto.ts")]
+pub struct AgentOpenDto {
+    /// The harness id to start, e.g. `claude`.
+    pub program: String,
+}
+
+/// The tab `POST /api/agents` opened.
+///
+/// It is what a client needs to select the tab it just asked for: the host's own
+/// id, and the words the tab is named with. It is [`AgentDto`]'s tab counterpart,
+/// not the same thing: that one is the run's record of an agent, this one is a
+/// host tab that runs one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AgentTabDto.ts")]
+pub struct AgentTabDto {
+    /// The harness id that was started, e.g. `claude`.
+    pub program: String,
+    /// The words the tab is named with, from the harness table.
+    pub name: String,
+    /// The host's id for the new tab.
+    pub tab: String,
+}
+
 /// One file a task's branch changed, with its line counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "FileChangeDto.ts")]
@@ -1201,6 +1226,13 @@ pub struct ProgramDto {
     pub id: String,
     /// The words a person sees, e.g. Claude Code.
     pub name: String,
+    /// Whether the CLI is on this machine's `PATH`.
+    ///
+    /// It is a fact about the machine, asked here because the mod has no
+    /// environment of its own ([`shprd_agents::detect::find_binary`]). A menu
+    /// that would start a program dims the ones it cannot find; a service that
+    /// was told no `PATH` answers `false` rather than guessing.
+    pub installed: bool,
     /// The vendor that ships the CLI, e.g. `anthropic`.
     pub vendor: String,
     /// Whether the CLI runs other vendors' models, so a model names its own.
@@ -1457,6 +1489,8 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<TaskPrDto>()?,
         one::<PrStateDto>()?,
         one::<NewTaskDto>()?,
+        one::<AgentOpenDto>()?,
+        one::<AgentTabDto>()?,
         one::<FileChangeDto>()?,
         one::<TaskChangesDto>()?,
         one::<TaskProgressDto>()?,

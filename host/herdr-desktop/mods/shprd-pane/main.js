@@ -11,13 +11,20 @@
 // person checks before they click into it. Herdr hands each copy `props().pane`
 // and `props().terminal`; everything else comes from `panes()`.
 //
+// Right-clicking the header opens the pane's menu — Split right, Split down,
+// Zoom, Send back to its parent (a kept sub-agent only), Close pane — which is
+// Shepherdr's pane menu (`mods/menu-tasks/main.js:29-52`, ported in
+// `lib/menu.js`). It opens at the pointer, at the size its own rows need, so a
+// menu is never taller than what is in it.
+//
 // M10.4 fills the Chat│Terminal switch and the Autopilot switch. What is here is
 // the header itself: the name, the task, the dot, and the three buttons.
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme } from "herdr";
+import { openOverlay, panes, props, run, terminals, theme } from "herdr";
 
+import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
 const STATUS = {
@@ -33,6 +40,35 @@ export default class Pane extends View {
     if (!folder) return "";
     const parts = folder.replace(/\/+$/, "").split("/");
     return parts.length <= 2 ? folder : `…/${parts.slice(-2).join("/")}`;
+  }
+
+  /**
+   * The pane's menu, opened over the header at the pointer.
+   *
+   * The rows come from `lib/menu.js` and the height is theirs, so the same list
+   * is measured here and drawn by `shprd-menu`. *Send back* appears only when
+   * the terminal has a parent: a pane that was parked under another one is the
+   * only thing that can go back to it.
+   */
+  menu(wired) {
+    const all = terminals();
+    const term = all.find((entry) => entry?.address === wired?.terminal);
+    const parent = term?.parent ? all.find((entry) => entry?.address === term.parent) : null;
+    const rows = paneMenu({
+      pane: wired?.pane ?? null,
+      sendBack: parent ? { name: parent.name || parent.address, terminal: parent.address } : null,
+    });
+    if (rows.length === 0) return;
+    openOverlay({
+      mod: "shprd-menu",
+      kind: "popup",
+      width: MENU.pane,
+      height: menuHeight(rows),
+      props: {
+        tab: "pane",
+        target: { pane: wired?.pane ?? null, terminal: wired?.terminal ?? null },
+      },
+    });
   }
 
   render() {
@@ -52,6 +88,10 @@ export default class Pane extends View {
       .border_color(t.border)
       .text_size(TEXT.label)
       .text_color(t.muted)
+      .on_mouse_down("right", (_event, cx) => {
+        cx?.stop_propagation?.();
+        this.menu(wired);
+      })
       .child(div().w(6).h(6).flex_none().rounded(3).bg(dot))
       .child(
         div()

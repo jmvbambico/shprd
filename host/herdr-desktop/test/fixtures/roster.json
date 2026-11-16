@@ -3,6 +3,7 @@
     {
       "id": "claude",
       "name": "Claude Code",
+      "installed": true,
       "vendor": "anthropic",
       "multi_model": false,
       "needs_provider": false,
@@ -83,6 +84,7 @@
     {
       "id": "codex",
       "name": "Codex",
+      "installed": true,
       "vendor": "openai",
       "multi_model": false,
       "needs_provider": false,
@@ -117,6 +119,7 @@
     {
       "id": "kilo",
       "name": "Kilo",
+      "installed": true,
       "vendor": "kilo",
       "multi_model": true,
       "needs_provider": false,
@@ -158,6 +161,7 @@
     {
       "id": "opencode",
       "name": "OpenCode",
+      "installed": true,
       "vendor": "opencode",
       "multi_model": true,
       "needs_provider": false,
@@ -199,6 +203,7 @@
     {
       "id": "pi",
       "name": "Pi",
+      "installed": true,
       "vendor": "pi",
       "multi_model": true,
       "needs_provider": true,

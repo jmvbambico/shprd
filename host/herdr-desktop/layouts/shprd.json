@@ -303,6 +303,7 @@
     "color": "border"
   },
   "titlebar": "none",
+  "terminal_menu": "shprd-menu",
   "traffic_lights": [
     12,
     16

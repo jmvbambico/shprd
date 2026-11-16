@@ -34,6 +34,8 @@ import {
   panelButtons,
   parseTabName,
   pillCounts,
+  tabLabel,
+  tabProgram,
   tabRows,
   tabState,
 } from "../mods/lib/tabstrip.js";
@@ -345,6 +347,64 @@ test("the most urgent status in a tab is the one its pill shows", () => {
   assert.equal(paneState(panes, "c"), null);
   assert.equal(paneState([], "a"), null);
   assert.equal(tabState({ id: "c", name: "claude·T1" }, panes, STATE).status, "working");
+});
+
+test("a pill is called by its name, or by what runs in it when it has none", () => {
+  // shprd's own title is the pill's name.
+  assert.equal(tabLabel({ id: "a", name: "pi·T1" }, parseTabName("pi·T1"), { name: "pi" }), "pi·T1");
+  // A name a person gave it is kept, even though shprd did not give it.
+  assert.equal(tabLabel({ id: "a", name: "my shell" }, parseTabName("my shell"), { name: "zsh" }), "my shell");
+  // Herdr's own names — a position, or "tb3" on older builds — are not names.
+  assert.equal(tabLabel({ id: "a", name: "1" }, parseTabName("1"), { name: "zsh" }), "zsh");
+  assert.equal(
+    tabLabel({ id: "a", name: "tb3" }, parseTabName("tb3"), { name: "Claude Code" }),
+    "Claude Code",
+  );
+  // Nothing to call it by is still a word, never an empty pill.
+  assert.equal(tabLabel({ id: "a", name: "1" }, parseTabName("1"), null), "Terminal");
+});
+
+test("a pill wears the program in its tab and counts what it needs", () => {
+  const panes = [
+    { tab: "a", program: { name: "zsh", icon: "icons/zsh.svg", tint: true } },
+    {
+      tab: "a",
+      program: { name: "Claude Code", icon: "icons/none.svg", tint: false, agent: true },
+    },
+    { tab: "b", program: { name: "zsh", icon: "icons/zsh.svg", tint: true } },
+  ];
+  // An agent's own glyph wins over the shell a tab's first pane runs.
+  assert.equal(tabProgram(panes, "a").name, "Claude Code");
+  assert.equal(tabProgram(panes, "b").name, "zsh");
+  assert.equal(tabProgram(panes, "c"), null, "a tab with no pane claims no program");
+
+  const space = {
+    id: "s",
+    name: "shprd · shop",
+    tabs: [
+      { id: "a", name: "claude·T2", active: true, panes: 1 },
+      { id: "b", name: "zsh", panes: 1 },
+    ],
+  };
+  const rows = tabRows(space, panes, STATE);
+  assert.deepEqual(
+    rows.map((row) => [row.icon, row.tint, row.program, row.named]),
+    [
+      ["icons/none.svg", false, "Claude Code", false],
+      ["icons/zsh.svg", true, "zsh", false],
+    ],
+  );
+  // The badge's two numbers: what needs the person, then what is ready.
+  assert.deepEqual(
+    rows.map((row) => [row.need, row.ready]),
+    [
+      [0, 1],
+      [0, 0],
+    ],
+    "T2 is ready, and a shell says nothing about a task",
+  );
+  const blocked = tabRows(space, [{ tab: "a", status: "blocked" }], STATE);
+  assert.deepEqual([blocked[0].need, blocked[0].ready], [1, 0]);
 });
 
 test("the side panel's buttons carry the counts of the stacks they open", () => {

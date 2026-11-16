@@ -32,12 +32,13 @@ use shprd_core::log::{Clock, SystemClock};
 use tower_http::trace::TraceLayer;
 
 use crate::actions;
+use crate::agents::AgentOpener;
 use crate::auth;
 use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
-    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto, ChatSendReply,
-    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto, RosterDto,
-    SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AgentTabDto, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto,
+    ChatSendReply, ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto,
+    RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
@@ -172,6 +173,14 @@ pub(crate) struct AppState {
     /// A service without one answers `POST /api/chat` with a refusal rather
     /// than pretending the line went somewhere.
     pub(crate) chat: ChatHost,
+    /// What starts a program in a new tab, when the caller has a host.
+    ///
+    /// "Start an agent" in the tab bar's "+" menu is a host verb — a terminal is
+    /// opened and a CLI started in it — so the binary passes its adapter in
+    /// ([`App::with_agent_opener`]) exactly as it passes the chat writer and the
+    /// tick's spawn path. A service without one refuses `POST /api/agents`
+    /// rather than pretending a tab exists.
+    pub(crate) agents: crate::agents::Agents,
     /// The home and data home the agent CLIs run with, when the caller resolved
     /// them.
     ///
@@ -309,6 +318,7 @@ impl App {
             path_env: paths.path_env,
             dagr: paths.dagr,
             chat: ChatHost::new(),
+            agents: crate::agents::Agents::new(),
             transcript_roots: paths.transcript_roots,
             web: crate::web::Source::Embedded,
         };
@@ -484,6 +494,28 @@ impl App {
         self
     }
 
+    /// Start programs in new tabs through `opener`.
+    ///
+    /// The binary passes the host it drives; a test passes a recorder, so the
+    /// route is proved without a terminal and a person's window is never opened
+    /// by a test.
+    pub fn with_agent_opener(self, opener: Arc<dyn crate::agents::AgentOpener>) -> Self {
+        self.with_agent_opener_opt(Some(opener))
+    }
+
+    /// [`App::with_agent_opener`], for a caller that may not have one.
+    ///
+    /// It is the same shape as [`App::with_chat_opt`]: a service started with no
+    /// host still answers every read, and refuses only the start.
+    pub(crate) fn with_agent_opener_opt(mut self, opener: Option<Arc<dyn AgentOpener>>) -> Self {
+        self.state.agents = match opener {
+            Some(opener) => crate::agents::Agents::with(opener),
+            None => crate::agents::Agents::new(),
+        };
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Serve the web app from `dir` instead of the build embedded in the binary.
     ///
     /// Production always embeds `web/dist`; a test passes a temp directory
@@ -521,6 +553,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
         .route("/api/roster", get(roster))
+        .route("/api/agents", post(open_agent))
         .route("/api/prompts", get(list_prompts))
         .route(
             "/api/prompts/{id}",
@@ -811,6 +844,22 @@ async fn put_settings(
 ) -> Result<Json<SettingsWriteDto>, ApiReject> {
     let answer = blocking(move || settings_api::write(&state, &body)).await?;
     answer.map(Json)
+}
+
+/// `POST /api/agents`: start a program in a new tab, in the run's space.
+///
+/// It is the tab bar's "+" menu's *Start an agent*: a plain CLI in a tab, with
+/// nothing to work on — a task's agent is a spawn, and that is `POST /api/action`.
+/// The service holds no harness table and no host, so the work is the binary's
+/// ([`crate::agents::AgentOpener`]); this route parses the request and hands it
+/// over, and a service without one refuses rather than pretending.
+async fn open_agent(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<AgentTabDto>, ApiReject> {
+    let agents = state.agents.clone();
+    let opened = blocking(move || agents.open(&body)).await?;
+    Ok(Json(AgentTabDto::from(opened?)))
 }
 
 /// `GET /api/roster`: the programs a role may run, with their models and levels.
