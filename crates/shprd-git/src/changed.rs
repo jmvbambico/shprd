@@ -1,10 +1,28 @@
-//! Which paths a branch changed, and whether they stayed inside a scope.
+//! Which paths a branch changed, how much, and whether they stayed inside a
+//! scope.
 
 use std::path::Path;
 
 use shprd_core::scope;
 
 use crate::git::{Git, GitError};
+
+/// One file a branch changed, as a diff stat counts it.
+///
+/// `binary` is a file git would not count lines of: it reports `-` instead of a
+/// number, and a card that showed `+0 −0` for it would be claiming the file is
+/// empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStat {
+    /// The path, repo-relative, as git printed it.
+    pub path: String,
+    /// Lines added.
+    pub added: u64,
+    /// Lines deleted.
+    pub deleted: u64,
+    /// Whether git called the file binary.
+    pub binary: bool,
+}
 
 /// The paths that differ between `base` and `head`.
 ///
@@ -15,6 +33,43 @@ pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>,
     let range = format!("{base}..{head}");
     let raw = Git::new(repo).run(&["diff", "--name-only", "-z", "--no-renames", &range])?;
     Ok(split_nul(&raw))
+}
+
+/// The files that differ between `base` and `head`, with their line counts.
+///
+/// It is what the accept card's Changes section reads: the same range
+/// [`changed_paths`] walks, asked for counts instead of names. `--no-renames`
+/// for the same reason: a rename is a deletion and an addition, which is what
+/// both the count and the scope check are about.
+pub fn file_stats(repo: &Path, base: &str, head: &str) -> Result<Vec<FileStat>, GitError> {
+    let range = format!("{base}..{head}");
+    let raw = Git::new(repo).run(&["diff", "--numstat", "-z", "--no-renames", &range])?;
+    Ok(parse_numstat(&raw))
+}
+
+/// Parses `git diff --numstat -z` output.
+///
+/// Each record is `added<TAB>deleted<TAB>path` ended by a NUL; a binary file
+/// has `-` where the numbers go. A record that is not three fields is dropped
+/// rather than guessed at: the count is a display detail, and a half-read one
+/// would be a wrong number in front of a person.
+fn parse_numstat(text: &str) -> Vec<FileStat> {
+    text.split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let mut fields = record.splitn(3, '\t');
+            let added = fields.next()?;
+            let deleted = fields.next()?;
+            let path = fields.next()?;
+            let binary = added == "-" || deleted == "-";
+            Some(FileStat {
+                path: path.to_string(),
+                added: added.parse().unwrap_or(0),
+                deleted: deleted.parse().unwrap_or(0),
+                binary,
+            })
+        })
+        .collect()
 }
 
 /// The paths in `paths` that fall outside `scope`.
@@ -46,6 +101,38 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    #[test]
+    fn numstat_records_become_file_stats() {
+        let raw = "12\t3\tcrates/shprd-git/src/git.rs\0-\t-\tassets/logo.png\0";
+        assert_eq!(
+            parse_numstat(raw),
+            vec![
+                FileStat {
+                    path: "crates/shprd-git/src/git.rs".to_string(),
+                    added: 12,
+                    deleted: 3,
+                    binary: false,
+                },
+                FileStat {
+                    path: "assets/logo.png".to_string(),
+                    added: 0,
+                    deleted: 0,
+                    binary: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_record_that_is_not_three_fields_is_dropped() {
+        assert!(parse_numstat("").is_empty());
+        assert!(parse_numstat("12\t3\0").is_empty());
+        // A path with a tab in it keeps the tab: only the first two are split off.
+        let odd = parse_numstat("1\t2\ta\tb\0");
+        assert_eq!(odd.len(), 1);
+        assert_eq!(odd[0].path, "a\tb");
     }
 
     #[test]

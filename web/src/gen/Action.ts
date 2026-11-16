@@ -49,4 +49,28 @@ msg: string,
 /**
  * How far along the task is, from 0 to 100.
  */
-progress?: number, };
+progress?: number, } | { "kind": "task.start", 
+/**
+ * The task to start.
+ */
+task: string, } | { "kind": "task.retry", 
+/**
+ * The task to try again.
+ */
+task: string, } | { "kind": "task.stop", 
+/**
+ * The task whose agent should stop.
+ */
+task: string, } | { "kind": "task.drop", 
+/**
+ * The task to drop.
+ */
+task: string, 
+/**
+ * Why the person decided against it.
+ */
+reason: string, } | { "kind": "task.accept", 
+/**
+ * The task to accept.
+ */
+task: string, };

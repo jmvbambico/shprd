@@ -1,0 +1,10 @@
+{"type":"session_meta","payload":{"id":"01a1-codex","timestamp":"2026-11-03T00:16:02.418Z","cwd":"/work/repo","cli_version":"0.60.0"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are Codex."}]}}
+{"type":"response_item","timestamp":"2026-11-03T00:16:03.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work/repo\n\n<INSTRUCTIONS>\nRead AGENTS.md before you act.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/work/repo</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}
+{"type":"turn_context","payload":{"cwd":"/work/repo","approval_policy":"on-request"}}
+{"type":"response_item","timestamp":"2026-11-03T00:16:04.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/work/repo</cwd>\n</environment_context>"},{"type":"input_text","text":"Review the diff on branch work/12."}]}}
+{"type":"response_item","timestamp":"2026-11-03T00:16:05.000Z","payload":{"type":"reasoning","summary":[],"encrypted_content":"opaque"}}
+{"type":"response_item","timestamp":"2026-11-03T00:16:06.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will read the diff first."}]}}
+{"type":"response_item","timestamp":"2026-11-03T00:16:07.000Z","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_1","input":"const r = await tools.exec_command({cmd:\"git diff main...work/12\"});"}}
+{"type":"response_item","timestamp":"2026-11-03T00:16:09.000Z","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":"diff --git a/x b/x"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{}}}

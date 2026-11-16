@@ -1,0 +1,17 @@
+{
+  "asks": [
+    {
+      "id": "1794749539249.90280.0",
+      "task": "T1",
+      "kind": "question",
+      "text": "The README needs a quickstart. Should I write one for the CLI only, or for the desktop too?",
+      "options": [
+        "CLI only",
+        "Both",
+        "Leave it to me"
+      ],
+      "created_at_ms": 1794749539250,
+      "expires_at_ms": 1794750139250
+    }
+  ]
+}

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use shprd_agents::data::DataDir;
 use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_agents::models::{AgentRef, Catalog};
 use shprd_agents::skills::{CompatEntry, Role as SkillRole, Verdict};
@@ -33,7 +34,7 @@ use shprd_core::state::{ResourceStatus, RunState, Task, TaskStatus};
 use shprd_git::archive;
 use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
-use shprd_mux::{AgentState, Mux};
+use shprd_mux::{AgentState, Host, PaneId};
 
 use crate::ctx::{CliError, Ctx};
 
@@ -99,10 +100,11 @@ pub struct SpawnEnv<'a> {
     /// injects fixtures here; on a machine the map is empty and the spawn asks
     /// only the program it picked.
     pub catalogs: BTreeMap<String, Catalog>,
-    /// The `data/` directory, where a program's static catalog lives. The
-    /// launched CLI is told it as `SHPRD_DATA_DIR`, so the agent's own `shprd`
-    /// finds the same harnesses the engine did.
-    pub data_dir: PathBuf,
+    /// The data the engine read: the harness table, the model catalogs and the
+    /// skills tables. A directory named with `SHPRD_DATA_DIR` is handed to the
+    /// launched CLI as the same variable, so the agent's own `shprd` finds the
+    /// same harnesses the engine did; the embedded copy needs no variable.
+    pub data_dir: DataDir,
     /// The curated skill compatibility list.
     pub compat: Vec<CompatEntry>,
     /// The environment the launched CLI would inherit.
@@ -111,6 +113,12 @@ pub struct SpawnEnv<'a> {
     /// before its brief counts as undelivered. Production reads it from the
     /// environment; tests set it explicitly.
     pub ready_wait: Duration,
+    /// The roots the agent CLIs write their session records under: the real
+    /// `HOME` they inherit (`HOME` is a protected variable, so a spawn never
+    /// rewrites it) and the XDG data home they resolve. The chat and the
+    /// watchdog read a CLI's own file, so they look where *that* process wrote,
+    /// never under the engine's `SHPRD_HOME`.
+    pub transcript_roots: shprd_agents::transcript::Roots,
 }
 
 /// What the caller asked for.
@@ -186,6 +194,36 @@ pub(crate) struct Pick {
     pub(crate) launch: LaunchSpec,
     /// The prompts the CLI waits on a human to answer before it reads anything.
     pub(crate) blocking_prompts: Vec<BlockingPrompt>,
+    /// The lines the program's TUI prints once it can take its brief.
+    ///
+    /// Read off the bottom of the pane when the host cannot report the
+    /// program's status at all ([`Pick::own_status`] is false).
+    pub(crate) ready_lines: Vec<String>,
+    /// Whether this program has any status source of its own.
+    ///
+    /// From the harness's `[status] sources`: false for a program whose every
+    /// source is a plugin or hook, which is opencode's and kilo's shape. The
+    /// host's own `agent_reports` capability decides the rest.
+    pub(crate) own_status: bool,
+    /// The program's `[status] sources`, as its harness file names them, for
+    /// the spawn record.
+    pub(crate) status_words: String,
+}
+
+impl Pick {
+    /// The readiness this pick's program has, as the delivery needs it.
+    pub(crate) fn readiness(&self) -> super::deliver::Readiness<'_> {
+        super::deliver::Readiness {
+            lines: &self.ready_lines,
+            prompts: &self.blocking_prompts,
+            own_status: self.own_status,
+        }
+    }
+
+    /// The program's status sources, as its harness file names them.
+    pub(crate) fn status_words(&self) -> &str {
+        &self.status_words
+    }
 }
 
 /// Spawns an agent for one task attempt.
@@ -194,7 +232,7 @@ pub(crate) struct Pick {
 /// before the first side effect, and the effects are undone in reverse if a
 /// later one fails.
 pub fn spawn(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
     req: &SpawnRequest,
 ) -> Result<SpawnReport, CliError> {
@@ -278,16 +316,24 @@ pub fn spawn(
         warnings: &warnings,
     });
     write_brief(&brief_path, &brief)?;
-    // The workspace must exist before a worktree does, so a repo the human has
-    // not opened in the multiplexer yet costs nothing to refuse.
-    let workspace = workspace_of(mux, env)?;
-    let created = create_worktree(env, &task.id)?;
+    // The task's own space comes first, and it is shprd's to make rather than a
+    // person's to open: a spawn needs somewhere to put the tab it is about to
+    // start, and the label is derived from the task. A host that refuses (tuios
+    // without the `admin` grant, say) refuses here, before the worktree exists.
+    let space = task_space(mux, env, &task.id)?;
+    let created = match create_worktree(env, &task.id) {
+        Ok(created) => created,
+        Err(err) => {
+            discard_empty_space(mux, &space);
+            return Err(err);
+        }
+    };
     // From here on every failure undoes everything: the tab first, then the
     // worktree, and never an event.
     let opened = open_agent(
         mux,
         env,
-        &workspace,
+        &space,
         &Launching {
             pick: &pick,
             applied: &chosen,
@@ -298,15 +344,20 @@ pub fn spawn(
             worktree: &created,
         },
     );
-    let (tab_id, tab) = match opened {
+    let (tab_id, tab, ready) = match opened {
         Ok(opened) => opened,
         Err(err) => {
             discard_worktree(env, &created);
+            // The space is shprd's own, made for this spawn: an empty one left
+            // on the host's bar is a task a person sees and no agent works in.
+            discard_empty_space(mux, &space);
             return Err(err);
         }
     };
-    // The tab id goes next to the brief: a label is only 16 characters, so
-    // two tasks can share one, and the id cannot.
+    // The tab id goes next to the brief: a label is only 16 characters, so two
+    // tasks can share one, and the id cannot. With a space per task the tab is
+    // found inside the task's own space, and the record is what says which tab
+    // of it is the worker's.
     write_tab(
         &tab_path(&env.briefs_dir, &env.run, &task.id, attempt),
         &tab_id,
@@ -314,8 +365,19 @@ pub fn spawn(
     if let Err(err) = record_attempt(env, &task.id, attempt, &pick, &created) {
         close_tab(mux, &tab_id);
         discard_worktree(env, &created);
+        discard_empty_space(mux, &space);
         return Err(err);
     }
+    // What said the program was ready goes beside the tab record, so a person
+    // reading the run can tell a host that reported the agent from a program
+    // read off its own screen — and a lost delivery from a delivered one. It is
+    // written last: a spawn that did not land an attempt is one no reader should
+    // find a record for.
+    write_spawn_record(
+        &spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt),
+        &pick,
+        ready,
+    );
     Ok(SpawnReport {
         task: task.id.clone(),
         attempt,
@@ -371,92 +433,109 @@ fn catalog_for(env: &SpawnEnv<'_>, program: &str) -> Option<Catalog> {
         .find(|candidate| candidate.spec.id == program)
         .map(|candidate| &candidate.spec)?;
     let path_env = std::env::var("PATH").unwrap_or_default();
-    shprd_agents::adapter::catalog(
-        spec,
-        &env.data_dir.join("models"),
-        &path_env,
-        CATALOG_TIMEOUT,
-    )
+    env.data_dir.catalog(spec, &path_env, CATALOG_TIMEOUT)
 }
 
-/// The name of the workspace that hosts a repository's tabs.
+/// The name of the space a repository's coordinator tabs live in.
 ///
-/// One repository, one workspace: a human reads the name on their host's bar
-/// and knows which checkout the tabs belong to.
+/// One repository, one space for the coordinator: a human reads the name on
+/// their host's bar and knows which checkout they are looking at. Every task
+/// gets a space of its own ([`task_space_name`]), so this one outlives them.
+pub(crate) fn repo_space_name(repo_name: &str) -> String {
+    shprd_mux::repo_space_name(repo_name)
+}
+
+/// The name of the space one task's tabs live in: worker and reviewer together.
 ///
-/// // M10.2: the space-per-task host model gives each task its own space, so
-/// this one-workspace-per-repository name is temporary.
-pub(crate) fn workspace_name(repo_name: &str) -> String {
-    format!("shprd · {repo_name}")
+/// The task and the run are both in the label, so a human reading the host's bar
+/// can tell which run a task belongs to when the same task id comes round again.
+pub(crate) fn task_space_name(repo_name: &str, run: &str, task: &str) -> String {
+    shprd_mux::task_space_name(repo_name, run, task)
 }
 
 /// The title of a task's agent tab: `<agent>·<task>`.
 ///
 /// The role glyphs the old naming module prefixed are gone with the
 /// tab-per-agent launcher. The host's ids are what shprd follows, so a title
-/// is only what a human reads.
-///
-/// // M10.2: a task gets a space of its own, titled after the task.
+/// is only what a human reads; the task's own name is on its space.
 pub(crate) fn worker_title(agent: &str, task: &str) -> String {
     format!("{agent}·{task}")
 }
 
 /// A repository's own name: the last component of its path.
 ///
-/// It is the input to [`workspace_name`], so this is where the label's one
-/// derivation gets its input from, for a caller holding a path rather than a
-/// [`SpawnEnv`] (`shprd serve` does, before there is a run to spawn for).
+/// It is the input to [`repo_space_name`] and [`task_space_name`], so this is
+/// where the labels' one derivation gets its input from, for a caller holding a
+/// path rather than a [`SpawnEnv`] (`shprd serve` does, before there is a run to
+/// spawn for).
 pub(crate) fn repo_name(repo: &Path) -> Result<String, CliError> {
     repo.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .ok_or_else(|| CliError::other(anyhow!("{} has no directory name", repo.display())))
 }
 
-/// The repository's workspace, or an error telling the human what to do.
-pub(crate) fn workspace_of(
-    mux: &dyn Mux,
+/// A task's space, found or made at the repository root.
+///
+/// One task, one space: its worker, its reviewer and its backup all open tabs
+/// here, so a person sees one group per task and a landing has one thing to
+/// close. The label is derived ([`task_space_name`]), so a race with another
+/// caller is resolved by reading back what the winner made rather than by
+/// adopting whatever happens to be there.
+pub(crate) fn task_space(
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
-) -> Result<shprd_mux::Workspace, CliError> {
-    workspace_named(mux, &workspace_name(&env.repo_name))
+    task: &str,
+) -> Result<shprd_mux::Space, CliError> {
+    let name = task_space_name(&env.repo_name, &env.run, task);
+    mux.ensure_space(&name, &env.ctx.root).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("opening the space {name:?} for {task}")))
+    })
 }
 
-/// The workspace labelled `name`, or the refusal a missing one earns.
+/// The space labelled `name`, or the refusal a missing one earns.
 ///
-/// The label is derived ([`workspace_name`]) and a host refuses a duplicate, so
-/// nothing is ever renamed or adopted here: the workspace shprd uses is the one
+/// The label is derived ([`repo_space_name`]) and a host refuses a duplicate, so
+/// nothing is ever renamed or adopted here: the space shprd uses is the one
 /// whose label is exactly `name`. A refusal names that label and the ones the
 /// host does have, because the label is the one thing a person can fix.
-pub(crate) fn workspace_named(mux: &dyn Mux, name: &str) -> Result<shprd_mux::Workspace, CliError> {
-    let found = mux.find_workspace(name).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("looking for the workspace {name:?}")))
+///
+/// No verb calls this today — a task's space is always ensured rather than
+/// looked up, because its label is shprd's own — but the refusal is the one a
+/// person reads when a hand-named space is what they need, so it is kept and
+/// tested rather than deleted with the last caller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn space_named(mux: &dyn Host, name: &str) -> Result<shprd_mux::Space, CliError> {
+    let found = mux.find_space(name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
     })?;
-    if let Some(workspace) = found {
-        return Ok(workspace);
+    if let Some(space) = found {
+        return Ok(space);
     }
     // A host that cannot list still gets the refusal; it just cannot name what
     // it does have, and says so rather than guessing.
-    let existing = match mux.list_workspaces() {
-        Ok(workspaces) => workspaces
-            .into_iter()
-            .map(|workspace| workspace.name)
-            .collect(),
+    let existing = match mux.list_spaces() {
+        Ok(spaces) => spaces.into_iter().map(|space| space.name).collect(),
         Err(_) => Vec::new(),
     };
-    Err(CliError::Invalid(anyhow!(missing_workspace_message(
+    Err(CliError::Invalid(anyhow!(missing_space_message(
         name, &existing
     ))))
 }
 
-/// What a person reads when the workspace a run needs is not there.
+/// What a person reads when the coordinator's space is not there.
 ///
-/// The expected label comes first and the labels the host does have follow, so
-/// a workspace named almost right (`shprd · gate repo` for the folder `repo`)
-/// is visible as the difference it is. `shprd serve` creates the workspace at
-/// startup, which is why the refusal can point at it.
-pub(crate) fn missing_workspace_message(expected: &str, existing: &[String]) -> String {
+/// The expected label comes first and the labels the host does have follow, so a
+/// space named almost right (`shprd · gate repo` for the folder `repo`) is
+/// visible as the difference it is. `shprd serve` creates the space at startup,
+/// which is why the refusal can point at it.
+///
+/// No verb calls this today for the same reason [`space_named`] is kept: the
+/// refusal it builds is the one a person reads, and it is worth its own test.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn missing_space_message(expected: &str, existing: &[String]) -> String {
     let mut message = format!(
-        "no workspace {expected:?} yet: a run's tabs open in the workspace labelled \
-         `shprd · <repo folder name>`, and shprd leaves every other workspace alone. \
+        "no space {expected:?} yet: the coordinator's tabs open in the space labelled \
+         `shprd · <repo folder name>`, and shprd leaves every other space alone. \
          `shprd serve` creates it at startup; without a service, create it in your multiplexer \
          with that exact label"
     );
@@ -465,51 +544,53 @@ pub(crate) fn missing_workspace_message(expected: &str, existing: &[String]) -> 
             let listed: Vec<String> = existing.iter().map(|name| format!("{name:?}")).collect();
             message.push_str(&format!(". The host has: {}", listed.join(", ")));
         }
-        None => message.push_str(". The host has no workspace at all"),
+        None => message.push_str(". The host has no space at all"),
     }
     message
 }
 
-/// A repository's workspace, made at the repository root when the host has none.
+/// The coordinator's space for a repository, made at the repository root when
+/// the host has none.
 ///
 /// `shprd serve` calls this at startup: the label is derived from the folder
-/// name rather than chosen by a person, so leaving the workspace to be created
-/// by hand is a run that silently cannot start a task (M9 gate bug 6). Only the
-/// workspace with exactly that label is reused, and only that label is created;
-/// anything else on the host is left alone.
-pub(crate) struct PreparedWorkspace {
-    /// The workspace tabs open in.
-    pub(crate) workspace: shprd_mux::Workspace,
+/// name rather than chosen by a person, so leaving the space to be created by
+/// hand is a run that silently cannot start a task (M9 gate bug 6). Only the
+/// space with exactly that label is reused, and only that label is created;
+/// anything else on the host is left alone. Task spaces are made by
+/// [`task_space`] at spawn and closed when the task lands.
+pub(crate) struct PreparedSpace {
+    /// The space the coordinator's tabs open in.
+    pub(crate) space: shprd_mux::Space,
     /// True when this call created it, false when it was already there.
     pub(crate) created: bool,
 }
 
-/// [`PreparedWorkspace`]: find the repository's workspace, or create it.
-pub(crate) fn ensure_workspace(mux: &dyn Mux, repo: &Path) -> Result<PreparedWorkspace, CliError> {
-    let name = workspace_name(&repo_name(repo)?);
-    let found = mux.find_workspace(&name).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("looking for the workspace {name:?}")))
+/// [`PreparedSpace`]: find the coordinator's space, or create it.
+pub(crate) fn ensure_repo_space(mux: &dyn Host, repo: &Path) -> Result<PreparedSpace, CliError> {
+    let name = repo_space_name(&repo_name(repo)?);
+    let found = mux.find_space(&name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
     })?;
-    if let Some(workspace) = found {
-        return Ok(PreparedWorkspace {
-            workspace,
+    if let Some(space) = found {
+        return Ok(PreparedSpace {
+            space,
             created: false,
         });
     }
-    match mux.create_workspace(&name, repo) {
-        Ok(workspace) => Ok(PreparedWorkspace {
-            workspace,
+    match mux.create_space(&name, repo) {
+        Ok(space) => Ok(PreparedSpace {
+            space,
             created: true,
         }),
         // Two services can start at once; the loser of the race finds what the
         // winner made rather than reporting a failure it can do nothing about.
-        Err(err) => match mux.find_workspace(&name) {
-            Ok(Some(workspace)) => Ok(PreparedWorkspace {
-                workspace,
+        Err(err) => match mux.find_space(&name) {
+            Ok(Some(space)) => Ok(PreparedSpace {
+                space,
                 created: false,
             }),
             _ => Err(CliError::other(anyhow!(err).context(format!(
-                "creating the workspace {name:?} at {}",
+                "creating the space {name:?} at {}",
                 repo.display()
             )))),
         },
@@ -539,12 +620,16 @@ pub(crate) struct Launching<'a> {
     pub(crate) worktree: &'a Worktree,
 }
 
+/// Opens the agent's tab and starts its CLI in it, handing it the brief.
+///
+/// Returns the tab's id, its title and what said the program was ready for its
+/// brief (`None` when the brief did not arrive).
 pub(crate) fn open_agent(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
-    workspace: &shprd_mux::Workspace,
+    space: &shprd_mux::Space,
     launching: &Launching<'_>,
-) -> Result<(shprd_mux::TabId, String), CliError> {
+) -> Result<(shprd_mux::TabId, String, Option<super::deliver::ReadyBy>), CliError> {
     let Launching {
         pick,
         applied,
@@ -555,40 +640,10 @@ pub(crate) fn open_agent(
         worktree,
     } = *launching;
     let title = worker_title(&pick.agent, task);
-    let tab = mux
-        .create_tab(&workspace.id, &title, &worktree.path)
-        .map_err(|err| CliError::other(anyhow!(err).context("creating the agent tab")))?;
-    // The tab exists from here on, so every failure closes it again: a tab left
-    // open points at a worktree the failing spawn is about to remove.
-    match start_in_tab(
-        mux, env, pick, applied, effort, brief, brief_path, worktree, task, &title, &tab,
-    ) {
-        Ok(()) => Ok((tab.id, title)),
-        Err(err) => {
-            close_tab(mux, &tab.id);
-            Err(err)
-        }
-    }
-}
-
-/// Starts the agent's CLI in `tab` and hands it the brief.
-///
-/// A brief that does not arrive is reported, never fatal: the CLI is running,
-/// and the human can resend the brief into the tab.
-#[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
-fn start_in_tab(
-    mux: &dyn Mux,
-    env: &SpawnEnv<'_>,
-    pick: &Pick,
-    applied: &Applied,
-    effort: Option<&str>,
-    brief: &str,
-    brief_path: &Path,
-    worktree: &Worktree,
-    task: &str,
-    title: &str,
-    tab: &shprd_mux::Tab,
-) -> Result<(), CliError> {
+    // One call makes the tab and starts the program in it, so a launch that
+    // cannot start is a spawn that leaves no tab behind: [`Host::spawn`]'s own
+    // contract. The brief still follows as its own turn, because a host starts
+    // a program and never types for it.
     let program = program_of(env.programs.as_slice(), &pick.agent)?;
     let (argv, brief_in_args) = launch_argv(
         &pick.launch,
@@ -608,11 +663,50 @@ fn start_in_tab(
             run: Some(env.run.clone()),
             repo: worktree.path.clone(),
             home: Some(env.home.clone()),
-            data: Some(env.data_dir.clone()),
+            data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
-    mux.run(&tab.root_pane, &argv, &pairs)
-        .map_err(|err| CliError::other(anyhow!(err).context("starting the agent CLI")))?;
+    let tab = mux
+        .spawn(&space.id, &title, &argv, &pairs, &worktree.path)
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the agent tab")))?;
+    // The tab exists from here on, so every failure closes it again: a tab left
+    // open points at a worktree the failing spawn is about to remove.
+    match hand_over(
+        mux,
+        env,
+        pick,
+        brief,
+        brief_path,
+        task,
+        &title,
+        &tab,
+        brief_in_args,
+    ) {
+        Ok(ready) => Ok((tab.id, title, ready)),
+        Err(err) => {
+            close_tab(mux, &tab.id);
+            Err(err)
+        }
+    }
+}
+
+/// Hands the agent that is already running in `tab` its brief.
+///
+/// A brief that does not arrive is reported, never fatal: the CLI is running,
+/// and the human can resend the brief into the tab. What arrives answers what
+/// said the program was ready, which the caller records beside the attempt.
+#[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
+fn hand_over(
+    mux: &dyn Host,
+    env: &SpawnEnv<'_>,
+    pick: &Pick,
+    brief: &str,
+    brief_path: &Path,
+    task: &str,
+    title: &str,
+    tab: &shprd_mux::Tab,
+    brief_in_args: bool,
+) -> Result<Option<super::deliver::ReadyBy>, CliError> {
     // A brief that arrived as a system prompt leaves the CLI idle, waiting for a
     // first turn, so it gets a one-line kickoff; an agent with no system-prompt
     // flag gets the whole brief typed in, as before.
@@ -621,15 +715,10 @@ fn start_in_tab(
     } else {
         (brief, "brief")
     };
-    let delivery = super::deliver::deliver_brief(
-        mux,
-        &tab.root_pane,
-        text,
-        &pick.blocking_prompts,
-        env.ready_wait,
-    );
+    let delivery =
+        super::deliver::deliver_brief(mux, &tab.root_pane, text, &pick.readiness(), env.ready_wait);
     let Some(reason) = delivery.reason() else {
-        return Ok(());
+        return Ok(delivery.ready());
     };
     eprintln!(
         "warning: {what} not delivered to {title}: {reason}; resend with: shprd agent prompt --task {task} \"$(cat {})\"",
@@ -643,12 +732,12 @@ fn start_in_tab(
     if let Err(err) = env.ctx.commit(escalation) {
         eprintln!("warning: could not record the escalation: {err}");
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Closes a tab this spawn opened, ignoring the failure for the same reason as
 /// [`discard_worktree`].
-pub(crate) fn close_tab(mux: &dyn Mux, tab: &shprd_mux::TabId) {
+pub(crate) fn close_tab(mux: &dyn Host, tab: &shprd_mux::TabId) {
     if let Err(err) = mux.close_tab(tab) {
         eprintln!("warning: could not close tab {}: {err}", tab.as_str());
     }
@@ -691,7 +780,7 @@ impl Leftover {
 /// and a pane the host keeps is handed back as a [`Leftover`] so the run's end
 /// can list everything still open in one place.
 pub(crate) fn close_pane_leftover(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     what: &str,
     pane: &shprd_mux::PaneId,
 ) -> Option<Leftover> {
@@ -701,6 +790,92 @@ pub(crate) fn close_pane_leftover(
     }
 }
 
+/// Closes the space a landed task's terminals lived in.
+///
+/// One task, one space: its worker, its reviewer and any backup are tabs of it,
+/// so the space is what goes when the task lands — one call instead of one per
+/// tab, and nothing on the host outside that space is touched. A space the host
+/// has already forgotten (a human closed it, or a second landing raced this one)
+/// is in the state this wanted, so [`MuxError::NotFound`] is success.
+///
+/// # The tab records always follow
+///
+/// [`Capabilities::close_space`] is what says whether the one call is possible.
+/// Either way the records the run wrote beside the briefs are closed after it:
+/// they name every tab shprd opened for the task, a tab the space already took
+/// answers `NotFound` (which counts as closed), and a host that cannot close a
+/// space — or one whose space a human closed by hand — is left with neither a
+/// tab running an agent nor a space nobody can account for.
+pub fn close_task_space(
+    mux: &dyn Host,
+    briefs: &Path,
+    run: &str,
+    repo_name: &str,
+    task: &str,
+) -> Result<(), CliError> {
+    if mux.capabilities().close_space {
+        let name = task_space_name(repo_name, run, task);
+        // A host that cannot answer is not a host that kept the space: the tab
+        // records below are the evidence shprd itself wrote, so an unreachable
+        // host degrades to them rather than refusing the caller's verb.
+        match mux.find_space(&name) {
+            Ok(found) => {
+                if let Some(space) = found {
+                    match mux.close_space(&space.id) {
+                        Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+                        // The host promised the capability and then could not do
+                        // it: the records still say what was opened, so the tabs
+                        // are closed one by one below.
+                        Err(
+                            shprd_mux::MuxError::Unsupported(_)
+                            | shprd_mux::MuxError::Command { .. },
+                        ) => {}
+                        Err(err) => {
+                            return Err(CliError::other(
+                                anyhow!(err)
+                                    .context(format!("closing the space {name:?} of {task}")),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(err) => eprintln!("warning: could not look for the space {name:?}: {err}"),
+        }
+    }
+    // Then the records, always: a host that could not close the space, or one
+    // whose space a human had already closed, leaves whatever shprd opened. A
+    // tab the space already took answers `NotFound`, which counts as closed, so
+    // this second sweep costs one call per record and can never fail on the
+    // normal path.
+    close_task_tabs(mux, briefs, run, task)
+}
+
+/// Closes every task space a run opened, as the run's last act.
+///
+/// Run end has no task in hand, so every task the log still knows is asked
+/// about; a task whose space a landing already closed is simply not there. A
+/// host that keeps a space comes back as a [`Leftover`], the way a tab it keeps
+/// does, so the one escalation names everything still open.
+pub(crate) fn close_run_spaces(
+    mux: &dyn Host,
+    state: &RunState,
+    repo_name: &str,
+    briefs: &Path,
+    run: &str,
+) -> Vec<Leftover> {
+    let mut leftovers = Vec::new();
+    for task in state.tasks.keys() {
+        if let Err(err) = close_task_space(mux, briefs, run, repo_name, task) {
+            eprintln!("warning: {err}");
+            leftovers.push(Leftover::new(
+                "task space",
+                task_space_name(repo_name, run, task),
+            ));
+        }
+    }
+    leftovers
+}
+
 /// Closes the tabs a run recorded for `task`, once no attempt can use them.
 ///
 /// The records beside the briefs are the only list of tabs a run opened:
@@ -708,7 +883,7 @@ pub(crate) fn close_pane_leftover(
 /// both live in `<briefs>/<run>/`, and the whole name has to match, so one
 /// task's records never stand in for another's (`T1-a1.tab` is not
 /// `T10-a1.tab`, and `T1-audit-a1.tab` is not `T1`'s).
-pub fn close_worker(mux: &dyn Mux, briefs: &Path, run: &str, task: &str) -> Result<(), CliError> {
+pub fn close_worker(mux: &dyn Host, briefs: &Path, run: &str, task: &str) -> Result<(), CliError> {
     close_records(mux, briefs, run, "worker's", move |name| {
         is_task_tab_record(name, task) && !name.ends_with(REVIEW_TAB_SUFFIX)
     })
@@ -749,7 +924,7 @@ fn is_task_tab_record(file_name: &str, task: &str) -> bool {
 /// record are closed here, and the caller counts every refusal — a tab the host
 /// keeps still has an agent in it.
 pub(crate) fn close_task_tabs(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     briefs: &Path,
     run: &str,
     task: &str,
@@ -766,7 +941,7 @@ pub(crate) fn close_task_tabs(
 /// a record there — which is why a tab a human opened is never in reach. A
 /// refusal is not fatal: the tabs are cleanup, not the point, so each one the
 /// host keeps comes back as a [`Leftover`].
-pub(crate) fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> Vec<Leftover> {
+pub(crate) fn close_run_tabs(mux: &dyn Host, ctx: &Ctx, home: Option<&Path>) -> Vec<Leftover> {
     let Ok(home) = crate::ctx::resolve_home(home) else {
         return Vec::new();
     };
@@ -778,6 +953,12 @@ pub(crate) fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> V
     };
     let briefs = home.join(".shprd").join("briefs");
     let mut leftovers = Vec::new();
+    // A task's own space goes first: closing it takes its tabs, so the sweep
+    // below then finds the records already satisfied. Sweeping tab by tab first
+    // would work too, but it would leave an empty space behind for every task.
+    if let Ok(name) = repo_name(&ctx.root) {
+        leftovers.extend(close_run_spaces(mux, &state, &name, &briefs, &run));
+    }
     if let Err(err) = sweep_records(mux, &briefs, &run, |_| true, &mut leftovers) {
         eprintln!("warning: {err}");
     }
@@ -793,7 +974,7 @@ pub(crate) fn close_run_tabs(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>) -> V
 /// refuses anything but cleanup once the run is finished, so this is the last
 /// point at which an escalation can land — and a refused run closes nothing.
 pub fn close_at_run_end(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     ctx: &Ctx,
     home: Option<&Path>,
     watch_pane: Option<&shprd_mux::PaneId>,
@@ -847,7 +1028,7 @@ pub const REVIEW_TAB_SUFFIX: &str = "-review.tab";
 /// A host that no longer knows a tab (a human closed it, say) is not an error:
 /// that is the state the caller wanted anyway. `what` names the tab's owner in
 /// the error, and an unreadable record names no tab at all.
-pub(crate) fn close_recorded(mux: &dyn Mux, what: &str, record: &Path) -> Result<(), CliError> {
+pub(crate) fn close_recorded(mux: &dyn Host, what: &str, record: &Path) -> Result<(), CliError> {
     let Ok(id) = std::fs::read_to_string(record) else {
         return Ok(());
     };
@@ -867,7 +1048,7 @@ pub(crate) fn close_recorded(mux: &dyn Mux, what: &str, record: &Path) -> Result
 
 /// Closes every tab record in the run's folder that `wanted` picks out.
 fn close_records(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     briefs: &Path,
     run: &str,
     what: &str,
@@ -882,7 +1063,7 @@ fn close_records(
 /// Sweeps every tab record `wanted` picks out, collecting the tabs the host
 /// keeps instead of stopping at the first refusal.
 fn sweep_records(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     briefs: &Path,
     run: &str,
     wanted: impl Fn(&str) -> bool,
@@ -998,6 +1179,30 @@ fn create_worktree(env: &SpawnEnv<'_>, task: &str) -> Result<Worktree, CliError>
     })
 }
 
+/// Closes a task's space this spawn made and then could not use.
+///
+/// Only an empty one goes: a space with a tab in it belongs to an attempt that
+/// is running (or to a reviewer), and this cleanup runs only on the path where
+/// the spawn is about to return an error. A host that refuses is a warning, not
+/// a second failure.
+fn discard_empty_space(mux: &dyn Host, space: &shprd_mux::Space) {
+    let empty = match mux.list_tabs(&space.id) {
+        Ok(tabs) => tabs.is_empty(),
+        Err(_) => false,
+    };
+    if !empty {
+        return;
+    }
+    if let Err(err) = mux.close_space(&space.id)
+        && !matches!(err, shprd_mux::MuxError::Unsupported(_))
+    {
+        eprintln!(
+            "warning: could not close the empty space {:?}: {err}",
+            space.name
+        );
+    }
+}
+
 /// Removes a worktree this spawn created, ignoring the failure: the caller is
 /// already returning a more useful error.
 fn discard_worktree(env: &SpawnEnv<'_>, created: &Worktree) {
@@ -1024,7 +1229,7 @@ fn discard_worktree(env: &SpawnEnv<'_>, created: &Worktree) {
 /// removing its worktree under the agent's feet would throw that work away, so
 /// it is refused with the reason.
 fn replace_previous(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
     state: &RunState,
     task: &Task,
@@ -1388,6 +1593,9 @@ fn choose_agent(
             model: parsed.model,
             launch: program.spec.launch.clone(),
             blocking_prompts: program.spec.blocking_prompts.clone(),
+            ready_lines: program.spec.ready.screen.clone(),
+            own_status: !program.spec.status.needs_the_host(),
+            status_words: program.spec.status.words(),
         });
     }
     for raw in workers {
@@ -1407,6 +1615,9 @@ fn choose_agent(
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
                 blocking_prompts: program.spec.blocking_prompts.clone(),
+                ready_lines: program.spec.ready.screen.clone(),
+                own_status: !program.spec.status.needs_the_host(),
+                status_words: program.spec.status.words(),
             });
         }
     }
@@ -1618,10 +1829,26 @@ pub use shprd_views::brief::{AskRoute, BriefInput, task_brief as render_brief};
 /// Everything that touches the machine is resolved here, once, so [`spawn`]
 /// itself stays pure logic plus the worktree and the multiplexer.
 pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, CliError> {
+    let data = crate::cmd::roster::resolve_data_dir();
+    build_env_in(ctx, home, &data)
+}
+
+/// [`build_env`], with the shipped data already resolved.
+///
+/// The data is the one thing a test cannot ask the environment for without
+/// racing every other test in the process, so it is passed in here: a spawn
+/// whose harness table is the copy embedded in the binary is built the same way
+/// an installed `shprd` builds it.
+pub fn build_env_in<'a>(
+    ctx: &'a Ctx,
+    home: Option<&Path>,
+    data: &DataDir,
+) -> Result<SpawnEnv<'a>, CliError> {
     let home = crate::ctx::resolve_home(home)?;
-    let data = crate::cmd::roster::resolve_data_dir()?;
-    let specs = shprd_agents::spec::load_dir(&data.join("harness")).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("loading {}", data.display())))
+    let specs = data.harness_specs().map_err(|err| {
+        CliError::other(
+            anyhow!(err).context(format!("loading the harness table from {}", data.label())),
+        )
     })?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     let programs: Vec<Program> = specs
@@ -1635,7 +1862,7 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
     let repo_config = ctx.root.join(".shprd").join("config.toml");
     let config = shprd_core::config::load(Some(&global), Some(&repo_config))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
-    let compat = read_compat(&data.join("skills").join("compat.toml"))?;
+    let compat = read_compat(data)?;
     let settings = Loaded::read(&home, Some(&ctx.root))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the settings")))?;
     let state = ctx.state()?;
@@ -1644,7 +1871,11 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         .as_ref()
         .ok_or_else(|| CliError::other(anyhow!("no run yet: start one with `shprd run start`")))?;
     let repo_name = repo_name(&ctx.root)?;
-    let base_env = std::env::vars().collect();
+    let base_env: BTreeMap<String, String> = std::env::vars().collect();
+    // The roots the agent CLIs write under are read from the same environment
+    // they will inherit, so a launch that carries `HOME` or `$XDG_DATA_HOME`
+    // reads its own records and not the service's.
+    let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
     Ok(SpawnEnv {
         ctx,
         layout: Layout::default_for_home(&home),
@@ -1664,32 +1895,40 @@ pub fn build_env<'a>(ctx: &'a Ctx, home: Option<&Path>) -> Result<SpawnEnv<'a>, 
         compat,
         base_env,
         ready_wait: super::deliver::ready_wait(),
+        transcript_roots,
     })
 }
 
 /// Reads the curated compatibility list, treating a missing file as an empty
 /// list: a checkout without `data/skills` still spawns, it just adds no
 /// tag-selected skills.
-fn read_compat(path: &Path) -> Result<Vec<CompatEntry>, CliError> {
-    if !path.exists() {
+fn read_compat(data: &DataDir) -> Result<Vec<CompatEntry>, CliError> {
+    let rel = "skills/compat.toml";
+    if !data.contains(rel) {
         return Ok(Vec::new());
     }
-    let list = shprd_agents::skills::CompatList::load(path).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("loading {}", path.display())))
+    let list = data.compat().map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("loading {}", data.path(rel).display())))
     })?;
     Ok(list.skills)
 }
 
-/// The multiplexer the binary drives: the real herdr the human is working in.
-pub fn real_mux() -> shprd_mux_herdr::HerdrMux {
-    shprd_mux_herdr::HerdrMux::new()
+/// The host the binary drives, chosen at the wiring edge.
+///
+/// Which one it is — Herdr desktop, the herdr TUI or tuios — is
+/// [`crate::host::select`]'s decision, from the `host` setting and what this
+/// machine has (M10.9). Every verb reaches a host through here, so nothing in
+/// `cmd/` has to know which adapter it is holding: the trait's verbs are the
+/// same, and the capability flags are what says which of them a host has.
+pub fn real_mux() -> Box<dyn Host> {
+    crate::host::select().1
 }
 
 /// Sends one turn of input to the tab a task's agent runs in.
 ///
 /// Only the tab the active run's log says this task's latest attempt opened is
 /// reachable, so a prompt can never land in another run's agent.
-pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
+pub fn prompt(mux: &dyn Host, repo: &Path, task: &str, text: &str) -> Result<(), CliError> {
     let home = crate::ctx::resolve_home(None)?;
     // Reading the log needs the root; the actor and the flags only matter to a
     // verb that writes.
@@ -1699,18 +1938,27 @@ pub fn prompt(mux: &dyn Mux, repo: &Path, task: &str, text: &str) -> Result<(), 
 
 /// [`prompt`], against an explicit home directory, so a test needs no
 /// environment.
-fn prompt_in(
-    mux: &dyn Mux,
+pub(crate) fn prompt_in(
+    mux: &dyn Host,
     home: &Path,
     ctx: &Ctx,
     task: &str,
     text: &str,
 ) -> Result<(), CliError> {
     let run = active_run(ctx)?;
-    let repo = &ctx.root;
-    let workspace = workspace_named(mux, &workspace_name(&repo_name(repo)?))?;
+    // A task's tabs live in the task's own space, so the prompt goes to the tab
+    // the record names, looked up in that space only. A space that is not there
+    // is the same answer as a tab that is not there: nothing to type into, and
+    // the person is told how to spawn it.
+    let name = task_space_name(&repo_name(&ctx.root)?, &run, task);
+    let Some(space) = mux.find_space(&name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
+    })?
+    else {
+        return Err(no_open_tab(task));
+    };
     let tabs = mux
-        .list_tabs(&workspace.id)
+        .list_tabs(&space.id)
         .map_err(|err| CliError::other(anyhow!(err).context("listing tabs")))?;
     let record = latest_tab_record(&home.join(".shprd").join("briefs"), &run, task)
         .ok_or_else(|| no_open_tab(task))?;
@@ -1721,8 +1969,132 @@ fn prompt_in(
         .iter()
         .find(|tab| tab.id.as_str() == wanted.trim())
         .ok_or_else(|| no_open_tab(task))?;
-    mux.prompt(&tab.root_pane, text)
+    mux.write(&tab.root_pane, text, true)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// Where the pane shprd prepared for the coordinator is written.
+///
+/// It is `<home>/.shprd/coordinator.pane`, beside the tab records: the service
+/// writes the pane it prepared when it made or found the repository's space,
+/// and a chat line is typed there. One line, the host's own pane id.
+pub(crate) fn coordinator_pane_path(home: &Path) -> PathBuf {
+    home.join(".shprd").join("coordinator.pane")
+}
+
+/// Records the pane the repository's own space holds for the coordinator.
+///
+/// `shprd serve` calls this once it has made or found the space: the pane is
+/// the space's own first tab, which is where a person starts the coordinator, so
+/// it is the one pane a chat line may reach. Returns the pane it recorded, or
+/// `None` when the space has no tab to name.
+pub(crate) fn record_coordinator_pane(
+    home: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Result<Option<PaneId>, CliError> {
+    let tabs = mux
+        .list_tabs(&space.id)
+        .map_err(|err| CliError::other(anyhow!(err).context("listing the space's tabs")))?;
+    let Some(tab) = tabs.first() else {
+        return Ok(None);
+    };
+    let path = coordinator_pane_path(home);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!("making {}", dir.display())))
+        })?;
+    }
+    std::fs::write(&path, format!("{}\n", tab.root_pane.as_str())).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("writing {}", path.display())))
+    })?;
+    Ok(Some(tab.root_pane.clone()))
+}
+
+/// The pane recorded for the coordinator, when it is still one of the space's.
+///
+/// The record is only trusted while the pane is still a tab of the repository's
+/// own space: a person who closed that tab and left a shell in another one must
+/// not be typed into, so a stale record is a refusal rather than a fallback.
+fn recorded_coordinator_pane(
+    home: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Option<PaneId> {
+    let path = coordinator_pane_path(home);
+    let wanted = std::fs::read_to_string(path).ok()?;
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return None;
+    }
+    let tabs = mux.list_tabs(&space.id).ok()?;
+    tabs.into_iter()
+        .map(|tab| tab.root_pane)
+        .find(|pane| pane.as_str() == wanted)
+}
+
+/// The pane a run's coordinator may be typed into, when one is reachable.
+///
+/// Two panes are reachable, and both are named rather than guessed:
+///
+/// 1. the pane the run recorded when it launched a coordinator
+///    (`OrchestratorLaunched`), which its launcher owns; and
+/// 2. the pane `shprd serve` recorded for the repository's own space
+///    ([`record_coordinator_pane`]), which is where a person starts the
+///    coordinator in the M10 flow. The space is found by its derived label, and
+///    the record is trusted only while its pane is still one of that space's
+///    tabs.
+///
+/// `Ok(None)` is "nobody to tell right now": no such space, or no tab recorded
+/// in it. It is not an error, because both chats and the news keep their words
+/// for a later call rather than refusing outright.
+pub(crate) fn coordinator_pane_for(
+    mux: &dyn Host,
+    home: &Path,
+    state: &RunState,
+    space_name: &str,
+) -> Result<Option<PaneId>, CliError> {
+    if let Some(orchestrator) = state.orchestrator.as_ref() {
+        return Ok(Some(PaneId::new(orchestrator.pane.clone())));
+    }
+    let space = mux.find_space(space_name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {space_name:?}")))
+    })?;
+    let Some(space) = space else {
+        return Ok(None);
+    };
+    Ok(recorded_coordinator_pane(home, mux, &space))
+}
+
+/// Sends one turn of input to the run's coordinator, as the person.
+///
+/// The pane is [`coordinator_pane_for`]'s: the run's own record when it
+/// launched one, otherwise the repository space's recorded coordinator tab. A
+/// pane that is neither is a refusal: shprd never types into a tab it cannot
+/// name, so a chat line cannot land in whatever happens to be first on the
+/// host's bar.
+pub(crate) fn prompt_coordinator(
+    mux: &dyn Host,
+    home: &Path,
+    ctx: &Ctx,
+    text: &str,
+) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    let name = repo_space_name(&repo_name(&ctx.root)?);
+    let Some(pane) = coordinator_pane_for(mux, home, &state, &name)? else {
+        return Err(no_coordinator(&name));
+    };
+    mux.write(&pane, text, true)
+        .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")))
+}
+
+/// The refusal a coordinator with no recorded pane earns.
+fn no_coordinator(space: &str) -> CliError {
+    CliError::Invalid(anyhow!(
+        "no pane is recorded for the coordinator: `shprd serve` records the first tab of the \
+         space {space:?} when it starts, so run the coordinator there and start the service \
+         (or restart it), then send again — nothing was typed"
+    ))
 }
 
 /// The run the folded event log names as active.
@@ -1762,6 +2134,107 @@ pub(crate) fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> Pa
     briefs.join(run).join(format!("{task}-a{attempt}.tab"))
 }
 
+/// Where an attempt records how its launch went:
+/// `<briefs>/<run>/<task>-a<attempt>.spawn`, beside the tab record.
+pub(crate) fn spawn_record_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+    briefs.join(run).join(format!("{task}-a{attempt}.spawn"))
+}
+
+/// What a spawn record holds: how one attempt's launch went.
+///
+/// It is written beside the tab record ([`spawn_record_path`]) so anything that
+/// later asks "is this attempt's agent there?" can tell a program the host
+/// reports from one the host cannot hear at all (see [`crate::cmd::deliver`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnRecord {
+    /// The program that was launched.
+    pub(crate) agent: String,
+    /// How it was ready: a [`shprd_mux`]-independent word, one of
+    /// [`super::deliver::ReadyBy::as_str`]'s values or `not-delivered`.
+    pub(crate) ready: String,
+    /// The program's `[status] sources`, as its harness file names them.
+    pub(crate) status: String,
+}
+
+impl SpawnRecord {
+    /// Whether the host can report this attempt's program at all.
+    ///
+    /// A brief that was read off the ready line is proof the host could not
+    /// report the program: it stayed `Unknown` while the program was plainly
+    /// running. That is the one fact a later reader needs to stop asking the
+    /// host a question it cannot answer.
+    pub(crate) fn host_cannot_report(&self) -> bool {
+        self.ready == "ready-line"
+    }
+}
+
+/// Reads an attempt's spawn record, or `None` when it has none to read.
+///
+/// A missing or unreadable record is not an error: it is an attempt spawned
+/// before this record existed, or one whose launch failed before it got here,
+/// and every caller's answer in that case is the host's own word.
+pub(crate) fn read_spawn_record(path: &Path) -> Option<SpawnRecord> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut agent = String::new();
+    let mut ready = String::new();
+    let mut status = String::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "agent" => agent = value.trim().to_string(),
+            "ready" => ready = value.trim().to_string(),
+            "status" => status = value.trim().to_string(),
+            _ => {}
+        }
+    }
+    if agent.is_empty() || ready.is_empty() {
+        return None;
+    }
+    Some(SpawnRecord {
+        agent,
+        ready,
+        status,
+    })
+}
+
+/// Records what said the program was ready for its brief.
+///
+/// A spawn record is one line of `key=value`, so a person can read it without a
+/// program and a later reader can parse it without a schema:
+///
+/// ```text
+/// agent=opencode
+/// ready=ready-line
+/// status=osc7501,hook,screen
+/// ```
+///
+/// `ready` is `host-status` when the host reported the agent, `ready-line` when
+/// its harness's line was read off the screen because the host could not report
+/// it, and `not-delivered` when the brief never arrived at all.
+///
+/// A failure to write is a warning, never a failed launch: the agent is running
+/// either way, and this record is how a person reads afterwards what happened.
+pub(crate) fn write_spawn_record(path: &Path, pick: &Pick, ready: Option<super::deliver::ReadyBy>) {
+    let ready = ready.map_or("not-delivered", super::deliver::ReadyBy::as_str);
+    let line = format!(
+        "agent={}\nready={}\nstatus={}\n",
+        pick.agent,
+        ready,
+        pick.status_words()
+    );
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("warning: creating {} failed: {err}", parent.display());
+        return;
+    }
+    if let Err(err) = std::fs::write(path, line) {
+        eprintln!("warning: writing {} failed: {err}", path.display());
+    }
+}
+
 /// Records the tab an attempt opened, so a later prompt reaches that exact tab
 /// rather than one whose truncated label happens to match.
 ///
@@ -1792,29 +2265,34 @@ pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(
 /// the `.tab` record a spawn writes, so a title that happens to match is never
 /// mistaken for the attempt's own tab.
 ///
-/// A host that cannot be asked answers "nothing is live", which is the safe
-/// direction for the tick: a task it cannot see is a task it will not start a
-/// second attempt on.
-pub fn live_tasks(
-    mux: &dyn Mux,
-    home: &Path,
-    repo_name: &str,
-    state: &RunState,
-) -> BTreeSet<String> {
+/// # When the host cannot report the program
+///
+/// `Unknown` is not always "not there". A core without `pane.report_agent`
+/// leaves a program whose only sources are plugins (opencode, kilo, codex,
+/// claude's hooks) reporting nothing at all, and a tab of it is then `Unknown`
+/// for as long as it runs. The attempt's spawn record says which case this is:
+/// a launch whose brief was read off the ready line is proof the host could not
+/// see the program, so the tab's existence is the evidence instead and the task
+/// stays live. Reading it as dead here is what would let the tick land work an
+/// agent is still writing, which is the one thing the live set exists to stop.
+///
+/// A host that cannot be asked at all answers "nothing is live", which is the
+/// safe direction for the tick: a task it cannot see is a task it will not start
+/// a second attempt on.
+pub fn live_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<String> {
     let mut live = BTreeSet::new();
     let Some(run) = state.run.as_ref() else {
         return live;
     };
-    let Some(workspace) = mux
-        .find_workspace(&workspace_name(repo_name))
-        .ok()
-        .flatten()
-    else {
+    // One tab per task, and each task's tab is in that task's own space, so
+    // every space the host lists is asked for its tabs.
+    let Ok(spaces) = mux.list_spaces() else {
         return live;
     };
-    let Ok(tabs) = mux.list_tabs(&workspace.id) else {
-        return live;
-    };
+    let tabs: Vec<shprd_mux::Tab> = spaces
+        .iter()
+        .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
+        .collect();
     let briefs = home.join(".shprd").join("briefs");
     for (id, task) in &state.tasks {
         // A task that cannot have an agent at work is not asked about: a long
@@ -1835,16 +2313,43 @@ pub fn live_tasks(
         let Some(tab) = tabs.iter().find(|tab| tab.id.as_str() == wanted) else {
             continue;
         };
-        // Done, Unknown or a host error all mean the same thing here: no agent
-        // is at work in that pane, or nobody can say — and either way the task
-        // is not "live".
-        if let Ok(AgentState::Working | AgentState::Idle | AgentState::Blocked) =
-            mux.agent_state(&tab.root_pane)
-        {
-            live.insert(id.clone());
+        // Done and a host error both mean no agent is at work. `Unknown` means
+        // either that, or a program this host cannot report — and the attempt's
+        // spawn record is what tells the two apart.
+        match mux.agent_state(&tab.root_pane) {
+            Ok(AgentState::Working | AgentState::Idle | AgentState::Blocked) => {
+                live.insert(id.clone());
+            }
+            Ok(AgentState::Unknown) if unreadable_by_host(&briefs, &run.run_id, id) => {
+                live.insert(id.clone());
+            }
+            _ => {}
         }
     }
     live
+}
+
+/// Whether this task's newest attempt is a program the host cannot report.
+///
+/// The answer is the attempt's own spawn record: a delivery that was read off
+/// the ready line means the host stayed `Unknown` while the program was up.
+pub(crate) fn unreadable_by_host(briefs: &Path, run: &str, task: &str) -> bool {
+    let Some(attempt) = latest_attempt(briefs, run, task) else {
+        return false;
+    };
+    read_spawn_record(&spawn_record_path(briefs, run, task, attempt))
+        .is_some_and(|record| record.host_cannot_report())
+}
+
+/// The number of a task's newest attempt in one run, from its tab records.
+pub(crate) fn latest_attempt(briefs: &Path, run: &str, task: &str) -> Option<u32> {
+    latest_tab_record(briefs, run, task).and_then(|path| {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let prefix = format!("{task}-a");
+        name.strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tab"))
+            .and_then(|digits| digits.parse::<u32>().ok())
+    })
 }
 
 /// The tab record of a task's latest attempt in one run.
@@ -2090,6 +2595,7 @@ project_dirs = []
             let mut base_env = BTreeMap::new();
             base_env.insert("GH_TOKEN".to_string(), "secret".to_string());
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
             SpawnEnv {
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
@@ -2111,12 +2617,13 @@ project_dirs = []
                 },
                 gates: vec!["cargo test --workspace".to_string()],
                 catalogs: BTreeMap::new(),
-                data_dir: self.home.path().to_path_buf(),
+                data_dir: DataDir::resolve(Some(self.home.path()), None),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
                 // otherwise stall every test that launches one.
                 ready_wait: Duration::ZERO,
+                transcript_roots,
             }
         }
 
@@ -2198,7 +2705,56 @@ project_dirs = []
             model: None,
             launch: fake_spec("sh").launch,
             blocking_prompts: Vec::new(),
+            ready_lines: Vec::new(),
+            // A fake `sh` reports no status of its own and no screen line, so
+            // the readiness of this pick is the painted-screen fallback.
+            own_status: false,
+            status_words: "osc7501, screen".to_string(),
         }
+    }
+
+    /// The spawn plan of an installed binary: no `$SHPRD_DATA_DIR`, an empty
+    /// data home, and only the harness table, model catalogs and skills tables
+    /// the binary carries.
+    #[test]
+    fn a_spawn_plan_finds_the_pi_harness_in_the_embedded_data() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let data_home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let data = DataDir::resolve(None, Some(data_home.path()));
+        assert_eq!(
+            data.origin(),
+            &shprd_agents::data::Origin::Embedded,
+            "an empty data home is no override"
+        );
+
+        let env = build_env_in(&ctx, Some(scratch.home.path()), &data)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let ids: Vec<&str> = env
+            .programs
+            .iter()
+            .map(|program| program.spec.id.as_str())
+            .collect();
+        for id in ["claude", "codex", "kilo", "opencode", "pi"] {
+            assert!(
+                ids.contains(&id),
+                "{id} is not in the shipped harness table: {ids:?}"
+            );
+        }
+        // The rest of the plan is embedded too: claude's static catalog and the
+        // curated skills tables read with no directory on disk anywhere.
+        let claude = env
+            .programs
+            .iter()
+            .find(|program| program.spec.id == "claude")
+            .unwrap_or_else(|| panic!("no claude program"));
+        assert!(
+            env.data_dir
+                .catalog(&claude.spec, "", Duration::ZERO)
+                .is_some(),
+            "claude's static catalog should come from the binary"
+        );
+        assert!(!env.compat.is_empty(), "the skills table should be shipped");
     }
 
     #[test]
@@ -2241,20 +2797,19 @@ project_dirs = []
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default().with_ready_agent();
-        let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        // The agent's tab is in the task's own space, which the spawn made.
         let pane = mux
-            .list_tabs(&workspace.id)
+            .list_spaces()
             .unwrap_or_else(|err| panic!("{err}"))
-            .into_iter()
+            .iter()
+            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
             .find(|tab| tab.title == report.tab)
             .map(|tab| tab.root_pane)
             .unwrap_or_else(|| panic!("no tab for {:?}", report.tab));
 
         let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
-        let mut live = live_tasks(&mux, scratch.home.path(), &scratch.repo_name(), &state);
+        let mut live = live_tasks(&mux, scratch.home.path(), &state);
         assert!(
             live.remove("T1"),
             "a working agent's task is live: {live:?}"
@@ -2264,7 +2819,7 @@ project_dirs = []
         // The agent's turn ended: its process is still there, so the task is
         // still live — a landing would judge a commit it may yet move.
         mux.set_state(&pane, AgentState::Idle);
-        let live = live_tasks(&mux, scratch.home.path(), &scratch.repo_name(), &state);
+        let live = live_tasks(&mux, scratch.home.path(), &state);
         assert!(
             live.contains("T1"),
             "an idle agent is still there: {live:?}"
@@ -2272,7 +2827,7 @@ project_dirs = []
 
         // The process ended: nothing is live any more.
         mux.set_state(&pane, AgentState::Done);
-        let live = live_tasks(&mux, scratch.home.path(), &scratch.repo_name(), &state);
+        let live = live_tasks(&mux, scratch.home.path(), &state);
         assert!(live.is_empty(), "a finished agent is not live: {live:?}");
     }
 
@@ -2284,12 +2839,7 @@ project_dirs = []
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
-        let live = live_tasks(
-            &FakeMux::default(),
-            scratch.home.path(),
-            &scratch.repo_name(),
-            &state,
-        );
+        let live = live_tasks(&FakeMux::default(), scratch.home.path(), &state);
         assert!(live.is_empty());
     }
 
@@ -2309,7 +2859,7 @@ project_dirs = []
             installed: true,
         });
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
@@ -2350,7 +2900,7 @@ project_dirs = []
         };
         env.catalogs.insert("pi".to_string(), catalog);
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
@@ -2365,7 +2915,7 @@ project_dirs = []
             .calls()
             .into_iter()
             .filter_map(|call| match call {
-                Call::Run(_, argv, _) => Some(argv),
+                Call::Spawn(_, _, argv, _, _) => Some(argv),
                 _ => None,
             })
             .collect();
@@ -2396,7 +2946,7 @@ project_dirs = []
         calls
             .iter()
             .find_map(|call| match call {
-                Call::Run(_, argv, _) => Some(argv.clone()),
+                Call::Spawn(_, _, argv, _, _) => Some(argv.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"))
@@ -2417,7 +2967,7 @@ project_dirs = []
             installed: true,
         }];
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
@@ -2453,7 +3003,7 @@ project_dirs = []
             installed: true,
         }];
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
@@ -2474,15 +3024,142 @@ project_dirs = []
         );
     }
 
+    /// The repository's own space, made on `mux`, as `shprd serve` would: a
+    /// host that gives a new space its starter tab.
+    fn repo_space(mux: &FakeMux, scratch: &Scratch) -> shprd_mux::Space {
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Every write the fake saw, as `(pane, text)`.
+    fn writes(mux: &FakeMux) -> Vec<(String, String)> {
+        mux.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Write(pane, text, _) => Some((pane.as_str().to_string(), text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pane the service records is the pane the chat types into: this is the
+    /// path every coordinator line in the M10 flow takes, since nothing launches
+    /// a coordinator for the run to record.
+    #[test]
+    fn a_coordinator_line_goes_to_the_pane_the_service_recorded() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let pane = record_coordinator_pane(scratch.home.path(), &mux, &space)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("the space has a pane to record"));
+        let _ = mux.take_calls();
+
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello coordinator")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            writes(&mux),
+            vec![(pane.as_str().to_string(), "hello coordinator".to_string())],
+            "one line, into the recorded pane, and nowhere else"
+        );
+    }
+
+    /// No record is no pane: shprd will not guess at one, so a chat line cannot
+    /// land in whatever tab happens to be first.
+    #[test]
+    fn a_coordinator_line_without_a_recorded_pane_is_refused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let _ = repo_space(&mux, &scratch);
+        let _ = mux.take_calls();
+
+        match prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello") {
+            Ok(()) => panic!("nothing recorded, so nothing may be typed into"),
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("no pane is recorded for the coordinator"),
+                "the refusal says what is missing: {err}"
+            ),
+        }
+        assert!(writes(&mux).is_empty(), "nothing was typed");
+    }
+
+    /// A record whose pane is no longer in the space is stale — the person
+    /// closed that tab — and a stale record is a refusal, never a fallback.
+    #[test]
+    fn a_stale_coordinator_record_is_not_typed_into() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let path = coordinator_pane_path(scratch.home.path());
+        let dir = path.parent().unwrap_or_else(|| panic!("a parent"));
+        std::fs::create_dir_all(dir).unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&path, "p-closed\n").unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        let refused = prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello").is_err();
+        assert!(refused, "a pane the space no longer has is refused");
+        assert!(writes(&mux).is_empty(), "nothing was typed");
+
+        // And the space's own tab is still fine once it is the one recorded.
+        let pane = record_coordinator_pane(scratch.home.path(), &mux, &space)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("a pane"));
+        let _ = mux.take_calls();
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            writes(&mux),
+            vec![(pane.as_str().to_string(), "hello".to_string())]
+        );
+    }
+
+    /// A run that recorded its own coordinator pane wins over the service's
+    /// record: it is the pane a launcher owns.
+    #[test]
+    fn the_runs_recorded_coordinator_pane_wins() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let _ = record_coordinator_pane(scratch.home.path(), &mux, &space).unwrap_or_default();
+        let launched = mux
+            .spawn(
+                &space.id,
+                "★ coordinator",
+                &[String::from("sh")],
+                &[],
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        ctx.commit(EventKind::OrchestratorLaunched {
+            title: launched.title.clone(),
+            pane: launched.root_pane.as_str().to_string(),
+            process_group: 1,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            writes(&mux),
+            vec![(launched.root_pane.as_str().to_string(), "hello".to_string())],
+            "the run's own pane is used, not the service's record"
+        );
+    }
+
     #[test]
     fn spawn_creates_a_worktree_and_records_it() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default().with_ready_agent();
-        let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
 
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
 
@@ -2520,12 +3197,13 @@ project_dirs = []
             1,
         );
         let tab_id = std::fs::read_to_string(&recorded).unwrap_or_default();
+        let space = task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
         let tabs = mux
-            .list_tabs(&workspace.id)
+            .list_tabs(&space.id)
             .unwrap_or_else(|err| panic!("{err}"));
         assert!(
             tabs.iter().any(|tab| tab.id.as_str() == tab_id),
-            "{tab_id:?} names no tab in {tabs:?}"
+            "{tab_id:?} names no tab in the task's space {tabs:?}"
         );
 
         let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
@@ -2547,19 +3225,27 @@ project_dirs = []
         let tab = calls
             .iter()
             .find_map(|call| match call {
-                Call::CreateTab(owner, title, cwd) => {
+                Call::Spawn(owner, title, _argv, _env, cwd) => {
                     Some((owner.clone(), title.clone(), cwd.clone()))
                 }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no tab was created: {calls:?}"));
-        assert_eq!(tab.0, workspace.id);
+        let name = task_space_name(&scratch.repo_name(), &env.run, "T1");
+        let space = mux
+            .find_space(&name)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no space {name:?}"));
+        assert_eq!(
+            tab.0, space.id,
+            "the agent's tab is in the task's own space"
+        );
         assert_eq!(tab.1, "sh·T1");
         assert_eq!(tab.2, report.worktree);
         let (argv, pairs) = calls
             .iter()
             .find_map(|call| match call {
-                Call::Run(_, argv, pairs) => Some((argv.clone(), pairs.clone())),
+                Call::Spawn(_, _, argv, pairs, _) => Some((argv.clone(), pairs.clone())),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"));
@@ -2579,7 +3265,9 @@ project_dirs = []
         assert!(
             pairs.contains(&(
                 "SHPRD_DATA_DIR".to_string(),
-                Some(env.data_dir.display().to_string())
+                env.data_dir
+                    .env_value()
+                    .map(|dir| dir.display().to_string())
             )),
             "{pairs:?}"
         );
@@ -2589,7 +3277,7 @@ project_dirs = []
         let prompt = calls
             .iter()
             .find_map(|call| match call {
-                Call::Prompt(_, text) => Some(text.clone()),
+                Call::Write(_, text, _) => Some(text.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the brief was never typed in: {calls:?}"));
@@ -2631,7 +3319,7 @@ project_dirs = []
     /// A host with the repository's workspace open, the way a launcher leaves it.
     fn host(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
@@ -2687,6 +3375,53 @@ project_dirs = []
                 }),
             })
             .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// A person's stop leaves the attempt replaceable: the retry archives it,
+    /// removes its worktree and branch, and starts attempt 2 in a fresh one.
+    ///
+    /// It is the half of M10 gate bug 1 the service test cannot see: the API
+    /// refuses a retry only when the spawn path refuses it, and the spawn path
+    /// refuses one only while the attempt is still in flight.
+    #[test]
+    fn a_stop_leaves_the_attempt_replaceable_and_a_retry_starts() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let tip = commit_in(&first.worktree, "stopped.txt", "attempt one\n");
+        ctx.commit(EventKind::TaskStopped {
+            task: "T1".to_string(),
+            attempt: 1,
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2, "the retry is a new attempt");
+        let replaced = second
+            .replaced
+            .clone()
+            .unwrap_or_else(|| panic!("the retry must name the ref it archived"));
+        assert_eq!(replaced.ref_name, "refs/shprd/archive/t1/T1-a1");
+        // The stopped attempt's commits are kept, reachable from its ref.
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
+            ),
+            tip
+        );
+        // The space the stop closed is made again by the retry, so the person
+        // gets one group per task rather than a tab with nowhere to live.
+        let name = task_space_name(&env.repo_name, &env.run, "T1");
+        assert!(
+            mux.find_space(&name)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .is_some(),
+            "the retry reopens the task's space"
+        );
     }
 
     /// Every resource event the log holds, in order.
@@ -2916,7 +3651,7 @@ project_dirs = []
         env.programs[0].spec.launch.system_prompt_args =
             system_prompt_args.map(|args| args.into_iter().map(str::to_string).collect());
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
         mux.calls()
@@ -2927,7 +3662,7 @@ project_dirs = []
         calls
             .iter()
             .filter_map(|call| match call {
-                Call::Prompt(_, text) => Some(text.clone()),
+                Call::Write(_, text, _) => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -2941,7 +3676,7 @@ project_dirs = []
         let argv = calls
             .iter()
             .find_map(|call| match call {
-                Call::Run(_, argv, _) => Some(argv.clone()),
+                Call::Spawn(_, _, argv, _, _) => Some(argv.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the CLI was not started: {calls:?}"));
@@ -2967,101 +3702,16 @@ project_dirs = []
         assert!(prompt.contains("crates/shprd"), "{prompt}");
     }
 
-    /// A [`Mux`] that delegates everything but refuses to open tabs, which is
-    /// how a host that lost the workspace looks from spawn's side.
-    struct NoTabs(FakeMux);
-
-    impl Mux for NoTabs {
-        fn capabilities(&self) -> shprd_mux::Capabilities {
-            self.0.capabilities()
-        }
-        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<shprd_mux::Workspace>> {
-            self.0.find_workspace(name)
-        }
-        fn create_workspace(
-            &self,
-            name: &str,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::Workspace> {
-            self.0.create_workspace(name, cwd)
-        }
-        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
-            self.0.focus_workspace(workspace)
-        }
-        fn list_tabs(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
-            self.0.list_tabs(workspace)
-        }
-        fn create_tab(
-            &self,
-            _workspace: &shprd_mux::WorkspaceId,
-            _title: &str,
-            _cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::Tab> {
-            Err(shprd_mux::MuxError::command(
-                "create tab",
-                "the host refused",
-            ))
-        }
-        fn rename_tab(&self, tab: &shprd_mux::TabId, title: &str) -> shprd_mux::Result<()> {
-            self.0.rename_tab(tab, title)
-        }
-        fn focus_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()> {
-            self.0.focus_tab(tab)
-        }
-        fn close_tab(&self, tab: &shprd_mux::TabId) -> shprd_mux::Result<()> {
-            self.0.close_tab(tab)
-        }
-        fn split(
-            &self,
-            pane: &shprd_mux::PaneId,
-            direction: shprd_mux::Direction,
-            ratio: f32,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::PaneId> {
-            self.0.split(pane, direction, ratio, cwd)
-        }
-        fn run(
-            &self,
-            pane: &shprd_mux::PaneId,
-            argv: &[String],
-            env: &[(String, Option<String>)],
-        ) -> shprd_mux::Result<()> {
-            self.0.run(pane, argv, env)
-        }
-        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.0.send_text(pane, text)
-        }
-        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.0.prompt(pane, text)
-        }
-        fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
-            self.0.read(pane, lines)
-        }
-        fn agent_state(
-            &self,
-            pane: &shprd_mux::PaneId,
-        ) -> shprd_mux::Result<shprd_mux::AgentState> {
-            self.0.agent_state(pane)
-        }
-        fn next_events(
-            &self,
-            timeout: std::time::Duration,
-        ) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
-            self.0.next_events(timeout)
-        }
-    }
-
     #[test]
     fn a_failed_tab_removes_the_worktree_and_records_nothing() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
-        let mux = NoTabs(FakeMux::default().with_ready_agent());
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
+        // A host that has the space but cannot start a program in it: the tab
+        // shprd asked for never exists, so the worktree must go back.
+        let mux = FakeMux::default()
+            .with_ready_agent()
+            .failing_spawn("the host refused");
 
         let failure = spawn(&mux, &env, &request());
         assert!(failure.is_err(), "spawn should have failed");
@@ -3088,17 +3738,8 @@ project_dirs = []
         // The host needs two polls to call the pane an agent; the wait covers it.
         env.ready_wait = Duration::from_secs(5);
         let mux = FakeMux::default();
-        let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
         let pane = shprd_mux::PaneId::new("pane-1");
         mux.set_state_after(&pane, 2, shprd_mux::AgentState::Idle);
-        assert!(
-            mux.list_tabs(&workspace.id)
-                .unwrap_or_else(|err| panic!("{err}"))
-                .is_empty(),
-            "the fake starts with no tabs"
-        );
 
         let report = match spawn(&mux, &env, &request()) {
             Ok(report) => report,
@@ -3109,7 +3750,7 @@ project_dirs = []
             .calls()
             .into_iter()
             .filter_map(|call| match call {
-                Call::Prompt(pane, text) => Some((pane, text)),
+                Call::Write(pane, text, _) => Some((pane, text)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -3131,7 +3772,7 @@ project_dirs = []
         // No ready agent and no wait: the plain `sh` this fake hosts is never
         // detected, which is the real OpenCode and Kilo case.
         let mux = FakeMux::default();
-        mux.create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
         let report = match spawn(&mux, &env, &request()) {
@@ -3142,7 +3783,7 @@ project_dirs = []
         assert!(
             mux.calls()
                 .iter()
-                .all(|call| !matches!(call, Call::Prompt(..))),
+                .all(|call| !matches!(call, Call::Write(..))),
             "nothing may be typed into an undetected pane"
         );
         let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
@@ -3155,6 +3796,142 @@ project_dirs = []
         assert_eq!(escalation.default_action, "resend the brief");
     }
 
+    /// A host with a core that cannot report a program listed in a spawn record
+    /// as unreadable — the herdr-core 0.1.21 case — and one that can.
+    fn no_plugin_reports() -> FakeMux {
+        let mut caps = shprd_mux::Capabilities::all();
+        caps.agent_reports = false;
+        FakeMux::new(caps)
+    }
+
+    /// A spec that names its ready line and reports nothing of its own, the way
+    /// the real opencode file does.
+    fn plugin_only_spec(id: &str) -> HarnessSpec {
+        let mut spec = fake_spec(id);
+        spec.status.sources = vec![
+            shprd_agents::spec::StatusSource::Hook,
+            shprd_agents::spec::StatusSource::Screen,
+        ];
+        spec.ready.screen = vec!["Ask anything".to_string()];
+        spec
+    }
+
+    /// `Scratch::spawn_env` with a program list of the caller's choosing.
+    fn spawn_env_with_programs<'a>(
+        scratch: &Scratch,
+        ctx: &'a Ctx,
+        programs: Vec<Program>,
+    ) -> SpawnEnv<'a> {
+        let mut env = scratch.spawn_env(ctx);
+        env.workers = programs
+            .iter()
+            .map(|program| program.spec.id.clone())
+            .collect();
+        env.programs = programs;
+        env
+    }
+
+    #[test]
+    fn a_spawn_records_that_a_ready_line_was_what_said_the_program_was_up() {
+        // The M10 gate's bug 3, from the spawn's own side: opencode's plugin
+        // cannot report through a core without `pane.report_agent`, so the brief
+        // goes in once the TUI's own line is drawn, and the record says so.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = spawn_env_with_programs(
+            &scratch,
+            &ctx,
+            vec![Program {
+                spec: plugin_only_spec("sh"),
+                installed: true,
+            }],
+        );
+        let mux = no_plugin_reports();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let report = match spawn(&mux, &env, &request()) {
+            Ok(report) => report,
+            Err(err) => panic!("{err}"),
+        };
+        // The screen is only painted after the spawn has read it once, so the
+        // record cannot say `ready-line` from a *zero* wait: an empty screen and
+        // a zero wait is a lost brief. Prove the record exists and names the
+        // program and its sources either way.
+        let path = spawn_record_path(&env.briefs_dir, "t1", "T1", report.attempt);
+        let record = read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(record.agent, "sh");
+        assert_eq!(record.status, "hook, screen");
+        assert_eq!(
+            record.ready, "not-delivered",
+            "a zero wait delivers nothing"
+        );
+        assert!(!record.host_cannot_report());
+    }
+
+    #[test]
+    fn a_brief_read_off_the_ready_line_keeps_a_task_the_host_cannot_report_alive() {
+        // A task whose brief arrived through opencode's ready line is one the
+        // host cannot see afterwards either: its `agent_state` stays Unknown for
+        // as long as it runs. Reading that as "no agent" is what would let the
+        // tick land work still being written.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = spawn_env_with_programs(
+            &scratch,
+            &ctx,
+            vec![Program {
+                spec: plugin_only_spec("sh"),
+                installed: true,
+            }],
+        );
+        // A TUI that paints its prompt: every pane the spawn makes shows it.
+        let mux = no_plugin_reports().with_screen("┃  Ask anything… \"Fix broken tests\"");
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mut env = env;
+        env.ready_wait = Duration::from_secs(5);
+        let report = match spawn(&mux, &env, &request()) {
+            Ok(report) => report,
+            Err(err) => panic!("{err}"),
+        };
+        let path = spawn_record_path(&env.briefs_dir, "t1", "T1", report.attempt);
+        let record = read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(record.ready, "ready-line", "{record:?}");
+        assert!(record.host_cannot_report());
+
+        // Now the liveness rule reads the same record: the task is live even
+        // though the host has no opinion about its pane.
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            live_tasks(&mux, &env.home, &state).contains("T1"),
+            "a task whose program the host cannot report must stay live while its tab exists"
+        );
+    }
+
+    #[test]
+    fn a_task_the_host_does_report_goes_quiet_when_its_agent_does() {
+        // The same rule, the other way: an ordinary launch that reported its
+        // state is not kept alive by its tab alone.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(live_tasks(&mux, &env.home, &state).contains("T1"));
+
+        // Its agent ends: the tab is still there, and the task is not live.
+        mux.set_exited(&PaneId::new("pane-1"), Some(0));
+        assert!(
+            !live_tasks(&mux, &env.home, &state).contains("T1"),
+            "a reported agent that ended is not live"
+        );
+    }
+
     #[test]
     fn a_failing_run_closes_the_tab_and_removes_the_worktree() {
         let scratch = Scratch::new();
@@ -3162,10 +3939,7 @@ project_dirs = []
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default()
             .with_ready_agent()
-            .failing_run("the host refused");
-        let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
+            .failing_spawn("the host refused");
 
         let failure = spawn(&mux, &env, &request());
         assert!(failure.is_err(), "spawn should have failed");
@@ -3176,15 +3950,20 @@ project_dirs = []
             "worktree {} survived",
             worktree.display()
         );
+        // The space the spawn made is still there, with no tab in it: `spawn`
+        // makes the tab and starts the program in one call, so a host that
+        // refuses the program never leaves a tab behind.
+        let space = task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
         let tabs = mux
-            .list_tabs(&workspace.id)
+            .list_tabs(&space.id)
             .unwrap_or_else(|err| panic!("{err}"));
         assert!(tabs.is_empty(), "the tab it opened survived: {tabs:?}");
         assert!(
-            mux.calls()
+            !mux.calls()
                 .iter()
                 .any(|call| matches!(call, Call::CloseTab(_))),
-            "the tab must be closed, not abandoned"
+            "there was no tab to close: {:?}",
+            mux.calls()
         );
         let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
         assert!(state.resources.is_empty(), "{:?}", state.resources);
@@ -3193,20 +3972,36 @@ project_dirs = []
         assert!(state.escalations.is_empty(), "{:?}", state.escalations);
     }
 
+    /// A task's space is shprd's own to make, so a spawn does not depend on a
+    /// person having opened anything: the space it works in is labelled from the
+    /// task and made at the repository root.
     #[test]
-    fn spawn_without_a_workspace_says_to_create_one_first() {
+    fn a_spawn_makes_the_task_space_and_works_in_it() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default().with_ready_agent();
 
-        let message = match spawn(&mux, &env, &request()) {
-            Ok(report) => panic!("spawn should have failed, got {report:?}"),
-            Err(err) => err.to_string(),
-        };
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let name = task_space_name(&scratch.repo_name(), &env.run, "T1");
+        let space = mux
+            .find_space(&name)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("no space {name:?}"));
+        let tabs = mux
+            .list_tabs(&space.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert_eq!(tabs[0].title, report.tab);
         assert!(
-            message.contains("create it in your multiplexer"),
-            "{message}"
+            mux.calls().iter().any(|call| matches!(
+                call,
+                Call::CreateSpace(label, cwd)
+                    if label == &name && cwd == scratch.root()
+            )),
+            "the task's space is made at the repository root: {:?}",
+            mux.calls()
         );
     }
 
@@ -3227,18 +4022,40 @@ project_dirs = []
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_ready_agent();
-        let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
-        // Both tabs are titled after their own task; which one a prompt
-        // reaches is decided by the record beside the brief, not the title.
+        // Each task's tab is in that task's own space, and both are titled
+        // after their own task: which one a prompt reaches is decided by the
+        // record beside the brief, not by the title or the space alone.
         let first = "task-one";
         let second = "task-two";
+        let other_space = mux
+            .create_space(
+                &task_space_name(&scratch.repo_name(), "t1", first),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mine_space = mux
+            .create_space(
+                &task_space_name(&scratch.repo_name(), "t1", second),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
         let other = mux
-            .create_tab(&workspace.id, &worker_title("sh", first), scratch.root())
+            .spawn(
+                &other_space.id,
+                &worker_title("sh", first),
+                &[],
+                &[],
+                scratch.root(),
+            )
             .unwrap_or_else(|err| panic!("{err}"));
         let mine = mux
-            .create_tab(&workspace.id, &worker_title("sh", second), scratch.root())
+            .spawn(
+                &mine_space.id,
+                &worker_title("sh", second),
+                &[],
+                &[],
+                scratch.root(),
+            )
             .unwrap_or_else(|err| panic!("{err}"));
         record_tab(&scratch, "t1", first, 1, &other.id);
         record_tab(&scratch, "t1", second, 1, &mine.id);
@@ -3249,7 +4066,7 @@ project_dirs = []
             .calls()
             .into_iter()
             .find_map(|call| match call {
-                Call::Prompt(pane, text) => Some((pane, text)),
+                Call::Write(pane, text, _) => Some((pane, text)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("nothing was prompted"));
@@ -3299,14 +4116,25 @@ project_dirs = []
         })
         .unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default().with_ready_agent();
-        let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+        // One space per run-and-task, so the two records below name tabs in
+        // two different spaces: the active run's is the one that gets typed at.
+        let stale_space = mux
+            .create_space(
+                &task_space_name(&scratch.repo_name(), "run-one", "api"),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let alive_space = mux
+            .create_space(
+                &task_space_name(&scratch.repo_name(), "run-two", "api"),
+                scratch.root(),
+            )
             .unwrap_or_else(|err| panic!("{err}"));
         let stale = mux
-            .create_tab(&workspace.id, "stale", scratch.root())
+            .spawn(&stale_space.id, "stale", &[], &[], scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let current = mux
-            .create_tab(&workspace.id, "current", scratch.root())
+            .spawn(&alive_space.id, "current", &[], &[], scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         // The older run kept retrying, so its attempt number is the higher one.
         record_tab(&scratch, "run-one", "api", 7, &stale.id);
@@ -3318,7 +4146,7 @@ project_dirs = []
             .calls()
             .into_iter()
             .find_map(|call| match call {
-                Call::Prompt(pane, _) => Some(pane),
+                Call::Write(pane, _, _) => Some(pane),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("nothing was prompted"));
@@ -3357,10 +4185,10 @@ project_dirs = []
         .unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default().with_ready_agent();
         let workspace = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let tab = mux
-            .create_tab(&workspace.id, "api", scratch.root())
+            .spawn(&workspace.id, "api", &[], &[], scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         record_tab(&scratch, "run-done", "api", 1, &tab.id);
         ctx.commit(EventKind::RunFinished {
@@ -3379,75 +4207,75 @@ project_dirs = []
     }
 
     #[test]
-    fn a_missing_workspace_is_created_at_the_repository_root() {
+    fn a_missing_repo_space_is_created_at_the_repository_root() {
         // Bug 6 of the M9 gate: the label is derived from the folder name and
-        // the workspace was left to a person, so a run refused every pass until
+        // the space was left to a person, so a run refused every pass until
         // someone read the refusal. `serve` creates it instead, with exactly that
         // label, at the repository root.
         let scratch = Scratch::new();
         let mux = FakeMux::default();
-        let name = workspace_name(&scratch.repo_name());
+        let name = repo_space_name(&scratch.repo_name());
 
-        let prepared = ensure_workspace(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
 
-        assert!(prepared.created, "the workspace was missing, so it is made");
-        assert_eq!(prepared.workspace.name, name);
+        assert!(prepared.created, "the space was missing, so it is made");
+        assert_eq!(prepared.space.name, name);
         assert_eq!(
             mux.calls(),
             vec![
-                Call::FindWorkspace(name.clone()),
-                Call::CreateWorkspace(name, scratch.root().to_path_buf()),
+                Call::FindSpace(name.clone()),
+                Call::CreateSpace(name, scratch.root().to_path_buf()),
             ],
             "one lookup, one creation, and nothing else touched"
         );
     }
 
     #[test]
-    fn an_existing_workspace_is_reused_and_no_other_is_created() {
+    fn an_existing_repo_space_is_reused_and_no_other_is_created() {
         let scratch = Scratch::new();
         let mux = FakeMux::default();
         let human = mux
-            .create_workspace("my own work", scratch.root())
+            .create_space("my own work", scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let ours = mux
-            .create_workspace(&workspace_name(&scratch.repo_name()), scratch.root())
+            .create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
         let _ = mux.take_calls();
 
-        let prepared = ensure_workspace(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
 
-        assert!(!prepared.created, "the workspace was already there");
-        assert_eq!(prepared.workspace.id, ours.id, "the one with that label");
+        assert!(!prepared.created, "the space was already there");
+        assert_eq!(prepared.space.id, ours.id, "the one with that label");
         assert_eq!(
             mux.calls(),
-            vec![Call::FindWorkspace(workspace_name(&scratch.repo_name()))],
+            vec![Call::FindSpace(repo_space_name(&scratch.repo_name()))],
             "a lookup only: nothing is created, renamed or focused"
         );
-        let workspaces = mux.list_workspaces().unwrap_or_else(|err| panic!("{err}"));
+        let spaces = mux.list_spaces().unwrap_or_else(|err| panic!("{err}"));
         assert!(
-            workspaces.iter().any(|found| found.id == human.id),
-            "the person's own workspace is untouched: {workspaces:?}"
+            spaces.iter().any(|found| found.id == human.id),
+            "the person's own space is untouched: {spaces:?}"
         );
     }
 
     #[test]
     fn the_refusal_names_the_expected_label_and_the_ones_the_host_has() {
         let scratch = Scratch::new();
-        let ctx = scratch.ctx();
-        let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default();
-        // The gate's attempt A: a workspace whose label is almost right.
-        mux.create_workspace("shprd · gate repo", scratch.root())
+        // The gate's attempt A: a space whose label is almost right.
+        mux.create_space("shprd · gate repo", scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
-        mux.create_workspace("my own work", scratch.root())
+        mux.create_space("my own work", scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));
 
-        let text = match workspace_of(&mux, &env) {
-            Ok(workspace) => panic!("the workspace {} was accepted", workspace.id),
+        let text = match space_named(&mux, &repo_space_name(&scratch.repo_name())) {
+            Ok(space) => panic!("the space {} was accepted", space.id),
             Err(err) => err.to_string(),
         };
 
-        let expected = workspace_name(&scratch.repo_name());
+        let expected = repo_space_name(&scratch.repo_name());
         assert!(
             text.contains(&format!("{expected:?}")),
             "the expected label is named: {text}"
@@ -3458,26 +4286,72 @@ project_dirs = []
         );
         assert!(
             text.contains("\"my own work\""),
-            "every workspace the host has is listed: {text}"
+            "every space the host has is listed: {text}"
         );
     }
 
     #[test]
-    fn the_refusal_says_when_the_host_has_no_workspace_at_all() {
+    fn the_refusal_says_when_the_host_has_no_space_at_all() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+
+        let text = match space_named(&mux, &repo_space_name(&scratch.repo_name())) {
+            Ok(space) => panic!("the space {} was accepted", space.id),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(text.contains("no space at all"), "{text}");
+        assert!(
+            text.contains("shprd serve"),
+            "the verb that fixes it: {text}"
+        );
+    }
+
+    #[test]
+    fn a_task_gets_a_space_labelled_from_the_task() {
+        // The space-per-task layout: the label names the repository, the run
+        // and the task, so two runs of one task never share a space and a human
+        // reading the host's bar knows whose terminals these are.
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default();
 
-        let text = match workspace_of(&mux, &env) {
-            Ok(workspace) => panic!("the workspace {} was accepted", workspace.id),
-            Err(err) => err.to_string(),
-        };
+        let space = task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
 
-        assert!(text.contains("no workspace at all"), "{text}");
+        assert_eq!(
+            space.name,
+            task_space_name(&scratch.repo_name(), &env.run, "T1")
+        );
+        assert_ne!(space.name, repo_space_name(&scratch.repo_name()));
+        // Ensured, not merely found: the first spawn is what makes it.
         assert!(
-            text.contains("shprd serve"),
-            "the verb that fixes it: {text}"
+            mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::EnsureSpace(..))),
+            "the task's space is ensured: {:?}",
+            mux.calls()
+        );
+    }
+
+    #[test]
+    fn a_task_space_the_host_already_has_is_reused() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default();
+        let first = task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
+        let _ = mux.take_calls();
+
+        let again = task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(first, again, "one task, one space");
+        assert!(
+            !mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::CreateSpace(..))),
+            "a second spawn does not make a second space: {:?}",
+            mux.calls()
         );
     }
 }
@@ -3975,6 +4849,7 @@ off = ["--no-fast"]
             }],
             reviews: Vec::new(),
             spawn_seq: None,
+            stopped: false,
         });
         plan
     }
@@ -3988,25 +4863,31 @@ off = ["--no-fast"]
 #[cfg(test)]
 pub(crate) mod fault {
     use std::path::Path;
-    use std::time::Duration;
 
     use shprd_mux::fake::FakeMux;
     use shprd_mux::{
-        AgentState, Capabilities, Direction, Mux, MuxError, MuxEvent, PaneId, Tab, TabId,
-        Workspace, WorkspaceId,
+        AgentState, Capabilities, Direction, Host, MuxError, Outcome, PaneId, Result, Space,
+        SpaceId, Tab, TabId, Waited,
     };
+    use std::time::Duration;
 
     /// The call a [`FlakyMux`] makes fail.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fault {
-        /// [`Mux::list_tabs`] answers [`MuxError::Command`].
+        /// [`Host::list_tabs`] answers [`MuxError::Command`].
         ListTabs,
-        /// [`Mux::close_tab`] answers [`MuxError::Command`].
+        /// [`Host::close_tab`] answers [`MuxError::Command`].
         CloseTab,
+        /// [`Host::list_spaces`] answers [`MuxError::Command`].
+        ListSpaces,
     }
 
     /// A [`FakeMux`] whose `fault` call fails with a host error that is not
     /// [`MuxError::NotFound`], i.e. one a caller must not read as "gone".
+    ///
+    /// Only the verbs it changes are written out: every other one is the
+    /// [`Host`] default delegating to the fake, through [`Fault::pass`]'s two
+    /// helpers.
     pub(crate) struct FlakyMux {
         /// The fake host that answers every other call.
         inner: FakeMux,
@@ -4034,52 +4915,61 @@ pub(crate) mod fault {
         }
     }
 
-    impl Mux for FlakyMux {
+    impl Host for FlakyMux {
         fn capabilities(&self) -> Capabilities {
             self.inner.capabilities()
         }
 
-        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<Workspace>> {
-            self.inner.find_workspace(name)
+        fn find_space(&self, name: &str) -> Result<Option<Space>> {
+            self.inner.find_space(name)
         }
 
-        fn create_workspace(&self, name: &str, cwd: &Path) -> shprd_mux::Result<Workspace> {
-            self.inner.create_workspace(name, cwd)
-        }
-
-        fn focus_workspace(&self, workspace: &WorkspaceId) -> shprd_mux::Result<()> {
-            self.inner.focus_workspace(workspace)
-        }
-
-        fn list_tabs(&self, workspace: &WorkspaceId) -> shprd_mux::Result<Vec<Tab>> {
-            match self.failure(Fault::ListTabs) {
+        fn list_spaces(&self) -> Result<Vec<Space>> {
+            match self.failure(Fault::ListSpaces) {
                 Some(err) => Err(err),
-                None => self.inner.list_tabs(workspace),
+                None => self.inner.list_spaces(),
             }
         }
 
-        fn create_tab(
-            &self,
-            workspace: &WorkspaceId,
-            title: &str,
-            cwd: &Path,
-        ) -> shprd_mux::Result<Tab> {
-            self.inner.create_tab(workspace, title, cwd)
+        fn create_space(&self, name: &str, cwd: &Path) -> Result<Space> {
+            self.inner.create_space(name, cwd)
         }
 
-        fn rename_tab(&self, tab: &TabId, title: &str) -> shprd_mux::Result<()> {
+        fn focus_space(&self, space: &SpaceId) -> Result<()> {
+            self.inner.focus_space(space)
+        }
+
+        fn list_tabs(&self, space: &SpaceId) -> Result<Vec<Tab>> {
+            match self.failure(Fault::ListTabs) {
+                Some(err) => Err(err),
+                None => self.inner.list_tabs(space),
+            }
+        }
+
+        fn rename_tab(&self, tab: &TabId, title: &str) -> Result<()> {
             self.inner.rename_tab(tab, title)
         }
 
-        fn focus_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+        fn focus_tab(&self, tab: &TabId) -> Result<()> {
             self.inner.focus_tab(tab)
         }
 
-        fn close_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
+        fn close_tab(&self, tab: &TabId) -> Result<()> {
             match self.failure(Fault::CloseTab) {
                 Some(err) => Err(err),
                 None => self.inner.close_tab(tab),
             }
+        }
+
+        fn spawn(
+            &self,
+            space: &SpaceId,
+            title: &str,
+            argv: &[String],
+            env: &[(String, Option<String>)],
+            cwd: &Path,
+        ) -> Result<Tab> {
+            self.inner.spawn(space, title, argv, env, cwd)
         }
 
         fn split(
@@ -4088,37 +4978,28 @@ pub(crate) mod fault {
             direction: Direction,
             ratio: f32,
             cwd: &Path,
-        ) -> shprd_mux::Result<PaneId> {
+        ) -> Result<PaneId> {
             self.inner.split(pane, direction, ratio, cwd)
         }
 
-        fn run(
-            &self,
-            pane: &PaneId,
-            argv: &[String],
-            env: &[(String, Option<String>)],
-        ) -> shprd_mux::Result<()> {
-            self.inner.run(pane, argv, env)
+        fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {
+            self.inner.write(pane, text, submit)
         }
 
-        fn send_text(&self, pane: &PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.send_text(pane, text)
-        }
-
-        fn prompt(&self, pane: &PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.prompt(pane, text)
-        }
-
-        fn read(&self, pane: &PaneId, lines: usize) -> shprd_mux::Result<String> {
+        fn read(&self, pane: &PaneId, lines: usize) -> Result<String> {
             self.inner.read(pane, lines)
         }
 
-        fn agent_state(&self, pane: &PaneId) -> shprd_mux::Result<AgentState> {
+        fn wait(&self, pane: &PaneId, wanted: &Waited, timeout: Duration) -> Result<Outcome> {
+            self.inner.wait(pane, wanted, timeout)
+        }
+
+        fn agent_state(&self, pane: &PaneId) -> Result<AgentState> {
             self.inner.agent_state(pane)
         }
 
-        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<MuxEvent>> {
-            self.inner.next_events(timeout)
+        fn subscribe(&self, timeout: Duration) -> Result<Vec<shprd_mux::MuxEvent>> {
+            self.inner.subscribe(timeout)
         }
     }
 }

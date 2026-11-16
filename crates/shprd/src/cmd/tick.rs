@@ -47,6 +47,7 @@ use anyhow::anyhow;
 use shprd_core::config;
 use shprd_core::event::Actor;
 use shprd_git::forge::{Forge, GhForge};
+use shprd_mux::Host;
 use shprd_server::{NewsDesk, Starter, TickReport, Worker};
 
 use crate::cli::TickArgs;
@@ -74,7 +75,8 @@ pub fn tick_verb(ctx: &Ctx, args: &TickArgs, home: Option<&Path>) -> Result<(), 
 /// The worker one pass runs against: the repo's log, the real forge and host,
 /// and the binary's own spawn path.
 pub(crate) fn worker(ctx: &Ctx, home: &Path, config: config::Config) -> Result<Worker, CliError> {
-    worker_with_hub(ctx, home, config, shprd_server::hub::Hub::new())
+    let host: std::sync::Arc<dyn Host> = std::sync::Arc::from(crate::cmd::spawn::real_mux());
+    worker_with_hub(ctx, home, config, shprd_server::hub::Hub::new(), host)
 }
 
 /// [`worker`], publishing its writes on `hub`.
@@ -87,6 +89,7 @@ pub(crate) fn worker_with_hub(
     home: &Path,
     config: config::Config,
     hub: shprd_server::hub::Hub,
+    host: std::sync::Arc<dyn Host>,
 ) -> Result<Worker, CliError> {
     let repo = ctx.root.clone();
     let actor = shprd_core::event::Actor::Engine;
@@ -97,17 +100,15 @@ pub(crate) fn worker_with_hub(
     // record-only start in a test also reports.
     let live_repo = repo.display().to_string();
     let live_home = home.to_path_buf();
+    let live_host = std::sync::Arc::clone(&host);
     let live: shprd_server::LiveFn = std::sync::Arc::new(move |state| {
         if record_only() {
             return Default::default();
         }
-        let Some(name) = Path::new(&live_repo)
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-        else {
+        if Path::new(&live_repo).file_name().is_none() {
             return Default::default();
-        };
-        crate::cmd::spawn::live_tasks(&crate::cmd::spawn::real_mux(), &live_home, &name, state)
+        }
+        crate::cmd::spawn::live_tasks(&*live_host, &live_home, state)
     });
     let facts: std::sync::Arc<dyn shprd_server::FactsSource> =
         std::sync::Arc::new(shprd_server::LiveFacts {
@@ -137,29 +138,32 @@ pub(crate) fn worker_with_hub(
     // pass that decides a review calls the same `review::close_reviewer` the
     // verb does. A record-only pass has no tabs at all.
     let close_home = home.to_path_buf();
+    let close_reviewer_host = std::sync::Arc::clone(&host);
     let close_reviewer: Option<shprd_server::ReviewCloser> = (!record_only()).then(|| {
         std::sync::Arc::new(move |repo: &Path, task: &str, attempt: u32| {
             let (run, briefs) = run_and_briefs(repo, &close_home)?;
-            crate::cmd::review::close_reviewer(
-                &crate::cmd::spawn::real_mux(),
-                &briefs,
-                &run,
-                task,
-                attempt,
-            )
-            .map_err(|err| err.to_string())
+            crate::cmd::review::close_reviewer(&*close_reviewer_host, &briefs, &run, task, attempt)
+                .map_err(|err| err.to_string())
         }) as shprd_server::ReviewCloser
     });
-    // A landing closes the worker's tab, for the same reason and through the same
-    // one path `shprd agent integrate` uses: the records beside the briefs are
-    // the only tabs in reach, and a landed task cannot come back to one. A
-    // record-only pass has no tabs at all.
+    // A landing closes the task's whole space, for the same reason and through
+    // the same one path `shprd agent integrate` uses: the worker and the
+    // reviewer are tabs of it, so one close takes both, and a landed task cannot
+    // come back to either. A record-only pass has no spaces at all.
     let close_worker_home = home.to_path_buf();
+    let close_worker_host = std::sync::Arc::clone(&host);
     let close_worker: Option<shprd_server::WorkerCloser> = (!record_only()).then(|| {
         std::sync::Arc::new(move |repo: &Path, task: &str| {
             let (run, briefs) = run_and_briefs(repo, &close_worker_home)?;
-            crate::cmd::spawn::close_worker(&crate::cmd::spawn::real_mux(), &briefs, &run, task)
-                .map_err(|err| err.to_string())
+            let repo_name = crate::cmd::spawn::repo_name(repo).map_err(|err| err.to_string())?;
+            crate::cmd::spawn::close_task_space(
+                &*close_worker_host,
+                &briefs,
+                &run,
+                &repo_name,
+                task,
+            )
+            .map_err(|err| err.to_string())
         }) as shprd_server::WorkerCloser
     });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two
@@ -168,16 +172,12 @@ pub(crate) fn worker_with_hub(
     let fallback: Option<shprd_server::FallbackSourceArc> = if record_only() {
         None
     } else {
-        let name = repo
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
         ctx.state()
             .ok()
             .and_then(|state| state.run.map(|run| run.run_id))
             .map(|run| {
                 std::sync::Arc::new(crate::cmd::live_fallback::LiveFallback::new(
-                    &repo, home, &run, &name,
+                    &repo, home, &run,
                 )) as shprd_server::FallbackSourceArc
             })
     };
@@ -187,9 +187,11 @@ pub(crate) fn worker_with_hub(
         None
     } else {
         Some(NewsDesk {
-            coordinator: Arc::new(crate::cmd::live_news::LiveNews::new(Box::new(
-                crate::cmd::spawn::real_mux(),
-            ))),
+            coordinator: Arc::new(crate::cmd::live_news::LiveNews::new(
+                Box::new(std::sync::Arc::clone(&host)),
+                home,
+                &repo,
+            )),
             settle_ms: settle_ms(home, &repo),
             clock: Arc::new(shprd_core::log::SystemClock),
         })

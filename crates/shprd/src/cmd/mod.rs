@@ -9,7 +9,9 @@ pub mod deliver;
 pub mod doctor;
 pub mod drop;
 pub mod fullgate;
+pub mod graph;
 pub mod handoff;
+pub mod install;
 pub mod integrate;
 pub mod janitor;
 pub mod land;
@@ -36,7 +38,7 @@ use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
 use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, TaskVerb};
-use crate::ctx::{CliError, Ctx, resolve_actor, resolve_root};
+use crate::ctx::{CliError, Ctx, resolve_actor, resolve_home, resolve_root};
 
 /// Runs whichever verb the command line asked for.
 pub fn dispatch(cli: Cli) -> Result<(), CliError> {
@@ -64,13 +66,24 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Prompts { cmd }) = &cli.command {
         return prompts::run(cmd, cli.global.json, cli.global.home.as_deref());
     }
+    // `install` writes files under the Herdr app home, not a log, so it answers
+    // outside a repository too.
+    if let Some(Command::Install(args)) = &cli.command {
+        return install::run(args, cli.global.home.as_deref(), cli.global.json);
+    }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
         return doctor::run(args, cli.global.json, cli.global.home.as_deref());
     }
     let root = resolve_root(cli.global.repo.as_deref())?;
     let actor = resolve_actor(cli.global.actor.as_deref())?;
-    let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr);
+    // The home is resolved once, here, and carried down: the dagr projection
+    // that follows every write reads `graph.dagr` from it and looks in the
+    // person's herdr plugin folder, and no verb should resolve `$HOME` for
+    // itself. A machine with no home at all still works: the graph falls back
+    // to `$SHPRD_DAGR_BIN` and `PATH`.
+    let home = resolve_home(cli.global.home.as_deref()).ok();
+    let ctx = Ctx::new(root, actor, cli.global.json, cli.global.no_dagr).with_home(home);
 
     match cli.command {
         None => view::status(&ctx, cli.global.home.as_deref()),
@@ -110,6 +123,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
             let root = settings_root(cli.global.repo.as_deref());
             settings::run(&cmd, ctx.json, cli.global.home.as_deref(), root.as_deref())
         }
+        // Unreachable in practice: `install` returns above.
+        Some(Command::Install(args)) => install::run(&args, None, ctx.json),
         // Unreachable in practice: `prompts` returns above.
         Some(Command::Prompts { cmd }) => prompts::run(&cmd, ctx.json, None),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
@@ -190,6 +205,7 @@ pub fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::TaskDropped { .. } => "task_dropped",
+        EventKind::TaskStopped { .. } => "task_stopped",
         EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
         EventKind::Available { .. } => "available",

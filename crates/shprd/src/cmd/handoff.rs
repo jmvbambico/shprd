@@ -15,7 +15,7 @@ use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_git::worktree::Worktree;
-use shprd_mux::{Mux, MuxError, TabId, Workspace};
+use shprd_mux::{Host, MuxError, Space, TabId};
 
 use crate::cli::HandoffArgs;
 use crate::cmd::spawn::{self, BriefInput, Launching, Pick, Program, SpawnEnv};
@@ -99,6 +99,9 @@ fn pick_to(
         model: parsed.model,
         launch: program.spec.launch.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
+        ready_lines: program.spec.ready.screen.clone(),
+        own_status: !program.spec.status.needs_the_host(),
+        status_words: program.spec.status.words(),
     }))
 }
 
@@ -144,6 +147,9 @@ fn next_worker(
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
                 blocking_prompts: program.spec.blocking_prompts.clone(),
+                ready_lines: program.spec.ready.screen.clone(),
+                own_status: !program.spec.status.needs_the_host(),
+                status_words: program.spec.status.words(),
             });
         }
     }
@@ -257,8 +263,8 @@ const PANE_TAIL_LINES: usize = 30;
 /// other one was in the middle of; a tab the human already closed is not an
 /// error, the brief just says nothing about it.
 fn old_pane_tail(
-    mux: &dyn Mux,
-    workspace: &Workspace,
+    mux: &dyn Host,
+    space: &Space,
     env: &SpawnEnv<'_>,
     task: &str,
     attempt: &Attempt,
@@ -266,7 +272,7 @@ fn old_pane_tail(
     let record = spawn::tab_path(&env.briefs_dir, &env.run, task, attempt.n);
     let wanted = std::fs::read_to_string(record).ok()?;
     let wanted = wanted.trim().to_string();
-    let tabs = mux.list_tabs(&workspace.id).ok()?;
+    let tabs = mux.list_tabs(&space.id).ok()?;
     let tab = tabs.iter().find(|tab| tab.id.as_str() == wanted)?;
     let text = mux.read(&tab.root_pane, PANE_TAIL_LINES).ok()?;
     let text = text.trim_end().to_string();
@@ -356,7 +362,7 @@ pub struct HandoffReport {
 /// outgoing work is checkpointed first, because that commit is the only record
 /// of what the human is asking someone else to finish.
 pub fn handoff(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
     req: &HandoffRequest,
 ) -> Result<HandoffReport, CliError> {
@@ -411,10 +417,12 @@ pub fn handoff(
     );
     // The newcomer's program decides how it raises a needs-you card.
     let ask = spawn::AskRoute::of_harness(program.spec.asks.supported);
-    // The newcomer's words are read before the workspace and the pane are
-    // touched: a prompt that cannot be read must cost nothing.
+    // The newcomer's words are read before the space and the pane are touched:
+    // a prompt that cannot be read must cost nothing.
     let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
-    let workspace = spawn::workspace_of(mux, env)?;
+    // A hand-off is the same attempt in the same task, so the newcomer joins the
+    // tab group the outgoing agent's space already holds.
+    let space = spawn::task_space(mux, env, &task.id)?;
     // The newcomer keeps the worktree the attempt already has, which an older
     // build may have made without shprd's state excluded. A warning, not a
     // failure: the hand-off is about the work, not a tidy `git status`.
@@ -424,7 +432,7 @@ pub fn handoff(
             worktree.display()
         );
     }
-    let pane_tail = old_pane_tail(mux, &workspace, env, &task.id, attempt);
+    let pane_tail = old_pane_tail(mux, &space, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
     let start = BriefInput {
         task,
@@ -498,7 +506,7 @@ pub fn handoff(
     let opened = spawn::open_agent(
         mux,
         env,
-        &workspace,
+        &space,
         &Launching {
             pick: &to,
             applied: &chosen,
@@ -509,7 +517,7 @@ pub fn handoff(
             worktree: &continuing,
         },
     );
-    let (tab_id, title) = match opened {
+    let (tab_id, title, ready) = match opened {
         Ok(opened) => opened,
         Err(err) => {
             escalate(
@@ -546,6 +554,18 @@ pub fn handoff(
         escalate(env, &task.id, &body, "stop the run");
         return Err(err);
     }
+    // The spawn record follows the tab for the same reason: it is what says
+    // whether this newcomer's program is one the host reports, and the attempt
+    // number is the one the original launch used. Leaving the old record in
+    // place would keep answering for a program that is no longer in the tab —
+    // a hand-off from a reported program to one the host cannot report would
+    // then read the newcomer's `Unknown` pane as a stopped agent, and the tick
+    // would start a second attempt on a task an agent is still working.
+    spawn::write_spawn_record(
+        &spawn::spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt.n),
+        &to,
+        ready,
+    );
     let kind = EventKind::HandedOff {
         task: task.id.clone(),
         from_agent: from.clone(),
@@ -588,7 +608,7 @@ enum OldTab {
 /// [`OldTab::Unrecorded`] rather than success: without it there is no tab to
 /// close and nothing to prove the old agent stopped.
 fn close_old_tab(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     env: &SpawnEnv<'_>,
     task: &str,
     attempt: &Attempt,
@@ -790,6 +810,7 @@ project_dirs = []
         fn env<'a>(&self, ctx: &'a Ctx, workers: &[&str]) -> SpawnEnv<'a> {
             let mut base_env = BTreeMap::new();
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
             SpawnEnv {
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
@@ -814,12 +835,13 @@ project_dirs = []
                 },
                 gates: vec!["cargo test --workspace".to_string()],
                 catalogs: std::collections::BTreeMap::new(),
-                data_dir: self.home.path().to_path_buf(),
+                data_dir: shprd_agents::data::DataDir::resolve(Some(self.home.path()), None),
                 compat: Vec::new(),
                 base_env,
                 // No wait: a fake pane that never reports an agent would
                 // otherwise stall every test that launches one.
                 ready_wait: Duration::ZERO,
+                transcript_roots,
             }
         }
     }
@@ -827,8 +849,13 @@ project_dirs = []
     /// A fake multiplexer holding the repo's workspace.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
-        mux.create_workspace(&spawn::workspace_name(&scratch.repo_name()), scratch.root())
-            .unwrap_or_else(|err| panic!("{err}"));
+        // The repository's own space, as `serve` makes it: the coordinator's
+        // tabs live here, and each task's space is made at its spawn.
+        mux.create_space(
+            &spawn::repo_space_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         mux
     }
 
@@ -948,12 +975,9 @@ project_dirs = []
         );
         assert_eq!(task.attempts[0].agent, "pi");
         assert_eq!(task.status, TaskStatus::Working);
-        let workspace = mux
-            .find_workspace(&spawn::workspace_name(&scratch.repo_name()))
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("no workspace"));
+        let space = spawn::task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
         let tabs = mux
-            .list_tabs(&workspace.id)
+            .list_tabs(&space.id)
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(tabs.len(), 1, "the old tab should be closed: {tabs:?}");
         assert_eq!(tabs[0].title, "pi·T1");
@@ -973,12 +997,90 @@ project_dirs = []
             .iter()
             .rev()
             .find_map(|call| match call {
-                Call::CreateTab(_, _, cwd) => Some(cwd.clone()),
+                Call::Spawn(_, _, _, _, cwd) => Some(cwd.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no tab was created by the hand-off"));
         assert_eq!(created, worktree, "the newcomer sits elsewhere");
         assert_eq!(report.tab, "pi·T1");
+    }
+
+    /// A spec whose only status source is the plugin it runs for us, and which
+    /// names the line its TUI prints when it can take a turn — the shape of the
+    /// real opencode file.
+    fn plugin_only_spec(id: &str) -> HarnessSpec {
+        let mut spec = fake_spec(id);
+        spec.status.sources = vec![
+            shprd_agents::spec::StatusSource::Hook,
+            shprd_agents::spec::StatusSource::Screen,
+        ];
+        spec.ready.screen = vec!["Ask anything".to_string()];
+        spec
+    }
+
+    /// A host with a core that has no `pane.report_agent`: a program the host
+    /// recognises is called idle, and one whose only source is its plugin is
+    /// `Unknown` for as long as it runs.
+    fn no_plugin_reports() -> FakeMux {
+        let mut caps = shprd_mux::Capabilities::all();
+        caps.agent_reports = false;
+        FakeMux::new(caps)
+            .with_ready_agent()
+            .with_screen("\u{2503}  Ask anything\u{2026} \"Fix broken tests\"")
+    }
+
+    #[test]
+    fn a_hand_off_rewrites_the_spawn_record_for_the_newcomer() {
+        // The attempt number is the original launch's, so the record is the one
+        // place that says which program is in the tab now. Left stale, it keeps
+        // answering for the program that just left: a hand-off to a program the
+        // host cannot report would then read the newcomer's `Unknown` pane as a
+        // stopped agent, and the tick's live set would let a pass start a second
+        // attempt on a task an agent is still working.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = no_plugin_reports();
+        mux.create_space(
+            &spawn::repo_space_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        // The original launch is a program with a status source of its own, so
+        // the host reports it and its record says so. Only the hand-off can make
+        // the record true again.
+        let planted = scratch.env(&ctx, &["sh"]);
+        seed(&mux, &planted);
+        let path = spawn::spawn_record_path(&planted.briefs_dir, &planted.run, "T1", 1);
+        let before = spawn::read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(before.ready, "host-status");
+        assert!(!before.host_cannot_report());
+
+        // The hand-off goes to a program whose only status source is its plugin,
+        // on a host that cannot carry one: nothing but its own ready line can
+        // say it is up.
+        let mut env = scratch.env(&ctx, &["sh"]);
+        env.programs[0].spec = plugin_only_spec("sh");
+        env.ready_wait = Duration::from_secs(5);
+        handoff(&mux, &env, &request(Some("sh"))).unwrap_or_else(|err| panic!("{err}"));
+
+        let after = spawn::read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(after.agent, "sh");
+        assert_eq!(after.status, "hook, screen");
+        assert_eq!(
+            after.ready, "ready-line",
+            "the newcomer's delivery is what the record must say now"
+        );
+        assert!(after.host_cannot_report());
+
+        // And the liveness rule reads that record: the task stays live while the
+        // newcomer's tab exists, even though the host has no opinion about it.
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            spawn::live_tasks(&mux, &env.home, &state).contains("T1"),
+            "a hand-off to a program the host cannot report must stay live"
+        );
     }
 
     #[test]
@@ -990,12 +1092,12 @@ project_dirs = []
         let worktree = seed(&mux, &env);
         // What the outgoing agent last printed, which the newcomer should see.
         let pane = mux
-            .calls()
+            .list_spaces()
+            .unwrap_or_else(|err| panic!("{err}"))
             .iter()
-            .find_map(|call| match call {
-                Call::Run(pane, _, _) => Some(pane.clone()),
-                _ => None,
-            })
+            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
+            .next()
+            .map(|tab| tab.root_pane)
             .unwrap_or_else(|| panic!("the CLI was never started"));
         mux.set_screen(&pane, "half of the parser is written");
         std::fs::write(worktree.join("half.rs"), "fn half() {}\n").unwrap_or_default();
@@ -1098,7 +1200,7 @@ project_dirs = []
     fn tabs_created(mux: &FakeMux) -> usize {
         mux.calls()
             .iter()
-            .filter(|call| matches!(call, Call::CreateTab(..)))
+            .filter(|call| matches!(call, Call::Spawn(..)))
             .count()
     }
 
@@ -1193,204 +1295,6 @@ project_dirs = []
         );
     }
 
-    /// A [`FakeMux`] that closes `keep` but refuses every other tab: the old
-    /// agent's tab must still close, so the hand-off reaches the record write,
-    /// and the newcomer's cleanup close is the one that fails.
-    struct RefusesNewcomerClose {
-        inner: FakeMux,
-        keep: TabId,
-    }
-
-    impl Mux for RefusesNewcomerClose {
-        fn capabilities(&self) -> shprd_mux::Capabilities {
-            self.inner.capabilities()
-        }
-
-        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<Workspace>> {
-            self.inner.find_workspace(name)
-        }
-
-        fn create_workspace(&self, name: &str, cwd: &Path) -> shprd_mux::Result<Workspace> {
-            self.inner.create_workspace(name, cwd)
-        }
-
-        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
-            self.inner.focus_workspace(workspace)
-        }
-
-        fn list_tabs(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
-            self.inner.list_tabs(workspace)
-        }
-
-        fn create_tab(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-            title: &str,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::Tab> {
-            self.inner.create_tab(workspace, title, cwd)
-        }
-
-        fn rename_tab(&self, tab: &TabId, title: &str) -> shprd_mux::Result<()> {
-            self.inner.rename_tab(tab, title)
-        }
-
-        fn focus_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
-            self.inner.focus_tab(tab)
-        }
-
-        fn close_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
-            if *tab != self.keep {
-                return Err(MuxError::command("close tab", "the host refused"));
-            }
-            self.inner.close_tab(tab)
-        }
-
-        fn split(
-            &self,
-            pane: &shprd_mux::PaneId,
-            direction: shprd_mux::Direction,
-            ratio: f32,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::PaneId> {
-            self.inner.split(pane, direction, ratio, cwd)
-        }
-
-        fn run(
-            &self,
-            pane: &shprd_mux::PaneId,
-            argv: &[String],
-            env: &[(String, Option<String>)],
-        ) -> shprd_mux::Result<()> {
-            self.inner.run(pane, argv, env)
-        }
-
-        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.send_text(pane, text)
-        }
-
-        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.prompt(pane, text)
-        }
-
-        fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
-            self.inner.read(pane, lines)
-        }
-
-        fn agent_state(
-            &self,
-            pane: &shprd_mux::PaneId,
-        ) -> shprd_mux::Result<shprd_mux::AgentState> {
-            self.inner.agent_state(pane)
-        }
-
-        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
-            self.inner.next_events(timeout)
-        }
-    }
-
-    /// A [`FakeMux`] that closes `keep` and reports every other tab as already
-    /// gone: the old agent's tab must still close, so the hand-off reaches the
-    /// record write, and the newcomer's cleanup close finds nothing to close.
-    struct VanishedNewcomerClose {
-        inner: FakeMux,
-        keep: TabId,
-    }
-
-    impl Mux for VanishedNewcomerClose {
-        fn capabilities(&self) -> shprd_mux::Capabilities {
-            self.inner.capabilities()
-        }
-
-        fn find_workspace(&self, name: &str) -> shprd_mux::Result<Option<Workspace>> {
-            self.inner.find_workspace(name)
-        }
-
-        fn create_workspace(&self, name: &str, cwd: &Path) -> shprd_mux::Result<Workspace> {
-            self.inner.create_workspace(name, cwd)
-        }
-
-        fn focus_workspace(&self, workspace: &shprd_mux::WorkspaceId) -> shprd_mux::Result<()> {
-            self.inner.focus_workspace(workspace)
-        }
-
-        fn list_tabs(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-        ) -> shprd_mux::Result<Vec<shprd_mux::Tab>> {
-            self.inner.list_tabs(workspace)
-        }
-
-        fn create_tab(
-            &self,
-            workspace: &shprd_mux::WorkspaceId,
-            title: &str,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::Tab> {
-            self.inner.create_tab(workspace, title, cwd)
-        }
-
-        fn rename_tab(&self, tab: &TabId, title: &str) -> shprd_mux::Result<()> {
-            self.inner.rename_tab(tab, title)
-        }
-
-        fn focus_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
-            self.inner.focus_tab(tab)
-        }
-
-        fn close_tab(&self, tab: &TabId) -> shprd_mux::Result<()> {
-            if *tab != self.keep {
-                return Err(MuxError::not_found("tab", tab));
-            }
-            self.inner.close_tab(tab)
-        }
-
-        fn split(
-            &self,
-            pane: &shprd_mux::PaneId,
-            direction: shprd_mux::Direction,
-            ratio: f32,
-            cwd: &Path,
-        ) -> shprd_mux::Result<shprd_mux::PaneId> {
-            self.inner.split(pane, direction, ratio, cwd)
-        }
-
-        fn run(
-            &self,
-            pane: &shprd_mux::PaneId,
-            argv: &[String],
-            env: &[(String, Option<String>)],
-        ) -> shprd_mux::Result<()> {
-            self.inner.run(pane, argv, env)
-        }
-
-        fn send_text(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.send_text(pane, text)
-        }
-
-        fn prompt(&self, pane: &shprd_mux::PaneId, text: &str) -> shprd_mux::Result<()> {
-            self.inner.prompt(pane, text)
-        }
-
-        fn read(&self, pane: &shprd_mux::PaneId, lines: usize) -> shprd_mux::Result<String> {
-            self.inner.read(pane, lines)
-        }
-
-        fn agent_state(
-            &self,
-            pane: &shprd_mux::PaneId,
-        ) -> shprd_mux::Result<shprd_mux::AgentState> {
-            self.inner.agent_state(pane)
-        }
-
-        fn next_events(&self, timeout: Duration) -> shprd_mux::Result<Vec<shprd_mux::MuxEvent>> {
-            self.inner.next_events(timeout)
-        }
-    }
-
     /// A cleanup the host refused is the human's only clue that a stray agent is
     /// still running, so the escalation must say so rather than hide it.
     #[test]
@@ -1407,10 +1311,11 @@ project_dirs = []
         // Readable, so the old tab is still closed, but not writable.
         std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o400))
             .unwrap_or_else(|err| panic!("{err}"));
-        let mux = RefusesNewcomerClose {
-            inner: mux,
-            keep: TabId::new(old.trim()),
-        };
+        // Every close but the outgoing agent's fails: the old tab must still
+        // close, so the hand-off reaches the record write, and the newcomer's
+        // cleanup close is the one that fails.
+        let mut mux = mux;
+        mux.failing_tab_closes(Some(&TabId::new(old.trim())), "the host refused");
 
         let err = match handoff(&mux, &env, &request(None)) {
             Ok(report) => panic!("handed off to {} anyway", report.to),
@@ -1453,10 +1358,9 @@ project_dirs = []
         // Readable, so the old tab is still closed, but not writable.
         std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o400))
             .unwrap_or_else(|err| panic!("{err}"));
-        let mux = VanishedNewcomerClose {
-            inner: mux,
-            keep: TabId::new(old.trim()),
-        };
+        // Every close but the outgoing agent's answers "no such tab".
+        let mut mux = mux;
+        mux.forgetting_tab_closes(Some(&TabId::new(old.trim())));
 
         let err = match handoff(&mux, &env, &request(None)) {
             Ok(report) => panic!("handed off to {} anyway", report.to),
@@ -1519,12 +1423,9 @@ project_dirs = []
                 .map(|escalation| escalation.body.as_str()),
             Some("hand-off to pi could not be recorded")
         );
-        let workspace = mux
-            .find_workspace(&spawn::workspace_name(&scratch.repo_name()))
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("no workspace"));
+        let space = spawn::task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
         let tabs = mux
-            .list_tabs(&workspace.id)
+            .list_tabs(&space.id)
             .unwrap_or_else(|err| panic!("{err}"));
         assert!(
             tabs.is_empty(),

@@ -1,13 +1,13 @@
 //! Screen signals: which dry pattern a pane shows, what reset hint it carries,
 //! and whether the screen is still changing.
 //!
-//! Everything here reads through [`shprd_mux::Mux`], so the same code runs
+//! Everything here reads through [`shprd_mux::Host`], so the same code runs
 //! against herdr, tuios and [`shprd_mux::fake::FakeMux`].
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use shprd_mux::{AgentState, Mux, MuxError, PaneId};
+use shprd_mux::{AgentState, Host, MuxError, PaneId};
 
 /// How many trailing screen lines a signal looks at. Anything further up has
 /// scrolled out of the agent's current turn.
@@ -203,7 +203,7 @@ pub struct ScreenSignal {
 /// the screen into `sampler`. The caller owns the sampler so the liveness
 /// history survives between polls of the same pane.
 pub fn sample(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     pane: &PaneId,
     patterns: &[String],
     sampler: &mut Sampler,

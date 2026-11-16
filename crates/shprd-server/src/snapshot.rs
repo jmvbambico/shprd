@@ -10,7 +10,8 @@ use shprd_views::status;
 
 use crate::dto::{
     AgentDto, AskDto, AttemptDto, DerivedStatusDto, FindingDto, GateDto, NeedDto, NeedKindDto,
-    ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskProgressDto,
+    PrStateDto, ReportDto, ReviewDto, RunDto, SnapshotDto, TaskDerivedDto, TaskDto, TaskPrDto,
+    TaskProgressDto,
 };
 
 /// What `GET /api/state` answers with when the repository has no run yet.
@@ -53,36 +54,18 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
         needs: state
             .escalations
             .iter()
-            .filter(|escalation| still_needs_a_person(state, escalation))
-            .map(|escalation| NeedDto {
-                task: escalation.task.clone(),
-                body: escalation.body.clone(),
-                default_action: escalation.default_action.clone(),
-                seq: escalation.seq,
+            .filter_map(|escalation| {
+                shprd_views::cards::card(state, escalation).map(|card| NeedDto {
+                    task: escalation.task.clone(),
+                    body: card.body,
+                    default_action: card.default_action,
+                    seq: escalation.seq,
+                })
             })
             .collect(),
         asks: open_asks(state, now_ms),
         finished: state.finished,
     }
-}
-
-/// Whether an escalation is still the board's to show.
-///
-/// A task that landed or was dropped has nobody left to ask: the escalation that
-/// held it back is history, and a card that kept it would ask a person to
-/// approve work that is already in. So is a card about a failed review that a
-/// newer attempt has answered. An escalation about no single task (a run's own)
-/// is always kept: the fold has nothing to resolve it against.
-fn still_needs_a_person(state: &RunState, escalation: &shprd_core::state::Escalation) -> bool {
-    let Some(task) = escalation.task.as_deref() else {
-        return true;
-    };
-    state.tasks.get(task).is_none_or(|task| {
-        !matches!(
-            task.status,
-            shprd_core::state::TaskStatus::Integrated | shprd_core::state::TaskStatus::Dropped
-        ) && card_is_current(task, &escalation.body)
-    })
 }
 
 /// Whether the card `body` names is about the attempt the task is on.
@@ -169,6 +152,22 @@ pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: 
             seq: status.seq,
         }),
         attempts: task.attempts.iter().map(attempt).collect(),
+        pr: task.pr.as_ref().map(task_pr),
+    }
+}
+
+/// One task's pull request, as its card draws it.
+fn task_pr(pr: &shprd_core::state::PrInfo) -> TaskPrDto {
+    TaskPrDto {
+        number: pr.number,
+        url: pr.url.clone(),
+        head: pr.head.clone(),
+        state: if pr.merged {
+            PrStateDto::Merged
+        } else {
+            PrStateDto::Open
+        },
+        approved: pr.approved_head.is_some(),
     }
 }
 
@@ -217,6 +216,16 @@ fn report(report: &shprd_core::state::Report) -> ReportDto {
         status: report.status.into(),
         summary: report.summary.clone(),
         tests: report.tests.clone(),
+        checks: report
+            .checks
+            .iter()
+            .map(|check| crate::dto::CheckDto {
+                gate: check.gate.clone(),
+                command: check.command.clone(),
+                exit_code: check.exit_code,
+                output_tail: check.output_tail.clone(),
+            })
+            .collect(),
         changed_paths: report.changed_paths.clone(),
         commit: report.commit.clone(),
         skills_used: report.skills_used.clone(),
@@ -286,6 +295,48 @@ mod tests {
     }
 
     #[test]
+    fn a_task_that_landed_through_a_pull_request_carries_it() {
+        // The task PR card reads this and nothing else: a number, a state and a
+        // link. A task that landed locally has none, and the board must be able
+        // to tell that apart from "a pull request nobody opened yet".
+        let mut state = run_with_a_task();
+        let pr = shprd_core::state::PrInfo {
+            number: 12,
+            url: "https://example.invalid/pr/12".to_string(),
+            head: "shprd/r1/T1".to_string(),
+            approved_head: None,
+            merged: false,
+        };
+        state.tasks.get_mut("T1").expect("the fixture's task").pr = Some(pr);
+        let open = snapshot(&state, NOW);
+        let task = &open.tasks[0];
+        let carried = task.pr.as_ref().expect("the pull request is carried");
+        assert_eq!(carried.number, 12);
+        assert_eq!(carried.state, crate::dto::PrStateDto::Open);
+        assert_eq!(carried.url, "https://example.invalid/pr/12");
+        assert!(!carried.approved, "nothing approved it yet");
+
+        let merged = state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .pr
+            .as_mut()
+            .expect("the pull request");
+        merged.merged = true;
+        merged.approved_head = Some("abc1234".to_string());
+        let landed = snapshot(&state, NOW);
+        let carried = landed.tasks[0].pr.as_ref().expect("still carried");
+        assert_eq!(carried.state, crate::dto::PrStateDto::Merged);
+        assert!(carried.approved);
+
+        // A local landing opens no pull request at all.
+        state.tasks.get_mut("T1").expect("the fixture's task").pr = None;
+        let local = snapshot(&state, NOW);
+        assert!(local.tasks[0].pr.is_none());
+    }
+
+    #[test]
     fn a_landed_task_keeps_no_needs_you_card() {
         // The M9 gate found `/api/state` still listing the escalation that held a
         // task back after the task had landed: a board reading `needs` would ask
@@ -343,6 +394,7 @@ mod tests {
                 worktree: String::from("/wt/T1"),
                 branch: String::from("shprd/r1/T1"),
                 spawn_seq: Some(1),
+                stopped: false,
                 report: None,
                 gates: Vec::new(),
                 reviews: Vec::new(),
@@ -393,6 +445,7 @@ mod tests {
                 worktree: String::from("/wt/T1"),
                 branch: String::from("shprd/r1/T1"),
                 spawn_seq: Some(6),
+                stopped: false,
                 report: None,
                 gates: Vec::new(),
                 reviews: Vec::new(),
@@ -420,6 +473,7 @@ mod tests {
                 worktree: String::from("/wt/T1"),
                 branch: String::from("shprd/r1/T1"),
                 spawn_seq: Some(1),
+                stopped: false,
                 report: None,
                 gates: Vec::new(),
                 reviews: Vec::new(),
@@ -448,12 +502,139 @@ mod tests {
                 worktree: String::from("/wt/T1"),
                 branch: String::from("shprd/r1/T1"),
                 spawn_seq: Some(6),
+                stopped: false,
                 report: None,
                 gates: Vec::new(),
                 reviews: Vec::new(),
             });
         let answered = snapshot(&state, NOW);
         assert!(answered.needs.is_empty(), "{:?}", answered.needs);
+    }
+
+    #[test]
+    fn an_answered_card_names_the_verb_and_leaves_the_ask_list() {
+        // Bug 1 of gate run #4: answering a spent-review card with `drop it`
+        // consumed the ask, and the card stayed on `needs` pointing at it, so
+        // every click on the card was refused. The card now says the verb the
+        // answer leaves, and it stops needing a person once that verb's record
+        // is in the log.
+        let mut state = run_with_a_task();
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .attempts
+            .push(shprd_core::state::Attempt {
+                n: 1,
+                agent: String::from("claude"),
+                model: None,
+                worktree: String::from("/wt/T1"),
+                branch: String::from("shprd/r1/T1"),
+                spawn_seq: Some(1),
+                stopped: false,
+                report: None,
+                gates: vec![shprd_core::state::GateResult {
+                    gate: String::from(shprd_core::gate::REVIEW_GATE),
+                    passed: false,
+                    findings: vec![shprd_core::event::Finding {
+                        severity: shprd_core::event::Severity::Major,
+                        title: String::from("No evidence that test_calc.py still passes"),
+                        location: None,
+                        detail: String::new(),
+                    }],
+                    source: None,
+                    seq: 3,
+                }],
+                reviews: Vec::new(),
+            });
+        let body = shprd_core::gate::rounds_spent_body(
+            state.tasks.get("T1").expect("the fixture's task"),
+            1,
+            1,
+        );
+        state.escalations.push(shprd_core::state::Escalation {
+            task: Some("T1".to_string()),
+            body: body.clone(),
+            default_action: String::from(shprd_core::gate::ESCALATION_ACTION),
+            seq: 4,
+        });
+        state.asks.insert(
+            ("T1".to_string(), shprd_core::gate::rounds_spent_ask(1)),
+            AskRecord {
+                id: shprd_core::gate::rounds_spent_ask(1),
+                task: String::from("T1"),
+                kind: AskKind::Question,
+                text: body,
+                options: shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                    .iter()
+                    .map(|choice| (*choice).to_string())
+                    .collect(),
+                created_at_ms: 1_000,
+                expires_at_ms: None,
+                raised_seq: 5,
+                answer: Some(AskAnswerRecord {
+                    text: String::from("drop it"),
+                    seq: 6,
+                }),
+            },
+        );
+
+        let answered = snapshot(&state, NOW);
+        assert_eq!(answered.needs.len(), 1, "{:?}", answered.needs);
+        let card = &answered.needs[0];
+        assert!(!card.body.contains("answer the card"), "{}", card.body);
+        assert!(
+            card.body.contains("you answered `drop it`"),
+            "{}",
+            card.body
+        );
+        assert!(
+            card.body.contains("`shprd drop T1 --reason …`"),
+            "{}",
+            card.body
+        );
+        assert!(
+            answered.asks.is_empty(),
+            "the ask was consumed by the answer: {:?}",
+            answered.asks
+        );
+
+        // Dropping it is the verb the card named: once it is in the log there
+        // is nothing left to ask.
+        state
+            .tasks
+            .get_mut("T1")
+            .expect("the fixture's task")
+            .status = shprd_core::state::TaskStatus::Dropped;
+        let dropped = snapshot(&state, NOW);
+        assert!(dropped.needs.is_empty(), "{:?}", dropped.needs);
+    }
+
+    #[test]
+    fn a_task_with_an_open_card_reads_needs_you_on_the_board_too() {
+        // Bug 4 of gate run #4: the row said Working while the card sat in
+        // `needs`. The derived word and the card now come from one place.
+        let mut state = run_with_a_task();
+        state.escalations.push(shprd_core::state::Escalation {
+            task: Some("T1".to_string()),
+            body: String::from("T1: the engine's review did not start: no workspace yet"),
+            default_action: String::from("create the workspace"),
+            seq: 3,
+        });
+        let board = snapshot(&state, NOW);
+        assert_eq!(board.needs.len(), 1, "{:?}", board.needs);
+        let row = board
+            .tasks
+            .iter()
+            .find(|task| task.id == "T1")
+            .expect("T1's row");
+        assert_eq!(
+            row.derived.status,
+            DerivedStatusDto::NeedsYou,
+            "{:?}",
+            row.derived
+        );
+        assert_eq!(row.derived.need, Some(NeedKindDto::Attention));
     }
 
     #[test]

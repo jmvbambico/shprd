@@ -14,10 +14,13 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+serde.workspace = true
 shprd-core = { path = "../shprd-core" }
 shprd-git = { path = "../shprd-git" }
 shprd-mux = { path = "../shprd-mux" }
 shprd-mux-herdr = { path = "../shprd-mux-herdr" }
+shprd-mux-hc = { path = "../shprd-mux-hc" }
 shprd-agents = { path = "../shprd-agents" }
 shprd-server = { path = "../shprd-server" }
 shprd-watch = { path = "../shprd-watch" }
@@ -29,6 +32,7 @@ tracing-subscriber.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
 

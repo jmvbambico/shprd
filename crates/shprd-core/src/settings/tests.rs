@@ -49,6 +49,7 @@ fn an_empty_file_resolves_to_the_built_in_values() {
     assert_eq!(shown(&resolved, "tasks.base"), "\"\"");
     assert_eq!(shown(&resolved, "tasks.branch"), "\"task/{n}-{slug}\"");
     assert_eq!(shown(&resolved, "review.cross_vendor"), "true");
+    assert_eq!(shown(&resolved, "host"), "\"auto\"");
     assert_eq!(
         source_of(&resolved, "tasks.merge"),
         Some(Source::BuiltIn),
@@ -282,7 +283,8 @@ fn every_key_is_reported_even_the_ones_nobody_set() {
     assert!(rows.iter().any(|row| row.key == "tasks.tick_secs"));
     assert_eq!(
         rows.last().map(|row| row.key.as_str()),
-        Some("review.cross_vendor")
+        Some("host"),
+        "the host is the last row a settings page draws"
     );
 }
 
@@ -663,6 +665,7 @@ fn keys_parse_from_their_names_and_their_old_names() {
         ("review.must_fix", "tasks.must_fix"),
         ("review.rounds", "tasks.review_rounds"),
         ("review.cross_vendor", "review.cross_vendor"),
+        ("graph.dagr", "graph.dagr"),
         ("roles.order", "roles.order"),
         ("roles.worker.agent", "roles.worker.agent"),
         ("roles.docs_writer.fallback", "roles.docs_writer.fallback"),
@@ -684,8 +687,34 @@ fn keys_parse_from_their_names_and_their_old_names() {
         "roles.docs/1.agent",
         "review",
         "agents.reactions",
+        "graph",
+        "graph.nope",
     ] {
         assert!(Key::parse(refused).is_err(), "`{refused}` must be refused");
+    }
+}
+
+#[test]
+fn the_graph_program_is_a_key_of_its_own_and_unset_by_default() {
+    // Unset is what makes the graph block look for dagr itself: a value nobody
+    // set must not be mistaken for a path.
+    let resolved = resolve(&File::default(), &Request::default());
+    assert_eq!(shown(&resolved, "graph.dagr"), "\"\"");
+    assert_eq!(source_of(&resolved, "graph.dagr"), Some(Source::BuiltIn));
+    assert_eq!(resolved.graph_dagr(), None, "an empty value is unset");
+
+    let file = you("[graph]\ndagr = \"/opt/dagr/bin/dagr\"\n");
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(shown(&resolved, "graph.dagr"), "\"/opt/dagr/bin/dagr\"");
+    assert_eq!(source_of(&resolved, "graph.dagr"), Some(Source::You));
+    assert_eq!(resolved.graph_dagr(), Some("/opt/dagr/bin/dagr"));
+
+    // A repository's committed file may not point the graph at a program: it is
+    // written by whoever works in the repository, and this key runs one.
+    let committed = "[graph]\ndagr = \"/tmp/dagr\"\n";
+    match parse_repo_committed(committed) {
+        Err(SettingsError::NotAllowed { key, .. }) => assert_eq!(key, "graph"),
+        other => panic!("expected a refusal, got {other:?}"),
     }
 }
 
@@ -842,6 +871,60 @@ fn a_roles_order_list_is_reported_as_a_source() {
         resolved.order(),
         ["docs", "coordinator", "worker", "reviewer", "backup"]
     );
+}
+
+#[test]
+fn the_host_setting_names_one_host_or_asks_the_machine() {
+    assert_eq!(
+        resolve(&File::default(), &Request::default()).host(),
+        HostChoice::Auto,
+        "nothing set: pick the host"
+    );
+    let file = you("host = \"herdr-desktop\"");
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(resolved.host(), HostChoice::HerdrDesktop);
+    assert_eq!(source_of(&resolved, "host"), Some(Source::You));
+    for word in HOST_WORDS {
+        let file = you(&format!("host = {word:?}"));
+        assert_eq!(
+            resolve(&file, &Request::default()).host().name(),
+            word,
+            "{word} round-trips"
+        );
+    }
+    // A word this build does not know is refused where it is read, naming the
+    // ones it takes; a layer built by hand still resolves to `auto`, so a
+    // caller holding an unknown word asks the machine instead of panicking.
+    let refused = Key::parse("host").expect("the key parses");
+    assert!(refused.check(&Value::Text("hologram".to_owned())).is_err());
+    assert!(File::parse("host = \"hologram\"").is_err());
+    assert_eq!(
+        resolve(&File::default(), &Request::default()).host(),
+        HostChoice::Auto
+    );
+    assert_eq!(
+        refused.value_from_text("herdr").expect("a known host"),
+        Value::Text("herdr".to_owned())
+    );
+}
+
+#[test]
+fn the_host_setting_is_written_to_the_persons_file() {
+    let home = home();
+    let loaded = Loaded::read(home.path(), None).expect("an empty home loads");
+    let key = Key::parse("host").expect("the key parses");
+    let written = loaded
+        .write(
+            home.path(),
+            &Scope::You,
+            &key,
+            Some(Value::Text("herdr-desktop".to_owned())),
+            None,
+        )
+        .expect("the host is stored");
+    assert_eq!(written.resolved.host(), HostChoice::HerdrDesktop);
+    let text = std::fs::read_to_string(user_file(home.path())).expect("the file exists");
+    assert!(text.contains("host = \"herdr-desktop\""), "{text}");
 }
 
 #[test]

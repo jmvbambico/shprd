@@ -17,9 +17,12 @@
 //!
 //! Shepherdr writes its coordinator's news into the Assistant's terminal through
 //! `hc send`, one message per space per pass, with `.news.json` holding what
-//! was told. shprd does the same through the multiplexer seam, into the pane the
-//! run recorded when it launched its coordinator: shprd only types into panes it
-//! started itself, so a person's own tab is never written into.
+//! was told. shprd does the same through the multiplexer seam, into the pane its
+//! [`Coordinator`] names: the pane the run recorded when it launched its own
+//! coordinator, or — in the M10 flow, where a person starts the coordinator
+//! themselves — the repository space's coordinator tab, found by its label. A
+//! pane shprd cannot name is never typed into, so the lines wait for a later
+//! pass.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -40,6 +43,27 @@ use shprd_views::news::{Mark, News, Reading, Snapshot};
 ///
 /// [`shprd_mux::Mux`]: https://docs.rs/shprd-mux
 pub trait Coordinator: Send + Sync {
+    /// The pane this run's news may be typed into, when one is reachable.
+    ///
+    /// The default is the pane the run recorded when it launched its own
+    /// coordinator ([`OrchestratorLaunched`]). The binary's adapter answers
+    /// more than that: when a person starts the coordinator themselves in the
+    /// repository's own space, it finds that space by its label through the
+    /// host and uses the pane `shprd serve` recorded there. `None` means nobody
+    /// can be told right now, so the lines stay queued for a later pass.
+    ///
+    /// It is asked once on a pass that has something to tell, before anything
+    /// is typed: a coordinator that was closed since the last pass is found
+    /// again, or the news waits.
+    ///
+    /// [`OrchestratorLaunched`]: shprd_core::event::EventKind::OrchestratorLaunched
+    fn pane(&self, state: &RunState) -> Option<String> {
+        state
+            .orchestrator
+            .as_ref()
+            .map(|orchestrator| orchestrator.pane.clone())
+    }
+
     /// Type `text` into `pane` as one turn of input, exactly as
     /// [`Mux::prompt`](https://docs.rs/shprd-mux) does for an agent.
     ///
@@ -84,10 +108,10 @@ pub fn memory_path(repo: &Path) -> PathBuf {
 /// Runs one news pass: notes how every task reads, tells what settled, and
 /// keeps the memory.
 ///
-/// Delivery is one message per space per pass, into the pane the run recorded
-/// for its coordinator. A run that never launched one has nobody to tell, so
-/// the lines stay queued (and are dropped after six hours, as Shepherdr drops
-/// them) rather than going into a pane shprd did not start.
+/// Delivery is one message per space per pass, into the pane the pass's
+/// [`Coordinator::pane`] names. A run with no reachable coordinator has nobody
+/// to tell, so the lines stay queued (and are dropped after six hours, as
+/// Shepherdr drops them) rather than going into a pane shprd cannot name.
 ///
 /// The memory is held under its own file lock for the whole pass, as Shepherdr
 /// runs its news inside the tick lock: two processes on one repository — a
@@ -114,13 +138,13 @@ pub fn tell(desk: &NewsDesk, repo: &Path, state: &RunState, snapshot: &Snapshot)
     news.observe(now_ms, snapshot);
     let batches = news.settled(now_ms, desk.settle_ms, snapshot);
     let mut sent = Vec::new();
-    if let Some(pane) = state
-        .orchestrator
-        .as_ref()
-        .map(|orchestrator| orchestrator.pane.as_str())
+    // Only a pass with something to tell asks the host where the coordinator
+    // is: an idle pass should not make host calls for news that does not exist.
+    if !batches.is_empty()
+        && let Some(pane) = desk.coordinator.pane(state)
     {
         for batch in batches {
-            match desk.coordinator.tell(pane, &batch.text()) {
+            match desk.coordinator.tell(&pane, &batch.text()) {
                 Ok(()) => {
                     let report = NewsSent {
                         space: batch.space.clone(),

@@ -3,11 +3,16 @@
 //! `GET /api/health` is the only unauthenticated one — it is the handshake, not
 //! a secret. Everything else is behind the gate in `auth`. Reads answer from the
 //! fold (a snapshot or a change notice), except `GET /api/settings`, which
-//! answers the settings files as they resolve (`crate::settings`). The writes
-//! are `POST /api/action`, which hands one [`Action`] to `actions`, and
-//! `PUT /api/settings`, which writes one settings key.
+//! answers the settings files as they resolve (`crate::settings`), and
+//! `GET /api/roster`, which answers the programs a role may run
+//! (`crate::roster`), and `GET /api/tasks/{id}/changes`, which reads git
+//! (`crate::tasks`). The writes are `POST /api/action`, which hands one
+//! [`Action`] to `actions`, `POST /api/tasks`, which adds one task,
+//! `PUT /api/settings`, which writes one settings key, and the prompt routes,
+//! which store or reset one template's words.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -21,22 +26,28 @@ use axum::routing::{get, post};
 use axum::{Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
+use shprd_agents::data::DataDir;
 use shprd_core::event::Actor;
 use shprd_core::log::{Clock, SystemClock};
 use tower_http::trace::TraceLayer;
 
 use crate::actions;
 use crate::auth;
+use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
-    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ClientMessage, ErrorCode,
-    HealthDto, PromptDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    Action, ActionReply, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto, ChatSendReply,
+    ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto, RosterDto,
+    SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
+use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};
 use crate::hub::Hub;
 use crate::ledger::{self, Stamp};
 use crate::prompts as prompts_api;
+use crate::roster as roster_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
+use crate::tasks;
 
 /// How long a change request waits when it does not say.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
@@ -119,9 +130,16 @@ pub(crate) struct AppState {
     /// The state directory holding `service.json`, the token and the last pass's
     /// outcome ([`crate::pass`]).
     pub(crate) state_dir: PathBuf,
-    /// The `data/` directory the harness table is read from, when this service
-    /// was given one. Only the settings checks need it.
-    pub(crate) data: Option<PathBuf>,
+    /// The shipped data the harness table is read from, when this service was
+    /// given one. Only the settings checks need it.
+    pub(crate) data: Option<DataDir>,
+    /// The binary's spawn and close, when this service was given them.
+    ///
+    /// Three of the person's actions — a start, a retry and a stop — are not an
+    /// event but the host's business, so the binary passes the same closures a
+    /// tick's steps use ([`crate::engine`]). A service without them refuses
+    /// those actions rather than pretending it started an agent.
+    pub(crate) engine: Option<Engine>,
     /// The prompts directory, when the caller set one.
     ///
     /// The binary resolves the configuration root once (where `$XDG_CONFIG_HOME`
@@ -129,6 +147,41 @@ pub(crate) struct AppState {
     /// test always sets it, so neither the service nor a test ever resolves a
     /// path from the process's own XDG settings.
     pub(crate) prompts_dir: Option<PathBuf>,
+    /// The `PATH` a program's own model listing runs with, when the caller
+    /// resolved one.
+    ///
+    /// The binary passes the `PATH` it was started with, because the roster's
+    /// pickers ask a program for the models it runs. A service built by hand — a
+    /// test, for one — leaves it unset, and then only the shipped catalogs are
+    /// read: a request never starts a program this service was not told how to
+    /// find.
+    pub(crate) path_env: Option<String>,
+    /// Where the graph's program is, as the binary found it.
+    ///
+    /// The binary is the one place that reads `graph.dagr`, `PATH` and the
+    /// herdr plugin folder ([`crate::graph::locate`]), so the service answers
+    /// `GET /api/graph` from a value rather than probing a machine it was not
+    /// pointed at. `None` is "nobody told this service", which the route says
+    /// out loud.
+    pub(crate) dagr: Option<crate::graph::Dagr>,
+    /// What types a chat line into a space's agent, when the caller has a host.
+    ///
+    /// The service reads a transcript by itself (it is a file), but typing into
+    /// a pane is the host's verb, so the binary passes it in
+    /// ([`App::with_chat_writer`]) exactly as it passes the tick's spawn path.
+    /// A service without one answers `POST /api/chat` with a refusal rather
+    /// than pretending the line went somewhere.
+    pub(crate) chat: ChatHost,
+    /// The home and data home the agent CLIs run with, when the caller resolved
+    /// them.
+    ///
+    /// A transcript is the CLI's own file, so a chat reads it under the roots
+    /// *that process* had ([`shprd_agents::transcript::Roots`]): the real `HOME`
+    /// it inherits and its XDG data home, never the engine's own `SHPRD_HOME`,
+    /// which no CLI writes a session under. The empty [`Paths::default`] leaves
+    /// it unset, and a chat then says it was not told rather than looking in a
+    /// directory that can never hold a session.
+    pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
 }
 
 /// The directories the binary resolved for the service.
@@ -143,8 +196,14 @@ pub(crate) struct Paths {
     pub(crate) home: Option<PathBuf>,
     /// The prompts directory, when there is one.
     pub(crate) prompts_dir: Option<PathBuf>,
-    /// The `data/` directory the harness table is read from, when there is one.
-    pub(crate) data: Option<PathBuf>,
+    /// The shipped data the harness table is read from, when there is one.
+    pub(crate) data: Option<DataDir>,
+    /// The `PATH` a program's own model listing runs with, when there is one.
+    pub(crate) path_env: Option<String>,
+    /// Where the graph's program is, as the binary found it.
+    pub(crate) dagr: Option<crate::graph::Dagr>,
+    /// The home and data home the agent CLIs run with, when there is one.
+    pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -215,6 +274,12 @@ impl App {
         paths: Paths,
     ) -> Result<Self, ServerError> {
         let files = ServiceFiles::prepare(state_dir)?;
+        // A mod that starts before the run moves has nothing to watch for: the
+        // change file is written once here, naming the log as it stands, so a
+        // panel's first look at it is a real answer rather than a missing file.
+        // It goes before the record, so a client that polls for `service.json`
+        // never finds a record whose change file is still missing.
+        let _ = crate::changes::touch(state_dir, ledger::last_seq(repo).unwrap_or(0));
         files.write_record(port)?;
         let state = AppState {
             repo: repo.to_path_buf(),
@@ -232,7 +297,12 @@ impl App {
             home: paths.home,
             state_dir: state_dir.to_path_buf(),
             data: paths.data,
+            engine: None,
             prompts_dir: paths.prompts_dir,
+            path_env: paths.path_env,
+            dagr: paths.dagr,
+            chat: ChatHost::new(),
+            transcript_roots: paths.transcript_roots,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -296,12 +366,36 @@ impl App {
         self
     }
 
+    /// Look for the agent CLIs' session records under `roots`.
+    ///
+    /// A transcript is the CLI's own file, written under the home and data home
+    /// *that* process resolved, so the binary passes them here
+    /// ([`shprd_agents::transcript::Roots`]) rather than letting the chat guess
+    /// from the settings home. A test points them at its own fixture home, which
+    /// is the only way a chat reads a transcript a test wrote.
+    pub fn with_transcript_roots(mut self, roots: shprd_agents::transcript::Roots) -> Self {
+        self.state.transcript_roots = Some(roots);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Check the settings' roles against the harness table in `data`.
     ///
     /// A service without a data directory still resolves and writes the workflow
     /// keys; it refuses a role, because a role nothing looked at must not be
     /// stored.
     pub fn with_data(mut self, data: PathBuf) -> Self {
+        self.state.data = Some(DataDir::resolve(Some(&data), None));
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Read the harness table from `data`, however its origin resolved.
+    ///
+    /// [`App::with_data`] names a directory; this takes the
+    /// [`DataDir`](shprd_agents::data::DataDir) the binary resolved, which is
+    /// how a test drives a service with only the copy embedded in the binary.
+    pub fn with_data_dir(mut self, data: DataDir) -> Self {
         self.state.data = Some(data);
         self.router = router(self.state.clone());
         self
@@ -313,6 +407,71 @@ impl App {
     /// developer's own prompt files.
     pub fn with_prompts_dir(mut self, dir: PathBuf) -> Self {
         self.state.prompts_dir = Some(dir);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Read a program's own model listing with `path_env`, as `shprd serve`
+    /// does with the `PATH` it was started with.
+    ///
+    /// A test passes a directory of its own — or nothing at all, which keeps
+    /// every listing off the machine.
+    pub fn with_path_env(mut self, path_env: Option<String>) -> Self {
+        self.state.path_env = path_env;
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Answer `GET /api/graph` with the program the binary found.
+    ///
+    /// A test passes its own answer, so the route is proven without probing the
+    /// machine the test runs on.
+    pub fn with_dagr(mut self, dagr: crate::graph::Dagr) -> Self {
+        self.state.dagr = Some(dagr);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Give the service the binary's spawn and close, so the person's start,
+    /// retry and stop actions reach a host.
+    ///
+    /// The service cannot make either itself — a spawn writes a brief and opens
+    /// a tab, a stop closes a space — so they are passed in exactly as the
+    /// tick's own steps are.
+    pub fn with_engine(self, engine: Engine) -> Self {
+        self.with_engine_opt(Some(engine))
+    }
+
+    /// [`App::with_engine`], for a caller that may not have one.
+    ///
+    /// The service's config carries an `Option`, and a builder that turned
+    /// `None` into a refusal at the wrong place would be one more branch to
+    /// keep in step.
+    pub(crate) fn with_engine_opt(mut self, engine: Option<Engine>) -> Self {
+        self.state.engine = engine;
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Type chat lines into a space's agent through `writer`.
+    ///
+    /// The binary passes the host it drives; a test passes a recorder, so the
+    /// API is proved without a terminal and a person's window is never written
+    /// to by a test.
+    pub fn with_chat_writer(self, writer: Arc<dyn ChatWriter>) -> Self {
+        self.with_chat_opt(Some(writer))
+    }
+
+    /// [`App::with_chat_writer`], for a caller that may not have one.
+    ///
+    /// The service's config carries an `Option`, and this is the same shape as
+    /// [`App::with_engine_opt`]: a service started with no host still reads a
+    /// conversation, and refuses only the send.
+    pub(crate) fn with_chat_opt(mut self, writer: Option<Arc<dyn ChatWriter>>) -> Self {
+        self.state.chat = match writer {
+            Some(writer) => ChatHost::with(writer),
+            None => ChatHost::new(),
+        };
         self.router = router(self.state.clone());
         self
     }
@@ -335,9 +494,18 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/changes", get(changes))
         .route("/api/asks", get(asks))
         .route("/api/asks/answer", post(answer))
+        .route("/api/chat", get(chat_page).post(chat_send))
         .route("/api/action", post(action))
+        .route("/api/graph", get(graph))
+        .route("/api/tasks", post(add_task))
+        .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
-        .route("/api/prompts/{id}", get(read_prompt).put(put_prompt))
+        .route("/api/roster", get(roster))
+        .route("/api/prompts", get(list_prompts))
+        .route(
+            "/api/prompts/{id}",
+            get(read_prompt).put(put_prompt).delete(reset_prompt),
+        )
         .route("/api/ws", get(socket))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
@@ -378,6 +546,27 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     Ok(Json(snapshot))
 }
 
+/// `GET /api/graph`: where the graph's program is, and the command that draws
+/// the run.
+///
+/// The block in the Herdr window is a terminal running dagr, so this answers the
+/// command and the reason when there is none; the run's identity is read from
+/// the same log the board is folded from, so a graph and a board never disagree
+/// about which run they show.
+async fn graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiReject> {
+    let repo = state.repo.clone();
+    let dagr = state.dagr.clone();
+    let run = blocking(move || ledger::load(&repo).map(|(state, _)| state.run))
+        .await?
+        .map_err(|err| ApiReject::internal(err.to_string()))?
+        .map(|run| run.run_id);
+    Ok(Json(GraphDto::new(
+        &state.repo,
+        run.as_deref(),
+        dagr.as_ref(),
+    )))
+}
+
 /// `GET /api/asks`: every ask still waiting for the person.
 async fn asks(State(state): State<AppState>) -> Result<Json<AskListDto>, ApiReject> {
     let repo = state.repo.clone();
@@ -395,18 +584,54 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Result<Json<AskRe
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
     let reply = blocking(move || {
-        actions::answer_ask(
-            &repo,
-            &actor,
-            &hub,
-            after_write.as_ref(),
-            &body.task,
-            &body.ask,
-            &body.answer,
-        )
+        let ctx = actions::Context {
+            repo: &repo,
+            actor: &actor,
+            hub: &hub,
+            after_write: after_write.as_ref(),
+            engine: None,
+            merge: None,
+        };
+        actions::answer_ask(&ctx, &body.task, &body.ask, &body.answer)
     })
     .await?;
     Ok(Json(reply?))
+}
+
+/// The query `GET /api/chat` takes.
+#[derive(Debug, Deserialize)]
+struct ChatQuery {
+    /// `coordinator`, or a task's id. Absent means the coordinator.
+    space: Option<String>,
+    /// The cursor the client already has.
+    since: Option<String>,
+}
+
+/// `GET /api/chat`: what a space's agent record gained since `since`.
+///
+/// The answer is a page and a cursor; a client that asks again with the cursor
+/// sees only what was added. Nothing is written, and the agent's own file is the
+/// only copy read.
+async fn chat_page(
+    State(state): State<AppState>,
+    Query(query): Query<ChatQuery>,
+) -> Result<Json<ChatDto>, ApiReject> {
+    let space = Space::parse(query.space.as_deref());
+    let since = query.since.unwrap_or_default();
+    let answer = blocking(move || chat::page(&state, &space, &since)).await?;
+    Ok(Json(answer?))
+}
+
+/// `POST /api/chat`: type one turn into a space's agent, as the person.
+///
+/// The write needs the custom header every other write needs (`auth`), because
+/// it reaches a terminal rather than the ledger.
+async fn chat_send(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ChatSendReply>, ApiReject> {
+    let answer = blocking(move || chat::send(&state, &body)).await?;
+    Ok(Json(answer?))
 }
 
 /// The query `GET /api/changes` takes.
@@ -499,13 +724,55 @@ async fn action(
     let action: Action = Action::from_value(value)
         .map_err(|err| ApiReject::bad_request(format!("a {kind:?} action is malformed: {err}")))?;
 
+    // The context borrows the service, and the work runs on a blocking thread,
+    // so the pieces it needs are moved in and rebuilt there.
     let repo = state.repo.clone();
     let actor = state.actor.clone();
     let hub = state.hub.clone();
     let after_write = state.after_write.clone();
-    let reply =
-        blocking(move || actions::run(&repo, &actor, &hub, after_write.as_ref(), action)).await?;
+    let engine = state.engine.clone();
+    let merge = settings_api::merge_policy(&state);
+    let reply = blocking(move || {
+        let ctx = actions::Context {
+            repo: &repo,
+            actor: &actor,
+            hub: &hub,
+            after_write: after_write.as_ref(),
+            engine: engine.as_ref(),
+            merge,
+        };
+        actions::run(&ctx, action)
+    })
+    .await?;
     Ok(Json(reply?))
+}
+
+/// `POST /api/tasks`: add one task, as `shprd agent task add` does.
+///
+/// The person's own verb: the service's actor is the person who started it, so a
+/// task added from a board is the orchestrator's peer rather than its
+/// subordinate, and the same rules check it either way.
+async fn add_task(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ActionReply>, ApiReject> {
+    let hub = state.hub.clone();
+    let after_write = state.after_write.clone();
+    let reply = blocking(move || tasks::add(&state, &hub, after_write.as_ref(), &body)).await?;
+    Ok(Json(reply?))
+}
+
+/// `GET /api/tasks/{id}/changes`: the task's branch against its base.
+///
+/// The accept card's Changes section: the files the attempt changed and how much.
+/// It reads git — a fold says an attempt exists, and only the repository says
+/// what it did — so it answers the count line and the paths the card draws.
+async fn task_changes(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<crate::dto::TaskChangesDto>, ApiReject> {
+    let answer = blocking(move || tasks::changes(&state, &id)).await?;
+    answer.map(Json)
 }
 
 /// `GET /api/settings`: every key, its value and the layer it came from.
@@ -520,6 +787,23 @@ async fn put_settings(
     body: Bytes,
 ) -> Result<Json<SettingsWriteDto>, ApiReject> {
     let answer = blocking(move || settings_api::write(&state, &body)).await?;
+    answer.map(Json)
+}
+
+/// `GET /api/roster`: the programs a role may run, with their models and levels.
+///
+/// It is a read of the shipped tables, except for a program that lists its own
+/// models: that listing is a process, so it runs on a blocking thread and with
+/// the `PATH` the binary passed in ([`AppState::path_env`]).
+async fn roster(State(state): State<AppState>) -> Result<Json<RosterDto>, ApiReject> {
+    let answer =
+        blocking(move || roster_api::read(state.data.as_ref(), state.path_env.as_deref())).await?;
+    Ok(Json(answer))
+}
+
+/// `GET /api/prompts`: every template this machine has, without its words.
+async fn list_prompts(State(state): State<AppState>) -> Result<Json<PromptListDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::list(&state)).await?;
     answer.map(Json)
 }
 
@@ -539,6 +823,19 @@ async fn put_prompt(
     body: Bytes,
 ) -> Result<Json<PromptDto>, ApiReject> {
     let answer = blocking(move || prompts_api::write(&state, &id, &body)).await?;
+    answer.map(Json)
+}
+
+/// `DELETE /api/prompts/:id`: put the shipped words back over an edit.
+///
+/// It is the templates page's Reset, and the command line's `shprd prompts
+/// reset`: the only route that replaces the person's words, and it does so with
+/// the words this build ships rather than with anything a client sent.
+async fn reset_prompt(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<PromptDto>, ApiReject> {
+    let answer = blocking(move || prompts_api::reset(&state, &id)).await?;
     answer.map(Json)
 }
 

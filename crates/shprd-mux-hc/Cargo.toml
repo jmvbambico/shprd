@@ -1,0 +1,31 @@
+[package]
+name = "shprd-mux-hc"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+description = "Herdr desktop (herdr-core, `hc`) client: framed JSON-RPC, event fold, placement and OSC 7501"
+
+[dependencies]
+shprd-mux = { path = "../shprd-mux" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+    "io-util",
+    "process",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "macros",
+] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "time", "macros"] }
+
+[lints]
+workspace = true

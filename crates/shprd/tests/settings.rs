@@ -14,6 +14,10 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -43,7 +47,9 @@ impl Fixture {
 
     /// Runs `shprd settings <args>` for this fixture.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .arg("settings")
             .args(args)
             .arg("--repo")
@@ -61,11 +67,12 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
 
-    /// Runs `shprd settings <args>` with no data directory anywhere: the
-    /// environment's is removed and the temp home holds none, so the role
-    /// checks have nothing to read.
-    fn run_without_data(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+    /// Runs `shprd settings <args>` with the data the binary ships: no
+    /// `$SHPRD_DATA_DIR` and a temp data home holding no overrides.
+    fn run_with_shipped_data(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .arg("settings")
             .args(args)
             .arg("--repo")
@@ -83,9 +90,41 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
     }
 
+    /// Runs `shprd settings <args>` with a data directory whose harness table
+    /// does not load, so the role checks have nothing trustworthy to read.
+    fn run_with_broken_table(&self, args: &[&str]) -> Output {
+        let data = self.home.path().join("broken-data");
+        fs::create_dir_all(data.join("harness")).expect("the broken table's directory");
+        fs::write(
+            data.join("harness").join("broken.toml"),
+            "id = \"claude\"\n",
+        )
+        .expect("a harness that does not parse");
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
+            .arg("settings")
+            .args(args)
+            .arg("--repo")
+            .arg(&self.repo)
+            .env("SHPRD_DATA_DIR", &data)
+            .env_remove("XDG_DATA_HOME")
+            .env("SHPRD_HOME", self.home.path())
+            .env("HOME", self.home.path())
+            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
+            .env(
+                "XDG_STATE_HOME",
+                self.home.path().join(".local").join("state"),
+            )
+            .output()
+            .unwrap_or_else(|error| panic!("running {BIN} failed: {error}"))
+    }
+
     /// Runs any shprd verb in this fixture's repository.
     fn shprd(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        isolate(&mut command, self.home.path());
+        command
             .args(args)
             .arg("--repo")
             .arg(&self.repo)
@@ -455,6 +494,46 @@ fn a_bad_value_is_refused_before_anything_is_written() {
 }
 
 #[test]
+fn the_host_is_a_setting_like_any_other() {
+    let fixture = Fixture::new();
+    // Unset it resolves to `auto`: the machine decides.
+    let shown = fixture.ok(&["get", "host"]);
+    assert_eq!(shown.trim(), "host = \"auto\"  (built in)");
+
+    let printed = fixture.ok(&["set", "host", "herdr-desktop"]);
+    assert!(printed.contains("ok host stored"), "{printed}");
+    let text = Fixture::text(&fixture.settings());
+    assert!(text.contains("host = \"herdr-desktop\""), "{text}");
+    assert_eq!(
+        fixture.ok(&["get", "host"]).trim(),
+        "host = \"herdr-desktop\"  (you)"
+    );
+
+    // A word that names no host is refused, with the words that do, and nothing
+    // is written.
+    let refused = fixture.refused(&["set", "host", "hologram"]);
+    assert!(
+        refused.contains("auto, herdr-desktop, herdr, tuios"),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.ok(&["get", "host"]).trim(),
+        "host = \"herdr-desktop\"  (you)",
+        "the refused write left the value alone"
+    );
+
+    // A person's own entry for one repository may set it …
+    let printed = fixture.ok(&["set", "host", "tuios", "--for-repo"]);
+    assert!(printed.contains("(this repo)"), "{printed}");
+    // … but a repository's committed file may not: which multiplexer a person
+    // works in is a fact about their screen, not the repository's business.
+    Fixture::write(&fixture.committed(), "version = 1\nhost = \"herdr\"\n");
+    let refused = fixture.refused(&["get", "tasks.base"]);
+    assert!(refused.contains("`host`"), "{refused}");
+    assert!(refused.contains("may only set `tasks.base`"), "{refused}");
+}
+
+#[test]
 fn a_write_aimed_at_a_task_is_refused_with_the_reason() {
     let fixture = Fixture::new();
     let refused = fixture.refused(&["set", "tasks.merge", "checks", "--task", "M9.3"]);
@@ -583,9 +662,9 @@ fn a_task_is_the_nearest_layer_and_setting_one_is_refused() {
 #[test]
 fn a_role_is_never_stored_unchecked() {
     let fixture = Fixture::new();
-    // No data directory: the harness table cannot be read, so a role write must
-    // not be accepted with no warning at all.
-    let refused = fixture.run_without_data(&["set", "roles.worker.agent", "claude"]);
+    // A harness table that does not load: a role write must not be accepted
+    // with no warning at all.
+    let refused = fixture.run_with_broken_table(&["set", "roles.worker.agent", "claude"]);
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(
@@ -599,7 +678,7 @@ fn a_role_is_never_stored_unchecked() {
     );
 
     // A workflow key needs no harness table, so it is still storable.
-    let stored = fixture.run_without_data(&["set", "tasks.max_running", "2"]);
+    let stored = fixture.run_with_broken_table(&["set", "tasks.max_running", "2"]);
     assert_eq!(
         stored.status.code(),
         Some(0),
@@ -609,13 +688,37 @@ fn a_role_is_never_stored_unchecked() {
 }
 
 #[test]
+fn a_role_is_checked_against_the_data_the_binary_ships() {
+    let fixture = Fixture::new();
+    // No `$SHPRD_DATA_DIR` and an empty data home: the harness table the binary
+    // carries is the one a role is checked against, so a good pick is stored.
+    let stored = fixture.run_with_shipped_data(&["set", "roles.worker.agent", "claude"]);
+    let stderr = String::from_utf8_lossy(&stored.stderr).into_owned();
+    assert_eq!(stored.status.code(), Some(0), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&stored.stdout).contains("roles.worker.agent"),
+        "{}",
+        String::from_utf8_lossy(&stored.stdout)
+    );
+    assert!(fixture.settings().exists(), "the role was written");
+
+    // A program the shipped table does not name is still refused: the table is
+    // read and checked, not merely present.
+    let refused = fixture.run_with_shipped_data(&["set", "roles.reviewer.agent", "nope/x"]);
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(stderr.contains("would be refused"), "{stderr}");
+    assert!(stderr.contains("known programs are"), "{stderr}");
+}
+
+#[test]
 fn a_read_says_when_the_roles_could_not_be_checked() {
     let fixture = Fixture::new();
     Fixture::write(
         &fixture.settings(),
         "[roles.worker]\nagent = \"claude\"\n\n[roles.reviewer]\nagent = \"claude\"\n",
     );
-    let output = fixture.run_without_data(&["show"]);
+    let output = fixture.run_with_broken_table(&["show"]);
     assert!(output.status.success(), "reading never refuses");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
@@ -623,7 +726,7 @@ fn a_read_says_when_the_roles_could_not_be_checked() {
         "an unchecked read must say so: {stderr}"
     );
     let document = serde_json::from_str::<Value>(&String::from_utf8_lossy(
-        &fixture.run_without_data(&["show", "--json"]).stdout,
+        &fixture.run_with_broken_table(&["show", "--json"]).stdout,
     ))
     .expect("JSON");
     assert!(
@@ -634,7 +737,7 @@ fn a_read_says_when_the_roles_could_not_be_checked() {
 
     // A checkout with no pick at all has nothing to check, so nothing is said.
     let quiet = Fixture::new();
-    let output = quiet.run_without_data(&["show"]);
+    let output = quiet.run_with_broken_table(&["show"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!stderr.contains("not checked"), "{stderr}");
 }

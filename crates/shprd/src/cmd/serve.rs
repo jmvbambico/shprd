@@ -19,11 +19,12 @@
 //! every step's `tracing::warn!` goes, and it says in its banner whether the
 //! repository has a run at all.
 //!
-//! It also prepares the repository's workspace before the first pass: the label
-//! is derived from the folder name, so a workspace nobody made is a run that
-//! cannot start a task until someone reads a refusal (M9 gate bug 6). The
-//! banner says whether it found the workspace, made it, or could not reach the
-//! host at all.
+//! It also prepares the repository's own space before the first pass: the label
+//! is derived from the folder name, so a space nobody made is a run that cannot
+//! start a task until someone reads a refusal (M9 gate bug 6). That space is the
+//! coordinator's; a task gets its own when it is spawned, and loses it when it
+//! lands. The banner says whether it found the space, made it, or could not
+//! reach the host at all.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -31,18 +32,20 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use serde_json::Value;
+use shprd_core::event::Actor;
 use shprd_core::state::RunInfo;
-use shprd_mux::Mux;
+use shprd_mux::Host;
 use shprd_server::{
-    AfterWrite, Config, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
+    AfterWrite, Config, Engine, NO_RUN_HINT, PassNotice, Service, TickConfig, TickReport, WsLimits,
     shutdown_signal,
 };
 
-use shprd_server::ServerError::AlreadyRunning;
+use shprd_server::ServerError::{AlreadyRunning, ShuttingDown};
 
 use crate::cli::ServeArgs;
 use crate::ctx::{
-    CliError, Ctx, resolve_config_home, resolve_data_dir, resolve_home, resolve_state_home,
+    CliError, Ctx, resolve_agent_data_home, resolve_agent_home, resolve_config_home,
+    resolve_data_dir, resolve_home, resolve_state_home,
 };
 
 /// The variable that sets how much the service logs.
@@ -55,14 +58,21 @@ const LOG_ENV: &str = "SHPRD_LOG";
 pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     install_subscriber();
-    // The workspace is part of the host setup a run needs, and its label is
-    // derived rather than chosen, so the service makes it rather than leaving a
-    // pass to refuse (M9 gate bug 6). A host that cannot be reached is a
-    // warning and not a refusal to serve: the board is still what a person
-    // reads, and the next start can make the workspace.
-    let workspace = prepare_workspace(&crate::cmd::spawn::real_mux(), &ctx.root);
-    if let WorkspaceNotice::Unavailable(reason) = &workspace {
-        tracing::warn!(%reason, "the repository's workspace is not ready: a pass cannot start a task until it is");
+    // The host is resolved once, here, and passed down: every pass, every spawn
+    // and every close of this service drives the same adapter, so a run cannot
+    // half-happen on one multiplexer and half on another (M10.9).
+    let (resolution, host) = crate::host::select();
+    // The coordinator's space is part of the host setup a run needs, and its
+    // label is derived rather than chosen, so the service makes it rather than
+    // leaving a pass to refuse (M9 gate bug 6). A host that cannot be reached is
+    // a warning and not a refusal to serve: the board is still what a person
+    // reads, and the next start can make the space.
+    // The host is the one this service resolved, handed on as an `Arc` because
+    // the tick and the chat's writer both hold it: one service, one adapter.
+    let host: std::sync::Arc<dyn Host> = std::sync::Arc::from(host);
+    let workspace = prepare_space(host.as_ref(), &ctx.root, &home);
+    if let SpaceNotice::Unavailable(reason) = &workspace {
+        tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
     }
     // The banner says whether there is a run at all, and the passes say so again
     // if one is started after the service was: a service that came up too early
@@ -75,12 +85,50 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     let mut config = Config::new(ctx.root.clone(), shprd_server::state_dir(&state_home));
     config.port = args.port;
     config.actor = ctx.actor.clone();
-    config.after_write = Some(after_write(ctx));
+    // The context the service's own writes run with: the same repository, actor
+    // and flags, plus the home this start resolved. A write made through the
+    // API reaches the same dagr projection a CLI write does.
+    let write_ctx = ctx.clone().with_home(Some(home.clone()));
+    config.after_write = Some(after_write(&write_ctx));
+    // Where the graph's program is, found once here: the window's graph block
+    // asks the service rather than probing this machine itself, and the answer
+    // is the same one the projection is checked with.
+    let dagr = crate::cmd::dagr::dagr(&write_ctx);
+    // The window's graph block is a layout terminal block, and Herdr prunes such
+    // a block when its terminal does not exist when the layout loads. The service
+    // is up before the window is, so it starts the terminal; the mod in the
+    // window keeps its own start as a fallback (M10.7).
+    crate::cmd::graph::ensure(&resolution, &dagr, &ctx.root);
+    config.dagr = Some(dagr);
     config.home = Some(home.clone());
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
         &home,
     )));
-    config.data = resolve_data_dir(Some(&ctx.root)).ok();
+    config.data = Some(resolve_data_dir());
+    // A chat reads an agent CLI's own session record, and that file is written
+    // by the CLI under the home and data home *it* resolves — the `HOME` it
+    // inherits (shprd never rewrites it: it is a protected variable) and the
+    // `$XDG_DATA_HOME` this process was started with. The engine's own home is
+    // `SHPRD_HOME`, which no CLI writes a session under, so it is not the root a
+    // transcript is looked for in (M10 gate bug 2). A process with no `$HOME`
+    // leaves this unset rather than guessing, and the chat's route then says it
+    // was not told.
+    config.transcript_roots = resolve_agent_home().map(|agent_home| {
+        shprd_agents::transcript::Roots::new(&agent_home, resolve_agent_data_home().as_deref())
+    });
+    // The roster's pickers ask a program for the models it runs, so the service
+    // is given the `PATH` this process was started with rather than reading one
+    // of its own: what a request may start is the binary's decision, resolved
+    // once, here.
+    config.path_env = Some(std::env::var("PATH").unwrap_or_default());
+    // The chat's writes go through the host, the same adapter every other verb
+    // drives: one code path types into a pane, so a chat line lands where a
+    // prompt does and never in a tab shprd did not open.
+    config.chat = shprd_server::ChatHost::with(Arc::new(HostChat {
+        repo: ctx.root.clone(),
+        home: home.clone(),
+        host: host.clone(),
+    }));
     let tick = tick_config(
         ctx,
         &home,
@@ -89,11 +137,16 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             ctx.json,
             run_at_start.as_ref().map(|run| run.run_id.clone()),
         ),
+        host,
     )?;
     let announced = AnnouncedTick {
         interval_secs: tick.interval.as_secs(),
         max_running: tick.max_running,
     };
+    // The person's start, retry and stop actions are the same two closures the
+    // tick's steps run: one spawn path, one way of closing a task's space, so a
+    // board's Start and the engine's own start cannot drift apart.
+    config.engine = Some(engine_of(&tick.worker));
     config.tick = Some(tick);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -106,11 +159,21 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         // over and leave the running one undiscoverable, so it is refused with
         // the exit code a refused verb uses rather than an error's.
         let service = Service::start(config).await.map_err(|err| match err {
-            AlreadyRunning { .. } => CliError::Invalid(anyhow!(err)),
+            // A service that is up, or one whose stop is still in flight, is a
+            // person's verb that did not happen rather than a fault: the message
+            // says which, and the retry fixes the second.
+            AlreadyRunning { .. } | ShuttingDown { .. } => CliError::Invalid(anyhow!(err)),
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
         let info = service.info().clone();
-        announce(ctx, &info, &announced, run_at_start.as_ref(), &workspace);
+        announce(
+            ctx,
+            &info,
+            &announced,
+            run_at_start.as_ref(),
+            &workspace,
+            &resolution,
+        );
         service
             .run(shutdown_signal())
             .await
@@ -141,33 +204,91 @@ fn install_subscriber() {
         .try_init();
 }
 
-/// What the service did about the repository's workspace when it started.
+/// The host as the chat uses it: one turn of the person's input, into a pane.
 ///
-/// The label is derived ([`crate::cmd::spawn::workspace_name`]) and a host
-/// refuses a duplicate, so nothing here renames, adopts or removes a workspace:
-/// the one shprd uses is the one whose label is exactly right, and everything
-/// else on the host is left alone.
+/// It holds nothing but the repository, because the host is made per call: a
+/// `shprd serve` that runs for days must pick up a herdr that was restarted
+/// under it, and the adapter rediscovers its socket every time it is built. The
+/// pane a space's agent runs in is resolved by the same path `shprd agent
+/// prompt` uses ([`crate::cmd::spawn::prompt_in`]), so a task's chat and a
+/// prompt can never disagree about which tab is the task's.
+struct HostChat {
+    /// The repository whose run log names each space's pane.
+    repo: std::path::PathBuf,
+    /// The home directory the pane record and the tab records live under,
+    /// resolved once by the binary rather than read from the environment on
+    /// every request.
+    home: std::path::PathBuf,
+    /// The host this service drives — the same adapter the tick spawns and
+    /// closes with, so a chat line and a prompt can never go to two hosts.
+    host: Arc<dyn Host>,
+}
+
+impl shprd_server::ChatWriter for HostChat {
+    fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
+        // Reading the log needs the root; the actor is the person, because the
+        // line is theirs — the API never writes to the ledger for a chat turn,
+        // so nothing here can be mistaken for an engine decision.
+        let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
+        match space {
+            None => {
+                crate::cmd::spawn::prompt_coordinator(self.host.as_ref(), &self.home, &ctx, text)
+            }
+            Some(task) => {
+                crate::cmd::spawn::prompt_in(self.host.as_ref(), &self.home, &ctx, task, text)
+            }
+        }
+        .map_err(|err| err.to_string())
+    }
+}
+
+/// What the service did about the repository's own space when it started.
+///
+/// The label is derived ([`crate::cmd::spawn::repo_space_name`]) and a host
+/// refuses a duplicate, so nothing here renames, adopts or removes a space: the
+/// one shprd uses is the one whose label is exactly right, and everything else
+/// on the host is left alone. Task spaces are not the service's business at
+/// startup: they come and go with their tasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkspaceNotice {
-    /// The workspace was already there and is reused.
-    Reused(String),
-    /// The workspace was missing and is created at the repository root.
-    Created(String),
+pub(crate) enum SpaceNotice {
+    /// The space was already there and is reused, with the pane recorded for the
+    /// coordinator's chat when the space has a tab.
+    Reused(String, Option<String>),
+    /// The space was missing and is created at the repository root, with that
+    /// pane.
+    Created(String, Option<String>),
     /// It could not be found or made; the reason names the label it wanted.
     Unavailable(String),
 }
 
-/// Finds the repository's workspace, or creates it at the repository root.
+/// Finds the repository's own space, or creates it at the repository root.
 ///
 /// This is the step that used to be left to a person (`docs/multiplexers.md`
 /// states the convention, but the folder name is load-bearing and a label that
 /// was almost right made every pass refuse). A host that cannot be asked at all
 /// is reported rather than fatal, because the API is useful without one.
-fn prepare_workspace(mux: &dyn Mux, repo: &Path) -> WorkspaceNotice {
-    match crate::cmd::spawn::ensure_workspace(mux, repo) {
-        Ok(prepared) if prepared.created => WorkspaceNotice::Created(prepared.workspace.name),
-        Ok(prepared) => WorkspaceNotice::Reused(prepared.workspace.name),
-        Err(err) => WorkspaceNotice::Unavailable(err.to_string()),
+fn prepare_space(mux: &dyn Host, repo: &Path, home: &Path) -> SpaceNotice {
+    let prepared = match crate::cmd::spawn::ensure_repo_space(mux, repo) {
+        Ok(prepared) => prepared,
+        Err(err) => return SpaceNotice::Unavailable(err.to_string()),
+    };
+    // The coordinator's chat types into this space, and nothing lists the space
+    // for it later, so the pane is recorded here — once, by the start that made
+    // or found the space. A space with no tab records nothing, and a chat then
+    // refuses rather than guessing at a pane.
+    let pane = match crate::cmd::spawn::record_coordinator_pane(home, mux, &prepared.space) {
+        Ok(pane) => pane.map(|pane| pane.as_str().to_string()),
+        // A record that cannot be written is not a reason to refuse to serve:
+        // the board is still what a person reads, and the chat says why it has
+        // nowhere to type.
+        Err(err) => {
+            tracing::warn!(%err, "the coordinator's pane could not be recorded");
+            None
+        }
+    };
+    match prepared.created {
+        true => SpaceNotice::Created(prepared.space.name, pane),
+        false => SpaceNotice::Reused(prepared.space.name, pane),
     }
 }
 
@@ -213,17 +334,37 @@ fn tick_config(
     home: &Path,
     hub: shprd_server::hub::Hub,
     notice: PassNotice,
+    host: Arc<dyn Host>,
 ) -> Result<TickConfig, CliError> {
     let config = crate::cmd::tick::load_config(ctx, home)?;
+    // The interval the banner prints is the one the first pass will act on, not
+    // only the one the config file named: `tasks.tick_secs` is read per pass, and
+    // a banner that disagreed with the first pass would be the very confusion
+    // M10 gate bug 4 was.
+    let (config, settings_interval) = shprd_server::tick::pass_config(home, &ctx.root, &config);
     let max_running = config.tick.max_running;
-    let interval = Duration::from_secs(config.tick.interval_secs);
-    let worker = crate::cmd::tick::worker_with_hub(ctx, home, config, hub)?;
+    let interval = Duration::from_secs(settings_interval.unwrap_or(config.tick.interval_secs));
+    let worker = crate::cmd::tick::worker_with_hub(ctx, home, config, hub, host)?;
     Ok(TickConfig {
         worker: std::sync::Arc::new(worker),
         interval,
         max_running,
         notice: Some(notice),
     })
+}
+
+/// The binary's spawn and close, as the API's actions call them.
+///
+/// Both are the tick worker's own: it was built with the same closures a pass
+/// uses, so a person's start leaves exactly what the engine's start leaves. A
+/// worker built without a host's close (a record-only pass) gets an engine that
+/// says so when a stop is asked for.
+fn engine_of(worker: &std::sync::Arc<shprd_server::Worker>) -> Engine {
+    let engine = Engine::new(worker.start.clone());
+    match worker.close_worker.clone() {
+        Some(close) => engine.with_stop(close),
+        None => engine,
+    }
 }
 
 /// What the startup line says about the tick.
@@ -242,11 +383,13 @@ struct AnnouncedTick {
 fn after_write(ctx: &Ctx) -> AfterWrite {
     let actor = ctx.actor.clone();
     let no_dagr = ctx.no_dagr;
+    let home = ctx.home.clone();
     AfterWrite::new(move |repo| {
         if no_dagr {
             return;
         }
-        let write_ctx = Ctx::new(repo.to_path_buf(), actor.clone(), false, false);
+        let write_ctx =
+            Ctx::new(repo.to_path_buf(), actor.clone(), false, false).with_home(home.clone());
         crate::cmd::agent::sync_dagr(&write_ctx);
     })
 }
@@ -262,7 +405,8 @@ fn announce(
     info: &shprd_server::ServiceInfo,
     tick: &AnnouncedTick,
     run: Option<&RunInfo>,
-    workspace: &WorkspaceNotice,
+    space: &SpaceNotice,
+    host: &crate::host::Resolution,
 ) {
     let limits = WsLimits::default();
     let hint = run.is_none().then_some(NO_RUN_HINT);
@@ -281,7 +425,16 @@ fn announce(
                 "base": run.base_branch,
                 "integration": run.integration_branch,
             })),
-            "workspace": workspace_json(workspace),
+            "space": space_json(space),
+            "host": {
+                "kind": host.kind.name(),
+                "binary": host.kind.binary(),
+                "setting": host.setting.name(),
+                "why": host.why,
+                "fell_back": host.fell_back,
+                "herdr_core": host.probe.core,
+                "window": host.probe.window,
+            },
             "hint": hint,
             "ws": {
                 "ping_secs": limits.ping.as_secs(),
@@ -310,7 +463,8 @@ fn announce(
         ),
         None => println!("   run:          {NO_RUN_HINT}"),
     }
-    println!("   workspace:    {}", workspace_line(workspace, &ctx.root));
+    println!("   space:        {}", space_line(space, &ctx.root));
+    println!("   host:         {}", host.line());
     println!("   token:        {}", info.token_path.display());
     println!("   service.json: {}", info.service_json.display());
     println!(
@@ -326,38 +480,43 @@ fn announce(
     println!("   stop with Ctrl-C or SIGTERM");
 }
 
-/// The banner's workspace line: what the service found, made, or could not make.
+/// The banner's space line: what the service found, made, or could not make.
 ///
 /// It is one line either way, so a service whose host is missing still prints a
-/// banner a person can read, and the failure to prepare the workspace is in the
+/// banner a person can read, and the failure to prepare the space is in the
 /// place the rest of the setup is.
-fn workspace_line(notice: &WorkspaceNotice, root: &Path) -> String {
+fn space_line(notice: &SpaceNotice, root: &Path) -> String {
+    let coordinator = |pane: &Option<String>| match pane {
+        Some(pane) => format!(", the coordinator's pane {pane}"),
+        None => String::from(", no tab for the coordinator yet"),
+    };
     match notice {
-        WorkspaceNotice::Created(label) => {
-            format!(
-                "created {label:?} at the repository root {}",
-                root.display()
-            )
+        SpaceNotice::Created(label, pane) => format!(
+            "created {label:?} at the repository root {}{}",
+            root.display(),
+            coordinator(pane)
+        ),
+        SpaceNotice::Reused(label, pane) => {
+            format!("{label:?} (already there, reused){}", coordinator(pane))
         }
-        WorkspaceNotice::Reused(label) => format!("{label:?} (already there, reused)"),
-        WorkspaceNotice::Unavailable(reason) => format!("not ready: {reason}"),
+        SpaceNotice::Unavailable(reason) => format!("not ready: {reason}"),
     }
 }
 
-/// The banner's workspace line, as the one document's field.
+/// The banner's space line, as the one document's field.
 ///
-/// A workspace that could not be prepared has no label to report, so it says so
+/// A space that could not be prepared has no label to report, so it says so
 /// and carries the reason: the label is what a person fixes, and the reason is
 /// the only thing that says which label was wanted.
-fn workspace_json(notice: &WorkspaceNotice) -> Value {
+fn space_json(notice: &SpaceNotice) -> Value {
     match notice {
-        WorkspaceNotice::Created(label) => {
-            serde_json::json!({ "label": label, "state": "created" })
+        SpaceNotice::Created(label, pane) => {
+            serde_json::json!({ "label": label, "state": "created", "pane": pane })
         }
-        WorkspaceNotice::Reused(label) => {
-            serde_json::json!({ "label": label, "state": "reused" })
+        SpaceNotice::Reused(label, pane) => {
+            serde_json::json!({ "label": label, "state": "reused", "pane": pane })
         }
-        WorkspaceNotice::Unavailable(reason) => {
+        SpaceNotice::Unavailable(reason) => {
             serde_json::json!({ "label": Value::Null, "state": "unavailable", "reason": reason })
         }
     }
@@ -369,77 +528,107 @@ mod tests {
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
 
-    /// The label a repository's workspace carries, as the banner reports it.
+    /// The id of the space `label` names, for the calls that take one.
+    fn notice_space(mux: &FakeMux, label: &str) -> shprd_mux::SpaceId {
+        mux.find_space(label)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("{label:?} is there"))
+            .id
+    }
+
+    /// The label a repository's own space carries, as the banner reports it.
     fn label_of(repo: &Path) -> String {
         match crate::cmd::spawn::repo_name(repo) {
-            Ok(name) => crate::cmd::spawn::workspace_name(&name),
+            Ok(name) => crate::cmd::spawn::repo_space_name(&name),
             Err(err) => panic!("{err}"),
         }
     }
 
     #[test]
-    fn a_service_makes_the_missing_workspace_at_the_repository_root() {
+    fn a_service_makes_the_missing_space_at_the_repository_root() {
         // Bug 6 of the M9 gate: the label is derived from the folder name, and
-        // the workspace was left to a person, so a run refused every pass. The
+        // the space was left to a person, so a run refused every pass. The
         // service creates it, with exactly that label, where the repository is.
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_starter_tab();
         let label = label_of(repo.path());
 
-        let notice = prepare_workspace(&mux, repo.path());
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let notice = prepare_space(&mux, repo.path(), home.path());
 
-        assert_eq!(notice, WorkspaceNotice::Created(label.clone()));
+        let SpaceNotice::Created(reported, pane) = &notice else {
+            panic!("the space is created, not {notice:?}");
+        };
+        assert_eq!(reported, &label);
+        // The space's own first tab is the pane the chat may reach, and it is
+        // recorded once, here.
+        let recorded =
+            std::fs::read_to_string(crate::cmd::spawn::coordinator_pane_path(home.path()))
+                .unwrap_or_else(|err| panic!("the pane is recorded: {err}"));
+        assert_eq!(recorded.trim(), pane.clone().unwrap_or_default());
         assert_eq!(
             mux.calls(),
             vec![
-                Call::FindWorkspace(label.clone()),
-                Call::CreateWorkspace(label.clone(), repo.path().to_path_buf()),
+                Call::FindSpace(label.clone()),
+                Call::CreateSpace(label.clone(), repo.path().to_path_buf()),
+                Call::ListTabs(notice_space(&mux, &label)),
             ],
-            "one lookup, one creation, and nothing else touched"
+            "one lookup, one creation, one look at its tabs, and nothing else touched"
         );
-        let line = workspace_line(&notice, repo.path());
+        let line = space_line(&notice, repo.path());
         assert!(line.contains("created"), "{line}");
         assert!(line.contains(&label), "the label is named: {line}");
     }
 
     #[test]
-    fn a_service_reuses_the_workspace_that_is_already_there() {
+    fn a_service_reuses_the_space_that_is_already_there() {
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let mux = FakeMux::default();
+        let mux = FakeMux::default().with_starter_tab();
         let label = label_of(repo.path());
         let made = mux
-            .create_workspace(&label, repo.path())
+            .create_space(&label, repo.path())
             .unwrap_or_else(|err| panic!("{err}"));
         let _ = mux.take_calls();
 
-        let notice = prepare_workspace(&mux, repo.path());
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let notice = prepare_space(&mux, repo.path(), home.path());
 
-        assert_eq!(notice, WorkspaceNotice::Reused(label.clone()));
+        let SpaceNotice::Reused(reported, pane) = &notice else {
+            panic!("the space is reused, not {notice:?}");
+        };
+        assert_eq!(reported, &label);
+        assert!(
+            pane.is_some(),
+            "the pane the chat may reach is recorded on a reused space too"
+        );
         assert_eq!(
             mux.calls(),
-            vec![Call::FindWorkspace(label)],
-            "a lookup only: nothing is created, renamed or focused"
+            vec![
+                Call::FindSpace(label.clone()),
+                Call::ListTabs(notice_space(&mux, &label)),
+            ],
+            "a lookup, then the tabs to find the pane: nothing created, renamed or focused"
         );
         let found = mux
-            .find_workspace(&made.name)
+            .find_space(&made.name)
             .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("the workspace is gone"));
+            .unwrap_or_else(|| panic!("the space is gone"));
         assert_eq!(found.id, made.id);
     }
 
     #[test]
-    fn a_workspace_that_could_not_be_made_is_reported_not_hidden() {
+    fn a_space_that_could_not_be_made_is_reported_not_hidden() {
         // A host that is not there must not stop the service: the API is still
         // the board a person reads. The banner says the one thing a pass will
         // fail on, so it is not silent.
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let message = crate::cmd::spawn::missing_workspace_message(
+        let message = crate::cmd::spawn::missing_space_message(
             &label_of(repo.path()),
             &[String::from("shprd · gate repo")],
         );
-        let notice = WorkspaceNotice::Unavailable(message);
+        let notice = SpaceNotice::Unavailable(message);
 
-        let line = workspace_line(&notice, repo.path());
+        let line = space_line(&notice, repo.path());
         assert!(line.starts_with("not ready:"), "{line}");
         assert!(
             line.contains(&label_of(repo.path())),
@@ -449,7 +638,7 @@ mod tests {
             line.contains("shprd · gate repo"),
             "and the one it has: {line}"
         );
-        assert_eq!(workspace_json(&notice)["state"], "unavailable");
-        assert_eq!(workspace_json(&notice)["label"], Value::Null);
+        assert_eq!(space_json(&notice)["state"], "unavailable");
+        assert_eq!(space_json(&notice)["label"], Value::Null);
     }
 }

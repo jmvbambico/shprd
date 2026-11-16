@@ -116,6 +116,20 @@ impl Failure {
             .as_deref()
             .is_some_and(|code| code.ends_with("not_found"))
     }
+
+    /// True when the host allowed the verb and refused *this* caller it.
+    ///
+    /// herdr never answers this; tuios does, for every verb that needs the
+    /// `admin` grant (`new-window`, `new-session`, `pane.split`), with
+    /// `{"code":"forbidden","message":"… needs the admin grant …"}` (M7g §2.7).
+    /// The difference matters: a missing verb cannot be fixed, and a missing
+    /// grant is one line of the host's own instructions away.
+    pub(crate) fn is_forbidden(&self) -> bool {
+        matches!(
+            self.code.as_deref(),
+            Some("forbidden" | "grant_required" | "permission_denied")
+        )
+    }
 }
 
 /// Keep a diagnosis short enough to log on one line.
@@ -194,16 +208,50 @@ fn parse_object(text: &str) -> Option<std::result::Result<Value, Failure>> {
 }
 
 impl HerdrMux {
-    /// Run `herdr` with `args` and capture both streams.
-    fn answer(&self, args: &[&str]) -> std::result::Result<Answer, Failure> {
+    /// The environment variables a `herdr` call must not inherit.
+    ///
+    /// A herdr pane exports the pane it is in (`HERDR_ENV`, `HERDR_PANE_ID`,
+    /// `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERDR_SESSION`), and `herdr` uses
+    /// them as the *default target*: `pane split` with no target splits the
+    /// calling pane. An adapter explicitly pointed at a server therefore removes
+    /// them, so a sandbox or a live test that names a private server can only act
+    /// on that server — never on the pane it happened to be started from. An
+    /// adapter with no server of its own keeps them: that is the person's own
+    /// session, which is exactly what they asked for.
+    const PINNED_SESSION_VARS: [&'static str; 6] = [
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_SESSION",
+        "HC_SESSION",
+    ];
+
+    /// The `herdr` command this adapter runs for `args`, before it is started.
+    ///
+    /// Kept apart from [`HerdrMux::answer`] so the environment a command is
+    /// given can be asserted without a process: see the test at the bottom of
+    /// this file.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(&self.bin);
         command.args(args);
         if let Some(socket) = &self.socket {
             command.env("HERDR_SOCKET_PATH", socket);
+            // A named server means a named place to work; the pane that started
+            // this process is not in it.
+            for name in Self::PINNED_SESSION_VARS {
+                command.env_remove(name);
+            }
         }
         if let Some(home) = &self.home {
             command.env("HOME", home);
         }
+        command
+    }
+
+    /// Run `herdr` with `args` and capture both streams.
+    fn answer(&self, args: &[&str]) -> std::result::Result<Answer, Failure> {
+        let mut command = self.command(args);
         let output = output_retrying_busy(&mut command).map_err(|error| {
             Failure::new(format!("could not start {}: {error}", self.bin.display()))
         })?;
@@ -253,6 +301,41 @@ impl HerdrMux {
         }
     }
 
+    /// [`HerdrMux::call_as`] for a verb the host may refuse this caller: a
+    /// `forbidden` code becomes [`MuxError::Forbidden`] naming `verb`, so a
+    /// caller can tell "not allowed" from "not there".
+    pub(crate) fn call_verb(
+        &self,
+        verb: &'static str,
+        what: &'static str,
+        id: &str,
+        context: &str,
+        args: &[&str],
+    ) -> Result<Option<Value>> {
+        let answer = self.answer(args).map_err(|failure| {
+            let error = failure.into_mux_error_for(verb, context);
+            self.note_if_forbidden(verb, &error);
+            error
+        })?;
+        match answer.object() {
+            Ok(value) => Ok(value.and_then(|value| value.get("result").cloned())),
+            Err(failure) if failure.is_not_found() => Err(MuxError::not_found(what, id)),
+            Err(failure) => {
+                let error = failure.into_mux_error_for(verb, context);
+                self.note_if_forbidden(verb, &error);
+                Err(error)
+            }
+        }
+    }
+
+    /// Remember a refusal, so [`shprd_mux::Host::capabilities`] stops promising
+    /// a verb the host will not allow this caller.
+    fn note_if_forbidden(&self, verb: &'static str, error: &MuxError) {
+        if matches!(error, MuxError::Forbidden { .. }) {
+            self.note_refusal(verb);
+        }
+    }
+
     /// A command that prints text rather than JSON, e.g. `pane read`.
     pub(crate) fn call_text(&self, context: &str, args: &[&str]) -> Result<String> {
         let answer = self
@@ -269,6 +352,18 @@ impl Failure {
     /// Turn this failure into the trait error, naming what shprd was doing.
     pub(crate) fn into_mux_error(self, context: &str) -> MuxError {
         MuxError::command(context.to_string(), self.detail())
+    }
+
+    /// Turn this failure into the trait error for `verb`, keeping a host's
+    /// refusal to allow it (`forbidden` on tuios) apart from a failure.
+    ///
+    /// The refusal's message is the host's own, verbatim: it names the grant
+    /// and where to give it, which is the only thing a person can act on.
+    pub(crate) fn into_mux_error_for(self, verb: &'static str, context: &str) -> MuxError {
+        if self.is_forbidden() {
+            return MuxError::forbidden(verb, truncate(&self.message));
+        }
+        self.into_mux_error(context)
     }
 }
 
@@ -317,6 +412,12 @@ mod tests {
     }
 
     const WORKSPACE_LIST: &str = include_str!("../tests/fixtures/workspace_list.json");
+    /// tuios's refusal of a verb that needs the `admin` grant, verbatim from
+    /// M7g §2.7: the message names the grant and where a person gives it.
+    const FORBIDDEN: &str = r#"{"id":"cli:tab:create","error":{"code":"forbidden","message":"new-window is refused for plugin shprd.probe: new-window needs the admin grant. The plugin holds read,write. Nothing was done. A plugin asks for grants in [permissions] of tuios-plugin.toml."}}"#;
+    /// tuios's answer for a method it does not implement at all, verbatim from
+    /// M7g §2.7: this is "no such verb", not "not allowed".
+    const UNSUPPORTED: &str = r#"{"id":"cli:workspace:move","error":{"code":"unsupported","message":"tuios does not answer workspace.move. See the herdr compatibility section of docs/AGENT_STATE.md for what it answers"}}"#;
     const PANE_NOT_FOUND: &str = include_str!("../tests/fixtures/pane_read_not_found.json");
     const SERVER_DOWN: &str = r#"{"id":"cli:workspace:list","error":{"code":"server_not_running","message":"no herdr server is running at /tmp/fixture/herdr.sock; run `herdr` to start or attach it"}}"#;
     const PANE_READ: &str = include_str!("../tests/fixtures/pane_read.txt");
@@ -369,6 +470,74 @@ mod tests {
     }
 
     #[test]
+    fn a_forbidden_reply_is_the_host_refusing_this_caller_not_a_broken_host() {
+        let failure = answer("", FORBIDDEN, false).object().err().unwrap();
+        assert_eq!(failure.code.as_deref(), Some("forbidden"));
+        assert!(failure.is_forbidden());
+        assert!(!failure.is_not_found());
+        let error = failure.into_mux_error_for("spawn", "create tab");
+        match &error {
+            MuxError::Forbidden { verb, reason } => {
+                assert_eq!(*verb, "spawn");
+                assert!(
+                    reason.contains("admin grant"),
+                    "the host's instruction is kept verbatim: {reason}"
+                );
+            }
+            other => panic!("a forbidden reply must be Forbidden, got {other:?}"),
+        }
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "this host refused the spawn: {}",
+                match &error {
+                    MuxError::Forbidden { reason, .. } => reason.clone(),
+                    _ => String::new(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_forbidden_reply_through_call_as_names_the_default_verb() {
+        // `call_as` has no verb to name, so a refusal that reaches it is still a
+        // command failure rather than being swallowed: only `call_verb` knows
+        // what was being attempted.
+        let failure = answer("", FORBIDDEN, false).object().err().unwrap();
+        assert!(matches!(
+            failure.into_mux_error("create tab"),
+            MuxError::Command { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unimplemented_verb_is_not_read_as_a_permission_problem() {
+        let failure = answer("", UNSUPPORTED, false).object().err().unwrap();
+        assert_eq!(failure.code.as_deref(), Some("unsupported"));
+        assert!(!failure.is_forbidden());
+        assert!(matches!(
+            failure.into_mux_error_for("doc", "open a document"),
+            MuxError::Command { .. }
+        ));
+    }
+
+    #[test]
+    fn the_other_words_a_host_uses_for_a_refusal_are_recognised() {
+        for code in ["grant_required", "permission_denied"] {
+            let failure = Failure {
+                code: Some(code.to_string()),
+                message: "no".to_string(),
+            };
+            assert!(failure.is_forbidden(), "{code} is a refusal");
+        }
+        let missing = Failure {
+            code: Some("pane_not_found".to_string()),
+            message: "no".to_string(),
+        };
+        assert!(!missing.is_forbidden());
+    }
+
+    #[test]
     fn a_silent_non_zero_exit_reports_stderr_text() {
         let failure = answer("", "kaboom: no socket", false)
             .object()
@@ -406,5 +575,52 @@ mod tests {
     fn details_never_span_lines() {
         let failure = Failure::new("first\nsecond");
         assert_eq!(failure.detail(), "first second");
+    }
+
+    /// An adapter that names its own server removes the pane variables a herdr
+    /// pane exported to this process: they are `herdr`'s own default target, so
+    /// keeping them would let one command act on the pane that started it even
+    /// though the adapter was told which server to work in.
+    #[test]
+    fn an_adapter_with_its_own_server_does_not_carry_the_callers_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let mux =
+            HerdrMux::with_bin(dir.path().join("herdr")).with_environment(&socket, dir.path());
+
+        let command = mux.command(&["version"]);
+        let value = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new(name))
+                .map(|(_, value)| value.map(std::borrow::ToOwned::to_owned))
+        };
+        for name in HerdrMux::PINNED_SESSION_VARS {
+            assert_eq!(
+                value(name),
+                Some(None),
+                "{name} is cleared, so herdr cannot default to the pane that started shprd"
+            );
+        }
+        assert_eq!(
+            value("HERDR_SOCKET_PATH").flatten().as_deref(),
+            Some(socket.as_os_str()),
+            "the server the adapter does name still reaches the child"
+        );
+    }
+
+    /// An adapter with no server of its own is the person's own session, so it
+    /// leaves the pane variables alone: that is exactly what they asked for.
+    #[test]
+    fn an_adapter_with_no_server_keeps_the_environment_it_was_given() {
+        let mux = HerdrMux::with_bin("/usr/bin/true");
+        let command = mux.command(&["version"]);
+        assert!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "HERDR_SOCKET_PATH")
+                .is_none(),
+            "nothing is overridden when the adapter was not told which host to use"
+        );
     }
 }

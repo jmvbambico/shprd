@@ -521,6 +521,90 @@ fn a_failed_step_is_readable_after_the_pass() {
 }
 
 #[test]
+fn a_step_that_fails_the_same_way_three_passes_asks_a_person_once() {
+    // Bug 3 of gate run #4: a `start` that failed every pass warned every pass
+    // and never reached a person, so the board showed an unchanged row while
+    // 99 identical lines went to a terminal nobody read. The third identical
+    // failure is a card, recorded once, naming the step and its error.
+    let fixture = Fixture::new(vec![started(), added(2, "C2")]);
+    let start: shprd_server::Starter = Arc::new(|_repo: &Path, _task: &str| {
+        Err(String::from(
+            "task \"C2\" path \"calc.py\" overlaps task \"C1\"",
+        ))
+    });
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    );
+
+    for pass in 1..=2 {
+        let report = worker.tick().expect("the pass ran");
+        assert!(!report.ok(), "pass {pass} failed as scripted");
+        let state = fixture.state();
+        assert!(
+            state.escalations.is_empty(),
+            "pass {pass} is a warning, not yet a card: {:?}",
+            state.escalations
+        );
+    }
+
+    worker.tick().expect("the third pass ran");
+    let state = fixture.state();
+    assert_eq!(state.escalations.len(), 1, "{:?}", state.escalations);
+    let card = &state.escalations[0];
+    assert_eq!(card.task.as_deref(), Some("C2"));
+    assert!(
+        card.body
+            .contains("its `start` step has failed the same way 3 passes in a row"),
+        "{}",
+        card.body
+    );
+    assert!(
+        card.body.contains("(attempt 0)"),
+        "the card is about the attempt the failure happened in, so a fix or a \
+         new attempt retires it: {}",
+        card.body
+    );
+    assert!(
+        card.body.contains("overlaps task"),
+        "the card names the error: {}",
+        card.body
+    );
+    assert!(
+        card.default_action.contains("retries `start`"),
+        "the card says what happens once it is fixed: {}",
+        card.default_action
+    );
+
+    // A fourth pass writes no second card for the same run of failures.
+    worker.tick().expect("the fourth pass ran");
+    assert_eq!(
+        fixture.state().escalations.len(),
+        1,
+        "one run of failures is one card"
+    );
+
+    // And the board reads the card as the person's: the row says Needs you,
+    // exactly as `needs` does.
+    let now = SystemClock.now_ms();
+    let board = shprd_server::dto::SnapshotDto::from_state(&fixture.state(), now);
+    assert_eq!(board.needs.len(), 1, "{:?}", board.needs);
+    let row = board
+        .tasks
+        .iter()
+        .find(|task| task.id == "C2")
+        .expect("C2's row");
+    assert_eq!(
+        row.derived.status,
+        shprd_server::dto::DerivedStatusDto::NeedsYou,
+        "{:?}",
+        row.derived
+    );
+}
+
+#[test]
 fn a_pass_that_cannot_read_the_run_is_recorded_too() {
     // The one failure that ends a pass before any step runs is the one a
     // person must hear about, because nothing else will move.
@@ -1334,6 +1418,46 @@ fn two_passes_never_overlap() {
         peak.load(Ordering::SeqCst),
         1,
         "two passes ran their steps at the same time"
+    );
+}
+
+#[test]
+fn the_running_loop_takes_a_new_tick_interval_without_a_restart() {
+    // Bug 4 of the M10 gate at the loop, not just the pass: the loop sleeps what
+    // the last pass answered, so a `tasks.tick_secs` written while the service
+    // is up changes how soon the next pass comes. The fixture's first passes are
+    // a second apart; the settings then name one second, and the count over a
+    // fixed wall-clock window has to fall.
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    let forge: SharedForge = Arc::new(NoForge);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let start: shprd_server::Starter = Arc::new(move |_repo: &Path, _task: &str| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Err(String::from("no agent CLI is installed"))
+    });
+    let worker = Arc::new(fixture.worker(
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        start,
+    ));
+    // The person's answer, written before the loop starts: one second, not the
+    // fifteen the service would have started with.
+    fixture.settings("version = 1\n\n[tasks]\ntick_secs = 1\n");
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(async {
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+        };
+        // Started with a minute between passes: without reading the setting the
+        // loop would run once and stop, so a count above one is the proof.
+        tick::run(worker, Duration::from_secs(60), None, stop).await;
+    });
+    assert!(
+        attempts.load(Ordering::SeqCst) > 1,
+        "the loop kept the interval it started with instead of the setting: {} pass(es)",
+        attempts.load(Ordering::SeqCst)
     );
 }
 
@@ -2205,6 +2329,72 @@ fn the_concurrency_cap_is_read_from_the_settings_on_every_pass() {
     fixture.settings("version = 1\n\n[tasks]\nmax_running = 2\n");
     let second = worker.tick().expect("the second pass ran");
     assert_eq!(second.steps.len(), 2, "{second:?}");
+}
+
+#[test]
+fn the_tick_interval_is_read_from_the_settings_on_every_pass() {
+    // Bug 4 of the M10 gate: `settings set tasks.tick_secs 10` was written and
+    // shown, and the running service kept its 15 s. The settings are re-read per
+    // pass and the pass answers the interval it read, so the loop sleeps the new
+    // one with no restart.
+    let fixture = Fixture::new(vec![started(), added(2, "A")]);
+    let forge: SharedForge = Arc::new(NoForge);
+    let worker = Fixture::worker(
+        &fixture,
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let started_with = Duration::from_secs(20);
+
+    // Nothing names the key: the pass answers none, so the loop keeps the
+    // interval it was started with.
+    let unset = worker.tick().expect("the pass ran");
+    assert_eq!(unset.interval_secs, None, "nobody set it: {unset:?}");
+    assert_eq!(unset.next_interval(started_with), started_with);
+
+    // The person's setting is picked up by the same worker's next pass.
+    fixture.settings("version = 1\n\n[tasks]\ntick_secs = 10\n");
+    let ten = worker.tick().expect("the second pass ran");
+    assert_eq!(
+        ten.interval_secs,
+        Some(10),
+        "the setting is read per pass: {ten:?}"
+    );
+    assert_eq!(ten.next_interval(started_with), Duration::from_secs(10));
+
+    // And a second change is picked up the same way.
+    fixture.settings("version = 1\n\n[tasks]\ntick_secs = 3\n");
+    let three = worker.tick().expect("the third pass ran");
+    assert_eq!(three.next_interval(started_with), Duration::from_secs(3));
+
+    // The older `[tick] interval_secs` spelling reaches the same key through
+    // the settings' legacy layer, read from the person's pre-M9 `config.toml`
+    // rather than `settings.toml`, so a run that never migrated still moves.
+    std::fs::remove_file(
+        fixture
+            .home
+            .join(".config")
+            .join("shprd")
+            .join("settings.toml"),
+    )
+    .expect("the settings file goes");
+    std::fs::write(
+        fixture
+            .home
+            .join(".config")
+            .join("shprd")
+            .join("config.toml"),
+        "[tick]\ninterval_secs = 7\n",
+    )
+    .expect("write the old config");
+    let seven = worker.tick().expect("the fourth pass ran");
+    assert_eq!(
+        seven.next_interval(started_with),
+        Duration::from_secs(7),
+        "the old config key is read too"
+    );
 }
 
 /// A facts source that lets another decider win the race for the verdict.

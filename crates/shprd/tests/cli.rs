@@ -8,6 +8,10 @@ use serde_json::Value;
 use shprd_core::event::{Actor, Event, EventKind, ResourceAction, ResourceKind};
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -23,11 +27,9 @@ fn repo() -> TempDir {
 fn run(root: &Path, args: &[&str]) -> Output {
     let mut all: Vec<String> = vec!["--repo".into(), root.display().to_string()];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
-        .args(&all)
-        .env_remove("SHPRD_ACTOR")
-        .output()
-    {
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command.args(&all).env_remove("SHPRD_ACTOR").output() {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -264,9 +266,9 @@ fn a_hand_in_records_its_proofs_apart_from_the_summary() {
             "--changed",
             "crates/shprd/src/main.rs",
             "--proof",
-            ".shprd/proof/menu.png",
+            "proof/menu.png",
             "--proof",
-            ".shprd/proof/tests.txt",
+            "proof/tests.txt",
             "--json",
         ],
     );
@@ -279,11 +281,115 @@ fn a_hand_in_records_its_proofs_apart_from_the_summary() {
     );
     assert_eq!(
         event.get("proofs"),
-        Some(&serde_json::json!([
-            ".shprd/proof/menu.png",
-            ".shprd/proof/tests.txt"
-        ])),
+        Some(&serde_json::json!(["proof/menu.png", "proof/tests.txt"])),
         "both proofs are recorded: {event}"
+    );
+}
+
+/// A proof outside the task's worktree is refused: the reviewer reads the
+/// packet from outside the worktree, so a path there is one it cannot open
+/// (item 6 of the M10.0 follow-ups).
+#[test]
+fn a_proof_outside_the_worktree_is_refused() {
+    let dir = repo();
+    let root = dir.path();
+    let outside = match TempDir::new() {
+        Ok(dir) => dir,
+        Err(err) => panic!("tempdir failed: {err}"),
+    };
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+
+    let output = run(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "the menu opens",
+            "--proof",
+            &outside.path().join("tests.txt").display().to_string(),
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a proof the reviewer cannot open is refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("not inside the task's worktree"),
+        "the refusal says why: {stderr}"
+    );
+    assert!(
+        stderr.contains(root.display().to_string().as_str()),
+        "it names the worktree the proof belongs in: {stderr}"
+    );
+    assert!(
+        stderr.contains("--proof proof/tests.txt"),
+        "and shows the shape that works: {stderr}"
+    );
+    // Nothing was written: the log has the spawn and nothing after it.
+    let log = match std::fs::read_to_string(log_path(root)) {
+        Ok(text) => text,
+        Err(err) => panic!("read the log: {err}"),
+    };
+    assert!(
+        !log.contains("\"kind\":\"reported\""),
+        "a refused hand-in records nothing: {log}"
+    );
+}
+
+/// A proof inside the worktree is recorded, including one written with a `..`
+/// that stays inside it.
+#[test]
+fn a_proof_inside_the_worktree_is_recorded() {
+    let dir = repo();
+    let root = dir.path();
+    start(root);
+    add_task(root, "T1", "crates/shprd");
+    spawn(root, "T1");
+
+    let printed = ok(
+        root,
+        &[
+            "agent",
+            "report",
+            "--check",
+            "tests|cargo test|0",
+            "--task",
+            "T1",
+            "--attempt",
+            "1",
+            "--status",
+            "completed",
+            "--summary",
+            "the menu opens",
+            "--proof",
+            "proof/tests.txt",
+            "--proof",
+            "./proof/../proof/menu.png",
+            "--json",
+        ],
+    );
+    let event: Value = serde_json::from_str(&printed).unwrap_or(Value::Null);
+    assert_eq!(
+        event.get("proofs"),
+        Some(&serde_json::json!([
+            "proof/tests.txt",
+            "./proof/../proof/menu.png"
+        ])),
+        "the paths are recorded as the worker wrote them: {event}"
     );
 }
 
@@ -385,7 +491,9 @@ fn verbs_before_run_start_are_refused() {
 fn run_with_path(root: &Path, args: &[&str], bin_dir: &Path) -> Output {
     let mut all: Vec<String> = vec!["--repo".into(), root.display().to_string()];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
         .env("PATH", bin_dir)
@@ -603,7 +711,9 @@ fn dagr_sync_checks_the_document_when_a_checker_is_given() {
     let root = dir.path();
     start(root);
     add_task(root, "T1", "crates/shprd");
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
         .args(["--repo", &root.display().to_string(), "dagr", "sync"])
         .env_remove("SHPRD_ACTOR")
         .env("SHPRD_DAGR_BIN", checker)
@@ -627,7 +737,9 @@ fn a_failing_sync_does_not_undo_a_write() {
     let dir = repo();
     let root = dir.path();
     // A checker that always refuses: `/bin/false`.
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -698,6 +810,170 @@ fn no_dagr_flag_skips_the_sync() {
     assert!(
         !root.join(".dagr").join("run.json").exists(),
         "--no-dagr must not write the document"
+    );
+}
+
+/// A stub checker that records the arguments it was run with, then passes.
+///
+/// It stands in for `dagr check`: the projection is only proof of anything if a
+/// program really ran on it, so the stub leaves a file naming the document it
+/// was asked about.
+#[cfg(unix)]
+fn stub_checker(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("stub-dagr");
+    let record = dir.join("called.txt");
+    if let Err(err) = std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '[]\\n'\nexit 0\n",
+            record.display()
+        ),
+    ) {
+        panic!("writing the stub failed: {err}");
+    }
+    if let Err(err) = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)) {
+        panic!("making the stub executable failed: {err}");
+    }
+    (script, record)
+}
+
+/// A temp home holding `settings.toml` with `text`.
+fn home_with_settings(text: &str) -> TempDir {
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(err) => panic!("temp home failed: {err}"),
+    };
+    let dir = home.path().join(".config").join("shprd");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        panic!("creating the config folder failed: {err}");
+    }
+    if let Err(err) = std::fs::write(dir.join("settings.toml"), text) {
+        panic!("writing the settings failed: {err}");
+    }
+    home
+}
+
+#[test]
+#[cfg(unix)]
+fn the_graph_dagr_setting_is_what_validates_the_projection() {
+    // M10.7's first rule: a person who names their dagr in `graph.dagr` gets
+    // their projections checked by it, and the value is read where the wiring
+    // reads every other file — from their home, not from a variable.
+    let dir = repo();
+    let root = dir.path();
+    let stubs = match TempDir::new() {
+        Ok(stubs) => stubs,
+        Err(err) => panic!("temp folder failed: {err}"),
+    };
+    let (checker, record) = stub_checker(stubs.path());
+    let home = home_with_settings(&format!(
+        "[graph]\ndagr = {:?}\n",
+        checker.display().to_string()
+    ));
+
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "--home",
+            &home.path().display().to_string(),
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ])
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_DAGR_BIN")
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("wrote unchecked"),
+        "the document must be checked when the setting names a dagr: {stderr}"
+    );
+    let called = match std::fs::read_to_string(&record) {
+        Ok(text) => text,
+        Err(err) => panic!("the stub was never run: {err}"),
+    };
+    assert!(
+        called.contains("check"),
+        "the stub is run as a checker: {called}"
+    );
+    assert!(
+        called.contains(".dagr/run.json.tmp") || called.contains(".tmp"),
+        "it is run on the temporary document, before the rename: {called}"
+    );
+    assert!(
+        root.join(".dagr").join("run.json").exists(),
+        "the document is written"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn without_dagr_the_note_names_the_setting_to_fix() {
+    // No `graph.dagr`, no `dagr` on PATH and no herdr plugin in this home: the
+    // write still happens, and the one line a person sees names the key.
+    let dir = repo();
+    let root = dir.path();
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(err) => panic!("temp home failed: {err}"),
+    };
+    let empty = home.path().join("bin");
+    if let Err(err) = std::fs::create_dir_all(&empty) {
+        panic!("creating the bin folder failed: {err}");
+    }
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = command
+        .args([
+            "--repo",
+            &root.display().to_string(),
+            "--home",
+            &home.path().display().to_string(),
+            "run",
+            "start",
+            "--run-id",
+            "t1",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m1",
+        ])
+        .env("PATH", &empty)
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env_remove("SHPRD_ACTOR")
+        .env_remove("SHPRD_DAGR_BIN")
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => panic!("running {BIN} failed: {err}"),
+    };
+    assert_eq!(output.status.code(), Some(0), "the write still succeeds");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("wrote unchecked"), "{stderr}");
+    assert!(stderr.contains("graph.dagr"), "the key is named: {stderr}");
+    assert!(
+        root.join(".dagr").join("run.json").exists(),
+        "a machine without dagr still leaves a document"
     );
 }
 
@@ -776,11 +1052,9 @@ fn run_with_home(root: &Path, home: &Path, args: &[&str]) -> Output {
         home.display().to_string(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
-        .args(&all)
-        .env_remove("SHPRD_ACTOR")
-        .output()
-    {
+    let mut command = Command::new(BIN);
+    isolate(&mut command, home);
+    match command.args(&all).env_remove("SHPRD_ACTOR").output() {
         Ok(output) => output,
         Err(err) => panic!("running {BIN} failed: {err}"),
     }
@@ -914,6 +1188,149 @@ fn integrated_task(root: &Path, branch: &str) {
     ok(
         root,
         &["agent", "integrate", "--task", "T1", "--record-only"],
+    );
+}
+
+/// `run start` makes the branch it integrates on, from `--base`, when it is not
+/// there: a run whose integration branch does not exist cannot move, and every
+/// start fails on it for ever (bug 2 of gate run #4).
+#[test]
+fn run_start_creates_the_integration_branch_from_the_base() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let base = git.git(&["rev-parse", "main"]);
+    assert!(
+        !git.has_ref("integration/m9"),
+        "the fixture starts without the branch"
+    );
+
+    let printed = ok(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "m9",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+            "--json",
+        ],
+    );
+    let event: Value = serde_json::from_str(&printed).unwrap_or(Value::Null);
+    assert_eq!(
+        event.get("kind").and_then(Value::as_str),
+        Some("run_started")
+    );
+
+    assert!(
+        git.has_ref("integration/m9"),
+        "the integration branch was made"
+    );
+    assert_eq!(
+        git.git(&["rev-parse", "integration/m9"]),
+        base,
+        "it is cut from the base branch"
+    );
+
+    // And the record says shprd made it, so the janitor may clean it up.
+    let log = match std::fs::read_to_string(log_path(&root)) {
+        Ok(text) => text,
+        Err(err) => panic!("read the log: {err}"),
+    };
+    assert_eq!(
+        resource_events(&root),
+        1,
+        "one branch was created and recorded"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.contains("\"kind\":\"resource\"")
+                && line.contains("\"resource\":\"branch\"")
+                && line.contains("integration/m9")
+                && line.contains("\"created\"")),
+        "the resource line names the branch it made: {log}"
+    );
+}
+
+/// A base branch that is not there either is the person's mistake, and the run
+/// must not start half made.
+#[test]
+fn run_start_refuses_a_missing_base_and_writes_nothing() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    let output = run(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "m9",
+            "--base",
+            "release/9",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a missing base is the person's mistake: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("release/9"), "{stderr}");
+    assert!(
+        stderr.contains("integration/m9"),
+        "the branch it could not cut is named: {stderr}"
+    );
+    assert!(!git.has_ref("integration/m9"), "nothing was created");
+    assert!(
+        !root.join(".shprd").join("events.jsonl").exists(),
+        "a refused start writes no log"
+    );
+}
+
+/// A run started over a branch that is already there keeps it, and creates
+/// nothing: an existing branch may hold someone's commits.
+#[test]
+fn run_start_leaves_an_existing_integration_branch_alone() {
+    let git = GitRepo::new();
+    let root = git.path.clone();
+    git.git(&["branch", "integration/m9", "main"]);
+    git.git(&["checkout", "integration/m9"]);
+    if let Err(err) = std::fs::write(root.join("work.txt"), "landed work\n") {
+        panic!("write work.txt: {err}");
+    }
+    git.git(&["add", "--", "work.txt"]);
+    git.git(&["commit", "-m", "work already integrated"]);
+    let tip = git.git(&["rev-parse", "integration/m9"]);
+    git.git(&["checkout", "main"]);
+
+    ok(
+        &root,
+        &[
+            "run",
+            "start",
+            "--run-id",
+            "m9",
+            "--base",
+            "main",
+            "--integration",
+            "integration/m9",
+        ],
+    );
+
+    assert_eq!(
+        git.git(&["rev-parse", "integration/m9"]),
+        tip,
+        "the existing branch and its commits are kept"
+    );
+    assert_eq!(
+        resource_events(&root),
+        0,
+        "an existing branch is not recorded as shprd's own"
     );
 }
 
@@ -1060,7 +1477,9 @@ fn abandoning_is_refused_for_an_agent_actor_even_with_yes() {
     start(root);
     add_task(root, "T2", "crates/y");
     let before = last_event(root);
-    let output = match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = match command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -1369,7 +1788,9 @@ fn an_orchestrator_may_not_re_admit_an_agent() {
     add_task(root, "T1", "crates/shprd");
     mark_dry(root, "w1");
     let before = last_event(root);
-    let output = match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = match command
         .args([
             "--repo",
             &root.display().to_string(),
@@ -1462,7 +1883,9 @@ fn run_as(root: &Path, actor: &str, args: &[&str]) -> Output {
         "--json".to_string(),
     ];
     all.extend(args.iter().map(|arg| (*arg).to_string()));
-    match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    match command
         .args(&all)
         .env_remove("SHPRD_ACTOR")
         .env("SHPRD_ACTOR", actor)
@@ -1675,7 +2098,9 @@ fn a_drop_that_cannot_find_the_home_is_refused_and_logs_nothing() {
         "not needed after all".to_string(),
         "--yes".to_string(),
     ];
-    let output = match Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, root);
+    let output = match command
         .args(&args)
         .env_remove("SHPRD_ACTOR")
         .env_remove("SHPRD_HOME")

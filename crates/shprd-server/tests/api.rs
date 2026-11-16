@@ -338,6 +338,7 @@ async fn a_failed_pass_is_on_the_board() {
             },
         ],
         news: Vec::new(),
+        interval_secs: None,
     };
     let last = shprd_server::LastPass::of(&report, fixture.repo.path(), 1_700_000_000_000);
     last.write(fixture.state.path())
@@ -625,6 +626,160 @@ async fn an_action_runs_the_binarys_after_write_step() {
     let response = app.router().oneshot(call.request()).await.expect("answers");
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn the_graph_route_says_which_probe_found_dagr() {
+    use shprd_server::graph::{Located, Origin};
+
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let state = tempfile::tempdir().expect("state dir");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_dagr(shprd_server::Dagr::Found(Located {
+            path: std::path::PathBuf::from("/opt/dagr"),
+            origin: Origin::Setting,
+        }));
+    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+    let token = token.trim().to_string();
+    let response = app
+        .router()
+        .oneshot(Call::get("/api/graph").with_token(&token).request())
+        .await
+        .expect("answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the body reads")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("the body is JSON");
+
+    let run_json = repo.path().join(".dagr").join("run.json");
+    assert_eq!(body["repo"], json!(repo.path().display().to_string()));
+    assert_eq!(body["run_json"], json!(run_json.display().to_string()));
+    assert_eq!(body["run"], json!("r1"), "the run the board is showing");
+    assert_eq!(body["dagr"]["path"], json!("/opt/dagr"));
+    assert_eq!(body["dagr"]["origin"], json!("setting"));
+    assert_eq!(
+        body["argv"],
+        json!(["/opt/dagr", "view", run_json.display().to_string(),]),
+        "the block runs dagr's own follow mode on the projected document"
+    );
+    assert_eq!(body["setting"], json!("graph.dagr"));
+    assert_eq!(body["message"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_graph_with_no_dagr_names_the_setting_to_fix() {
+    use shprd_server::graph::Missing;
+
+    let repo = tempfile::tempdir().expect("repo dir");
+    let state = tempfile::tempdir().expect("state dir");
+    // No run: the graph must still answer, because the block renders before a
+    // run exists.
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_dagr(shprd_server::Dagr::Missing(Missing::NotFound));
+    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+    let token = token.trim().to_string();
+    let response = app
+        .router()
+        .oneshot(Call::get("/api/graph").with_token(&token).request())
+        .await
+        .expect("answers");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the body reads")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("the body is JSON");
+
+    assert_eq!(body["dagr"], Value::Null);
+    assert_eq!(body["argv"], json!([]), "nothing to run");
+    assert_eq!(body["run"], Value::Null, "no run has started");
+    let message = body["message"].as_str().expect("the refusal is in words");
+    assert!(message.contains("graph.dagr"), "{message}");
+    assert!(message.contains("dagr was not found"), "{message}");
+}
+
+#[tokio::test]
+async fn a_service_write_rewrites_the_graph_document_atomically() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let state = tempfile::tempdir().expect("state dir");
+    // The binary's own after-write step, at the level a route can prove: project
+    // and write through the one atomic writer `shprd dagr sync` uses.
+    let app = App::prepare(
+        repo.path(),
+        PORT,
+        &Actor::Human,
+        state.path(),
+        Some(shprd_server::AfterWrite::new(|repo: &std::path::Path| {
+            project_and_write(repo);
+        })),
+    )
+    .expect("prepare");
+    let token = std::fs::read_to_string(app.info().token_path).expect("the token file");
+    let token = token.trim().to_string();
+    let run_json = repo.path().join(".dagr").join("run.json");
+
+    let call = Call::post("/api/action", task_add("T1"))
+        .with_token(&token)
+        .with_write_header();
+    let response = app.router().oneshot(call.request()).await.expect("answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = read_json(&run_json);
+    assert_eq!(
+        first["tasks"].as_array().map(Vec::len),
+        Some(1),
+        "the write reached the document"
+    );
+
+    // A second write replaces it whole: a reader never sees half a document,
+    // and no temporary file is left behind.
+    let call = Call::post("/api/action", task_add("T2"))
+        .with_token(&token)
+        .with_write_header();
+    let response = app.router().oneshot(call.request()).await.expect("answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let second = read_json(&run_json);
+    assert_eq!(second["tasks"].as_array().map(Vec::len), Some(2));
+    assert_ne!(first, second, "the document moved with the log");
+
+    let leftovers: Vec<String> = std::fs::read_dir(repo.path().join(".dagr"))
+        .expect("the graph folder")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "run.json")
+        .collect();
+    assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+}
+
+/// What `shprd dagr sync` does after a write: fold the log, project it and write
+/// the document through the one atomic writer.
+fn project_and_write(repo: &std::path::Path) {
+    let outcome = EventLog::read_all(&repo.join(".shprd").join("events.jsonl"))
+        .unwrap_or_else(|err| panic!("the log reads: {err}"));
+    let folded = shprd_core::state::RunState::fold(&outcome.events)
+        .unwrap_or_else(|err| panic!("the log folds: {err}"));
+    let doc = shprd_views::dagr::project(&folded, &outcome.events, 1_763_200_000_000)
+        .unwrap_or_else(|err| panic!("the run projects: {err}"));
+    shprd_views::dagr::write_atomic(&doc, &shprd_server::graph::run_json(repo), None)
+        .unwrap_or_else(|err| panic!("the document writes: {err}"));
+}
+
+/// One JSON file, read as a value.
+fn read_json(path: &std::path::Path) -> Value {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|err| {
+        panic!("reading {}: {err}", path.display());
+    });
+    serde_json::from_str(&text).unwrap_or_else(|err| {
+        panic!("{} is not JSON: {err}", path.display());
+    })
 }
 
 #[tokio::test]

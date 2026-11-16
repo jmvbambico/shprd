@@ -8,7 +8,8 @@
 use crate::config::Review;
 use crate::event::{EventKind, Finding, ReviewSource, Severity};
 use crate::hash;
-use crate::state::{GateResult, RunState, Task};
+use crate::rules::INTEGRATE_AFTER_FAILED_GATE;
+use crate::state::{GateResult, RunState, Task, TaskStatus};
 
 /// The gate name review results are recorded under.
 pub const REVIEW_GATE: &str = "review";
@@ -168,8 +169,8 @@ pub fn rounds_spent_prefix(task: &str, attempt: u32, rounds: u32) -> String {
 ///
 /// It is how a board tells a card that still holds from the history of a
 /// failure a newer attempt has answered. Every card about an attempt names it,
-/// so one rule covers a review that spent its rounds and a send-back that did
-/// not start.
+/// so one rule covers a review that spent its rounds, a send-back that did not
+/// start, and a step that keeps failing.
 pub fn card_attempt(task: &str, body: &str) -> Option<u32> {
     let named = |prefix: &str, tail: &str| -> Option<u32> {
         let rest = body.strip_prefix(prefix)?;
@@ -177,8 +178,21 @@ pub fn card_attempt(task: &str, body: &str) -> Option<u32> {
         let attempt: u32 = digits.parse().ok()?;
         rest.starts_with(tail).then_some(attempt)
     };
+    if !body.starts_with(task) {
+        return None;
+    }
     named(&format!("{task}: its review of attempt "), "failed ")
         .or_else(|| named(&format!("{task}: sending attempt "), "back did not start: "))
+        // A step that keeps failing names its attempt in parentheses, after the
+        // words that say what failed: `… 3 passes in a row (attempt 2): …`.
+        .or_else(|| tagged_attempt(body))
+}
+
+/// The attempt a body marks with `(attempt N)`, when it does.
+fn tagged_attempt(body: &str) -> Option<u32> {
+    let (_, rest) = body.split_once("(attempt ")?;
+    let (digits, rest) = rest.split_once(')')?;
+    rest.starts_with(':').then(|| digits.parse().ok())?
 }
 
 /// The card a review that spent its rounds puts in front of a person.
@@ -187,18 +201,7 @@ pub fn card_attempt(task: &str, body: &str) -> Option<u32> {
 /// it without knowing anything about reviews, and names the verb behind each
 /// choice so the card answers itself.
 pub fn rounds_spent_body(task: &Task, attempt: u32, rounds: u32) -> String {
-    let found = latest_failed_review(task)
-        .map(|gate| {
-            gate.findings
-                .iter()
-                .take(CARD_FINDINGS)
-                .map(|finding| finding.title.trim())
-                .filter(|title| !title.is_empty())
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
-        .filter(|found| !found.is_empty())
-        .unwrap_or_else(|| String::from("the reviewer wrote no finding"));
+    let found = findings_line(task);
     let id = &task.id;
     format!(
         "{}: {found}; answer the card `{}`: retry with another round, take it as it is, or drop \
@@ -210,6 +213,60 @@ pub fn rounds_spent_body(task: &Task, attempt: u32, rounds: u32) -> String {
     )
 }
 
+/// The findings a card repeats, as one phrase, taken from the newest failure.
+fn findings_line(task: &Task) -> String {
+    latest_failed_review(task)
+        .map(|gate| {
+            gate.findings
+                .iter()
+                .take(CARD_FINDINGS)
+                .map(|finding| finding.title.trim())
+                .filter(|title| !title.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|found| !found.is_empty())
+        .unwrap_or_else(|| String::from("the reviewer wrote no finding"))
+}
+
+/// The card a spent review puts in front of a person once they answered it.
+///
+/// The ask that offered the choices has been consumed -- answering it is what
+/// takes it out of `/api/asks` -- so a card that kept pointing at it would draw
+/// buttons every click of which is refused. The answer is the person's
+/// decision; what is left is the verb it names, so the card says that verb and
+/// nothing else. It keeps the review's own prefix, so a board still reads it as
+/// the same card about the same attempt.
+///
+/// `answer` is the answer as the log recorded it, so `drop it` reads as *you
+/// answered `drop it`: run `shprd drop T1 --reason …`*.
+pub fn answered_rounds_body(task: &Task, attempt: u32, rounds: u32, answer: &str) -> String {
+    let id = &task.id;
+    let found = findings_line(task);
+    let choice = answer.trim();
+    let lower = choice.to_ascii_lowercase();
+    let verb = if lower.starts_with("drop") {
+        format!("`shprd drop {id} --reason …`")
+    } else if lower.starts_with("take") {
+        format!(
+            "`shprd override --task {id} --rule integrate_after_failed_gate --reason …` then \
+             `shprd land {id}`"
+        )
+    } else {
+        // An answer in the person's own words names no choice, so the card
+        // names every by-hand verb instead of guessing which one they meant.
+        format!(
+            "`shprd agent spawn --task {id}`, or `shprd override --task {id} --rule \
+             integrate_after_failed_gate --reason …` then `shprd land {id}`, or `shprd drop {id} \
+             --reason …`"
+        )
+    };
+    format!(
+        "{}: {found}; you answered `{choice}`, so run {verb}",
+        rounds_spent_prefix(id, attempt, rounds),
+    )
+}
+
 /// Whether a card's answer asks for one more review round.
 ///
 /// The card's first choice is "retry with another round", and a person who types
@@ -217,6 +274,52 @@ pub fn rounds_spent_body(task: &Task, attempt: u32, rounds: u32) -> String {
 /// a decision the run records and the person carries out with their own verb.
 pub fn wants_another_round(answer: &str) -> bool {
     answer.trim().to_ascii_lowercase().starts_with("retry")
+}
+
+/// The answer a spent review's card was given, when a person answered it.
+///
+/// The card's ask id names its attempt, so one failure has one answer and a
+/// later failure after another round reads its own ask.
+pub fn rounds_spent_answer(state: &RunState, task: &Task, attempt: u32) -> Option<String> {
+    let ask = state
+        .asks
+        .get(&(task.id.clone(), rounds_spent_ask(attempt)))?;
+    ask.answer.as_ref().map(|answer| answer.text.clone())
+}
+
+/// Whether a spent review's answer leaves the person a verb of their own.
+///
+/// `drop it` and `take it as it is` are the two choices the run cannot carry
+/// out: another attempt is the engine's work, but dropping and accepting are a
+/// person's verbs. So an answered card whose answer is one of those keeps
+/// needing the person until that verb's record is in the log.
+pub fn answer_leaves_a_verb(answer: &str) -> bool {
+    let choice = answer.trim().to_ascii_lowercase();
+    choice.starts_with("drop") || choice.starts_with("take")
+}
+
+/// Whether the verb a spent review's answer named has been run for `task`.
+///
+/// `drop it` leaves a `drop`, which the fold records as the task's `Dropped`
+/// status; `take it as it is` leaves an `integrate_after_failed_gate` override
+/// said after the gate that failed, which is the rule that accepts one. An
+/// answer in the person's own words leaves every by-hand verb, so any of them
+/// having run settles it: the card's job was to name what was left, and a
+/// person who did something else with the task has answered it.
+pub fn rounds_spent_verb_ran(task: &Task, answer: &str) -> bool {
+    let lower = answer.trim().to_ascii_lowercase();
+    if lower.starts_with("drop") {
+        return task.status == TaskStatus::Dropped;
+    }
+    let accepted = !task.overrides.is_empty()
+        && task.overrides.iter().any(|record| {
+            record.rule == INTEGRATE_AFTER_FAILED_GATE
+                && latest_failed_review(task).is_none_or(|gate| record.seq > gate.seq)
+        });
+    if lower.starts_with("take") {
+        return accepted;
+    }
+    accepted || task.status == TaskStatus::Dropped
 }
 
 /// How many review rounds a person granted `task` by answering its cards.
@@ -337,13 +440,15 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        ESCALATION_ACTION, Next, REVIEW_GATE, after_failure, card_attempt, decide,
-        failed_review_rounds, latest_failed_review, provenance, rounds_spent_body,
-        rounds_spent_prefix, send_back_failure_prefix, verdict,
+        ESCALATION_ACTION, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, after_failure,
+        answer_leaves_a_verb, answered_rounds_body, card_attempt, decide, failed_review_rounds,
+        latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
+        rounds_spent_prefix, rounds_spent_verb_ran, send_back_failure_prefix, verdict,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
-    use crate::state::{Attempt, GateResult, Task, TaskStatus};
+    use crate::rules::INTEGRATE_AFTER_FAILED_GATE;
+    use crate::state::{Attempt, GateResult, RunState, Task, TaskStatus};
 
     /// A finding of a given severity with placeholder text.
     fn finding(severity: Severity) -> Finding {
@@ -378,6 +483,7 @@ mod tests {
             gates,
             reviews: Vec::new(),
             spawn_seq: None,
+            stopped: false,
         }
     }
 
@@ -634,12 +740,22 @@ mod tests {
         assert_eq!(card_attempt("T1", &spent), Some(3));
         let failed = send_back_failure_prefix("T1", 4);
         assert_eq!(card_attempt("T1", &failed), Some(4));
+        // A step that keeps failing names its attempt in parentheses: a card
+        // about one attempt leaves the board once the task is on another.
+        let repeated = "T1: its `start` step has failed the same way 3 passes in a row (attempt 2): \
+                        task \"T1\" path \"calc.py\" overlaps task \"T0\"";
+        assert_eq!(card_attempt("T1", repeated), Some(2));
         // Anything else is not a card about an attempt, and a card for another
         // task is not this task's.
         assert_eq!(card_attempt("T1", "T1 is ready to land"), None);
         assert_eq!(card_attempt("T2", &spent), None);
         assert_eq!(
             card_attempt("T1", "T1: sending attempt x back did not start: "),
+            None
+        );
+        // A body that is not this task's at all is never its card.
+        assert_eq!(
+            card_attempt("T1", "T2: its `start` step failed (attempt 1): x"),
             None
         );
     }
@@ -655,5 +771,156 @@ mod tests {
             provenance(&reviewed, 2, b"[]").is_none(),
             "an attempt nobody reviewed has no provenance"
         );
+    }
+
+    /// A task whose one attempt spent its rounds, as the failure leaves it.
+    fn spent(task: &str, attempt: u32) -> Task {
+        let mut failed = attempt_of(attempt, vec![gate(REVIEW_GATE, false)]);
+        failed.gates[0].findings = vec![Finding {
+            severity: Severity::Major,
+            title: String::from("No evidence that test_calc.py still passes"),
+            location: None,
+            detail: String::new(),
+        }];
+        let mut found = task_of(task, vec![failed]);
+        found.status = TaskStatus::Failed;
+        found
+    }
+
+    /// One attempt of a task, with the given gates.
+    fn attempt_of(n: u32, gates: Vec<GateResult>) -> Attempt {
+        attempt(n, gates)
+    }
+
+    /// A task under the given id with the given attempts.
+    fn task_of(id: &str, attempts: Vec<Attempt>) -> Task {
+        Task {
+            id: id.to_string(),
+            ..task(attempts)
+        }
+    }
+
+    /// A run whose ask `id` of `task` was answered with `answer`.
+    fn answered_state(task: &str, id: &str, answer: Option<&str>) -> RunState {
+        let mut state = RunState::default();
+        state.asks.insert(
+            (task.to_string(), id.to_string()),
+            crate::state::AskRecord {
+                id: id.to_string(),
+                task: task.to_string(),
+                kind: crate::ask::AskKind::Question,
+                text: String::from("what now"),
+                options: ROUNDS_SPENT_OPTIONS
+                    .iter()
+                    .map(|choice| (*choice).to_string())
+                    .collect(),
+                created_at_ms: 1,
+                expires_at_ms: None,
+                raised_seq: 1,
+                answer: answer.map(|text| crate::state::AskAnswerRecord {
+                    text: text.to_string(),
+                    seq: 2,
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn an_answered_card_names_the_verb_the_answer_leaves() {
+        // Bug 1 of gate run #4: a card answered with `drop it` kept pointing at
+        // an ask that had been consumed, so every click on it was refused. Once
+        // the answer is known the card stops offering choices and says the verb
+        // that is left.
+        let found = spent("T1", 2);
+        let drop = answered_rounds_body(&found, 2, 2, "drop it");
+        assert!(drop.starts_with(&rounds_spent_prefix("T1", 2, 2)), "{drop}");
+        assert!(!drop.contains("answer the card"), "{drop}");
+        assert!(drop.contains("you answered `drop it`"), "{drop}");
+        assert!(drop.contains("`shprd drop T1 --reason …`"), "{drop}");
+        assert!(
+            !drop.contains("`shprd agent spawn --task T1`"),
+            "one verb, not every one: {drop}"
+        );
+        // It names the failure it is about, exactly as the offered card did.
+        assert!(
+            drop.contains("No evidence that test_calc.py still passes"),
+            "{drop}"
+        );
+
+        let take = answered_rounds_body(&found, 2, 2, "take it as it is");
+        assert!(take.contains("you answered `take it as it is`"), "{take}");
+        assert!(
+            take.contains("`shprd override --task T1 --rule integrate_after_failed_gate"),
+            "{take}"
+        );
+        assert!(take.contains("`shprd land T1`"), "{take}");
+    }
+
+    #[test]
+    fn an_answer_in_the_persons_own_words_names_every_by_hand_verb() {
+        let found = spent("T1", 1);
+        let body = answered_rounds_body(&found, 1, 1, "I will look at it tomorrow");
+        assert!(
+            body.contains("you answered `I will look at it tomorrow`"),
+            "{body}"
+        );
+        assert!(body.contains("`shprd agent spawn --task T1`"), "{body}");
+        assert!(body.contains("`shprd drop T1 --reason …`"), "{body}");
+    }
+
+    #[test]
+    fn only_drop_and_take_leave_the_person_a_verb() {
+        assert!(answer_leaves_a_verb("drop it"));
+        assert!(answer_leaves_a_verb("  Take it as it is "));
+        // A retry is the engine's own work, so the card stands down at once.
+        assert!(!answer_leaves_a_verb("retry with another round"));
+        assert!(!answer_leaves_a_verb("retry"));
+    }
+
+    #[test]
+    fn the_answer_a_retry_card_was_given_is_read_off_the_fold() {
+        let found = spent("T1", 2);
+        let id = rounds_spent_ask(2);
+        let open = answered_state("T1", &id, None);
+        assert_eq!(
+            rounds_spent_answer(&open, &found, 2),
+            None,
+            "nobody answered"
+        );
+        let answered = answered_state("T1", &id, Some("drop it"));
+        assert_eq!(
+            rounds_spent_answer(&answered, &found, 2).as_deref(),
+            Some("drop it")
+        );
+        // The ask names its attempt, so another failure reads its own answer.
+        assert_eq!(rounds_spent_answer(&answered, &found, 1), None);
+    }
+
+    #[test]
+    fn the_card_a_person_answered_stands_down_once_its_verb_ran() {
+        let mut found = spent("T1", 1);
+        assert!(
+            !rounds_spent_verb_ran(&found, "drop it"),
+            "nothing was run yet"
+        );
+        found.status = TaskStatus::Dropped;
+        assert!(rounds_spent_verb_ran(&found, "drop it"));
+
+        let mut found = spent("T1", 1);
+        assert!(!rounds_spent_verb_ran(&found, "take it as it is"));
+        found.overrides.push(crate::state::OverrideRecord {
+            rule: String::from(INTEGRATE_AFTER_FAILED_GATE),
+            reason: String::from("the failure is cosmetic"),
+            seq: 9,
+        });
+        assert!(rounds_spent_verb_ran(&found, "take it as it is"));
+        // A drop settles any answer, including one in the person's own words.
+        let mut dropped = spent("T1", 1);
+        dropped.status = TaskStatus::Dropped;
+        assert!(rounds_spent_verb_ran(
+            &dropped,
+            "I will look at it tomorrow"
+        ));
     }
 }

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use crate::HerdrMux;
 use crate::panes::map_status;
 
-/// How long to wait between two snapshots while [`crate::Mux::next_events`]
+/// How long to wait between two snapshots while [`crate::HerdrMux::poll_events`]
 /// waits for something to happen.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 

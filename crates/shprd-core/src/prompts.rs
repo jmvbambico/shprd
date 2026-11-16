@@ -109,12 +109,23 @@ const WORKER_M9_PROOF: &str = include_str!("../../../data/templates/history/work
 const WORKER_M9_PROOF_DIGEST: &str =
     "a371c687e291a4ed26386320b8f5bb9f08adf6764d459e7055e75edaa78ebcf8";
 
+/// The worker wording M10.0 shipped, which named the proof's `--proof` flag but
+/// not where the artifact has to live. A proof outside the worktree is one the
+/// reviewer cannot open, so today's words say the artifact must be inside it.
+#[cfg(test)]
+const WORKER_M10_PROOF: &str = include_str!("../../../data/templates/history/worker-m10-proof.md");
+
+/// The SHA-256 of [`WORKER_M10_PROOF`], the worker's fifth retired default.
+const WORKER_M10_PROOF_DIGEST: &str =
+    "39c27a0d0d261505d9cf2663e11c4f724c9a33f52ce826a6bbf4d9b65895eb50";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
     WORKER_M9_DIGEST,
     WORKER_M9_ASKS_DIGEST,
     WORKER_M9_PROOF_DIGEST,
+    WORKER_M10_PROOF_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:

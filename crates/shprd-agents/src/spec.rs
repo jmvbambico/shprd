@@ -77,6 +77,13 @@ pub struct HarnessSpec {
     /// Absent means the agent's own OSC 7501 report and then its screen.
     #[serde(default)]
     pub status: StatusSpec,
+    /// The line the program prints once it is up and can take its brief.
+    ///
+    /// This is what readiness falls back to when the host cannot report the
+    /// program's status at all (see [`ReadySpec`]). Absent means the program
+    /// names no line, and readiness then needs the host's own status.
+    #[serde(default)]
+    pub ready: ReadySpec,
     /// Whether and how the program accepts a hook for its asks.
     ///
     /// Absent means the program takes no ask hook.
@@ -97,6 +104,12 @@ pub struct HarnessSpec {
     /// CLI raises no such prompt.
     #[serde(default)]
     pub blocking_prompts: Vec<BlockingPrompt>,
+    /// Where one session's record is read as a chat transcript.
+    ///
+    /// Absent means shprd shows no conversation for this program: the chat
+    /// panel says so rather than reading a record whose shape it does not know.
+    #[serde(default)]
+    pub transcript: TranscriptSpec,
 }
 
 /// One question the CLI asks its own user and blocks on until they answer.
@@ -126,6 +139,7 @@ impl HarnessSpec {
     /// how a hook is installed or say the program takes none.
     pub fn validate(&self) -> Result<(), SpecError> {
         validate_location(&self.records.location)?;
+        self.transcript.validate()?;
 
         for dir in &self.skills.home_dirs {
             match dir.strip_prefix("~/") {
@@ -182,6 +196,7 @@ impl HarnessSpec {
         self.brief.validate(launch)?;
         self.fast.validate()?;
         self.status.validate()?;
+        self.ready.validate()?;
         self.asks.validate()?;
         Ok(())
     }
@@ -429,15 +444,79 @@ pub struct RecordsSpec {
     pub verified: bool,
 }
 
+/// Where one session's record is read as a conversation, and how.
+///
+/// [`RecordsSpec`] says where a CLI writes its record so a reader can find it
+/// again; this says how to turn that record into messages, which is a different
+/// question: the watchdog only needs the newest error out of a record, while a
+/// chat needs the person's words, the agent's words and a summary of its tools.
+///
+/// The location is a pattern with the same placeholders [`RecordsSpec`] allows,
+/// plus `*` for any run of characters inside one component, so one session's
+/// file can be named by the search rather than by a pid the service does not
+/// have. A CLI that changes where it writes is a table change, not a code
+/// change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptSpec {
+    /// How the record is read; absent means no reader, and no chat.
+    pub format: Option<TranscriptFormat>,
+    /// Where one session lives, as a path pattern.
+    ///
+    /// A file format names the session's file
+    /// (`~/.claude/projects/{cwd_slug}/*.jsonl`); a store format names the
+    /// directory the session's parts are kept under
+    /// (`~/.local/share/opencode/storage`).
+    pub location: Option<String>,
+}
+
+impl TranscriptSpec {
+    /// Whether this program's conversation can be read at all.
+    pub fn readable(&self) -> bool {
+        self.format.is_some()
+    }
+
+    /// Check that a format and its location are stated together, and that the
+    /// location uses only the placeholders [`RecordsSpec::location`] allows.
+    pub fn validate(&self) -> Result<(), SpecError> {
+        match (&self.format, &self.location) {
+            (Some(_), Some(location)) => validate_location(location),
+            (Some(_), None) => Err(SpecError::TranscriptWithoutLocation),
+            (None, Some(_)) => Err(SpecError::LocationWithoutTranscript),
+            (None, None) => Ok(()),
+        }
+    }
+}
+
+/// The on-disk shape of one session's record, as a chat reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptFormat {
+    /// Claude Code's `~/.claude/projects/<slug>/<session>.jsonl`.
+    ClaudeJsonl,
+    /// Codex's `~/.codex/sessions/<date>/rollout-*.jsonl`.
+    CodexJsonl,
+    /// Pi's `~/.pi/agent/sessions/<slug>/<date>_<session>.jsonl`.
+    PiJsonl,
+    /// OpenCode's storage folder: one JSON file a session, one a message, and a
+    /// folder of parts for each message. OpenCode up to 1.18 wrote this; from
+    /// 1.18 on the same tables live in [`Self::OpencodeSqlite`].
+    OpencodeStorage,
+    /// OpenCode's database: `session`, `message` and `part` tables in one SQLite
+    /// file, which is what 1.18.35 writes and what a chat reads.
+    OpencodeSqlite,
+}
+
 /// Placeholders allowed in a [`RecordsSpec::location`] pattern.
-const LOCATION_PLACEHOLDERS: [&str; 5] = ["cwd_slug", "session", "yyyy", "mm", "dd"];
+const LOCATION_PLACEHOLDERS: [&str; 6] = ["cwd_slug", "session", "yyyy", "mm", "dd", "data_home"];
 
 /// Check a record location pattern against the placeholder contract.
 ///
-/// Allowed placeholders are `{cwd_slug}`, `{session}`, `{yyyy}`, `{mm}` and
-/// `{dd}`; `*` may stand for any run of characters within a single path
-/// component; and `~` may appear only as the first component, where it means the
-/// user's home directory.
+/// Allowed placeholders are `{cwd_slug}`, `{session}`, `{yyyy}`, `{mm}`,
+/// `{dd}` and `{data_home}`; `*` may stand for any run of characters within a
+/// single path component; `~` may appear only as the first component, where it
+/// means the user's home directory; and `{data_home}` may only be the first
+/// component, where it means the XDG data home.
 pub fn validate_location(location: &str) -> Result<(), SpecError> {
     if location.trim().is_empty() {
         return Err(SpecError::EmptyLocation);
@@ -452,6 +531,16 @@ pub fn validate_location(location: &str) -> Result<(), SpecError> {
     }
     if location.contains("**") {
         return Err(SpecError::DoubleStar {
+            location: location.to_owned(),
+        });
+    }
+    // `{data_home}` is a root, like `~`: anywhere else it would name a
+    // directory under another one, which is not a thing a CLI has.
+    if location
+        .match_indices("{data_home}")
+        .any(|(index, _)| index != 0)
+    {
+        return Err(SpecError::DataHomeNotLeading {
             location: location.to_owned(),
         });
     }
@@ -813,6 +902,13 @@ pub struct StatusSpec {
     ///
     /// The default is the agent's own report and then its screen, which every
     /// program has; `hook` is for a program whose hook reports its state.
+    ///
+    /// A source is only worth listing when shprd can actually receive it here:
+    /// `hook` needs a host that carries the report method a program's plugin or
+    /// hook calls, and `osc7501` needs a program that emits the sequence at all.
+    /// A program whose every real source the host lacks is one shprd cannot see
+    /// start, so the readiness check in `[ready]` is what tells it the program
+    /// is up (see [`ReadySpec`]).
     #[serde(default = "default_status_sources")]
     pub sources: Vec<StatusSource>,
 }
@@ -841,6 +937,76 @@ impl StatusSpec {
                 return Err(SpecError::DuplicateStatusSource {
                     name: source.as_str().to_owned(),
                 });
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this program has no status of its own — nothing the host can
+    /// hear without a report method some cores do not have.
+    ///
+    /// Exactly one source is the program's own doing: [`StatusSource::Osc7501`],
+    /// the sequence its terminal writes, which any herdr-core parses. The other
+    /// two are not: `hook` is a plugin or hook the host installs, and it reports
+    /// through a host method (`pane.report_agent`) that herdr-core 0.1.21 does
+    /// not have, so its plugin silently no-ops; `screen` is where the watchdog
+    /// *guesses* a state from the bottom of a pane, which is no evidence at all
+    /// that an agent has started.
+    ///
+    /// So a file that lists no `osc7501` is one whose program reports nothing
+    /// this host is sure to receive, and its readiness has to be read another
+    /// way ([`ReadySpec`]). That is why the sources are a claim about the
+    /// program and not an aspiration: `opencode` and `kilo` emit no 7501 at all,
+    /// `codex` emits none, and `claude` only queries the sequence without ever
+    /// answering it — while `pi` reports `state=idle` on its own.
+    pub fn needs_the_host(&self) -> bool {
+        !self.sources.contains(&StatusSource::Osc7501)
+    }
+
+    /// The sources as a person reads them: `osc7501, hook, screen`.
+    pub fn words(&self) -> String {
+        self.sources
+            .iter()
+            .map(|source| source.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// How a program says it has started and can take its brief.
+///
+/// This is the fallback for a program whose status the host cannot report: a
+/// program's plugin or hook reports through `pane.report_agent`, and a core
+/// that does not implement that method (herdr-core 0.1.21 does not) leaves such
+/// a program with no status at all. OpenCode and Kilo are the two on this
+/// machine: their TUI paints, their plugin silently no-ops, and shprd waited
+/// out its whole ready timeout and then reported a brief it never sent.
+///
+/// So every program names the line its TUI prints once it is up and waiting for
+/// input, and that line is what shprd reads when nothing else can say. The
+/// patterns are case-insensitive substrings of the bottom of the pane, so each
+/// is a whole phrase of the program's own wording — `Ask anything` for OpenCode
+/// and Kilo, `Ask Codex to do anything` for Codex — never a bare word.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadySpec {
+    /// Case-insensitive screen substrings that mean the TUI accepts a turn.
+    ///
+    /// Empty means the program names no such line. That is a real gap and not a
+    /// fallback: a pane with text on it is no evidence that its program is
+    /// taking turns (a CLI that crashed leaves its error message there), so on a
+    /// host that cannot report the program the launch says the brief was not
+    /// delivered rather than typing it in. Every shipped harness names a line.
+    #[serde(default)]
+    pub screen: Vec<String>,
+}
+
+impl ReadySpec {
+    /// Check that every pattern is a non-empty phrase.
+    fn validate(&self) -> Result<(), SpecError> {
+        for pattern in &self.screen {
+            if pattern.trim().is_empty() {
+                return Err(SpecError::EmptyReadyPattern);
             }
         }
         Ok(())
@@ -1072,6 +1238,12 @@ pub enum SpecError {
         /// The location pattern that failed.
         location: String,
     },
+    /// A record location uses `{data_home}` anywhere but its first component.
+    #[error("location {location} uses `{{data_home}}` outside its first path component")]
+    DataHomeNotLeading {
+        /// The location pattern that failed.
+        location: String,
+    },
     /// A loaded harness spec failed the checks in [`HarnessSpec::validate`].
     #[error("invalid harness spec {path}: {source}")]
     Invalid {
@@ -1105,6 +1277,12 @@ pub enum SpecError {
         /// The template token that failed.
         token: String,
     },
+    /// A transcript format is stated without a location to read.
+    #[error("transcript.format is set but transcript.location is not")]
+    TranscriptWithoutLocation,
+    /// A transcript location is stated without a format to read it with.
+    #[error("transcript.location is set but transcript.format is not")]
+    LocationWithoutTranscript,
     /// A record location is empty or whitespace only.
     #[error("location pattern is empty")]
     EmptyLocation,
@@ -1213,6 +1391,9 @@ pub enum SpecError {
         /// The field that holds the stray flag.
         field: &'static str,
     },
+    /// A harness names an empty ready line.
+    #[error("ready.screen holds an empty pattern: name a phrase the program prints")]
+    EmptyReadyPattern,
     /// A program takes its brief as a system-prompt file but names no flag.
     #[error(
         "brief.delivery is system-prompt-file but neither brief.args nor launch.system_prompt_args names the flag"
@@ -1435,34 +1616,49 @@ pub fn load_dir(path: &Path) -> Result<Vec<HarnessSpec>, SpecError> {
     }
     files.sort();
 
-    let mut specs = Vec::with_capacity(files.len());
-    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for file in &files {
-        let spec = load_file(file)?;
-        spec.validate().map_err(|source| SpecError::Invalid {
+    let mut loaded = Vec::with_capacity(files.len());
+    for file in files {
+        let text = fs::read_to_string(&file).map_err(|source| SpecError::ReadFile {
             path: file.clone(),
+            source,
+        })?;
+        loaded.push((file, text));
+    }
+    load_entries(loaded)
+}
+
+/// Check harness files already read in, each with the path it came from.
+///
+/// This is [`load_dir`] for data that is not a directory on this machine: the
+/// copy embedded in the binary, or a person's overrides, both of which
+/// [`crate::data::DataDir`] reads into text first. The entries are checked in
+/// the order given, so a caller that lists them sorted keeps the same order of
+/// refusals a directory read would give.
+pub(crate) fn load_entries(entries: Vec<(PathBuf, String)>) -> Result<Vec<HarnessSpec>, SpecError> {
+    let mut specs = Vec::with_capacity(entries.len());
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for (path, text) in entries {
+        let spec = parse(&path, &text)?;
+        spec.validate().map_err(|source| SpecError::Invalid {
+            path: path.clone(),
             source: Box::new(source),
         })?;
         if let Some(first) = seen.get(&spec.id) {
             return Err(SpecError::DuplicateId {
                 id: spec.id.clone(),
-                path: file.clone(),
+                path: path.clone(),
                 first: first.clone(),
             });
         }
-        seen.insert(spec.id.clone(), file.clone());
+        seen.insert(spec.id.clone(), path.clone());
         specs.push(spec);
     }
     Ok(specs)
 }
 
-/// Parse one harness file, without the checks [`HarnessSpec::validate`] runs.
-pub(crate) fn load_file(path: &Path) -> Result<HarnessSpec, SpecError> {
-    let source = fs::read_to_string(path).map_err(|source| SpecError::ReadFile {
-        path: path.to_owned(),
-        source,
-    })?;
-    toml::from_str(&source).map_err(|source| SpecError::Parse {
+/// Parse one harness file's text, naming `path` in any error.
+pub(crate) fn parse(path: &Path, text: &str) -> Result<HarnessSpec, SpecError> {
+    toml::from_str(text).map_err(|source| SpecError::Parse {
         path: path.to_owned(),
         source,
     })
@@ -2129,14 +2325,36 @@ levels = [\"low\", \"high\"]
     fn accepts_shipped_location_patterns() {
         for location in [
             "~/.claude/projects/{cwd_slug}/{session}.jsonl",
+            "~/.claude/projects/{cwd_slug}/*.jsonl",
             "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl",
             "~/.pi/agent/sessions/{cwd_slug}/*_{session}.jsonl",
-            "~/.local/share/kilo/kilo.db",
+            "~/.pi/agent/sessions/{cwd_slug}/*.jsonl",
+            "{data_home}/opencode/opencode.db",
+            "{data_home}/opencode/storage",
+            "{data_home}/kilo/kilo.db",
         ] {
             if let Err(error) = validate_location(location) {
                 panic!("{location} should validate: {error}");
             }
         }
+    }
+
+    /// `{data_home}` is a root like `~`, so it belongs at the front and nowhere
+    /// else: `~/.local/share` is one place, `~/.local/share/{data_home}` is
+    /// another directory and not a thing any CLI writes.
+    #[test]
+    fn rejects_a_data_home_outside_the_first_component() {
+        let error = match validate_location("~/.local/share/{data_home}/opencode.db") {
+            Ok(()) => panic!("a misplaced `{{data_home}}` should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DataHomeNotLeading { .. }));
+        // A pattern that merely contains the word is not a root either.
+        let error = match validate_location("/work/{data_home}.db") {
+            Ok(()) => panic!("a trailing `{{data_home}}` should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DataHomeNotLeading { .. }));
     }
 
     #[test]

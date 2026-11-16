@@ -6,16 +6,18 @@
 //! shows every problem. The verb exits 1 when any line is a [`Level::Fail`].
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use shprd_agents::data::{DataDir, Kind};
 use shprd_agents::detect::{Detection, SignIn, detect_all, find_binary, vendor_name};
 use shprd_agents::env::{self, EnvContext, LaunchEnv, Role};
 use shprd_agents::families::{Families, agent_vendor};
 use shprd_agents::models::AgentRef;
 use shprd_agents::quota::{self, ProbeContext, QuotaReport, QuotaState};
 use shprd_agents::skills::{self, CompatList, ReviewState, Verdict, VisibilityRules};
-use shprd_agents::spec::{HarnessSpec, load_dir};
+use shprd_agents::spec::HarnessSpec;
 use shprd_core::config::{self, Config, Roster};
 use shprd_core::settings::{Loaded, Resolved, ResolvedRole, RoleKind, Source};
 
@@ -135,6 +137,7 @@ fn build(home_flag: Option<&Path>, no_quota: bool) -> Report {
     host(&mut report, &facts);
     let specs = data(&mut report, &facts);
     let roles = config_section(&mut report, &facts);
+    graph_section(&mut report, &facts);
     let clean = worker_env(&facts);
     let detections = detect_every(&facts, &specs, &roles);
     agents(&mut report, &detections);
@@ -157,8 +160,9 @@ struct Facts {
     home: Option<PathBuf>,
     /// The repository root, when the verb runs inside one.
     repo: Option<PathBuf>,
-    /// The data directory holding `harness/` and `skills/`.
-    data: Option<PathBuf>,
+    /// The data the binary reads: `$SHPRD_DATA_DIR`, the person's overrides,
+    /// or the copy embedded in the binary.
+    data: DataDir,
 }
 
 impl Facts {
@@ -169,7 +173,7 @@ impl Facts {
             path_env: std::env::var("PATH").unwrap_or_default(),
             home: resolve_home(home_flag).ok(),
             repo: crate::ctx::resolve_root(None).ok(),
-            data: crate::cmd::roster::resolve_data_dir().ok(),
+            data: crate::cmd::roster::resolve_data_dir(),
         }
     }
 }
@@ -220,7 +224,8 @@ fn marked(current: &BTreeMap<String, String>, var: &str) -> bool {
     current.get(var).map(String::as_str) == Some("1")
 }
 
-/// Section 1: the multiplexer we are inside and the binaries we would drive.
+/// Section 1: the multiplexer we are inside, the host a run would drive, and the
+/// binaries behind it.
 fn host(report: &mut Report, facts: &Facts) {
     let section = report.section("Host");
     if marked(&facts.current, "TUIOS_ENV") {
@@ -230,7 +235,17 @@ fn host(report: &mut Report, facts: &Facts) {
     } else {
         section.add(Level::Warn, "not inside herdr or tuios");
     }
-    for binary in ["herdr", "tuios"] {
+    // The host the verbs would drive, and why: the same resolution the run does
+    // (M10.9), so a person asking "which multiplexer is shprd using?" gets the
+    // answer the next spawn will act on rather than a second opinion.
+    let resolution = crate::host::resolve();
+    let level = if resolution.fell_back {
+        Level::Warn
+    } else {
+        Level::Ok
+    };
+    section.add(level, resolution.line());
+    for binary in ["herdr", "tuios", "hc", "herdr-app"] {
         match find_binary(binary, &facts.path_env) {
             Some(path) => section.add(Level::Ok, format!("{binary} {}", path.display())),
             None => section.add(Level::Warn, format!("{binary} not on PATH")),
@@ -238,20 +253,26 @@ fn host(report: &mut Report, facts: &Facts) {
     }
 }
 
-/// Section 2: the harness table and the curated skills tables in `data/`.
+/// Section 2: where the shipped data came from, what it holds and whether it
+/// loads.
 ///
-/// Returns the specs it loaded, so the agent section does not load them again.
+/// Every kind is named with its own source, because a person's overrides are
+/// merged file by file: their `harness/` may hold one file while the rest still
+/// comes from the binary. Returns the specs it loaded, so the agent section
+/// does not load them again.
 fn data(report: &mut Report, facts: &Facts) -> Vec<HarnessSpec> {
     let section = report.section("Data");
-    let Some(dir) = &facts.data else {
-        section.add(
-            Level::Fail,
-            "no data directory: set SHPRD_DATA_DIR to a directory holding `harness/`",
-        );
-        return Vec::new();
-    };
-    section.add(Level::Info, format!("data directory {}", dir.display()));
-    let specs = match load_dir(&dir.join("harness")) {
+    section.add(Level::Info, format!("data from {}", facts.data.label()));
+    for kind in Kind::ALL {
+        let files = facts.data.summary(kind);
+        let level = if files.total == 0 {
+            Level::Warn
+        } else {
+            Level::Ok
+        };
+        section.add(level, files.describe(kind));
+    }
+    let specs = match facts.data.harness_specs() {
         Ok(specs) => {
             section.add(
                 Level::Ok,
@@ -264,15 +285,14 @@ fn data(report: &mut Report, facts: &Facts) -> Vec<HarnessSpec> {
             Vec::new()
         }
     };
-    let skills_dir = dir.join("skills");
-    match CompatList::load(&skills_dir.join("compat.toml")) {
+    match facts.data.compat() {
         Ok(list) => section.add(
             Level::Ok,
             format!("compat.toml: {} entries", list.skills.len()),
         ),
         Err(err) => section.add(Level::Fail, format!("compat.toml does not load: {err}")),
     }
-    match VisibilityRules::load(&skills_dir.join("visibility.toml")) {
+    match facts.data.visibility() {
         Ok(rules) => section.add(
             Level::Ok,
             format!("visibility.toml: {} rule(s)", rules.rules.len()),
@@ -466,20 +486,43 @@ fn config_section(report: &mut Report, facts: &Facts) -> Roles {
             return Roles::resolve(facts, None);
         }
     };
-    match (&global, repo_layer.as_deref()) {
-        (Some(global), Some(repo)) => section.add(
+    // Only the files that are there: naming one shprd never writes sends a
+    // person looking for a file that does not exist, and an M9 install keeps
+    // everything in `settings.toml`.
+    let present = config_files(facts);
+    match present.as_slice() {
+        [] => section.add(
             Level::Ok,
-            format!(
-                "loads and validates ({} and {})",
-                global.display(),
-                repo.display()
-            ),
+            "loads and validates (no config.toml: the settings file is the only layer)",
         ),
-        _ => section.add(Level::Ok, "loads and validates"),
+        [one] => section.add(Level::Ok, format!("loads and validates ({one})")),
+        [one, two, ..] => section.add(Level::Ok, format!("loads and validates ({one} and {two})")),
     }
     let roles = Roles::resolve(facts, Some(&loaded));
     roles_section(section, &roles);
     roles
+}
+
+/// The `config.toml` files this machine actually has, as `path`s.
+///
+/// The person's file first, then the repository's, which is the order the layers
+/// are read in. A file that is not there is left out: a page that named it would
+/// send a person looking for something shprd never wrote.
+fn config_files(facts: &Facts) -> Vec<String> {
+    let global = facts
+        .home
+        .as_ref()
+        .map(|home| home.join(".config").join("shprd").join("config.toml"));
+    let repo = facts
+        .repo
+        .as_ref()
+        .map(|root| root.join(".shprd").join("config.toml"));
+    [global, repo]
+        .into_iter()
+        .flatten()
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect()
 }
 
 /// Prints the three role lines the engine would act on, and where each came
@@ -529,7 +572,7 @@ fn worker_env(facts: &Facts) -> LaunchEnv {
         run: None,
         repo: std::env::current_dir().unwrap_or_default(),
         home: facts.home.clone(),
-        data: facts.data.clone(),
+        data: facts.data.env_value().map(Path::to_path_buf),
     };
     env::launch_env(&facts.current, Role::Worker, &ctx)
 }
@@ -573,6 +616,63 @@ fn detect_every(facts: &Facts, specs: &[HarnessSpec], roles: &Roles) -> Vec<Dete
     let pairs = worker_env(facts).as_pairs();
     let models = pi_models(facts, specs, roles);
     detect_all(specs, &facts.path_env, &pairs, &models)
+}
+
+/// Section 3b: the graph's program and the document it draws.
+///
+/// Two questions a person cannot answer from anywhere else: which dagr shprd
+/// will run (the setting, `PATH` or the herdr plugin, and it matters because a
+/// projection is only checked when one is found), and whether the run's
+/// `run.json` is there and younger than the log it was projected from. A missing
+/// program is a warning and not a failure — a run without a graph still runs —
+/// but it is said in the words that name the key to set.
+fn graph_section(report: &mut Report, facts: &Facts) {
+    let section = report.section("Graph");
+    match crate::cmd::dagr::locate(facts.home.as_deref()) {
+        Ok(found) => section.add(
+            Level::Ok,
+            format!(
+                "dagr {} (from {})",
+                found.path.display(),
+                found.origin.label()
+            ),
+        ),
+        Err(missing) => section.add(Level::Warn, missing.message()),
+    }
+    let Some(root) = facts.repo.as_deref() else {
+        section.add(
+            Level::Info,
+            "no repository here, so there is no run to draw",
+        );
+        return;
+    };
+    let run_json = crate::cmd::dagr::run_json_path(root);
+    let log = root.join(".shprd").join("events.jsonl");
+    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    match (modified(&run_json), modified(&log)) {
+        (Some(document), Some(log)) if document >= log => section.add(
+            Level::Ok,
+            format!("{} is as new as the log", run_json.display()),
+        ),
+        (Some(_), _) => section.add(
+            Level::Warn,
+            format!(
+                "{} is older than the log: every ledger write rewrites it, so a service that is not running leaves it behind",
+                run_json.display()
+            ),
+        ),
+        (None, Some(_)) => section.add(
+            Level::Warn,
+            format!(
+                "{} is missing while the run has a log: `shprd dagr sync` writes it",
+                run_json.display()
+            ),
+        ),
+        (None, None) => section.add(
+            Level::Info,
+            "no run yet, so there is no graph to draw",
+        ),
+    }
 }
 
 /// Section 4: every harness CLI, as a worker would find it.
@@ -633,10 +733,7 @@ fn vendor_or_reason(
 /// An empty table knows no family, so every line about a family is a warning
 /// rather than a pass.
 fn families_table(facts: &Facts) -> Families {
-    let Some(data) = &facts.data else {
-        return Families::default();
-    };
-    Families::load(&data.join("models").join("families.toml")).unwrap_or_default()
+    facts.data.families().unwrap_or_default()
 }
 
 /// Section 5: whether the reviewer comes from another vendor than every worker.
@@ -796,18 +893,11 @@ fn skills_section(
     detections: &[Detection],
 ) {
     let section = report.section("Skills");
-    let (Some(dir), Some(home)) = (facts.data.as_ref(), facts.home.as_ref()) else {
-        section.add(
-            Level::Warn,
-            "no data directory or home, so no skill was scanned",
-        );
+    let Some(home) = facts.home.as_ref() else {
+        section.add(Level::Warn, "no home directory, so no skill was scanned");
         return;
     };
-    let skills_dir = dir.join("skills");
-    let (Ok(compat), Ok(rules)) = (
-        CompatList::load(&skills_dir.join("compat.toml")),
-        VisibilityRules::load(&skills_dir.join("visibility.toml")),
-    ) else {
+    let (Ok(compat), Ok(rules)) = (facts.data.compat(), facts.data.visibility()) else {
         section.add(Level::Warn, "the skill tables do not load");
         return;
     };
@@ -1074,8 +1164,7 @@ mod tests {
 
     /// The shipped harness table, which names every program.
     fn harness_specs() -> Vec<HarnessSpec> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
-        match load_dir(&dir) {
+        match DataDir::resolve(None, None).harness_specs() {
             Ok(specs) => specs,
             Err(error) => panic!("the shipped harness table must load: {error}"),
         }
@@ -1110,7 +1199,7 @@ mod tests {
             path_env: String::new(),
             home: Some(home.path().to_path_buf()),
             repo: None,
-            data: None,
+            data: DataDir::resolve(None, None),
         };
         let mut report = Report::default();
         config_section(&mut report, &facts);

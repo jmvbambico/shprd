@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
+use shprd_agents::data::DataDir;
 use shprd_core::event::{Actor, Event, EventKind};
 use shprd_core::log::{AppendError, Clock, EventLog, SystemClock};
 use shprd_core::rules::RuleError;
@@ -95,6 +96,16 @@ pub struct Ctx {
     pub json: bool,
     /// Whether to skip the dagr sync that follows every write.
     pub no_dagr: bool,
+    /// The home directory shprd's own files live under, as the binary resolved
+    /// it at the wiring edge.
+    ///
+    /// It is carried here because the dagr projection reads the person's
+    /// `graph.dagr` setting and looks in their herdr plugin folder, and the
+    /// writes that project happen deep inside verbs ([`crate::cmd::emit`]).
+    /// `None` is a verb that resolved no home: then only `$SHPRD_DAGR_BIN` and
+    /// `PATH` can name a program, because the two probes that need a home were
+    /// never given one.
+    pub home: Option<PathBuf>,
 }
 
 impl Ctx {
@@ -107,7 +118,17 @@ impl Ctx {
             actor,
             json,
             no_dagr,
+            home: None,
         }
+    }
+
+    /// The same context, carrying the home directory the binary resolved.
+    ///
+    /// The edge resolves `--home`, `$SHPRD_HOME`, then `$HOME` once and hands
+    /// the answer down this way, so no verb and no library reads it for itself.
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
     }
 
     /// The same context, acting as `actor`.
@@ -327,6 +348,29 @@ pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
     }
 }
 
+/// Resolves the home directory an agent CLI runs with, which is the one its
+/// session record is written under.
+///
+/// It is `$HOME` and nothing else: shprd never rewrites `HOME` for a launch (it
+/// is a protected variable, [`shprd_agents::env`]), so the CLI that a spawn
+/// starts writes its record under the same `$HOME` this process has. That is a
+/// different directory from the engine's home ([`resolve_home`]), which may be
+/// `SHPRD_HOME` or a `--home` flag and which no CLI writes a session under, and
+/// it is why a chat that looked under the engine's home never found one.
+///
+/// `None` is a process with no `$HOME` at all. That is not a reason to fall back
+/// to the engine's home — the guess would be wrong in exactly the case this
+/// resolver exists for — so a caller says it was not told instead.
+pub fn resolve_agent_home() -> Option<PathBuf> {
+    env_value("HOME").map(PathBuf::from)
+}
+
+/// Resolves the XDG data home an agent CLI writes under: `$XDG_DATA_HOME` when
+/// it is set, else `None` and the caller's own `<home>/.local/share` rule.
+pub fn resolve_agent_data_home() -> Option<PathBuf> {
+    env_value(DATA_HOME_ENV).map(PathBuf::from)
+}
+
 /// One environment variable's value, with an empty one read as unset.
 ///
 /// This is the binary's only way of reading the variables below, so the rule —
@@ -360,23 +404,21 @@ pub fn resolve_data_home(home: &Path) -> PathBuf {
     shprd_agents::harness::data_home(home, env_value(DATA_HOME_ENV).as_deref())
 }
 
-/// Resolves the harness data directory for `root`: `$SHPRD_DATA_DIR`, else
-/// `<root>/data`, else the packaged install's copy, else the data home's.
+/// Resolves the data shprd ships: the harness table, the model catalogs, the
+/// role templates and the skills tables.
 ///
-/// `root` is the repository the caller works in, when it has one. Read here, at
-/// the edge, so a test that names its own home never finds the developer's
-/// install, and a run of the test suite can never depend on the machine's XDG
-/// directories.
-pub fn resolve_data_dir(root: Option<&Path>) -> Result<PathBuf, CliError> {
+/// `$SHPRD_DATA_DIR` when a person named it, else their own overrides under the
+/// data home (`<XDG_DATA_HOME or ~/.local/share>/shprd/`) when it holds a
+/// `harness/`, else the copy embedded in the binary at build time. That last
+/// answer is why an installed `shprd` needs no data directory at all.
+///
+/// Read here, at the edge: the variables are read once and the answer is
+/// carried in as a value, so no verb and no library looks one up, and a test
+/// that names its own home never finds the developer's install.
+pub fn resolve_data_dir() -> DataDir {
     let explicit = env_value(shprd_agents::harness::DATA_ENV).map(PathBuf::from);
-    let home = resolve_home(None)?;
-    let data_home = resolve_data_home(&home);
-    shprd_agents::harness::data_dir(root, explicit.as_deref(), &data_home).ok_or_else(|| {
-        CliError::other(anyhow!(
-            "no harness data directory: set {} to a directory holding `harness/`",
-            shprd_agents::harness::DATA_ENV
-        ))
-    })
+    let data_home = resolve_home(None).ok().map(|home| resolve_data_home(&home));
+    DataDir::resolve(explicit.as_deref(), data_home.as_deref())
 }
 
 /// Resolves the layout shprd's git state lives in, with `namespace` as the

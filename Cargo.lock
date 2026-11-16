@@ -1175,11 +1175,14 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
+ "sha2",
  "shprd-agents",
  "shprd-core",
  "shprd-git",
  "shprd-mux",
+ "shprd-mux-hc",
  "shprd-mux-herdr",
  "shprd-server",
  "shprd-views",
@@ -1197,6 +1200,8 @@ dependencies = [
 name = "shprd-agents"
 version = "0.0.0"
 dependencies = [
+ "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
  "shprd-core",
@@ -1237,6 +1242,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "shprd-mux-hc"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shprd-mux",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "shprd-mux-herdr"
 version = "0.0.0"
 dependencies = [
@@ -1254,6 +1272,7 @@ dependencies = [
  "axum",
  "futures-util",
  "http-body-util",
+ "rusqlite",
  "serde",
  "serde_json",
  "shprd-agents",

@@ -6,6 +6,7 @@
 //! agent.
 
 pub mod brief;
+pub mod cards;
 mod clock;
 pub mod dagr;
 pub mod derived;

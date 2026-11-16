@@ -20,6 +20,10 @@ use std::process::{Command, Output};
 mod live_server;
 
 use live_server::LiveServer;
+// The live-server helper already carries the isolation rule, and re-exporting
+// it from there rather than including `herdr_env.rs` a second time keeps one
+// module per rule: a test crate that loaded it twice would not compile.
+use live_server::herdr_env::isolate;
 
 /// Runs one `git` command in `dir`, failing the test when it does.
 fn git(dir: &Path, args: &[&str]) {
@@ -97,7 +101,12 @@ project_dirs = []
     let home = server.home().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let shprd = |args: &[&str]| -> Output {
-        Command::new(BIN)
+        let mut command = Command::new(BIN);
+        // The rule first, then this test's own private server: a live test is
+        // the one place a child may reach a multiplexer, and it is the one this
+        // test started in a temp directory, never the person's.
+        isolate(&mut command, &home);
+        command
             .args(args)
             .env("HOME", &home)
             .env("SHPRD_HOME", &home)

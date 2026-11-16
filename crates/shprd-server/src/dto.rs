@@ -279,6 +279,48 @@ pub struct TaskDto {
     pub last_status: Option<TaskProgressDto>,
     /// Attempts made so far, in order.
     pub attempts: Vec<AttemptDto>,
+    /// The task's own pull request, once a landing opened one.
+    ///
+    /// `null` is the normal answer for a repository with no forge: a local
+    /// landing merges the branch into its base and opens nothing, so a card
+    /// that drew a pull request row for it would be inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<TaskPrDto>,
+}
+
+/// Whether a task's pull request has been merged.
+///
+/// It is the fold's [`shprd_core::state::PrInfo::merged`] as a word: a board row
+/// has room for two states and a person decides by them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "PrStateDto.ts")]
+pub enum PrStateDto {
+    /// The forge has not merged it, and landing still waits on it.
+    Open,
+    /// It was merged: the task's work is in its base branch.
+    Merged,
+}
+
+/// A task's own pull request, as its card reads it.
+///
+/// The per-task workflow gives every task its own pull request into the run's
+/// base branch, so this is where a person goes to read, approve or merge the
+/// work. A task that landed locally has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskPrDto.ts")]
+pub struct TaskPrDto {
+    /// The forge's number for it, as a person writes it (`#12`).
+    pub number: u64,
+    /// The URL to open: the forge's page for it.
+    pub url: String,
+    /// The branch it proposes to merge.
+    pub head: String,
+    /// Whether it is open or merged.
+    pub state: PrStateDto,
+    /// Whether a human approved it in shprd, at the head the log recorded.
+    pub approved: bool,
 }
 
 /// One task as a person sees it: its derived word, and why it needs them.
@@ -356,6 +398,13 @@ pub struct ReportDto {
     pub summary: String,
     /// Test commands the agent ran, with their result.
     pub tests: Vec<String>,
+    /// The gates the agent ran for the hand-in, with their result.
+    ///
+    /// This is what the accept card's Checks section reads: the commands the
+    /// worker really ran and what each said, which is the half of a hand-in a
+    /// person can check for themselves. Empty for a report recorded before
+    /// hand-ins carried checks.
+    pub checks: Vec<CheckDto>,
     /// Normalized paths the agent changed.
     pub changed_paths: Vec<String>,
     /// Commit the agent made, if any.
@@ -364,6 +413,26 @@ pub struct ReportDto {
     pub commit: Option<String>,
     /// Skills the agent used.
     pub skills_used: Vec<String>,
+}
+
+/// One gate the agent ran for its hand-in.
+///
+/// It is the worker's own record of a check — the gate's name, the command, its
+/// exit code and the tail of what it printed — so a person reading the accept
+/// card sees what ran rather than a claim that it passed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "CheckDto.ts")]
+pub struct CheckDto {
+    /// The gate's name, e.g. `tests` or `lint`.
+    pub gate: String,
+    /// The command, as the worker ran it.
+    pub command: String,
+    /// Its exit code, or `null` when a timeout killed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    /// The last lines it printed, capped.
+    pub output_tail: String,
 }
 
 /// The outcome of one gate against one attempt.
@@ -578,6 +647,76 @@ pub struct HealthDto {
     pub version: String,
 }
 
+/// The body of `POST /api/tasks`.
+///
+/// It is the person's own `shprd agent task add`, minus the id: a form on a
+/// board asks for a title, a scope and an acceptance line, and the service names
+/// the task from the title (see [`crate::tasks::task_id`]). A caller that does
+/// have an id — a script porting a plan — sends it and the service keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "NewTaskDto.ts")]
+pub struct NewTaskDto {
+    /// The id to store it under, when the caller has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    /// One-line title.
+    pub title: String,
+    /// Repo-relative paths the task may change.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// What must be true when the task is done.
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    /// Free-form tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Skills the agent is told to load.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Tasks that must be integrated first.
+    #[serde(default)]
+    pub deps: Vec<String>,
+}
+
+/// One file a task's branch changed, with its line counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "FileChangeDto.ts")]
+pub struct FileChangeDto {
+    /// The path, repo-relative.
+    pub path: String,
+    /// Lines added.
+    pub added: u64,
+    /// Lines deleted.
+    pub deleted: u64,
+    /// True when git counted no lines: the file is binary.
+    pub binary: bool,
+}
+
+/// What `GET /api/tasks/{id}/changes` answers with.
+///
+/// It is the task's branch against its base, read from the merge base, so the
+/// numbers are the work the task did rather than everything its base moved
+/// since. The accept card draws it as a count line and a list of paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TaskChangesDto.ts")]
+pub struct TaskChangesDto {
+    /// The task the changes belong to.
+    pub task: String,
+    /// The branch its work lands on, as the run records it.
+    pub base: String,
+    /// The branch the task's attempt committed on.
+    pub branch: String,
+    /// The commit both branches meet at: what the diff is taken from.
+    pub merge_base: String,
+    /// Every changed file, in git's order.
+    pub files: Vec<FileChangeDto>,
+    /// Lines added across every file.
+    pub added: u64,
+    /// Lines deleted across every file.
+    pub deleted: u64,
+}
+
 /// One event's footprint, as change notifications carry it.
 ///
 /// The change channel carries only what tells a client whether it must refetch
@@ -663,6 +802,69 @@ pub enum Action {
         #[ts(optional)]
         progress: Option<u8>,
     },
+    /// Start a task's first attempt, as `shprd agent spawn --task` does.
+    ///
+    /// The spawn belongs to the binary — it writes a brief, makes a worktree
+    /// and opens a tab — so the service calls that same path. The transition
+    /// rules decide whether a start is allowed: only a queued or failed task
+    /// with its dependencies landed may have one.
+    #[serde(rename = "task.start")]
+    TaskStart {
+        /// The task to start.
+        task: String,
+    },
+    /// Start another attempt at a task, as a send-back does.
+    ///
+    /// It is the same spawn path a start uses, so the new attempt's brief
+    /// carries the failed review's findings exactly as the engine's own
+    /// send-back does. The rules refuse it while the task is not in a state
+    /// where a new attempt is the answer.
+    #[serde(rename = "task.retry")]
+    TaskRetry {
+        /// The task to try again.
+        task: String,
+    },
+    /// Stop the agent working on a task, by closing its space on the host.
+    ///
+    /// The space is closed first — a host that refuses refuses the whole stop,
+    /// and nothing is written — and then the attempt is recorded as stopped. The
+    /// task reads *Needs you · Agent stopped* and `task.retry` starts a new
+    /// attempt, which is Shepherdr's rule for a task whose agent went away (M7a
+    /// §5). A stop of a task nobody started, or a second stop of the same
+    /// attempt, is refused with its reason. A service started without a host
+    /// refuses it.
+    #[serde(rename = "task.stop")]
+    TaskStop {
+        /// The task whose agent should stop.
+        task: String,
+    },
+    /// Drop a task, as `shprd drop` does.
+    ///
+    /// It is the person's decision that the task will not be done, and it is
+    /// what unblocks a run held by work nobody will finish. The reason is
+    /// required: it is what the run's pull request lists under `## Dropped`.
+    /// Nothing is deleted — the branch stays — and the rules refuse a task that
+    /// already landed or was already dropped.
+    #[serde(rename = "task.drop")]
+    TaskDrop {
+        /// The task to drop.
+        task: String,
+        /// Why the person decided against it.
+        reason: String,
+    },
+    /// Accept a task's work at the head its branch is at, as `shprd approve`
+    /// does for a task.
+    ///
+    /// A solo maintainer cannot approve their own pull request on a forge, so
+    /// the approval is recorded in the log, pinned to the commit it was given
+    /// for. It only means something where `tasks.merge` is `ask`: with `checks`
+    /// or `auto` the task lands without an approval, and the service refuses
+    /// this action rather than recording a decision nothing waits on.
+    #[serde(rename = "task.accept")]
+    TaskAccept {
+        /// The task to accept.
+        task: String,
+    },
 }
 
 impl Action {
@@ -671,14 +873,33 @@ impl Action {
     ///
     /// Keep it beside the enum: `every_action_kind_is_listed` fails when a
     /// variant is added without its kind.
-    pub const KINDS: &'static [&'static str] =
-        &["task.add", "task_add", "task.status", "task_status"];
+    pub const KINDS: &'static [&'static str] = &[
+        "task.add",
+        "task_add",
+        "task.status",
+        "task_status",
+        "task.start",
+        "task_start",
+        "task.retry",
+        "task_retry",
+        "task.stop",
+        "task_stop",
+        "task.drop",
+        "task_drop",
+        "task.accept",
+        "task_accept",
+    ];
 
     /// The action's kind, as the envelope spells it.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::TaskAdd { .. } => "task.add",
             Self::TaskStatus { .. } => "task.status",
+            Self::TaskStart { .. } => "task.start",
+            Self::TaskRetry { .. } => "task.retry",
+            Self::TaskStop { .. } => "task.stop",
+            Self::TaskDrop { .. } => "task.drop",
+            Self::TaskAccept { .. } => "task.accept",
         }
     }
 
@@ -693,6 +914,11 @@ impl Action {
             let canonical = match kind {
                 "task_add" => Some("task.add"),
                 "task_status" => Some("task.status"),
+                "task_start" => Some("task.start"),
+                "task_retry" => Some("task.retry"),
+                "task_stop" => Some("task.stop"),
+                "task_drop" => Some("task.drop"),
+                "task_accept" => Some("task.accept"),
                 _ => None,
             };
             if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {
@@ -924,6 +1150,137 @@ pub struct PromptPutDto {
     pub text: String,
 }
 
+/// One prompt in the templates page's list: its identity, its file and whether
+/// it is the person's own.
+///
+/// The words themselves are not in the list — four prompts' standing text is a
+/// lot to send for a page that shows one at a time — so a client reads the one
+/// it opens with [`PromptDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptSummaryDto.ts")]
+pub struct PromptSummaryDto {
+    /// The id it is stored under.
+    pub id: String,
+    /// One line about the role, when this build ships this prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub about: Option<String>,
+    /// The file it lives in.
+    pub path: String,
+    /// Whether the file is the shipped default or the person's own words, when
+    /// it could be read at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub state: Option<PromptStateDto>,
+    /// Whether this build ships a prompt under this id.
+    pub shipped: bool,
+    /// Why the file cannot be used, when it cannot: a person's own file is never
+    /// dropped from the list without a word about why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub problem: Option<String>,
+}
+
+/// What `GET /api/prompts` answers with: every prompt this machine has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PromptListDto.ts")]
+pub struct PromptListDto {
+    /// The prompts, the shipped ones first, then the person's own by id.
+    pub prompts: Vec<PromptSummaryDto>,
+}
+
+/// One program a role may run, with what its catalog and harness table say it
+/// takes.
+///
+/// It is the picker's data, served by the service for the same reason the
+/// settings are: the mod has no data directory of its own, and a picker that
+/// guessed at a program's models would offer ones it cannot run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ProgramDto.ts")]
+pub struct ProgramDto {
+    /// The harness id, e.g. `claude`.
+    pub id: String,
+    /// The words a person sees, e.g. Claude Code.
+    pub name: String,
+    /// The vendor that ships the CLI, e.g. `anthropic`.
+    pub vendor: String,
+    /// Whether the CLI runs other vendors' models, so a model names its own.
+    pub multi_model: bool,
+    /// Whether a model must name its provider too, as `pi` requires.
+    pub needs_provider: bool,
+    /// The models its catalog lists, in the catalog's order.
+    pub models: Vec<ModelChoiceDto>,
+    /// Where the models came from, so a picker can say why a list is short.
+    pub models_source: ModelsSourceDto,
+    /// Why there are no models, when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub models_note: Option<String>,
+    /// The effort levels the program takes overall, lowest first.
+    pub efforts: Vec<String>,
+    /// Whether the program has a fast (higher-priority) mode.
+    pub fast: bool,
+    /// The access modes it offers, in the order its harness table lists them.
+    pub permissions: Vec<PermissionDto>,
+    /// The access mode a role gets when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_permission: Option<String>,
+}
+
+/// One model a program's catalog lists, with the levels it takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ModelChoiceDto.ts")]
+pub struct ModelChoiceDto {
+    /// The name the program's model flag takes.
+    pub id: String,
+    /// The words a person sees; the id when the catalog names no other.
+    pub name: String,
+    /// The effort levels this model takes, lowest first.
+    pub efforts: Vec<String>,
+    /// The level it starts at when a role names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_effort: Option<String>,
+    /// Whether the model has a speed tier of its own.
+    pub fast: bool,
+}
+
+/// One access mode a program offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "PermissionDto.ts")]
+pub struct PermissionDto {
+    /// The program's own word for the mode, e.g. `auto`.
+    pub id: String,
+    /// The words a person sees, e.g. `Auto`.
+    pub label: String,
+}
+
+/// Where a program's model list came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "ModelsSourceDto.ts")]
+pub enum ModelsSourceDto {
+    /// A static list in the shipped data, e.g. `data/models/claude.toml`.
+    Static,
+    /// The program's own list command, read for this answer.
+    Command,
+    /// The program names no model list at all.
+    None,
+}
+
+/// What `GET /api/roster` answers with: the programs a role may run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "RosterDto.ts")]
+pub struct RosterDto {
+    /// One entry per `data/harness/*.toml`.
+    pub programs: Vec<ProgramDto>,
+    /// Why there are no programs, when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+}
+
 /// What one write did, and the settings as they now resolve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "SettingsWriteDto.ts")]
@@ -932,6 +1289,82 @@ pub struct SettingsWriteDto {
     pub outcome: SettingsOutcomeDto,
     /// The settings, resolved after the write.
     pub settings: SettingsDto,
+}
+
+/// One message of a space's conversation, as a panel draws it.
+///
+/// It is [`shprd_agents::transcript::Message`] with a JSON spelling: the role is
+/// the word `user` or `assistant`, and each tool the agent ran is beside its
+/// words rather than a row of its own, because a person reads what the agent
+/// said and only glances at what it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatMessageDto.ts")]
+pub struct ChatMessageDto {
+    /// Who said it: `user` or `assistant`.
+    pub role: String,
+    /// The words, with a program's own markup removed. Empty for a message that
+    /// is tool calls only, which is what Codex records for a call.
+    pub text: String,
+    /// The tools the agent ran as part of this reply, in order.
+    pub tools: Vec<ChatToolDto>,
+    /// When the program recorded it, in ms since the epoch, when it did.
+    pub at_ms: Option<i64>,
+}
+
+/// One tool call, summarised to what a chat row shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatToolDto.ts")]
+pub struct ChatToolDto {
+    /// The program's own name for the tool, e.g. `Bash`.
+    pub name: String,
+    /// One line of what it ran or read, already cut short.
+    pub summary: String,
+}
+
+/// One page of a space's conversation, and where to ask from next.
+///
+/// `cursor` is opaque to a client: it names the session and how far into it the
+/// page reached, so a client that polls with the last cursor it was given sees
+/// each message once. A cursor from another session (the agent started a new
+/// one) reads that session from its start, which is what a panel wants to show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatDto.ts")]
+pub struct ChatDto {
+    /// The space asked about: `coordinator`, or a task's id.
+    pub space: String,
+    /// The program whose record was read, when the service knows it.
+    pub program: Option<String>,
+    /// The session that was read, when there was one.
+    pub session: Option<String>,
+    /// The messages after the client's cursor, oldest first.
+    pub messages: Vec<ChatMessageDto>,
+    /// Where to ask from next.
+    pub cursor: String,
+    /// Whether the record has more to give: ask again at once with `cursor`.
+    pub more: bool,
+    /// Why the page is empty, in words a panel shows, when it is.
+    pub note: Option<String>,
+}
+
+/// One chat line to type into a space's agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatSendDto.ts")]
+pub struct ChatSendDto {
+    /// The space to type into: `coordinator`, or a task's id.
+    pub space: String,
+    /// The words to send, as one turn of the person's input.
+    pub text: String,
+}
+
+/// What one send did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatSendReply.ts")]
+pub struct ChatSendReply {
+    /// The space the line went to.
+    pub space: String,
+    /// True when the line was typed into the agent's pane. A refusal is an
+    /// error answer instead, so a `true` here means the host took it.
+    pub sent: bool,
 }
 
 /// What one write did to the key it named.
@@ -1022,9 +1455,15 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<FailedStepDto>()?,
         one::<LastTickDto>()?,
         one::<TaskDto>()?,
+        one::<TaskPrDto>()?,
+        one::<PrStateDto>()?,
+        one::<NewTaskDto>()?,
+        one::<FileChangeDto>()?,
+        one::<TaskChangesDto>()?,
         one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,
         one::<ReportDto>()?,
+        one::<CheckDto>()?,
         one::<GateDto>()?,
         one::<FindingDto>()?,
         one::<ReviewDto>()?,
@@ -1035,6 +1474,11 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<AskListDto>()?,
         one::<AnswerAsk>()?,
         one::<AskReply>()?,
+        one::<ChatMessageDto>()?,
+        one::<ChatToolDto>()?,
+        one::<ChatDto>()?,
+        one::<ChatSendDto>()?,
+        one::<ChatSendReply>()?,
         one::<SnapshotDto>()?,
         one::<HealthDto>()?,
         one::<EventNoticeDto>()?,
@@ -1053,7 +1497,17 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<PromptDto>()?,
         one::<PromptStateDto>()?,
         one::<PromptPutDto>()?,
+        one::<PromptSummaryDto>()?,
+        one::<PromptListDto>()?,
         one::<SettingsOutcomeDto>()?,
+        one::<RosterDto>()?,
+        one::<ProgramDto>()?,
+        one::<ModelChoiceDto>()?,
+        one::<PermissionDto>()?,
+        one::<ModelsSourceDto>()?,
+        one::<GraphDto>()?,
+        one::<DagrDto>()?,
+        one::<DagrOriginDto>()?,
     ])
 }
 
@@ -1092,14 +1546,65 @@ mod tests {
 
     #[test]
     fn every_action_kind_is_listed() {
-        assert!(Action::KINDS.contains(&task_add().kind()));
-        let status = Action::TaskStatus {
-            task: "T1".to_string(),
-            msg: "halfway".to_string(),
-            progress: Some(50),
-        };
-        assert!(Action::KINDS.contains(&status.kind()));
-        assert_eq!(status.kind(), "task.status");
+        for action in [
+            task_add(),
+            Action::TaskStatus {
+                task: "T1".to_string(),
+                msg: "halfway".to_string(),
+                progress: Some(50),
+            },
+            Action::TaskStart {
+                task: "T1".to_string(),
+            },
+            Action::TaskRetry {
+                task: "T1".to_string(),
+            },
+            Action::TaskStop {
+                task: "T1".to_string(),
+            },
+            Action::TaskDrop {
+                task: "T1".to_string(),
+                reason: "not needed".to_string(),
+            },
+            Action::TaskAccept {
+                task: "T1".to_string(),
+            },
+        ] {
+            assert!(
+                Action::KINDS.contains(&action.kind()),
+                "{} is a kind nobody lists",
+                action.kind()
+            );
+            // And the snake spelling of it round-trips too.
+            let snake = action.kind().replace('.', "_");
+            assert!(Action::KINDS.contains(&snake.as_str()), "{snake}");
+        }
+    }
+
+    #[test]
+    fn the_persons_task_verbs_parse() {
+        let drop = Action::from_value(serde_json::json!({
+            "kind": "task_drop", "task": "T1", "reason": "not needed",
+        }))
+        .expect("a drop");
+        assert_eq!(
+            drop,
+            Action::TaskDrop {
+                task: "T1".to_string(),
+                reason: "not needed".to_string(),
+            }
+        );
+        assert_eq!(drop.kind(), "task.drop");
+        let accept = Action::from_value(serde_json::json!({
+            "kind": "task.accept", "task": "T1",
+        }))
+        .expect("an accept");
+        assert_eq!(accept.kind(), "task.accept");
+        let start = Action::from_value(serde_json::json!({
+            "kind": "task.start", "task": "T1",
+        }))
+        .expect("a start");
+        assert_eq!(start.kind(), "task.start");
     }
 
     #[test]
@@ -1144,6 +1649,119 @@ mod tests {
                 assert!(acceptance.is_empty());
             }
             other => panic!("expected a task.add, got {other:?}"),
+        }
+    }
+}
+
+/// What a graph block needs to draw the run, from `GET /api/graph`.
+///
+/// The block itself is a terminal running dagr (`dagr view <run_json>`), so this
+/// answer carries the command to run and where the program came from, not the
+/// document: dagr reads the file and follows it. `message` is set only when
+/// there is no program, and it names the setting a person has to fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "GraphDto.ts")]
+pub struct GraphDto {
+    /// The repository the service serves.
+    pub repo: String,
+    /// Where the projection lives: `<repo>/.dagr/run.json`.
+    pub run_json: String,
+    /// The run's identity, or `null` before `shprd run start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run: Option<String>,
+    /// The program that draws it, or `null` when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dagr: Option<DagrDto>,
+    /// The command the block runs, `[dagr, view, run_json]`; empty without a
+    /// program.
+    pub argv: Vec<String>,
+    /// The settings key that names the program, so a message can say which key
+    /// to change instead of "configure it somewhere".
+    pub setting: String,
+    /// Why there is no program, in one line, when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+}
+
+/// The program that draws the graph, and the probe that found it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "DagrDto.ts")]
+pub struct DagrDto {
+    /// The executable to run.
+    pub path: String,
+    /// Which probe named it: the setting, `PATH` or the herdr plugin folder.
+    pub origin: DagrOriginDto,
+}
+
+/// Where the graph program was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "DagrOriginDto.ts")]
+pub enum DagrOriginDto {
+    /// `$SHPRD_DAGR_BIN`.
+    Env,
+    /// The `graph.dagr` setting.
+    Setting,
+    /// A `dagr` on `PATH`.
+    Path,
+    /// The `herdr-dagr` herdr plugin's checkout.
+    Plugin,
+}
+
+impl From<crate::graph::Origin> for DagrOriginDto {
+    fn from(origin: crate::graph::Origin) -> Self {
+        match origin {
+            crate::graph::Origin::Env => Self::Env,
+            crate::graph::Origin::Setting => Self::Setting,
+            crate::graph::Origin::Path => Self::Path,
+            crate::graph::Origin::Plugin => Self::Plugin,
+        }
+    }
+}
+
+impl GraphDto {
+    /// The answer for `repo`, whose run is `run` (when one has started), with
+    /// what the binary found when it looked for dagr.
+    pub fn new(
+        repo: &std::path::Path,
+        run: Option<&str>,
+        dagr: Option<&crate::graph::Dagr>,
+    ) -> Self {
+        let run_json = crate::graph::run_json(repo);
+        let (details, argv, message) = match dagr {
+            Some(crate::graph::Dagr::Found(located)) => (
+                Some(DagrDto {
+                    path: located.path.display().to_string(),
+                    origin: DagrOriginDto::from(located.origin),
+                }),
+                located.command(&run_json),
+                None,
+            ),
+            Some(crate::graph::Dagr::Missing(missing)) => {
+                (None, Vec::new(), Some(missing.message()))
+            }
+            // A service nobody told reads nothing of the machine, so it says so
+            // rather than pretending the machine has no dagr.
+            None => (
+                None,
+                Vec::new(),
+                Some(format!(
+                    "this service was not told where dagr is: set `{}` and restart it",
+                    crate::graph::SETTING
+                )),
+            ),
+        };
+        Self {
+            repo: repo.display().to_string(),
+            run_json: run_json.display().to_string(),
+            run: run.map(str::to_owned),
+            dagr: details,
+            argv,
+            setting: crate::graph::SETTING.to_owned(),
+            message,
         }
     }
 }

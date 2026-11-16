@@ -8,6 +8,10 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::isolate;
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
 
@@ -134,9 +138,46 @@ impl Setup {
         setup
     }
 
+    /// Writes the person's `settings.toml` into this fixture's home.
+    fn settings(&self, text: &str) {
+        let config = self.tmp.path().join("home").join(".config").join("shprd");
+        if let Err(error) = fs::create_dir_all(&config) {
+            panic!("creating {} failed: {error}", config.display());
+        }
+        if let Err(error) = fs::write(config.join("settings.toml"), text) {
+            panic!("writing the settings failed: {error}");
+        }
+    }
+
     /// Runs `shprd doctor --no-quota` and returns what it printed.
     fn run(&self, env: &[(&str, &str)]) -> Output {
+        let mut command = self.command();
+        apply(&mut command, env);
+        match command.output() {
+            Ok(output) => output,
+            Err(error) => panic!("running {BIN} failed: {error}"),
+        }
+    }
+
+    /// [`Setup::run`] with no data directory named: the binary has only the
+    /// copy of the shipped data it carries.
+    fn run_without_data(&self, env: &[(&str, &str)]) -> Output {
+        let mut command = self.command();
+        command.env_remove("SHPRD_DATA_DIR");
+        apply(&mut command, env);
+        match command.output() {
+            Ok(output) => output,
+            Err(error) => panic!("running {BIN} failed: {error}"),
+        }
+    }
+
+    /// The child every run starts from: the fixture's own `PATH`, home and XDG
+    /// directories, and the copied data directory.
+    fn command(&self) -> Command {
         let mut command = Command::new(BIN);
+        // The temp home, not the machine: a diagnosis of this fixture, and a
+        // child that cannot reach the person's herdr session or desktop.
+        isolate(&mut command, &self.tmp.path().join("home"));
         command
             .args(["doctor", "--no-quota"])
             .env("PATH", self.tmp.path().join("bin").display().to_string())
@@ -169,22 +210,88 @@ impl Setup {
             )
             .env_remove("SHPRD_HOME")
             .env_remove("SHPRD_PI_MODEL")
-            .env_remove("TUIOS_ENV")
-            .env_remove("HERDR_ENV")
+            // `TUIOS_ENV`, `HERDR_ENV` and every other host variable are
+            // removed by `isolate` above, so a doctor run from a herdr pane
+            // diagnoses the fixture and not the pane it started in.
             .env_remove("OPENCODE_DISABLE_EXTERNAL_SKILLS");
-        for (name, value) in env {
-            command.env(name, value);
-        }
-        match command.output() {
-            Ok(output) => output,
-            Err(error) => panic!("running {BIN} failed: {error}"),
-        }
+        command
+    }
+}
+
+/// Adds per-test environment on top of a fixture's own.
+fn apply(command: &mut Command, env: &[(&str, &str)]) {
+    for (name, value) in env {
+        command.env(name, value);
     }
 }
 
 /// The stdout of a finished run.
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// One titled section of a page, so a test about one part never reads another
+/// by accident.
+fn section(text: &str, title: &str) -> String {
+    let mut section = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line == title {
+            inside = true;
+            continue;
+        }
+        if inside {
+            // The next heading starts at the left edge; every line of a section
+            // is indented under its title.
+            if line.trim().is_empty() || !line.starts_with(' ') {
+                break;
+            }
+            section.push_str(line);
+            section.push('\n');
+        }
+    }
+    section
+}
+
+/// The `Data` section of a page, so a test about data sources never reads the
+/// quota or skills sections by accident.
+fn data_section(text: &str) -> String {
+    section(text, "Data")
+}
+
+#[test]
+fn the_graph_section_says_which_probe_found_dagr() {
+    // A dagr on the fixture's PATH, which is the second probe: the message has
+    // to say which one answered, because that is what a person fixes.
+    let setup = Setup::new(
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
+    );
+    write_script(
+        &setup.tmp.path().join("bin"),
+        "dagr",
+        "case \"$1\" in\n  check) printf '[]\\n' ;;\nesac\nexit 0",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    let graph = section(&text, "Graph");
+    assert!(
+        graph.contains("dagr ") && graph.contains("(from PATH)"),
+        "the program and its probe: {graph}"
+    );
+    assert!(graph.contains("no run"), "no run is not an error: {graph}");
+}
+
+#[test]
+fn without_dagr_the_graph_section_names_the_setting() {
+    let setup = Setup::new(
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    let graph = section(&text, "Graph");
+    assert!(graph.contains('!'), "a missing graph is a warning: {graph}");
+    assert!(graph.contains("dagr was not found"), "{graph}");
+    assert!(graph.contains("graph.dagr"), "the key is named: {graph}");
 }
 
 #[test]
@@ -300,6 +407,76 @@ fn reads_the_roles_from_settings_when_there_is_no_legacy_config() {
     );
 }
 
+/// The Config line names only files that are there: a settings-only install has
+/// no `config.toml`, and naming two paths that do not exist sends a person
+/// looking for a file shprd never writes (item 5 of the M10.0 follow-ups).
+#[test]
+fn the_config_line_names_only_files_that_exist() {
+    let setup = Setup::settings_only(
+        "version = 1\n\n\
+         [roles.worker]\nagent = \"pi\"\nmodel = \"commandcode/deepseek/deepseek-v4.1-flash\"\n\n\
+         [roles.reviewer]\nagent = \"pi\"\nmodel = \"commandcode/z-ai/glm-5.3-flash\"\n",
+    );
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "doctor should pass: {text}");
+    let config_line = text
+        .lines()
+        .find(|line| line.contains("loads and validates"))
+        .unwrap_or_else(|| panic!("no Config line in {text}"));
+    assert!(
+        !config_line.contains(".config/shprd/config.toml")
+            && !config_line.contains(".shprd/config.toml"),
+        "no path to a file that is not there is given: {config_line}"
+    );
+    assert!(
+        config_line.contains("no config.toml: the settings file is the only layer"),
+        "the page says which layer answered: {config_line}"
+    );
+}
+
+/// With both config files there, both are named: that is the shape the two-path
+/// line is for.
+#[test]
+fn the_config_line_names_both_files_when_both_are_there() {
+    let setup = Setup::new(
+        "orchestrator = \"claude/opus\"\nreviewer = \"pi/openrouter/deepseek/deepseek-v4.1-flash\"\nworkers = [\"claude/opus\"]",
+    );
+    // A repository layer too, which the run is pointed at.
+    let root = setup.tmp.path().join("repo");
+    let repo_config = root.join(".shprd");
+    if let Err(error) = fs::create_dir_all(&repo_config) {
+        panic!("creating {} failed: {error}", repo_config.display());
+    }
+    if let Err(error) = fs::write(repo_config.join("config.toml"), "[gates]\n") {
+        panic!("writing the repo config failed: {error}");
+    }
+    let output = setup.run(&[
+        ("SHPRD_REPO", &root.display().to_string()),
+        (
+            "SHPRD_HOME",
+            &setup.tmp.path().join("home").display().to_string(),
+        ),
+    ]);
+    let text = stdout(&output);
+    let config_line = text
+        .lines()
+        .find(|line| line.contains("loads and validates"))
+        .unwrap_or_else(|| panic!("no Config line in {text}"));
+    assert!(
+        config_line.contains(".config/shprd/config.toml"),
+        "the person's file is named: {config_line}"
+    );
+    assert!(
+        config_line.contains(".shprd/config.toml"),
+        "the repository's file is named too: {config_line}"
+    );
+    assert!(
+        !config_line.contains("no config.toml:"),
+        "a page with both files says nothing about a missing one: {config_line}"
+    );
+}
+
 /// The legacy roster is still the layer under the settings: a home with only
 /// `config.toml` keeps the role lines it wrote.
 #[test]
@@ -321,6 +498,66 @@ fn falls_back_to_the_legacy_roster_when_the_settings_name_no_role() {
 }
 
 #[test]
+fn names_the_host_a_run_would_drive_and_why() {
+    // No window, no `hc` and no `herdr` on this fixture's PATH: `auto` asks the
+    // machine, finds neither, and says so — which is the line a person needs
+    // when their terminals do not appear.
+    let setup = Setup::new("orchestrator = \"claude/opus\"\nworkers = [\"claude/opus\"]");
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "the section must not fail: {text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains("host:"))
+        .unwrap_or_else(|| panic!("no host line in {text}"));
+    assert!(
+        line.contains("host: herdr"),
+        "the chosen host is named: {line}"
+    );
+    assert!(
+        line.contains("auto picked herdr"),
+        "and that auto chose it: {line}"
+    );
+    assert!(
+        line.contains("no Herdr window is attached"),
+        "and why not the desktop: {line}"
+    );
+    // Every binary behind the choice is named, so a missing one is visible.
+    for binary in ["hc", "herdr-app"] {
+        assert!(
+            text.lines()
+                .any(|line| line.contains(binary) && line.contains("not on PATH")),
+            "{binary} should be reported as missing: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_desktop_the_machine_cannot_give_warns_and_falls_back() {
+    let setup = Setup::new("orchestrator = \"claude/opus\"\nworkers = [\"claude/opus\"]");
+    setup.settings("host = \"herdr-desktop\"\n");
+    let output = setup.run(&[]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "a fallback is a warning: {text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains("host: herdr"))
+        .unwrap_or_else(|| panic!("no host line in {text}"));
+    assert!(
+        line.trim_start().starts_with('!'),
+        "a named host the machine cannot give is a warning: {line}"
+    );
+    assert!(
+        line.contains("host = herdr-desktop, but"),
+        "the setting is named: {line}"
+    );
+    assert!(
+        line.contains("using herdr instead"),
+        "the fallback is named: {line}"
+    );
+}
+
+#[test]
 fn warns_when_this_shell_hides_a_skill_directory() {
     let setup = Setup::new(
         "orchestrator = \"claude/opus\"\nreviewer = \"pi/anthropic/claude-sonnet\"\nworkers = [\"claude/opus\"]",
@@ -335,5 +572,91 @@ fn warns_when_this_shell_hides_a_skill_directory() {
     assert!(
         warn.contains("~/.agents/skills"),
         "the hidden directory should be named: {warn}"
+    );
+}
+
+#[test]
+fn the_data_section_names_the_source_of_every_kind() {
+    let setup = Setup::new("");
+    let text = data_section(&stdout(&setup.run(&[])));
+    assert!(
+        text.contains("data from SHPRD_DATA_DIR ("),
+        "a named directory is named with the variable: {text}"
+    );
+    for kind in ["harness", "models", "templates", "skills"] {
+        assert!(
+            text.contains(&format!("{kind}: ")),
+            "the {kind} kind has no line of its own: {text}"
+        );
+    }
+    assert!(
+        !text.contains("embedded"),
+        "a named directory is the whole table, with nothing merged in: {text}"
+    );
+}
+
+#[test]
+fn an_installed_binary_reads_the_data_it_ships() {
+    let setup = Setup::new("");
+    let output = setup.run_without_data(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = data_section(&stdout(&output));
+    assert!(
+        text.contains("data from embedded in the binary"),
+        "the source is the binary itself: {text}"
+    );
+    assert!(
+        text.contains("harness: 5 file(s), embedded"),
+        "the shipped harness table is named and counted: {text}"
+    );
+    for kind in ["models", "templates", "skills"] {
+        assert!(
+            text.contains(&format!("{kind}: ")) && text.contains("embedded"),
+            "the {kind} kind is embedded too: {text}"
+        );
+    }
+    assert!(
+        text.contains("5 harness spec(s) load and validate"),
+        "the embedded table loads: {text}"
+    );
+    assert!(text.contains("compat.toml:"), "{text}");
+}
+
+#[test]
+fn a_persons_own_harness_is_named_as_an_override() {
+    let setup = Setup::new("");
+    // A person's own harness for pi, layered over the shipped copy.
+    let overrides = setup.tmp.path().join("home/.local/share/shprd/harness");
+    if let Err(error) = fs::create_dir_all(&overrides) {
+        panic!("creating {} failed: {error}", overrides.display());
+    }
+    let source = data_source().join("harness").join("pi.toml");
+    let text = match fs::read_to_string(&source) {
+        Ok(text) => text.replace("name = \"Pi\"", "name = \"Mine\""),
+        Err(error) => panic!("reading {} failed: {error}", source.display()),
+    };
+    if let Err(error) = fs::write(overrides.join("pi.toml"), text) {
+        panic!("writing the override failed: {error}");
+    }
+
+    let output = setup.run_without_data(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = data_section(&stdout(&output));
+    assert!(text.contains("data from overrides ("), "{text}");
+    assert!(
+        text.contains("harness: 5 file(s): 1 overridden in"),
+        "one file is overridden and the rest are still embedded: {text}"
+    );
+    assert!(
+        text.contains("5 harness spec(s) load and validate"),
+        "the merged table loads: {text}"
     );
 }

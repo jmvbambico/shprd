@@ -78,15 +78,42 @@ list_command = ["opencode", "models"]
 [brief]
 # No system-prompt flag: the brief is the program's first turn. The TUI's only
 # positional is `[project]`, so the brief cannot ride on the launch argv as a
-# prompt; it is typed into the pane (`--prompt` exists but a multi-line brief
-# may not be an argument).
+# prompt; it is typed into the pane. `--prompt` exists (1.18.35's `--help`) but
+# takes the words as one string, and a brief is multi-line, so it is not used:
+# what a terminal `write` pastes is the brief itself, newlines and all.
 delivery = "first-message"
 
 [status]
-# The agent's own OSC 7501 report first, then the plugin it runs for us, then the
-# bottom of its pane. Verified on this machine: herdr installs
-# ~/.config/opencode/plugins/herdr-agent-state.js, which reports opencode's state.
-sources = ["osc7501", "hook", "screen"]
+# The plugin it runs for us, then the bottom of its pane — and no `osc7501`,
+# because opencode 1.18.35 emits none. Verified live on this machine: with
+# HERDR_ENV=1, a private HERDR_PANE_ID and a socket of this task's own, the raw
+# pty capture holds the `\e]7501;?` query and never an answer, while `pi` on the
+# same terminal answers at once.
+#
+# That leaves the plugin, which reports through `pane.report_agent` — a method
+# herdr-core 0.1.21 does not implement (`hc schema` lists none), so the plugin
+# silently no-ops there and opencode's status never arrives at all. Listing
+# `osc7501` here would claim a source the program does not have, and shprd would
+# then wait on a status that cannot come instead of reading the ready line in
+# [ready] (M10 gate, bug 3). A core that gains `pane.report_agent` gets the
+# plugin path back on its own, with no file change: [ready] is only consulted
+# when the host cannot report.
+sources = ["hook", "screen"]
+
+[ready]
+# What shprd waits for when the host cannot report opencode's status, which is
+# every herdr-core up to 0.1.21 (see `status.sources`). Verified live on 1.18.35
+# in a private tmux pane: once the TUI is painted and accepting a turn, the
+# bottom of the pane reads
+#
+#   ┃  Ask anything… "Fix broken tests"
+#   ┃  Build · DeepSeek V4.1 Flash Free OpenCode
+#
+# so the placeholder prompt is the line, and it is the program's own wording —
+# the phase before it (`▀▀█` art, the model line still empty) has neither. A
+# brief typed while the TUI is still painting lands in a pane that is not
+# reading yet, which is exactly the bug this replaces (M10 gate, bug 3).
+screen = ["Ask anything"]
 
 [asks]
 # opencode has a plugin API and herdr's plugin sees `permission.asked` and
@@ -97,10 +124,31 @@ sources = ["osc7501", "hook", "screen"]
 supported = false
 
 [records]
+# The database is `<XDG_DATA_HOME>/opencode/opencode.db`, which is
+# `~/.local/share/opencode/opencode.db` only while `$XDG_DATA_HOME` is unset.
+# OpenCode resolves its own data home, so the location says the same thing with
+# `{data_home}` rather than naming the default.
 kind = "sqlite"
-location = "~/.local/share/opencode/opencode.db"
+location = "{data_home}/opencode/opencode.db"
 errors = "message.data.error holds final errors; retries are not persisted"
 verified = true
+
+[transcript]
+# OpenCode keeps its conversation in the `session`, `message` and `part` tables of
+# the same database the watchdog reads: a `session` row names the directory the
+# session belongs to, `message` holds one row a message and `part` the text and
+# tool blocks of each (1.18.35 on this machine, docs/agents.md). There is no
+# single file a session lives in, so the location names the database itself, and
+# the reader picks the newest session whose `directory` is the space's cwd.
+#
+# `opencode_storage` was the pre-1.18 folder store
+# (`storage/session/<project>/<id>.json` plus `storage/message/<session>/` and
+# `storage/part/<message>/`); an installation that still has one is read with
+# `format = "opencode_storage"` and `location = "{data_home}/opencode/storage"`
+# instead. The database is what a current CLI writes, so it is what the table
+# names.
+format = "opencode_sqlite"
+location = "{data_home}/opencode/opencode.db"
 
 [quota]
 source = "none"

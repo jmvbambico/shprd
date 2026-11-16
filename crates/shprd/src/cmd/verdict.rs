@@ -13,7 +13,7 @@ use shprd_core::config::{self, Review};
 use shprd_core::event::{Actor, EventKind, Finding};
 use shprd_core::gate;
 use shprd_core::rules::RuleError;
-use shprd_mux::Mux;
+use shprd_mux::Host;
 
 use crate::cli::ReviewVerdictArgs;
 use crate::cmd::{review, spawn};
@@ -78,7 +78,7 @@ pub fn verdict_verb(
 /// reviewer's last word: once it is recorded, the reviewer's tab is closed, and
 /// `mux` is the host that closes it.
 pub fn submit_verdict(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     ctx: &Ctx,
     home: Option<&Path>,
     task: &str,
@@ -175,7 +175,7 @@ fn packet_path(ctx: &Ctx, home: &Path, task: &str, attempt: u32) -> Result<PathB
 /// waits for is already in the log, and failing here would tell the caller the
 /// review decided nothing. A run that has already finished has no reviewer left
 /// to stop.
-fn close_reviewer(mux: &dyn Mux, ctx: &Ctx, home: &Path, task: &str, attempt: u32) {
+fn close_reviewer(mux: &dyn Host, ctx: &Ctx, home: &Path, task: &str, attempt: u32) {
     let Some(run) = active_run(ctx) else {
         return;
     };

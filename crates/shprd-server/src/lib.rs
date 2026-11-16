@@ -8,10 +8,18 @@
 //! | `GET /api/state` | the snapshot: the fold, projected for a board |
 //! | `GET /api/changes` | long-poll for events after a sequence, `204` on timeout |
 //! | `POST /api/action` | one tab-typed envelope, run against the same log the CLI writes |
+//! | `GET /api/graph` | where the graph's program is, and the command that draws the run |
+//! | `POST /api/tasks` | add one task, as `shprd agent task add` does |
+//! | `GET /api/tasks/:id/changes` | the task's branch against its base, with line counts |
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
+//! | `GET /api/roster` | the programs a role may run, with their models and levels |
+//! | `GET /api/prompts` | the templates this machine has, without their words |
 //! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
 //! | `PUT /api/prompts/:id` | the person's words, stored over that prompt's file |
+//! | `DELETE /api/prompts/:id` | the shipped words put back over an edit |
+//! | `GET /api/chat` | a space's conversation, read from its agent's own record, after a cursor |
+//! | `POST /api/chat` | one turn of the person's input, typed into that space's agent |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
 //!
 //! Everything but health needs `Authorization: Bearer <token>` from the state
@@ -29,11 +37,16 @@
 
 pub mod api;
 pub mod bindings;
+pub mod changes;
+pub mod chat;
 pub mod dto;
+pub mod engine;
 pub mod error;
+pub mod graph;
 pub mod pass;
 pub mod service;
 pub mod snapshot;
+pub mod tasks;
 pub mod tick;
 
 pub(crate) mod actions;
@@ -42,10 +55,15 @@ pub mod hub;
 pub(crate) mod ledger;
 pub mod news;
 pub(crate) mod prompts;
+pub(crate) mod roster;
 pub(crate) mod settings;
 
 pub use api::{App, WsLimits};
+pub use changes::Touch;
+pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
+pub use engine::Engine;
 pub use error::{ApiReject, ServerError};
+pub use graph::{Dagr, Located, Missing, Origin};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
 pub use service::{

@@ -21,6 +21,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::data::{DataDir, Kind};
 use crate::detect::{self, DetectError};
 use crate::spec::{CatalogParser, EffortSource, HarnessSpec, ModelsSpec};
 
@@ -398,18 +399,21 @@ pub fn parse_catalog(spec: &HarnessSpec, text: &str) -> Result<Catalog, ModelErr
     })
 }
 
-/// The static catalog a harness names, read from `models_dir`.
+/// The static catalog a harness names, read from the shipped data.
 ///
 /// [`None`] when the spec names no static list; an error when it names one that
 /// cannot be read or parsed.
-pub fn static_catalog(
-    spec: &HarnessSpec,
-    models_dir: &Path,
-) -> Result<Option<Catalog>, ModelError> {
-    let Some(path) = spec.models.static_list_path(models_dir) else {
+pub fn static_catalog(spec: &HarnessSpec, data: &DataDir) -> Result<Option<Catalog>, ModelError> {
+    let Some(name) = spec.models.static_list.as_deref() else {
         return Ok(None);
     };
-    let list = StaticCatalog::load(&path)?;
+    let rel = format!("{}/{name}", Kind::Models.dir());
+    let path = data.path(&rel);
+    let text = data.read(&rel).map_err(|source| ModelError::CatalogRead {
+        path: path.clone(),
+        source,
+    })?;
+    let list = StaticCatalog::parse(&path, &text)?;
     Ok(Some(Catalog::from_static(&list, &program_levels(spec))))
 }
 
@@ -589,6 +593,10 @@ impl ModelsSpec {
     ///
     /// The file name is validated when the harness loads: a bare `*.toml` name
     /// with no directory in it, so the catalogue can only sit in `data/models/`.
+    /// The file a static list names, under `models_dir`.
+    ///
+    /// A path-shaped helper for callers holding a directory; the binary reads
+    /// the shipped data through [`crate::data::DataDir`].
     pub fn static_list_path(&self, models_dir: &Path) -> Option<PathBuf> {
         self.static_list.as_ref().map(|name| models_dir.join(name))
     }
@@ -633,7 +641,16 @@ impl StaticCatalog {
             path: path.to_owned(),
             source,
         })?;
-        toml::from_str(&source).map_err(|source| ModelError::CatalogParse {
+        StaticCatalog::parse(path, &source)
+    }
+
+    /// Parse one static catalog already read in, naming `path` in any error.
+    ///
+    /// This is [`StaticCatalog::load`] for a catalog that is not a file on this
+    /// machine: the copy embedded in the binary, which
+    /// [`crate::data::DataDir`] reads into text.
+    pub(crate) fn parse(path: &Path, source: &str) -> Result<StaticCatalog, ModelError> {
+        toml::from_str(source).map_err(|source| ModelError::CatalogParse {
             path: path.to_owned(),
             source,
         })
@@ -1161,6 +1178,11 @@ parser = "codex_catalog""#,
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/models")
     }
 
+    /// The shipped data, read through the embedded copy the binary carries.
+    fn shipped() -> crate::data::DataDir {
+        crate::data::DataDir::resolve(None, None)
+    }
+
     #[test]
     fn loads_the_shipped_claude_catalog() {
         let path = models_dir().join("claude.toml");
@@ -1201,7 +1223,7 @@ parser = "codex_catalog""#,
             Ok(spec) => spec,
             Err(error) => panic!("the shipped claude spec should parse: {error}"),
         };
-        let catalog = match static_catalog(&spec, &models_dir()) {
+        let catalog = match static_catalog(&spec, &shipped()) {
             Ok(Some(catalog)) => catalog,
             Ok(None) => panic!("the claude spec should name a static catalog"),
             Err(error) => panic!("the claude catalog should load: {error}"),
@@ -1216,7 +1238,7 @@ parser = "codex_catalog""#,
     #[test]
     fn a_spec_with_no_static_list_has_no_static_catalog() {
         let spec = spec("opencode", r#"["opencode", "models"]"#, false);
-        match static_catalog(&spec, &models_dir()) {
+        match static_catalog(&spec, &shipped()) {
             Ok(None) => {}
             other => panic!("a spec with no static list should have no catalog: {other:?}"),
         }

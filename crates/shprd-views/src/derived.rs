@@ -402,6 +402,12 @@ pub struct TaskSignal {
     /// Why its newest attempt failed, in the agent's own words, when it is
     /// [`TaskStatus::Failed`].
     pub failure: Option<String>,
+    /// True when a person stopped the agent on its newest attempt.
+    ///
+    /// Shepherdr's rule is that a task whose agent went away reads *Needs you ·
+    /// Agent stopped*, not a failed attempt's own words (M7a §5, `agents.py:170`):
+    /// nothing the attempt said is the reason, the person's own stop is.
+    pub stopped: bool,
     /// Why a person dropped it, when one did.
     pub dropped_reason: Option<String>,
     /// Asks still waiting for the person, oldest first.
@@ -410,6 +416,22 @@ pub struct TaskSignal {
     /// shows the first one still open, so a card and the board agree without a
     /// second source of truth.
     pub open_asks: Vec<AskFacts>,
+    /// The escalations this task still has in front of the person, oldest
+    /// first, as [`crate::cards::card`] reads them.
+    ///
+    /// An escalation is the engine's own card — a review that spent its
+    /// rounds, a review that could not start, a landing that conflicted — and
+    /// it is the person's to settle exactly as an ask is. Reading it here is
+    /// what makes `shprd status` and the board agree with `needs` instead of a
+    /// row that says Working while a card sits unread beside it.
+    pub cards: Vec<CardFacts>,
+}
+
+/// One escalation still in front of a person, as the status rules see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardFacts {
+    /// What needs deciding, in the card's own words.
+    pub body: String,
 }
 
 impl Default for TaskSignal {
@@ -428,8 +450,10 @@ impl Default for TaskSignal {
             provider_cut: None,
             merge: MergeFacts::default(),
             failure: None,
+            stopped: false,
             dropped_reason: None,
             open_asks: Vec::new(),
+            cards: Vec::new(),
         }
     }
 }
@@ -450,6 +474,7 @@ impl TaskSignal {
             waiting_on: waiting_on(state, task),
             wait: reported_wait(task),
             failure: failure_reason(task),
+            stopped: task.latest_attempt().is_some_and(|attempt| attempt.stopped),
             dropped_reason: task.dropped_reason.clone(),
             open_asks: state
                 .asks
@@ -460,6 +485,13 @@ impl TaskSignal {
                     text: ask.text.clone(),
                     expires_at_ms: ask.expires_at_ms,
                 })
+                .collect(),
+            cards: state
+                .escalations
+                .iter()
+                .filter(|escalation| escalation.task.as_deref() == Some(id))
+                .filter_map(|escalation| crate::cards::card(state, escalation))
+                .map(|card| CardFacts { body: card.body })
                 .collect(),
             ..Self::default()
         })
@@ -564,6 +596,13 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
     // back. An ask whose hook timed out is no longer open and says nothing.
     if let Some(ask) = open_ask(signal, now_ms) {
         return Derived::needs(Need::Asks, &ask_reason(ask));
+    }
+    // The engine's own card — a review that spent its rounds, a review that
+    // could not start — is the person's to settle, so it is read here too: a
+    // row that kept saying Working while a card sat in `needs` is how a person
+    // reading the board alone missed that nothing else would move.
+    if let Some(card) = signal.cards.first() {
+        return Derived::needs(Need::Attention, &card.body);
     }
     // A problem found a moment ago reads as the task would without it
     // (agents.py:118-120): its agent is usually told and takes it up, and the
@@ -689,9 +728,17 @@ pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
     if !matches!(
         signal.status,
         TaskStatus::Failed | TaskStatus::Dropped | TaskStatus::Integrated
-    ) && let Some(ask) = open_ask(signal, now_ms)
-    {
-        return Derived::needs(Need::Asks, &ask_reason(ask));
+    ) {
+        if let Some(ask) = open_ask(signal, now_ms) {
+            return Derived::needs(Need::Asks, &ask_reason(ask));
+        }
+        // An escalation is the engine's own card, and it is the person's to
+        // settle: a row that said Working while a card sat unread beside it is
+        // how a person reading `shprd status` alone missed that they were
+        // needed.
+        if let Some(card) = signal.cards.first() {
+            return Derived::needs(Need::Attention, &card.body);
+        }
     }
     if matches!(signal.status, TaskStatus::Working) {
         let at_work = LiveAgents::new(vec![LiveAgent {
@@ -735,6 +782,13 @@ fn parked(signal: &TaskSignal) -> Derived {
             }
         }
         TaskStatus::Failed => {
+            // A person's own stop is why the attempt ended, so it reads
+            // Shepherdr's words rather than the attempt's: nothing the agent
+            // said is the reason, and "Its attempt failed" about work somebody
+            // deliberately stopped is a lie (M7a §5, `agents.py:170`).
+            if signal.stopped {
+                return Derived::needs(Need::Stopped, STOPPED);
+            }
             Derived::needs(Need::Attention, signal.failure.as_deref().unwrap_or(FAILED))
         }
         TaskStatus::Dropped => {
@@ -1008,6 +1062,15 @@ mod tests {
         }
     }
 
+    /// A task a person stopped: Failed, with its newest attempt marked stopped
+    /// and a failure word beside it, which must not win.
+    fn stopped_task() -> TaskSignal {
+        let mut signal = task(TaskStatus::Failed);
+        signal.stopped = true;
+        signal.failure = Some("the agent said it gave up".to_string());
+        signal
+    }
+
     /// A task in the given state with a worker that has been idle since well
     /// before now, so no grace holds anything back.
     fn settled(status: TaskStatus) -> (TaskSignal, LiveAgents) {
@@ -1117,6 +1180,14 @@ mod tests {
                 status: DerivedStatus::NeedsYou,
                 needs: Some(Need::Attention),
                 reason: Some(FAILED),
+            },
+            Case {
+                rule: "a task a person stopped reads Agent stopped (agents.py:170, M10 gate bug 1)",
+                signal: stopped_task(),
+                live: LiveAgents::default(),
+                status: DerivedStatus::NeedsYou,
+                needs: Some(Need::Stopped),
+                reason: Some(STOPPED),
             },
             Case {
                 rule: "a landed task is done (agents.py:111-114)",
@@ -1786,6 +1857,67 @@ mod tests {
         let got = derive_status(&signal, &one(Some(Activity::Working)), NOW);
         assert_eq!(got.status, DerivedStatus::Working);
         assert_ne!(got.needs, Some(Need::Asks));
+    }
+
+    #[test]
+    fn a_log_only_reader_sees_an_open_card_as_needs_you() {
+        // Gate run #4, bug 4: a task whose review could not start read
+        // `Working · In review` while its card sat in `/api/state`'s `needs`,
+        // so a person reading `shprd status` alone never learned they were
+        // needed. An escalation is read exactly as an open ask is.
+        let mut signal = task(TaskStatus::Working);
+        signal.cards.push(CardFacts {
+            body: String::from(
+                "C1: the engine's review did not start: no workspace \"shprd · repo\" yet",
+            ),
+        });
+        let got = derive_from_fold(&signal, NOW);
+        assert_eq!(got.status, DerivedStatus::NeedsYou);
+        assert_eq!(got.needs, Some(Need::Attention));
+        assert!(
+            got.reason
+                .unwrap_or_default()
+                .starts_with("C1: the engine's review did not start"),
+            "the card's own reason is the row's"
+        );
+
+        // A reported task reads it too: nothing moves without the person,
+        // whatever its own attempt last said.
+        let mut reported = task(TaskStatus::Reported);
+        reported.cards.push(CardFacts {
+            body: String::from("C1: its `start` step has failed the same way 3 passes in a row"),
+        });
+        assert_eq!(
+            derive_from_fold(&reported, NOW).status,
+            DerivedStatus::NeedsYou
+        );
+
+        // And a task that is already done says nothing it still needs.
+        for status in [
+            TaskStatus::Integrated,
+            TaskStatus::Dropped,
+            TaskStatus::Failed,
+        ] {
+            let mut done = task(status);
+            done.cards.push(CardFacts {
+                body: String::from("a stale card"),
+            });
+            let got = derive_from_fold(&done, NOW);
+            if status == TaskStatus::Failed {
+                // A failed task is the person's anyway, but for its own reason:
+                // the card is not what the row cites.
+                assert_ne!(got.reason.as_deref(), Some("a stale card"));
+            } else {
+                assert_ne!(got.status, DerivedStatus::NeedsYou, "{status:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_card_lists_reads_as_it_did_before() {
+        // Nothing changes for the runs that have no escalation at all.
+        let signal = task(TaskStatus::Working);
+        assert_eq!(derive_from_fold(&signal, NOW), Derived::working(None));
     }
 
     #[test]

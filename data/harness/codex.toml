@@ -115,11 +115,29 @@ levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 delivery = "first-message"
 
 [status]
-# The agent's own OSC 7501 report first, then a hook it runs for us, then the
-# bottom of its pane. Verified on this machine: herdr installs a SessionStart
-# hook into ~/.codex/hooks.json (status hooks are the person's own; the ask hook
-# below is worktree-local).
-sources = ["osc7501", "hook", "screen"]
+# The hook it runs for us, then the bottom of its pane — and no `osc7501`,
+# because codex 0.167.0 emits none. Verified live on this machine: the raw pty
+# capture of a codex pane holds no 7501 sequence at all. herdr installs a
+# SessionStart hook into ~/.codex/hooks.json, which reports through
+# `pane.report_agent` — absent from herdr-core 0.1.21, so on this core codex
+# reports nothing and [ready] is what says it is up. (Status hooks are the
+# person's own; the ask hook below is worktree-local.)
+sources = ["hook", "screen"]
+
+[ready]
+# The fallback for a host that cannot report codex's status, which is
+# herdr-core 0.1.21 and its missing `pane.report_agent`: codex's hook reports
+# through that method, and codex emits no OSC 7501 of its own (the raw capture
+# holds the `\e]7501;?` query and no answer). Verified live on 0.167.0 in a
+# private tmux pane: once signed in, the bottom of the pane reads
+#
+#   › Ask Codex to do anything
+#     ? for shortcuts
+#
+# so that placeholder is the line. Codex's own startup asks — the sign-in menu
+# and the update offer — are not ready: the first is a [[blocking_prompts]]-style
+# wait a person has to answer, and the second is already listed there.
+screen = ["Ask Codex to do anything"]
 
 [asks]
 # Codex fires `PermissionRequest` for an approval; the shape is the one this
@@ -155,6 +173,13 @@ kind = "jsonl"
 location = "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl"
 errors = "provider errors in the rollout; quota on every turn via event_msg/token_count.rate_limits"
 verified = true
+
+[transcript]
+# Codex's rollouts live in one date tree for every directory, so the newest one
+# whose own `session_meta` names this working directory is the session. The date
+# placeholders are matched as wildcards: a session can cross midnight.
+format = "codex_jsonl"
+location = "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl"
 
 [quota]
 source = "codex_wham"

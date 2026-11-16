@@ -5,6 +5,13 @@
 //! The service is a real child process on a real loopback socket, which is the
 //! point: the router's own tests drive it in-process, and this one proves the
 //! subcommand wires the same thing up. Nothing here leaves the machine.
+//!
+//! Two of these tests run the service on the **Herdr desktop host**, over the
+//! fake `hc connect` the host crate's tests speak the protocol with and a fake
+//! window, and assert it stops with exit code 0 on `SIGTERM` and on `SIGINT`.
+//! That is a regression test with a history: the desktop host owns a tokio
+//! runtime, and a runtime dropped inside the service's async context panicked on
+//! every clean shutdown, so Ctrl-C used to exit 101.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -17,8 +24,18 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::herdr::{absent_socket, isolate};
+
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
+
+/// The fake `hc connect` the host crate's tests drive the client with.
+///
+/// Compiled in rather than read at run time, so there is one fake and not two,
+/// and so this test does not care where the other crate's test support sits.
+const FAKE_HC: &str = include_str!("../../shprd-mux-hc/tests/support/fake_hc.py");
 
 /// A child `shprd serve`, stopped on drop so a failing test leaves nothing
 /// running.
@@ -35,9 +52,10 @@ impl Service {
     /// Starts the service with its output going where the test can read it.
     ///
     /// `json` picks the banner's shape. Every service these tests start is
-    /// pointed at a multiplexer socket that does not exist: a pass must never
-    /// reach the person's own herdr session, and a start that cannot find a host
-    /// is exactly the failure the tests about visible failures are about.
+    /// pointed at a multiplexer socket that does not exist (see [`isolate`]): a
+    /// pass must never reach the person's own herdr session, and a start that
+    /// cannot find a host is exactly the failure the tests about visible
+    /// failures are about.
     fn start_with(
         repo: &Path,
         state: &Path,
@@ -47,6 +65,7 @@ impl Service {
         stderr: Stdio,
     ) -> Self {
         let mut command = Command::new(BIN);
+        isolate(&mut command, state);
         command.args([
             "--repo",
             &repo.display().to_string(),
@@ -65,11 +84,51 @@ impl Service {
             // machine's real ones would see whatever the developer has installed.
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", home.join(".local").join("share"))
-            .env("HERDR_SOCKET_PATH", state.join("no-herdr-server.sock"))
+            // `isolate` already put `HERDR_SOCKET_PATH` at an absent socket in
+            // `state`; this states the fact the failure tests below rely on.
+            .env("HERDR_SOCKET_PATH", absent_socket(state))
             .env_remove("SHPRD_TICK_RECORD_ONLY")
             .env_remove("SHPRD_ACTOR")
             .stdout(stdout)
             .stderr(stderr)
+            .spawn()
+            .expect("the service starts");
+        let service = Self { child };
+        service.wait_for_record(state);
+        service
+    }
+
+    /// Starts a service on the Herdr desktop host: a fake `hc`, a fake window,
+    /// and this fixture's own homes.
+    ///
+    /// It is record-only off, because a record-only service drops the host where
+    /// it builds it; the host a real service keeps lives in the closures its
+    /// passes run, and that is the one whose drop has to be quiet.
+    fn start_on_desktop(repo: &Path, state: &Path, home: &Path) -> Self {
+        let (hc, window) = fake_desktop(state);
+        let mut command = Command::new(BIN);
+        isolate(&mut command, state);
+        let child = command
+            .args([
+                "--repo",
+                &repo.display().to_string(),
+                "--home",
+                &home.display().to_string(),
+                "serve",
+                "--port",
+                "0",
+            ])
+            .env("XDG_STATE_HOME", state)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local").join("share"))
+            .env("HERDR_APP_HOME", state.join("herdr-app"))
+            // The two programs the desktop host is made of, and this test's own.
+            .env("SHPRD_HC", &hc)
+            .env("SHPRD_HERDR_APP", &window)
+            .env_remove("SHPRD_TICK_RECORD_ONLY")
+            .env_remove("SHPRD_ACTOR")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("the service starts");
         let service = Self { child };
@@ -91,20 +150,26 @@ impl Service {
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
-    fn stop(mut self) {
+    fn stop(self) {
+        let _ = self.stop_with("-TERM");
+    }
+
+    /// Sends `signal` (a `kill` name such as `-TERM`) and answers how the
+    /// service ended.
+    fn stop_with(mut self, signal: &str) -> std::process::ExitStatus {
         let _ = Command::new("kill")
-            .arg("-TERM")
+            .arg(signal)
             .arg(self.child.id().to_string())
             .status();
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => return status,
                 Ok(None) => sleep(Duration::from_millis(50)),
                 Err(err) => panic!("waiting for the service failed: {err}"),
             }
         }
-        panic!("the service did not stop after SIGTERM");
+        panic!("the service did not stop after {signal}");
     }
 }
 
@@ -113,6 +178,55 @@ impl Drop for Service {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A fake herdr-core and a fake Herdr window, as the two binaries the desktop
+/// host runs.
+///
+/// The core is [`FAKE_HC`] behind a shell wrapper (the client spawns the binary
+/// with `connect` as its only argument, as a real `hc` takes it); the window is a
+/// script answering the `herdr-app do …` commands the host sends (M7ef §2.12).
+fn fake_desktop(dir: &Path) -> (PathBuf, PathBuf) {
+    let at = dir.join("desktop");
+    fs::create_dir_all(&at).expect("make the fake desktop's folder");
+    let script = at.join("fake_hc.py");
+    fs::write(&script, FAKE_HC).expect("write the fake core");
+    fs::write(at.join("mode"), "normal").expect("write the fake core's mode");
+    let hc = at.join("hc");
+    fs::write(
+        &hc,
+        format!(
+            "#!/bin/sh\nFAKE_HC_DIR='{}' exec python3 '{}' \"$@\"\n",
+            at.display(),
+            script.display()
+        ),
+    )
+    .expect("write the fake core's wrapper");
+    let window = at.join("herdr-app");
+    fs::write(
+        &window,
+        "#!/bin/sh
+if [ \"$1\" = \"status\" ]; then
+  echo '{\"layout\":\"main\"}'
+  exit 0
+fi
+case \"$2\" in
+  space.new) echo '{\"space\":\"spfake\",\"tab\":\"tbfake\",\"terminal\":\"t100\"}' ;;
+  *)         echo '{\"ok\":true}' ;;
+esac
+",
+    )
+    .expect("write the fake window");
+    for binary in [&hc, &window] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = fs::metadata(binary).expect("the fake exists").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(binary, permissions).expect("make the fake executable");
+        }
+    }
+    (hc, window)
 }
 
 /// Where the service writes its discovery file.
@@ -125,7 +239,9 @@ fn repo_with_a_run() -> (TempDir, TempDir, TempDir) {
     let repo = TempDir::new().expect("repo dir");
     let state = TempDir::new().expect("state dir");
     let home = TempDir::new().expect("home dir");
-    let started = Command::new(BIN)
+    let mut start = Command::new(BIN);
+    isolate(&mut start, state.path());
+    let started = start
         .args([
             "--repo",
             &repo.path().display().to_string(),
@@ -170,7 +286,9 @@ fn fast_tick(repo: &Path) {
 
 /// Runs one `shprd` verb in `repo`, asserting it worked.
 fn shprd(repo: &Path, home: &Path, state: &Path, args: &[&str]) -> String {
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    isolate(&mut command, state);
+    let output = command
         .arg("--repo")
         .arg(repo)
         .arg("--home")
@@ -243,6 +361,32 @@ fn post_action(url: &str, token: &str, write_header: bool, body: &Value) -> Resu
 }
 
 #[test]
+fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigterm() {
+    // The Herdr desktop host owns a tokio runtime. A runtime shut down inside an
+    // async context used to panic — "Cannot drop a runtime in a context where
+    // blocking is not allowed" — so every Ctrl-C on Herdr desktop exited 101.
+    // This is the whole path a supervisor takes: start, then SIGTERM.
+    let (repo, state, home) = repo_with_a_run();
+    let service = Service::start_on_desktop(repo.path(), state.path(), home.path());
+    let status = service.stop_with("-TERM");
+    assert!(
+        status.success(),
+        "the service must stop quietly, and it stopped with {status}"
+    );
+}
+
+#[test]
+fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigint() {
+    let (repo, state, home) = repo_with_a_run();
+    let service = Service::start_on_desktop(repo.path(), state.path(), home.path());
+    let status = service.stop_with("-INT");
+    assert!(
+        status.success(),
+        "Ctrl-C must stop the service quietly too, and it stopped with {status}"
+    );
+}
+
+#[test]
 fn a_second_serve_for_the_same_state_directory_is_refused() {
     let (repo, state, home) = repo_with_a_run();
     let first = Service::start(repo.path(), state.path(), home.path());
@@ -251,7 +395,9 @@ fn a_second_serve_for_the_same_state_directory_is_refused() {
     // A second service would take the record over and leave the first one
     // running with no way to find it, so it is refused — and the refusal names
     // the service that already holds the directory.
-    let second = Command::new(BIN)
+    let mut second_serve = Command::new(BIN);
+    isolate(&mut second_serve, state.path());
+    let second = second_serve
         .args([
             "--repo",
             &repo.path().display().to_string(),
@@ -290,6 +436,60 @@ fn a_second_serve_for_the_same_state_directory_is_refused() {
     assert_eq!(status, 200);
 
     first.stop();
+    assert!(!record_path(state.path()).exists());
+}
+
+#[test]
+fn a_serve_right_after_a_kill_takes_over_from_the_stale_record() {
+    // Bug 7 of the M10 gate: after `pkill -f "shprd serve"` a start within a
+    // second or two was refused with "already running (pid N)" — the flock is
+    // still held by the dying process, and `service.json` still names it. The
+    // start looks at the process, waits the lock out, and takes the directory.
+    let (repo, state, home) = repo_with_a_run();
+    let first = Service::start(repo.path(), state.path(), home.path());
+    let stale = read_record(state.path());
+    let stale_pid = stale["pid"].as_u64().expect("a pid");
+    // `SIGKILL`, so the process cannot remove its own record: exactly the state a
+    // `pkill -9` leaves behind.
+    first.stop_with("-KILL");
+    assert!(
+        record_path(state.path()).exists(),
+        "a killed service leaves its record behind"
+    );
+
+    // The start right after the kill must not believe the record. It waits for
+    // the *new* record, since the dead one is already on disk and would
+    // otherwise answer `wait_for_record` at once.
+    let second = Service::start(repo.path(), state.path(), home.path());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let fresh = loop {
+        let record = read_record(state.path());
+        if record["id"] != stale["id"] {
+            break record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the new service never wrote its own record: {record}"
+        );
+        sleep(Duration::from_millis(50));
+    };
+    assert_ne!(
+        fresh["id"], stale["id"],
+        "the new start is its own service, not the dead one"
+    );
+    assert_ne!(
+        fresh["pid"].as_u64(),
+        Some(stale_pid),
+        "the record now names the new process"
+    );
+    let port = fresh["port"].as_u64().expect("a port");
+    let (status, body) =
+        get(&format!("http://127.0.0.1:{port}/api/health"), None).expect("the new service answers");
+    assert_eq!(status, 200);
+    let health: Value = serde_json::from_str(&body).expect("health is JSON");
+    assert_eq!(health["id"], fresh["id"]);
+
+    second.stop();
     assert!(!record_path(state.path()).exists());
 }
 
@@ -557,7 +757,9 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
 
     // `shprd status` says the same thing in one line on stderr, so the board on
     // stdout is untouched — a `--json` caller still gets one document.
-    let status = Command::new(BIN)
+    let mut status_command = Command::new(BIN);
+    isolate(&mut status_command, state.path());
+    let status = status_command
         .arg("--repo")
         .arg(repo.path())
         .arg("--home")
@@ -588,7 +790,9 @@ fn a_failed_step_warns_on_the_services_stderr_and_reaches_the_board() {
         state.path(),
         &["run", "finish", "--abandon", "--yes"],
     );
-    let finished = Command::new(BIN)
+    let mut finished_command = Command::new(BIN);
+    isolate(&mut finished_command, state.path());
+    let finished = finished_command
         .arg("--repo")
         .arg(repo.path())
         .arg("--home")
@@ -710,12 +914,43 @@ fn a_json_service_keeps_stdout_one_document_when_the_run_starts() {
 }
 
 #[test]
-fn a_service_says_what_it_did_about_the_repositorys_workspace() {
-    // Bug 6 of the M9 gate: the workspace label is derived from the folder
-    // name, so leaving the workspace to a person is a run that refuses every
-    // pass until someone reads a refusal. The service prepares it at startup and
-    // says which it did. Here the socket names no host at all, so the banner
-    // says it could not, in one line that names the label it wanted.
+fn the_banner_prints_the_tick_interval_the_settings_name() {
+    // M10 gate bug 4: `settings set tasks.tick_secs 10` was written and shown,
+    // and the service kept 15 s — in the banner and in every pass. The passes
+    // read the setting per pass now, and the banner prints the same one so a
+    // reader is not told an interval no pass will use.
+    let (repo, state, home) = repo_with_a_run();
+    let settings = home.path().join(".config").join("shprd");
+    fs::create_dir_all(&settings).expect("the settings dir");
+    fs::write(
+        settings.join("settings.toml"),
+        "version = 1\n\n[tasks]\ntick_secs = 4\n",
+    )
+    .expect("write the settings");
+    let out_path = state.path().join("serve.out");
+    let service = Service::start_with(
+        repo.path(),
+        state.path(),
+        home.path(),
+        false,
+        Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
+        Stdio::null(),
+    );
+    let banner = read_when(&out_path, "tick:");
+    assert!(
+        banner.contains("every 4s"),
+        "the banner uses the person's setting: {banner}"
+    );
+    service.stop();
+}
+
+#[test]
+fn a_service_says_what_it_did_about_the_repositorys_space() {
+    // Bug 6 of the M9 gate: the space label is derived from the folder name, so
+    // leaving the space to a person is a run that refuses every pass until
+    // someone reads a refusal. The service prepares the coordinator's space at
+    // startup and says which it did. Here the socket names no host at all, so
+    // the banner says it could not, in one line that names the label it wanted.
     let label = |repo: &Path| {
         format!(
             "shprd · {}",
@@ -734,14 +969,14 @@ fn a_service_says_what_it_did_about_the_repositorys_workspace() {
         Stdio::from(fs::File::create(&out_path).expect("the stdout file")),
         Stdio::from(fs::File::create(&err_path).expect("the stderr file")),
     );
-    let banner = read_when(&out_path, "workspace:");
+    let banner = read_when(&out_path, "space:");
     assert!(
         banner.contains(&label(repo.path())),
         "the banner names the label a run needs: {banner}"
     );
     assert!(
         banner.contains("not ready"),
-        "and says the workspace is not there: {banner}"
+        "and says the space is not there: {banner}"
     );
     let warning = read_when(&err_path, "not ready");
     assert!(
@@ -763,10 +998,81 @@ fn a_service_says_what_it_did_about_the_repositorys_workspace() {
     );
     let banner = read_when(&out_path, "\"serving\"");
     let value: Value = serde_json::from_str(&banner).expect("the banner is one JSON document");
-    assert_eq!(value["workspace"]["state"], "unavailable", "{value}");
-    let reason = value["workspace"]["reason"]
+    assert_eq!(value["space"]["state"], "unavailable", "{value}");
+    let reason = value["space"]["reason"]
         .as_str()
         .expect("the reason is a string");
     assert!(reason.contains(&label(repo.path())), "{reason}");
     service.stop();
+}
+
+#[test]
+fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
+    // A Herdr desktop mod cannot read a stream: its `fetch` is buffered and it
+    // has no WebSocket (M7ef §2.11). Its live arm is the long poll plus
+    // `watchFolder`, so the service keeps one small file that it rewrites after
+    // every ledger write, and the window reads that instead of guessing.
+    let (repo, state, home) = repo_with_a_run();
+    // Held for the whole test: its `Drop` is what stops the service.
+    let _service = Service::start(repo.path(), state.path(), home.path());
+    let change = state.path().join("shprd").join("changes");
+
+    // It is there as soon as the service is: a window that starts first has a
+    // real answer rather than a missing file.
+    let first: Value = serde_json::from_str(
+        &fs::read_to_string(&change).expect("the change file is written at start"),
+    )
+    .expect("the change file is JSON");
+    let start_seq = first["seq"].as_u64().expect("a sequence");
+    assert_eq!(start_seq, 1, "the run start is the log's first event");
+    assert!(first["at_ms"].as_u64().expect("a time") > 0);
+
+    // A write through the API moves it, ahead of the answer the caller reads.
+    let port = read_record(state.path())["port"].as_u64().expect("a port") as u16;
+    let base = format!("http://127.0.0.1:{port}");
+    let token = read_token(state.path());
+    let added = serde_json::json!({
+        "kind": "task.add",
+        "task": "T1",
+        "title": "a task",
+        "scope": ["crates/a"],
+        "acceptance": ["it works"],
+    });
+    assert_eq!(
+        post_action(&format!("{base}/api/action"), &token, true, &added),
+        Ok(200)
+    );
+    let second: Value =
+        serde_json::from_str(&fs::read_to_string(&change).expect("the change file is there"))
+            .expect("JSON");
+    assert_eq!(second["seq"].as_u64(), Some(2), "{second}");
+    assert!(
+        second["at_ms"].as_u64() >= first["at_ms"].as_u64(),
+        "the file moves forward"
+    );
+
+    // And a write made by another process — a worker's own verb — moves it too,
+    // because the service watches the log and publishes what it finds.
+    shprd(
+        repo.path(),
+        home.path(),
+        state.path(),
+        &["task", "status", "T1", "--msg", "from the command line"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut third = second.clone();
+    while Instant::now() < deadline {
+        third =
+            serde_json::from_str(&fs::read_to_string(&change).expect("the change file is there"))
+                .expect("JSON");
+        if third["seq"].as_u64() == Some(3) {
+            break;
+        }
+        sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        third["seq"].as_u64(),
+        Some(3),
+        "a write by another process reaches a watching mod: {third}"
+    );
 }

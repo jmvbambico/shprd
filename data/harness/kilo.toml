@@ -71,10 +71,24 @@ list_command = ["kilo", "models"]
 delivery = "first-message"
 
 [status]
-# The agent's own OSC 7501 report first, then the plugin it runs for us, then the
-# bottom of its pane. Verified on this machine: herdr installs
-# ~/.config/kilo/plugin/herdr-agent-state.js, a plugin that reports kilo's state.
-sources = ["osc7501", "hook", "screen"]
+# The plugin it runs for us, then the bottom of its pane — and no `osc7501`,
+# because kilo 7.8.8 emits none. Verified live on this machine: the raw pty
+# capture of a kilo pane holds no 7501 sequence at all. The plugin reports
+# through `pane.report_agent`, which herdr-core 0.1.21 does not implement, so on
+# this core kilo reports nothing and [ready] is what says it is up.
+sources = ["hook", "screen"]
+
+[ready]
+# Verified live on 7.8.8 in a private tmux pane: the bottom of a kilo pane that
+# has painted and is taking a turn reads
+#
+#   ┃  Ask anything... "Fix broken tests"
+#   ┃  Code  · Auto Free Kilo Gateway
+#
+# so the placeholder prompt is the line, exactly as opencode's is — which is
+# what a shared TUI lineage predicts, and why the pattern is the program's own
+# wording rather than a program's name.
+screen = ["Ask anything"]
 
 [asks]
 # kilo has a plugin API and herdr's plugin sees `permission.asked` and
@@ -84,8 +98,10 @@ sources = ["osc7501", "hook", "screen"]
 supported = false
 
 [records]
+# Kilo resolves its own data home the XDG way, as OpenCode does, so the location
+# names it rather than the default `~/.local/share` spelling of it.
 kind = "sqlite"
-location = "~/.local/share/kilo/kilo.db"
+location = "{data_home}/kilo/kilo.db"
 errors = "message.data.error holds final errors; retries are not persisted"
 verified = true
 

@@ -12,7 +12,7 @@ use shprd_core::state::Task;
 use shprd_git::git::Git;
 use shprd_git::integrate::{self, IntegrateError, TaskCommits};
 use shprd_git::worktree::Layout;
-use shprd_mux::Mux;
+use shprd_mux::Host;
 
 use crate::cli::IntegrateArgs;
 use crate::cmd::run_lock::lock_run;
@@ -27,7 +27,7 @@ const SHORT_SHA: usize = 7;
 /// The task has to be `Passed` with no unanswered failed gate, which is what
 /// the `Integrated` rule checks, so a refused task touches no git state.
 pub fn verb(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     ctx: &Ctx,
     args: &IntegrateArgs,
     home: Option<&Path>,
@@ -98,7 +98,7 @@ pub fn verb(
 /// This is the M1 path: the caller did the merge and only needs the ledger to
 /// know about it, so no commit list is invented here.
 fn record_only(
-    mux: &dyn Mux,
+    mux: &dyn Host,
     ctx: &Ctx,
     args: &IntegrateArgs,
     home: Option<&Path>,
@@ -111,14 +111,16 @@ fn record_only(
     emit(ctx, &event)
 }
 
-/// Closes the worker tab an integrated task can no longer come back to.
+/// Closes the space an integrated task can no longer come back to.
 ///
 /// Integration is the one event after which no attempt of the task can run in
-/// its tab again: a failed review sends a task back only while it is not yet
-/// integrated. That is why the tab outlives `reported` and ends here. A close
-/// the host refuses is warned about, never fatal — the landing is recorded, and
-/// run end sweeps whatever a refusal leaves behind.
-fn close_worker_tab(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, task: &str) {
+/// its space again: a failed review sends a task back only while it is not yet
+/// integrated. That is why the space outlives `reported` and ends here, and why
+/// it is the whole space rather than the worker's tab — its reviewer is a tab of
+/// it too, and neither can be used now. A close the host refuses is warned
+/// about, never fatal — the landing is recorded, and run end sweeps whatever a
+/// refusal leaves behind.
+fn close_worker_tab(mux: &dyn Host, ctx: &Ctx, home: Option<&Path>, task: &str) {
     let Ok(home) = resolve_home(home) else {
         return;
     };
@@ -128,8 +130,11 @@ fn close_worker_tab(mux: &dyn Mux, ctx: &Ctx, home: Option<&Path>, task: &str) {
     let Some(run) = state.run.as_ref().map(|run| run.run_id.clone()) else {
         return;
     };
+    let Ok(repo_name) = spawn::repo_name(&ctx.root) else {
+        return;
+    };
     let briefs = home.join(".shprd").join("briefs");
-    if let Err(err) = spawn::close_worker(mux, &briefs, &run, task) {
+    if let Err(err) = spawn::close_task_space(mux, &briefs, &run, &repo_name, task) {
         eprintln!("warning: {err}");
     }
 }
@@ -241,7 +246,7 @@ mod tests {
     use shprd_core::event::{Actor, ReportStatus, ReviewSource};
     use shprd_core::gate::REVIEW_GATE;
     use shprd_mux::TabId;
-    use shprd_mux::fake::FakeMux;
+    use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
 
     use super::*;
@@ -391,15 +396,27 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{err}"));
         }
 
-        /// A host with this repository's workspace, and the worker tab the
-        /// attempt recorded beside its brief.
+        /// A host with the task's own space, and the worker tab the attempt
+        /// recorded beside its brief, and a second task's space beside it.
+        ///
+        /// The second space is what a landing must not touch: one task, one
+        /// space, so a close that reached another task's agent would take work
+        /// the run still wants.
         fn mux_with_worker(&self) -> (FakeMux, String) {
             let mux = FakeMux::default();
-            let workspace = mux
-                .create_workspace(&spawn::workspace_name(&self.repo_name()), self.root())
+            let space = mux
+                .create_space(
+                    &spawn::task_space_name(&self.repo_name(), "t1", "T1"),
+                    self.root(),
+                )
                 .unwrap_or_else(|err| panic!("{err}"));
+            mux.create_space(
+                &spawn::task_space_name(&self.repo_name(), "t1", "T2"),
+                self.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
             let tab = mux
-                .create_tab(&workspace.id, "worker", self.root())
+                .spawn(&space.id, "worker", &[], &[], self.root())
                 .unwrap_or_else(|err| panic!("{err}"));
             let record = spawn::tab_path(&self.briefs(), "t1", "T1", 1);
             std::fs::create_dir_all(self.briefs().join("t1")).unwrap_or_else(|err| panic!("{err}"));
@@ -407,16 +424,23 @@ mod tests {
             (mux, tab.id.to_string())
         }
 
-        /// Whether `tab` is still open on `mux`.
+        /// Whether `tab` is still open on `mux`, in whatever space holds it.
         fn still_open(&self, mux: &FakeMux, tab: &str) -> bool {
-            let workspace = mux
-                .find_workspace(&spawn::workspace_name(&self.repo_name()))
-                .unwrap_or_else(|err| panic!("{err}"))
-                .unwrap_or_else(|| panic!("the workspace is gone"));
-            mux.list_tabs(&workspace.id)
+            let _ = self;
+            mux.list_spaces()
                 .unwrap_or_else(|err| panic!("{err}"))
                 .iter()
+                .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
                 .any(|open| open.id == TabId::new(tab))
+        }
+
+        /// The spaces the host still has, by label.
+        fn spaces(&self, mux: &FakeMux) -> Vec<String> {
+            mux.list_spaces()
+                .unwrap_or_else(|err| panic!("{err}"))
+                .into_iter()
+                .map(|space| space.name)
+                .collect()
         }
     }
 
@@ -464,6 +488,82 @@ mod tests {
         assert!(
             !scratch.still_open(&mux, &tab),
             "the worker tab {tab} outlived the task's integration"
+        );
+    }
+
+    /// A landing closes the task's own space, and nothing else.
+    ///
+    /// This is the space-per-task change: the space labelled from the task goes
+    /// whole, so its worker and its reviewer go with it in one call, and a
+    /// neighbour task's space — whose agent may still be working — is untouched.
+    #[test]
+    fn a_landing_closes_the_tasks_space_and_no_other() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.passed(&ctx);
+        let (mux, _tab) = scratch.mux_with_worker();
+        let mine = spawn::task_space_name(&scratch.repo_name(), "t1", "T1");
+        let neighbour = spawn::task_space_name(&scratch.repo_name(), "t1", "T2");
+        assert_eq!(scratch.spaces(&mux), vec![mine.clone(), neighbour.clone()]);
+
+        verb(&mux, &ctx, &args(), Some(scratch.home.path())).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(
+            scratch.spaces(&mux),
+            vec![neighbour.clone()],
+            "only the landed task's space is gone"
+        );
+        assert!(
+            mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::CloseSpace(_))),
+            "the space is closed as one call: {:?}",
+            mux.calls()
+        );
+        let kept = mux
+            .find_space(&neighbour)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .unwrap_or_else(|| panic!("the neighbour's space was closed"));
+        assert!(mux.list_tabs(&kept.id).is_ok());
+    }
+
+    /// A host that cannot close a whole space still loses the task's tabs.
+    ///
+    /// The degradation is the capability flag: the space stays on the host's
+    /// bar, but no agent is left running in it, because the records shprd wrote
+    /// name every tab it opened.
+    #[test]
+    fn a_landing_without_space_close_empties_the_tasks_tabs() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.passed(&ctx);
+        let mux = FakeMux::default().without_close_space();
+        let space = mux
+            .create_space(
+                &spawn::task_space_name(&scratch.repo_name(), "t1", "T1"),
+                scratch.root(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+        let tab = mux
+            .spawn(&space.id, "worker", &[], &[], scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let record = spawn::tab_path(&scratch.briefs(), "t1", "T1", 1);
+        std::fs::create_dir_all(scratch.briefs().join("t1")).unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(record, tab.id.as_str()).unwrap_or_else(|err| panic!("{err}"));
+
+        verb(&mux, &ctx, &args(), Some(scratch.home.path())).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(
+            mux.calls().contains(&Call::CloseTab(tab.id.clone())),
+            "the tab is closed one by one: {:?}",
+            mux.calls()
+        );
+        assert!(
+            !mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::CloseSpace(_))),
+            "a host without the capability is never asked: {:?}",
+            mux.calls()
         );
     }
 

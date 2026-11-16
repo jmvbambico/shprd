@@ -171,11 +171,127 @@ impl LastPass {
     }
 }
 
+/// How many passes in a row one task's step has failed the same way.
+///
+/// A step that fails is the person's to fix — a scope that overlaps another
+/// task, an integration branch nobody made — so the run repeats it, and every
+/// pass writes one `WARN` line. That is right for the first pass and useless by
+/// the tenth: nobody is reading a terminal, and `/api/state`'s `needs` stays
+/// empty, so the board shows an unchanged row for ever.
+///
+/// This keeps the run of identical failures where the next pass can read it, so
+/// the third one can be a card instead of another warning. It is a mirror of the
+/// pass, not the record: the log is what happened, and a file that cannot be
+/// written is a warning rather than a failed pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Failures {
+    /// The repository these failures happened in.
+    pub repo: String,
+    /// One entry per task and step that failed on the pass that wrote it, with
+    /// how many passes in a row it has failed that way.
+    pub runs: Vec<FailureRun>,
+}
+
+/// One task's step, and how long it has been failing the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureRun {
+    /// The task the step was about.
+    pub task: String,
+    /// The step's name: `start`, `review`, `verdict`, `land`, `send_back`.
+    pub step: String,
+    /// The error the step reported, as the pass recorded it.
+    pub error: String,
+    /// How many passes in a row failed this way, this one included.
+    pub passes: u32,
+}
+
+/// How many passes a step must fail the same way before the run asks a person.
+///
+/// Three is enough to tell a transient failure — a host that was busy, a worktree
+/// another writer held — from one that is a person's to fix, and short enough
+/// that a run which cannot move does not sit quiet for a minute.
+pub const REPEATS_BEFORE_A_CARD: u32 = 3;
+
+impl Failures {
+    /// The record the pass that produced `report` leaves, given the record the
+    /// pass before it left.
+    ///
+    /// A step that failed on both passes with the same words is one run longer;
+    /// a step that did not fail on this pass is forgotten, because the person
+    /// fixed it or something else moved the task. A step that failed differently
+    /// starts again at one: the error is what the card would name, so a new
+    /// error is a new problem.
+    pub fn next(previous: Option<&Self>, report: &TickReport, repo: &Path) -> Self {
+        let failures: Vec<&StepReport> = report.steps.iter().filter(|step| !step.ok).collect();
+        let runs = failures
+            .iter()
+            .map(|step| {
+                let passes = previous
+                    .and_then(|previous| {
+                        previous.runs.iter().find(|run| {
+                            run.task == step.task
+                                && run.step == step.action
+                                && run.error == step.detail
+                        })
+                    })
+                    .map_or(1, |run| run.passes.saturating_add(1));
+                FailureRun {
+                    task: step.task.clone(),
+                    step: step.action.clone(),
+                    error: step.detail.clone(),
+                    passes,
+                }
+            })
+            .collect();
+        Self {
+            repo: repo.display().to_string(),
+            runs,
+        }
+    }
+
+    /// The run for one task's step on this pass, when it failed.
+    pub fn run_of(&self, task: &str, step: &str) -> Option<&FailureRun> {
+        self.runs
+            .iter()
+            .find(|run| run.task == task && run.step == step)
+    }
+
+    /// Whether `task`'s `step` has now failed the same way often enough for a
+    /// person to be asked.
+    pub fn needs_a_person(&self, task: &str, step: &str) -> bool {
+        self.run_of(task, step)
+            .is_some_and(|run| run.passes >= REPEATS_BEFORE_A_CARD)
+    }
+
+    /// The newest record written for `repo`, when there is one.
+    pub fn read(state_dir: &Path, repo: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(state_dir.join(failures_file_name(repo))).ok()?;
+        let found: Self = serde_json::from_str(&text).ok()?;
+        (Path::new(&found.repo) == repo).then_some(found)
+    }
+
+    /// Writes this record into `state_dir`, replacing the previous one.
+    pub fn write(&self, state_dir: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(state_dir)?;
+        let name = failures_file_name(Path::new(&self.repo));
+        let path = state_dir.join(&name);
+        let temporary: PathBuf = state_dir.join(format!("{name}.tmp"));
+        let text = serde_json::to_string(self).map_err(io::Error::other)?;
+        std::fs::write(&temporary, text)?;
+        std::fs::rename(&temporary, path)
+    }
+}
+
+/// The failure record's file name for `repo`, beside the last pass's.
+fn failures_file_name(repo: &Path) -> String {
+    format!("repeats-{}", &file_name(repo)[PREFIX.len()..])
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{FailedStep, LastPass};
+    use super::{FailedStep, Failures, LastPass};
     use crate::tick::{StepReport, TickReport};
 
     /// A pass over `/repo` with two steps, one of them failed.
@@ -199,6 +315,7 @@ mod tests {
                 },
             ],
             news: Vec::new(),
+            interval_secs: None,
         }
     }
 
@@ -246,6 +363,88 @@ mod tests {
         assert!(LastPass::read(&state, std::path::Path::new("/other")).is_none());
         // And a missing one is no failure at all.
         assert!(LastPass::read(&dir.path().join("never"), std::path::Path::new("/repo")).is_none());
+    }
+
+    /// A pass over `/repo` that failed one step with `error`.
+    fn one_failure(task: &str, step: &str, error: &str) -> TickReport {
+        TickReport {
+            run: Some(String::from("m9")),
+            steps: vec![StepReport {
+                action: step.to_string(),
+                task: task.to_string(),
+                ok: false,
+                detail: error.to_string(),
+                seq: None,
+            }],
+            news: Vec::new(),
+            interval_secs: None,
+        }
+    }
+
+    #[test]
+    fn the_same_failure_counts_up_and_a_different_one_starts_again() {
+        // Bug 3 of gate run #4: a step that failed every pass warned every pass
+        // and never reached a person. The record is what lets the third pass be
+        // a card.
+        let repo = std::path::Path::new("/repo");
+        let first = Failures::next(None, &one_failure("C2", "start", "scope overlaps T1"), repo);
+        assert_eq!(first.run_of("C2", "start").map(|run| run.passes), Some(1));
+        assert!(!first.needs_a_person("C2", "start"));
+
+        let second = Failures::next(
+            Some(&first),
+            &one_failure("C2", "start", "scope overlaps T1"),
+            repo,
+        );
+        assert_eq!(second.run_of("C2", "start").map(|run| run.passes), Some(2));
+        assert!(!second.needs_a_person("C2", "start"));
+
+        let third = Failures::next(
+            Some(&second),
+            &one_failure("C2", "start", "scope overlaps T1"),
+            repo,
+        );
+        assert_eq!(third.run_of("C2", "start").map(|run| run.passes), Some(3));
+        assert!(
+            third.needs_a_person("C2", "start"),
+            "three passes of the same failure is the person's"
+        );
+
+        // A different error is a different problem, so it starts again.
+        let other = Failures::next(
+            Some(&third),
+            &one_failure("C2", "start", "no workspace yet"),
+            repo,
+        );
+        assert_eq!(other.run_of("C2", "start").map(|run| run.passes), Some(1));
+    }
+
+    #[test]
+    fn a_pass_that_worked_forgets_the_run_of_failures() {
+        let repo = std::path::Path::new("/repo");
+        let failed = Failures::next(None, &one_failure("C2", "start", "scope overlaps"), repo);
+        let mut worked = one_failure("C2", "start", "scope overlaps");
+        worked.steps[0].ok = true;
+        let healed = Failures::next(Some(&failed), &worked, repo);
+        assert!(healed.runs.is_empty(), "the failure was fixed: {healed:?}");
+        assert!(!healed.needs_a_person("C2", "start"));
+    }
+
+    #[test]
+    fn the_failure_record_is_written_read_and_ignored_for_another_repo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state = dir.path().join("state");
+        let record = Failures::next(
+            None,
+            &one_failure("C2", "start", "scope overlaps"),
+            std::path::Path::new("/repo"),
+        );
+        record.write(&state).expect("write");
+        assert_eq!(
+            Failures::read(&state, std::path::Path::new("/repo")),
+            Some(record)
+        );
+        assert!(Failures::read(&state, std::path::Path::new("/other")).is_none());
     }
 
     #[test]

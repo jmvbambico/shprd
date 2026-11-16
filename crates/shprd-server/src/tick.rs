@@ -250,6 +250,16 @@ pub struct TickReport {
     /// What the pass told each space's coordinator, when a news desk is wired.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub news: Vec<NewsSent>,
+    /// How long the loop should wait before the next pass, in seconds.
+    ///
+    /// It is the interval this pass actually read from the settings, so
+    /// `tasks.tick_secs` (and the old `[tick] interval_secs`) takes effect on a
+    /// running service with no restart: the loop sleeps what the last pass
+    /// answered rather than the interval the service started with (M10 gate bug
+    /// 4). `None` on a pass that did not resolve one, which leaves the loop's
+    /// own interval standing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
 }
 
 impl TickReport {
@@ -261,6 +271,17 @@ impl TickReport {
     /// True when every step that ran also worked.
     pub fn ok(&self) -> bool {
         self.steps.iter().all(|step| step.ok)
+    }
+
+    /// How long the loop should wait before the next pass.
+    ///
+    /// The interval from this pass's settings when it resolved one, else
+    /// `fallback` (the interval the loop was started with).
+    pub fn next_interval(&self, fallback: Duration) -> Duration {
+        match self.interval_secs {
+            Some(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => fallback,
+        }
     }
 }
 
@@ -287,13 +308,15 @@ pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + S
 /// log, and failing the step would tell the caller the review decided nothing.
 pub type ReviewCloser = Arc<dyn Fn(&Path, &str, u32) -> Result<(), String> + Send + Sync>;
 
-/// What the tick needs to close a landed task's worker tab.
+/// What the tick needs to close a landed task's space.
 ///
-/// A landing is the engine's record and the tab is the host's, so the binary
-/// passes the same `spawn::close_worker` the CLI's `agent integrate` uses. Only
-/// the records shprd wrote for that task are in reach, so a tab nobody put in
-/// `<briefs>/<run>/` is never closed. A host that refuses the close is logged
-/// and never fails the step: the landing is already in the log.
+/// A landing is the engine's record and the space is the host's, so the binary
+/// passes the same `spawn::close_task_space` the CLI's `agent integrate` uses:
+/// one task, one space, so a landing closes the space rather than the worker's
+/// tab and leaves the reviewer's behind. Only the space labelled from that task
+/// is in reach, and only the records shprd wrote for it when the host cannot
+/// close a whole space. A host that refuses the close is logged and never fails
+/// the step: the landing is already in the log.
 pub type WorkerCloser = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
 
 /// Everything one pass runs against.
@@ -338,11 +361,11 @@ pub struct Worker {
     /// `None` when the caller has no host (a test, a record-only pass): a
     /// verdict is still recorded, and nothing is left open to close.
     pub close_reviewer: Option<ReviewCloser>,
-    /// Closes a landed task's worker tab once the landing is recorded.
+    /// Closes a landed task's space once the landing is recorded.
     ///
     /// `None` when the caller has no host (a test, a record-only pass): a
     /// landing is still recorded, and nothing is left open to close. A landed
-    /// task cannot come back to its tab — only a failed review sends a task
+    /// task cannot come back to its space — only a failed review sends a task
     /// back, and only before it is integrated — so this is the last moment the
     /// worker's tab is still useful.
     pub close_worker: Option<WorkerCloser>,
@@ -390,7 +413,7 @@ impl Worker {
         // who changes the merge policy or the concurrency cap while the service
         // runs gets it on the next pass, exactly as the roles and the fallbacks
         // already do.
-        let config = self.pass_config();
+        let (config, interval) = self.pass_config();
         let facts = Facts {
             prs: self.state_prs(&state),
             live: self.facts.live(&state),
@@ -410,10 +433,17 @@ impl Worker {
         });
         let mut report = TickReport {
             run: state.run.as_ref().map(|run| run.run_id.clone()),
+            interval_secs: interval,
             ..TickReport::default()
         };
+        // A task whose step has failed the same way often enough has been put in
+        // front of a person on an earlier pass. Repeating the identical warning
+        // every fifteen seconds tells nobody anything new, so a step in that set
+        // says it on the debug channel instead. The step still runs and its
+        // failure is still recorded: what goes quiet is the terminal.
+        let quiet = self.quiet_failures(&state);
         for step in steps {
-            let result = self.run_step(&config, &state, &step);
+            let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
         // The ladder runs after the advance steps so a task this pass just
@@ -424,12 +454,102 @@ impl Worker {
         // And the news last, from the log as the steps left it, so a task this
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
+        self.record_failures(&report);
         self.record(&pass::LastPass::of(
             &report,
             &self.repo,
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Counts this pass's failures against the last one's, and asks a person
+    /// once a step has failed the same way three passes in a row.
+    ///
+    /// A step that keeps failing is the person's to fix — a task whose scope
+    /// overlaps another's, an integration branch nobody made — so the run is
+    /// right to stop, and wrong to say so only in a terminal. The first two
+    /// passes are warnings, because a host that was busy or a worktree another
+    /// writer held clears itself; the third is a card, recorded once, naming the
+    /// error and the verb that fixes it.
+    fn record_failures(&self, report: &TickReport) {
+        let previous = pass::Failures::read(&self.state_dir, &self.repo);
+        let failures = pass::Failures::next(previous.as_ref(), report, &self.repo);
+        for run in &failures.runs {
+            // Only on the pass that reached the count: the record carries the
+            // count forward, so a card written every pass after it would bury
+            // the log in the same decision.
+            if run.passes != pass::REPEATS_BEFORE_A_CARD {
+                continue;
+            }
+            if let Err(err) = self.escalate_repeated_failure(run) {
+                tracing::warn!(task = %run.task, step = %run.step, %err, "the card for a repeated failure could not be recorded");
+            }
+        }
+        if let Err(err) = failures.write(&self.state_dir) {
+            tracing::warn!(%err, "could not write the repeated-failure record");
+        }
+    }
+
+    /// The failures already put in front of a person, as `(task, step)`.
+    ///
+    /// A step that has failed the same way three passes running is a card once:
+    /// the record carries the count forward, so every pass after the third would
+    /// write the same card into the log again. The escalation itself is drawn
+    /// from the first card, and it leaves the board when the step stops failing
+    /// — which is what [`shprd_views::cards`] reads off the log.
+    fn quiet_failures(&self, state: &RunState) -> BTreeSet<(String, String)> {
+        let Some(failures) = pass::Failures::read(&self.state_dir, &self.repo) else {
+            return BTreeSet::new();
+        };
+        failures
+            .runs
+            .iter()
+            .filter(|run| run.passes >= pass::REPEATS_BEFORE_A_CARD)
+            .filter(|run| {
+                let marker =
+                    repeated_failure_prefix(&run.task, &run.step, attempt_of(state, &run.task));
+                state.escalations.iter().any(|escalation| {
+                    escalation.task.as_deref() == Some(run.task.as_str())
+                        && escalation.body.starts_with(&marker)
+                })
+            })
+            .map(|run| (run.task.clone(), run.step.clone()))
+            .collect()
+    }
+
+    /// Puts a step that keeps failing in front of a person, once.
+    ///
+    /// The body begins with [`repeated_failure_prefix`], which [`Self::quiet_failures`]
+    /// compares, so one run of failures costs one card rather than one every
+    /// fifteen seconds. It names the step and the error, and what the person has
+    /// to do: shprd cannot narrow a scope or make a branch for them.
+    fn escalate_repeated_failure(&self, run: &pass::FailureRun) -> Result<(), String> {
+        let state = ledger::load(&self.repo).map(|(state, _)| state).ok();
+        let attempt = state
+            .as_ref()
+            .map_or(0, |state| attempt_of(state, &run.task));
+        let marker = repeated_failure_prefix(&run.task, &run.step, attempt);
+        let told = state.is_some_and(|state| {
+            state.escalations.iter().any(|escalation| {
+                escalation.task.as_deref() == Some(run.task.as_str())
+                    && escalation.body.starts_with(&marker)
+            })
+        });
+        if told {
+            return Ok(());
+        }
+        let error = run.error.lines().next().unwrap_or_default().trim();
+        let seq = self.commit(EventKind::Escalated {
+            task: Some(run.task.clone()),
+            body: format!("{marker}{error}"),
+            default_action: format!(
+                "fix what the card names, then the engine retries `{}` on its next pass",
+                run.step
+            ),
+        })?;
+        self.notify(Some(seq));
+        Ok(())
     }
 
     /// Writes what this pass did where `shprd status` and `GET /api/state` read
@@ -487,51 +607,12 @@ impl Worker {
         }
     }
 
-    /// The config this pass runs under: the file layers, with the settings
-    /// resolution applied on top.
+    /// The config this pass runs under, and how long the loop should wait before
+    /// the next one.
     ///
-    /// `tasks.merge` and `tasks.max_running` are what the person sees in the
-    /// brief's Settings block and in `shprd settings show`, so they are what the
-    /// pass must act on. Only a key a layer actually names wins: a settings file
-    /// that says nothing about the merge policy leaves the resolved config's own
-    /// answer standing, which is what a test that hands a pass its config
-    /// directly expects. The settings resolution already reads the old
-    /// `config.toml` keys as its lowest named layer, so a run whose person has
-    /// not migrated keeps the values its config file asks for. A settings file
-    /// that cannot be read is not a reason to stop the pass: the resolved
-    /// config's own values stand, and the next pass reads the file again.
-    fn pass_config(&self) -> Config {
-        use shprd_core::settings::{Key, Source, TaskKey};
-
-        let Ok(loaded) = shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) else {
-            return self.config.clone();
-        };
-        let resolved = loaded.resolve(None);
-        let tasks = resolved.tasks();
-        // Every key resolves, because the built-in layer sets them all: a key is
-        // "set" only when a layer other than the defaults named it.
-        let named = |key: TaskKey| {
-            resolved
-                .get(&Key::Task(key))
-                .is_some_and(|sourced| sourced.source != Source::BuiltIn)
-        };
-        let mut config = self.config.clone();
-        if named(TaskKey::Merge) {
-            config.land.merge = tasks.merge;
-        }
-        if named(TaskKey::MaxRunning) {
-            config.tick.max_running = tasks.max_running;
-        }
-        // The review's policy is what the send-back and the out-of-rounds card
-        // are decided by, so the person's own answer to the brief's
-        // `Review rounds` line is what the pass must act on.
-        if named(TaskKey::ReviewRounds) {
-            config.review.rounds = tasks.review_rounds;
-        }
-        if named(TaskKey::MustFix) {
-            config.review.must_fix = tasks.must_fix;
-        }
-        config
+    /// See [`pass_config`] for what is read and why, and what the interval means.
+    fn pass_config(&self) -> (Config, Option<u64>) {
+        pass_config(&self.home, &self.repo, &self.config)
     }
 
     /// The tasks whose reviewer's findings file has settled and may be decided.
@@ -911,7 +992,13 @@ impl Worker {
     }
 
     /// Runs one step, mapping a failure to a reported one.
-    fn run_step(&self, config: &Config, state: &RunState, step: &Step) -> StepReport {
+    fn run_step(
+        &self,
+        config: &Config,
+        state: &RunState,
+        step: &Step,
+        quiet: &BTreeSet<(String, String)>,
+    ) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
             Step::Review { task } => self.review_task(state, task),
@@ -935,8 +1022,15 @@ impl Worker {
             Ok(report) => report,
             Err(reason) => {
                 // Logged, not raised: a failing step is news about one task, and
-                // the pass must reach the others.
-                tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
+                // the pass must reach the others. A failure a person has already
+                // been given a card for is logged quietly: the card is the
+                // telling, and a line every pass is noise on top of it.
+                let key = (step.task().to_string(), step.action().to_string());
+                if quiet.contains(&key) {
+                    tracing::debug!(action = step.action(), task = step.task(), %reason, "tick step still failing, already in front of a person");
+                } else {
+                    tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
+                }
                 StepReport::failed(step, reason)
             }
         }
@@ -1623,13 +1717,13 @@ impl Worker {
         Ok(last)
     }
 
-    /// Records that a task landed, and closes the worker tab that carried it.
+    /// Records that a task landed, and closes the space that carried it.
     ///
     /// One record for all three ways a task lands — a forge merge, a local
     /// merge into the integration branch, and a merge someone made outside
-    /// shprd — because the tab question is the same for all of them: a landed
-    /// task cannot come back to it. The close is logged when the host refuses, as
-    /// the reviewer's is, since the landing is already in the log.
+    /// shprd — because the space question is the same for all of them: a landed
+    /// task cannot come back to it. The close is logged when the host refuses,
+    /// as the reviewer's is, since the landing is already in the log.
     fn record_landed(
         &self,
         task: &str,
@@ -1650,7 +1744,7 @@ impl Worker {
         Ok(event)
     }
 
-    /// Closes a landed task's worker tab, logging a host that refuses.
+    /// Closes a landed task's space, logging a host that refuses.
     ///
     /// A close that fails is never fatal: the landing is recorded, and failing
     /// the step would report a merge that already happened as a failure. Run end
@@ -1659,7 +1753,7 @@ impl Worker {
         if let Some(close) = &self.close_worker
             && let Err(err) = close(&self.repo, task)
         {
-            tracing::warn!(task, %err, "the worker's tab did not close after its landing");
+            tracing::warn!(task, %err, "the task's space did not close after its landing");
         }
     }
 
@@ -1811,6 +1905,33 @@ fn review_failure_prefix(task: &str) -> String {
     format!("{task}: the engine's review did not start: ")
 }
 
+/// What every escalation body for a step that keeps failing begins with.
+///
+/// It names the task, the step and the attempt the failure was about, so the
+/// next pass recognises its own card and writes no second one, a failure of a
+/// different step is a card of its own, and a new attempt after the fix is a
+/// card of its own too. It is shaped like
+/// [`shprd_core::gate::send_back_failure_prefix`], so a board's staleness rule
+/// reads it the same way: the card is history once a newer attempt exists.
+pub fn repeated_failure_prefix(task: &str, step: &str, attempt: u32) -> String {
+    format!(
+        "{task}: its `{step}` step has failed the same way {} passes in a row (attempt {attempt}): ",
+        pass::REPEATS_BEFORE_A_CARD
+    )
+}
+
+/// How many attempts the task has had, as the fold counts them.
+///
+/// A repeated-failure card names it, so the card is about the attempt the
+/// failure happened in and leaves the board when the work moves on.
+fn attempt_of(state: &RunState, task: &str) -> u32 {
+    state
+        .tasks
+        .get(task)
+        .and_then(|task| task.latest_attempt().map(|attempt| attempt.n))
+        .unwrap_or(0)
+}
+
 /// The log's spelling of a provider class.
 fn provider_class(kind: CutKind) -> ProviderClass {
     match kind {
@@ -1930,6 +2051,66 @@ fn describe_land_error(err: LandError, task: &str) -> String {
     }
 }
 
+/// The config a pass runs under, and how long the loop should wait before the
+/// next one.
+///
+/// `tasks.merge`, `tasks.max_running`, the review rounds and must-fix are what
+/// the person sees in the brief's Settings block and in `shprd settings show`,
+/// so they are what the pass must act on. Only a key a layer actually names
+/// wins: a settings file that says nothing about the merge policy leaves the
+/// resolved config's own answer standing, which is what a test that hands a pass
+/// its config directly expects. The settings resolution already reads the old
+/// `config.toml` keys as its lowest named layer, so a run whose person has not
+/// migrated keeps the values its config file asks for. A settings file that
+/// cannot be read is not a reason to stop the pass: the resolved config's own
+/// values stand, and the next pass reads the file again.
+///
+/// The interval is returned beside the config because it is the one workflow
+/// value that is not the pass's own business: `tasks.tick_secs` decides how long
+/// the *loop* waits, so the loop has to be told what this pass read (M10 gate bug
+/// 4). It comes back `None` when no settings layer names it, so a service started
+/// with a `[tick] interval_secs` keeps that value. `shprd serve` calls this too,
+/// so the banner prints the interval the first pass will act on rather than only
+/// the one its config file named.
+pub fn pass_config(home: &Path, repo: &Path, base: &Config) -> (Config, Option<u64>) {
+    use shprd_core::settings::{Key, Source, TaskKey};
+
+    let Ok(loaded) = shprd_core::settings::Loaded::read(home, Some(repo)) else {
+        return (base.clone(), None);
+    };
+    let resolved = loaded.resolve(None);
+    let tasks = resolved.tasks();
+    // Every key resolves, because the built-in layer sets them all: a key is
+    // "set" only when a layer other than the defaults named it.
+    let named = |key: TaskKey| {
+        resolved
+            .get(&Key::Task(key))
+            .is_some_and(|sourced| sourced.source != Source::BuiltIn)
+    };
+    let mut config = base.clone();
+    let mut interval = None;
+    if named(TaskKey::Merge) {
+        config.land.merge = tasks.merge;
+    }
+    if named(TaskKey::MaxRunning) {
+        config.tick.max_running = tasks.max_running;
+    }
+    // The review's policy is what the send-back and the out-of-rounds card are
+    // decided by, so the person's own answer to the brief's `Review rounds` line
+    // is what the pass must act on.
+    if named(TaskKey::ReviewRounds) {
+        config.review.rounds = tasks.review_rounds;
+    }
+    if named(TaskKey::MustFix) {
+        config.review.must_fix = tasks.must_fix;
+    }
+    if named(TaskKey::TickSecs) {
+        config.tick.interval_secs = tasks.tick_secs;
+        interval = Some(tasks.tick_secs);
+    }
+    (config, interval)
+}
+
 /// Maps the eight derived words onto the planner's phase.
 fn phase_of(status: DerivedStatus) -> Phase {
     match status {
@@ -1950,6 +2131,13 @@ fn phase_of(status: DerivedStatus) -> Phase {
 /// that is slow — a landing that waits on a push — delays the next one instead
 /// of running beside it. A pass that fails to read the log is logged and the
 /// loop carries on: the run is still there when the next one looks.
+///
+/// `interval` is only the starting wait: the settings are read on every pass, so
+/// a person who sets `tasks.tick_secs` (or the older `[tick] interval_secs`) gets
+/// it on the wait after the next pass with no restart (M10 gate bug 4). Each
+/// pass answers the interval it read in
+/// [`TickReport::interval_secs`](crate::tick::TickReport::interval_secs), and the
+/// loop sleeps that, falling back to `interval` when the pass named none.
 pub async fn run(
     worker: Arc<Worker>,
     interval: Duration,
@@ -1957,6 +2145,7 @@ pub async fn run(
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
     let permit = Arc::new(tokio::sync::Mutex::new(()));
+    let mut wait = interval;
     tokio::pin!(shutdown);
     loop {
         let running = Arc::clone(&worker);
@@ -1974,6 +2163,7 @@ pub async fn run(
                         ok = report.ok(),
                         "tick pass finished"
                     );
+                    wait = report.next_interval(interval);
                     if let Some(notice) = &notice {
                         notice(&report);
                     }
@@ -1990,7 +2180,7 @@ pub async fn run(
             }
         }
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = &mut shutdown => return,
         }
     }

@@ -52,22 +52,19 @@ pub struct LiveFallback {
     home: PathBuf,
     /// The run's id.
     run: String,
-    /// The repository's directory name, which names its workspace.
-    repo_name: String,
     /// The multiplexer the task's tabs live in.
-    mux: Arc<dyn shprd_mux::Mux>,
+    mux: Arc<dyn shprd_mux::Host>,
     /// The last sign-in check, kept across passes.
     check: Mutex<Option<Check>>,
 }
 
 impl LiveFallback {
     /// A host over one repository, its home and its run.
-    pub fn new(repo: &Path, home: &Path, run: &str, repo_name: &str) -> Self {
+    pub fn new(repo: &Path, home: &Path, run: &str) -> Self {
         Self {
             repo: repo.to_path_buf(),
             home: home.to_path_buf(),
             run: run.to_string(),
-            repo_name: repo_name.to_string(),
             mux: Arc::new(spawn::real_mux()),
             check: Mutex::new(None),
         }
@@ -101,12 +98,21 @@ impl LiveFallback {
             .map(|tab| tab.root_pane.clone())
     }
 
-    /// The workspace every task's tab lives in, when the host has one.
-    fn workspace(&self) -> Option<shprd_mux::Workspace> {
-        self.mux
-            .find_workspace(&spawn::workspace_name(&self.repo_name))
-            .ok()
-            .flatten()
+    /// Every tab the host has, across every space, when it can say.
+    ///
+    /// A task's tabs live in the task's own space, so there is no single space
+    /// to list: the tabs this seam looks for are named by the records a spawn
+    /// and a review wrote, and the answer is one flat list of every space's
+    /// tabs. A host that cannot list spaces (or a space that vanished)
+    /// contributes nothing rather than failing the fact.
+    fn tabs(&self) -> Vec<shprd_mux::Tab> {
+        let Ok(spaces) = self.mux.list_spaces() else {
+            return Vec::new();
+        };
+        spaces
+            .iter()
+            .flat_map(|space| self.mux.list_tabs(&space.id).unwrap_or_default())
+            .collect()
     }
 
     /// What a backup needs to know about the work so far.
@@ -144,8 +150,7 @@ impl LiveFallback {
             return check.clone();
         }
         let specs = crate::cmd::roster::resolve_data_dir()
-            .ok()
-            .and_then(|data| shprd_agents::spec::load_dir(&data.join("harness")).ok())
+            .harness_specs()
             .unwrap_or_default();
         let path_env = std::env::var("PATH").unwrap_or_default();
         let env: Vec<(String, Option<String>)> = std::env::vars()
@@ -179,12 +184,10 @@ fn task_agent(task: &Task) -> String {
 
 impl shprd_server::FallbackSource for LiveFallback {
     fn agents(&self, state: &RunState) -> Vec<AgentFacts> {
-        let Some(workspace) = self.workspace() else {
+        let tabs = self.tabs();
+        if tabs.is_empty() {
             return Vec::new();
-        };
-        let Ok(tabs) = self.mux.list_tabs(&workspace.id) else {
-            return Vec::new();
-        };
+        }
         let mut facts = Vec::new();
         for task in state.tasks.values() {
             if task.status != TaskStatus::Working {
@@ -256,13 +259,10 @@ impl shprd_server::FallbackSource for LiveFallback {
     }
 
     fn nudge(&self, task: &str, agent: &str, text: &str) -> Result<String, String> {
-        let Some(workspace) = self.workspace() else {
-            return Err(format!("no workspace for {}", self.repo.display()));
-        };
-        let tabs = self
-            .mux
-            .list_tabs(&workspace.id)
-            .map_err(|err| err.to_string())?;
+        let tabs = self.tabs();
+        if tabs.is_empty() {
+            return Err(format!("no space for {}", self.repo.display()));
+        }
         let record = spawn::latest_tab_record(&self.briefs(), &self.run, task)
             .ok_or_else(|| format!("no tab record for {task}"))?;
         let wanted = std::fs::read_to_string(record).map_err(|err| err.to_string())?;
@@ -272,7 +272,7 @@ impl shprd_server::FallbackSource for LiveFallback {
             .find(|tab| tab.id.as_str() == wanted)
             .ok_or_else(|| format!("{task}'s tab is gone"))?;
         self.mux
-            .prompt(&tab.root_pane, text)
+            .write(&tab.root_pane, text, true)
             .map_err(|err| err.to_string())?;
         Ok(format!("told {agent} to carry on"))
     }
@@ -285,7 +285,8 @@ impl shprd_server::FallbackSource for LiveFallback {
         to: &str,
         brief: &str,
     ) -> Result<String, String> {
-        let ctx = Ctx::new(self.repo.clone(), Actor::Engine, false, false);
+        let ctx = Ctx::new(self.repo.clone(), Actor::Engine, false, false)
+            .with_home(Some(self.home.clone()));
         let env = spawn::build_env(&ctx, Some(&self.home)).map_err(|err| err.to_string())?;
         let request = HandoffRequest {
             task: task.to_string(),
