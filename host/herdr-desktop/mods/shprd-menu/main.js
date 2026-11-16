@@ -176,7 +176,9 @@ export default class Menu extends View {
         return;
       }
       this.client = next.client;
-      await this.client.action({ action: "task.retry", task });
+      // The action route's envelope is `{kind, task}`: the kind names the verb
+      // (`task.retry`), exactly as `shprd-tasks` and the Accept card send it.
+      await this.client.action({ kind: "task.retry", task });
       this.failure = null;
     } catch (err) {
       this.failure = reason(err);
