@@ -1,3 +1,7 @@
 .DS_Store
 .shprd/
 /target
+
+# The web app's build products; `web/src/gen/` is committed.
+/web/node_modules
+/web/dist
