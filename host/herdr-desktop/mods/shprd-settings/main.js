@@ -33,9 +33,9 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, Textarea, TextareaState, h_flex, v_flex } from "gpui-base";
-import { closeOverlay, nextCommand, props, theme } from "herdr";
+import { closeOverlay, props, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { ServiceError, attach, reason } from "./lib/client.js";
 import {
   CHANGED_HERE,
   LEVEL,
@@ -76,6 +76,15 @@ const FLOOR_MS = 10_000;
 const SAVED_MS = 2100;
 /** How long a note waits after the last key before it saves itself. */
 const NOTE_MS = 500;
+/**
+ * How long after a write a read that disagrees with it is treated as the older one.
+ *
+ * A `GET /api/settings` already in flight when the write landed carries the value
+ * from before it. It is the person's own words coming back as if they had been
+ * undone, so a box keeps what it wrote for this long, and takes the service's word
+ * after — by then any read has seen the write.
+ */
+const WRITE_SETTLE_MS = 15_000;
 /** How long an edited prompt waits before it saves itself. */
 const PROMPT_MS = 700;
 /**
@@ -105,6 +114,18 @@ export default class Settings extends View {
     this.typed = null;
     /** The key a write is in flight for. */
     this.writing = null;
+    /**
+     * Writes waiting their turn: `{ key, value, for_repo }`, oldest first.
+     *
+     * One write is in flight at a time — the service takes one key per call, and a
+     * page that fired two at once would have the second answer overwrite the
+     * first's settings — so a second change is queued rather than dropped. In the
+     * order they were made: the last words typed for one key are what the queue
+     * ends with, and nothing a person typed is ever thrown away on the way.
+     */
+    this.queue = [];
+    /** The one write in flight, so a flush can wait for it. */
+    this.inFlight = null;
     /** The service's refusal, verbatim, and the key it was about. */
     this.refusal = null;
     /** What the last write or reset did, in words. */
@@ -120,6 +141,14 @@ export default class Settings extends View {
     this.promptSavedAt = 0;
     /** Whether the last leave could not store the words, so `Esc` may close instead. */
     this.promptSaveFailed = false;
+    /**
+     * Whether the editor holds words that a *transport* failure kept from landing.
+     *
+     * A service that did not answer is the window's to retry: the next read that
+     * answers writes them. A service that *refused* the words is the person's to act
+     * on, so those are never retried behind their back.
+     */
+    this.promptRetry = false;
     /** The id a new role gets, typed into a box made on the first Add. */
     this.newRole = null;
     /** The boxes under rows: `key -> { state, saved, gen, savedAt, rows }`. */
@@ -139,30 +168,12 @@ export default class Settings extends View {
     settingsWindowOpened(this.window_, this.page);
     this.refresh();
     this.schedule();
-    // The commands a person (or a script) may send this window:
-    // `shprd-settings.agents`, `.tasks`, `.prompts`, `.save`, `.reset`, `.close`.
-    cx.spawn(async () => {
-      for (;;) {
-        const command = await nextCommand();
-        this.command(command);
-        cx.notify();
-      }
-    });
-  }
-
-  /** What one of the window's own commands does. */
-  command(name) {
-    if (name === "agents" || name === "tasks" || name === "prompts") {
-      this.page = name;
-      this.refusal = null;
-      this.keepKeyboard();
-    } else if (name === "save") {
-      if (this.prompt !== null) this.savePrompt();
-    } else if (name === "reset") {
-      if (this.prompt !== null) this.resetPrompt();
-    } else if (name === "close") {
-      this.dismiss();
-    }
+    // No `nextCommand()` loop: a window has no key of its own. Shepherdr's settings
+    // are opened from its sidebar's row and from nothing else — its `keys.json`
+    // binds no key to them and its palette registers no entry — and this window is
+    // the same, so there is no command for a script to send it. What the pages do
+    // is driven by the pointer (`toggle`, `step`, `apply`, the boxes' own events),
+    // which is what the tests drive them with too.
   }
 
   /**
@@ -196,6 +207,9 @@ export default class Settings extends View {
       // answer, and a page that waited on four model listings to show a table it
       // already had would look stuck.
       this.failure = null;
+      // A read that answers is the moment to write what the service did not answer
+      // for: the notes queued while nothing did, and the prompt editor's words.
+      await this.retryWrites(cx);
       this.resetBoxes();
       cx.notify();
       // The roster and the template list are each the window's to do without: a
@@ -227,10 +241,40 @@ export default class Settings extends View {
     this.settings = null;
     this.roster = null;
     this.prompts = null;
-    this.prompt = null;
     this.open = null;
     this.refusal = null;
-    this.boxes.clear();
+    // A prompt's words are the person's until they are stored. A restarted service is
+    // a new run's settings, but a prompt is a file in the config directory and the
+    // words typed over it are not that run's to throw away: an editor with unsaved
+    // words stays open, and the next read — from the service that is back — stores
+    // them. An editor with nothing typed in it goes, as it always did.
+    const typed = this.editor?.value?.() ?? this.editorSaved;
+    if (this.prompt !== null && typed !== this.editorSaved) {
+      this.promptRetry = true;
+    } else {
+      this.prompt = null;
+    }
+    // The boxes stay: a note typed while the service was down is the person's and
+    // is not this window's to drop. Their saved values are refreshed by the next
+    // read's `resetBoxes()`, which leaves a changed box alone.
+    for (const box of this.boxes.values()) box.saved = null;
+  }
+
+  /**
+   * Writes what a service that did not answer kept from being written.
+   *
+   * A read that answers is the moment for it: the notes queued while nothing did,
+   * and the prompt editor's words when a transport failure (never a refusal) left
+   * them in the box. The read awaits it, so the page is not redrawn before the
+   * words it is showing have been stored.
+   */
+  async retryWrites(cx = this.cx) {
+    if (this.queue.length > 0) await this.pump();
+    const typed = this.editor?.value?.() ?? this.editorSaved;
+    if (this.promptRetry && this.prompt !== null && typed !== this.editorSaved) {
+      this.promptRetry = false;
+      await this.savePrompt(cx);
+    }
   }
 
   /** Puts the keyboard back on the panel, as Shepherdr's every page change does. */
@@ -250,30 +294,89 @@ export default class Settings extends View {
    * value the scope would inherit applies again (Shepherdr's own rule, and
    * `shprd_core::settings` stores nothing when a value equals the inherited one).
    */
-  async apply(key, value) {
-    if (!this.client || this.writing !== null) return;
-    this.writing = key;
-    this.refusal = null;
-    this.saved = null;
-    this.cx.notify();
-    try {
-      const reply = await this.client.putSetting(key, value, forRepo(this.scope));
-      if (reply?.settings) this.settings = reply.settings;
-      this.saved = outcomeOf(reply);
-      this.savedAt = Date.now();
-      this.open = null;
-      this.typedKey = null;
-      this.writing = null;
+  apply(key, value) {
+    // No client is not the same as "nothing to write": the words are held in the
+    // queue and written when a read finds the service again (see `pump()`), so a
+    // transient timeout never costs a person a note.
+    this.queue.push({ key, value, for_repo: forRepo(this.scope) });
+    return this.pump();
+  }
+
+  /**
+   * Writes what is queued, one key at a time, and answers when the queue is empty.
+   *
+   * Every write goes through here: a click, a step, a switch, a note closing, the
+   * prompt editor saving. A direct write is queued like the rest, so two writes can
+   * never race for the same page's settings, and a write that fails leaves its
+   * words in the queue (a no-answer failure) or is reported (a refusal).
+   */
+  pump() {
+    if (this.inFlight !== null) return this.inFlight;
+    this.inFlight = this.drain().finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  /** The body of [`pump`]: one write after another until the queue is empty. */
+  async drain() {
+    while (this.queue.length > 0) {
+      const next = this.queue.shift();
+      this.writing = next.key;
+      this.refusal = null;
+      this.saved = null;
       this.cx.notify();
-      this.cx.timer.after(SAVED_MS, (next) => next.notify());
-      return;
-    } catch (err) {
-      // A refusal is the service's sentence, shown as it was sent: the person
-      // has to read *why* ("they are both anthropic"), not a summary of it.
-      this.refusal = refused(key, err);
+      if (!this.client) {
+        // The service is not there to ask: the words go back to the front of the
+        // queue, and the next read of the service writes them.
+        this.queue.unshift(next);
+        this.writing = null;
+        this.cx.notify();
+        return;
+      }
+      try {
+        const reply = await this.client.putSetting(next.key, next.value, next.for_repo);
+        if (reply?.settings) this.settings = reply.settings;
+        this.saved = outcomeOf(reply);
+        this.savedAt = Date.now();
+        this.open = null;
+        this.typedKey = null;
+        this.cx.notify();
+        this.cx.timer.after(SAVED_MS, (next_timer) => next_timer.notify());
+        // A box or the editor whose words this write carried is "saved" now, so a
+        // later blur or debounce sees nothing left to do.
+        this.markSaved(next.key, next.value);
+      } catch (err) {
+        // A refusal is the service's sentence, shown as it was sent: the person has
+        // to read *why* ("they are both anthropic"), not a summary of it. The words
+        // stay in the box, unsaved, and the person can try again.
+        this.refusal = refused(next.key, err);
+      }
     }
     this.writing = null;
     this.cx.notify();
+  }
+
+  /**
+   * Records that the words of one key are stored, on the box or the editor that
+   * held them.
+   *
+   * It is called from the write's own success — not from the caller — so a write
+   * that was queued behind another and landed later still settles the box that
+   * typed it, and a box never asks to write the same words twice.
+   */
+  markSaved(key, value) {
+    const box = this.boxes.get(key);
+    if (box && typeof value === "string") {
+      box.saved = value;
+      box.savedAt = Date.now();
+      box.wrote = value;
+      box.wroteAt = box.savedAt;
+    }
+    if (this.prompt !== null && this.writing === `prompts.${this.prompt.id}`) {
+      this.editorSaved = this.editor?.value?.() ?? "";
+      this.promptSavedAt = Date.now();
+    }
   }
 
   /** Steps one number's row by `by`, inside the row's own bounds. */
@@ -317,46 +420,72 @@ export default class Settings extends View {
       if (this.focusKey === key) this.focusKey = null;
       this.writeBox(key);
     });
-    box.written = text;
     this.boxes.set(key, box);
     return box;
   }
 
   /**
-   * Takes every box's value from the settings the service resolved, except a box
-   * the person has changed and not saved yet: a re-read must never eat a note
-   * being typed.
+   * Takes every box's value from the settings the service resolved — except a box
+   * whose words are not stored yet.
+   *
+   * A re-read runs every ten seconds and after every write, so it is exactly the
+   * moment a note could be eaten: a box the person has changed (its text is not
+   * what was stored), a box they are typing in, and a box whose write is still
+   * queued all keep their words, and the queue writes them when the service
+   * answers. Only a box that is in step with the service takes the new value.
    */
   resetBoxes() {
+    // Nothing has been read yet (or the page was forgotten): there is no value to
+    // compare a box with, so no box is rewritten.
+    if (this.settings === null) return;
+    const queued = new Set(this.queue.map((write) => write.key));
     for (const row of workflowRows(this.settings)) {
       if (row.kind !== "text" && row.kind !== "notes") continue;
       const box = this.boxOf(row.key, row.value, { rows: row.kind === "notes" ? 3 : 1 });
       const text = typeof row.value === "string" ? row.value : "";
-      box.saved = text;
-      // A box the person is in is never rewritten from under them: a re-read a
-      // moment after their last key would otherwise eat the note being typed.
+      const typed = box.state.value?.() ?? "";
+      // A box the person is in, has changed and not stored, or whose words are
+      // still queued, is never rewritten from under them.
       if (this.focusKey === row.key) continue;
-      if (box.state.value?.() === text) continue;
+      if (queued.has(row.key)) continue;
+      if (box.saved !== null && typed !== box.saved) {
+        // Their words, not the service's: keep them, and make sure they are on
+        // their way (a box whose last write failed has no timer left).
+        this.writeBox(row.key);
+        continue;
+      }
+      // What this box last put in the service, and when: a read that was already
+      // on its way when the write landed answers with the older value, and taking
+      // it would show the person their own words as if they had been undone.
+      if (box.wrote !== undefined && box.wrote !== text) {
+        const fresh = box.wroteAt !== undefined && Date.now() - box.wroteAt < WRITE_SETTLE_MS;
+        if (fresh) continue;
+      }
+      box.saved = text;
+      if (typed === text) continue;
       box.state.set_value?.(text);
     }
   }
 
-  /** Writes one box's words to its key, if they changed since the last write. */
+  /**
+   * Writes one box's words to its key, if they changed since the last write.
+   *
+   * The words are queued, not dropped: whether a write is in flight, or the service
+   * is not answering at this instant, the box's text is what gets written — now, or
+   * when the next read finds the service again. That is what keeps a note typed
+   * during a time-out from being replaced by the value the page last read.
+   */
   async writeBox(key, cx = this.cx) {
     const box = this.boxes.get(key);
-    if (!box || !this.client || this.writing !== null) return;
+    if (!box) return;
     const text = box.state.value?.() ?? "";
     if (text === box.saved) return;
     // The debounce that called this is the one that saves: bump the counter so a
     // timer armed a moment later does not write the same words again.
     box.gen += 1;
     await this.apply(key, text);
-    if (this.refusal === null) {
-      box.saved = text;
-      box.savedAt = Date.now();
-      cx.notify();
-      cx.timer.after(SAVED_MS, (next) => next.notify());
-    }
+    cx.notify();
+    cx.timer.after(SAVED_MS, (next) => next.notify());
   }
 
   // -- the pickers -----------------------------------------------------------
@@ -441,12 +570,28 @@ export default class Settings extends View {
   /**
    * Stores the editor's words over the open prompt, if they changed.
    *
-   * One write at a time: a caller that asks again while one is in flight gets
-   * that write's promise, so `leavePrompt()` and a debounce firing together
-   * cannot store the same words twice.
+   * A prompt's words are the one write that is not a settings key, so they bypass
+   * the queue for settings keys — but not the rule that a save is never dropped: if
+   * a settings write is in flight, this one starts when it is done, and if the
+   * service is not there to ask the words stay in the box with a reason on screen
+   * rather than being thrown away.
+   *
+   * One write at a time: a caller that asks again while one is in flight gets that
+   * write's promise, so `leavePrompt()` and a debounce firing together cannot
+   * store the same words twice.
    */
   savePrompt(cx = this.cx) {
     if (this.promptWrite) return this.promptWrite;
+    if (this.writing !== null) {
+      // A settings write is in flight: the editor's words go right after it.
+      this.promptWrite = (this.inFlight ?? Promise.resolve())
+        .catch(() => {})
+        .then(() => {
+          this.promptWrite = null;
+          return this.savePrompt(cx);
+        });
+      return this.promptWrite;
+    }
     this.promptWrite = this.writePrompt(cx).finally(() => {
       this.promptWrite = null;
     });
@@ -456,9 +601,22 @@ export default class Settings extends View {
   /** The write behind [`savePrompt`]: the words, over the prompt that is open. */
   async writePrompt(cx = this.cx) {
     const prompt = this.prompt;
-    if (!this.client || !prompt || this.writing !== null) return;
+    if (!prompt) return;
     const text = this.editor?.value?.() ?? "";
     if (text === this.editorSaved) return;
+    if (!this.client) {
+      // The service is not there: say so over the editor and keep the words in it,
+      // so the person sees the note was not stored and Esc closes the window
+      // instead of quietly losing it. The next read that answers writes them.
+      this.refusal = refused(
+        `prompts.${prompt.id}`,
+        new ServiceError("the service did not answer, so these words are not stored yet"),
+      );
+      this.promptSaveFailed = true;
+      this.promptRetry = true;
+      this.cx.notify();
+      return;
+    }
     const id = prompt.id;
     this.writing = `prompts.${id}`;
     this.refusal = null;
@@ -470,6 +628,7 @@ export default class Settings extends View {
       this.saved = { outcome: "stored", text: "Saved: your words are what an agent is told." };
       this.savedAt = Date.now();
       this.promptSavedAt = this.savedAt;
+      this.promptRetry = false;
       const list = await this.client.prompts();
       if (list) this.prompts = list;
       this.writing = null;
@@ -478,6 +637,12 @@ export default class Settings extends View {
       return;
     } catch (err) {
       this.refusal = refused(`prompts.${id}`, err);
+      // A call that got no answer at all is retried by the next read; a service
+      // that answered with a refusal is the person's to read and act on.
+      this.promptRetry = err instanceof ServiceError && err.code === "no-answer";
+      this.writing = null;
+      this.cx.notify();
+      return;
     }
     this.writing = null;
     this.cx.notify();
@@ -604,6 +769,7 @@ export default class Settings extends View {
     const writing = (async () => {
       if (this.prompt !== null) await this.savePrompt();
       for (const key of this.boxes.keys()) await this.writeBox(key);
+      await this.pump();
     })();
     let wait = Promise.resolve();
     try {
