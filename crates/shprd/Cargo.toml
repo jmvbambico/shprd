@@ -22,6 +22,7 @@ shprd-mux = { path = "../shprd-mux" }
 shprd-mux-herdr = { path = "../shprd-mux-herdr" }
 shprd-mux-hc = { path = "../shprd-mux-hc" }
 shprd-agents = { path = "../shprd-agents" }
+shprd-remote = { path = "../shprd-remote" }
 shprd-server = { path = "../shprd-server" }
 shprd-watch = { path = "../shprd-watch" }
 shprd-views = { path = "../shprd-views" }
