@@ -1061,7 +1061,6 @@ pub struct SettingsValueDto {
     #[ts(type = "string | number | boolean | Array<string> | null")]
     pub value: Option<Value>,
     /// The layer that set it, or `null`.
-    #[ts(type = "SettingsSourceDto | null")]
     pub source: Option<SettingsSourceDto>,
 }
 

@@ -21,12 +21,15 @@
 //! | `GET /api/chat` | a space's conversation, read from its agent's own record, after a cursor |
 //! | `POST /api/chat` | one turn of the person's input, typed into that space's agent |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
+//! | anything else | the built web app: hashed assets, and `index.html` for an SPA route |
 //!
-//! Everything but health needs `Authorization: Bearer <token>` from the state
-//! directory; writes also need `x-shprd: 1`; a request whose `Origin` is not
-//! this service's own loopback origin is refused. A Herdr mod can only `fetch`
-//! (no streaming, no WebSocket), which is why the change channel is a long poll
-//! first and a socket second.
+//! Every `/api` route but health needs `Authorization: Bearer <token>` from the
+//! state directory (M11.1 adds the browser's session cookie door); writes also
+//! need `x-shprd: 1`; a request whose `Origin` is not this service's own origin
+//! is refused. The web app itself is public, because the page a signed-out
+//! person gets *is* the login screen; everything it calls is behind the gate.
+//! A Herdr mod can only `fetch` (no streaming, no WebSocket), which is why the
+//! change channel is a long poll first and a socket second.
 //!
 //! Every socket is bounded and a request that is not an upgrade is refused with
 //! a typed body, so no client — a page, a probe, or a connection nobody closed —
@@ -57,6 +60,7 @@ pub mod news;
 pub(crate) mod prompts;
 pub(crate) mod roster;
 pub(crate) mod settings;
+pub(crate) mod web;
 
 pub use api::{App, WsLimits};
 pub use changes::Touch;

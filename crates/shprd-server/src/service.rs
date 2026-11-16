@@ -655,6 +655,17 @@ impl Service {
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");
+        // The page is served from this same port. Saying whether this binary
+        // embedded a build is the one thing a person opening it needs to know
+        // when there is no app to see.
+        if crate::web::built() {
+            tracing::info!(port, "the web app is embedded");
+        } else {
+            tracing::warn!(
+                port,
+                "this build has no web app; run `npm ci && npm run build` in web/, then build shprd again"
+            );
+        }
         Ok(Self {
             app,
             listener,
