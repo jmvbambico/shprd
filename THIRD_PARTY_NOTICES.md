@@ -71,8 +71,9 @@ SOFTWARE.
   heading with its "+", the rail under 160 px, the row's right-click menu and the
   close confirm it asks in — from `mods/spaces-chat/main.js`,
   `mods/spaces-chat/sections.js`, `mods/spaces-chat/popups.js`, `core/menus.js`
-  and `mods/confirm-chat/main.js`, and the split red/green badge itself from
-  `lib/ui.js` (`countBadge`, Shepherdr's `AttentionBadge`), the
+  and `mods/confirm-chat/main.js`, and the split red/green badge itself (Shepherdr's
+  `AttentionBadge`, `lib/ui.js`'s `countBadge`) in
+  `host/herdr-desktop/mods/shprd-spaces/main.js`, the
   toast float and the numbers it follows — three at once, 360 px wide, a body cut
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
