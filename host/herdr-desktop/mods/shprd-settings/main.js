@@ -58,7 +58,16 @@ import {
   withoutRole,
   workflowRows,
 } from "./lib/settings.js";
-import { badge, keycap, link, note, segmented, toggleSwitch } from "./lib/panel.js";
+import {
+  badge,
+  keycap,
+  link,
+  note,
+  segmented,
+  settingsWindowClosed,
+  settingsWindowOpened,
+  toggleSwitch,
+} from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the window re-reads the service, so another window's write shows. */
@@ -112,6 +121,11 @@ export default class Settings extends View {
     this.armedAt = 0;
     this.handle = cx.focus_handle();
     this.handle.focus();
+    // The window's own copy is the one the footer's row asks for: recording it
+    // here is what keeps a second click from opening a second window. Every read
+    // renews it, and `close()` (the app's, below) forgets it.
+    this.window_ = props()?.overlay ?? null;
+    settingsWindowOpened(this.window_, this.page);
     this.refresh();
     this.schedule();
     // The commands a person (or a script) may send this window:
@@ -136,7 +150,7 @@ export default class Settings extends View {
     } else if (name === "reset") {
       if (this.prompt !== null) this.resetPrompt();
     } else if (name === "close") {
-      this.close();
+      this.dismiss();
     }
   }
 
@@ -166,6 +180,7 @@ export default class Settings extends View {
       // answer, and a page that waited on four model listings to show a table it
       // already had would look stuck.
       this.failure = null;
+      settingsWindowOpened(this.window_, this.page);
       this.resetBoxes();
       cx.notify();
       // The roster and the template list are each the window's to do without: a
@@ -491,7 +506,7 @@ export default class Settings extends View {
       this.cx.notify();
       return;
     }
-    this.close();
+    this.dismiss();
   }
 
   /**
@@ -501,10 +516,24 @@ export default class Settings extends View {
    * be waiting when the window goes: leaving is one of the moments Shepherdr
    * saves at, and this is that moment.
    */
-  close() {
+  dismiss() {
     this.savePrompt();
     for (const key of this.boxes.keys()) this.writeBox(key);
+    settingsWindowClosed(this.window_);
     closeOverlay(props()?.overlay);
+  }
+
+  /**
+   * The app's own last word about this copy: it is gone, however it went.
+   *
+   * Herdr calls `close(cx)` when an overlay is taken away — `Esc`, a click
+   * beside it, `overlay.close` from the command line — and this is where the
+   * window stops claiming its place, so the footer's next click opens it again.
+   */
+  async close(_cx) {
+    if (this.prompt !== null) await this.savePrompt();
+    for (const key of this.boxes.keys()) await this.writeBox(key);
+    settingsWindowClosed(this.window_);
   }
 
   // -- reading again ---------------------------------------------------------
@@ -592,7 +621,7 @@ export default class Settings extends View {
       .flex()
       .items_center()
       .justify_center()
-      .on_click(() => this.close())
+      .on_click(() => this.dismiss())
       .child(card);
   }
 
