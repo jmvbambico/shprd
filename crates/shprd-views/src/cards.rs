@@ -138,6 +138,7 @@ mod tests {
             worktree: String::from("/wt/T1"),
             branch: String::from("shprd/r1/T1"),
             spawn_seq: Some(1),
+            stopped: false,
             report: None,
             gates: vec![GateResult {
                 gate: String::from(gate::REVIEW_GATE),

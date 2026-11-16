@@ -402,6 +402,12 @@ pub struct TaskSignal {
     /// Why its newest attempt failed, in the agent's own words, when it is
     /// [`TaskStatus::Failed`].
     pub failure: Option<String>,
+    /// True when a person stopped the agent on its newest attempt.
+    ///
+    /// Shepherdr's rule is that a task whose agent went away reads *Needs you ·
+    /// Agent stopped*, not a failed attempt's own words (M7a §5, `agents.py:170`):
+    /// nothing the attempt said is the reason, the person's own stop is.
+    pub stopped: bool,
     /// Why a person dropped it, when one did.
     pub dropped_reason: Option<String>,
     /// Asks still waiting for the person, oldest first.
@@ -444,6 +450,7 @@ impl Default for TaskSignal {
             provider_cut: None,
             merge: MergeFacts::default(),
             failure: None,
+            stopped: false,
             dropped_reason: None,
             open_asks: Vec::new(),
             cards: Vec::new(),
@@ -467,6 +474,7 @@ impl TaskSignal {
             waiting_on: waiting_on(state, task),
             wait: reported_wait(task),
             failure: failure_reason(task),
+            stopped: task.latest_attempt().is_some_and(|attempt| attempt.stopped),
             dropped_reason: task.dropped_reason.clone(),
             open_asks: state
                 .asks
@@ -774,6 +782,13 @@ fn parked(signal: &TaskSignal) -> Derived {
             }
         }
         TaskStatus::Failed => {
+            // A person's own stop is why the attempt ended, so it reads
+            // Shepherdr's words rather than the attempt's: nothing the agent
+            // said is the reason, and "Its attempt failed" about work somebody
+            // deliberately stopped is a lie (M7a §5, `agents.py:170`).
+            if signal.stopped {
+                return Derived::needs(Need::Stopped, STOPPED);
+            }
             Derived::needs(Need::Attention, signal.failure.as_deref().unwrap_or(FAILED))
         }
         TaskStatus::Dropped => {
@@ -1047,6 +1062,15 @@ mod tests {
         }
     }
 
+    /// A task a person stopped: Failed, with its newest attempt marked stopped
+    /// and a failure word beside it, which must not win.
+    fn stopped_task() -> TaskSignal {
+        let mut signal = task(TaskStatus::Failed);
+        signal.stopped = true;
+        signal.failure = Some("the agent said it gave up".to_string());
+        signal
+    }
+
     /// A task in the given state with a worker that has been idle since well
     /// before now, so no grace holds anything back.
     fn settled(status: TaskStatus) -> (TaskSignal, LiveAgents) {
@@ -1156,6 +1180,14 @@ mod tests {
                 status: DerivedStatus::NeedsYou,
                 needs: Some(Need::Attention),
                 reason: Some(FAILED),
+            },
+            Case {
+                rule: "a task a person stopped reads Agent stopped (agents.py:170, M10 gate bug 1)",
+                signal: stopped_task(),
+                live: LiveAgents::default(),
+                status: DerivedStatus::NeedsYou,
+                needs: Some(Need::Stopped),
+                reason: Some(STOPPED),
             },
             Case {
                 rule: "a landed task is done (agents.py:111-114)",

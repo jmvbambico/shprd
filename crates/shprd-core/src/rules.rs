@@ -497,6 +497,21 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
+    /// The agent on an attempt was already stopped.
+    ///
+    /// A stop is about a terminal that is open, so a second one names an agent
+    /// that is not there any more. It is refused with that fact rather than
+    /// recorded, so the board says why the second press did nothing (M10 gate bug
+    /// 1).
+    #[error(
+        "task {task:?} attempt {attempt} was already stopped: nobody is on it, and `task.retry` starts a new attempt"
+    )]
+    AlreadyStopped {
+        /// The task.
+        task: TaskId,
+        /// The attempt that was stopped already.
+        attempt: u32,
+    },
     /// A run was abandoned by something that is not a human.
     ///
     /// `--abandon` ends a run that still has work in it: it is the human's
@@ -781,6 +796,9 @@ fn check_with(
         EventKind::TaskDropped { task, reason } => {
             check_task_dropped(state, actor, task, reason, provenance)
         }
+        EventKind::TaskStopped { task, attempt } => {
+            check_task_stopped(state, task, *attempt, provenance)
+        }
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
@@ -921,6 +939,43 @@ fn check_task_dropped(
     if reason.trim().is_empty() {
         return Err(RuleError::EmptyDropReason {
             task: task.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Rules for a person stopping a task's agent.
+///
+/// A stop is a fact about a terminal, and the only terminal it can be a fact
+/// about is one that is still open: the task must have an attempt, that attempt
+/// must be the newest one, its agent must not already have been stopped, and the
+/// task must not have landed or been dropped. A second stop of the same attempt
+/// is refused with the reason rather than recorded twice, because the second one
+/// names an agent that is no longer there.
+///
+/// Any actor may record it: the person's own `task.stop` does, and so does the
+/// engine when it closes a terminal nobody may use any more. What the log keeps
+/// is who stopped it.
+fn check_task_stopped(
+    state: &RunState,
+    task: &str,
+    attempt: u32,
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
+    let found = task_in(state, task)?;
+    if found.status == TaskStatus::Integrated {
+        return Err(RuleError::WrongStatus {
+            task: task.to_string(),
+            expected: "a task whose agent is still running",
+            found: found.status,
+        });
+    }
+    let current = expect_current_attempt(task, found, attempt)?;
+    if current.stopped {
+        return Err(RuleError::AlreadyStopped {
+            task: task.to_string(),
+            attempt,
         });
     }
     Ok(())
@@ -3881,6 +3936,75 @@ mod tests {
             abandonable_tasks(&state).is_empty(),
             "nothing is integrated, so there is nothing an abandon would carry"
         );
+    }
+
+    /// A person stopping the agent on task `id` attempt `attempt`, at `seq`.
+    fn stopped(seq: u64, id: &str, attempt: u32) -> Event {
+        by(
+            seq,
+            Actor::Human,
+            EventKind::TaskStopped {
+                task: id.to_string(),
+                attempt,
+            },
+        )
+    }
+
+    #[test]
+    fn a_human_stops_the_agent_on_a_working_task_and_it_may_be_retried() {
+        // Bug 1 of the M10 gate: the stop only closed the space, so the fold
+        // kept the task Working for ever and a retry was refused. The event is
+        // the fact that makes the task Failed — which a retry may replace — and
+        // marks the attempt stopped.
+        let mut log = reported_run();
+        log.truncate(3);
+        log.push(stopped(4, "a", 1));
+        let state = folded(&log);
+        assert_eq!(status(&state, "a"), TaskStatus::Failed);
+        let attempt = state
+            .tasks
+            .get("a")
+            .and_then(|task| task.latest_attempt())
+            .expect("the attempt");
+        assert!(attempt.stopped, "the attempt is marked stopped");
+        // And the task is in the state a retry may replace, which is the whole
+        // point: a new attempt's spawn is accepted.
+        state
+            .check_as(&Actor::Engine, &spawned(5, "a", 2, "agent-1").kind, 6_000)
+            .unwrap_or_else(|err| panic!("the stopped attempt may be retried: {err}"));
+    }
+
+    #[test]
+    fn a_second_stop_of_the_same_attempt_is_refused() {
+        let mut log = reported_run();
+        log.truncate(3);
+        log.push(stopped(4, "a", 1));
+        let state = folded(&log);
+        match state.check_as(&Actor::Human, &stopped(5, "a", 1).kind, 6_000) {
+            Err(RuleError::AlreadyStopped { task, attempt }) => {
+                assert_eq!(task, "a");
+                assert_eq!(attempt, 1);
+            }
+            other => panic!("a stopped attempt was stopped again: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_task_nobody_started_cannot_be_stopped() {
+        let state = folded(&[started(1), added(2, "a", &["src/a"], &[])]);
+        match state.check_as(&Actor::Human, &stopped(3, "a", 1).kind, 4_000) {
+            Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Queued),
+            other => panic!("a queued task was stopped: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_integrated_task_cannot_be_stopped() {
+        let state = folded(&landed());
+        match state.check_as(&Actor::Human, &stopped(9, "a", 1).kind, 10_000) {
+            Err(RuleError::WrongStatus { found, .. }) => assert_eq!(found, TaskStatus::Integrated),
+            other => panic!("an integrated task was stopped: {other:?}"),
+        }
     }
 
     #[test]

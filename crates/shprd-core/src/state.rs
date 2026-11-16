@@ -339,6 +339,13 @@ pub struct Attempt {
     /// whose report came after, so a reviewer judging this attempt reads this
     /// attempt's cards and no others.
     pub spawn_seq: Option<u64>,
+    /// True when a person stopped the agent on this attempt.
+    ///
+    /// It is a fact about the terminal, not about the work: the space was
+    /// closed, so nobody is on the attempt any more. It is recorded rather than
+    /// derived because the host forgets a closed space, and a task that kept
+    /// reading Working would never be startable again (M10 gate bug 1).
+    pub stopped: bool,
 }
 
 /// A review handed to a reviewer for an attempt.
@@ -585,6 +592,7 @@ impl RunState {
                         report: None,
                         gates: Vec::new(),
                         reviews: Vec::new(),
+                        stopped: false,
                     });
                 }
             }
@@ -727,6 +735,27 @@ impl RunState {
             EventKind::Integrated { task, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
+                }
+            }
+            EventKind::TaskStopped { task, attempt } => {
+                // A stop settles the attempt's terminal and nothing else: the
+                // task goes Failed when it had not handed in, which is the status
+                // a retry may replace, so the person's own stop leaves a task
+                // they can pick up again rather than one stuck Working for ever
+                // (M10 gate bug 1). An attempt that already reported keeps its
+                // task's status: the hand-in is still the engine's to review and
+                // land, and closing its tab takes nothing away from it.
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    if entry.status == TaskStatus::Working {
+                        entry.status = TaskStatus::Failed;
+                    }
+                    if let Some(current) = entry
+                        .attempts
+                        .iter_mut()
+                        .find(|current| current.n == *attempt)
+                    {
+                        current.stopped = true;
+                    }
                 }
             }
             EventKind::TaskDropped { task, reason } => {

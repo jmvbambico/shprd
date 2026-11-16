@@ -516,6 +516,21 @@ pub enum EventKind {
         /// request lists, so a reader sees what was left out and why.
         reason: String,
     },
+    /// The agent working on a task was stopped, so the attempt has no agent.
+    ///
+    /// It is the person's own verb (`task.stop` on the API), and the fact it
+    /// records is about the attempt's terminal rather than about the work: the
+    /// space was closed, so nobody is on the task any more. Shepherdr's rule is
+    /// that such a task reads *Needs you · Agent stopped* instead of staying
+    /// Working for ever (M7a §5), so the fold marks that attempt stopped and
+    /// fails it: a stopped attempt is one a retry may replace, which is what
+    /// keeps the task reachable rather than wedged.
+    TaskStopped {
+        /// The task.
+        task: TaskId,
+        /// The attempt whose agent was stopped.
+        attempt: u32,
+    },
     /// A review was handed to a reviewer for an attempt.
     ///
     /// `degraded` is the fact a landing decision needs: it records that the
@@ -846,6 +861,7 @@ impl EventKind {
             | Self::GateFailed { task, .. }
             | Self::Integrated { task, .. }
             | Self::TaskDropped { task, .. }
+            | Self::TaskStopped { task, .. }
             | Self::ReviewRequested { task, .. }
             | Self::HandedOff { task, .. }
             | Self::Override { task, .. }
@@ -967,6 +983,10 @@ mod tests {
                 task: "M1.2".to_string(),
                 reason: "not needed after all".to_string(),
             },
+            EventKind::TaskStopped {
+                task: "M1.3".to_string(),
+                attempt: 1,
+            },
             EventKind::ReviewRequested {
                 task: "M1.1".to_string(),
                 attempt: 1,
@@ -1081,7 +1101,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 26, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 27, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {
