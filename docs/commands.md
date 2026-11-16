@@ -1,8 +1,9 @@
 # Commands
 
-Status: built through M9. `shprd up`, `shprd down`, `shprd remote` and `shprd keys` are
+Status: built through M10. `shprd up`, `shprd down`, `shprd remote` and `shprd keys` are
 described below but not built yet; the setup wizard was dropped in the M7 re-plan.
-Today a run starts with `shprd run start` and `shprd serve` drives it.
+Today a run starts with `shprd run start` and `shprd serve` drives it; on the Herdr
+desktop, `shprd install herdr-desktop` puts in the layout and mods that show it.
 
 ## For you
 
@@ -12,6 +13,7 @@ Today a run starts with `shprd run start` and `shprd serve` drives it.
 | `shprd down` | finish the run; refuses (exit 2, nothing written) while any task is unfinished or the run's pull request has not merged, and names each task and how to proceed: `shprd up` restarts the orchestrator or watchdog and resumes this run. `shprd down --abandon` (you only, never an agent or the orchestrator) asks you to confirm at a terminal, naming the run and each task it would leave with its branch; a 'no' or a missing terminal writes nothing and closes nothing. On a 'yes' it ends the run anyway, records which tasks were left (with an unmerged pull request, the integrated tasks it carried too), and keeps their branches. The orchestrator may end a run normally once every task is integrated and the pull request merged |
 | `shprd run start --run-id <ID> --base <BRANCH> --integration <BRANCH>` / `shprd run finish` | start a run (the first event in the log) / finish it. The `--integration` branch must already exist (`git branch integration/m<N> main`); `run start` does not create it yet |
 | `shprd serve [--port N]` | the service: a loopback HTTP API for every UI, plus the tick every `tasks.tick_secs`. See [The service](#the-service) |
+| `shprd install herdr-desktop [--dry-run] [--uninstall] [--from DIR] [--app-home DIR]` | put shprd's layout, its `shprd-*` mods and their keys into the Herdr desktop's home (`~/.config/herdr-app`, or `$HERDR_APP_HOME`). It owns only the files it wrote (a manifest with a SHA-256 of each), refuses and writes nothing on a clash with a file it did not write, never overwrites a key you bound, and puts back a layout Herdr pruned. The files come from `--from`, `$SHPRD_HOST_DIR`, the current checkout, or the copy built into the binary, in that order |
 | `shprd tick [--once] [--json]` | run one pass of the service's tick by hand: start, review, verdict, send back, escalate, land |
 | `shprd settings show\|get\|set\|unset` | the settings: roles (`roles.worker.agent`, `roles.reviewer.model`, …) and workflow keys (`tasks.merge`, `tasks.max_running`, …), each printed with the layer it came from. `set` refuses a reviewer of the worker's model family |
 | `shprd prompts list\|show\|path\|reset <id>` | the prompts each role starts with, stored under `~/.config/shprd/prompts/`; your edits are kept, `reset` brings back the shipped words |
@@ -92,6 +94,11 @@ there rather than guessing. On a clean stop it removes `service.json`.
 | `GET /api/asks`, `POST /api/asks/answer` | open needs-you cards / answer one (`{task, ask, answer}`) |
 | `POST /api/action` | the person's actions on a task |
 | `GET\|PUT /api/settings`, `GET\|PUT /api/prompts/{id}` | the settings and prompts verbs over HTTP |
+| `POST /api/tasks` | add a task, as `shprd agent task add` does |
+| `GET /api/tasks/{id}/changes` | the task's branch against the branch it was cut from (the integration branch), for the accept card |
+| `GET /api/chat`, `POST /api/chat` | what a space's agent wrote since a point, read from the program's own transcript (Claude Code, Codex, Pi, OpenCode) / type one turn into it, as the person |
+| `GET /api/graph` | where dagr is (`$SHPRD_DAGR_BIN`, the `graph.dagr` setting, `PATH`, then the herdr-dagr plugin folder), which probe found it, and the command that draws the run |
+| `GET /api/roster` | the programs a role may run, with their models and effort levels |
 
 Every request needs the bearer token; every write also needs the header
 `x-shprd: 1`. The tick (every `tasks.tick_secs`, at most `tasks.max_running`
@@ -104,6 +111,14 @@ and closes the landed task's tabs. A failed step is logged on stderr at the leve
 
 At startup `serve` creates or reuses the repo's workspace, labelled exactly
 `shprd · <repo folder name>`.
+
+`serve` picks its host from the `host` setting: `auto` (the default: the Herdr desktop
+when its `herdr-core` answers, else herdr; never tuios), `herdr-desktop`, `herdr` or
+`tuios`. On the Herdr desktop each task gets its own space, which closes when the task
+lands. A change to `tasks.tick_secs` or `tasks.max_running` takes effect on the next
+pass, without a restart. A `serve` whose lock was left by a crashed one starts anyway;
+a live one is refused. The mods follow a restarted service, on the same port or a new
+one.
 
 ## Config sections added in M5 and M6
 

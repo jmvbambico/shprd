@@ -1,8 +1,8 @@
 # Build plan
 
 Status: M0–M6 done (gate passed 2026-10-29). Re-planned from M7 on 2026-11-14:
-see "M7 onward · the pivot". M7 and M8 done 2026-11-14; M9 gate passed 2026-11-15
-(gate below). Language: Rust (service) and TypeScript (web app).
+see "M7 onward · the pivot". M7 and M8 done 2026-11-14; M9 gate passed 2026-11-15;
+M10 gate passed 2026-11-16 (gates below). Language: Rust (service) and TypeScript (web app).
 
 The plan is cut into milestones. Each one ends at a **gate**: a demo you can run
 and a check that has to pass before the next milestone starts. Inside a
@@ -355,6 +355,20 @@ Every mod passes `herdr-app check` and is screenshotted in a private window
 
 **Gate:** on Herdr desktop, shprd works the way Shepherdr does, and also runs
 Pi and OpenCode agents.
+
+**Gate result (2026-11-16): passed after fixes.** The live run (a private Herdr
+window and `herdr-core`, `HC_SESSION` + `HERDR_APP_HOME`) came back *pass with gaps*:
+`shprd serve` alone drove a coordinator and three tasks (one after another, one
+raising a needs-you card) to landing, each in its own space, with the graph redrawn
+on every ledger write. It found nine bugs; fixes N–R (#64–#68) closed them: a
+stopped task no longer wedges, `tasks.tick_secs` applies live, a crashed `serve`
+no longer blocks the next, the chat reads real transcripts (Claude's slug rule,
+the program's own home), OpenCode gets its brief once its ready line shows, mods
+follow a restarted service, `install` takes the binary's own tree and restores a
+pruned layout, the accept card diffs against the integration branch, and the
+coordinator gets the news when the person started it. Pi and OpenCode both ran
+end to end. Left for later: a per-task thread view (chat, terminal, files) like
+Shepherdr's, and `shprd doctor` reading a crashing CLI as "signed out".
 
 ---
 
