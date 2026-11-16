@@ -886,3 +886,111 @@ async fn a_service_with_no_agent_roots_says_it_was_not_told() {
         reply.body
     );
 }
+
+/// A task's space reads pi's session the same way its coordinator's does: the
+/// program's own folder under the home the agent ran with, and the worktree as
+/// the directory the session belongs to.
+#[tokio::test]
+async fn a_task_space_reads_a_pi_session_from_its_worktree() {
+    let fixture = Fixture::new("claude");
+    let worktree = fixture.home.path().join("worktrees").join("T2");
+    std::fs::create_dir_all(&worktree).unwrap();
+    fixture.spawn_task("T2", "pi", &worktree);
+    let slug = cwd_slug(TranscriptFormat::PiJsonl, &worktree);
+    let dir = fixture
+        .home
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = json!({
+        "type": "session",
+        "version": 3,
+        "id": "worker",
+        "timestamp": "2026-11-04T10:00:00.000Z",
+        "cwd": worktree.display().to_string(),
+    });
+    let line = json!({
+        "type": "message",
+        "id": "u1",
+        "message": {
+            "role": "user",
+            "timestamp": 1_794_616_780_000i64,
+            "content": [{"type": "text", "text": "T2 is done."}],
+        },
+    });
+    std::fs::write(
+        dir.join("2026-11-04T10-00-00-000Z_worker.jsonl"),
+        format!("{header}\n{line}\n"),
+    )
+    .unwrap();
+    let reply = fixture.chat("T2", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], "pi");
+    assert_eq!(reply.body["session"], "2026-11-04T10-00-00-000Z_worker");
+    assert_eq!(reply.messages().len(), 1, "{}", reply.body);
+    assert_eq!(reply.messages()[0]["text"], "T2 is done.");
+}
+
+/// A task's space reads an OpenCode database session, picked by the worktree the
+/// session row names rather than by being the newest on the machine.
+#[tokio::test]
+async fn a_task_space_reads_an_opencode_database_session_from_its_worktree() {
+    let fixture = Fixture::new("claude");
+    let worktree = fixture.home.path().join("worktrees").join("T3");
+    std::fs::create_dir_all(&worktree).unwrap();
+    fixture.spawn_task("T3", "opencode", &worktree);
+    let dir = fixture
+        .home
+        .path()
+        .join(".local")
+        .join("share")
+        .join("opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+    // A newer session for another directory, which must not win.
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_elsewhere', '/work/other', 9999999999)",
+            (),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_task', ?1, 5)",
+            (worktree.display().to_string(),),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO message VALUES ('msg_1', 'ses_task', 1, ?1)",
+            (r#"{"role":"assistant","time":{"created":1000}}"#,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_1', 'msg_1', 'ses_task', 1, ?1)",
+            (r#"{"type":"text","text":"T3 is done."}"#,),
+        )
+        .unwrap();
+    drop(connection);
+    let reply = fixture.chat("T3", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], "opencode");
+    assert_eq!(reply.body["session"], "ses_task");
+    assert_eq!(reply.messages().len(), 1, "{}", reply.body);
+    assert_eq!(reply.messages()[0]["text"], "T3 is done.");
+}
