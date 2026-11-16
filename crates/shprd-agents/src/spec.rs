@@ -499,19 +499,24 @@ pub enum TranscriptFormat {
     /// Pi's `~/.pi/agent/sessions/<slug>/<date>_<session>.jsonl`.
     PiJsonl,
     /// OpenCode's storage folder: one JSON file a session, one a message, and a
-    /// folder of parts for each message.
+    /// folder of parts for each message. OpenCode up to 1.18 wrote this; from
+    /// 1.18 on the same tables live in [`Self::OpencodeSqlite`].
     OpencodeStorage,
+    /// OpenCode's database: `session`, `message` and `part` tables in one SQLite
+    /// file, which is what 1.18.35 writes and what a chat reads.
+    OpencodeSqlite,
 }
 
 /// Placeholders allowed in a [`RecordsSpec::location`] pattern.
-const LOCATION_PLACEHOLDERS: [&str; 5] = ["cwd_slug", "session", "yyyy", "mm", "dd"];
+const LOCATION_PLACEHOLDERS: [&str; 6] = ["cwd_slug", "session", "yyyy", "mm", "dd", "data_home"];
 
 /// Check a record location pattern against the placeholder contract.
 ///
-/// Allowed placeholders are `{cwd_slug}`, `{session}`, `{yyyy}`, `{mm}` and
-/// `{dd}`; `*` may stand for any run of characters within a single path
-/// component; and `~` may appear only as the first component, where it means the
-/// user's home directory.
+/// Allowed placeholders are `{cwd_slug}`, `{session}`, `{yyyy}`, `{mm}`,
+/// `{dd}` and `{data_home}`; `*` may stand for any run of characters within a
+/// single path component; `~` may appear only as the first component, where it
+/// means the user's home directory; and `{data_home}` may only be the first
+/// component, where it means the XDG data home.
 pub fn validate_location(location: &str) -> Result<(), SpecError> {
     if location.trim().is_empty() {
         return Err(SpecError::EmptyLocation);
@@ -526,6 +531,16 @@ pub fn validate_location(location: &str) -> Result<(), SpecError> {
     }
     if location.contains("**") {
         return Err(SpecError::DoubleStar {
+            location: location.to_owned(),
+        });
+    }
+    // `{data_home}` is a root, like `~`: anywhere else it would name a
+    // directory under another one, which is not a thing a CLI has.
+    if location
+        .match_indices("{data_home}")
+        .any(|(index, _)| index != 0)
+    {
+        return Err(SpecError::DataHomeNotLeading {
             location: location.to_owned(),
         });
     }
@@ -1217,6 +1232,12 @@ pub enum SpecError {
     /// A record location uses `~` anywhere but its first path component.
     #[error("location {location} uses `~` outside its first path component")]
     TildeNotLeading {
+        /// The location pattern that failed.
+        location: String,
+    },
+    /// A record location uses `{data_home}` anywhere but its first component.
+    #[error("location {location} uses `{{data_home}}` outside its first path component")]
+    DataHomeNotLeading {
         /// The location pattern that failed.
         location: String,
     },
@@ -2301,14 +2322,36 @@ levels = [\"low\", \"high\"]
     fn accepts_shipped_location_patterns() {
         for location in [
             "~/.claude/projects/{cwd_slug}/{session}.jsonl",
+            "~/.claude/projects/{cwd_slug}/*.jsonl",
             "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl",
             "~/.pi/agent/sessions/{cwd_slug}/*_{session}.jsonl",
-            "~/.local/share/kilo/kilo.db",
+            "~/.pi/agent/sessions/{cwd_slug}/*.jsonl",
+            "{data_home}/opencode/opencode.db",
+            "{data_home}/opencode/storage",
+            "{data_home}/kilo/kilo.db",
         ] {
             if let Err(error) = validate_location(location) {
                 panic!("{location} should validate: {error}");
             }
         }
+    }
+
+    /// `{data_home}` is a root like `~`, so it belongs at the front and nowhere
+    /// else: `~/.local/share` is one place, `~/.local/share/{data_home}` is
+    /// another directory and not a thing any CLI writes.
+    #[test]
+    fn rejects_a_data_home_outside_the_first_component() {
+        let error = match validate_location("~/.local/share/{data_home}/opencode.db") {
+            Ok(()) => panic!("a misplaced `{{data_home}}` should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DataHomeNotLeading { .. }));
+        // A pattern that merely contains the word is not a root either.
+        let error = match validate_location("/work/{data_home}.db") {
+            Ok(()) => panic!("a trailing `{{data_home}}` should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DataHomeNotLeading { .. }));
     }
 
     #[test]

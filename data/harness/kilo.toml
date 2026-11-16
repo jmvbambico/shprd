@@ -98,8 +98,10 @@ screen = ["Ask anything"]
 supported = false
 
 [records]
+# Kilo resolves its own data home the XDG way, as OpenCode does, so the location
+# names it rather than the default `~/.local/share` spelling of it.
 kind = "sqlite"
-location = "~/.local/share/kilo/kilo.db"
+location = "{data_home}/kilo/kilo.db"
 errors = "message.data.error holds final errors; retries are not persisted"
 verified = true
 

@@ -1,0 +1,1 @@
+{"id":"prt_4","message_id":"msg_2","session_id":"ses_fixture","time_created":1768956610300,"data":{"type":"tool","callID":"call_prt_4","tool":"bash","state":{"status":"completed","input":{"command":"git show --stat HEAD"}}}}

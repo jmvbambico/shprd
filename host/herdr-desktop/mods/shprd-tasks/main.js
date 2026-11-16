@@ -26,7 +26,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { nextCommand, run, setShared, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import {
   counts,
   grouped,
@@ -77,28 +77,51 @@ export default class Tasks extends View {
     });
   }
 
-  /** Reads the board once; a service that went away is looked for again. */
+  /**
+   * Reads the board once; a service that restarted or went away is noticed and
+   * looked for again, so the panel never keeps painting an old board.
+   *
+   * Two things make that true and both are in `lib/client.js`: `attach` compares
+   * the `service.json` on disk with the id this panel's client was made from (a
+   * restarted service writes a new one, even on the same port), and `state()`
+   * throws rather than answering `null` when nothing answers at all. A restart
+   * clears what this panel cached, and the board is read whole again — which is
+   * why a task added while the service was down appears without reloading the
+   * layout (bug 5 of the M10 gate).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.state = null;
-          this.failure = "shprd serve is not running";
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.state = null;
+        this.failure = "shprd serve is not running";
+        cx.notify();
+        return;
       }
-      const state = await this.client.state();
-      if (state) this.state = state;
+      if (next.restarted) this.forget();
+      this.client = next.client;
+      this.follow();
+      this.state = await this.client.state();
       this.failure = null;
     } catch (err) {
       this.client = null;
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * Drops what was read from the service that just went away.
+   *
+   * The board itself is replaced by the next read; what is kept is what was said
+   * *about* a board — a refusal from a verb, a half-typed task — and neither is
+   * true of the new service's run.
+   */
+  forget() {
+    this.state = null;
+    this.actionError = null;
+    this.addError = null;
   }
 
   /** Follows the service's change file for as long as this copy lives. */

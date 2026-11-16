@@ -27,7 +27,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { props, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import {
   COMPACT_MAX,
   COORDINATOR,
@@ -82,27 +82,35 @@ export default class Coordinator extends View {
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** Reads the pages after the cursor, then shows them. */
+  /**
+   * Reads the pages after the cursor, then shows them.
+   *
+   * A service that restarted has a new `id`, and its agent's record is a new one
+   * too: `attach` notices the restart and the panel starts the conversation over
+   * from its first page instead of asking a new service for a cursor it never
+   * wrote (M10 gate bug 5). A read that answers nothing is a failure, so a dead
+   * port is looked for again rather than kept.
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.failure = "shprd serve is not running";
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.failure = "shprd serve is not running";
+        cx.notify();
+        return;
       }
+      if (next.restarted) this.forget();
+      this.client = next.client;
+      this.follow();
       // `more` means the page filled up: a long conversation arrives over a few
       // calls rather than one slow one, and the next timer catches any left over.
       for (let page = 0; page < PAGES; page += 1) {
         const answer = await this.client.call(
           "GET",
           `/api/chat?space=${encodeURIComponent(this.space)}&since=${encodeURIComponent(nextCursor(this.chat))}`,
+          { strict: true },
         );
-        if (!answer) break;
         this.chat = fold(this.chat, answer);
         if (!this.chat.more) break;
       }
@@ -114,6 +122,16 @@ export default class Coordinator extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * Starts the conversation again: a new service's agent wrote a new record, so
+   * a cursor from the old one names nothing it has.
+   */
+  forget() {
+    this.chat = empty(this.space);
+    this.refusal = null;
+    this.sending = false;
   }
 
   /** Follows the service's change file for as long as this copy lives. */

@@ -31,7 +31,8 @@ mods/lib/               the shared modules: tokens, panel parts, the board's
                         folder.
 keys.json               the keys the layout expects, merged by the installer
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
-bin/check               all of it: the copies, the unit tests, `herdr-app check`
+bin/check               all of it: the copies, the tests, `herdr-app check`
+bin/gate-env            a private app home with the first-run screens answered
 test/                   the unit tests (node or bun, see below); `fixtures/` holds
                         a real service's answers and a real window's list
 ```
@@ -39,6 +40,44 @@ test/                   the unit tests (node or bun, see below); `fixtures/` hol
 Install it with `shprd install herdr-desktop` (and `--dry-run` to see the plan,
 `--uninstall` to take back exactly what it wrote), then pick the layout in Herdr
 with `ctrl-shift-l`.
+
+## Installing from anywhere
+
+`shprd install herdr-desktop` installs the desktop the **binary** carries, not the
+one in whichever checkout the caller happens to stand in. The order is:
+
+1. `--from <dir>`, when a person names a tree. A named tree must be one: a
+   `--from` with no `layouts/` is refused rather than quietly replaced by the
+   embedded copy.
+2. `$SHPRD_HOST_DIR`.
+3. `<cwd>/host/herdr-desktop`, then `<cwd>/../host/herdr-desktop` — a checkout or
+   a worker's worktree, whose `crates/` sits one step down from the tree.
+4. The checkout this binary was compiled from, in a **debug** build only. A
+   release binary has no such path, which is the point.
+5. The copy embedded in the binary at build time (`crates/shprd/build.rs`, the
+   same shape as the shipped `data/`). This is what makes an installed `shprd`
+   work with no checkout at all, and what the M10 gate's bug 6 was about: run
+   from a worktree without `--from`, the installer used to look in the canonical
+   `~/projects/shprd` and refuse.
+
+`--dry-run --json` says which tree it used in its `source` field.
+
+### A file Herdr pruned
+
+Herdr resolves a layout terminal block by name when the layout loads and **writes
+the layout file back without the block** when no such terminal exists (see "The
+graph block" below). That is the app's edit, not the person's. The installer owns
+the file its manifest still lists, so it recognises a prune — the two documents
+are compared with their terminal blocks removed — and puts its own file back:
+
+```
+wrote …/layouts/shprd.json (put back after Herdr pruned it)
+```
+
+A change that is not a prune (a size, a colour, a block someone added) is the
+person's and is still refused, with the file left exactly as they wrote it. So
+the recovery for a pruned block is just `shprd install herdr-desktop`; nothing
+has to be moved aside first.
 
 ## The mods talk to `shprd serve`
 
@@ -51,6 +90,23 @@ the `token` file beside it — and follows it with a long poll
 ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
 `mods/lib/watch.js`.
 
+### A service that restarted
+
+A `shprd serve` that restarts is a different service: a new `id` in
+`service.json` (possibly on the same port), a new board, a new run. A panel must
+never keep painting the old one, so every mod follows two rules, both in
+`mods/lib/client.js`:
+
+* Before a read, `attach(client)` compares the id in `service.json` with the one
+the panel's client was made from. A different id (or a record that is gone) is a
+restart: a new client, and the panel drops what it cached and reads the whole
+board again — which is how a task added while the service was down appears
+without the layout being reloaded.
+* A read of the board is **strict**: `GET /api/state` against a dead port does not
+throw, it just runs out of time and answers nothing, so a `null` board is treated
+as a failure. The panel drops its client, shows the failure, and the next look
+discovers the service again. Treating that `null` as "nothing new" is exactly
+what used to freeze the panels for ever (the M10 gate's bug 5).
 ## The graph block
 
 The side panel's last row is the run's graph: a stack with a terminal block
@@ -85,8 +141,44 @@ service started before the window's core, a terminal someone ended), and selects
 the terminal's child once it is live — a mod may not edit a layout's structure on
 this build, so it only ever selects a node the layout already holds. If Herdr
 pruned the block anyway (a window opened on a fresh install with no service
-running), the note says so and gives the one recovery: move `layouts/shprd.json`
-aside and run `shprd install herdr-desktop`.
+running), the note says so and gives the recovery: `shprd install herdr-desktop`,
+which puts its own layout back (see "A file Herdr pruned" above).
+
+## A private window for a test or a gate
+
+Everything below is for a **private** Herdr, never the person's own: a private
+`HC_SESSION`, a private `HERDR_APP_HOME`, and every `XDG_*` variable and `TMPDIR`
+under one scratch folder — the recipe is M7ef §2.1, and the socket path has to fit
+in 103 bytes, so the scratch folder is usually reached through a short symlink.
+
+A fresh `HERDR_APP_HOME` opens with Herdr's first-run welcome over the layout, and
+a `layout.switch` does not clear it. `bin/gate-env` writes the two keys the
+welcome and the "What's new" screen read before the window starts, into a home
+of your own. They live in the window's shared state, `<app home>/shared.json` —
+beside `keys.json` and `layouts/`, *not* in `data/`, which is each mod's own
+folder:
+
+```sh
+# a private app home, with the first-run screens already answered
+eval "$(HERDR_APP_HOME=/tmp/shs/app bin/gate-env --export)"
+
+# the whole private environment, per M7ef §2.1
+ln -sfn "$(mktemp -d)" /tmp/shs
+export HC_SESSION=shprdgate \
+       XDG_CONFIG_HOME=/tmp/shs/cfg XDG_STATE_HOME=/tmp/shs/state \
+       XDG_DATA_HOME=/tmp/shs/data XDG_RUNTIME_DIR=/tmp/shs/run \
+       XDG_CACHE_HOME=/tmp/shs/cache TMPDIR=/tmp/shs/tmp
+unset HC_TERMINAL_ID HERDR_TAB_ID HERDR_PANE_ID HERDR_WORKSPACE_ID
+
+shprd install herdr-desktop            # the binary's own copy
+herdr-app                                # the private window
+herdr-app do layout.switch '{"name":"shprd"}'
+herdr-app shot /tmp/shs/shot.png
+```
+
+`bin/gate-env` refuses `$HOME/.config/herdr-app` outright: writing
+`frame.welcomed` into a person's own window would tell it that it had already
+shown them the welcome. `bin/check` runs that refusal as part of its own check.
 
 ## Tests
 
@@ -98,10 +190,15 @@ node --import ./test/boot.mjs --test test/
 bun test --preload ./test/boot-bun.mjs test/
 ```
 
-Both run the same files, `test/lib.test.mjs`, `test/chrome.test.mjs`,
-`test/mods.test.mjs`, `test/settings.test.mjs` and `test/asks.test.mjs`;
+Both run the same files, `test/lib.test.mjs`, `test/restart.test.mjs`,
+`test/chrome.test.mjs`, `test/mods.test.mjs`, `test/settings.test.mjs`,
+`test/asks.test.mjs`, `test/coordinator.test.mjs` and `test/graph.test.mjs`;
 `test/stub-herdr.js` stands in for the app's `herdr` module and
 `test/stub-gpui.js` for its element builders (`gpui-kit`, `gpui-base`).
+`test/restart.test.mjs` is the one about a `shprd serve` that restarted: the
+client's `attach` notices the new `id` in `service.json`, a board read that gets
+no answer is a failure rather than "nothing new", and the tasks panel repaints
+the new run's board without the layout being reloaded (the M10 gate's bug 5).
 `test/mods.test.mjs` drives the four view models with fixtures captured from a
 real `shprd serve` (`test/fixtures/state.json`, `changes.json`) and a real
 `herdr-app ls` of the window that showed it (`spaces.json`): the sidebar's rows,

@@ -124,18 +124,31 @@ screen = ["Ask anything"]
 supported = false
 
 [records]
+# The database is `<XDG_DATA_HOME>/opencode/opencode.db`, which is
+# `~/.local/share/opencode/opencode.db` only while `$XDG_DATA_HOME` is unset.
+# OpenCode resolves its own data home, so the location says the same thing with
+# `{data_home}` rather than naming the default.
 kind = "sqlite"
-location = "~/.local/share/opencode/opencode.db"
+location = "{data_home}/opencode/opencode.db"
 errors = "message.data.error holds final errors; retries are not persisted"
 verified = true
 
 [transcript]
-# OpenCode's store: `session/<project>/<id>.json` names a session and the
-# directory it belongs to, `message/<session>/` holds one file a message and
-# `part/<message>/` the text and tool blocks of each. There is no single file a
-# session lives in, so the location names the store itself.
-format = "opencode_storage"
-location = "~/.local/share/opencode/storage"
+# OpenCode keeps its conversation in the `session`, `message` and `part` tables of
+# the same database the watchdog reads: a `session` row names the directory the
+# session belongs to, `message` holds one row a message and `part` the text and
+# tool blocks of each (1.18.35 on this machine, docs/agents.md). There is no
+# single file a session lives in, so the location names the database itself, and
+# the reader picks the newest session whose `directory` is the space's cwd.
+#
+# `opencode_storage` was the pre-1.18 folder store
+# (`storage/session/<project>/<id>.json` plus `storage/message/<session>/` and
+# `storage/part/<message>/`); an installation that still has one is read with
+# `format = "opencode_storage"` and `location = "{data_home}/opencode/storage"`
+# instead. The database is what a current CLI writes, so it is what the table
+# names.
+format = "opencode_sqlite"
+location = "{data_home}/opencode/opencode.db"
 
 [quota]
 source = "none"

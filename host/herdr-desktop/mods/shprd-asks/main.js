@@ -23,7 +23,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import { SECTION, answerBody, cards, footer, section, tally } from "./lib/asks.js";
 import { badge, card, cardHeader, countBadge, keycap, note } from "./lib/panel.js";
 import { RADIUS, TEXT, ref, tone } from "./lib/tokens.js";
@@ -57,25 +57,31 @@ export default class Asks extends View {
     this.schedule();
   }
 
-  /** Reads the cards once; a service that went away is looked for again. */
+  /**
+   * Reads the cards once; a service that restarted or went away is looked for
+   * again.
+   *
+   * The cards are what a person answers, so a stale list is worse than an empty
+   * one: `attach` spots the restart by its `id` and the reads are strict, so a
+   * dead port shows as "not running" rather than as the cards of a run that has
+   * moved on (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.state = null;
-          this.asks = null;
-          this.failure = "shprd serve is not running";
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.state = null;
+        this.asks = null;
+        this.failure = "shprd serve is not running";
+        cx.notify();
+        return;
       }
-      const state = await this.client.state();
-      if (state) this.state = state;
-      const asks = await this.client.asks();
-      if (asks) this.asks = asks;
+      if (next.restarted) this.forget();
+      this.client = next.client;
+      this.follow();
+      this.state = await this.client.state();
+      this.asks = await this.client.asks();
       this.failure = null;
     } catch (err) {
       // A restarted service answers with another id, so the next look finds the
@@ -84,6 +90,15 @@ export default class Asks extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /** Drops what was said about the service that went away. */
+  forget() {
+    this.state = null;
+    this.asks = null;
+    this.refusal = null;
+    this.typing = null;
+    this.answering = null;
   }
 
   /** Follows the service's change file for as long as this copy lives. */

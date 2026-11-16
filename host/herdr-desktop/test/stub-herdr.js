@@ -51,6 +51,7 @@ export function reset() {
   HC_CALLS.length = 0;
   SPACES = [];
   RUNS.length = 0;
+  SHARED.clear();
   PROPS = {};
 }
 
@@ -124,6 +125,30 @@ export const RUNS = [];
 export function run(name, args) {
   RUNS.push({ name, args });
   return null;
+}
+
+/** The shared key/value space, as `shared(k)` and `setShared(k, v)` see it. */
+export const SHARED = new Map();
+
+/** What `shared(key)` answers: the value last set, or null. */
+export function shared(key) {
+  return SHARED.has(key) ? SHARED.get(key) : null;
+}
+
+/** Sets one shared key, as a click in another mod would. */
+export function setShared(key, value) {
+  SHARED.set(key, value);
+  return value;
+}
+
+/**
+ * `nextCommand()`: the app's command queue for a focusable mod.
+ *
+ * A mod awaits it in a loop, so a test that never presses a command must leave
+ * it waiting rather than resolving: a resolved `null` would spin the loop.
+ */
+export function nextCommand() {
+  return new Promise(() => {});
 }
 
 /** The theme colours the footer draws with: one per name it uses. */
