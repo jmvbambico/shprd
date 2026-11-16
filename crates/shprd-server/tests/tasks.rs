@@ -293,6 +293,17 @@ fn with_a_task_branch() -> Fixture {
     fixture
 }
 
+/// One task's row in a `/api/state` body, by id.
+fn task_in(state: &Reply, id: &str) -> Value {
+    state.json()["tasks"]
+        .as_array()
+        .expect("the tasks")
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap_or_else(|| panic!("{id}'s row is on the board: {}", state.json()))
+        .clone()
+}
+
 /// What the closures were asked for, as a copy: a guard never crosses an await.
 fn calls(log: &Calls) -> Vec<(String, String)> {
     log.lock().expect("the lock").clone()
@@ -640,6 +651,191 @@ async fn a_stop_closes_the_tasks_space_and_an_unknown_task_is_a_404() {
         1,
         "nothing was closed for a task the run does not hold"
     );
+}
+
+/// A service over a repository whose one task has a spawned attempt and no
+/// report: exactly the state a person's Stop is pressed in.
+fn with_a_working_task() -> Fixture {
+    let repo = TempDir::new().expect("repo dir");
+    start_run(repo.path());
+    let fixture = Fixture::prepared(repo);
+    append(
+        &fixture,
+        EventKind::TaskAdded {
+            task: "T1".to_string(),
+            title: "a task at work".to_string(),
+            scope: vec!["kept.txt".to_string()],
+            acceptance: vec!["it works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    append(
+        &fixture,
+        EventKind::Spawned {
+            task: "T1".to_string(),
+            attempt: 1,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt/r1/T1".to_string(),
+            branch: "shprd/r1/T1".to_string(),
+        },
+    );
+    fixture
+}
+
+#[tokio::test]
+async fn a_stop_of_a_working_task_moves_to_needs_you_and_a_retry_is_allowed() {
+    // Bug 1 of the M10 gate: the stop closed the space and wrote nothing, so the
+    // task read Working for ever and every retry was refused with "attempt 1
+    // cannot be archived and replaced until it fails or is integrated".
+    let fixture = with_a_working_task();
+    let (engine, started, stopped) = recording_engine(Ok("closed the space"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let before = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(before.status, StatusCode::OK, "{:?}", before.body);
+    assert_eq!(
+        task_in(&before, "T1")["derived"]["status"],
+        json!("working"),
+        "a spawned task reads working: {}",
+        before.json()
+    );
+
+    let stop = fixture
+        .act(json!({"kind": "task.stop", "task": "T1"}))
+        .await;
+    assert_eq!(stop.status, StatusCode::OK, "{:?}", stop.body);
+    assert_eq!(calls(&stopped).len(), 1, "the space was closed once");
+    // It reads *Needs you · Agent stopped*, Shepherdr's words for a task with no
+    // agent left (M7a §5, `agents.py:170`).
+    assert_eq!(stop.json()["task"]["derived"]["status"], json!("needs_you"));
+    assert_eq!(stop.json()["task"]["derived"]["need"], json!("stopped"));
+    assert_eq!(
+        stop.json()["task"]["derived"]["reason"],
+        json!("Agent stopped")
+    );
+    // The stored state is the one a retry may replace, which is what makes the
+    // row's own Retry verb work again.
+    assert_eq!(stop.json()["task"]["status"], json!("failed"));
+
+    // A retry is the engine's spawn path, and it is no longer refused.
+    let retry = fixture
+        .act(json!({"kind": "task.retry", "task": "T1"}))
+        .await;
+    assert_eq!(retry.status, StatusCode::OK, "{:?}", retry.body);
+    assert_eq!(calls(&started).len(), 1, "a retry is the spawn path");
+
+    // The stop is in the log, as the person's own act.
+    let recorded = fixture
+        .events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::TaskStopped { task, attempt } => Some((event.actor, task, attempt)),
+            _ => None,
+        })
+        .expect("the stop is recorded");
+    assert_eq!(recorded.0, Actor::Human);
+    assert_eq!(recorded.1, "T1");
+    assert_eq!(recorded.2, 1);
+}
+
+#[tokio::test]
+async fn a_second_stop_is_refused_with_its_reason() {
+    let fixture = with_a_working_task();
+    let (engine, _, stopped) = recording_engine(Ok("closed the space"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let first = fixture
+        .act(json!({"kind": "task.stop", "task": "T1"}))
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+
+    let again = fixture
+        .act(json!({"kind": "task.stop", "task": "T1"}))
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.body);
+    assert_eq!(again.code(), "refused");
+    assert!(
+        again.message().contains("already stopped"),
+        "the refusal says why: {}",
+        again.message()
+    );
+    assert!(
+        again.message().contains("task.retry"),
+        "and what to do instead: {}",
+        again.message()
+    );
+    assert_eq!(
+        calls(&stopped).len(),
+        1,
+        "a refused stop closes nothing: the host is not touched"
+    );
+    // One event, not two: the refused press wrote nothing.
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TaskStopped { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_stop_of_a_task_nobody_started_is_refused() {
+    let fixture = Fixture::new();
+    fixture
+        .add(json!({"title": "not started", "scope": ["a"], "acceptance": ["y"]}))
+        .await;
+    let (engine, _, stopped) = recording_engine(Ok("closed the space"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.stop", "task": "not-started"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    assert!(
+        reply.message().contains("nothing has been started"),
+        "the refusal says why: {}",
+        reply.message()
+    );
+    assert_eq!(calls(&stopped).len(), 0, "nothing was closed");
+}
+
+#[tokio::test]
+async fn a_stopped_task_reads_the_same_from_the_cli_and_the_board() {
+    // The one thing two readers must not disagree about: `shprd status` derives
+    // from the fold alone, and the board reads the snapshot. A stopped attempt
+    // carries the fact, so both say *Agent stopped*.
+    let fixture = with_a_working_task();
+    let (engine, _, _) = recording_engine(Ok("closed the space"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let stop = fixture
+        .act(json!({"kind": "task.stop", "task": "T1"}))
+        .await;
+    assert_eq!(stop.status, StatusCode::OK, "{:?}", stop.body);
+
+    let events = fixture.events();
+    let state = shprd_core::state::RunState::fold(&events).expect("the log folds");
+    let reading =
+        shprd_views::status::reading(&state, "T1", 1_700_000_000_000).expect("the task reads");
+    assert_eq!(
+        reading.needs,
+        Some(shprd_views::derived::Need::Stopped),
+        "the CLI's reader says the same: {reading:?}"
+    );
+    assert_eq!(reading.reason.as_deref(), Some("Agent stopped"));
 }
 
 #[tokio::test]
