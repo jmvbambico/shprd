@@ -4,9 +4,15 @@
 //! service's own work: it finds the agent's program from the ledger (a task's
 //! latest attempt names it) or from the settings (the coordinator role does),
 //! asks that program's harness where the session lives
-//! ([`shprd_agents::transcript::Transcript::locate`]) and answers what the
+//! ([`shprd_agents::transcript::Transcript::locate_in`]) and answers what the
 //! record gained after the client's cursor. Nothing is written: a transcript is
 //! read-only evidence, and the agent's own file is the only copy of it.
+//!
+//! The roots a record is looked for under are the ones the *agent CLI* ran with
+//! ([`shprd_agents::transcript::Roots`]: its real `HOME` and its XDG data home),
+//! which the binary resolves once and passes in. They are deliberately not the
+//! engine's own home: `SHPRD_HOME` is where shprd keeps its settings, briefs and
+//! worktrees, and no CLI has ever written a session there.
 //!
 //! Sending is the one thing the service cannot do alone: typing into a pane is
 //! the host's verb, so the binary passes a [`ChatWriter`] here exactly as it
@@ -162,17 +168,23 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         answer.note = Some(format!("shprd cannot read {program}'s conversation yet"));
         return Ok(answer);
     }
-    let home = state.home.as_deref().ok_or_else(|| {
+    // A transcript is the agent CLI's own file, so it is looked for under the
+    // roots *that* process had: the real `HOME` it inherits (which a spawn never
+    // rewrites) and its XDG data home. The engine's own home is a different
+    // directory — `SHPRD_HOME` — and no CLI writes a session under it, so using
+    // it here is why every chat pane answered "has not written a session" while
+    // the session sat in the person's real `~/.claude`.
+    let roots = state.transcript_roots.as_ref().ok_or_else(|| {
         ApiReject::internal(
-            "this service has no home directory, so it cannot find a transcript: \
-             set SHPRD_HOME or HOME",
+            "this service was not told the home its agents run with, so it cannot find a \
+             transcript: start `shprd serve` from a build that passes $HOME in",
         )
     })?;
-    let Some(transcript) = Transcript::locate(&spec.transcript, home, &place.cwd) else {
+    let Some(transcript) = Transcript::locate_in(&spec.transcript, roots, &place.cwd) else {
         answer.note = Some(match spec.transcript.format {
-            // An OpenCode store is a folder of sessions; a missing one is a
-            // program that has not run here yet.
-            Some(TranscriptFormat::OpencodeStorage) => {
+            // OpenCode's store and database are session stores rather than one
+            // file a session; a missing one is a program that has not run here.
+            Some(TranscriptFormat::OpencodeStorage | TranscriptFormat::OpencodeSqlite) => {
                 format!("{program} has not run in {} yet", place.cwd.display())
             }
             _ => format!(

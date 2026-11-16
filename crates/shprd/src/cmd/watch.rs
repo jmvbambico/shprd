@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use shprd_agents::spec::TranscriptFormat;
+use shprd_agents::transcript::cwd_slug;
 use shprd_core::config::MergePolicy;
 use shprd_core::event::{Actor, Event, EventKind, ReportStatus};
 use shprd_core::gate::REVIEW_GATE;
@@ -55,24 +57,25 @@ fn newest_jsonl(dir: &Path) -> Option<PathBuf> {
 
 /// The newest record `claude` wrote for `worktree`.
 ///
-/// Its project directory is the worktree path with every `/` and `.` turned
-/// into `-`, so `/.worktrees` becomes `--worktrees`.
+/// Its project directory is the program's own fold of the worktree path, taken
+/// from the one function the chat reads with
+/// ([`shprd_agents::transcript::cwd_slug`]): a watchdog and a chat must never
+/// disagree about which folder a program put a session in, and the fold turns
+/// `_`, `.` and every other non-alphanumeric character into `-`.
 fn claude_record(home: &Path, worktree: &Path) -> Option<PathBuf> {
-    let slug = worktree.to_string_lossy().replace(['/', '.'], "-");
+    let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, worktree);
     newest_jsonl(&home.join(".claude").join("projects").join(slug))
 }
 
 /// The newest record `pi` wrote for `worktree`.
 ///
-/// Its session directory is the worktree path without the leading `/`, with
-/// `/` turned into `-`, wrapped in `--`.
+/// Its session directory is the program's own fold of the worktree path, from
+/// the same [`shprd_agents::transcript::cwd_slug`] the chat uses: the path
+/// without its leading `/`, separated by `-`, wrapped in `--`.
 fn pi_record(home: &Path, worktree: &Path) -> Option<PathBuf> {
-    let slug = worktree
-        .to_string_lossy()
-        .trim_start_matches('/')
-        .replace('/', "-");
+    let slug = cwd_slug(TranscriptFormat::PiJsonl, worktree);
     let dir = home.join(".pi").join("agent").join("sessions");
-    newest_jsonl(&dir.join(format!("--{slug}--")))
+    newest_jsonl(&dir.join(slug))
 }
 
 /// The newest provider error `program` recorded for `worktree` at or after
@@ -83,16 +86,24 @@ fn pi_record(home: &Path, worktree: &Path) -> Option<PathBuf> {
 /// keeps no record we can classify, so both answer `None`.
 fn record_error(
     program: &Program,
-    home: &Path,
+    roots: &shprd_agents::transcript::Roots,
     worktree: &Path,
     since_ms: u64,
 ) -> Option<RecordError> {
-    let db = |name: &str| home.join(".local").join("share").join(name);
+    let home = roots.home.as_path();
     let scan = match program.spec.id.as_str() {
         "claude" => scan_claude(&claude_record(home, worktree)?, since_ms),
         "pi" => scan_pi(&pi_record(home, worktree)?, since_ms),
-        "opencode" => scan_opencode(&db("opencode").join("opencode.db"), worktree, since_ms),
-        "kilo" => scan_kilo(&db("kilo").join("kilo.db"), worktree, since_ms),
+        "opencode" => scan_opencode(
+            &roots.data_home.join("opencode").join("opencode.db"),
+            worktree,
+            since_ms,
+        ),
+        "kilo" => scan_kilo(
+            &roots.data_home.join("kilo").join("kilo.db"),
+            worktree,
+            since_ms,
+        ),
         _ => return None,
     };
     scan.ok()?.last_error
@@ -716,8 +727,12 @@ fn tick_task(
     let started_at = worker_started_at_ms(events, &task.id, attempt.n);
     let starting_up = started_at <= now_ms && now_ms.saturating_sub(started_at) < EXIT_GRACE_MS;
     let process_exited = process_exited && !starting_up;
-    let record_error = home_of(env)
-        .and_then(|home| record_error(program, home, Path::new(&attempt.worktree), since_ms));
+    let record_error = record_error(
+        program,
+        &env.transcript_roots,
+        Path::new(&attempt.worktree),
+        since_ms,
+    );
     let inputs = Inputs {
         now_ms,
         record_error,
@@ -1422,6 +1437,7 @@ project_dirs = []
         fn env<'a>(&self, ctx: &'a Ctx, workers: &[&str]) -> SpawnEnv<'a> {
             let mut base_env = BTreeMap::new();
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
             SpawnEnv {
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
@@ -1452,6 +1468,7 @@ project_dirs = []
                 // No wait: a fake pane that never reports an agent would
                 // otherwise stall every test that launches one.
                 ready_wait: Duration::ZERO,
+                transcript_roots,
             }
         }
     }

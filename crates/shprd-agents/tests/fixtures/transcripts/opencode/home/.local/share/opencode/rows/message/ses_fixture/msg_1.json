@@ -1,0 +1,1 @@
+{"id":"msg_1","session_id":"ses_fixture","time_created":1768956600000,"data":{"role":"user","time":{"created":1768956600000,"completed":1768956605000},"agent":"build","model":{"providerID":"google","modelID":"gemini-3-flash-preview"},"summary":{"diffs":[]}}}
