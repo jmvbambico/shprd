@@ -992,8 +992,11 @@ impl StatusSpec {
 pub struct ReadySpec {
     /// Case-insensitive screen substrings that mean the TUI accepts a turn.
     ///
-    /// Empty means the program names no such line, and shprd's last resort is
-    /// a pane that has painted anything at all.
+    /// Empty means the program names no such line. That is a real gap and not a
+    /// fallback: a pane with text on it is no evidence that its program is
+    /// taking turns (a CLI that crashed leaves its error message there), so on a
+    /// host that cannot report the program the launch says the brief was not
+    /// delivered rather than typing it in. Every shipped harness names a line.
     #[serde(default)]
     pub screen: Vec<String>,
 }

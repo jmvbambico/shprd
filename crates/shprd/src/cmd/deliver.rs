@@ -2,9 +2,10 @@
 //!
 //! `spawn` (a task's agent), `review` (a reviewer) and `watch` (a notice typed
 //! into an orchestrator) all start a process and then have to get text into it
-//! once the host has detected an agent there. The decisions that are not
-//! verb-specific live here and are made once: the argv-flag rules, how long to
-//! wait, and whether a prompt of the CLI's own is in the way.
+//! once the program will read it. The decisions that are not verb-specific live
+//! here and are made once: the argv-flag rules, how long to wait, whether a
+//! prompt of the CLI's own is in the way, and — the part that is not the same on
+//! every host — which evidence counts as "the program is up" ([`Readiness`]).
 //!
 use std::time::{Duration, Instant};
 
