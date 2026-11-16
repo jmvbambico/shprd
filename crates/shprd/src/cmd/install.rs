@@ -78,18 +78,25 @@ const MOD_PREFIX: &str = "shprd-";
 
 /// The layouts earlier builds shipped, as the documents they were.
 ///
-/// One entry per layout file this verb has ever installed that has since changed:
-/// a file Herdr pruned out of the *previous* build's layout is still recognised
-/// as the app's edit when the new build's layout is a different document, which
-/// is what makes such an upgrade one command rather than a manual repair. The
-/// rule for a later change is to add here the layout it replaces, and nothing
-/// else — a document here is a fact about what shprd shipped, never a guess about
-/// what a person meant.
+/// One entry per version of a layout file this verb has installed that has since
+/// changed — every version, because a person upgrades from whichever one they last
+/// installed: a file Herdr pruned out of an *older* build's layout is still
+/// recognised as the app's edit when this build's layout is a different document,
+/// which is what makes such an upgrade one command rather than a manual repair. The
+/// rule for a later change is to add here the layout it replaces, and nothing else
+/// — a document here is a fact about what shprd shipped, never a guess about what a
+/// person meant.
 ///
-/// `shprd-m10.json` is the layout through M10, whose side panel held settings as
-/// a tab. M11 fix S made settings a dialog over the window, so the block went
-/// away.
-const PREVIOUS_LAYOUTS: &[&str] = &[include_str!("previous-layouts/shprd-m10.json")];
+/// The three M10 layouts are the ones that differ (the four M10 fix releases did
+/// not touch the file): M10.3's, M10.4's (`spaces` became `shprd-spaces`, and the
+/// tab bar and panel gained their buttons) and M10.7's, which is where M10 ended
+/// and whose side panel held settings as a tab. M11 fix S made settings a dialog
+/// over the window, so that block went away.
+const PREVIOUS_LAYOUTS: &[&str] = &[
+    include_str!("previous-layouts/shprd-m10.3.json"),
+    include_str!("previous-layouts/shprd-m10.4.json"),
+    include_str!("previous-layouts/shprd-m10.json"),
+];
 
 /// Runs `shprd install`, whichever mode the command line asked for.
 pub fn run(args: &InstallArgs, home: Option<&Path>, json: bool) -> Result<(), CliError> {
