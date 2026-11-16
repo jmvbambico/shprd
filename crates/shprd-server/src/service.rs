@@ -229,7 +229,7 @@ impl ServiceFiles {
 /// second or two. The wait only ever costs a start that finds a lock nobody can
 /// explain; a live service's record names a live pid, so that refusal is
 /// immediate.
-pub const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// How often that wait looks at the lock again.
 const SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
