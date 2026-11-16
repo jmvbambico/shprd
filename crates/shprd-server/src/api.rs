@@ -578,7 +578,18 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(guarded)
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
-        .layer(TraceLayer::new_for_http())
+        // The path only, never the query: a socket's query carries the bearer
+        // token, because a browser cannot send one as a header, and a log is not
+        // a place for a secret (M7d §4.4, threat row 15).
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                tracing::debug_span!(
+                    "request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), auth::host))
         .layer(middleware::from_fn(auth::peer))
         .with_state(state)
