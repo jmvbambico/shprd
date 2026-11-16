@@ -24,7 +24,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { nextCommand, run, setShared, theme } from "herdr";
+import { nextCommand, run, setShared, shared, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import {
@@ -69,6 +69,7 @@ export default class Tasks extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "add") this.beginAdd(cx);
+        else if (command === "open") this.openShared();
         else if (command === "focus") {
           this.handle.focus();
           cx.notify();
@@ -147,6 +148,20 @@ export default class Tasks extends View {
     run("layout.select", { stack: "tasks-thread-body", child: CARD });
     run("layout.show", { id: "panel" });
     this.cx.notify();
+  }
+
+  /**
+   * Opens the task the window already shares as `tasks.thread`.
+   *
+   * It is how another mod asks for this panel's drill-in — the sidebar's row menu
+   * "Open task" — without naming a stack child here, which the thread's own views
+   * may move: the shared id is the contract (Shepherdr's, `tasks.thread`), and this
+   * panel owns what opening one shows.
+   */
+  openShared() {
+    const thread = shared("tasks.thread");
+    if (!thread?.task) return;
+    this.open({ id: thread.task, title: thread.title ?? "" });
   }
 
   /** Opens one of the panel's own stacks: the board, the cards, the settings. */

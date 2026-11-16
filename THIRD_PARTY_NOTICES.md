@@ -66,9 +66,13 @@ SOFTWARE.
   colours and the space marks) from `lib/ui.js`, the status glyph shapes from
   `lib/dot.js`, the status-bar, tab-bar, pane-header and footer rows from
   `mods/workspace-status-chat`, `mods/tabs-tasks`, `mods/pane-chat` and
-  `mods/workspace-chrome-shepherdr`, the sidebar's rows — a coloured mark, the
-  name, the count that needs the person, and a quiet section heading above them
-  — from `mods/spaces-chat/main.js` and `mods/spaces-chat/sections.js`, the
+  `mods/workspace-chrome-shepherdr`, the sidebar's rows — one 30 px line a space,
+  its mark, its name and the red/green count badge at the end, the "Spaces"
+  heading with its "+", the rail under 160 px, the row's right-click menu and the
+  close confirm it asks in — from `mods/spaces-chat/main.js`,
+  `mods/spaces-chat/sections.js`, `mods/spaces-chat/popups.js`, `core/menus.js`
+  and `mods/confirm-chat/main.js`, and the split red/green badge itself from
+  `lib/ui.js` (`countBadge`, Shepherdr's `AttentionBadge`), the
   toast float and the numbers it follows — three at once, 360 px wide, a body cut
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
