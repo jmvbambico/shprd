@@ -11,8 +11,16 @@ mods/shprd-spaces/      the sidebar: the coordinator's space, then one row a tas
 mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
 mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons
-mods/shprd-tabs/        the tab bar (each tab's agent, role and state) and the
-                        side panel's buttons
+mods/shprd-tabs/        the tab bar: 24 px pills (the program's icon, the name,
+                        a spinner while working, a count badge, the close mark
+                        on the shown one), the "+", the side panel's buttons and
+                        the window's; a drag moves a tab, the wheel steps them,
+                        a double-click renames, a right-click opens its menu
+mods/shprd-new-menu/    the "+" menu: Terminal, New task…, and the roster's
+                        programs (1–9, the ones this machine lacks dimmed)
+mods/shprd-menu/        the context menus: a tab's, the app's, and a terminal's
+                        right-click menu
+mods/shprd-prompt/      the one text prompt (Rename tab)
 mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
 mods/shprd-accept/      the Accept card            (M10.5)
 mods/shprd-task-pr/     the task's pull request    (M10.5)
@@ -22,7 +30,8 @@ mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
                         where dagr is          (M10.7)
 mods/shprd-coordinator/ the coordinator's chat     (M10.8)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
-mods/lib/               the shared modules: tokens, panel parts, the board's
+mods/lib/               the shared modules: tokens, panel parts, the menus' rows
+                        (`menu.js`), the board's
                         reading (`board.js`), the sidebar's (`spaces.js`), the
                         tab bar's (`tabstrip.js`), the toasts' (`toasts.js`), the
                         service client, the change watcher, and sync-shared's
@@ -191,15 +200,19 @@ bun test --preload ./test/boot-bun.mjs test/
 ```
 
 Both run the same files, `test/lib.test.mjs`, `test/restart.test.mjs`,
-`test/chrome.test.mjs`, `test/mods.test.mjs`, `test/settings.test.mjs`,
-`test/asks.test.mjs`, `test/coordinator.test.mjs` and `test/graph.test.mjs`;
+`test/chrome.test.mjs`, `test/mods.test.mjs`, `test/menu.test.mjs`,
+`test/settings.test.mjs`, `test/asks.test.mjs`, `test/coordinator.test.mjs` and
+`test/graph.test.mjs`;
 `test/stub-herdr.js` stands in for the app's `herdr` module and
 `test/stub-gpui.js` for its element builders (`gpui-kit`, `gpui-base`).
 `test/restart.test.mjs` is the one about a `shprd serve` that restarted: the
 client's `attach` notices the new `id` in `service.json`, a board read that gets
 no answer is a failure rather than "nothing new", and the tasks panel repaints
 the new run's board without the layout being reloaded (the M10 gate's bug 5).
-`test/mods.test.mjs` drives the four view models with fixtures captured from a
+`test/menu.test.mjs` reads the four menus — the "+" menu, a tab's, the app's and a
+pane's — off the same roster and window fixtures: the rows, their order, their
+words, the 1–9 keys, the dim *Not installed* line, and the height a popup is
+asked for. `test/mods.test.mjs` drives the four view models with fixtures captured from a
 real `shprd serve` (`test/fixtures/state.json`, `changes.json`) and a real
 `herdr-app ls` of the window that showed it (`spaces.json`): the sidebar's rows,
 the tab bar's pills, the toasts' news and the status bar's counts are all pure

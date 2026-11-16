@@ -457,6 +457,17 @@ export class Client {
     return this.call("GET", "/api/roster", { wait: ROSTER_WAIT });
   }
 
+  /**
+   * `POST /api/agents`: start a program's tab, as the tab bar's "+" menu asks.
+   *
+   * The service opens it — a mod starts no program — and answers the tab it
+   * opened: `{program, name, tab}`. The roster's `installed` is what says whether
+   * a program can be asked for at all.
+   */
+  openAgent(program) {
+    return this.call("POST", "/api/agents", { body: { program } });
+  }
+
   /** `GET /api/prompts`: every template this machine has, without its words. */
   prompts() {
     return this.call("GET", "/api/prompts");
