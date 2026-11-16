@@ -17,8 +17,11 @@
 // Ported from Shepherdr's spaces list (MIT):
 //
 // - Source: <https://github.com/eliasstravik/shepherdr>
-// - Paths: `mods/spaces-chat/main.js` (a row per space: an avatar, the name, and
-//   the count that needs the person), `core/tasks.js` (`place()`'s grouping)
+// - Paths: `mods/spaces-chat/main.js` (a row per space: a mark, the name, and the
+//   red/green counts at the end; `rowHeight`, `compact()`'s rail and `narrow()`),
+//   `mods/spaces-chat/popups.js` (the row's menu: `heightOf`, `openMenu`,
+//   `closeSpace`), `core/menus.js` (`spaceMenu`'s items and order), `core/tasks.js`
+//   (`place()`'s grouping)
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
@@ -36,6 +39,18 @@ export const SEP = " · ";
 
 /** The prefix every space shprd owns begins with. */
 export const PREFIX = "shprd";
+
+/**
+ * The width below which the sidebar draws its rail, in px.
+ *
+ * It is Shepherdr's own threshold, and it is why the rail is read from the layout
+ * rather than kept as a flag: dragging the edge narrows it too
+ * (`mods/spaces-chat/main.js:790`, `narrow()`).
+ */
+export const NARROW_PX = 160;
+
+/** A menu popup's measurements, as Shepherdr's `popups.js` `heightOf` has them. */
+export const MENU = { width: 210, row: 32, pad: 5, sep: 9 };
 
 /** A row's kind: the coordinator's space, a task's space, or a task with none. */
 export const KIND = { coordinator: "coordinator", task: "task", waiting: "waiting" };
@@ -110,30 +125,20 @@ export function taskLook(task) {
 }
 
 /**
- * The badge a row carries, or null: the count a row is *about* where there is
- * one, else a mark that it needs the person.
+ * The two numbers a row's badge shows: what needs the person, and what is ready.
  *
- * The coordinator's row is about the whole run, so its badge is how many tasks
- * need a person — a count. A task's row is about one task, so its badge is the
- * exclamation the sidebar's heading counts: "needs you", told once in the row's
- * own word and once in the place a person scans down.
+ * It is Shepherdr's rule for its space rows — one badge, red *Needs you* on the
+ * left and green *Ready* on the right, drawn by `countBadge(need, ready)` —
+ * filled the way shprd's data allows: the coordinator's row counts the run's
+ * tasks, a task's row is one task and so counts at most one of each. A row with
+ * nothing to say gets `{need: 0, ready: 0}`, and the badge is not drawn.
  */
-export function rowBadge(row) {
-  if (!row?.needs) return null;
-  if (row.kind === KIND.coordinator) return String(Number.isInteger(row.count) ? row.count : 1);
-  return "!";
-}
-
-/** How many rows of each kind a row set holds, for the heading's counts. */
-export function rowCounts(rows) {
-  const tally = { needs: 0, ready: 0, working: 0, total: 0 };
-  for (const row of [...(rows?.tasks ?? []), ...(rows?.waiting ?? [])]) {
-    tally.total += 1;
-    if (row.tone === "red") tally.needs += 1;
-    else if (row.tone === "green") tally.ready += 1;
-    else if (row.tone === "amber") tally.working += 1;
+export function attention(row) {
+  if (!row) return { need: 0, ready: 0 };
+  if (row.kind === KIND.coordinator) {
+    return { need: Math.max(0, row.count ?? 0), ready: Math.max(0, row.readyCount ?? 0) };
   }
-  return tally;
+  return { need: row.needs ? 1 : 0, ready: row.ready ? 1 : 0 };
 }
 
 /**
@@ -203,6 +208,10 @@ export function coordinatorRow(state, space = null) {
     needs: tally.needs > 0,
     count: tally.needs,
     ready: false,
+    readyCount: tally.ready,
+    // The row's own tail, in the slot Shepherdr gives a repo's git state: the run
+    // this space belongs to, which is what a person needs to see on it.
+    tail: run ? `run ${run.id}` : "",
     active: Boolean(space?.active),
     space,
     folder: space?.folder ?? "",
@@ -214,7 +223,8 @@ export function coordinatorRow(state, space = null) {
  * Why a row says what it says, when it needs the person: the card's own words
  * when the service has one, else the derived reason, else the token table's.
  *
- * It is the row's second line when the task has nothing more recent to say.
+ * A one-line row does not draw it, but the row keeps it: it is what a toast or a
+ * later view says about the same task, and it is derived here once.
  */
 export function needWords(task, state) {
   const need = task?.derived?.need;
@@ -223,4 +233,82 @@ export function needWords(task, state) {
   if (card?.body) return card.body;
   if (task?.derived?.reason) return task.derived.reason;
   return NEED[need] ?? null;
+}
+
+/**
+ * Whether the sidebar is drawn as its rail: one glyph a row, no names.
+ *
+ * Shepherdr reads the width, not a flag ("the sidebar's rail goes by its width,
+ * not a flag: dragging its edge narrows it too" — `mods/spaces-chat/main.js:50`,
+ * and `narrow()` at `:795`), so a person who drags the edge gets the rail without
+ * asking for it. The tree is Herdr's `layout()`; a tree with no `sidebar` node
+ * keeps the wide form.
+ */
+export function narrowSidebar(tree) {
+  const width = findNode(tree, "sidebar")?.size?.px;
+  return typeof width === "number" && width < NARROW_PX;
+}
+
+/** The first node of a layout tree with `id`, depth first. */
+function findNode(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * A space row's right-click menu, in Shepherdr's order and words.
+ *
+ * Shepherdr's list is Notify, [Start Assistant], [Mark as read], Pin/Unpin,
+ * Rename…, Space settings…, [worktree rows], Close… (`core/menus.js:16-30`). shprd
+ * keeps the two that mean something for a task's space and drops the rest:
+ *
+ * - **Open task** is shprd's own: in Shepherdr a click switches to the space and
+ *   that is all a space is, while here a space is one task, so the menu can also
+ *   put that task in front in the Tasks panel.
+ * - Notify, Mark as read and Pin have no shprd counterpart — the service has no
+ *   per-space notify, no unread and no pins.
+ * - **Rename…** is left out on purpose: Shepherdr renames the *space*, and a
+ *   space's name is the contract that ties it to its task here
+ *   (`task_space_name`; [`splitSpaceName`] reads it back). A renamed space would
+ *   stop being that task's space, and the row would vanish from this list. Renaming
+ *   the task instead is service work (no `task.edit` action exists).
+ * - Space settings and the worktree rows have nothing behind them (one repo per
+ *   service, worktrees made by the engine, artifacts deferred).
+ *
+ * A task with no space yet gets Open task only: there is nothing to close.
+ *
+ * `row` is a sidebar row, or the popup's own props: both say which space they are
+ * about (`space` an object, or its id).
+ */
+export function menuItems(row) {
+  const space = row?.space?.id ?? row?.space ?? null;
+  const items = [{ id: "open", label: "Open task" }];
+  if (space) items.push({ sep: true }, { id: "close", label: "Close…" });
+  return items;
+}
+
+/** A popup's height for its items: rows, separators and padding, as `heightOf`. */
+export function menuHeight(items = []) {
+  return items.reduce((h, item) => h + (item.sep ? MENU.sep : MENU.row), MENU.pad * 2);
+}
+
+/**
+ * What closing a space asks, in Shepherdr's words (`mods/spaces-chat/popups.js:31-39`):
+ * a question titled with what is closed, a line saying what goes with it, and a
+ * button that says the verb — never "Confirm".
+ *
+ * The title names the task, not the space: shprd's space names are long and
+ * derived (`shprd · shop · m11 · T4`), and the person picked the row by its id.
+ */
+export function closeWords(p) {
+  const named = String(p?.task ?? "").trim();
+  return {
+    title: `Close “${named || "this space"}”?`,
+    detail: "Its tabs close and every program in them ends.",
+    verb: "Close space",
+  };
 }
