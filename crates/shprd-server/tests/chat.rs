@@ -777,3 +777,112 @@ async fn the_state_directory_is_not_the_session_directory() {
         "the session is found through the recorded home, never the state directory"
     );
 }
+
+/// The gate's bug, as a route test: a service whose settings home is one
+/// directory and whose agents run with another reads the transcript from the
+/// agents' home. `SHPRD_HOME` (the settings home) is never where a CLI writes a
+/// session, so a chat that looked there answered "has not written a session"
+/// while the session sat in the real `~/.claude`.
+#[tokio::test]
+async fn a_transcript_is_read_from_the_home_the_agent_ran_with() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    // The engine's own home, which holds the settings and no sessions at all.
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    // The home the agent CLI really ran with, which is where its record is.
+    let agent_home = tempfile::tempdir().expect("agent home");
+    let state = tempfile::tempdir().expect("state dir");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_home(home.path().to_path_buf())
+        .with_data(data)
+        .with_transcript_roots(shprd_agents::transcript::Roots::at(agent_home.path()));
+    let token = std::fs::read_to_string(app.info().token_path)
+        .expect("the token file")
+        .trim()
+        .to_string();
+    let fixture = Fixture {
+        app,
+        token,
+        repo,
+        home,
+        state,
+        recorder: Arc::new(Recorder::default()),
+    };
+    // The session is written under the *agent* home, in the folder Claude Code's
+    // own fold names (which turns this temp path's underscores into `-`).
+    let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, fixture.repo.path());
+    let dir = agent_home
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = dir.join("real.jsonl");
+    std::fs::write(
+        &record,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "isSidechain": false,
+                "timestamp": "2026-11-04T10:00:00.000Z",
+                "message": {"role": "user", "content": "What does the gate say?"},
+            })
+        ),
+    )
+    .unwrap();
+    // Nothing was written under the settings home, so a chat that used it would
+    // find nothing.
+    assert!(!fixture.home.path().join(".claude").exists());
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["session"], "real");
+    assert_eq!(reply.messages().len(), 1, "{}", reply.body);
+    assert_eq!(reply.messages()[0]["text"], "What does the gate say?");
+}
+
+/// A service that was told no roots says so rather than looking in a directory
+/// that can never hold a session.
+#[tokio::test]
+async fn a_service_with_no_agent_roots_says_it_was_not_told() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    let state = tempfile::tempdir().expect("state dir");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_home(home.path().to_path_buf())
+        .with_data(data);
+    let token = std::fs::read_to_string(app.info().token_path)
+        .expect("the token file")
+        .trim()
+        .to_string();
+    let fixture = Fixture {
+        app,
+        token,
+        repo,
+        home,
+        state,
+        recorder: Arc::new(Recorder::default()),
+    };
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(
+        reply.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        reply.body
+    );
+    assert!(
+        reply.body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not told the home"),
+        "{}",
+        reply.body
+    );
+}

@@ -1307,10 +1307,8 @@ fn pattern_parts(
         (roots.data_home.clone(), rest)
     } else if let Some(rest) = location.strip_prefix("~/") {
         (roots.home.clone(), rest)
-    } else if let Some(rest) = location.strip_prefix('/') {
-        (PathBuf::from("/"), rest)
     } else {
-        return None;
+        (PathBuf::from("/"), location.strip_prefix('/')?)
     };
     let slug = cwd_slug(format, cwd);
     let components = body
