@@ -34,6 +34,7 @@ import {
   panelButtons,
   parseTabName,
   pillCounts,
+  tabLabel,
   tabProgram,
   tabRows,
   tabState,
@@ -346,6 +347,21 @@ test("the most urgent status in a tab is the one its pill shows", () => {
   assert.equal(paneState(panes, "c"), null);
   assert.equal(paneState([], "a"), null);
   assert.equal(tabState({ id: "c", name: "claude·T1" }, panes, STATE).status, "working");
+});
+
+test("a pill is called by its name, or by what runs in it when it has none", () => {
+  // shprd's own title is the pill's name.
+  assert.equal(tabLabel({ id: "a", name: "pi·T1" }, parseTabName("pi·T1"), { name: "pi" }), "pi·T1");
+  // A name a person gave it is kept, even though shprd did not give it.
+  assert.equal(tabLabel({ id: "a", name: "my shell" }, parseTabName("my shell"), { name: "zsh" }), "my shell");
+  // Herdr's own names — a position, or "tb3" on older builds — are not names.
+  assert.equal(tabLabel({ id: "a", name: "1" }, parseTabName("1"), { name: "zsh" }), "zsh");
+  assert.equal(
+    tabLabel({ id: "a", name: "tb3" }, parseTabName("tb3"), { name: "Claude Code" }),
+    "Claude Code",
+  );
+  // Nothing to call it by is still a word, never an empty pill.
+  assert.equal(tabLabel({ id: "a", name: "1" }, parseTabName("1"), null), "Terminal");
 });
 
 test("a pill wears the program in its tab and counts what it needs", () => {

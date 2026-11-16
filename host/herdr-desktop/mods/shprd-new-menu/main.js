@@ -42,7 +42,11 @@ export default class NewMenu extends View {
     this.at = 0;
     this.client = null;
     this.roster = props()?.roster ?? null;
+    // A refusal to *start* something is red, under the rows; a roster that could
+    // not be read is the group's own dim line, in the place the programs would be
+    // (Shepherdr's *Couldn't load agents*, `NEW_MENU.failed`).
     this.failure = null;
+    this.loadFailure = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
     // A copy opened without a roster (the window's own click passes one; a bare
@@ -51,20 +55,29 @@ export default class NewMenu extends View {
     if (this.roster === null) this.load();
   }
 
-  /** Reads the roster once, so a bare copy still offers the programs. */
+  /**
+   * Reads the roster once, so a copy opened without one still offers the programs.
+   *
+   * The window's own "+" passes the roster it read when the bar started, so this
+   * only runs for a copy opened on its own. A service that cannot be reached is
+   * said in the group's own place, in the menu's words rather than a sentence
+   * about a service a person did not ask about.
+   */
   async load() {
     try {
       const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
       if (!next.client) {
-        this.failure = "shprd serve is not running";
+        this.roster = { programs: [] };
+        this.loadFailure = NEW_WORDS.failed;
+        this.cx?.notify?.();
         return;
       }
       this.client = next.client;
       this.roster = await next.client.roster();
-      this.failure = null;
+      this.loadFailure = null;
     } catch (err) {
-      this.failure = reason(err);
       this.roster = { programs: [] };
+      this.loadFailure = `${NEW_WORDS.failed} (${reason(err)})`;
     }
     this.cx?.notify?.();
   }
@@ -73,8 +86,8 @@ export default class NewMenu extends View {
   rows() {
     return newMenu({
       roster: this.roster,
-      loading: this.roster === null && !this.failure,
-      failure: this.failure,
+      loading: this.roster === null && !this.loadFailure,
+      failure: this.loadFailure,
     });
   }
 

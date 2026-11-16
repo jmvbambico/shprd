@@ -295,14 +295,20 @@ export function menuRow(
       slot.child(div().flex_none().pl(8).text_size(TEXT.label).text_color(t.dim).child(hint)),
     );
   if (check !== null) {
+    // A tick drawn as a glyph, not shipped as an SVG: the slot is the same 16 px
+    // whether it is checked or not, so a choice list never moves when a pick
+    // changes. No menu in this window has one yet; the shape is here because
+    // `lib/ui.js`'s row has it.
     el = el.child(
       div()
         .w(16)
         .h(16)
         .flex_none()
-        .when(Boolean(check), (slot) =>
-          slot.child(svg("mods/workspace-chrome/check.svg").size(16).text_color(t.foreground)),
-        ),
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(t.foreground)
+        .when(Boolean(check), (slot) => slot.child("✓")),
     );
   }
   return el;
