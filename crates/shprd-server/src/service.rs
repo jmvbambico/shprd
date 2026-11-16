@@ -533,6 +533,13 @@ pub struct Config {
     /// started without one answers `POST /api/chat` with a refusal rather than
     /// pretending the line went somewhere.
     pub chat: crate::chat::ChatHost,
+    /// What starts a program in a new tab, when the binary has a host.
+    ///
+    /// "Start an agent" is a tab and a CLI, so the binary passes the adapter that
+    /// owns the harness table and the host ([`crate::AgentOpener`]). A service
+    /// started without one answers `POST /api/agents` with a refusal rather than
+    /// pretending a tab exists.
+    pub agents: crate::agents::Agents,
     /// The home and data home the agent CLIs run with, when the binary resolved
     /// them.
     ///
@@ -597,6 +604,7 @@ impl Config {
             dagr: None,
             engine: None,
             chat: crate::chat::ChatHost::new(),
+            agents: crate::agents::Agents::new(),
             transcript_roots: None,
         }
     }
@@ -651,7 +659,10 @@ impl Service {
         // The chat's writer is that same host. Attaching it rebuilds the router,
         // which a client never sees: the record is written before either is
         // wired, and a request cannot arrive until the listener is serving.
-        .with_chat_opt(config.chat.get().cloned());
+        .with_chat_opt(config.chat.get().cloned())
+        // The "+" menu's *Start an agent* is that host too: one adapter, so a
+        // program the tab bar starts and a chat line type into the same window.
+        .with_agent_opener_opt(config.agents.get().cloned());
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");

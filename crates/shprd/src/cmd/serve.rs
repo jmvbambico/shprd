@@ -104,7 +104,8 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
         &home,
     )));
-    config.data = Some(resolve_data_dir());
+    let data = resolve_data_dir();
+    config.data = Some(data.clone());
     // A chat reads an agent CLI's own session record, and that file is written
     // by the CLI under the home and data home *it* resolves — the `HOME` it
     // inherits (shprd never rewrites it: it is a protected variable) and the
@@ -124,6 +125,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // The chat's writes go through the host, the same adapter every other verb
     // drives: one code path types into a pane, so a chat line lands where a
     // prompt does and never in a tab shprd did not open.
+    let agent_host = host.clone();
     config.chat = shprd_server::ChatHost::with(Arc::new(HostChat {
         repo: ctx.root.clone(),
         home: home.clone(),
@@ -147,6 +149,14 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // tick's steps run: one spawn path, one way of closing a task's space, so a
     // board's Start and the engine's own start cannot drift apart.
     config.engine = Some(engine_of(&tick.worker));
+    // The tab bar's "+" menu's *Start an agent* is the same host and the same
+    // harness table: a program is a tab with its plain launch line in it, never
+    // a task's attempt, so it goes through the service and not through the mod.
+    config.agents = shprd_server::Agents::with(Arc::new(HostAgents {
+        repo: ctx.root.clone(),
+        data,
+        host: agent_host.clone(),
+    }));
     config.tick = Some(tick);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -239,6 +249,34 @@ impl shprd_server::ChatWriter for HostChat {
             }
         }
         .map_err(|err| err.to_string())
+    }
+}
+
+/// The host as the "+" menu's *Start an agent* uses it: one program, one tab.
+///
+/// It holds the repository, the shipped harness table and the same adapter every
+/// other verb drives. Opening is [`crate::cmd::spawn::open_program`], so the
+/// tab's argv, its name and the space it opens in are the spawn path's decisions
+/// and not the route's.
+struct HostAgents {
+    /// The repository whose space the tab opens in.
+    repo: std::path::PathBuf,
+    /// The harness table a program id is looked up in.
+    data: shprd_agents::data::DataDir,
+    /// The host this service drives.
+    host: Arc<dyn Host>,
+}
+
+impl shprd_server::AgentOpener for HostAgents {
+    fn open(&self, program: &str) -> Result<shprd_server::OpenedTab, String> {
+        let opened =
+            crate::cmd::spawn::open_program(self.host.as_ref(), &self.data, &self.repo, program)
+                .map_err(|err| err.to_string())?;
+        Ok(shprd_server::OpenedTab {
+            program: opened.program,
+            name: opened.name,
+            tab: opened.tab,
+        })
     }
 }
 
