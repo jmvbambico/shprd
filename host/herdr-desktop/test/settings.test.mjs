@@ -503,7 +503,9 @@ function context() {
   const after = [];
   return {
     cx: {
-      sleep: async () => {},
+      // A clock that never runs out: `flush()`'s bound must not cut a test's
+      // writes short, and nothing here needs a read to time out.
+      sleep: () => new Promise(() => {}),
       notify: () => {},
       focus_handle: () => ({ focus: () => {} }),
       spawn: () => ({ cancel: () => {} }),
@@ -544,17 +546,31 @@ async function settled(props_ = {}) {
 /** A client that answers writes with what the service would, and records them. */
 function client(reply = null, error = null) {
   const calls = [];
+  const promptWrites = [];
+  /** The words the service answers a prompt with, by id. */
+  const texts = new Map([["worker", "shipped words"]]);
   return {
     calls,
+    promptWrites,
+    texts,
     putSetting: async (key, value, forRepo_) => {
       calls.push({ key, value, forRepo: forRepo_ });
       if (error) throw error;
       return reply ?? { outcome: "stored", settings: SETTINGS };
     },
     prompts: async () => PROMPTS,
-    prompt: async () => null,
-    resetPrompt: async () => null,
-    putPrompt: async () => null,
+    prompt: async (id) => ({
+      id,
+      text: texts.get(id) ?? "shipped words",
+      state: "default",
+      path: `/cfg/prompts/${id}.md`,
+    }),
+    resetPrompt: async (id) => ({ id, text: "shipped words", state: "default" }),
+    putPrompt: async (id, text) => {
+      promptWrites.push({ id, text });
+      if (error) throw error;
+      return { id, text, state: "edited", path: `/cfg/prompts/${id}.md` };
+    },
     roster: async () => ROSTER,
     call: async () => SETTINGS,
   };
@@ -568,20 +584,20 @@ test("the window opens on the page it was asked for, and keeps to the ones it ha
   assert.equal(window_().view.scope, "you", "the person's own settings come first");
 });
 
-test("Esc closes what is open inside the window before it closes the window", () => {
+test("Esc closes what is open inside the window before it closes the window", async () => {
   const { view } = window_();
   view.open = "worker.agent";
-  view.escape();
+  await view.escape();
   assert.equal(view.open, null, "the first Esc closes the open picker");
   assert.deepEqual(herdr.CLOSED, [], "and leaves the window up");
 
-  view.escape();
+  await view.escape();
   assert.deepEqual(herdr.CLOSED, ["ov-1"], "the next Esc closes the overlay it was given");
 
   // A prompt being edited is closed by Esc before the window is.
   const editing = window_({ page: "prompts" }).view;
   editing.prompt = { id: "worker", text: "mine", state: "edited", path: "/p/worker.md" };
-  editing.escape();
+  await editing.escape();
   assert.equal(editing.prompt, null);
   assert.deepEqual(herdr.CLOSED, []);
 });
@@ -659,7 +675,7 @@ test("closing the window gives its place back at once", async () => {
   view.init({}, run.cx);
   view.cx = run.cx;
   assert.equal(settingsWindow().id, "ov-7");
-  view.dismiss();
+  await view.dismiss();
   assert.equal(settingsWindow(), null, "a dismissal is not a window that is still up");
   assert.deepEqual(herdr.CLOSED, ["ov-7"]);
   // And the app's own last word does the same for a copy it takes away itself.
@@ -669,13 +685,81 @@ test("closing the window gives its place back at once", async () => {
   assert.equal(settingsWindow(), null);
 });
 
+// -- leaving the prompt editor ---------------------------------------------
+
+/** A window on the Prompts page with the worker prompt open in its editor. */
+async function editing() {
+  const { view } = await settled({ page: "prompts" });
+  view.settings = SETTINGS;
+  view.client = client();
+  await view.openPrompt({ id: "worker" });
+  return view;
+}
+
+test("Esc on the Prompts page saves the words typed since the last pause", async () => {
+  // The defect the review found: Esc closed the editor and the pending autosave
+  // was cancelled by the close, so the last keystrokes vanished.
+  const view = await editing();
+  view.editor.set_value("the person's own words");
+  // What a keystroke does: the change handler, and the debounce armed behind it.
+  view.editor.handlers.get("change")?.({}, view.cx);
+
+  await view.escape();
+
+  assert.deepEqual(
+    view.client.promptWrites,
+    [{ id: "worker", text: "the person's own words" }],
+    "the words reached the service before the editor went",
+  );
+  assert.equal(view.prompt, null, "and the editor is closed afterwards");
+  // The debounce that was armed must not store them a second time.
+  assert.equal(view.client.promptWrites.length, 1);
+});
+
+test("Back saves the words and keeps the editor closed as the write lands", async () => {
+  // The other defect: a save that answered after the list was asked for put the
+  // editor back, so a first Back press looked like it had done nothing.
+  const view = await editing();
+  view.editor.set_value("mine, and worth keeping");
+  await view.leavePrompt();
+  assert.equal(view.prompt, null, "one press leaves the list showing");
+  assert.deepEqual(view.client.promptWrites, [{ id: "worker", text: "mine, and worth keeping" }]);
+});
+
+test("a prompt the service refused keeps the editor, and the next Esc closes the window", async () => {
+  // The words are still only in the box, so closing would lose them: the editor
+  // stays with the service's reason. The second Esc closes, so a broken service
+  // cannot trap a person in the editor.
+  const service = new ServiceError("`prompts.worker` could not be stored: the disk is full", {
+    status: 500,
+    code: "io",
+  });
+  const view = await editing();
+  view.client = client(null, service);
+  view.editor.set_value("words that will not store");
+  await view.escape();
+  assert.equal(view.prompt?.id, "worker", "the editor stays, with the words in it");
+  assert.match(view.refusal.text, /the disk is full/);
+  assert.deepEqual(herdr.CLOSED, [], "and the window is still up");
+
+  await view.escape();
+  assert.deepEqual(herdr.CLOSED, ["ov-1"], "the second Esc closes the window");
+});
+
+test("closing the window stores the last words before it goes", async () => {
+  const view = await editing();
+  view.editor.set_value("the last thing typed");
+  await view.dismiss();
+  assert.deepEqual(view.client.promptWrites, [{ id: "worker", text: "the last thing typed" }]);
+  assert.deepEqual(herdr.CLOSED, ["ov-1"]);
+});
+
 // -- the record a window keeps of itself -----------------------------------
 
 test("a window whose service is down still renews its place", async () => {
-  // The record used to be renewed only after a read answered, so with `shprd
-  // serve` down it went stale and the footer's next click stacked a second window
-  // on top of the first — the window itself invites that state, since it draws
-  // "shprd serve is not running" and points at the footer.
+  // The other defect the review found: the record was renewed only after a read
+  // answered, so with `shprd serve` down it went stale and the footer's next click
+  // stacked a second window.
   const { view } = await settled();
   assert.equal(settingsWindow().id, "ov-1");
   herdr.setShared("shprd.settings.window", { id: "ov-1", at: Date.now() - 9_000 });
