@@ -691,31 +691,25 @@ fn a_layout_the_person_changed_is_still_refused() {
     assert_eq!(fs::read(&installed).expect("their layout"), mine);
 }
 
-/// The M10 desktop as that install left it: this build's files with settings put
-/// back as a tab of the side panel, which is what M11 fix S took away.
+/// One of the layouts earlier builds shipped, as those builds wrote it.
 ///
-/// It is a tree of its own, so installing it records in the manifest the layout
-/// byte for byte as the older build wrote it — which is what makes the next
-/// install an upgrade rather than a first install.
-fn m10_tree() -> TempDir {
+/// They are the installer's own record of what shprd used to install
+/// (`crates/shprd/src/cmd/previous-layouts/`), which is what the upgrade tests need
+/// to start from: a desktop a person already has.
+fn older_layout(name: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("cmd")
+        .join("previous-layouts")
+        .join(name);
+    fs::read(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+}
+
+/// This build's files with one earlier build's layout, as that install left them.
+fn tree_with_layout(name: &str) -> TempDir {
     let tree = TempDir::new().expect("a temp host tree");
     copy_tree(&host_path(), tree.path());
-    let layout = tree.path().join("layouts/shprd.json");
-    let mut document: Value =
-        serde_json::from_slice(&fs::read(&layout).expect("the layout")).expect("JSON");
-    let panel = find_node(&mut document, "panel-body").expect("the side panel's stack");
-    panel
-        .get_mut("children")
-        .and_then(Value::as_array_mut)
-        .expect("children")
-        .push(serde_json::json!({
-            "id": "settings",
-            "type": "block",
-            "content": { "mod": "shprd-settings" }
-        }));
-    let mut older = serde_json::to_vec_pretty(&document).expect("JSON");
-    older.push(b'\n');
-    fs::write(&layout, &older).expect("the M10 layout");
+    fs::write(tree.path().join("layouts/shprd.json"), older_layout(name)).expect("the old layout");
     tree
 }
 
@@ -727,32 +721,9 @@ fn install_tree(fixture: &Fixture, tree: &TempDir) {
         .expect("the binary runs"));
 }
 
-#[test]
-fn an_install_upgrades_the_desktop_it_wrote_before() {
-    // The M10 desktop had settings as a tab of the side panel: a `settings` block
-    // in the panel's stack, drawn by the settings mod. M11 fix S makes settings a
-    // dialog over the window, so the block is gone from the layout — and a person
-    // who already installed the M10 desktop must get the new one by running the
-    // install again, not by moving files aside.
-    let fixture = Fixture::new();
-    let previous = m10_tree();
-    install_tree(&fixture, &previous);
-    let before = fixture.manifest();
-    assert!(
-        before["files"]
-            .get("layouts/shprd.json")
-            .is_some_and(Value::is_string),
-        "the M10 install recorded the layout as its own"
-    );
-
-    let said = ok(&fixture.run(&[]));
-    assert!(
-        said.contains("layouts/shprd.json"),
-        "the upgrade says it wrote the layout: {said}"
-    );
-
-    // The layout on disk is this build's, byte for byte: the settings block is
-    // gone, and so is the tab that switched to it.
+/// Asserts the upgrade landed: this build's layout, on disk and in the manifest,
+/// and the side panel keeps no settings block for a tab to switch to.
+fn assert_upgraded(fixture: &Fixture) {
     let installed = fs::read(fixture.app_path("layouts/shprd.json")).expect("the layout");
     let shipped = fs::read(host_path().join("layouts/shprd.json")).expect("the shipped layout");
     assert_eq!(installed, shipped, "the layout is replaced, not merged");
@@ -770,6 +741,31 @@ fn an_install_upgrades_the_desktop_it_wrote_before() {
         .filter_map(|child| child["id"].as_str())
         .collect();
     assert_eq!(ids, vec!["files", "changes", "tasks", "asks"]);
+}
+
+#[test]
+fn an_install_upgrades_the_desktop_it_wrote_before() {
+    // The M10 desktop had settings as a tab of the side panel: a `settings` block
+    // in the panel's stack, drawn by the settings mod. M11 fix S makes settings a
+    // dialog over the window, so the block is gone from the layout — and a person
+    // who already installed the M10 desktop must get the new one by running the
+    // install again, not by moving files aside.
+    let fixture = Fixture::new();
+    install_tree(&fixture, &tree_with_layout("shprd-m10.json"));
+    let before = fixture.manifest();
+    assert!(
+        before["files"]
+            .get("layouts/shprd.json")
+            .is_some_and(Value::is_string),
+        "the M10 install recorded the layout as its own"
+    );
+
+    let said = ok(&fixture.run(&[]));
+    assert!(
+        said.contains("layouts/shprd.json"),
+        "the upgrade says it wrote the layout: {said}"
+    );
+    assert_upgraded(&fixture);
 
     // Everything else the install owns moved with it, and the manifest now names
     // what is on disk: a second run has nothing left to do.
@@ -798,8 +794,7 @@ fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
     // build's. It is still the app's edit of a layout shprd shipped, so the
     // upgrade replaces it rather than refusing and asking the person to move it.
     let fixture = Fixture::new();
-    let previous = m10_tree();
-    install_tree(&fixture, &previous);
+    install_tree(&fixture, &tree_with_layout("shprd-m10.json"));
     let installed = fixture.app_path("layouts/shprd.json");
     let older = fs::read(&installed).expect("the M10 layout");
     fs::write(&installed, prune_terminal_blocks(&older)).expect("the pruned layout");
@@ -817,13 +812,39 @@ fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
 }
 
 #[test]
+fn a_desktop_from_earlier_in_m10_upgrades_too() {
+    // The layout changed twice inside M10, so a person's last install may be the
+    // M10.3 or M10.4 layout rather than M10's last one. Every version is carried,
+    // pruned or not, because that is what an upgrade may meet on disk.
+    for name in ["shprd-m10.3.json", "shprd-m10.4.json"] {
+        // As the older install left it, and as Herdr leaves it after pruning the
+        // terminal block it could not resolve.
+        for prune in [false, true] {
+            let fixture = Fixture::new();
+            install_tree(&fixture, &tree_with_layout(name));
+            let installed = fixture.app_path("layouts/shprd.json");
+            if prune {
+                let older = fs::read(&installed).expect("the older layout");
+                fs::write(&installed, prune_terminal_blocks(&older)).expect("the pruned layout");
+            }
+            ok(&fixture.run(&[]));
+            assert_upgraded(&fixture);
+            let again = ok(&fixture.run(&[]));
+            assert!(
+                again.contains("nothing to do"),
+                "{name} pruned={prune}: {again}"
+            );
+        }
+    }
+}
+
+#[test]
 fn an_older_layout_the_person_changed_is_still_refused() {
     // The recognition above is about the app's edit alone: a person who changed
     // the older layout has a file that is not what any build shipped, and it stays
     // exactly as they wrote it.
     let fixture = Fixture::new();
-    let previous = m10_tree();
-    install_tree(&fixture, &previous);
+    install_tree(&fixture, &tree_with_layout("shprd-m10.json"));
     let installed = fixture.app_path("layouts/shprd.json");
     let pruned = prune_terminal_blocks(&fs::read(&installed).expect("the M10 layout"));
     let mut document: Value = serde_json::from_slice(&pruned).expect("JSON");
