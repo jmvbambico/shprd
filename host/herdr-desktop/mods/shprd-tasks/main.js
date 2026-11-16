@@ -164,7 +164,7 @@ export default class Tasks extends View {
     this.open({ id: thread.task, title: thread.title ?? "" });
   }
 
-  /** Opens one of the panel's own stacks: the board, the cards, the settings. */
+  /** Opens one of the panel's own stacks: the board, or the needs-you cards. */
   panel(child) {
     run("layout.select", { stack: "panel-body", child });
     run("layout.show", { id: "panel" });
