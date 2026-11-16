@@ -99,6 +99,9 @@ fn pick_to(
         model: parsed.model,
         launch: program.spec.launch.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
+        ready_lines: program.spec.ready.screen.clone(),
+        own_status: !program.spec.status.needs_the_host(),
+        status_words: program.spec.status.words(),
     }))
 }
 
@@ -144,6 +147,9 @@ fn next_worker(
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
                 blocking_prompts: program.spec.blocking_prompts.clone(),
+                ready_lines: program.spec.ready.screen.clone(),
+                own_status: !program.spec.status.needs_the_host(),
+                status_words: program.spec.status.words(),
             });
         }
     }
@@ -511,7 +517,7 @@ pub fn handoff(
             worktree: &continuing,
         },
     );
-    let (tab_id, title) = match opened {
+    let (tab_id, title, ready) = match opened {
         Ok(opened) => opened,
         Err(err) => {
             escalate(
@@ -548,6 +554,18 @@ pub fn handoff(
         escalate(env, &task.id, &body, "stop the run");
         return Err(err);
     }
+    // The spawn record follows the tab for the same reason: it is what says
+    // whether this newcomer's program is one the host reports, and the attempt
+    // number is the one the original launch used. Leaving the old record in
+    // place would keep answering for a program that is no longer in the tab —
+    // a hand-off from a reported program to one the host cannot report would
+    // then read the newcomer's `Unknown` pane as a stopped agent, and the tick
+    // would start a second attempt on a task an agent is still working.
+    spawn::write_spawn_record(
+        &spawn::spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt.n),
+        &to,
+        ready,
+    );
     let kind = EventKind::HandedOff {
         task: task.id.clone(),
         from_agent: from.clone(),
@@ -985,6 +1003,84 @@ project_dirs = []
             .unwrap_or_else(|| panic!("no tab was created by the hand-off"));
         assert_eq!(created, worktree, "the newcomer sits elsewhere");
         assert_eq!(report.tab, "pi·T1");
+    }
+
+    /// A spec whose only status source is the plugin it runs for us, and which
+    /// names the line its TUI prints when it can take a turn — the shape of the
+    /// real opencode file.
+    fn plugin_only_spec(id: &str) -> HarnessSpec {
+        let mut spec = fake_spec(id);
+        spec.status.sources = vec![
+            shprd_agents::spec::StatusSource::Hook,
+            shprd_agents::spec::StatusSource::Screen,
+        ];
+        spec.ready.screen = vec!["Ask anything".to_string()];
+        spec
+    }
+
+    /// A host with a core that has no `pane.report_agent`: a program the host
+    /// recognises is called idle, and one whose only source is its plugin is
+    /// `Unknown` for as long as it runs.
+    fn no_plugin_reports() -> FakeMux {
+        let mut caps = shprd_mux::Capabilities::all();
+        caps.agent_reports = false;
+        FakeMux::new(caps)
+            .with_ready_agent()
+            .with_screen("\u{2503}  Ask anything\u{2026} \"Fix broken tests\"")
+    }
+
+    #[test]
+    fn a_hand_off_rewrites_the_spawn_record_for_the_newcomer() {
+        // The attempt number is the original launch's, so the record is the one
+        // place that says which program is in the tab now. Left stale, it keeps
+        // answering for the program that just left: a hand-off to a program the
+        // host cannot report would then read the newcomer's `Unknown` pane as a
+        // stopped agent, and the tick's live set would let a pass start a second
+        // attempt on a task an agent is still working.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = no_plugin_reports();
+        mux.create_space(
+            &spawn::repo_space_name(&scratch.repo_name()),
+            scratch.root(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        // The original launch is a program with a status source of its own, so
+        // the host reports it and its record says so. Only the hand-off can make
+        // the record true again.
+        let planted = scratch.env(&ctx, &["sh"]);
+        seed(&mux, &planted);
+        let path = spawn::spawn_record_path(&planted.briefs_dir, &planted.run, "T1", 1);
+        let before = spawn::read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(before.ready, "host-status");
+        assert!(!before.host_cannot_report());
+
+        // The hand-off goes to a program whose only status source is its plugin,
+        // on a host that cannot carry one: nothing but its own ready line can
+        // say it is up.
+        let mut env = scratch.env(&ctx, &["sh"]);
+        env.programs[0].spec = plugin_only_spec("sh");
+        env.ready_wait = Duration::from_secs(5);
+        handoff(&mux, &env, &request(Some("sh"))).unwrap_or_else(|err| panic!("{err}"));
+
+        let after = spawn::read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(after.agent, "sh");
+        assert_eq!(after.status, "hook, screen");
+        assert_eq!(
+            after.ready, "ready-line",
+            "the newcomer's delivery is what the record must say now"
+        );
+        assert!(after.host_cannot_report());
+
+        // And the liveness rule reads that record: the task stays live while the
+        // newcomer's tab exists, even though the host has no opinion about it.
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            spawn::live_tasks(&mux, &env.home, &state).contains("T1"),
+            "a hand-off to a program the host cannot report must stay live"
+        );
     }
 
     #[test]

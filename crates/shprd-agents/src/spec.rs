@@ -77,6 +77,13 @@ pub struct HarnessSpec {
     /// Absent means the agent's own OSC 7501 report and then its screen.
     #[serde(default)]
     pub status: StatusSpec,
+    /// The line the program prints once it is up and can take its brief.
+    ///
+    /// This is what readiness falls back to when the host cannot report the
+    /// program's status at all (see [`ReadySpec`]). Absent means the program
+    /// names no line, and readiness then needs the host's own status.
+    #[serde(default)]
+    pub ready: ReadySpec,
     /// Whether and how the program accepts a hook for its asks.
     ///
     /// Absent means the program takes no ask hook.
@@ -189,6 +196,7 @@ impl HarnessSpec {
         self.brief.validate(launch)?;
         self.fast.validate()?;
         self.status.validate()?;
+        self.ready.validate()?;
         self.asks.validate()?;
         Ok(())
     }
@@ -894,6 +902,13 @@ pub struct StatusSpec {
     ///
     /// The default is the agent's own report and then its screen, which every
     /// program has; `hook` is for a program whose hook reports its state.
+    ///
+    /// A source is only worth listing when shprd can actually receive it here:
+    /// `hook` needs a host that carries the report method a program's plugin or
+    /// hook calls, and `osc7501` needs a program that emits the sequence at all.
+    /// A program whose every real source the host lacks is one shprd cannot see
+    /// start, so the readiness check in `[ready]` is what tells it the program
+    /// is up (see [`ReadySpec`]).
     #[serde(default = "default_status_sources")]
     pub sources: Vec<StatusSource>,
 }
@@ -922,6 +937,76 @@ impl StatusSpec {
                 return Err(SpecError::DuplicateStatusSource {
                     name: source.as_str().to_owned(),
                 });
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this program has no status of its own — nothing the host can
+    /// hear without a report method some cores do not have.
+    ///
+    /// Exactly one source is the program's own doing: [`StatusSource::Osc7501`],
+    /// the sequence its terminal writes, which any herdr-core parses. The other
+    /// two are not: `hook` is a plugin or hook the host installs, and it reports
+    /// through a host method (`pane.report_agent`) that herdr-core 0.1.21 does
+    /// not have, so its plugin silently no-ops; `screen` is where the watchdog
+    /// *guesses* a state from the bottom of a pane, which is no evidence at all
+    /// that an agent has started.
+    ///
+    /// So a file that lists no `osc7501` is one whose program reports nothing
+    /// this host is sure to receive, and its readiness has to be read another
+    /// way ([`ReadySpec`]). That is why the sources are a claim about the
+    /// program and not an aspiration: `opencode` and `kilo` emit no 7501 at all,
+    /// `codex` emits none, and `claude` only queries the sequence without ever
+    /// answering it — while `pi` reports `state=idle` on its own.
+    pub fn needs_the_host(&self) -> bool {
+        !self.sources.contains(&StatusSource::Osc7501)
+    }
+
+    /// The sources as a person reads them: `osc7501, hook, screen`.
+    pub fn words(&self) -> String {
+        self.sources
+            .iter()
+            .map(|source| source.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// How a program says it has started and can take its brief.
+///
+/// This is the fallback for a program whose status the host cannot report: a
+/// program's plugin or hook reports through `pane.report_agent`, and a core
+/// that does not implement that method (herdr-core 0.1.21 does not) leaves such
+/// a program with no status at all. OpenCode and Kilo are the two on this
+/// machine: their TUI paints, their plugin silently no-ops, and shprd waited
+/// out its whole ready timeout and then reported a brief it never sent.
+///
+/// So every program names the line its TUI prints once it is up and waiting for
+/// input, and that line is what shprd reads when nothing else can say. The
+/// patterns are case-insensitive substrings of the bottom of the pane, so each
+/// is a whole phrase of the program's own wording — `Ask anything` for OpenCode
+/// and Kilo, `Ask Codex to do anything` for Codex — never a bare word.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadySpec {
+    /// Case-insensitive screen substrings that mean the TUI accepts a turn.
+    ///
+    /// Empty means the program names no such line. That is a real gap and not a
+    /// fallback: a pane with text on it is no evidence that its program is
+    /// taking turns (a CLI that crashed leaves its error message there), so on a
+    /// host that cannot report the program the launch says the brief was not
+    /// delivered rather than typing it in. Every shipped harness names a line.
+    #[serde(default)]
+    pub screen: Vec<String>,
+}
+
+impl ReadySpec {
+    /// Check that every pattern is a non-empty phrase.
+    fn validate(&self) -> Result<(), SpecError> {
+        for pattern in &self.screen {
+            if pattern.trim().is_empty() {
+                return Err(SpecError::EmptyReadyPattern);
             }
         }
         Ok(())
@@ -1306,6 +1391,9 @@ pub enum SpecError {
         /// The field that holds the stray flag.
         field: &'static str,
     },
+    /// A harness names an empty ready line.
+    #[error("ready.screen holds an empty pattern: name a phrase the program prints")]
+    EmptyReadyPattern,
     /// A program takes its brief as a system-prompt file but names no flag.
     #[error(
         "brief.delivery is system-prompt-file but neither brief.args nor launch.system_prompt_args names the flag"

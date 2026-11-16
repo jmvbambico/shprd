@@ -194,6 +194,36 @@ pub(crate) struct Pick {
     pub(crate) launch: LaunchSpec,
     /// The prompts the CLI waits on a human to answer before it reads anything.
     pub(crate) blocking_prompts: Vec<BlockingPrompt>,
+    /// The lines the program's TUI prints once it can take its brief.
+    ///
+    /// Read off the bottom of the pane when the host cannot report the
+    /// program's status at all ([`Pick::own_status`] is false).
+    pub(crate) ready_lines: Vec<String>,
+    /// Whether this program has any status source of its own.
+    ///
+    /// From the harness's `[status] sources`: false for a program whose every
+    /// source is a plugin or hook, which is opencode's and kilo's shape. The
+    /// host's own `agent_reports` capability decides the rest.
+    pub(crate) own_status: bool,
+    /// The program's `[status] sources`, as its harness file names them, for
+    /// the spawn record.
+    pub(crate) status_words: String,
+}
+
+impl Pick {
+    /// The readiness this pick's program has, as the delivery needs it.
+    pub(crate) fn readiness(&self) -> super::deliver::Readiness<'_> {
+        super::deliver::Readiness {
+            lines: &self.ready_lines,
+            prompts: &self.blocking_prompts,
+            own_status: self.own_status,
+        }
+    }
+
+    /// The program's status sources, as its harness file names them.
+    pub(crate) fn status_words(&self) -> &str {
+        &self.status_words
+    }
 }
 
 /// Spawns an agent for one task attempt.
@@ -314,7 +344,7 @@ pub fn spawn(
             worktree: &created,
         },
     );
-    let (tab_id, tab) = match opened {
+    let (tab_id, tab, ready) = match opened {
         Ok(opened) => opened,
         Err(err) => {
             discard_worktree(env, &created);
@@ -338,6 +368,16 @@ pub fn spawn(
         discard_empty_space(mux, &space);
         return Err(err);
     }
+    // What said the program was ready goes beside the tab record, so a person
+    // reading the run can tell a host that reported the agent from a program
+    // read off its own screen — and a lost delivery from a delivered one. It is
+    // written last: a spawn that did not land an attempt is one no reader should
+    // find a record for.
+    write_spawn_record(
+        &spawn_record_path(&env.briefs_dir, &env.run, &task.id, attempt),
+        &pick,
+        ready,
+    );
     Ok(SpawnReport {
         task: task.id.clone(),
         attempt,
@@ -581,12 +621,15 @@ pub(crate) struct Launching<'a> {
 }
 
 /// Opens the agent's tab and starts its CLI in it, handing it the brief.
+///
+/// Returns the tab's id, its title and what said the program was ready for its
+/// brief (`None` when the brief did not arrive).
 pub(crate) fn open_agent(
     mux: &dyn Host,
     env: &SpawnEnv<'_>,
     space: &shprd_mux::Space,
     launching: &Launching<'_>,
-) -> Result<(shprd_mux::TabId, String), CliError> {
+) -> Result<(shprd_mux::TabId, String, Option<super::deliver::ReadyBy>), CliError> {
     let Launching {
         pick,
         applied,
@@ -639,7 +682,7 @@ pub(crate) fn open_agent(
         &tab,
         brief_in_args,
     ) {
-        Ok(()) => Ok((tab.id, title)),
+        Ok(ready) => Ok((tab.id, title, ready)),
         Err(err) => {
             close_tab(mux, &tab.id);
             Err(err)
@@ -650,7 +693,8 @@ pub(crate) fn open_agent(
 /// Hands the agent that is already running in `tab` its brief.
 ///
 /// A brief that does not arrive is reported, never fatal: the CLI is running,
-/// and the human can resend the brief into the tab.
+/// and the human can resend the brief into the tab. What arrives answers what
+/// said the program was ready, which the caller records beside the attempt.
 #[expect(clippy::too_many_arguments, reason = "one launch's whole input")]
 fn hand_over(
     mux: &dyn Host,
@@ -662,7 +706,7 @@ fn hand_over(
     title: &str,
     tab: &shprd_mux::Tab,
     brief_in_args: bool,
-) -> Result<(), CliError> {
+) -> Result<Option<super::deliver::ReadyBy>, CliError> {
     // A brief that arrived as a system prompt leaves the CLI idle, waiting for a
     // first turn, so it gets a one-line kickoff; an agent with no system-prompt
     // flag gets the whole brief typed in, as before.
@@ -671,15 +715,10 @@ fn hand_over(
     } else {
         (brief, "brief")
     };
-    let delivery = super::deliver::deliver_brief(
-        mux,
-        &tab.root_pane,
-        text,
-        &pick.blocking_prompts,
-        env.ready_wait,
-    );
+    let delivery =
+        super::deliver::deliver_brief(mux, &tab.root_pane, text, &pick.readiness(), env.ready_wait);
     let Some(reason) = delivery.reason() else {
-        return Ok(());
+        return Ok(delivery.ready());
     };
     eprintln!(
         "warning: {what} not delivered to {title}: {reason}; resend with: shprd agent prompt --task {task} \"$(cat {})\"",
@@ -693,7 +732,7 @@ fn hand_over(
     if let Err(err) = env.ctx.commit(escalation) {
         eprintln!("warning: could not record the escalation: {err}");
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Closes a tab this spawn opened, ignoring the failure for the same reason as
@@ -1554,6 +1593,9 @@ fn choose_agent(
             model: parsed.model,
             launch: program.spec.launch.clone(),
             blocking_prompts: program.spec.blocking_prompts.clone(),
+            ready_lines: program.spec.ready.screen.clone(),
+            own_status: !program.spec.status.needs_the_host(),
+            status_words: program.spec.status.words(),
         });
     }
     for raw in workers {
@@ -1573,6 +1615,9 @@ fn choose_agent(
                 model: parsed.model,
                 launch: program.spec.launch.clone(),
                 blocking_prompts: program.spec.blocking_prompts.clone(),
+                ready_lines: program.spec.ready.screen.clone(),
+                own_status: !program.spec.status.needs_the_host(),
+                status_words: program.spec.status.words(),
             });
         }
     }
@@ -2074,6 +2119,107 @@ pub(crate) fn tab_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> Pa
     briefs.join(run).join(format!("{task}-a{attempt}.tab"))
 }
 
+/// Where an attempt records how its launch went:
+/// `<briefs>/<run>/<task>-a<attempt>.spawn`, beside the tab record.
+pub(crate) fn spawn_record_path(briefs: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {
+    briefs.join(run).join(format!("{task}-a{attempt}.spawn"))
+}
+
+/// What a spawn record holds: how one attempt's launch went.
+///
+/// It is written beside the tab record ([`spawn_record_path`]) so anything that
+/// later asks "is this attempt's agent there?" can tell a program the host
+/// reports from one the host cannot hear at all (see [`crate::cmd::deliver`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnRecord {
+    /// The program that was launched.
+    pub(crate) agent: String,
+    /// How it was ready: a [`shprd_mux`]-independent word, one of
+    /// [`super::deliver::ReadyBy::as_str`]'s values or `not-delivered`.
+    pub(crate) ready: String,
+    /// The program's `[status] sources`, as its harness file names them.
+    pub(crate) status: String,
+}
+
+impl SpawnRecord {
+    /// Whether the host can report this attempt's program at all.
+    ///
+    /// A brief that was read off the ready line is proof the host could not
+    /// report the program: it stayed `Unknown` while the program was plainly
+    /// running. That is the one fact a later reader needs to stop asking the
+    /// host a question it cannot answer.
+    pub(crate) fn host_cannot_report(&self) -> bool {
+        self.ready == "ready-line"
+    }
+}
+
+/// Reads an attempt's spawn record, or `None` when it has none to read.
+///
+/// A missing or unreadable record is not an error: it is an attempt spawned
+/// before this record existed, or one whose launch failed before it got here,
+/// and every caller's answer in that case is the host's own word.
+pub(crate) fn read_spawn_record(path: &Path) -> Option<SpawnRecord> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut agent = String::new();
+    let mut ready = String::new();
+    let mut status = String::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "agent" => agent = value.trim().to_string(),
+            "ready" => ready = value.trim().to_string(),
+            "status" => status = value.trim().to_string(),
+            _ => {}
+        }
+    }
+    if agent.is_empty() || ready.is_empty() {
+        return None;
+    }
+    Some(SpawnRecord {
+        agent,
+        ready,
+        status,
+    })
+}
+
+/// Records what said the program was ready for its brief.
+///
+/// A spawn record is one line of `key=value`, so a person can read it without a
+/// program and a later reader can parse it without a schema:
+///
+/// ```text
+/// agent=opencode
+/// ready=ready-line
+/// status=osc7501,hook,screen
+/// ```
+///
+/// `ready` is `host-status` when the host reported the agent, `ready-line` when
+/// its harness's line was read off the screen because the host could not report
+/// it, and `not-delivered` when the brief never arrived at all.
+///
+/// A failure to write is a warning, never a failed launch: the agent is running
+/// either way, and this record is how a person reads afterwards what happened.
+pub(crate) fn write_spawn_record(path: &Path, pick: &Pick, ready: Option<super::deliver::ReadyBy>) {
+    let ready = ready.map_or("not-delivered", super::deliver::ReadyBy::as_str);
+    let line = format!(
+        "agent={}\nready={}\nstatus={}\n",
+        pick.agent,
+        ready,
+        pick.status_words()
+    );
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("warning: creating {} failed: {err}", parent.display());
+        return;
+    }
+    if let Err(err) = std::fs::write(path, line) {
+        eprintln!("warning: writing {} failed: {err}", path.display());
+    }
+}
+
 /// Records the tab an attempt opened, so a later prompt reaches that exact tab
 /// rather than one whose truncated label happens to match.
 ///
@@ -2104,9 +2250,20 @@ pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(
 /// the `.tab` record a spawn writes, so a title that happens to match is never
 /// mistaken for the attempt's own tab.
 ///
-/// A host that cannot be asked answers "nothing is live", which is the safe
-/// direction for the tick: a task it cannot see is a task it will not start a
-/// second attempt on.
+/// # When the host cannot report the program
+///
+/// `Unknown` is not always "not there". A core without `pane.report_agent`
+/// leaves a program whose only sources are plugins (opencode, kilo, codex,
+/// claude's hooks) reporting nothing at all, and a tab of it is then `Unknown`
+/// for as long as it runs. The attempt's spawn record says which case this is:
+/// a launch whose brief was read off the ready line is proof the host could not
+/// see the program, so the tab's existence is the evidence instead and the task
+/// stays live. Reading it as dead here is what would let the tick land work an
+/// agent is still writing, which is the one thing the live set exists to stop.
+///
+/// A host that cannot be asked at all answers "nothing is live", which is the
+/// safe direction for the tick: a task it cannot see is a task it will not start
+/// a second attempt on.
 pub fn live_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<String> {
     let mut live = BTreeSet::new();
     let Some(run) = state.run.as_ref() else {
@@ -2141,16 +2298,43 @@ pub fn live_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<Str
         let Some(tab) = tabs.iter().find(|tab| tab.id.as_str() == wanted) else {
             continue;
         };
-        // Done, Unknown or a host error all mean the same thing here: no agent
-        // is at work in that pane, or nobody can say — and either way the task
-        // is not "live".
-        if let Ok(AgentState::Working | AgentState::Idle | AgentState::Blocked) =
-            mux.agent_state(&tab.root_pane)
-        {
-            live.insert(id.clone());
+        // Done and a host error both mean no agent is at work. `Unknown` means
+        // either that, or a program this host cannot report — and the attempt's
+        // spawn record is what tells the two apart.
+        match mux.agent_state(&tab.root_pane) {
+            Ok(AgentState::Working | AgentState::Idle | AgentState::Blocked) => {
+                live.insert(id.clone());
+            }
+            Ok(AgentState::Unknown) if unreadable_by_host(&briefs, &run.run_id, id) => {
+                live.insert(id.clone());
+            }
+            _ => {}
         }
     }
     live
+}
+
+/// Whether this task's newest attempt is a program the host cannot report.
+///
+/// The answer is the attempt's own spawn record: a delivery that was read off
+/// the ready line means the host stayed `Unknown` while the program was up.
+pub(crate) fn unreadable_by_host(briefs: &Path, run: &str, task: &str) -> bool {
+    let Some(attempt) = latest_attempt(briefs, run, task) else {
+        return false;
+    };
+    read_spawn_record(&spawn_record_path(briefs, run, task, attempt))
+        .is_some_and(|record| record.host_cannot_report())
+}
+
+/// The number of a task's newest attempt in one run, from its tab records.
+pub(crate) fn latest_attempt(briefs: &Path, run: &str, task: &str) -> Option<u32> {
+    latest_tab_record(briefs, run, task).and_then(|path| {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let prefix = format!("{task}-a");
+        name.strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tab"))
+            .and_then(|digits| digits.parse::<u32>().ok())
+    })
 }
 
 /// The tab record of a task's latest attempt in one run.
@@ -2506,6 +2690,11 @@ project_dirs = []
             model: None,
             launch: fake_spec("sh").launch,
             blocking_prompts: Vec::new(),
+            ready_lines: Vec::new(),
+            // A fake `sh` reports no status of its own and no screen line, so
+            // the readiness of this pick is the painted-screen fallback.
+            own_status: false,
+            status_words: "osc7501, screen".to_string(),
         }
     }
 
@@ -3543,6 +3732,142 @@ project_dirs = []
         assert_eq!(escalation.task.as_deref(), Some("T1"));
         assert_eq!(escalation.body, "brief not delivered");
         assert_eq!(escalation.default_action, "resend the brief");
+    }
+
+    /// A host with a core that cannot report a program listed in a spawn record
+    /// as unreadable — the herdr-core 0.1.21 case — and one that can.
+    fn no_plugin_reports() -> FakeMux {
+        let mut caps = shprd_mux::Capabilities::all();
+        caps.agent_reports = false;
+        FakeMux::new(caps)
+    }
+
+    /// A spec that names its ready line and reports nothing of its own, the way
+    /// the real opencode file does.
+    fn plugin_only_spec(id: &str) -> HarnessSpec {
+        let mut spec = fake_spec(id);
+        spec.status.sources = vec![
+            shprd_agents::spec::StatusSource::Hook,
+            shprd_agents::spec::StatusSource::Screen,
+        ];
+        spec.ready.screen = vec!["Ask anything".to_string()];
+        spec
+    }
+
+    /// `Scratch::spawn_env` with a program list of the caller's choosing.
+    fn spawn_env_with_programs<'a>(
+        scratch: &Scratch,
+        ctx: &'a Ctx,
+        programs: Vec<Program>,
+    ) -> SpawnEnv<'a> {
+        let mut env = scratch.spawn_env(ctx);
+        env.workers = programs
+            .iter()
+            .map(|program| program.spec.id.clone())
+            .collect();
+        env.programs = programs;
+        env
+    }
+
+    #[test]
+    fn a_spawn_records_that_a_ready_line_was_what_said_the_program_was_up() {
+        // The M10 gate's bug 3, from the spawn's own side: opencode's plugin
+        // cannot report through a core without `pane.report_agent`, so the brief
+        // goes in once the TUI's own line is drawn, and the record says so.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = spawn_env_with_programs(
+            &scratch,
+            &ctx,
+            vec![Program {
+                spec: plugin_only_spec("sh"),
+                installed: true,
+            }],
+        );
+        let mux = no_plugin_reports();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let report = match spawn(&mux, &env, &request()) {
+            Ok(report) => report,
+            Err(err) => panic!("{err}"),
+        };
+        // The screen is only painted after the spawn has read it once, so the
+        // record cannot say `ready-line` from a *zero* wait: an empty screen and
+        // a zero wait is a lost brief. Prove the record exists and names the
+        // program and its sources either way.
+        let path = spawn_record_path(&env.briefs_dir, "t1", "T1", report.attempt);
+        let record = read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(record.agent, "sh");
+        assert_eq!(record.status, "hook, screen");
+        assert_eq!(
+            record.ready, "not-delivered",
+            "a zero wait delivers nothing"
+        );
+        assert!(!record.host_cannot_report());
+    }
+
+    #[test]
+    fn a_brief_read_off_the_ready_line_keeps_a_task_the_host_cannot_report_alive() {
+        // A task whose brief arrived through opencode's ready line is one the
+        // host cannot see afterwards either: its `agent_state` stays Unknown for
+        // as long as it runs. Reading that as "no agent" is what would let the
+        // tick land work still being written.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = spawn_env_with_programs(
+            &scratch,
+            &ctx,
+            vec![Program {
+                spec: plugin_only_spec("sh"),
+                installed: true,
+            }],
+        );
+        // A TUI that paints its prompt: every pane the spawn makes shows it.
+        let mux = no_plugin_reports().with_screen("┃  Ask anything… \"Fix broken tests\"");
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mut env = env;
+        env.ready_wait = Duration::from_secs(5);
+        let report = match spawn(&mux, &env, &request()) {
+            Ok(report) => report,
+            Err(err) => panic!("{err}"),
+        };
+        let path = spawn_record_path(&env.briefs_dir, "t1", "T1", report.attempt);
+        let record = read_spawn_record(&path)
+            .unwrap_or_else(|| panic!("no spawn record at {}", path.display()));
+        assert_eq!(record.ready, "ready-line", "{record:?}");
+        assert!(record.host_cannot_report());
+
+        // Now the liveness rule reads the same record: the task is live even
+        // though the host has no opinion about its pane.
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            live_tasks(&mux, &env.home, &state).contains("T1"),
+            "a task whose program the host cannot report must stay live while its tab exists"
+        );
+    }
+
+    #[test]
+    fn a_task_the_host_does_report_goes_quiet_when_its_agent_does() {
+        // The same rule, the other way: an ordinary launch that reported its
+        // state is not kept alive by its tab alone.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(live_tasks(&mux, &env.home, &state).contains("T1"));
+
+        // Its agent ends: the tab is still there, and the task is not live.
+        mux.set_exited(&PaneId::new("pane-1"), Some(0));
+        assert!(
+            !live_tasks(&mux, &env.home, &state).contains("T1"),
+            "a reported agent that ended is not live"
+        );
     }
 
     #[test]
