@@ -149,7 +149,7 @@ export default class Tasks extends View {
     this.cx.notify();
   }
 
-  /** Opens one of the panel's own stacks: the board, the cards, the settings. */
+  /** Opens one of the panel's own stacks: the board, or the needs-you cards. */
   panel(child) {
     run("layout.select", { stack: "panel-body", child });
     run("layout.show", { id: "panel" });
@@ -264,8 +264,7 @@ export default class Tasks extends View {
       .text_size(TEXT.label)
       .text_color(t.muted)
       .child(this.tab(t, "Board", "tasks", true))
-      .child(this.tab(t, "Asks", "asks", (this.state?.asks ?? []).length > 0))
-      .child(this.tab(t, "Settings", "settings", false));
+      .child(this.tab(t, "Asks", "asks", (this.state?.asks ?? []).length > 0));
 
     const body = v_flex()
       .flex_1()

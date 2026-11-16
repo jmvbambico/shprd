@@ -20,8 +20,9 @@
 //
 // The side panel's buttons open the layout's stacks — `layout.select` then
 // `layout.show` — because the panel is a stack in `layouts/shprd.json`, not
-// something a mod draws.
-
+// something a mod draws. Settings is not one of them: it opens over the window
+// as Shepherdr's own settings do (`openSettings()` in `lib/panel.js`), from the
+// sidebar's footer row, so the panel keeps its stacks for the work.
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { layout, panes, run, spaces, theme } from "herdr";
