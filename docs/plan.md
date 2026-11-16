@@ -379,6 +379,24 @@ the tunnels (Cloudflare quick and named, ngrok, tunnl.gg, Tailscale serve) with
 a password login (argon2, session cookie, rate limiting, origin checks), QR
 code in the UI.
 
+Spec: `_research/m7/M7d-web-remote.md` §4 (routes, tunnels, the login and its
+threat table). The web app is served by `shprd serve` from the same origin; the
+login and the tunnels live in one new crate, `shprd-remote`, and the router stays
+in `shprd-server`.
+
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| M11.1 | The login: `shprd web password set` (argon2id, local only, length and common-password checks), server-side sessions with a `__Host-` cookie, `POST /api/login`, `/api/logout`, `GET /api/session`, rate limits (M7d §4.4 table), a `Host` allowlist (unknown host → 421), `Origin` + `x-shprd` on writes and socket upgrades, a fresh password for destructive actions, `shprd web sessions` to list and revoke. The loopback token door stays for the mods | new crate `shprd-remote`, `shprd-server`, `shprd/src/cmd/` | L |
+| M11.2 | Tunnels: a provider trait with Tailscale serve, cloudflared quick and named, ngrok and tunnl.gg; `shprd web up --tunnel <p>`, `down`, `status`; `<state>/web.json`; a public tunnel refuses to start without a password; the active tunnel's host joins the allowlist; the QR code (terminal half-blocks and SVG); the tunnel stops with the service | `shprd-remote`, `shprd/src/cmd/` | L |
+| M11.3 | Web app scaffold: Vite + React + TypeScript in `web/`, one `client.ts` (`x-shprd`, same-origin credentials), the generated `ts-rs` types, the login screen, phone (< 800 px) and desktop layouts, built assets embedded in the binary and served with an SPA fallback; CI runs `tsc --noEmit`, the web build and a diff check of the generated types | `web/`, `shprd-server`, `.github/` | M |
+| M11.4 | Web screens A: tasks board, accept card (changes, checks, review), needs-you cards, toasts | `web/` | L |
+| M11.5 | Web screens B: the graph, drawn from the run document the dagr block shows | `web/`, `shprd-server` | M |
+| M11.6 | Web screens C: terminal (xterm.js over a socket; watch by default, type on demand, OSC 52 stripped) and the coordinator chat | `web/`, `shprd-server` | L |
+| M11.7 | Web screens D: settings (agents, roles, prompts) and Settings › Remote (tunnel, sessions, QR) | `web/` | M |
+
+Lanes: M11.1 ∥ M11.3; then M11.2 (after M11.1) ∥ M11.4 ∥ M11.5 ∥ M11.6 ∥ M11.7
+(after M11.3). Every screen is screenshotted at 390 px and 1440 px before review.
+
 **Gate:** the M10 flow runs from a desktop browser and from a phone over each
 tunnel, and every request without a session is refused.
 
