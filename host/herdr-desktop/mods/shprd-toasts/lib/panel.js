@@ -17,7 +17,7 @@
 
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { openOverlay } from "herdr";
+import { openOverlay, setShared, shared } from "herdr";
 
 import { H, RADIUS, SPACE, TEXT } from "./tokens.js";
 
@@ -234,18 +234,80 @@ export function toggleSwitch(t, id, on, onToggle) {
 }
 
 /**
+ * The shared key the settings window records itself under, as `{ id, page, at }`.
+ *
+ * It is a *shared* value and not the app's `sessionStorage`, because the app
+ * gives every mod instance a storage of its own (measured: a key one copy writes
+ * is invisible to the next), and what this record has to answer is asked by a
+ * different copy every time — the footer's row, a menu, a key.
+ */
+export const SETTINGS_WINDOW = "shprd.settings.window";
+
+/**
+ * How long a window's word that it is open is believed, in ms.
+ *
+ * A live window renews it on its reads of the service (every ten seconds), so it
+ * is never doubted; a copy that went away without saying so — the app was
+ * killed, an overlay was closed by something that never told it — is forgotten
+ * within twenty seconds instead of shutting the settings out for the app's run.
+ */
+const ALIVE_MS = 20_000;
+
+/** How stale the record may be before a read of the service renews it. */
+const RENEW_MS = 8_000;
+
+/** The settings window that is on screen, as `{ id, page, at }`, or null. */
+export function settingsWindow() {
+  let kept = null;
+  try {
+    kept = shared(SETTINGS_WINDOW);
+    if (typeof kept === "string") kept = JSON.parse(kept);
+  } catch {
+    return null;
+  }
+  if (!kept || typeof kept !== "object" || typeof kept.id !== "string") return null;
+  if (!Number.isFinite(kept.at) || Date.now() - kept.at > ALIVE_MS) return null;
+  return kept;
+}
+
+/**
+ * Records that the settings window `id` is on screen, on `page`.
+ *
+ * The window calls this when it opens and again as it reads the service, and
+ * only when what is recorded has gone stale: the value is shared with every mod,
+ * so writing it is a repaint of the whole window.
+ */
+export function settingsWindowOpened(id, page = null) {
+  const kept = settingsWindow();
+  if (kept !== null && kept.id === id && Date.now() - kept.at < RENEW_MS) return;
+  setShared(SETTINGS_WINDOW, { id, page, at: Date.now() });
+}
+
+/** Forgets the settings window, when it closes. */
+export function settingsWindowClosed(id) {
+  const kept = settingsWindow();
+  if (kept !== null && id !== undefined && id !== null && kept.id !== id) return;
+  setShared(SETTINGS_WINDOW, null);
+}
+
+/**
  * The one Settings window (`mods/shprd-settings`), opened over the window.
  *
  * Shepherdr's `openSettings()` (`lib/ui.js`): a dialog most of the window's
  * height, at most 900 px, with `frame: "none"` so the mod draws its own rounded
- * panel inside it. A click beside the panel and `Esc` close it; opening it again
- * while it is open keeps the one copy, which is what Herdr does with a dialog of
- * the same mod.
+ * panel inside it. A click beside the panel and `Esc` close it.
+ *
+ * **One copy.** Herdr opens a second dialog of the same mod when it is asked
+ * twice, and two settings windows over one another is not what a click means, so
+ * a copy that is already up keeps its place and this asks for nothing (the mod
+ * puts it away again in its own `close(cx)`).
  *
  * `p` is `{ page }`, the page it opens on: `agents`, `tasks` or `prompts`.
  */
 export function openSettings(p = {}) {
-  return openOverlay({
+  const open = settingsWindow();
+  if (open !== null) return open.id;
+  const id = openOverlay({
     mod: "shprd-settings",
     kind: "dialog",
     frame: "none",
@@ -253,6 +315,8 @@ export function openSettings(p = {}) {
     height: 0.92,
     props: p,
   });
+  settingsWindowOpened(id, p.page ?? null);
+  return id;
 }
 
 /**

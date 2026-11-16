@@ -57,6 +57,11 @@ import {
   withoutRole,
   workflowRows,
 } from "../mods/lib/settings.js";
+import {
+  openSettings,
+  settingsWindow,
+  settingsWindowClosed,
+} from "../mods/lib/panel.js";
 import Settings from "../mods/shprd-settings/main.js";
 
 /** One fixture, parsed. */
@@ -612,4 +617,54 @@ test("a refused write keeps the service's sentence, and writes nothing twice", a
   assert.match(view.refusal.text, /both anthropic|worker role is anthropic/);
   assert.equal(view.refusal.text, reason(service), "the words are passed through, not summarised");
   assert.equal(view.writing, null, "the window is free to try another write");
+});
+
+test("opening the window again keeps the one copy that is up", async () => {
+  herdr.reset();
+  const first = openSettings({ page: "tasks" });
+  assert.equal(herdr.OVERLAYS.length, 1, "one window");
+  assert.equal(herdr.OVERLAYS[0].mod, "shprd-settings");
+  assert.equal(settingsWindow().id, first);
+
+  const again = openSettings();
+  assert.equal(herdr.OVERLAYS.length, 1, "a second ask opens no second window");
+  assert.equal(again, first);
+
+  // A window that is gone — closed by the app, not by our own button — is
+  // forgotten, and the next ask opens it again.
+  settingsWindowClosed(first);
+  assert.equal(settingsWindow(), null);
+  openSettings();
+  assert.equal(herdr.OVERLAYS.length, 2);
+});
+
+test("a window that stopped saying it is open is believed for twenty seconds only", () => {
+  herdr.reset();
+  const id = openSettings();
+  assert.equal(settingsWindow().id, id);
+  // The record the dialog renews on every read is stamped: one older than half a
+  // minute is a window that went away without saying so, and it does not shut the
+  // settings out of the rest of the app's run.
+  herdr.setShared("shprd.settings.window", { id: "overlay-9", at: Date.now() - 21_000 });
+  assert.equal(settingsWindow(), null);
+  openSettings();
+  assert.equal(herdr.OVERLAYS.length, 2);
+});
+
+test("closing the window gives its place back at once", async () => {
+  herdr.reset();
+  herdr.setProps({ overlay: "ov-7" });
+  const run = context();
+  const view = new Settings();
+  view.init({}, run.cx);
+  view.cx = run.cx;
+  assert.equal(settingsWindow().id, "ov-7");
+  view.dismiss();
+  assert.equal(settingsWindow(), null, "a dismissal is not a window that is still up");
+  assert.deepEqual(herdr.CLOSED, ["ov-7"]);
+  // And the app's own last word does the same for a copy it takes away itself.
+  const second = window_({ overlay: "ov-8" }).view;
+  assert.equal(settingsWindow().id, "ov-8");
+  await second.close(run.cx);
+  assert.equal(settingsWindow(), null);
 });
