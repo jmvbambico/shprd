@@ -156,7 +156,8 @@ export default class NewMenu extends View {
         // The number keys start a program, Shepherdr's 1–9: the hint on the row
         // is the key, in the order the rows are drawn.
         const typed = /^[1-9]$/.test(String(event.key ?? "")) ? Number(event.key) - 1 : null;
-        if (typed !== null && !event.modifiers?.control && !event.modifiers?.alt) {
+        const held = event.modifiers ?? {};
+        if (typed !== null && !held.control && !held.alt && !held.platform && !held.shift) {
           const choices = agentChoices(this.roster?.programs ?? []);
           const program = choices[typed];
           if (program?.installed) {
