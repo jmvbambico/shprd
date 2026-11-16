@@ -105,6 +105,36 @@ mod tests {
     }
 
     #[test]
+    fn exporting_into_a_fresh_directory_reproduces_the_commit() {
+        // The CI gate runs `export-ts` and then `git diff --exit-code`; this is
+        // the same check in miniature, so a stale file fails `cargo test` too.
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let written = export(dir.path()).expect("the bindings are exportable");
+        let committed = bindings_dir();
+        let mut on_disk = 0;
+        for entry in fs::read_dir(&committed).expect("web/src/gen reads") {
+            let entry = entry.expect("a directory entry");
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if !name.ends_with(".ts") {
+                continue;
+            }
+            on_disk += 1;
+            let fresh = fs::read(dir.path().join(&name)).expect("the export wrote it");
+            let old = fs::read(committed.join(&name)).expect("the commit holds it");
+            assert_eq!(
+                fresh, old,
+                "{name} is stale; run `cargo run -p shprd-server --example export-ts`"
+            );
+        }
+        assert_eq!(
+            written.len(),
+            on_disk,
+            "the export and the commit hold the same files"
+        );
+    }
+
+    #[test]
     fn a_binding_names_its_imports() {
         // The snapshot is made of tasks, so its file must import them; a
         // generator that inlined or dropped the import would be caught here.

@@ -182,6 +182,13 @@ pub(crate) struct AppState {
     /// it unset, and a chat then says it was not told rather than looking in a
     /// directory that can never hold a session.
     pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
+    /// Where the built web app's files come from.
+    ///
+    /// Production serves the build embedded in this binary ([`crate::web`]); a
+    /// test points this at a directory of its own ([`App::with_web_dir`]) so the
+    /// SPA fallback and the cache headers are proven without needing `web/dist`
+    /// to have been built.
+    pub(crate) web: crate::web::Source,
 }
 
 /// The directories the binary resolved for the service.
@@ -303,6 +310,7 @@ impl App {
             dagr: paths.dagr,
             chat: ChatHost::new(),
             transcript_roots: paths.transcript_roots,
+            web: crate::web::Source::Embedded,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -476,6 +484,18 @@ impl App {
         self
     }
 
+    /// Serve the web app from `dir` instead of the build embedded in the binary.
+    ///
+    /// Production always embeds `web/dist`; a test passes a temp directory
+    /// holding its own `index.html` and assets, so the SPA fallback, the cache
+    /// headers and the `/api` split are proven in CI, which does not build the
+    /// web app before the cargo job.
+    pub fn with_web_dir(mut self, dir: PathBuf) -> Self {
+        self.state.web = crate::web::Source::Dir(dir);
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Serve with no harness table at all, whatever the environment would find.
     ///
     /// A test uses it to prove what a machine without a data directory does,
@@ -511,7 +531,10 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .merge(guarded)
-        .fallback(not_found)
+        // Everything else is the built web app: an asset, an SPA route, or the
+        // page a binary without a web build serves. An `/api…` miss keeps the
+        // API's typed 404, which `web` asks `not_found` for.
+        .fallback(crate::web::serve)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -989,7 +1012,7 @@ async fn send(socket: &mut WebSocket, message: &WsMessage) -> Result<(), ()> {
 
 /// Always a typed body, so a client never has to parse HTML to learn why a path
 /// it guessed did not exist.
-async fn not_found() -> impl IntoResponse {
+pub(crate) fn not_found() -> ApiReject {
     ApiReject::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "no such route")
 }
 
