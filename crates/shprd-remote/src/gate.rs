@@ -310,11 +310,16 @@ impl Gateway {
         }
 
         // A session's last use is noted at most once a minute, so a page that
-        // polls does not write a file a request.
-        if let Door::Session(record) = &door
-            && let Ok(Some(touched)) = self.sessions.touch(&record.id_hash)
-        {
-            return Ok(Door::Session(touched));
+        // polls does not write a file a request. A session that went away
+        // between the lookup and the note — expired, or revoked by the CLI — is
+        // refused, and so is one the file would not rewrite: this is the last
+        // place a request could be let through on a stale answer.
+        if let Door::Session(record) = &door {
+            return match self.sessions.touch(&record.id_hash) {
+                Ok(Some(touched)) => Ok(Door::Session(touched)),
+                Ok(None) => Err(self.anonymous(request)),
+                Err(err) => Err(GateError::Failed(err.to_string())),
+            };
         }
         Ok(door)
     }
@@ -1069,6 +1074,29 @@ mod tests {
             GateError::TooManyRequests { after_ms } => assert!(after_ms > 0),
             other => panic!("expected a rate limit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_session_the_cli_revoked_is_refused_on_the_next_request() {
+        // The person runs `shprd web sessions --revoke` in another process: the
+        // service must stop trusting the cookie at once, not at its next start.
+        let fixture = Fixture::new();
+        let request = fixture.with_session(fixture.read());
+        assert!(matches!(decide(&fixture, &request), Ok(Door::Session(_))));
+
+        let elsewhere = Sessions::new(
+            fixture
+                .gateway
+                .sessions()
+                .path()
+                .parent()
+                .expect("the state dir"),
+            fixture.clock.clone(),
+        );
+        assert_eq!(elsewhere.revoke_all().expect("a revoke"), 1);
+
+        let request = fixture.with_session(fixture.read());
+        assert_eq!(decide(&fixture, &request), Err(GateError::Unauthorized));
     }
 
     #[test]

@@ -294,6 +294,13 @@ impl Sessions {
         else {
             return Ok(None);
         };
+        // A session that expired between the lookup and this call is gone, not
+        // refreshed: the answer is the same one `find` would have given.
+        if stored.sessions[index].expired(now) {
+            stored.sessions.remove(index);
+            self.write(&stored)?;
+            return Ok(None);
+        }
         let record = &mut stored.sessions[index];
         if now.saturating_sub(record.last_seen) >= TOUCH_SECS {
             record.last_seen = now;
