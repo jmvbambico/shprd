@@ -1,6 +1,7 @@
-// Unit tests for the settings page's view model: the roles table, the layers its
-// values came from, the choices the pickers offer, a refusal's words and the
-// template list.
+// Unit tests for the settings window's view model: the pages it lists, the level
+// its writes go to, the roles table, the workflow keys of the Tasks page, the
+// layers every value came from, the choices the pickers offer, a refusal's words
+// and the template list.
 //
 //   node --import ./test/boot.mjs --test test/          (node 22+)
 //   bun test --preload ./test/boot-bun.mjs test/        (bun)
@@ -18,18 +19,30 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import * as herdr from "herdr";
+
 import { ServiceError, reason } from "../mods/lib/client.js";
 import {
   BUILTIN,
+  CHANGED_HERE,
   LAYER,
+  LEVEL,
+  PAGES,
   PICKS,
+  RANGE,
+  SCOPES,
+  TITLE,
   UNSET_LAYER,
+  WORKFLOW,
   effortChoices,
   effortLevels,
+  forRepo,
   health,
   layerOf,
+  levelNote,
   modelChoices,
   outcomeOf,
+  pageOf,
   programChoices,
   programOf,
   promptLine,
@@ -38,9 +51,13 @@ import {
   roleIds,
   roleOf,
   roles,
+  scopeOf,
+  stepped,
   withRole,
   withoutRole,
+  workflowRows,
 } from "../mods/lib/settings.js";
+import Settings from "../mods/shprd-settings/main.js";
 
 /** One fixture, parsed. */
 function fixture(name) {
@@ -328,4 +345,271 @@ test("a role key is read back as its role and field", () => {
   assert.equal(roleOf("roles.order"), null);
   assert.equal(roleOf("tasks.merge"), null);
   assert.equal(roleOf(undefined), null);
+});
+
+// -- the window's frame ----------------------------------------------------
+//
+// Settings is a dialog over the window, not a tab of the side panel (Shepherdr's
+// own `openSettings()`): the page list, the level switch, and one row a setting
+// on the right. What a page draws is a pure function of the service's answers, so
+// these are the words and the choices a person reads.
+
+/** The layout file the window draws from, parsed. */
+const LAYOUT = JSON.parse(
+  readFileSync(new URL("../layouts/shprd.json", import.meta.url), "utf8"),
+);
+
+/** The layout node called `id`, or null. */
+function node(id, node_ = LAYOUT) {
+  if (node_?.id === id) return node_;
+  for (const child of node_?.children ?? []) {
+    const found = node(id, child);
+    if (found) return found;
+  }
+  return null;
+}
+
+test("the layout no longer carries a settings block for the panel to show", () => {
+  const panel = node("panel-body");
+  assert.ok(panel, "the side panel is still a stack");
+  assert.deepEqual(
+    panel.children.map((child) => child.id),
+    ["files", "changes", "tasks", "asks"],
+    "settings opens over the window, so it is not a stack the panel switches to",
+  );
+  assert.equal(node("settings"), null);
+  // And the stack's own selection still names a child that is there.
+  assert.ok(panel.children.some((child) => child.id === panel.active), panel.active);
+});
+
+test("the pages are the three shprd has, in the window's order, and Remote is a place held", () => {
+  assert.deepEqual(
+    PAGES.map((page) => page.title),
+    ["Agents", "Tasks", "Prompts", "Remote"],
+  );
+  assert.equal(TITLE, "Settings");
+  // Remote is drawn and inert: it is the page M11.7 gives it, and opening it
+  // must never land on a page that has nothing behind it.
+  const remote = PAGES.find((page) => page.id === "remote");
+  assert.equal(remote.soon, true);
+  assert.equal(pageOf("remote").id, "agents");
+  assert.equal(pageOf("nope").id, "agents");
+  assert.equal(pageOf("tasks").id, "tasks");
+});
+
+test("a page a repository can own takes the level switch; the others say they cannot", () => {
+  assert.equal(PAGES.find((page) => page.id === "agents").repo, true);
+  assert.equal(PAGES.find((page) => page.id === "tasks").repo, true);
+  assert.equal(Boolean(PAGES.find((page) => page.id === "prompts").repo), false);
+  assert.equal(LEVEL.label, "Applies to");
+  assert.match(LEVEL.one, /every repository/);
+});
+
+test("the level switch says what a write to each layer does", () => {
+  assert.deepEqual(
+    SCOPES.map((scope) => [scope.id, scope.word]),
+    [
+      ["you", "You"],
+      ["repo", "This repo"],
+    ],
+  );
+  assert.equal(forRepo("you"), false);
+  assert.equal(forRepo("repo"), true);
+  assert.equal(forRepo("nope"), false, "an unknown level writes the person's own file");
+  assert.match(levelNote("you"), /your own settings/i);
+  assert.match(levelNote("repo", "shop"), /only this repository \(shop\)/i);
+  assert.match(levelNote("repo", null), /inherited from you/);
+  assert.equal(scopeOf("repo").word, "This repo");
+  assert.equal(CHANGED_HERE, "Set for this repository");
+});
+
+test("the Tasks page shows the workflow keys the settings API exposes", () => {
+  const rows = workflowRows(SETTINGS);
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    WORKFLOW.map((row) => row.key),
+  );
+  // The three the task names, and the layers they came from, in the service's
+  // own words.
+  const merge = rows.find((row) => row.key === "tasks.merge");
+  assert.deepEqual(
+    { value: merge.value, layer: merge.layer, control: merge.control },
+    { value: "ask", layer: "built in", control: "segmented" },
+  );
+  assert.deepEqual(
+    merge.choices.map(([value, word]) => [value, word]),
+    [
+      ["ask", "Ask me"],
+      ["checks", "Checks pass"],
+      ["auto", "By itself"],
+    ],
+  );
+  const running = rows.find((row) => row.key === "tasks.max_running");
+  assert.equal(running.value, 1);
+  assert.equal(running.layer, "you");
+  assert.equal(running.control, "stepper");
+  const tick = rows.find((row) => row.key === "tasks.tick_secs");
+  assert.equal(tick.value, 15);
+  assert.equal(tick.display, "15 seconds");
+  assert.equal(rows.find((row) => row.key === "tasks.proof").control, "switch");
+  assert.equal(rows.find((row) => row.key === "tasks.proof").display, "On");
+  assert.equal(rows.find((row) => row.key === "tasks.start_notes").control, "box");
+  assert.equal(rows.find((row) => row.key === "review.cross_vendor").value, true);
+  // Every key the fixture answers is on the page, so no workflow setting is
+  // reachable only from the command line.
+  const shown = new Set(rows.map((row) => row.key));
+  for (const row of SETTINGS.values) {
+    if (row.key.startsWith("tasks.") || row.key === "review.cross_vendor") {
+      assert.ok(shown.has(row.key), `${row.key} is on the page`);
+    }
+  }
+});
+
+test("a workflow key the service did not answer is a row, not a hole", () => {
+  const rows = workflowRows({ values: [] });
+  assert.equal(rows.length, WORKFLOW.length);
+  for (const row of rows) {
+    assert.equal(row.value, null, row.key);
+    assert.equal(row.layer, UNSET_LAYER, row.key);
+  }
+  assert.equal(rows.find((row) => row.key === "tasks.merge").display, "not set");
+});
+
+test("a stepper never proposes a value the service would refuse", () => {
+  for (const [key, [min, max]] of Object.entries(RANGE)) {
+    assert.equal(stepped(min, -1, key), min, `${key} stays at its floor`);
+    assert.equal(stepped(max, 1, key), max, `${key} stays under its ceiling`);
+    assert.equal(stepped(min + 1, -1, key), min);
+  }
+  assert.deepEqual(RANGE["tasks.max_running"], [1, 10]);
+  assert.deepEqual(RANGE["tasks.tick_secs"], [1, 3600]);
+  // A row's own bounds are the ones its stepper uses.
+  const row = workflowRows(SETTINGS).find((entry) => entry.key === "tasks.tick_secs");
+  assert.equal(stepped(row.value, 1, row.key), 16);
+});
+
+// -- the window itself -----------------------------------------------------
+
+/**
+ * A context the window's `init` can be given: no timers of its own, and a focus
+ * handle that is only asked to take the keyboard.
+ */
+function context() {
+  const after = [];
+  return {
+    cx: {
+      sleep: async () => {},
+      notify: () => {},
+      focus_handle: () => ({ focus: () => {} }),
+      spawn: () => ({ cancel: () => {} }),
+      timer: {
+        after: (ms, fn) => {
+          after.push({ ms, fn });
+          return { cancel: () => {} };
+        },
+        every: () => ({ cancel: () => {} }),
+      },
+    },
+    after,
+  };
+}
+
+/** A window opened the way the footer opens it: `props().overlay` names it. */
+function window_(props_ = {}) {
+  herdr.reset();
+  herdr.setProps({ overlay: "ov-1", ...props_ });
+  const run = context();
+  const view = new Settings();
+  view.init(props_, run.cx);
+  view.cx = run.cx;
+  return { view, ...run };
+}
+
+/**
+ * A window whose first look at the service is over, as it is in a test with no
+ * service running: `init` starts a read, and the read's own failure must not
+ * land in the middle of what a test is doing.
+ */
+async function settled(props_ = {}) {
+  const opened = window_(props_);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return opened;
+}
+
+/** A client that answers writes with what the service would, and records them. */
+function client(reply = null, error = null) {
+  const calls = [];
+  return {
+    calls,
+    putSetting: async (key, value, forRepo_) => {
+      calls.push({ key, value, forRepo: forRepo_ });
+      if (error) throw error;
+      return reply ?? { outcome: "stored", settings: SETTINGS };
+    },
+    prompts: async () => PROMPTS,
+    prompt: async () => null,
+    resetPrompt: async () => null,
+    putPrompt: async () => null,
+    roster: async () => ROSTER,
+    call: async () => SETTINGS,
+  };
+}
+
+test("the window opens on the page it was asked for, and keeps to the ones it has", () => {
+  assert.equal(window_({ page: "tasks" }).view.page, "tasks");
+  assert.equal(window_({ page: "prompts" }).view.page, "prompts");
+  assert.equal(window_({ page: "nope" }).view.page, "agents");
+  assert.equal(window_({ page: "remote" }).view.page, "agents", "Remote is a place held, not a page");
+  assert.equal(window_().view.scope, "you", "the person's own settings come first");
+});
+
+test("Esc closes what is open inside the window before it closes the window", () => {
+  const { view } = window_();
+  view.open = "worker.agent";
+  view.escape();
+  assert.equal(view.open, null, "the first Esc closes the open picker");
+  assert.deepEqual(herdr.CLOSED, [], "and leaves the window up");
+
+  view.escape();
+  assert.deepEqual(herdr.CLOSED, ["ov-1"], "the next Esc closes the overlay it was given");
+
+  // A prompt being edited is closed by Esc before the window is.
+  const editing = window_({ page: "prompts" }).view;
+  editing.prompt = { id: "worker", text: "mine", state: "edited", path: "/p/worker.md" };
+  editing.escape();
+  assert.equal(editing.prompt, null);
+  assert.deepEqual(herdr.CLOSED, []);
+});
+
+test("a write goes to the layer the level switch names", async () => {
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  view.client = client();
+  await view.apply("tasks.max_running", 2);
+  view.scope = "repo";
+  await view.apply("tasks.max_running", 3);
+  assert.deepEqual(view.client.calls, [
+    { key: "tasks.max_running", value: 2, forRepo: false },
+    { key: "tasks.max_running", value: 3, forRepo: true },
+  ]);
+  // Reset is the same write with nothing: the repository's value goes, and what
+  // it inherits applies again.
+  await view.apply("tasks.max_running", null);
+  assert.deepEqual(view.client.calls[2], { key: "tasks.max_running", value: null, forRepo: true });
+  assert.equal(view.saved.text, "Saved");
+});
+
+test("a refused write keeps the service's sentence, and writes nothing twice", async () => {
+  const service = new ServiceError(
+    "`roles.reviewer.agent` would be refused: worker role is anthropic, reviewer role is anthropic",
+    { status: 409, code: "refused" },
+  );
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  view.client = client(null, service);
+  await view.apply("roles.reviewer.agent", "claude");
+  assert.equal(view.refusal.key, "roles.reviewer.agent");
+  assert.match(view.refusal.text, /both anthropic|worker role is anthropic/);
+  assert.equal(view.refusal.text, reason(service), "the words are passed through, not summarised");
+  assert.equal(view.writing, null, "the window is free to try another write");
 });

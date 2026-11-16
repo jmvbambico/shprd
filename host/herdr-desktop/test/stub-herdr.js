@@ -51,6 +51,8 @@ export function reset() {
   HC_CALLS.length = 0;
   SPACES = [];
   RUNS.length = 0;
+  OVERLAYS.length = 0;
+  CLOSED.length = 0;
   SHARED.clear();
   PROPS = {};
   LAYOUT = null;
@@ -168,6 +170,31 @@ export const RUNS = [];
 
 export function run(name, args) {
   RUNS.push({ name, args });
+  return null;
+}
+
+/** Every overlay a mod opened, in order, as `openOverlay(spec)` recorded it. */
+export const OVERLAYS = [];
+
+/** The overlays `closeOverlay(id)` closed, in order. */
+export const CLOSED = [];
+
+/**
+ * `openOverlay(spec)`: the only way a mod floats something.
+ *
+ * A test reads what a click asked for — the mod, the kind, the frame and the
+ * size — from [`OVERLAYS`], so the footer's row and the settings window can be
+ * checked without a window.
+ */
+export function openOverlay(spec) {
+  const id = `overlay-${OVERLAYS.length + 1}`;
+  OVERLAYS.push({ id, ...spec });
+  return id;
+}
+
+/** `closeOverlay(id)`: a mod closing itself, as `props().overlay` names it. */
+export function closeOverlay(id) {
+  CLOSED.push(id ?? null);
   return null;
 }
 

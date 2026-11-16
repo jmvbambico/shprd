@@ -97,3 +97,50 @@ test("a start that the core is already serving is not run twice", async () => {
   await view.start();
   assert.equal(herdr.HC_CALLS.length, 0, "a second click while starting does nothing");
 });
+
+// -- the footer's rows -----------------------------------------------------
+
+test("the footer's rows are the app's settings, shprd's own, and the service", async () => {
+  const { view } = await footer();
+  const actions = view.actions(herdr.theme());
+  assert.deepEqual(
+    actions.map((action) => action.id),
+    ["settings", "shprd", "service"],
+    "Shepherdr's three rows, with shprd's service in place of Add machine",
+  );
+  // The service row is a click only while there is nothing to look at.
+  assert.equal(typeof actions[2].onClick, "function");
+  herdr.setSpaces([{ id: "s1", active: true, folder: "/repo/demo" }]);
+  view.service = { record: { port: 7311 } };
+  assert.equal(view.actions(herdr.theme())[2].onClick, null);
+});
+
+test("the shprd row opens the settings window over the layout, not a panel tab", async () => {
+  const { view } = await footer();
+  const row = view.actions(herdr.theme()).find((action) => action.id === "shprd");
+  row.onClick();
+
+  assert.equal(herdr.OVERLAYS.length, 1, "one overlay");
+  const overlay = herdr.OVERLAYS[0];
+  // Shepherdr's own `openSettings()`: a dialog of the settings mod, most of the
+  // window's height, with the frame left to the mod.
+  assert.equal(overlay.mod, "shprd-settings");
+  assert.equal(overlay.kind, "dialog");
+  assert.equal(overlay.frame, "none");
+  assert.equal(overlay.width, 860);
+  assert.equal(overlay.height, 0.92);
+  assert.deepEqual(overlay.props, {}, "no page asked for: the window opens on Agents");
+  // Nothing was asked of the side panel: the settings are a window now.
+  assert.deepEqual(
+    herdr.RUNS.filter((call) => call.name.startsWith("layout.")),
+    [],
+  );
+});
+
+test("the app's own settings row is still the app's", async () => {
+  const { view } = await footer();
+  const row = view.actions(herdr.theme()).find((action) => action.id === "settings");
+  row.onClick();
+  assert.deepEqual(herdr.RUNS, [{ name: "app.settings", args: undefined }]);
+  assert.deepEqual(herdr.OVERLAYS, [], "and opens no overlay of ours");
+});
