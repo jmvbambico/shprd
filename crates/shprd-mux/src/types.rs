@@ -145,6 +145,20 @@ pub struct Capabilities {
     pub exec: bool,
     /// The host reports whether an agent is working, idle, blocked or done.
     pub agent_state: bool,
+    /// The host carries a program's *own* report of its state — herdr-core's
+    /// `pane.report_agent`, which is what a program's plugin or hook calls.
+    ///
+    /// This is deliberately separate from [`Self::agent_state`]. A program may
+    /// report its status itself (OSC 7501 on its terminal, `pi`'s own reporter)
+    /// or through a plugin the host installs (`opencode`, `kilo`, `codex`, and
+    /// `claude`'s hooks), and the two paths are not the same method. herdr-core
+    /// 0.1.21 has `terminal.status` and OSC 7501 but no `pane.report_agent`, so
+    /// its `agent_state` is true while a plugin's report goes nowhere: the
+    /// plugin silently no-ops and the program never reports. A program whose
+    /// only status source is such a plugin therefore has no status at all on
+    /// this host, and its readiness has to be read another way — which is what
+    /// [`shprd_agents::spec::ReadySpec`] is for.
+    pub agent_reports: bool,
     /// A space can be closed whole, taking every tab in it. Without it a task's
     /// space has to be emptied tab by tab and stays on the host's bar.
     pub close_space: bool,
@@ -172,6 +186,7 @@ impl Capabilities {
             doc: true,
             exec: true,
             agent_state: true,
+            agent_reports: true,
             close_space: true,
             list_spaces: true,
         }
@@ -195,6 +210,7 @@ impl Capabilities {
             doc: false,
             exec: false,
             agent_state: true,
+            agent_reports: false,
             close_space: false,
             list_spaces: false,
         }
@@ -537,6 +553,8 @@ mod tests {
         assert!(caps.resumable_events);
         assert!(caps.list_spaces);
         assert!(caps.exec);
+        assert!(caps.agent_state);
+        assert!(caps.agent_reports);
     }
 
     #[test]

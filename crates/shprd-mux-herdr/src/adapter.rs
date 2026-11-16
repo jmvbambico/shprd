@@ -64,6 +64,10 @@ impl Host for HerdrMux {
             doc: false,
             exec: false,
             agent_state: true,
+            // herdr 0.9.5 has `pane report-agent` / `pane report-agent-session`
+            // (M7g), which is the method a program's plugin calls, so a plugin's
+            // report does reach this host.
+            agent_reports: true,
             close_space: !refused.close_space,
             list_spaces: true,
         }
