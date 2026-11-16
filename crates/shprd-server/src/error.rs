@@ -46,6 +46,28 @@ pub enum ServerError {
         /// Its process, when its record could be read.
         pid: Option<u32>,
     },
+    /// A service was here and its process is gone, but its lock is still held.
+    ///
+    /// It is the moment just after a kill: the kernel has not reaped the process
+    /// yet, so the lock it holds is still there while nothing answers on its port
+    /// (M10 gate bug 7). A start waits this out before it gives up, and says so
+    /// rather than claiming a service is running.
+    #[error(
+        "a shprd service is still starting or shutting down for {} ({}); try again in a moment",
+        dir.display(),
+        match pid {
+            Some(pid) => format!("pid {pid}"),
+            None => "no record of it yet".to_string(),
+        },
+    )]
+    ShuttingDown {
+        /// The state directory the dying service holds.
+        dir: PathBuf,
+        /// The port it served, when its record could be read.
+        port: Option<u16>,
+        /// Its process, when its record could be read.
+        pid: Option<u32>,
+    },
     /// The socket could not be bound.
     #[error("could not listen on {address}: {source}")]
     Bind {

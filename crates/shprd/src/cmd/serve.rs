@@ -40,7 +40,7 @@ use shprd_server::{
     shutdown_signal,
 };
 
-use shprd_server::ServerError::AlreadyRunning;
+use shprd_server::ServerError::{AlreadyRunning, ShuttingDown};
 
 use crate::cli::ServeArgs;
 use crate::ctx::{
@@ -147,7 +147,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         // over and leave the running one undiscoverable, so it is refused with
         // the exit code a refused verb uses rather than an error's.
         let service = Service::start(config).await.map_err(|err| match err {
-            AlreadyRunning { .. } => CliError::Invalid(anyhow!(err)),
+            // A service that is up, or one whose stop is still in flight, is a
+            // person's verb that did not happen rather than a fault: the message
+            // says which, and the retry fixes the second.
+            AlreadyRunning { .. } | ShuttingDown { .. } => CliError::Invalid(anyhow!(err)),
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
         let info = service.info().clone();

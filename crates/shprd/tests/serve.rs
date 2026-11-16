@@ -440,6 +440,60 @@ fn a_second_serve_for_the_same_state_directory_is_refused() {
 }
 
 #[test]
+fn a_serve_right_after_a_kill_takes_over_from_the_stale_record() {
+    // Bug 7 of the M10 gate: after `pkill -f "shprd serve"` a start within a
+    // second or two was refused with "already running (pid N)" — the flock is
+    // still held by the dying process, and `service.json` still names it. The
+    // start looks at the process, waits the lock out, and takes the directory.
+    let (repo, state, home) = repo_with_a_run();
+    let first = Service::start(repo.path(), state.path(), home.path());
+    let stale = read_record(state.path());
+    let stale_pid = stale["pid"].as_u64().expect("a pid");
+    // `SIGKILL`, so the process cannot remove its own record: exactly the state a
+    // `pkill -9` leaves behind.
+    first.stop_with("-KILL");
+    assert!(
+        record_path(state.path()).exists(),
+        "a killed service leaves its record behind"
+    );
+
+    // The start right after the kill must not believe the record. It waits for
+    // the *new* record, since the dead one is already on disk and would
+    // otherwise answer `wait_for_record` at once.
+    let second = Service::start(repo.path(), state.path(), home.path());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let fresh = loop {
+        let record = read_record(state.path());
+        if record["id"] != stale["id"] {
+            break record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the new service never wrote its own record: {record}"
+        );
+        sleep(Duration::from_millis(50));
+    };
+    assert_ne!(
+        fresh["id"], stale["id"],
+        "the new start is its own service, not the dead one"
+    );
+    assert_ne!(
+        fresh["pid"].as_u64(),
+        Some(stale_pid),
+        "the record now names the new process"
+    );
+    let port = fresh["port"].as_u64().expect("a port");
+    let (status, body) =
+        get(&format!("http://127.0.0.1:{port}/api/health"), None).expect("the new service answers");
+    assert_eq!(status, 200);
+    let health: Value = serde_json::from_str(&body).expect("health is JSON");
+    assert_eq!(health["id"], fresh["id"]);
+
+    second.stop();
+    assert!(!record_path(state.path()).exists());
+}
+
+#[test]
 fn serve_answers_the_api_and_leaves_no_record_behind() {
     let (repo, state, home) = repo_with_a_run();
     let service = Service::start(repo.path(), state.path(), home.path());
