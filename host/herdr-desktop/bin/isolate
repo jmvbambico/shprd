@@ -1,0 +1,116 @@
+#!/bin/sh
+# Run one command with the person's herdr out of the environment.
+#
+#   bin/isolate shprd --repo "$PWD" serve --port 7787
+#   bin/isolate shprd --repo "$PWD" serve --json
+#   bin/isolate --print            say what would be stripped, run nothing
+#
+# # Why this exists
+#
+# A worker runs inside a herdr pane, and herdr exports that pane to everything it
+# starts: `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_ENV`, `HERDR_WORKSPACE_ID`,
+# `HERDR_TAB_ID`, `HC_SESSION` and more. A `shprd serve` started from there drives
+# **the person's own session**: it prepares a workspace labelled `shprd · <repo>`
+# in the window they are looking at, and its graph block starts a terminal in
+# their core. That is what happened twice in one day (SHP-66's live login check,
+# SHP-70's screenshot run).
+#
+# M11 fix Y closed it from the other side as well: `shprd serve` itself now
+# refuses to make a space when its checkout is under the temporary directory and
+# its socket is not (see `crates/shprd/src/guard.rs`). A real checkout under
+# `~/projects` is not covered by that rule, so the wrapper is still the thing to
+# run every live check through: it is the rule that holds wherever the checkout
+# is.
+#
+# # What it does
+#
+# - removes every `HERDR_*`, `HC_*` and `TUIOS_*` variable it was given, by name
+#   as the environment actually holds it, so a name herdr adds later cannot leak
+#   silently;
+# - points `HERDR_SOCKET_PATH` at `/nonexistent/herdr.sock`, a path nothing
+#   creates, so a `herdr` call fails visibly instead of finding a server;
+# - sets `HC_SESSION` to `shprd-isolated`, a session nobody runs, because an
+#   unset `HC_SESSION` means the **default** session — the person's;
+# - points `HERDR_APP_HOME` at a folder of its own under `$TMPDIR`, so the
+#   `herdr-app` a check calls can never be the person's window;
+# - points `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`
+#   and `XDG_RUNTIME_DIR` at the same folder, so nothing a check writes lands in
+#   the person's own files.
+#
+# Anything the caller sets **after** the wrapper's own assignments wins, so a
+# live check that starts a private `herdr server` of its own points
+# `HERDR_SOCKET_PATH` at that socket and is still stripped of everything else:
+#
+#   bin/isolate env HERDR_SOCKET_PATH="$my_private_socket" shprd serve
+#
+# # What it does not do
+#
+# It is not a sandbox and not a substitute for a private `HC_SESSION` and
+# `HERDR_APP_HOME` when a check wants a *live* Herdr desktop: for that, follow
+# M7ef §2.1 (`HERDR_APP_HOME`, `HC_SESSION` and the five XDG variables in a
+# scratch folder, which `bin/gate-env` helps with). `--print` says exactly what
+# this run would change, for a person who would rather see it than read it.
+
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+
+# The names removed whatever their value: the `HERDR_`/`HC_`/`TUIOS_` prefixes
+# are matched below, so this list is only the handful that are not prefixed.
+fixed_names="HC_SESSION HC_SOCKET HC_TERMINAL_ID HC_ASK_ID HERDR_APP_HOME"
+
+scratch="${TMPDIR:-/tmp}/shprd-isolate.$$"
+
+print=0
+case "${1:-}" in
+  --print)
+    print=1
+    shift
+    ;;
+  --help | -h)
+    sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  '')
+    echo "isolate: no command given; try --help" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$print" = 1 ]; then
+  echo "isolate: would remove every HERDR_*, HC_* and TUIOS_* variable from: $*"
+  echo "isolate: would set HERDR_SOCKET_PATH=/nonexistent/herdr.sock"
+  echo "isolate: would set HC_SESSION=shprd-isolated"
+  echo "isolate: would set the XDG homes, HERDR_APP_HOME and SHPRD_HOME under $scratch"
+  exit 0
+fi
+
+mkdir -p "$scratch"
+# One folder per run, removed on the way out unless the caller says otherwise.
+# `SHPRD_ISOLATE_KEEP=1` keeps it, for a check whose log a person wants to read.
+if [ "${SHPRD_ISOLATE_KEEP:-0}" != "1" ]; then
+  trap 'rm -rf "$scratch"' EXIT INT TERM
+fi
+
+# Build the `env -u NAME` list from the environment as it is. `env` is the
+# portable way to unset names in a child without a second shell, and the loop
+# reads the names rather than a list, so nothing herdr exports is forgotten.
+unset_args=""
+for name in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+  case "$name" in
+    HERDR_* | HC_* | TUIOS_* | $fixed_names) unset_args="$unset_args -u $name" ;;
+  esac
+done
+
+# shellcheck disable=SC2086 # the argument list is built here, one name at a time.
+exec env $unset_args \
+  HERDR_SOCKET_PATH=/nonexistent/herdr.sock \
+  HC_SESSION=shprd-isolated \
+  HERDR_APP_HOME="$scratch/app" \
+  SHPRD_HOME="$scratch/home" \
+  XDG_CONFIG_HOME="$scratch/config" \
+  XDG_STATE_HOME="$scratch/state" \
+  XDG_DATA_HOME="$scratch/data" \
+  XDG_CACHE_HOME="$scratch/cache" \
+  XDG_RUNTIME_DIR="$scratch/run" \
+  "$@"
