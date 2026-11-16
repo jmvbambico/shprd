@@ -67,6 +67,24 @@ export const InputState = { new: (options) => inputState(options) };
 /** The frame around retained text state, as the same chainable no-op. */
 export const Input = { new: () => element() };
 
+/**
+ * The retained multi-line state a mod constructs: the same state an input has,
+ * because a test drives a note's words and its handlers the same way.
+ */
+export const TextareaState = {
+  new: (options) => ({
+    ...inputState(options),
+    set_auto_grow: () => {},
+    set_rows: () => {},
+  }),
+};
+
+/** The frame around a text area, the same chainable no-op as `Input`. */
+export const Textarea = { new: () => element() };
+
+/** A spinbutton frame, unused by these mods but part of the base. */
+export const NumberInput = { new: () => element() };
+
 /** Every element entry point the mods use, and any other, as the same builder. */
 export const div = () => element();
 export const h_flex = () => element();
@@ -85,4 +103,7 @@ export default {
   ScrollHandle,
   InputState,
   Input,
+  TextareaState,
+  Textarea,
+  NumberInput,
 };

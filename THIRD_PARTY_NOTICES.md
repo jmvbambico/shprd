@@ -47,7 +47,12 @@ SOFTWARE.
   `settings_for()`, `task_settings()`),
   `core/settings.js` (`ROLES`, the role pick and level resolution,
   `otherCli()`), `mods/shepherdr-settings/main.js` (the per-scope level switch
-  and the rule that a value equal to the inherited one is deleted),
+  and the rule that a value equal to the inherited one is deleted, the
+  self-drawn `frame:"none"` dialog with its page list, its row anatomy — a
+  title, one line about it, the value and the scope line at the right, the box
+  underneath — and its stepwise controls),
+  `mods/shepherdr-settings/core/settings.js` (`SECTIONS`, `LEVEL`, `TITLE`),
+  `lib/ui.js` (`link`, `segmented`, `toggleSwitch`, `openSettings`),
   `mods/tasks/bin/herdr_task/provider.py` (`PROVIDER_WAITS`, `NUDGE`,
   `provider_cut`, `provider_error`),
   `mods/tasks/bin/herdr_task/takeover.py` (`backup_for`, `handover`,
@@ -73,9 +78,11 @@ SOFTWARE.
   at 140 characters, a dot per level, and a timeout per level with the older ones
   going first — from `mods/toasts/main.js` and `core/toasts.js`, the grouped
   two-line task rows and their second line from `mods/tasks/main.js` and
-  `core/tasks.js`, the settings page's role rows, its picker button and its
-  write-with-no-Save-step rule from `mods/shepherdr-settings/main.js`,
-  `mods/shepherdr-settings/settings.js` and `core/settings.js`, the needs-you
+  `core/tasks.js`, the settings page's role rows, its picker button, its
+  write-with-no-Save-step rule, its dialog frame, its page list and its level
+  switch from `mods/shepherdr-settings/main.js`,
+  `mods/shepherdr-settings/core/settings.js` and
+  `mods/shepherdr-settings/settings.js`, the needs-you
   cards — a question, permission or plan as one card with its choices and the
   answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
   `host/herdr-desktop/mods/{shprd-settings,shprd-asks}/main.js` and their

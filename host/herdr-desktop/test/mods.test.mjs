@@ -351,7 +351,8 @@ test("the side panel's buttons carry the counts of the stacks they open", () => 
   const buttons = panelButtons(STATE, "asks");
   assert.deepEqual(
     buttons.map((button) => button.id),
-    ["files", "changes", "tasks", "asks", "settings"],
+    ["files", "changes", "tasks", "asks"],
+    "the panel's stacks only: settings is a dialog, not a tab of the panel",
   );
   const tasks = buttons.find((button) => button.id === "tasks");
   assert.deepEqual({ needs: tasks.needs, ready: tasks.ready, active: tasks.active }, {

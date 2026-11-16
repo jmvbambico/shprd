@@ -48,11 +48,27 @@ export const BUILTIN = ["coordinator", "worker", "reviewer", "backup"];
 /** The three fields a role's pick is made of, in the order a page draws them. */
 export const PICKS = ["agent", "model", "effort"];
 
-/** What one pick is called, and the words under an empty one. */
+/**
+ * What one pick is called, the one line under it, and the words under an empty
+ * one: the three parts of Shepherdr's row anatomy (a title, a line about it, and
+ * the value at the right).
+ */
 export const PICK = {
-  agent: { label: "Program", empty: "Not chosen yet" },
-  model: { label: "Model", empty: "The program's default" },
-  effort: { label: "Effort", empty: "The program's default" },
+  agent: {
+    label: "Program",
+    about: "The program this role runs.",
+    empty: "Not chosen yet",
+  },
+  model: {
+    label: "Model",
+    about: "Which of the program's models it runs, or its own default.",
+    empty: "The program's default",
+  },
+  effort: {
+    label: "Effort",
+    about: "How hard the program thinks, where it offers levels.",
+    empty: "The program's default",
+  },
 };
 
 /** The words for what one write did (`SettingsOutcomeDto`). */
@@ -193,6 +209,7 @@ function pickOf(role, field, rows, roster) {
     field,
     key,
     label: PICK[field].label,
+    about: PICK[field].about,
     value,
     source: row?.source ?? null,
     layer: layerOf(row?.source),
@@ -344,4 +361,292 @@ export function health(document) {
     problems: document?.problems ?? [],
     notChecked: document?.not_checked ?? null,
   };
+}
+
+// -- the dialog's frame ------------------------------------------------------
+//
+// Settings is a window, not a tab (Shepherdr's own `openSettings()`): a list of
+// pages on the left, the page on the right, and on the left of each page that a
+// repository can own the level its writes go to. The pages, the level switch and
+// the rows are data here so the dialog, the tests and the words a person reads
+// are one thing.
+//
+// - Source: <https://github.com/eliasstravik/shepherdr>
+// - Paths: `mods/shepherdr-settings/core/settings.js` (`SECTIONS`, `LEVEL`,
+//   `TITLE`), `mods/shepherdr-settings/main.js` (`levelBar`, `row`, `scopeLine`)
+// - Commit: `a3f327a` (tag `v3.1.34`)
+// - License: MIT — Copyright (c) 2026 Elias Stravik
+
+/**
+ * The window's pages, in the order its list draws them.
+ *
+ * Shepherdr's list is Agents, Tasks, Autopilot, Notify, Secrets, Machines,
+ * Window, Web; shprd has three of those subjects today, and `Remote` is left in
+ * the list for the page M11.7 gives it (`soon`: drawn, dim, and not a page yet).
+ * A page shprd has nothing to put in is not invented: the list is the window's,
+ * and a person reading it is reading what is there.
+ *
+ * `repo: true` marks a page whose settings a repository can own, which is what
+ * puts the level switch over it.
+ */
+export const PAGES = [
+  { id: "agents", title: "Agents", repo: true },
+  { id: "tasks", title: "Tasks", repo: true },
+  { id: "prompts", title: "Prompts" },
+  { id: "remote", title: "Remote", soon: true },
+];
+
+/** The window's title, over the pages (Shepherdr's `TITLE`). */
+export const TITLE = "Settings";
+
+/**
+ * Where a write goes: your own settings, or this repository's entry.
+ *
+ * It is Shepherdr's level switch with shprd's two layers: `You` is the person's
+ * own file (every repository, unless one sets its own), and `This repo` is the
+ * entry for the repository this service serves. `for_repo` is what the write
+ * sends, so the words and the write can never disagree.
+ */
+export const SCOPES = [
+  { id: "you", word: "You", for_repo: false },
+  { id: "repo", word: "This repo", for_repo: true },
+];
+
+/** The level switch's words, under it (Shepherdr's `LEVEL`). */
+export const LEVEL = {
+  label: "Applies to",
+  you: "Your own settings: every repository, unless it sets its own.",
+  repo: (name) =>
+    name
+      ? `Only this repository (${name}): what it does not set is inherited from you.`
+      : "Only this repository: what it does not set is inherited from you.",
+  one: "The same for every repository.",
+};
+
+/** The words a row shows when this scope set its own value, and the way back. */
+export const CHANGED_HERE = "Set for this repository";
+/** The one write that puts a row back to what it inherits. */
+export const RESET = "Reset";
+
+/** The page an id names, or the first page the window has. */
+export function pageOf(id) {
+  return PAGES.find((page) => page.id === id && !page.soon) ?? PAGES[0];
+}
+
+/** The scope an id names, or the person's own. */
+export function scopeOf(id) {
+  return SCOPES.find((scope) => scope.id === id) ?? SCOPES[0];
+}
+
+/** The words under the level switch for one scope. */
+export function levelNote(scope, repository = null) {
+  const found = scopeOf(scope);
+  return found.for_repo ? LEVEL.repo(repository) : LEVEL.you;
+}
+
+/**
+ * One number's bounds, as the service checks them (`TaskKey::range`).
+ *
+ * The dialog's stepper refuses to step outside these and the service refuses the
+ * write anyway; both read the same numbers, so a click can never propose a value
+ * the service would answer with a sentence instead of a write.
+ */
+export const RANGE = {
+  "tasks.review_rounds": [1, 10],
+  "tasks.max_running": [1, 10],
+  "tasks.archive_after": [0, 3650],
+  "tasks.tick_secs": [1, 3600],
+  "tasks.news_settle_secs": [0, 3600],
+};
+
+/**
+ * The Tasks page's rows: the workflow keys `GET /api/settings` exposes, in the
+ * core's order (`TASK_KEYS`, then the review's own switch).
+ *
+ * Each row says what it is, what it does in one line, and what kind of control
+ * it takes: `choice` (a fixed set of words), `switch` (a yes or a no), `number`
+ * (a stepper inside `RANGE`) or `text` (a box under the row, written when the
+ * person leaves it).
+ */
+export const WORKFLOW = [
+  {
+    key: "tasks.merge",
+    title: "When a task lands",
+    about: "What has to be true before a finished task is merged.",
+    kind: "choice",
+    choices: [
+      ["ask", "Ask me"],
+      ["checks", "Checks pass"],
+      ["auto", "By itself"],
+    ],
+  },
+  {
+    key: "tasks.review_rounds",
+    title: "Review rounds",
+    about: "How many times a task may go back to its worker before it needs you.",
+    kind: "number",
+  },
+  {
+    key: "tasks.must_fix",
+    title: "Must-fix findings",
+    about: "Findings this severe or worse fail a review.",
+    kind: "choice",
+    choices: [
+      ["critical", "Critical"],
+      ["major", "Major"],
+      ["minor", "Minor"],
+      ["trivial", "Trivial"],
+    ],
+  },
+  {
+    key: "tasks.proof",
+    title: "Ask for proof",
+    about: "Each task hands in one artifact of real proof with its work.",
+    kind: "switch",
+  },
+  {
+    key: "tasks.max_running",
+    title: "Tasks at once",
+    about: "How many tasks this run may work on at the same time.",
+    kind: "number",
+  },
+  {
+    key: "tasks.archive_after",
+    title: "Archive done tasks",
+    about: "Days a finished task stays in your lists; 0 keeps it for ever.",
+    kind: "number",
+    unit: "days",
+  },
+  {
+    key: "tasks.archive_namespace",
+    title: "Archive branches as",
+    about: "Where a branch the janitor removes is kept.",
+    kind: "text",
+  },
+  {
+    key: "tasks.worktrees",
+    title: "A worktree per task",
+    about: "Each task works in a worktree of its own, off a branch of its own.",
+    kind: "switch",
+  },
+  {
+    key: "tasks.base",
+    title: "Base branch",
+    about: "The branch a task is cut from, when the repository names none.",
+    kind: "text",
+  },
+  {
+    key: "tasks.branch",
+    title: "Branch names",
+    about: "The pattern a task's branch is named after.",
+    kind: "text",
+  },
+  {
+    key: "tasks.start_notes",
+    title: "When a task starts",
+    about: "Words every task's brief carries before its own work.",
+    kind: "notes",
+  },
+  {
+    key: "tasks.finish_notes",
+    title: "Before a task reports",
+    about: "Words every task's brief carries before it hands in.",
+    kind: "notes",
+  },
+  {
+    key: "tasks.tick_secs",
+    title: "Time between passes",
+    about: "Seconds between two passes of the service's tick.",
+    kind: "number",
+    unit: "seconds",
+  },
+  {
+    key: "tasks.news_settle_secs",
+    title: "Let news settle",
+    about: "Seconds a change holds before the coordinator is told about it.",
+    kind: "number",
+    unit: "seconds",
+  },
+  {
+    key: "review.cross_vendor",
+    title: "Cross-vendor review",
+    about: "A reviewer never shares the worker's vendor, so the review is independent.",
+    kind: "switch",
+  },
+];
+
+/** The value one row holds: a string, a number, a boolean or a list. */
+function valueOf(row) {
+  if (!row) return null;
+  const value = row.value;
+  if (typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  return Array.isArray(value) ? value : null;
+}
+
+/** How a row's value reads at the right of its line. */
+function displayOf(spec, value) {
+  if (spec.kind === "switch") return value === true ? "On" : "Off";
+  if (spec.kind === "choice") {
+    const found = (spec.choices ?? []).find(([choice]) => choice === value);
+    return found ? found[1] : String(value ?? "not set");
+  }
+  if (spec.kind === "number") {
+    if (value === null) return "not set";
+    return spec.unit ? `${value} ${spec.unit}` : String(value);
+  }
+  const text = typeof value === "string" ? value : "";
+  return text.trim() === "" ? "not set" : text;
+}
+
+/**
+ * The Tasks page's rows, as the page draws them: what each key is set to, the
+ * layer that answered it, and the choices or bounds its control offers.
+ *
+ * A key the service does not answer is still a row, with `value: null` and no
+ * layer: a page that silently dropped it would let a person believe the setting
+ * was gone. `control` says which widget: `segmented` (a `choice`), `switch`,
+ * `stepper` (a `number`) or `box` (a `text` or `notes` field).
+ */
+export function workflowRows(document) {
+  const rows = rowsOf(document);
+  return WORKFLOW.map((spec) => {
+    const row = rows.get(spec.key);
+    const value = valueOf(row);
+    const control =
+      spec.kind === "choice" ? "segmented" : spec.kind === "switch" ? "switch" : spec.kind === "number" ? "stepper" : "box";
+    const bounds = RANGE[spec.key] ?? null;
+    return {
+      ...spec,
+      control,
+      value,
+      display: displayOf(spec, value),
+      layer: layerOf(row?.source),
+      source: row?.source ?? null,
+      min: bounds?.[0] ?? null,
+      max: bounds?.[1] ?? null,
+    };
+  });
+}
+
+/**
+ * The number a step of a stepper would write, clamped to the row's own bounds.
+ *
+ * The stepper's two buttons are the only way the dialog writes a number, so a
+ * value the service would refuse cannot be proposed: the bounds are the Rust
+ * `TaskKey::range`'s, and stepping past an end stays at it.
+ */
+export function stepped(value, by, key) {
+  const [min, max] = RANGE[key] ?? [0, Number.MAX_SAFE_INTEGER];
+  const from = Number.isFinite(Number(value)) ? Math.trunc(Number(value)) : min;
+  return Math.max(min, Math.min(max, from + by));
+}
+
+/**
+ * What the level switch writes with: whether a write goes to this repository's
+ * entry, as `PUT /api/settings` takes it.
+ */
+export function forRepo(scope) {
+  return scopeOf(scope).for_repo;
 }
