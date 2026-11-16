@@ -357,10 +357,12 @@ pub fn resolve_home(home: Option<&Path>) -> Result<PathBuf, CliError> {
 /// different directory from the engine's home ([`resolve_home`]), which may be
 /// `SHPRD_HOME` or a `--home` flag and which no CLI writes a session under, and
 /// it is why a chat that looked under the engine's home never found one.
-pub fn resolve_agent_home() -> PathBuf {
-    env_value("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+///
+/// `None` is a process with no `$HOME` at all. That is not a reason to fall back
+/// to the engine's home — the guess would be wrong in exactly the case this
+/// resolver exists for — so a caller says it was not told instead.
+pub fn resolve_agent_home() -> Option<PathBuf> {
+    env_value("HOME").map(PathBuf::from)
 }
 
 /// Resolves the XDG data home an agent CLI writes under: `$XDG_DATA_HOME` when

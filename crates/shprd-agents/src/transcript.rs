@@ -17,11 +17,22 @@
 //!
 //! The location is the same pattern language a harness's `[records]` location
 //! uses — `~`, `{cwd_slug}`, `{session}`, `{yyyy}`, `{mm}`, `{dd}` and `*` — with
-//! one addition: for a chat, the session is often one the service did not start
+//! two additions: for a chat, the session is often one the service did not start
 //! and has no id for, so the placeholders and `*` are matched as wildcards when
-//! looking. `{cwd_slug}` is the program's own name for a working directory,
-//! because Claude Code and pi fold a path into a folder name differently
-//! ([`cwd_slug`]).
+//! looking; and `{data_home}` names the XDG data home a CLI writes under, which
+//! is `<home>/.local/share` only while `$XDG_DATA_HOME` is unset (OpenCode and
+//! kilo both resolve it). `{cwd_slug}` is the program's own name for a working
+//! directory, because Claude Code and pi fold a path into a folder name
+//! differently ([`cwd_slug`]).
+//!
+//! # Whose home
+//!
+//! A record is the CLI's own file, so it is looked for under the roots *that
+//! process* had: the real `HOME` it inherits (shprd never rewrites it — `HOME`
+//! is a protected variable, [`crate::env`]) and its XDG data home. That is
+//! [`Roots`], and it is deliberately not the engine's home: a service whose
+//! `SHPRD_HOME` is somewhere else still reads the transcripts the agents wrote,
+//! because no CLI has ever written one under `SHPRD_HOME`.
 //!
 //! # The common shape
 //!
@@ -38,9 +49,10 @@
 //! session is read once and then followed. A JSONL record's cursor is a byte
 //! offset into that file: only what was appended is parsed, a half-written last
 //! line is left for the next read, and a file that was replaced or truncated
-//! starts over rather than seeking past its end. OpenCode keeps a session as
-//! one file a message and a folder of parts for each message, so its cursor is
-//! the index of the next message to deliver and only the new parts are read.
+//! starts over rather than seeking past its end. OpenCode keeps a session as a
+//! row in a database (or, before 1.18, one file a message and a folder of parts
+//! for each message), so its cursor is the index of the next message to deliver
+//! and only the new parts are read.
 //!
 //! One read is bounded ([`MAX_BYTES`], [`MAX_MESSAGES`]) so a first look at a
 //! long session answers quickly; [`Page::more`] says another call has work to
@@ -55,6 +67,7 @@
 //! - Commit: `a3f327a` (tag `v3.1.34`)
 //! - License: MIT — Copyright (c) 2026 Elias Stravik
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -1075,35 +1088,28 @@ fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
     let connection = open_ro(db)?;
     let mut statement = connection
         .prepare(
-            "SELECT s.id, s.directory, s.time_updated FROM session s \
-             ORDER BY s.time_updated DESC",
+            "SELECT id, directory FROM session \
+             ORDER BY time_updated DESC, id DESC",
         )
         .ok()?;
     let rows = statement
         .query_map((), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })
         .ok()?;
-    let mut candidates: Vec<(i64, String)> = Vec::new();
-    for row in rows.flatten() {
-        let (id, directory, updated) = row;
-        // A session that records no directory at all is not refused: an older
-        // OpenCode wrote the folder only into the message parts, and a row with
-        // an empty `directory` records nothing either.
-        if directory
-            .as_deref()
-            .is_some_and(|directory| !directory.is_empty() && !same_dir(Path::new(directory), cwd))
-        {
-            continue;
-        }
-        candidates.push((updated, id));
-    }
-    candidates.sort_by_key(|candidate| candidate.0);
-    let (_, session) = candidates.pop()?;
+    // The first row is the newest session that belongs here: the query is
+    // newest-first, so the search stops at its answer.
+    let session = rows
+        .flatten()
+        .find(|(_, directory)| {
+            // A session that records no directory at all is not refused: an older
+            // OpenCode wrote the folder only into the message parts, and a row
+            // with an empty `directory` records nothing either.
+            directory
+                .as_deref()
+                .is_none_or(|directory| directory.is_empty() || same_dir(Path::new(directory), cwd))
+        })
+        .map(|(id, _)| id)?;
     Some(Transcript {
         format: TranscriptFormat::OpencodeSqlite,
         source: Source::Database {
@@ -1141,7 +1147,7 @@ fn database_messages(db: &Path, session: &str) -> Result<Vec<DatabaseMessage>, T
     })?;
     // A database that predates the `part` table has no parts, not an error: its
     // messages still show, with the words the row itself carries.
-    let mut parts: Vec<(String, Value)> = Vec::new();
+    let mut parts: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     if let Ok(mut statement) = connection.prepare(
         "SELECT message_id, data FROM part WHERE session_id = ?1 \
          ORDER BY time_created, id",
@@ -1154,7 +1160,7 @@ fn database_messages(db: &Path, session: &str) -> Result<Vec<DatabaseMessage>, T
         for row in rows {
             let (message_id, data) = row.map_err(|error| list(db, error))?;
             if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                parts.push((message_id, value));
+                parts.entry(message_id).or_default().push(value);
             }
         }
     }
@@ -1179,11 +1185,7 @@ fn database_messages(db: &Path, session: &str) -> Result<Vec<DatabaseMessage>, T
         let Ok(header) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
-        let mine: Vec<Value> = parts
-            .iter()
-            .filter(|(message_id, _)| message_id == &id)
-            .map(|(_, value)| value.clone())
-            .collect();
+        let mine = parts.remove(&id).unwrap_or_default();
         messages.push(DatabaseMessage {
             id,
             created,
@@ -1345,7 +1347,7 @@ fn expand_path(location: &str, roots: &Roots) -> Option<PathBuf> {
 ///
 /// * Claude Code folds *every* character that is not an ASCII letter or digit
 ///   into `-`, keeping the leading separator (`/work/my_repo.v2` becomes
-///   `-work-my-repo-v2`). A folded name longer than [`CLAUDE_SLUG_MAX`] is cut
+///   `-work-my-repo-v2`). A folded name longer than 200 characters is cut
 ///   there and suffixed with `-<base36 hash of the whole path>`, so two deep
 ///   paths that share a prefix do not collide.
 /// * pi drops the leading separator, folds `/`, `\` and `:` into `-` and wraps

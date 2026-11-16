@@ -2237,14 +2237,36 @@ levels = [\"low\", \"high\"]
     fn accepts_shipped_location_patterns() {
         for location in [
             "~/.claude/projects/{cwd_slug}/{session}.jsonl",
+            "~/.claude/projects/{cwd_slug}/*.jsonl",
             "~/.codex/sessions/{yyyy}/{mm}/{dd}/rollout-*.jsonl",
             "~/.pi/agent/sessions/{cwd_slug}/*_{session}.jsonl",
-            "~/.local/share/kilo/kilo.db",
+            "~/.pi/agent/sessions/{cwd_slug}/*.jsonl",
+            "{data_home}/opencode/opencode.db",
+            "{data_home}/opencode/storage",
+            "{data_home}/kilo/kilo.db",
         ] {
             if let Err(error) = validate_location(location) {
                 panic!("{location} should validate: {error}");
             }
         }
+    }
+
+    /// `{data_home}` is a root like `~`, so it belongs at the front and nowhere
+    /// else: `~/.local/share` is one place, `~/.local/share/{data_home}` is
+    /// another directory and not a thing any CLI writes.
+    #[test]
+    fn rejects_a_data_home_outside_the_first_component() {
+        let error = match validate_location("~/.local/share/{data_home}/opencode.db") {
+            Ok(()) => panic!("a misplaced `{{data_home}}` should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DataHomeNotLeading { .. }));
+        // A pattern that merely contains the word is not a root either.
+        let error = match validate_location("/work/{data_home}.db") {
+            Ok(()) => panic!("a trailing `{{data_home}}` should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SpecError::DataHomeNotLeading { .. }));
     }
 
     #[test]

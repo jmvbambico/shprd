@@ -46,7 +46,107 @@ fn recorded(program: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("a temp home");
     copy_dir(&fixtures().join(program).join("home"), dir.path());
     let home = dir.path().to_path_buf();
+    // OpenCode's fixture is a set of rows rather than a database file, so a
+    // review can read it: the database is built from them here, exactly as
+    // OpenCode's own schema stores them.
+    let rows = home.join(".local/share/opencode/rows");
+    if rows.is_dir() {
+        build_opencode(&rows, &home.join(".local/share/opencode/opencode.db"));
+        fs::remove_dir_all(&rows).unwrap();
+    }
     (dir, home)
+}
+
+/// Build an OpenCode database from `rows`, the way OpenCode 1.18.35 stores it.
+///
+/// One `session` row names the directory; `message` holds one row a message with
+/// the header in `data`, and `part` one row a part. The fixture keeps the rows as
+/// JSON files so a person reviewing the diff can read them.
+fn build_opencode(rows: &Path, db: &Path) {
+    let connection = rusqlite::Connection::open(db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT,
+                name TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL,
+                title TEXT NOT NULL, version TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    };
+    for file in fs::read_dir(rows.join("session")).unwrap().flatten() {
+        let session = read(&file.path());
+        connection
+            .execute(
+                "INSERT INTO project VALUES (?1, ?2, 'git', 'repo', ?3, ?3)",
+                (
+                    session["project_id"].as_str().unwrap(),
+                    session["directory"].as_str().unwrap(),
+                    session["time_created"].as_i64().unwrap(),
+                ),
+            )
+            .ok();
+        connection
+            .execute(
+                "INSERT INTO session VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (
+                    session["id"].as_str().unwrap(),
+                    session["project_id"].as_str().unwrap(),
+                    session["slug"].as_str().unwrap(),
+                    session["directory"].as_str().unwrap(),
+                    session["title"].as_str().unwrap(),
+                    session["version"].as_str().unwrap(),
+                    session["time_created"].as_i64().unwrap(),
+                    session["time_updated"].as_i64().unwrap(),
+                ),
+            )
+            .unwrap();
+    }
+    // One folder a kind, one file a row, named by the session the row belongs
+    // to: the same shape OpenCode's own store used before the database.
+    for (kind, sql) in [
+        ("message", "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)"),
+        ("part", "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)"),
+    ] {
+        for session in fs::read_dir(rows.join(kind)).unwrap().flatten() {
+            for file in fs::read_dir(session.path()).unwrap().flatten() {
+                let row = read(&file.path());
+                match kind {
+                    "message" => connection
+                        .execute(
+                            sql,
+                            (
+                                row["id"].as_str().unwrap(),
+                                row["session_id"].as_str().unwrap(),
+                                row["time_created"].as_i64().unwrap(),
+                                row["data"].to_string(),
+                            ),
+                        )
+                        .unwrap(),
+                    _ => connection
+                        .execute(
+                            sql,
+                            (
+                                row["id"].as_str().unwrap(),
+                                row["message_id"].as_str().unwrap(),
+                                row["session_id"].as_str().unwrap(),
+                                row["time_created"].as_i64().unwrap(),
+                                row["data"].to_string(),
+                            ),
+                        )
+                        .unwrap(),
+                };
+            }
+        }
+    }
 }
 
 /// Locate the fixture session of `program` under `home`.

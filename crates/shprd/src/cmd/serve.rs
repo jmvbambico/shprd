@@ -110,11 +110,12 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // inherits (shprd never rewrites it: it is a protected variable) and the
     // `$XDG_DATA_HOME` this process was started with. The engine's own home is
     // `SHPRD_HOME`, which no CLI writes a session under, so it is not the root a
-    // transcript is looked for in (M10 gate bug 2).
-    config.transcript_roots = Some(shprd_agents::transcript::Roots::new(
-        &resolve_agent_home(),
-        resolve_agent_data_home().as_deref(),
-    ));
+    // transcript is looked for in (M10 gate bug 2). A process with no `$HOME`
+    // leaves this unset rather than guessing, and the chat's route then says it
+    // was not told.
+    config.transcript_roots = resolve_agent_home().map(|agent_home| {
+        shprd_agents::transcript::Roots::new(&agent_home, resolve_agent_data_home().as_deref())
+    });
     // The roster's pickers ask a program for the models it runs, so the service
     // is given the `PATH` this process was started with rather than reading one
     // of its own: what a request may start is the binary's decision, resolved
