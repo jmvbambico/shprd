@@ -22,7 +22,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { shared, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import { taskById } from "./lib/board.js";
 import { card as surface, cardHeader, note } from "./lib/panel.js";
 import { PR_WORDS, openUrl, taskPr } from "./lib/taskpr.js";
@@ -49,22 +49,24 @@ export default class TaskPr extends View {
     return taskById(this.state, thread?.task ?? null);
   }
 
-  /** Reads the board once; a service that went away is looked for again. */
+  /**
+   * Reads the board once; a service that restarted or went away is looked for
+   * again, and the card's whole state is re-read rather than kept (M10 gate
+   * bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.failure = "shprd serve is not running";
-          this.state = null;
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.failure = "shprd serve is not running";
+        this.state = null;
+        cx.notify();
+        return;
       }
-      const state = await this.client.state();
-      if (state) this.state = state;
+      this.client = next.client;
+      this.follow();
+      this.state = await this.client.state();
       this.failure = null;
     } catch (err) {
       this.client = null;

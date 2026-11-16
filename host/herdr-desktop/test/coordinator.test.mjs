@@ -11,7 +11,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import * as herdr from "herdr";
 import Coordinator from "../mods/shprd-coordinator/main.js";
+import { serviceFile } from "../mods/lib/client.js";
 import {
   BUBBLE_MAX,
   COORDINATOR,
@@ -177,14 +179,20 @@ test("the next request asks from the cursor the last page answered with", () => 
  * A panel whose client records every call.
  *
  * `answer` is what a GET answers, or a list of answers given out in order, so a
- * test can prove a page with `more` is followed by another call.
+ * test can prove a page with `more` is followed by another call. The client has
+ * an `id()` and a `service.json` on disk naming the same one, because every panel
+ * now asks `attach` before it reads whether the service it holds is still the one
+ * that is running; a client with no record beside it would look like a restart.
  */
 function panel(answers = [page()]) {
   const run = context();
   const calls = [];
   const queue = Array.isArray(answers) ? answers.slice() : [answers];
+  herdr.putFile(serviceFile("/state"), '{"port": 7788, "id": "abc"}');
   const client = {
     dir: "/state",
+    record: { port: 7788, id: "abc" },
+    id: () => "abc",
     call: async (method, path, options = {}) => {
       calls.push({ method, path, body: options.body ?? null });
       if (method === "GET") return queue.length > 1 ? queue.shift() : queue[0];

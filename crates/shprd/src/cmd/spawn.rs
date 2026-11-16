@@ -113,6 +113,12 @@ pub struct SpawnEnv<'a> {
     /// before its brief counts as undelivered. Production reads it from the
     /// environment; tests set it explicitly.
     pub ready_wait: Duration,
+    /// The roots the agent CLIs write their session records under: the real
+    /// `HOME` they inherit (`HOME` is a protected variable, so a spawn never
+    /// rewrites it) and the XDG data home they resolve. The chat and the
+    /// watchdog read a CLI's own file, so they look where *that* process wrote,
+    /// never under the engine's `SHPRD_HOME`.
+    pub transcript_roots: shprd_agents::transcript::Roots,
 }
 
 /// What the caller asked for.
@@ -1820,7 +1826,11 @@ pub fn build_env_in<'a>(
         .as_ref()
         .ok_or_else(|| CliError::other(anyhow!("no run yet: start one with `shprd run start`")))?;
     let repo_name = repo_name(&ctx.root)?;
-    let base_env = std::env::vars().collect();
+    let base_env: BTreeMap<String, String> = std::env::vars().collect();
+    // The roots the agent CLIs write under are read from the same environment
+    // they will inherit, so a launch that carries `HOME` or `$XDG_DATA_HOME`
+    // reads its own records and not the service's.
+    let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
     Ok(SpawnEnv {
         ctx,
         layout: Layout::default_for_home(&home),
@@ -1840,6 +1850,7 @@ pub fn build_env_in<'a>(
         compat,
         base_env,
         ready_wait: super::deliver::ready_wait(),
+        transcript_roots,
     })
 }
 
@@ -2385,6 +2396,7 @@ project_dirs = []
             let mut base_env = BTreeMap::new();
             base_env.insert("GH_TOKEN".to_string(), "secret".to_string());
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
             SpawnEnv {
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
@@ -2412,6 +2424,7 @@ project_dirs = []
                 // No wait: a fake pane that never reports an agent would
                 // otherwise stall every test that launches one.
                 ready_wait: Duration::ZERO,
+                transcript_roots,
             }
         }
 

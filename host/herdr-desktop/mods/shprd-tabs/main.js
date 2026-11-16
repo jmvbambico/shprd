@@ -26,7 +26,7 @@ import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { layout, panes, run, spaces, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import { badge, countBadge } from "./lib/panel.js";
 import { panelButtons, tabRows } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
@@ -44,19 +44,23 @@ export default class Tabs extends View {
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** Reads the board once; the pills fall back to Herdr's own status alone. */
+  /**
+   * Reads the board once; the pills fall back to Herdr's own status alone.
+   *
+   * A restarted service is noticed by `attach` (the id in `service.json` moved),
+   * so the bar takes the new client and re-reads the board instead of keeping the
+   * old words beside it (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          cx.notify();
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        cx.notify();
+        return;
       }
-      const state = await this.client.state();
-      if (state) this.state = state;
+      this.client = next.client;
+      this.state = await this.client.state();
     } catch (err) {
       // A restarted service answers with another id, so the next look finds the
       // new port rather than dialling a dead one; the pills keep working without

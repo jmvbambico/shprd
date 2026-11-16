@@ -47,7 +47,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { hc, layout, run, terminals, theme } from "herdr";
 
-import { Client, discover, reason } from "./lib/client.js";
+import { attach, reason } from "./lib/client.js";
 import { card, cardHeader } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -88,25 +88,30 @@ export default class Graph extends View {
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** Reads the service's answer about the graph, then shows what it says. */
+  /**
+   * Reads the service's answer about the graph, then shows what it says.
+   *
+   * A restarted service is a new client (`attach` compares the `id`), and the
+   * note forgets the old one's answer before reading the new: a graph of a run
+   * that is gone is worse than no graph (M10 gate bug 5).
+   */
   async refresh(cx = this.cx) {
     try {
-      if (!this.client) {
-        const found = await discover({ wait: (ms) => cx.sleep(ms) });
-        if (!found) {
-          this.service = null;
-          this.graph = null;
-          this.failure = "shprd serve is not running";
-          this.show(cx);
-          return;
-        }
-        this.client = new Client(found, { wait: (ms) => cx.sleep(ms) });
-        this.follow();
+      const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (!next.client) {
+        this.client = null;
+        this.service = null;
+        this.graph = null;
+        this.failure = "shprd serve is not running";
+        this.show(cx);
+        return;
       }
+      if (next.restarted) this.forget();
+      this.client = next.client;
+      this.follow();
       this.service = this.client.record;
       await this.forgetDead();
-      const graph = await this.client.graph();
-      if (graph) this.graph = graph;
+      this.graph = await this.client.call("GET", "/api/graph", { strict: true });
       this.failure = null;
     } catch (err) {
       // A restarted service answers with another id: drop the client so the next
@@ -117,6 +122,19 @@ export default class Graph extends View {
       this.failure = reason(err);
     }
     this.show(cx);
+  }
+
+  /**
+   * Drops what was read from the service that went away.
+   *
+   * The terminal start is forgotten too: a new service may have started its own
+   * `shprd-graph`, and asking for a second one under the same name would only
+   * shadow it.
+   */
+  forget() {
+    this.graph = null;
+    this.startedFor = null;
+    this.cleaned = false;
   }
 
   /**

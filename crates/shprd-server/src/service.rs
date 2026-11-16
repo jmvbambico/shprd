@@ -533,6 +533,15 @@ pub struct Config {
     /// started without one answers `POST /api/chat` with a refusal rather than
     /// pretending the line went somewhere.
     pub chat: crate::chat::ChatHost,
+    /// The home and data home the agent CLIs run with, when the binary resolved
+    /// them.
+    ///
+    /// The binary passes the environment its launches will inherit, so the chat
+    /// reads a CLI's own records where that CLI wrote them
+    /// ([`shprd_agents::transcript::Roots`]) and never under the engine's
+    /// `SHPRD_HOME`. `None` is a service nobody told, which the chat's route
+    /// says rather than looking in the wrong directory.
+    pub transcript_roots: Option<shprd_agents::transcript::Roots>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -588,6 +597,7 @@ impl Config {
             dagr: None,
             engine: None,
             chat: crate::chat::ChatHost::new(),
+            transcript_roots: None,
         }
     }
 }
@@ -631,6 +641,7 @@ impl Service {
                 data: config.data.clone(),
                 path_env: config.path_env.clone(),
                 dagr: config.dagr.clone(),
+                transcript_roots: config.transcript_roots.clone(),
             },
         )?
         // The spawn and the close are the binary's, wired exactly as the tick's

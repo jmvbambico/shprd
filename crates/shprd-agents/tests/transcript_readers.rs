@@ -46,7 +46,107 @@ fn recorded(program: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("a temp home");
     copy_dir(&fixtures().join(program).join("home"), dir.path());
     let home = dir.path().to_path_buf();
+    // OpenCode's fixture is a set of rows rather than a database file, so a
+    // review can read it: the database is built from them here, exactly as
+    // OpenCode's own schema stores them.
+    let rows = home.join(".local/share/opencode/rows");
+    if rows.is_dir() {
+        build_opencode(&rows, &home.join(".local/share/opencode/opencode.db"));
+        fs::remove_dir_all(&rows).unwrap();
+    }
     (dir, home)
+}
+
+/// Build an OpenCode database from `rows`, the way OpenCode 1.18.35 stores it.
+///
+/// One `session` row names the directory; `message` holds one row a message with
+/// the header in `data`, and `part` one row a part. The fixture keeps the rows as
+/// JSON files so a person reviewing the diff can read them.
+fn build_opencode(rows: &Path, db: &Path) {
+    let connection = rusqlite::Connection::open(db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT,
+                name TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL,
+                title TEXT NOT NULL, version TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    };
+    for file in fs::read_dir(rows.join("session")).unwrap().flatten() {
+        let session = read(&file.path());
+        connection
+            .execute(
+                "INSERT INTO project VALUES (?1, ?2, 'git', 'repo', ?3, ?3)",
+                (
+                    session["project_id"].as_str().unwrap(),
+                    session["directory"].as_str().unwrap(),
+                    session["time_created"].as_i64().unwrap(),
+                ),
+            )
+            .ok();
+        connection
+            .execute(
+                "INSERT INTO session VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (
+                    session["id"].as_str().unwrap(),
+                    session["project_id"].as_str().unwrap(),
+                    session["slug"].as_str().unwrap(),
+                    session["directory"].as_str().unwrap(),
+                    session["title"].as_str().unwrap(),
+                    session["version"].as_str().unwrap(),
+                    session["time_created"].as_i64().unwrap(),
+                    session["time_updated"].as_i64().unwrap(),
+                ),
+            )
+            .unwrap();
+    }
+    // One folder a kind, one file a row, named by the session the row belongs
+    // to: the same shape OpenCode's own store used before the database.
+    for (kind, sql) in [
+        ("message", "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)"),
+        ("part", "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)"),
+    ] {
+        for session in fs::read_dir(rows.join(kind)).unwrap().flatten() {
+            for file in fs::read_dir(session.path()).unwrap().flatten() {
+                let row = read(&file.path());
+                match kind {
+                    "message" => connection
+                        .execute(
+                            sql,
+                            (
+                                row["id"].as_str().unwrap(),
+                                row["session_id"].as_str().unwrap(),
+                                row["time_created"].as_i64().unwrap(),
+                                row["data"].to_string(),
+                            ),
+                        )
+                        .unwrap(),
+                    _ => connection
+                        .execute(
+                            sql,
+                            (
+                                row["id"].as_str().unwrap(),
+                                row["message_id"].as_str().unwrap(),
+                                row["session_id"].as_str().unwrap(),
+                                row["time_created"].as_i64().unwrap(),
+                                row["data"].to_string(),
+                            ),
+                        )
+                        .unwrap(),
+                };
+            }
+        }
+    }
 }
 
 /// Locate the fixture session of `program` under `home`.
@@ -268,17 +368,22 @@ fn codex_finds_the_rollout_that_names_this_directory() {
 }
 
 #[test]
-fn opencode_joins_a_session_of_message_files_and_its_parts() {
+fn opencode_joins_the_messages_and_parts_of_its_database() {
     let (_dir, home) = recorded("opencode");
     let transcript = locate("opencode", &home);
     assert_eq!(transcript.session(), "ses_fixture");
+    assert_eq!(transcript.format(), TranscriptFormat::OpencodeSqlite);
     let page = transcript.read("").expect("the fixture reads");
     assert_eq!(page.messages.len(), 2);
     assert_eq!(page.messages[0].role, Role::User);
     assert_eq!(page.messages[0].text, "Review the last commit.");
     assert_eq!(page.messages[1].role, Role::Assistant);
     assert_eq!(page.messages[1].text, "Reading the commit now.");
-    assert_eq!(page.messages[1].tools.len(), 1);
+    assert_eq!(
+        page.messages[1].tools.len(),
+        1,
+        "the reasoning part is bookkeeping, the tool is a row"
+    );
     assert_eq!(page.messages[1].tools[0].name, "bash");
     assert_eq!(page.messages[1].tools[0].summary, "git show --stat HEAD");
     assert!(page.messages[1].at_ms.is_some());
@@ -290,31 +395,65 @@ fn opencode_reads_on_from_the_message_index_and_only_finds_its_own_directory() {
     let (_dir, home) = recorded("opencode");
     let transcript = locate("opencode", &home);
     let first = transcript.read("").expect("the fixture reads");
-    let store = home.join(".local/share/opencode/storage");
-    // A newer session for another project must not be adopted.
-    fs::create_dir_all(store.join("session/other")).unwrap();
-    fs::write(
-        store.join("session/other/ses_other.json"),
-        r#"{"id":"ses_other","directory":"/work/other","time":{"created":1,"updated":9999999999999}}"#,
-    )
-    .unwrap();
-    let message = store.join("message/ses_fixture/msg_3.json");
-    fs::write(
-        &message,
-        r#"{"id":"msg_3","sessionID":"ses_fixture","role":"user","time":{"created":1768956700000}}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(store.join("part/msg_3")).unwrap();
-    fs::write(
-        store.join("part/msg_3/prt_5.json"),
-        r#"{"id":"prt_5","sessionID":"ses_fixture","messageID":"msg_3","type":"text","text":"Thanks."}"#,
-    )
-    .unwrap();
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    // A newer session for another directory must not be adopted.
+    connection
+        .execute(
+            "INSERT INTO project VALUES ('proj_other', '/work/other', 'git', 'other', 1, ?1)",
+            (9_999_999_999_999i64,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_other', 'proj_other', NULL, 'other', '/work/other', \
+             'Other', '1.18.35', 1, ?1)",
+            (9_999_999_999_999i64,),
+        )
+        .unwrap();
+    // A third message on this session, with one part: the page gains exactly one.
+    connection
+        .execute(
+            "INSERT INTO message VALUES ('msg_3', 'ses_fixture', 1768956700000, 1768956700000, ?1)",
+            (r#"{"role":"user","time":{"created":1768956700000}}"#,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_5', 'msg_3', 'ses_fixture', 1768956700000, \
+             1768956700000, ?1)",
+            (r#"{"type":"text","text":"Thanks."}"#,),
+        )
+        .unwrap();
+    drop(connection);
     let page = transcript.read(&first.cursor).expect("the fixture reads");
-    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages.len(), 1, "{:?}", page.messages);
     assert_eq!(page.messages[0].text, "Thanks.");
     assert_eq!(page.cursor, "ses_fixture@3");
     assert_eq!(locate("opencode", &home).session(), "ses_fixture");
+}
+
+/// An installation that still has the pre-1.18 folder store is read with the
+/// store format, and reads the same conversation the database holds: the two
+/// shapes are one store, and the harness table is the only thing that says
+/// which one a CLI wrote.
+#[test]
+fn the_older_folder_store_reads_the_same_conversation() {
+    let (_dir, home) = recorded("opencode-store");
+    let spec = shprd_agents::spec::TranscriptSpec {
+        format: Some(TranscriptFormat::OpencodeStorage),
+        location: Some("{data_home}/opencode/storage".to_string()),
+    };
+    let transcript =
+        Transcript::locate(&spec, &home, Path::new(CWD)).expect("the older fixture store is found");
+    assert_eq!(transcript.session(), "ses_fixture");
+    assert_eq!(transcript.format(), TranscriptFormat::OpencodeStorage);
+    let page = transcript.read("").expect("the fixture reads");
+    assert_eq!(page.messages.len(), 2);
+    assert_eq!(page.messages[0].text, "Review the last commit.");
+    assert_eq!(page.messages[1].text, "Reading the commit now.");
+    assert_eq!(page.messages[1].tools[0].name, "bash");
+    assert_eq!(page.cursor, "ses_fixture@2");
 }
 
 #[cfg(unix)]
@@ -328,13 +467,15 @@ fn a_record_is_matched_through_a_symlinked_directory() {
     fs::create_dir_all(&real).unwrap();
     let link = dir.path().join("linked");
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let session = home.join(".local/share/opencode/storage/session/proj_fixture/ses_fixture.json");
-    let text = fs::read_to_string(&session).unwrap();
-    fs::write(
-        &session,
-        text.replace("/work/repo", &real.display().to_string()),
-    )
-    .unwrap();
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE session SET directory = ?1 WHERE id = 'ses_fixture'",
+            (real.display().to_string(),),
+        )
+        .unwrap();
+    drop(connection);
     let transcript = Transcript::locate(harness("opencode").transcript(), &home, &link)
         .expect("the session is found through the symlink");
     assert_eq!(transcript.session(), "ses_fixture");
@@ -393,15 +534,40 @@ fn every_shipped_harness_that_names_a_format_names_its_location() {
     assert_eq!(readable, ["claude", "codex", "opencode", "pi"]);
 }
 
-/// A store whose session files are not JSON at all is no transcript rather than
-/// an error, so a half-written session file cannot break the panel.
+/// A folder store whose session files are not JSON at all is no transcript rather
+/// than an error, so a half-written session file cannot break the panel.
 #[test]
 fn an_unreadable_store_file_is_skipped() {
-    let (dir, home) = recorded("opencode");
+    let (dir, home) = recorded("opencode-store");
+    let spec = shprd_agents::spec::TranscriptSpec {
+        format: Some(TranscriptFormat::OpencodeStorage),
+        location: Some("{data_home}/opencode/storage".to_string()),
+    };
     let session = home.join(".local/share/opencode/storage/session/proj_fixture/ses_fixture.json");
     fs::write(&session, "{not json").unwrap();
-    assert!(Transcript::locate(harness("opencode").transcript(), &home, Path::new(CWD)).is_none());
+    assert!(Transcript::locate(&spec, &home, Path::new(CWD)).is_none());
     dir.close().unwrap();
+}
+
+/// A database whose session row names no directory at all is still adopted: an
+/// older OpenCode wrote the folder only into the message parts.
+#[test]
+fn a_database_session_with_no_directory_is_still_adopted() {
+    let (_dir, home) = recorded("opencode");
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE session SET directory = '' WHERE id = 'ses_fixture'",
+            (),
+        )
+        .unwrap();
+    drop(connection);
+    // An empty directory is not `cwd`, so this is *not* adopted... unless the
+    // reader treats "records nothing" as "belongs anywhere", which is the rule:
+    // a session that says nothing is not refused.
+    let transcript = locate("opencode", &home);
+    assert_eq!(transcript.session(), "ses_fixture");
 }
 
 /// A session that has just started has no conversation yet, which is an empty
@@ -410,19 +576,39 @@ fn an_unreadable_store_file_is_skipped() {
 fn a_session_with_no_messages_yet_is_an_empty_page() {
     let (dir, home) = recorded("opencode");
     let transcript = locate("opencode", &home);
-    fs::remove_dir_all(home.join(".local/share/opencode/storage/message")).unwrap();
+    let db = home.join(".local/share/opencode/opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("DELETE FROM part", ()).unwrap();
+    connection.execute("DELETE FROM message", ()).unwrap();
+    drop(connection);
     let page = transcript.read("").expect("an empty store reads");
     assert!(page.messages.is_empty());
     assert!(!page.more);
     dir.close().unwrap();
 }
 
-/// A store whose message folder is not a folder at all answers
+/// A database that is not a database at all is no transcript rather than a
+/// panic, so a half-written file cannot break the panel.
+#[test]
+fn a_corrupt_database_is_no_transcript() {
+    let (dir, home) = recorded("opencode");
+    let db = home.join(".local/share/opencode/opencode.db");
+    fs::write(&db, "not a database").unwrap();
+    assert!(Transcript::locate(harness("opencode").transcript(), &home, Path::new(CWD)).is_none());
+    dir.close().unwrap();
+}
+
+/// A folder store whose message folder is not a folder at all answers
 /// [`TranscriptError::List`] rather than panicking.
 #[test]
 fn a_corrupt_store_is_an_error_not_a_panic() {
-    let (dir, home) = recorded("opencode");
-    let transcript = locate("opencode", &home);
+    let (dir, home) = recorded("opencode-store");
+    let spec = shprd_agents::spec::TranscriptSpec {
+        format: Some(TranscriptFormat::OpencodeStorage),
+        location: Some("{data_home}/opencode/storage".to_string()),
+    };
+    let transcript =
+        Transcript::locate(&spec, &home, Path::new(CWD)).expect("the older fixture store is found");
     let messages = home.join(".local/share/opencode/storage/message");
     fs::remove_dir_all(&messages).unwrap();
     fs::write(&messages, "not a folder").unwrap();
@@ -431,4 +617,320 @@ fn a_corrupt_store_is_an_error_not_a_panic() {
         other => panic!("expected a list error, got {other:?}"),
     }
     dir.close().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Finding a session at a realistic path
+// ---------------------------------------------------------------------------
+//
+// The gate's bug was not the reading: it was the finding. A session sat in the
+// folder the CLI really wrote while the reader looked in a folder it had spelled
+// itself. These tests therefore write each program's session into the folder
+// *the program's own rule* names, under a path shaped like the ones this machine
+// really has (a temp dir under `/private/var/folders` with an underscore in it, a
+// task worktree with dots and dashes), and read it back through the shipped
+// harness line. If the rule and the CLI ever disagree again, one of these fails.
+
+use shprd_agents::transcript::Roots;
+
+/// A directory with every shape the gate's reports had trouble with: an
+/// underscore (which Claude folds and pi does not), a dot, a space, and dashes.
+///
+/// It is created inside the test's temp directory, and the *resolved* path is
+/// what a CLI would record, so these tests exercise the same
+/// `/private/var/…`-versus-`/tmp/…` question a real session has on macOS.
+fn tricky_dir(root: &Path, name: &str) -> PathBuf {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
+
+/// A claude session for `cwd` at the folder Claude Code's rule names.
+fn write_claude(home: &Path, cwd: &Path, session: &str, words: &str) -> PathBuf {
+    let folder = home
+        .join(".claude")
+        .join("projects")
+        .join(cwd_slug(TranscriptFormat::ClaudeJsonl, cwd));
+    fs::create_dir_all(&folder).unwrap();
+    let path = folder.join(format!("{session}.jsonl"));
+    let line = serde_json::json!({
+        "type": "user",
+        "isSidechain": false,
+        "timestamp": "2026-11-04T10:00:00.000Z",
+        "message": {"role": "user", "content": words},
+    });
+    fs::write(&path, format!("{line}\n")).unwrap();
+    path
+}
+
+/// A pi session for `cwd` at the folder pi's rule names.
+fn write_pi(home: &Path, cwd: &Path, session: &str, words: &str) -> PathBuf {
+    let folder = home
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join(cwd_slug(TranscriptFormat::PiJsonl, cwd));
+    fs::create_dir_all(&folder).unwrap();
+    let path = folder.join(format!("2026-11-04T00-00-00-000Z_{session}.jsonl"));
+    let header = serde_json::json!({
+        "type": "session",
+        "version": 3,
+        "id": session,
+        "timestamp": "2026-11-04T00:00:00.000Z",
+        "cwd": cwd.display().to_string(),
+    });
+    let line = serde_json::json!({
+        "type": "message",
+        "id": "u1",
+        "timestamp": "2026-11-04T00:00:01.000Z",
+        "message": {"role": "user", "timestamp": 1_794_616_780_000i64, "content": [{"type": "text", "text": words}]},
+    });
+    fs::write(&path, format!("{header}\n{line}\n")).unwrap();
+    path
+}
+
+/// An OpenCode database with one session of two messages in it.
+fn write_opencode(home: &Path, cwd: &Path, session: &str, said: [&str; 2]) -> PathBuf {
+    let dir = home.join(".local").join("share").join("opencode");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("opencode.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT,
+                name TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL,
+                title TEXT NOT NULL, version TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+    let directory = cwd.display().to_string();
+    connection
+        .execute(
+            "INSERT INTO project VALUES ('proj_fixture', ?1, 'git', 'repo', 1, 2)",
+            (&directory,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES (?1, 'proj_fixture', NULL, 'quiet-river', ?2, \
+             'Week 46', '1.18.35', 1, 2)",
+            (session, &directory),
+        )
+        .unwrap();
+    for (index, role) in ["user", "assistant"].iter().enumerate() {
+        let id = format!("msg_{index}");
+        let data = format!(r#"{{"role":"{role}","time":{{"created":{}}}}},"#, index);
+        let data = data.trim_end_matches(',').to_string();
+        connection
+            .execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+                (&id, session, index as i64, &data),
+            )
+            .unwrap();
+        let part = format!(
+            r#"{{"type":"text","text":{}}}"#,
+            serde_json::to_string(said[index]).unwrap()
+        );
+        connection
+            .execute(
+                "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                (format!("prt_{index}"), &id, session, index as i64, &part),
+            )
+            .unwrap();
+    }
+    drop(connection);
+    path
+}
+
+/// Every program's session is found through the shipped table at a path with an
+/// underscore, a dot, a space and a `/.tmpXXXX` segment in it — the shapes that
+/// broke the gate.
+#[test]
+fn every_program_is_found_at_a_path_with_underscores_dots_and_spaces() {
+    let homes = tempfile::tempdir().expect("a temp home");
+    let workspaces = tempfile::tempdir().expect("a temp workspace");
+    let home = homes.path().canonicalize().unwrap();
+    for name in [
+        "hp-501/210041/SHP-62/my_repo.v2 space",
+        "hp-501/210041/SHP-62/.tmpAbC123",
+    ] {
+        let cwd = tricky_dir(workspaces.path(), name);
+        let roots = Roots::at(&home);
+        for (program, session) in [("claude", "c-1"), ("pi", "p-1")] {
+            let _ = fs::remove_dir_all(home.join(".claude"));
+            let _ = fs::remove_dir_all(home.join(".pi"));
+            let path = match program {
+                "claude" => write_claude(&home, &cwd, session, "Read the run log."),
+                _ => write_pi(&home, &cwd, session, "Start task T3."),
+            };
+            let transcript = Transcript::locate_in(harness(program).transcript(), &roots, &cwd)
+                .unwrap_or_else(|| {
+                    panic!("{program} at {}: no transcript of {path:?}", cwd.display())
+                });
+            let page = transcript.read("").expect("the fixture reads");
+            assert_eq!(page.messages.len(), 1, "{program}: {:?}", page.messages);
+            assert!(page.messages[0].text.starts_with(if program == "claude" {
+                "Read the run log."
+            } else {
+                "Start task T3."
+            }));
+        }
+        // OpenCode is one database for the whole machine, keyed by directory.
+        let _ = fs::remove_dir_all(home.join(".local"));
+        write_opencode(&home, &cwd, "ses_tricky", ["Review it.", "Reading."]);
+        let transcript = Transcript::locate_in(harness("opencode").transcript(), &roots, &cwd)
+            .expect("opencode's database session is found");
+        assert_eq!(transcript.session(), "ses_tricky");
+        let page = transcript.read("").expect("the fixture reads");
+        assert_eq!(page.messages.len(), 2, "{:?}", page.messages);
+        assert_eq!(page.messages[0].text, "Review it.");
+        assert_eq!(page.messages[1].text, "Reading.");
+    }
+}
+
+/// A path with an underscore is the gate's own reproduction: Claude folds the
+/// underscore, so the folder it writes is not the folder a `/`-and-`.`-only fold
+/// names. The test states both spellings, which is what pins the rule.
+#[test]
+fn claude_reads_a_folder_whose_name_carries_a_folded_underscore() {
+    let homes = tempfile::tempdir().expect("a temp home");
+    let workspace = tempfile::tempdir().expect("a temp workspace");
+    let home = homes.path().canonicalize().unwrap();
+    let cwd = tricky_dir(workspace.path(), "hp_501/gn_T_hp/repo");
+    let path = write_claude(&home, &cwd, "s1", "What did the last pass do?");
+    // The folder really is the underscore-folded one, and the approximation the
+    // gate found is a folder that does not exist.
+    let folder = path.parent().unwrap();
+    assert!(
+        folder
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("-gn-T-hp-"),
+        "{}",
+        folder.display()
+    );
+    let wrong = cwd.to_string_lossy().replace(['/', '.'], "-");
+    assert_ne!(folder.file_name().unwrap().to_string_lossy(), wrong);
+    assert!(!home.join(".claude/projects").join(wrong).exists());
+    let transcript =
+        Transcript::locate_in(harness("claude").transcript(), &Roots::at(&home), &cwd).unwrap();
+    assert_eq!(transcript.session(), "s1");
+    let page = transcript.read("").unwrap();
+    assert_eq!(page.messages[0].text, "What did the last pass do?");
+}
+
+/// A pi path keeps its underscore, which is the other half of the same rule: the
+/// two programs disagree, and the reader has to know which one it is asking.
+#[test]
+fn pi_reads_a_folder_whose_name_keeps_its_underscore() {
+    let homes = tempfile::tempdir().expect("a temp home");
+    let workspace = tempfile::tempdir().expect("a temp workspace");
+    let home = homes.path().canonicalize().unwrap();
+    let cwd = tricky_dir(workspace.path(), "hp_501/gn_T_hp/repo.v2");
+    let path = write_pi(&home, &cwd, "p1", "Start task T3.");
+    let folder = path.parent().unwrap();
+    let name = folder.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.starts_with("--") && name.ends_with("--"), "{name}");
+    assert!(name.contains("hp_501"), "pi keeps the underscore: {name}");
+    assert!(name.contains("repo.v2"), "pi keeps the dot: {name}");
+    let transcript =
+        Transcript::locate_in(harness("pi").transcript(), &Roots::at(&home), &cwd).unwrap();
+    assert_eq!(
+        transcript.read("").unwrap().messages[0].text,
+        "Start task T3."
+    );
+}
+
+/// The reader looks under the roots it is given and nowhere else: a session that
+/// is in one home is not found when the chat is pointed at another, which is the
+/// rule that keeps `SHPRD_HOME` out of a transcript lookup.
+#[test]
+fn a_session_is_found_only_under_the_roots_it_was_given() {
+    let sessions = tempfile::tempdir().expect("a temp home");
+    let other = tempfile::tempdir().expect("another home");
+    let workspace = tempfile::tempdir().expect("a temp workspace");
+    let cwd = tricky_dir(workspace.path(), "repo");
+    let real = sessions.path().canonicalize().unwrap();
+    write_claude(&real, &cwd, "s1", "Read the run log.");
+    assert!(
+        Transcript::locate_in(harness("claude").transcript(), &Roots::at(&real), &cwd).is_some()
+    );
+    let wrong = Roots::at(other.path());
+    assert!(
+        Transcript::locate_in(harness("claude").transcript(), &wrong, &cwd).is_none(),
+        "a session in one home must not be found under another (SHPRD_HOME is not the CLI's home)"
+    );
+}
+
+/// `{data_home}` is a root of its own: with `$XDG_DATA_HOME` set, OpenCode's
+/// database is there and not under `~/.local/share`.
+#[test]
+fn the_data_home_root_follows_the_xdg_setting() {
+    let home_dir = tempfile::tempdir().expect("a temp home");
+    let xdg = tempfile::tempdir().expect("an xdg data home");
+    let workspace = tempfile::tempdir().expect("a temp workspace");
+    let home = home_dir.path().canonicalize().unwrap();
+    let data_home = xdg.path().canonicalize().unwrap();
+    let cwd = tricky_dir(workspace.path(), "repo");
+    // The database is written under the XDG home this time.
+    let dir = data_home.join("opencode");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("opencode.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_xdg', ?1, 5)",
+            (cwd.display().to_string(),),
+        )
+        .unwrap();
+    drop(connection);
+    let roots = Roots::new(&home, Some(&data_home));
+    let transcript = Transcript::locate_in(harness("opencode").transcript(), &roots, &cwd)
+        .expect("the database under $XDG_DATA_HOME is found");
+    assert_eq!(transcript.session(), "ses_xdg");
+    // With the default rule it is not found, which is what `{data_home}` means.
+    assert!(
+        Transcript::locate_in(harness("opencode").transcript(), &Roots::at(&home), &cwd).is_none()
+    );
+}
+
+/// The roots a launch will read are the ones its own environment carries.
+#[test]
+fn the_roots_of_a_launch_come_from_its_environment() {
+    let mut base = std::collections::BTreeMap::new();
+    base.insert("HOME".to_string(), "/home/dev".to_string());
+    let roots = Roots::for_launch(&base);
+    assert_eq!(roots.home, Path::new("/home/dev"));
+    assert_eq!(
+        roots.data_home,
+        Path::new("/home/dev/.local/share"),
+        "an unset XDG home is the default the CLI resolves"
+    );
+    base.insert("XDG_DATA_HOME".to_string(), "/xdg/data".to_string());
+    let roots = Roots::for_launch(&base);
+    assert_eq!(roots.data_home, Path::new("/xdg/data"));
+    // An empty variable is unset, as the XDG rule says.
+    base.insert("XDG_DATA_HOME".to_string(), String::new());
+    base.insert("HOME".to_string(), String::new());
+    let roots = Roots::for_launch(&base);
+    assert_eq!(roots.home, PathBuf::new());
+    assert_eq!(roots.data_home, PathBuf::new());
 }
