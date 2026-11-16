@@ -668,3 +668,20 @@ test("closing the window gives its place back at once", async () => {
   await second.close(run.cx);
   assert.equal(settingsWindow(), null);
 });
+
+// -- the record a window keeps of itself -----------------------------------
+
+test("a window whose service is down still renews its place", async () => {
+  // The record used to be renewed only after a read answered, so with `shprd
+  // serve` down it went stale and the footer's next click stacked a second window
+  // on top of the first — the window itself invites that state, since it draws
+  // "shprd serve is not running" and points at the footer.
+  const { view } = await settled();
+  assert.equal(settingsWindow().id, "ov-1");
+  herdr.setShared("shprd.settings.window", { id: "ov-1", at: Date.now() - 9_000 });
+  await view.refresh();
+  assert.ok(Date.now() - settingsWindow().at < 1_000, "the failed read renewed it anyway");
+
+  openSettings();
+  assert.equal(herdr.OVERLAYS.length, 0, "so a click keeps the one copy instead of stacking one");
+});
