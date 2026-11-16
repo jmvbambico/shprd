@@ -6,8 +6,8 @@
 // primary per surface, no tooltips and nothing that moves on hover.
 //
 // - Source: <https://github.com/eliasstravik/shepherdr>
-// - Paths: `lib/ui.js` (`cardHeader`, `countBadge`, `heading`, `menuRow`,
-//   `button`), `lib/UI.md` (the house rules)
+// - Paths: `lib/ui.js` (`cardHeader`, `countBadge`/`AttentionBadge`, `heading`,
+//   `menuRow`, `button`), `lib/UI.md` (the house rules)
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
@@ -117,6 +117,54 @@ export function label(t, color, text) {
 export function countBadge(n) {
   const value = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   return value > 9 ? "9+" : String(value);
+}
+
+/**
+ * The one badge a sidebar row ends with: *Needs you* red at the left, *Ready*
+ * green at the right (Shepherdr's `AttentionBadge`, `lib/ui.js:167-176`).
+ *
+ * One count is a single rounded pill in that count's colour; both are one oval
+ * split down the middle by a 1 px line in `line`, the colour behind the badge, so a
+ * row never jumps when the second count appears. It is always 16 tall, each count
+ * stops at `9+`, and the digits sit on the fill in `colors.on`. `colors` is
+ * `tone(theme())`.
+ */
+export function attentionBadge(t, need, ready, colors, line = t.chrome) {
+  const num = (n) =>
+    div()
+      .line_height("16px")
+      .when(n === 1, (el) => el.ml(1))
+      .child(n > 9 ? "9+" : String(n));
+  const part = (n, fill) =>
+    div()
+      .h(16)
+      .flex()
+      .items_center()
+      .justify_center()
+      .bg(fill)
+      .child(num(n));
+  const badgeShape = h_flex()
+    .h(16)
+    .flex_none()
+    .text_color(colors.on)
+    .text_size(TEXT.id)
+    .font_semibold();
+  const wants = Math.max(0, Math.floor(need ?? 0));
+  const reads = Math.max(0, Math.floor(ready ?? 0));
+  if (wants > 0 && reads > 0) {
+    return badgeShape
+      .child(part(wants, colors.red).w(wants > 9 ? 19 : 15).rounded_l(8))
+      .child(div().w(1).h(16).bg(line))
+      .child(part(reads, colors.green).w(reads > 9 ? 19 : 15).rounded_r(8));
+  }
+  const only = wants || reads;
+  if (only === 0) return null;
+  return badgeShape.child(
+    part(only, wants ? colors.red : colors.green)
+      .min_w(16)
+      .px(only > 9 ? 4 : 0)
+      .rounded(8),
+  );
 }
 
 /** A quiet line of words inside a panel, wrapped by the layout. */
