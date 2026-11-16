@@ -143,8 +143,9 @@ fn spawn(ctx: &Context<'_>, task: &str, verb: &str) -> Result<ActionReply, ApiRe
 /// stop that wrote nothing left the fold saying `working` for ever and every
 /// retry refused (M10 gate bug 1). The event is what makes the task read
 /// *Needs you · Agent stopped* and what makes `task.retry` allowed (Shepherdr's
-/// rule, M7a §5), and the rules refuse a stop that would take a finished hand-in
-/// away or one of a task nobody has started.
+/// rule, M7a §5). A task that already handed in keeps its status: the hand-in is
+/// still the engine's to review and land, and closing its tab takes nothing away
+/// from it.
 fn stop(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
     let engine = ctx.engine.ok_or_else(|| {
         ApiReject::refused(
