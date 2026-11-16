@@ -5,6 +5,11 @@
 //! nothing here can read or write the developer's own window (`~/.config/herdr-app`)
 //! and nothing depends on what that window currently holds.
 //!
+//! `install` drives no multiplexer, but it is still spawned through the shared
+//! isolation rule (`support/herdr.rs`, M10 fix X): a child of a test that runs
+//! inside a herdr pane must never see that pane's socket, whatever verb it runs.
+//! One rule for every spawn is one rule to keep honest.
+//!
 //! The acceptance the task asks for, one test each: a fresh install, a re-install
 //! that writes nothing, a merge that keeps a key the person bound, an uninstall
 //! that removes only the manifest's files, and a dry run that writes nothing.
@@ -18,6 +23,10 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+mod support;
+
+use support::herdr::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
@@ -84,8 +93,11 @@ impl Fixture {
                 "XDG_STATE_HOME",
                 self.app.path().join(".local").join("state"),
             )
-            .env_remove("HERDR_APP_HOME")
             .env_remove("SHPRD_HOST_DIR");
+        // The rule first, this fixture's own folders after it: a test spawned
+        // from a herdr pane must not inherit the pane's socket, and a live test
+        // that wants a private one names it after this call.
+        isolate(&mut command, self.app.path());
         command
     }
 

@@ -291,7 +291,11 @@ mod tests {
             "a real temporary folder holds its checkout, however it is spelled"
         );
         let spelled = Edge {
-            repo: Path::new(&format!("{}", temp.path().canonicalize().unwrap().display())).join("repo"),
+            repo: Path::new(&format!(
+                "{}",
+                temp.path().canonicalize().unwrap().display()
+            ))
+            .join("repo"),
             temp: temp.path().to_path_buf(),
             ..edge
         };
