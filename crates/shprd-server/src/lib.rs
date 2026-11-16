@@ -24,19 +24,23 @@
 //! | `POST /api/login` | the login password, exchanged for a session cookie |
 //! | `POST /api/logout` | ends the session the cookie names |
 //! | `GET /api/session` | who is asking, through which door, and how fresh |
+//! | anything else | the built web app: hashed assets, and `index.html` for an SPA route |
 //!
-//! Every route but health and login passes the gate (`crate::auth`): a request
-//! is allowed by **either** `Authorization: Bearer <token>` from the state
-//! directory — the door the CLI and the Herdr mods use — **or** a valid session
-//! cookie from `POST /api/login`. A write also needs `x-shprd: 1`, and its
-//! `Origin`, when it sends one, must be this service's own page origin; a socket
-//! upgrade needs that `Origin` and no header (a browser cannot set one on a
-//! handshake). A `Host` that is neither loopback nor a hostname a tunnel added
+//! Every `/api` route but health and login passes the gate (`crate::auth`): a
+//! request is allowed by **either** `Authorization: Bearer <token>` from the
+//! state directory — the door the CLI and the Herdr mods use — **or** a valid
+//! session cookie from `POST /api/login`. A write also needs `x-shprd: 1`, and
+//! its `Origin`, when it sends one, must be this service's own page origin; a
+//! socket upgrade needs that `Origin` and no header (a browser cannot set one on
+//! a handshake). A `Host` that is neither loopback nor a hostname a tunnel added
 //! is a `421`, and the login is rate limited with `429` and `Retry-After`.
 //!
 //! A destructive action — dropping a task, and later landing or merging one —
 //! needs a session whose password was entered in the last five minutes; the token
 //! door is exempt, because the token is already local.
+//!
+//! The web app itself is public, because the page a signed-out person gets *is*
+//! the login screen; everything it calls is behind the gate.
 //!
 //! A Herdr mod can only `fetch` (no streaming, no WebSocket), which is why the
 //! change channel is a long poll first and a socket second.
@@ -71,6 +75,7 @@ pub(crate) mod prompts;
 pub mod remote;
 pub(crate) mod roster;
 pub(crate) mod settings;
+pub(crate) mod web;
 
 pub use api::{App, BODY_LIMIT, WsLimits};
 pub use changes::Touch;

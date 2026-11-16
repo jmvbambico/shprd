@@ -9,6 +9,7 @@ version.workspace = true
 [dependencies]
 axum.workspace = true
 futures-util.workspace = true
+rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shprd-agents = { path = "../shprd-agents" }
