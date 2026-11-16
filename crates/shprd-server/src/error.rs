@@ -215,6 +215,21 @@ impl From<LogError> for ApiReject {
     }
 }
 
+impl From<crate::graph::DocumentError> for ApiReject {
+    /// A document that is not there yet is a `404` — the graph block draws
+    /// before a run exists — and anything else is this service's failure to
+    /// read its own projection.
+    fn from(err: crate::graph::DocumentError) -> Self {
+        match err {
+            crate::graph::DocumentError::Missing { .. } => {
+                Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, err.to_string())
+            }
+            crate::graph::DocumentError::Io { .. }
+            | crate::graph::DocumentError::NotADocument { .. } => Self::internal(err.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for ApiReject {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
