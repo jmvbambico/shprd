@@ -4,9 +4,15 @@
 //! service's own work: it finds the agent's program from the ledger (a task's
 //! latest attempt names it) or from the settings (the coordinator role does),
 //! asks that program's harness where the session lives
-//! ([`shprd_agents::transcript::Transcript::locate`]) and answers what the
+//! ([`shprd_agents::transcript::Transcript::locate_in`]) and answers what the
 //! record gained after the client's cursor. Nothing is written: a transcript is
 //! read-only evidence, and the agent's own file is the only copy of it.
+//!
+//! The roots a record is looked for under are the ones the *agent CLI* ran with
+//! ([`shprd_agents::transcript::Roots`]: its real `HOME` and its XDG data home),
+//! which the binary resolves once and passes in. They are deliberately not the
+//! engine's own home: `SHPRD_HOME` is where shprd keeps its settings, briefs and
+//! worktrees, and no CLI has ever written a session there.
 //!
 //! Sending is the one thing the service cannot do alone: typing into a pane is
 //! the host's verb, so the binary passes a [`ChatWriter`] here exactly as it
