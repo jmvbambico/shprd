@@ -67,11 +67,22 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // leaving a pass to refuse (M9 gate bug 6). A host that cannot be reached is
     // a warning and not a refusal to serve: the board is still what a person
     // reads, and the next start can make the space.
+    //
+    // It is not made at all when the checkout and the socket disagree about
+    // whose machine this is (M11 fix Y): a live check run from a temporary
+    // checkout inherits the pane's `HERDR_SOCKET_PATH`, and a service that
+    // prepared its space would make one in the person's own window. The guard
+    // is asked before anything touches the host, and its refusal is a banner
+    // line rather than a failure to serve — the API is still a board to read.
+    let leakage = crate::guard::leakage(&crate::guard::Edge::from_environment(&ctx.root));
     // The host is the one this service resolved, handed on as an `Arc` because
     // the tick and the chat's writer both hold it: one service, one adapter.
     let host: std::sync::Arc<dyn Host> = std::sync::Arc::from(host);
-    let workspace = prepare_space(host.as_ref(), &ctx.root, &home);
-    if let SpaceNotice::Unavailable(reason) = &workspace {
+    let workspace = match &leakage {
+        Some(reason) => SpaceNotice::Withheld(reason.clone()),
+        None => prepare_space(host.as_ref(), &ctx.root, &home),
+    };
+    if let SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) = &workspace {
         tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
     }
     // The banner says whether there is a run at all, and the passes say so again
@@ -98,7 +109,13 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // a block when its terminal does not exist when the layout loads. The service
     // is up before the window is, so it starts the terminal; the mod in the
     // window keeps its own start as a fallback (M10.7).
-    crate::cmd::graph::ensure(&resolution, &dagr, &ctx.root);
+    //
+    // Not when the guard refused the host: a terminal in the person's core is
+    // the same leak as a space in their window, and the banner has already said
+    // why neither was made.
+    if leakage.is_none() {
+        crate::cmd::graph::ensure(&resolution, &dagr, &ctx.root);
+    }
     config.dagr = Some(dagr);
     config.home = Some(home.clone());
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
@@ -259,6 +276,9 @@ pub(crate) enum SpaceNotice {
     Created(String, Option<String>),
     /// It could not be found or made; the reason names the label it wanted.
     Unavailable(String),
+    /// The host was not touched at all: the checkout and the socket name two
+    /// different machines ([`crate::guard`]). The reason says which two.
+    Withheld(String),
 }
 
 /// Finds the repository's own space, or creates it at the repository root.
@@ -500,6 +520,9 @@ fn space_line(notice: &SpaceNotice, root: &Path) -> String {
             format!("{label:?} (already there, reused){}", coordinator(pane))
         }
         SpaceNotice::Unavailable(reason) => format!("not ready: {reason}"),
+        // A withheld space has no label to report: nothing was looked up, and
+        // saying which label it would have used would suggest it had one.
+        SpaceNotice::Withheld(reason) => format!("not attempted: {reason}"),
     }
 }
 
@@ -518,6 +541,9 @@ fn space_json(notice: &SpaceNotice) -> Value {
         }
         SpaceNotice::Unavailable(reason) => {
             serde_json::json!({ "label": Value::Null, "state": "unavailable", "reason": reason })
+        }
+        SpaceNotice::Withheld(reason) => {
+            serde_json::json!({ "label": Value::Null, "state": "withheld", "reason": reason })
         }
     }
 }
@@ -640,5 +666,64 @@ mod tests {
         );
         assert_eq!(space_json(&notice)["state"], "unavailable");
         assert_eq!(space_json(&notice)["label"], Value::Null);
+    }
+
+    #[test]
+    fn a_withheld_space_says_so_and_names_no_label() {
+        // M11 fix Y: the guard refused the host, so nothing was looked up. The
+        // banner must not name a label it never wanted, and the reason has to
+        // carry the two paths a person needs to see the disagreement.
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let reason = crate::guard::leakage(&crate::guard::Edge {
+            repo: repo.path().to_path_buf(),
+            temp: repo.path().to_path_buf(),
+            socket: None,
+            allowed: false,
+        })
+        .unwrap_or_else(|| panic!("the guard fires for a checkout in the temp dir"));
+        let notice = SpaceNotice::Withheld(reason.clone());
+
+        let line = space_line(&notice, repo.path());
+        assert!(
+            line.starts_with("not attempted:"),
+            "a withheld space is not the same news as a failed one: {line}"
+        );
+        assert!(
+            !line.contains("shprd ·"),
+            "no label is named for a space that was never wanted: {line}"
+        );
+        assert!(line.contains(&repo.path().display().to_string()), "{line}");
+
+        let document = space_json(&notice);
+        assert_eq!(document["state"], "withheld");
+        assert_eq!(document["label"], Value::Null);
+        assert_eq!(document["reason"].as_str(), Some(reason.as_str()));
+    }
+
+    #[test]
+    fn the_host_is_not_asked_at_all_when_the_guard_refused() {
+        // The one thing the guard is for: not a workspace in the wrong window,
+        // and not a lookup either. `prepare_space` is the only caller that
+        // touches the host at startup, so a test that skips it is a test that
+        // left the host alone — and this one names the calls that would have
+        // happened if it had not.
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default().with_starter_tab();
+        let guard = crate::guard::leakage(&crate::guard::Edge {
+            repo: repo.path().to_path_buf(),
+            temp: repo.path().to_path_buf(),
+            socket: None,
+            allowed: false,
+        });
+        let notice = match &guard {
+            Some(reason) => SpaceNotice::Withheld(reason.clone()),
+            None => prepare_space(&mux, repo.path(), repo.path()),
+        };
+        assert!(matches!(notice, SpaceNotice::Withheld(_)), "{notice:?}");
+        assert_eq!(
+            mux.calls(),
+            Vec::new(),
+            "a refused start makes no workspace, looks none up and lists no tabs"
+        );
     }
 }
