@@ -32,7 +32,7 @@ use shprd_core::log::Clock;
 use ts_rs::TS;
 
 use crate::error::RemoteError;
-use crate::fsutil::{random_hex, secret_eq, write_private_atomic};
+use crate::fsutil::{create_private_dir, random_hex, secret_eq, write_private_atomic};
 
 /// The file name sessions live under, inside the service's state directory.
 pub const FILE: &str = "sessions.json";
@@ -168,6 +168,15 @@ impl SessionRecord {
     }
 }
 
+/// One writer's hold on the session file, in this process and across processes.
+///
+/// Dropping it releases both: the `flock` goes with the file, and the mutex with
+/// the guard.
+struct Locked<'a> {
+    _process: std::sync::MutexGuard<'a, ()>,
+    _file: std::fs::File,
+}
+
 /// What `sessions.json` holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Stored {
@@ -237,7 +246,7 @@ impl Sessions {
         user_agent: Option<&str>,
         remember: bool,
     ) -> Result<(String, SessionRecord), RemoteError> {
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let now = self.now();
         let id = random_hex(32)?;
         let class = UaClass::of(user_agent);
@@ -285,7 +294,7 @@ impl Sessions {
     /// answers with.
     pub fn touch(&self, id_hash: &str) -> Result<Option<SessionRecord>, RemoteError> {
         let now = self.now();
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let mut stored = self.read()?;
         let Some(index) = stored
             .sessions
@@ -318,7 +327,7 @@ impl Sessions {
     /// lose their other tabs.
     pub fn mark_fresh(&self, id_hash: &str) -> Result<Option<SessionRecord>, RemoteError> {
         let now = self.now();
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let mut stored = self.read()?;
         let Some(index) = stored
             .sessions
@@ -354,7 +363,7 @@ impl Sessions {
         if short.is_empty() {
             return Ok(Revoked::Nothing);
         }
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let mut stored = self.read()?;
         let matches: Vec<&SessionRecord> = stored
             .sessions
@@ -378,7 +387,7 @@ impl Sessions {
     ///
     /// Returns how many were ended, so the CLI can say it and a test can see it.
     pub fn revoke_all(&self) -> Result<usize, RemoteError> {
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let mut stored = self.read()?;
         let removed = stored.sessions.len();
         if removed > 0 {
@@ -408,7 +417,7 @@ impl Sessions {
     /// it when it starts and a test calls it directly.
     pub fn purge(&self) -> Result<usize, RemoteError> {
         let now = self.now();
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let mut stored = self.read()?;
         let before = stored.sessions.len();
         stored.sessions.retain(|session| !session.expired(now));
@@ -424,7 +433,7 @@ impl Sessions {
         &self,
         predicate: impl Fn(&SessionRecord) -> bool,
     ) -> Result<bool, RemoteError> {
-        let _guard = self.guard();
+        let _guard = self.guard()?;
         let mut stored = self.read()?;
         let before = stored.sessions.len();
         stored.sessions.retain(|session| !predicate(session));
@@ -435,13 +444,41 @@ impl Sessions {
         Ok(removed)
     }
 
-    /// The lock, with a poisoned one recovered: a panic while writing sessions
-    /// must not make the service unable to read them for ever.
-    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
-        match self.lock.lock() {
+    /// The exclusive lock: one writer at a time, in this process and others.
+    ///
+    /// The in-process mutex keeps one process's writers apart; the `flock` on
+    /// `sessions.lock` keeps the service and a `shprd web sessions --revoke` in
+    /// another process apart. Both are needed: a read-modify-write here could
+    /// otherwise write back a session the CLI had just revoked, which is exactly
+    /// the session a revocation is meant to end.
+    ///
+    /// A poisoned mutex is recovered — a panic while writing sessions must not
+    /// make the service unable to read them for ever — and a lock file that
+    /// cannot be opened or taken is an error rather than a write without it.
+    fn guard(&self) -> Result<Locked<'_>, RemoteError> {
+        let process = match self.lock.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
+        };
+        let path = self.path.with_extension("lock");
+        if let Some(parent) = path.parent() {
+            create_private_dir(parent)?;
         }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .map_err(|err| RemoteError::io(&path, err))?;
+        file.lock().map_err(|err| RemoteError::io(&path, err))?;
+        Ok(Locked {
+            _process: process,
+            _file: file,
+        })
     }
 
     /// Reads the file, turning "no file yet" into "no sessions".
@@ -797,6 +834,11 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
+            let lock = std::fs::metadata(sessions.path().with_extension("lock"))
+                .expect("the lock file")
+                .permissions()
+                .mode();
+            assert_eq!(lock & 0o777, 0o600, "the lock file is private too");
         }
     }
 
