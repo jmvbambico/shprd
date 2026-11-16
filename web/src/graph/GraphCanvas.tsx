@@ -110,8 +110,8 @@ export function GraphCanvas({ layout, selected, onSelect, device, viewport }: Gr
     if (touched.current || size.width <= 0 || layout.nodes.length === 0) {
       return;
     }
-    setView(fitTo({ width: layout.width, height: layout.height }, size, FIT_PADDING));
-  }, [layout.width, layout.height, layout.nodes.length, size.width, size.height]);
+    fit();
+  }, [fit, layout.nodes.length, size.width]);
 
   // A task opened from a node must be visible: on a desktop the detail covers
   // the right of the canvas, so the drawing moves just enough to bring the
