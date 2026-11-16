@@ -1570,6 +1570,7 @@ project_dirs = []
             let mut base_env = BTreeMap::new();
             base_env.insert("GH_TOKEN".to_string(), "secret".to_string());
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
             ReviewEnv {
                 spawn: SpawnEnv {
                     ctx,
@@ -1594,6 +1595,7 @@ project_dirs = []
                     // No wait: a fake pane that never reports an agent would
                     // otherwise stall every test.
                     ready_wait: Duration::ZERO,
+                    transcript_roots,
                 },
                 reviews_dir: self.home.path().join(".shprd").join("reviews"),
                 reviewer: reviewer_role(reviewer),

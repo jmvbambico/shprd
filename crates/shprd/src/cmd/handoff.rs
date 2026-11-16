@@ -792,6 +792,7 @@ project_dirs = []
         fn env<'a>(&self, ctx: &'a Ctx, workers: &[&str]) -> SpawnEnv<'a> {
             let mut base_env = BTreeMap::new();
             base_env.insert("PATH".to_string(), "/usr/bin".to_string());
+            let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
             SpawnEnv {
                 ctx,
                 layout: Layout::default_for_home(self.home.path()),
@@ -822,6 +823,7 @@ project_dirs = []
                 // No wait: a fake pane that never reports an agent would
                 // otherwise stall every test that launches one.
                 ready_wait: Duration::ZERO,
+                transcript_roots,
             }
         }
     }

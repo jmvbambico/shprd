@@ -87,6 +87,11 @@ impl Fixture {
         let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
             .expect("prepare")
             .with_home(home.path().to_path_buf())
+            // The agents' own records live under the home *they* ran with, which
+            // in this fixture is the same temp home the settings live in: a
+            // transcript a test wrote is found, and the developer's real
+            // `~/.claude` is never read.
+            .with_transcript_roots(shprd_agents::transcript::Roots::at(home.path()))
             .with_data(data)
             .with_prompts_dir(home.path().join(".config").join("shprd").join("prompts"))
             .with_chat_writer(writer);
@@ -487,6 +492,7 @@ async fn the_harness_table_is_read_from_the_copy_the_binary_ships() {
     let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
         .expect("prepare")
         .with_home(home.path().to_path_buf())
+        .with_transcript_roots(shprd_agents::transcript::Roots::at(home.path()))
         .with_data_dir(shprd_agents::data::DataDir::resolve(None, None));
     let token = std::fs::read_to_string(app.info().token_path)
         .expect("the token file")
@@ -770,4 +776,221 @@ async fn the_state_directory_is_not_the_session_directory() {
             .contains("/.claude/"),
         "the session is found through the recorded home, never the state directory"
     );
+}
+
+/// The gate's bug, as a route test: a service whose settings home is one
+/// directory and whose agents run with another reads the transcript from the
+/// agents' home. `SHPRD_HOME` (the settings home) is never where a CLI writes a
+/// session, so a chat that looked there answered "has not written a session"
+/// while the session sat in the real `~/.claude`.
+#[tokio::test]
+async fn a_transcript_is_read_from_the_home_the_agent_ran_with() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    // The engine's own home, which holds the settings and no sessions at all.
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    // The home the agent CLI really ran with, which is where its record is.
+    let agent_home = tempfile::tempdir().expect("agent home");
+    let state = tempfile::tempdir().expect("state dir");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_home(home.path().to_path_buf())
+        .with_data(data)
+        .with_transcript_roots(shprd_agents::transcript::Roots::at(agent_home.path()));
+    let token = std::fs::read_to_string(app.info().token_path)
+        .expect("the token file")
+        .trim()
+        .to_string();
+    let fixture = Fixture {
+        app,
+        token,
+        repo,
+        home,
+        state,
+        recorder: Arc::new(Recorder::default()),
+    };
+    // The session is written under the *agent* home, in the folder Claude Code's
+    // own fold names (which turns this temp path's underscores into `-`).
+    let slug = cwd_slug(TranscriptFormat::ClaudeJsonl, fixture.repo.path());
+    let dir = agent_home
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = dir.join("real.jsonl");
+    std::fs::write(
+        &record,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "isSidechain": false,
+                "timestamp": "2026-11-04T10:00:00.000Z",
+                "message": {"role": "user", "content": "What does the gate say?"},
+            })
+        ),
+    )
+    .unwrap();
+    // Nothing was written under the settings home, so a chat that used it would
+    // find nothing.
+    assert!(!fixture.home.path().join(".claude").exists());
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["session"], "real");
+    assert_eq!(reply.messages().len(), 1, "{}", reply.body);
+    assert_eq!(reply.messages()[0]["text"], "What does the gate say?");
+}
+
+/// A service that was told no roots says so rather than looking in a directory
+/// that can never hold a session.
+#[tokio::test]
+async fn a_service_with_no_agent_roots_says_it_was_not_told() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    let state = tempfile::tempdir().expect("state dir");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+    let app = App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None)
+        .expect("prepare")
+        .with_home(home.path().to_path_buf())
+        .with_data(data);
+    let token = std::fs::read_to_string(app.info().token_path)
+        .expect("the token file")
+        .trim()
+        .to_string();
+    let fixture = Fixture {
+        app,
+        token,
+        repo,
+        home,
+        state,
+        recorder: Arc::new(Recorder::default()),
+    };
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(
+        reply.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        reply.body
+    );
+    assert!(
+        reply.body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not told the home"),
+        "{}",
+        reply.body
+    );
+}
+
+/// A task's space reads pi's session the same way its coordinator's does: the
+/// program's own folder under the home the agent ran with, and the worktree as
+/// the directory the session belongs to.
+#[tokio::test]
+async fn a_task_space_reads_a_pi_session_from_its_worktree() {
+    let fixture = Fixture::new("claude");
+    let worktree = fixture.home.path().join("worktrees").join("T2");
+    std::fs::create_dir_all(&worktree).unwrap();
+    fixture.spawn_task("T2", "pi", &worktree);
+    let slug = cwd_slug(TranscriptFormat::PiJsonl, &worktree);
+    let dir = fixture
+        .home
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = json!({
+        "type": "session",
+        "version": 3,
+        "id": "worker",
+        "timestamp": "2026-11-04T10:00:00.000Z",
+        "cwd": worktree.display().to_string(),
+    });
+    let line = json!({
+        "type": "message",
+        "id": "u1",
+        "message": {
+            "role": "user",
+            "timestamp": 1_794_616_780_000i64,
+            "content": [{"type": "text", "text": "T2 is done."}],
+        },
+    });
+    std::fs::write(
+        dir.join("2026-11-04T10-00-00-000Z_worker.jsonl"),
+        format!("{header}\n{line}\n"),
+    )
+    .unwrap();
+    let reply = fixture.chat("T2", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], "pi");
+    assert_eq!(reply.body["session"], "2026-11-04T10-00-00-000Z_worker");
+    assert_eq!(reply.messages().len(), 1, "{}", reply.body);
+    assert_eq!(reply.messages()[0]["text"], "T2 is done.");
+}
+
+/// A task's space reads an OpenCode database session, picked by the worktree the
+/// session row names rather than by being the newest on the machine.
+#[tokio::test]
+async fn a_task_space_reads_an_opencode_database_session_from_its_worktree() {
+    let fixture = Fixture::new("claude");
+    let worktree = fixture.home.path().join("worktrees").join("T3");
+    std::fs::create_dir_all(&worktree).unwrap();
+    fixture.spawn_task("T3", "opencode", &worktree);
+    let dir = fixture
+        .home
+        .path()
+        .join(".local")
+        .join("share")
+        .join("opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+    // A newer session for another directory, which must not win.
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_elsewhere', '/work/other', 9999999999)",
+            (),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_task', ?1, 5)",
+            (worktree.display().to_string(),),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO message VALUES ('msg_1', 'ses_task', 1, ?1)",
+            (r#"{"role":"assistant","time":{"created":1000}}"#,),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_1', 'msg_1', 'ses_task', 1, ?1)",
+            (r#"{"type":"text","text":"T3 is done."}"#,),
+        )
+        .unwrap();
+    drop(connection);
+    let reply = fixture.chat("T3", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["program"], "opencode");
+    assert_eq!(reply.body["session"], "ses_task");
+    assert_eq!(reply.messages().len(), 1, "{}", reply.body);
+    assert_eq!(reply.messages()[0]["text"], "T3 is done.");
 }

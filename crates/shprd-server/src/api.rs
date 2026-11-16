@@ -172,6 +172,16 @@ pub(crate) struct AppState {
     /// A service without one answers `POST /api/chat` with a refusal rather
     /// than pretending the line went somewhere.
     pub(crate) chat: ChatHost,
+    /// The home and data home the agent CLIs run with, when the caller resolved
+    /// them.
+    ///
+    /// A transcript is the CLI's own file, so a chat reads it under the roots
+    /// *that process* had ([`shprd_agents::transcript::Roots`]): the real `HOME`
+    /// it inherits and its XDG data home, never the engine's own `SHPRD_HOME`,
+    /// which no CLI writes a session under. The empty [`Paths::default`] leaves
+    /// it unset, and a chat then says it was not told rather than looking in a
+    /// directory that can never hold a session.
+    pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
 }
 
 /// The directories the binary resolved for the service.
@@ -192,6 +202,8 @@ pub(crate) struct Paths {
     pub(crate) path_env: Option<String>,
     /// Where the graph's program is, as the binary found it.
     pub(crate) dagr: Option<crate::graph::Dagr>,
+    /// The home and data home the agent CLIs run with, when there is one.
+    pub(crate) transcript_roots: Option<shprd_agents::transcript::Roots>,
 }
 
 /// One prepared service: its state, its router and its discovery files.
@@ -290,6 +302,7 @@ impl App {
             path_env: paths.path_env,
             dagr: paths.dagr,
             chat: ChatHost::new(),
+            transcript_roots: paths.transcript_roots,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -349,6 +362,19 @@ impl App {
     /// never read or write the developer's own settings file.
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.state.home = Some(home);
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// Look for the agent CLIs' session records under `roots`.
+    ///
+    /// A transcript is the CLI's own file, written under the home and data home
+    /// *that* process resolved, so the binary passes them here
+    /// ([`shprd_agents::transcript::Roots`]) rather than letting the chat guess
+    /// from the settings home. A test points them at its own fixture home, which
+    /// is the only way a chat reads a transcript a test wrote.
+    pub fn with_transcript_roots(mut self, roots: shprd_agents::transcript::Roots) -> Self {
+        self.state.transcript_roots = Some(roots);
         self.router = router(self.state.clone());
         self
     }

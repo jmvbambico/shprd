@@ -1,0 +1,1 @@
+{"id":"msg_2","session_id":"ses_fixture","time_created":1768956610000,"data":{"parentID":"msg_1","role":"assistant","agent":"build","path":{"cwd":"/work/repo","root":"/work/repo"},"time":{"created":1768956610000,"completed":1768956615000},"modelID":"gemini-3-flash-preview","providerID":"google","finish":"stop"}}
