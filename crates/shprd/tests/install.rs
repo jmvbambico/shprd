@@ -679,6 +679,165 @@ fn a_layout_the_person_changed_is_still_refused() {
     assert_eq!(fs::read(&installed).expect("their layout"), mine);
 }
 
+/// The M10 desktop as that install left it: this build's files with settings put
+/// back as a tab of the side panel, which is what M11 fix S took away.
+///
+/// It is a tree of its own, so installing it records in the manifest the layout
+/// byte for byte as the older build wrote it — which is what makes the next
+/// install an upgrade rather than a first install.
+fn m10_tree() -> TempDir {
+    let tree = TempDir::new().expect("a temp host tree");
+    copy_tree(&host_path(), tree.path());
+    let layout = tree.path().join("layouts/shprd.json");
+    let mut document: Value =
+        serde_json::from_slice(&fs::read(&layout).expect("the layout")).expect("JSON");
+    let panel = find_node(&mut document, "panel-body").expect("the side panel's stack");
+    panel
+        .get_mut("children")
+        .and_then(Value::as_array_mut)
+        .expect("children")
+        .push(serde_json::json!({
+            "id": "settings",
+            "type": "block",
+            "content": { "mod": "shprd-settings" }
+        }));
+    let mut older = serde_json::to_vec_pretty(&document).expect("JSON");
+    older.push(b'\n');
+    fs::write(&layout, &older).expect("the M10 layout");
+    tree
+}
+
+/// Installs one tree into a fixture's app home.
+fn install_tree(fixture: &Fixture, tree: &TempDir) {
+    ok(&fixture
+        .command(&["--from", tree.path().to_str().unwrap()])
+        .output()
+        .expect("the binary runs"));
+}
+
+#[test]
+fn an_install_upgrades_the_desktop_it_wrote_before() {
+    // The M10 desktop had settings as a tab of the side panel: a `settings` block
+    // in the panel's stack, drawn by the settings mod. M11 fix S makes settings a
+    // dialog over the window, so the block is gone from the layout — and a person
+    // who already installed the M10 desktop must get the new one by running the
+    // install again, not by moving files aside.
+    let fixture = Fixture::new();
+    let previous = m10_tree();
+    install_tree(&fixture, &previous);
+    let before = fixture.manifest();
+    assert!(
+        before["files"]
+            .get("layouts/shprd.json")
+            .is_some_and(Value::is_string),
+        "the M10 install recorded the layout as its own"
+    );
+
+    let said = ok(&fixture.run(&[]));
+    assert!(
+        said.contains("layouts/shprd.json"),
+        "the upgrade says it wrote the layout: {said}"
+    );
+
+    // The layout on disk is this build's, byte for byte: the settings block is
+    // gone, and so is the tab that switched to it.
+    let installed = fs::read(fixture.app_path("layouts/shprd.json")).expect("the layout");
+    let shipped = fs::read(host_path().join("layouts/shprd.json")).expect("the shipped layout");
+    assert_eq!(installed, shipped, "the layout is replaced, not merged");
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    assert!(
+        find_node(&mut probe, "settings").is_none(),
+        "the side panel keeps no settings block"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    let panel = find_node(&mut probe, "panel-body").expect("the side panel");
+    let ids: Vec<&str> = panel["children"]
+        .as_array()
+        .expect("children")
+        .iter()
+        .filter_map(|child| child["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["files", "changes", "tasks", "asks"]);
+
+    // Everything else the install owns moved with it, and the manifest now names
+    // what is on disk: a second run has nothing left to do.
+    let mut hashes = BTreeMap::new();
+    for rel in fixture.files() {
+        if rel == "keys.json" {
+            continue;
+        }
+        let bytes = fs::read(fixture.app_path(&rel)).expect("an installed file");
+        hashes.insert(rel, sha_hex(&bytes));
+    }
+    assert_eq!(
+        fixture.manifest_files(),
+        hashes,
+        "the manifest names the files the upgrade left"
+    );
+    let again = ok(&fixture.run(&[]));
+    assert!(again.contains("nothing to do"), "{again}");
+}
+
+#[test]
+fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
+    // The harder half of the same upgrade: the M10 layout a person installed was
+    // then pruned by Herdr (the graph terminal did not exist when the window
+    // loaded it), so what is on disk is neither the file M10 wrote nor this
+    // build's. It is still the app's edit of a layout shprd shipped, so the
+    // upgrade replaces it rather than refusing and asking the person to move it.
+    let fixture = Fixture::new();
+    let previous = m10_tree();
+    install_tree(&fixture, &previous);
+    let installed = fixture.app_path("layouts/shprd.json");
+    let older = fs::read(&installed).expect("the M10 layout");
+    fs::write(&installed, prune_terminal_blocks(&older)).expect("the pruned layout");
+
+    let said = ok(&fixture.run(&[]));
+    assert!(
+        said.contains("put back after Herdr pruned it"),
+        "the upgrade says what it did: {said}"
+    );
+    assert_eq!(
+        fs::read(&installed).expect("the upgraded layout"),
+        fs::read(host_path().join("layouts/shprd.json")).expect("the shipped layout"),
+        "this build's layout is what is left"
+    );
+}
+
+#[test]
+fn an_older_layout_the_person_changed_is_still_refused() {
+    // The recognition above is about the app's edit alone: a person who changed
+    // the older layout has a file that is not what any build shipped, and it stays
+    // exactly as they wrote it.
+    let fixture = Fixture::new();
+    let previous = m10_tree();
+    install_tree(&fixture, &previous);
+    let installed = fixture.app_path("layouts/shprd.json");
+    let pruned = prune_terminal_blocks(&fs::read(&installed).expect("the M10 layout"));
+    let mut document: Value = serde_json::from_slice(&pruned).expect("JSON");
+    document["children"][0]["children"][1]["size"]["px"] = Value::from(300);
+    let mine = serde_json::to_vec_pretty(&document).expect("JSON");
+    fs::write(&installed, &mine).expect("their change");
+
+    let output = fixture.run(&[]);
+    assert!(!output.status.success(), "a person's change is refused");
+    assert_eq!(fs::read(&installed).expect("their layout"), mine);
+}
+
+/// One layout node by id, mutably, or `None`.
+fn find_node<'a>(node: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+    if node.get("id").and_then(Value::as_str) == Some(id) {
+        return Some(node);
+    }
+    let children = node.get_mut("children")?.as_array_mut()?;
+    for child in children.iter_mut() {
+        if let Some(found) = find_node(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Writes `bytes` back as Herdr does after pruning every terminal block: the
 /// block is gone, and so is the `active` of a stack that named it.
 ///
