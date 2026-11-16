@@ -397,6 +397,28 @@ in `shprd-server`.
 Lanes: M11.1 ∥ M11.3; then M11.2 (after M11.1) ∥ M11.4 ∥ M11.5 ∥ M11.6 ∥ M11.7
 (after M11.3). Every screen is screenshotted at 390 px and 1440 px before review.
 
+**Desktop parity fixes (added 2026-11-16).** An audit of the M10 window against
+Shepherdr's source (report kept outside the repo)
+found the desktop departing from Shepherdr's shapes: settings in a panel tab
+instead of a dialog, no "+" menu, the accept card inline, no search or filters in
+Tasks, no chat thread per task. Shepherdr's window is the reference, so these land
+in M11 before the web screens copy them:
+
+| ID | Task |
+|---|---|
+| fix S | Settings as Shepherdr's frameless dialog with a page list |
+| U1 | Tab bar: "+" menu (Terminal, New task, Start an agent), tab menu, pills |
+| U2 | Tasks panel: search, filter row, folding groups |
+| U3 | Accept card as a 640×640 dialog; thread head with Review and the view switch |
+| U4 | The per-task chat thread (question cards in the timeline; the Asks tab goes) and Chat │ Terminal on agent panes; the sidebar coordinator block goes |
+| U5 | Sidebar: one-line rows, right-click menu |
+| U6 | Keys, Jump (Ctrl+K), Keybinds |
+| U7 | The graph gets its own panel |
+| U8 | Look: icons, status glyphs, pane header, foot, status bar, toasts |
+
+The per-task thread, deferred at M10, is built here. M11.4 waits for U2–U4 and
+M11.6 for U4.
+
 **Gate:** the M10 flow runs from a desktop browser and from a phone over each
 tunnel, and every request without a session is refused.
 
