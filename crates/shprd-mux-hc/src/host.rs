@@ -483,6 +483,20 @@ impl HcHost {
         // The snapshot the subscription folded is the baseline: `subscribe`
         // reports what happens *after* the host exists, not the whole host.
         changes.borrow_and_update();
+        // Whether a program's own report can reach this core, from the method
+        // list `hello` answered with: a core without `pane.report_agent` is one
+        // whose plugin-installed reporters silently go nowhere, which is what
+        // makes a program like opencode invisible here even though the terminal
+        // is plainly drawing its TUI (M10 gate, bug 3).
+        let agent_reports = driver
+            .block_on(client.hello())
+            .and_then(std::result::Result::ok)
+            .is_some_and(|hello| {
+                hello
+                    .methods
+                    .iter()
+                    .any(|method| method == "pane.report_agent")
+            });
         let capabilities = Capabilities {
             spawn: true,
             split: attached,
@@ -507,6 +521,7 @@ impl HcHost {
             doc: true,
             exec: true,
             agent_state: true,
+            agent_reports,
             close_space: attached,
             list_spaces: true,
         };

@@ -99,7 +99,23 @@ file = "path"
 # The agent's own OSC 7501 report first, then the extension it runs for us, then
 # the bottom of its pane. Verified on this machine: herdr installs
 # ~/.pi/agent/extensions/herdr-agent-state.ts, which reports pi's state.
+#
+# pi is the one program here that reports for itself: 1.4.0's
+# `ProgramStatusReporter` writes `\e]7501;state=idle:app=pi` as soon as its TUI
+# is up, and working/done as it runs, so a core without `pane.report_agent`
+# still sees pi. [ready] is therefore a last resort here, not the usual path.
 sources = ["osc7501", "hook", "screen"]
+
+[ready]
+# Verified live on 1.4.0 in a private tmux pane: the last line of a pi pane that
+# is waiting for a turn is the model and its context budget,
+#
+#   0.0%/1.0M (auto)      (Command Code) deepseek/deepseek-v4.1-flash
+#
+# which is pi's own status footer. The `0.0%/` prefix is the context share it
+# starts at and is part of that footer, so the pattern names the share rather
+# than the model: a person's model is their own choice.
+screen = ["0.0%/"]
 
 [asks]
 # pi has extensions but shprd has no installer for an ask hook of its own, so

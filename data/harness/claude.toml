@@ -115,11 +115,32 @@ delivery = "system-prompt-file"
 file = "path"
 
 [status]
-# The agent's own OSC 7501 report first, then a hook it runs for us, then the
-# bottom of its pane. Verified on this machine: herdr installs SessionStart,
-# PreToolUse and PostToolUse hooks into ~/.claude/settings.json (status hooks
-# are the person's own; the ask hook below is worktree-local).
-sources = ["osc7501", "hook", "screen"]
+# The hook it runs for us, then the bottom of its pane — and no `osc7501`,
+# because Claude Code 2.1.311 only *asks* about the sequence and never answers
+# it. Verified live on this machine: a claude pane writes `\e]7501;?` and no
+# report follows, while `pi` on the same terminal answers at once. herdr installs
+# SessionStart, PreToolUse and PostToolUse hooks into ~/.claude/settings.json,
+# and those report through `pane.report_agent` — absent from herdr-core 0.1.21,
+# so on this core claude reports nothing and [ready] is what says it is up.
+# (Status hooks are the person's own; the ask hook below is worktree-local.)
+sources = ["hook", "screen"]
+
+[ready]
+# The fallback for a host that cannot report claude's status, which is
+# herdr-core 0.1.21 and its missing `pane.report_agent`: claude's hook reports
+# through that method, and its OSC 7501 answer is only the query. Verified live
+# on 2.1.311 in a private tmux pane: with the folder trusted, the bottom of the
+# pane reads
+#
+#   ────…
+#   ❯ Try "how do I log an error?"
+#   ────…
+#    ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents   ◐ medium · /effort
+#
+# so the placeholder prompt is the line. The trust dialog that comes first names
+# itself in [[blocking_prompts]] below, which is reported as blocked rather than
+# waited out.
+screen = ["Try \"how do I log an error?\"", "for agents"]
 
 [asks]
 # Claude Code fires one `PermissionRequest` hook for a permission, a question

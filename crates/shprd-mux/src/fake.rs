@@ -110,6 +110,9 @@ struct Inner {
     /// A scripted "not detected yet, then ready": how many more polls answer
     /// [`AgentState::Unknown`], and the state that follows.
     pending: HashMap<PaneId, (usize, AgentState)>,
+    /// A screen that is still being painted: how many more reads answer the
+    /// early text, and the text.
+    pending_screens: HashMap<PaneId, (usize, String)>,
     /// Scripted foreground process group per pane; absent means "no group".
     process_groups: HashMap<PaneId, Option<u32>>,
     /// Panes a test scripted `close_pane` to refuse, with the reason.
@@ -141,6 +144,7 @@ impl Inner {
             screens: HashMap::new(),
             states: HashMap::new(),
             pending: HashMap::new(),
+            pending_screens: HashMap::new(),
             process_groups: HashMap::new(),
             close_failures: HashMap::new(),
             read_failures: HashMap::new(),
@@ -207,6 +211,10 @@ pub struct FakeMux {
     starter_tab: bool,
     /// Whether a pane with no scripted state reports a detected agent.
     ready: bool,
+    /// The screen every pane with none of its own shows. A test that cannot know
+    /// a pane's id before the call sets this, which is how a program's painted
+    /// TUI is scripted through a spawn.
+    default_screen: Option<String>,
     /// The reason `spawn` fails, when a test wants a host that cannot start a
     /// program.
     spawn_failure: Option<String>,
@@ -245,6 +253,7 @@ impl FakeMux {
             caps,
             starter_tab: false,
             ready: false,
+            default_screen: None,
             spawn_failure: None,
             spawn_forbidden: None,
             default_group: None,
@@ -275,6 +284,16 @@ impl FakeMux {
     /// not have to script a state for ids it cannot predict.
     pub fn with_ready_agent(mut self) -> Self {
         self.ready = true;
+        self
+    }
+
+    /// Show `text` on every pane that has no screen of its own.
+    ///
+    /// A spawn makes the pane it will type into, so a test that wants to prove
+    /// what a program's painted TUI looks like cannot name that pane first. This
+    /// is that screen, for every pane the host makes.
+    pub fn with_screen(mut self, text: impl Into<String>) -> Self {
+        self.default_screen = Some(text.into());
         self
     }
 
@@ -447,6 +466,21 @@ impl FakeMux {
         if let Ok(mut inner) = self.lock() {
             inner.panes.insert(pane.clone());
             inner.screens.insert(pane.clone(), text.into());
+        }
+    }
+
+    /// Script a screen that changes as a program paints it: the first `reads`
+    /// reads answer `early`, and every read after them the screen last set.
+    ///
+    /// This is what a TUI looks like between its first paint and its prompt: a
+    /// pane that has drawn something is not yet a pane that can take a turn.
+    /// Registers the pane as existing if it was not already.
+    pub fn set_screen_after(&self, pane: &PaneId, reads: usize, early: impl Into<String>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.panes.insert(pane.clone());
+            inner
+                .pending_screens
+                .insert(pane.clone(), (reads, early.into()));
         }
     }
 
@@ -766,7 +800,18 @@ impl Host for FakeMux {
         if let Some(reason) = inner.read_failures.get(pane) {
             return Err(MuxError::command("read", reason.clone()));
         }
-        Ok(inner.screens.get(pane).cloned().unwrap_or_default())
+        if let Some((reads, early)) = inner.pending_screens.get_mut(pane)
+            && *reads > 0
+        {
+            *reads -= 1;
+            return Ok(early.clone());
+        }
+        Ok(inner
+            .screens
+            .get(pane)
+            .cloned()
+            .or_else(|| self.default_screen.clone())
+            .unwrap_or_default())
     }
 
     /// The fake answers in one call, as a host with [`Capabilities::wait`]
