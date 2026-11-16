@@ -43,9 +43,11 @@
 //   panel reads, `attach` compares the `service.json` on disk with the id its
 //   client was made from; a different id — a restarted service, even one that
 //   took the same port — is a new client, and the panel re-reads everything.
-// - **[`stateOrThrow`]** (and [`Client.call`'s `strict` reads): a read that runs
-//   out of time is a **failure**, not an empty answer. The panel's `catch` drops
-//   the client, the next look rediscovers, and the panel fills in again.
+// - **A read that must not paint stale is strict** ([`Client.call`]'s `strict`
+//   option, which is what `state()` and `asks()` use): a read that runs out of
+//   time is a **failure** (a [`noAnswer`]), not an empty answer. The panel's
+//   `catch` drops the client, the next look rediscovers, and the panel fills in
+//   again.
 
 import { exec, home, readTextFile } from "herdr";
 
