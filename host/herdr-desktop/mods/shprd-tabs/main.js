@@ -124,9 +124,11 @@ export default class Tabs extends View {
       }
       this.client = next.client;
       this.state = await this.client.state();
-      // One roster read for the bar's lifetime: the programs a person can start
-      // do not change while the window is open, and a click must not wait 20 s
-      // for a program's own model listing.
+      // The pills are painted before the roster is asked for: the roster can take
+      // a moment (a program that lists its own models is a process), and a bar
+      // that waits for it is a bar with no counts on the first frame. The "+"
+      // menu gets it when it is there, and reads it itself when it is not.
+      cx.notify();
       if (this.roster === undefined) {
         this.roster = await this.client.roster().catch(() => null);
       }

@@ -141,6 +141,24 @@ export function tabState(tab, panes, state) {
 }
 
 /**
+ * What a pill is called: the title shprd gave the tab, else the name someone
+ * gave it, else what runs in it (Shepherdr's `tabName`, `core/menus.js:106`).
+ *
+ * Herdr names a tab nobody named by its position ("1"), which is not a name a
+ * person reads on a pill — the program's own name is ("zsh", "Claude Code"), and
+ * "Terminal" when even that is unknown.
+ */
+export function tabLabel(tab, named, program) {
+  if (named?.titled) return named.name;
+  const text = String(tab?.name ?? named?.name ?? "").trim();
+  // Herdr's own names for a tab nobody named are its position ("1") and, on
+  // older builds, "tb3"; neither is a name a pill should wear.
+  const automatic = text === "" || /^(tb)?\d+$/.test(text);
+  if (!automatic) return text;
+  return program?.name || "Terminal";
+}
+
+/**
  * Every pill of `space`, in the host's order.
  *
  * A pill carries what the mod draws and what a test asserts: the tab's id, the
@@ -159,7 +177,7 @@ export function tabRows(space, panes, state) {
       id: tab.id,
       index,
       name: named.name,
-      label: named.titled ? named.name : (tab.name || String(index + 1)),
+      label: tabLabel(tab, named, program),
       // Whether a person named it (`tab.rename`, `tab.new {name}`): the rename
       // prompt's field holds the name only when there is one.
       named: Boolean(tab.named),
