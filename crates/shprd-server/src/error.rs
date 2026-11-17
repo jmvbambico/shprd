@@ -118,6 +118,8 @@ pub struct ApiReject {
     pub status: StatusCode,
     /// The body the client sees.
     pub body: ErrorBody,
+    /// How long the client must wait, for a `429`: the `Retry-After` header.
+    pub retry_after: Option<u64>,
 }
 
 impl ApiReject {
@@ -129,6 +131,7 @@ impl ApiReject {
                 code,
                 message: message.into(),
             },
+            retry_after: None,
         }
     }
 
@@ -138,6 +141,44 @@ impl ApiReject {
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthorized,
             "send `Authorization: Bearer <token>` with the token in the state directory",
+        )
+    }
+
+    /// The request was addressed to a name this service does not answer to.
+    ///
+    /// `421 Misdirected Request` is the researched design's answer to an unknown
+    /// `Host`: it is what DNS rebinding looks like from inside the process, and a
+    /// redirect would tell the attacker which name is right.
+    pub fn wrong_host(host: Option<&str>) -> Self {
+        Self::new(
+            StatusCode::MISDIRECTED_REQUEST,
+            ErrorCode::WrongHost,
+            match host {
+                Some(host) => format!("{host:?} is not a name this service answers to"),
+                None => {
+                    "the request carried no Host, so it is not a page on this service".to_string()
+                }
+            },
+        )
+    }
+
+    /// A rate limit refused the request; `after` is `Retry-After`'s seconds.
+    pub fn too_many_requests(after: u64) -> Self {
+        let mut reject = Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::TooManyRequests,
+            format!("too many attempts: try again in {after}s"),
+        );
+        reject.retry_after = Some(after);
+        reject
+    }
+
+    /// A destructive action needs the password again, through this session.
+    pub fn reauth() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Reauth,
+            "enter your password again to do this",
         )
     }
 
@@ -232,6 +273,14 @@ impl From<crate::graph::DocumentError> for ApiReject {
 
 impl IntoResponse for ApiReject {
     fn into_response(self) -> Response {
-        (self.status, Json(self.body)).into_response()
+        let mut response = (self.status, Json(self.body)).into_response();
+        if let Some(after) = self.retry_after
+            && let Ok(value) = axum::http::HeaderValue::from_str(&after.to_string())
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
     }
 }

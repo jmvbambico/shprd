@@ -97,6 +97,17 @@ pub enum Command {
     Janitor(JanitorArgs),
     /// Recreate a task's branch from its newest attempt's archive ref.
     Restore(RestoreArgs),
+    /// Remote access: the login password every tunnel's browser must enter, and
+    /// the sessions it starts.
+    ///
+    /// The password is set here, at this terminal, and never over the web: the
+    /// web app is the shell a tunnel exposes, so it can never reset the
+    /// credential that guards it. A password change ends every session.
+    Web {
+        /// Which web verb.
+        #[command(subcommand)]
+        cmd: WebCommand,
+    },
     /// Detect the agent CLIs installed here, their version and sign-in state.
     Roster(RosterArgs),
     /// Write a roster role into the global config, or with `--repo <PATH>`
@@ -276,6 +287,46 @@ pub struct DropArgs {
     /// still has to be unset or `human`.
     #[arg(long, hide = !cfg!(debug_assertions))]
     pub yes: bool,
+}
+
+/// The `shprd web` verbs.
+#[derive(Debug, Subcommand)]
+pub enum WebCommand {
+    /// The login password: set it here, or forget it.
+    Password {
+        /// Which password verb.
+        #[command(subcommand)]
+        cmd: PasswordCommand,
+    },
+    /// List the browser sessions, or end one or all of them.
+    Sessions(SessionsArgs),
+}
+
+/// The `shprd web password` verbs.
+#[derive(Debug, Subcommand)]
+pub enum PasswordCommand {
+    /// Set the password, typed twice at this terminal without echo.
+    ///
+    /// It must be at least twelve characters, and not one of the commonest
+    /// passwords or this machine's own name. Every existing session ends, because
+    /// each of them trusted the old password.
+    Set,
+    /// Forget the password.
+    ///
+    /// Nothing can sign in through the web afterwards — the loopback token is
+    /// the way back in — and every session ends.
+    Clear,
+}
+
+/// Arguments for `shprd web sessions`.
+#[derive(Debug, Args)]
+pub struct SessionsArgs {
+    /// End the session whose id starts with this (the id `sessions` prints).
+    #[arg(long, value_name = "ID", conflicts_with = "revoke_all")]
+    pub revoke: Option<String>,
+    /// End every session.
+    #[arg(long = "revoke-all")]
+    pub revoke_all: bool,
 }
 
 /// Arguments for `serve`.

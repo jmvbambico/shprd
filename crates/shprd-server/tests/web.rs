@@ -19,6 +19,13 @@ use tower::ServiceExt;
 /// The port the fixtures claim in `service.json`.
 const PORT: u16 = 18_081;
 
+/// The `Host` every request is addressed to.
+///
+/// The gate answers only a name this service knows — loopback always, a tunnel's
+/// when it is added — and a request with no `Host` at all is a `421`, so a test
+/// that drove the router without one would be testing the refusal.
+const HOST: &str = "127.0.0.1:18081";
+
 /// One prepared service with its own web build, state directory and repository.
 struct Fixture {
     app: App,
@@ -72,7 +79,10 @@ impl Fixture {
 
     /// Sends one GET carrying `token` when there is one.
     async fn get_with_token(&self, uri: &str, token: Option<&str>) -> Reply {
-        let mut builder = Request::builder().method("GET").uri(uri);
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(header::HOST, HOST);
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -229,6 +239,7 @@ async fn a_binary_without_a_web_build_says_how_to_build_one() {
         .oneshot(
             Request::builder()
                 .uri("/tasks")
+                .header(header::HOST, HOST)
                 .body(Body::empty())
                 .expect("a well-formed request"),
         )

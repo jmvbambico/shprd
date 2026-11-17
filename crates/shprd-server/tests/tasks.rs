@@ -27,6 +27,12 @@ use shprd_server::{App, Engine};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixtures claim; no `Origin` is sent, so it is only a label.
 const PORT: u16 = 18_120;
 
@@ -85,6 +91,7 @@ impl Fixture {
         let mut request = Request::builder()
             .method(method.clone())
             .uri(path)
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token));
         if method != Method::GET {
             request = request.header("x-shprd", "1");
@@ -117,6 +124,7 @@ impl Fixture {
         let request = Request::builder()
             .method(method)
             .uri(path)
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
@@ -651,6 +659,7 @@ async fn an_engine_failure_is_the_persons_refusal() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/action")
+                .header(header::HOST, HOST)
                 .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
                 .header("x-shprd", "1")
                 .header(header::CONTENT_TYPE, "application/json")

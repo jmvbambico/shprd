@@ -320,6 +320,22 @@ fn read_record(state: &Path) -> Value {
     serde_json::from_str(&text).expect("the record is JSON")
 }
 
+/// The banner, once the service has printed it.
+///
+/// `service.json` is written before the banner, so the two are not the same
+/// signal: a test that read the file the instant the record appeared could see
+/// nothing, and flake on a busy machine.
+fn wait_for_banner(path: &Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if !text.trim().is_empty() || std::time::Instant::now() > deadline {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// The token a client reads from the state directory.
 fn read_token(state: &Path) -> String {
     fs::read_to_string(state.join("shprd").join("token"))
@@ -617,8 +633,10 @@ fn a_service_started_before_the_run_says_so_and_sees_it_without_a_restart() {
     let base = format!("http://127.0.0.1:{port}");
     let token = read_token(state.path());
 
-    // The banner names the verb, not an empty run.
-    let text = fs::read_to_string(&banner_path).expect("the banner is written");
+    // The banner names the verb, not an empty run. The record is written before
+    // the banner is printed, so a start that returned the moment the record
+    // appeared can find the banner still empty; wait for the sentence itself.
+    let text = wait_for_banner(&banner_path);
     assert!(text.contains("no run yet"), "the banner says so: {text}");
     assert!(
         text.contains("shprd run start"),

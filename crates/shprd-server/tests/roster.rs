@@ -20,6 +20,12 @@ use shprd_server::App;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The `Host` every fixture request is addressed to.
+///
+/// The gate refuses a request with no `Host` (`421`), so a test that drove the
+/// router without one would be testing the refusal, not the route.
+const HOST: &str = "127.0.0.1:18080";
+
 /// The port the fixture claims; no `Origin` is sent, so it is only a label.
 const PORT: u16 = 18_092;
 
@@ -70,6 +76,7 @@ impl Fixture {
         let request = Request::builder()
             .method(Method::GET)
             .uri("/api/roster")
+            .header(header::HOST, HOST)
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .body(Body::empty())
             .expect("the request");
@@ -172,6 +179,7 @@ async fn the_roster_needs_a_token_like_every_other_read() {
     let request = Request::builder()
         .method(Method::GET)
         .uri("/api/roster")
+        .header(header::HOST, HOST)
         .body(Body::empty())
         .expect("the request");
     let response = fixture

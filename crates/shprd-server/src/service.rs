@@ -542,6 +542,13 @@ pub struct Config {
     /// `SHPRD_HOME`. `None` is a service nobody told, which the chat's route
     /// says rather than looking in the wrong directory.
     pub transcript_roots: Option<shprd_agents::transcript::Roots>,
+    /// The hostnames this service answers to besides loopback.
+    ///
+    /// The tunnel task adds its hostname here when a tunnel starts and removes it
+    /// when it stops ([`shprd_remote::AllowedHosts`]); the gate reads the set on
+    /// every request, and an unknown `Host` is a `421`. The default is loopback
+    /// only, so a service nothing put on the internet answers to nothing else.
+    pub allowed_hosts: shprd_remote::AllowedHosts,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -598,7 +605,23 @@ impl Config {
             engine: None,
             chat: crate::chat::ChatHost::new(),
             transcript_roots: None,
+            allowed_hosts: shprd_remote::AllowedHosts::loopback_only(),
         }
+    }
+
+    /// The names this service answers to, as a shared handle.
+    ///
+    /// The tunnel task keeps the handle and adds or removes its hostname; the
+    /// running service reads the set on every request.
+    pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
+        self.allowed_hosts.clone()
+    }
+}
+
+impl Service {
+    /// The names this running service answers to, as a shared handle.
+    pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
+        self.app.allowed_hosts()
     }
 }
 
@@ -642,6 +665,7 @@ impl Service {
                 path_env: config.path_env.clone(),
                 dagr: config.dagr.clone(),
                 transcript_roots: config.transcript_roots.clone(),
+                allowed_hosts: config.allowed_hosts.clone(),
             },
         )?
         // The spawn and the close are the binary's, wired exactly as the tick's
@@ -726,9 +750,16 @@ impl Service {
                 .await;
             })
         });
-        let served = axum::serve(listener, app.router())
-            .with_graceful_shutdown(shutdown)
-            .await;
+        // The peer address is the kernel's, and it is what every rate limit is
+        // keyed on: `X-Forwarded-For` is a header a client writes, and is ignored
+        // until the tunnel task decides when it may be trusted.
+        let served = axum::serve(
+            listener,
+            app.router()
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await;
         let _ = stop.send(());
         watcher.abort();
         if let Some(ticker) = ticker {
