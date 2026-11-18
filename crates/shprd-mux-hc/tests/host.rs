@@ -387,6 +387,16 @@ fn text_is_sent_as_the_persons_own_typing() {
 }
 
 #[test]
+fn a_core_without_attach_says_it_cannot_type_without_enter() {
+    let (_fake, host) = host("no-attach");
+    assert!(!host.capabilities().type_without_submit);
+    let error = host
+        .write(&PaneId::new("t20"), "half a line", false)
+        .expect_err("no stream to type on");
+    assert!(matches!(error, MuxError::Unsupported(_)), "{error}");
+}
+
+#[test]
 fn typing_nothing_attaches_to_nothing() {
     let (fake, host) = host("normal");
     host.write(&PaneId::new("t20"), "", false)

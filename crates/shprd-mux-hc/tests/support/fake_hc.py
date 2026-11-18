@@ -251,7 +251,8 @@ class Fake:
             "version": "0.1.21",
             "features": ["framed", "attach", "events", "status", "shell",
                          "resize_notifications", "automatic_input", "restart_environment"],
-            "methods": HELLO_METHODS,
+            "methods": [m for m in HELLO_METHODS if not (
+                self.mode == "no-attach" and m == "terminal.attach")],
             "login_session": {"gui": True, "id": 100020, "user": 501},
             "keeps_running_after_logout": None,
             "logout_linger_user": None,

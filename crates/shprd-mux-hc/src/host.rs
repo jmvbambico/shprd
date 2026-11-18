@@ -516,15 +516,16 @@ impl HcHost {
         // whose plugin-installed reporters silently go nowhere, which is what
         // makes a program like opencode invisible here even though the terminal
         // is plainly drawing its TUI (M10 gate, bug 3).
-        let agent_reports = driver
+        let methods: Vec<String> = driver
             .block_on(client.hello())
             .and_then(std::result::Result::ok)
-            .is_some_and(|hello| {
-                hello
-                    .methods
-                    .iter()
-                    .any(|method| method == "pane.report_agent")
-            });
+            .map(|hello| hello.methods)
+            .unwrap_or_default();
+        let has = |wanted: &str| methods.iter().any(|method| method == wanted);
+        let agent_reports = has("pane.report_agent");
+        // Typing without enter rides a `terminal.attach` stream, so a core that
+        // lacks the method says it cannot, instead of failing on the first key.
+        let can_attach = has("terminal.attach");
         let capabilities = Capabilities {
             spawn: true,
             split: attached,
@@ -539,7 +540,7 @@ impl HcHost {
             keys: true,
             // `terminal.send` pastes and then presses enter, so text left at the
             // cursor goes through a short attach stream (`HcClient::type_raw`).
-            type_without_submit: true,
+            type_without_submit: can_attach,
             // `terminal.wait` answers in one call.
             wait: true,
             kill: true,
@@ -1299,6 +1300,9 @@ impl Host for HcHost {
     /// instead: the bytes reach the terminal unchanged and no enter is added.
     fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {
         if !submit {
+            if !self.inner.capabilities.type_without_submit {
+                return Err(MuxError::unsupported("typing text without submitting it"));
+            }
             return self.type_raw(pane, text);
         }
         self.core_with(
