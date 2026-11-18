@@ -7,6 +7,7 @@
 // original of those is Shepherdr's `mods/chat/main.js` and `core/chat-view.js`,
 // MIT, commit a3f327a, see THIRD_PARTY_NOTICES.md).
 
+import type { Card } from "../tasks/asks";
 import type { ChatDto, ChatMessageDto, ChatSendDto } from "../gen";
 
 /** How many messages a screen keeps. */
@@ -147,4 +148,43 @@ export function folding(text: string, open = false, width = LINE_CHARS): { text:
     room -= n;
   }
   return { text: out.join("\n"), foldable: true, folded: true };
+}
+
+/** One row of the timeline. */
+export type Row =
+  | { kind: "top"; key: string }
+  | { kind: "message"; key: string; message: ChatMessageDto }
+  | { kind: "card"; key: string; card: Card };
+
+/**
+ * The timeline: the messages with the cards that wait for an answer among them.
+ * A card with a time sits before the first message written after it; the rest end
+ * the timeline, where the newest thing is.
+ */
+export function timeline(chat: Chat | null, cards: Card[] = []): Row[] {
+  const rows: Row[] = [];
+  const messages = chat?.messages ?? [];
+  const waiting = cards.slice().sort((a, b) => (a.at ?? Infinity) - (b.at ?? Infinity));
+  let next = 0;
+  if (!chat?.more && messages.length > 0) {
+    rows.push({ kind: "top", key: "top" });
+  }
+  for (const message of messages) {
+    for (;;) {
+      const card = waiting[next];
+      if (card === undefined || card.at === null || message.at_ms === null || card.at >= message.at_ms) {
+        break;
+      }
+      rows.push({ kind: "card", key: card.id, card });
+      next += 1;
+    }
+    rows.push({ kind: "message", key: messageKey(message), message });
+  }
+  for (; next < waiting.length; next += 1) {
+    const card = waiting[next];
+    if (card !== undefined) {
+      rows.push({ kind: "card", key: card.id, card });
+    }
+  }
+  return rows;
 }

@@ -17,7 +17,8 @@ import type { ApiClient } from "../api/client";
 import type { TaskChangesDto } from "../gen";
 import { PR_WORDS, canReview, openUrl, prSize, reportLine, taskPr, threadViews, type ThreadView } from "./accept";
 import { look, ref, taskById } from "./board";
-import { ChatView } from "./ChatView";
+import { ChatView } from "../agent/ChatView";
+import { cards, forTask } from "./asks";
 import { Glyph } from "./Glyph";
 import { reason, type Board } from "./useBoard";
 
@@ -104,7 +105,12 @@ export function TaskThread({ client, board, taskId, onBack, onReview }: TaskThre
             {board.phase === "loading" ? "Reading the task…" : "This task is no longer on the board."}
           </p>
         ) : view === "chat" ? (
-          <ChatView client={client} board={board} task={task.id} />
+          <ChatView
+            client={client}
+            space={task.id}
+            cards={forTask(cards(board.state, board.asks), task.id)}
+            onAnswered={board.reload}
+          />
         ) : view === "term" ? (
           <div className="note" data-view="terminal">
             <p>{live ? "The agent is working." : "No agent is up for this task."}</p>
