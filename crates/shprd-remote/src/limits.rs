@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -122,11 +123,39 @@ struct Buckets {
     anonymous: HashMap<IpAddr, Vec<u64>>,
 }
 
+/// A count of how often the sign-in limits that mean "someone is guessing" have
+/// tripped: the global attempt limit and the account lock.
+///
+/// A tunnel's supervisor watches it and stops the tunnel when it moves (M7d
+/// §4.3 rule 4, the auth-failure circuit breaker). It is its own shared handle,
+/// not a view of the limiter, because a gateway is rebuilt when a test swaps its
+/// clock and a tunnel started before that must still see the same counter.
+#[derive(Debug, Clone, Default)]
+pub struct StormSignal(Arc<AtomicU64>);
+
+impl StormSignal {
+    /// A signal that has not tripped.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one trip.
+    pub fn trip(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many times it has tripped since the service started.
+    pub fn count(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// The limiter: one instance per service, shared by every route.
 #[derive(Clone)]
 pub struct RateLimiter {
     clock: Arc<dyn Clock + Send + Sync>,
     inner: Arc<Mutex<Buckets>>,
+    storm: StormSignal,
 }
 
 impl std::fmt::Debug for RateLimiter {
@@ -141,7 +170,19 @@ impl RateLimiter {
         Self {
             clock,
             inner: Arc::new(Mutex::new(Buckets::default())),
+            storm: StormSignal::new(),
         }
+    }
+
+    /// Reports the limits that mean "someone is guessing" to `storm`.
+    pub fn with_storm(mut self, storm: StormSignal) -> Self {
+        self.storm = storm;
+        self
+    }
+
+    /// The signal those limits report to.
+    pub fn storm(&self) -> StormSignal {
+        self.storm.clone()
     }
 
     /// Counts one login attempt from `ip`, or refuses it.
@@ -196,6 +237,7 @@ impl RateLimiter {
             .login_all
             .retain(|at| now.saturating_sub(*at) < hour);
         if buckets.login_all.len() as u32 >= LOGIN_GLOBAL {
+            self.storm.trip();
             let after = buckets
                 .login_all
                 .first()
@@ -222,6 +264,7 @@ impl RateLimiter {
         buckets.failures.push(now);
         if buckets.failures.len() as u32 >= LOGIN_ACCOUNT {
             buckets.account_locked_until = now + ACCOUNT_LOCK.as_millis() as u64;
+            self.storm.trip();
             return Err(Retry {
                 after_ms: ACCOUNT_LOCK.as_millis() as u64,
             });
@@ -553,5 +596,44 @@ mod tests {
             buckets.anonymous.is_empty(),
             "addresses that can be refused nothing are forgotten"
         );
+    }
+
+    #[test]
+    fn the_storm_signal_trips_on_the_global_limit_and_the_account_lock_only() {
+        let (clock, limits) = limiter();
+        let storm = limits.storm();
+        // One address blocked on its own is not a storm.
+        for _ in 0..=LOGIN_PER_IP {
+            let _ = limits.login(ip(1));
+        }
+        assert_eq!(storm.count(), 0, "a per-address block is not a storm");
+
+        clock.advance(Duration::from_secs(60 * 60 * 7));
+        for n in 0..LOGIN_GLOBAL {
+            limits
+                .login(ip(u8::try_from(n + 10).expect("small")))
+                .expect("inside");
+        }
+        assert_eq!(storm.count(), 0);
+        limits.login(ip(250)).expect_err("the thirty-first");
+        assert_eq!(storm.count(), 1, "the global limit tripped it");
+
+        clock.advance(Duration::from_secs(60 * 60 * 7));
+        for _ in 0..(LOGIN_ACCOUNT - 1) {
+            limits.failure().expect("a wrong password");
+        }
+        assert_eq!(storm.count(), 1);
+        limits.failure().expect_err("the tenth locks the account");
+        assert_eq!(storm.count(), 2, "the account lock tripped it");
+    }
+
+    #[test]
+    fn a_signal_handed_in_is_the_one_the_limits_report_to() {
+        let signal = StormSignal::new();
+        let limits = RateLimiter::new(FakeClock::at(1_700_000_000_000)).with_storm(signal.clone());
+        for _ in 0..LOGIN_ACCOUNT {
+            let _ = limits.failure();
+        }
+        assert_eq!(signal.count(), 1);
     }
 }

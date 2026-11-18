@@ -136,7 +136,11 @@ SOFTWARE.
   are read from, and the newest-page-then-what-it-gained shape — in
   `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel — the
   transcript's bubbles, the composer and the sidebar placement — in
-  `host/herdr-desktop/mods/shprd-coordinator/`
+  `host/herdr-desktop/mods/shprd-coordinator/`; and the tailnet share — the
+  owner and machine name read from `status --json`, what `serve status --json`
+  says about the mount, the refusal to serve where Funnel is on, never replacing
+  a mount that points elsewhere, and the taken-HTTPS-port handling — from
+  `service/tailscale.ts`, in `crates/shprd-remote/src/tunnel/{parse,tailscale}.rs`
 - License: MIT
 
 MIT License
