@@ -19,7 +19,29 @@
 // source, never a copy.
 
 import { isLive, look } from "./board.js";
-import { STATUS_ORDER } from "./tokens.js";
+
+
+/** How long a finished agent stays in the Agents pane: 30 minutes. A coordinator stays as long as its space. */
+export const FINISHED_KEEP_MS = 30 * 60 * 1000;
+
+/** The task states the sidebar tree shows: the ones a person can act on or watch right now. */
+const TREE_STATES = new Set(["working", "needs_you", "ready", "merging"]);
+
+/** The tree's sort: needs you first, then working, then the rest (Q5). */
+const TREE_RANK = { needs_you: 0, working: 1, merging: 1, ready: 2 };
+
+/** Whether `agent` still belongs in the Agents pane at `now`: not a finished one older than 30 minutes. */
+export function agentKept(agent, now = Date.now()) {
+  if (agent?.state !== "done" || agent?.role === "coordinator") return true;
+  const ended = Number.isFinite(agent?.ended_ms) ? agent.ended_ms : agent?.since_ms;
+  if (!Number.isFinite(ended)) return true;
+  return now - ended < FINISHED_KEEP_MS;
+}
+
+/** The live agents that are still shown at `now`. */
+export function liveAgents(state, now = Date.now()) {
+  return (state?.live_agents ?? []).filter((agent) => agentKept(agent, now));
+}
 
 /** The words a role is shown as. */
 export const ROLE_WORDS = { worker: "Worker", reviewer: "Reviewer", coordinator: "Coordinator" };
@@ -61,14 +83,63 @@ export function spacesOf(state) {
   return [{ id: "run", name: repo, folder: state?.run?.repo ?? "", branch: state?.run?.integration_branch ?? "" }];
 }
 
+/**
+ * The state with only one space's tasks (`spaceId` null: all of them), for the
+ * Tasks list. A task with no space belongs to the only space there is.
+ */
+export function scopeToSpace(state, spaceId) {
+  if (!state || spaceId === null || spaceId === undefined) return state;
+  const list = spacesOf(state);
+  if (!list.some((space) => space.id === spaceId)) return state;
+  const tasks = (state.tasks ?? []).filter((task) => (task.space ?? (list.length === 1 ? list[0].id : null)) === spaceId);
+  return { ...state, tasks };
+}
+
 /** The task a state's agent works on, or null for a coordinator. */
 function taskOf(state, agent) {
   return (state?.tasks ?? []).find((task) => task.id === agent?.task) ?? null;
 }
 
 /** The live agents of one task, in the order the service gave them. */
-export function agentsOfTask(state, taskId) {
-  return (state?.live_agents ?? []).filter((agent) => agent.task === taskId);
+export function agentsOfTask(state, taskId, now = Date.now()) {
+  return liveAgents(state, now).filter((agent) => agent.task === taskId);
+}
+
+/**
+ * A task row's dim second line: who is on it and where it stands, then progress
+ * and time to go when known — `claude · working · R#1 · 6m`, `codex · reviewing`,
+ * `asks you · 2m ago`, `ready to approve`. Time to go is not in the service's answer yet, so it is not drawn.
+ */
+export function taskLine(state, task, now = Date.now()) {
+  const agents = agentsOfTask(state, task.id, now).filter((agent) => agent.state !== "done");
+  const worker = agents.find((agent) => agent.role === "worker");
+  const reviewer = agents.find((agent) => agent.role === "reviewer");
+  const status = task.derived?.status;
+  const attempt = (task.attempts ?? []).at(-1);
+  const rounds = attempt?.reviews?.length ?? 0;
+  const parts = [];
+  if (status === "needs_you") {
+    const need = task.derived?.need;
+    parts.push(need === "asks" ? "asks you" : need === "reply" ? "waits for you" : "needs you");
+    const since = age(worker?.since_ms, now);
+    if (since) parts.push(since === "now" ? "now" : `${since} ago`);
+    return parts.join(" · ");
+  } else if (status === "ready") {
+    return "ready to approve";
+  } else if (reviewer) {
+    parts.push(reviewer.program, "reviewing");
+  } else if (status === "merging") {
+    return "merging";
+  } else {
+    if (worker?.program) parts.push(worker.program);
+    parts.push(status === "working" ? "working" : (task.derived?.status ?? ""));
+  }
+  if (rounds > 0) parts.push(`R#${rounds}`);
+  const since = age(worker?.since_ms ?? reviewer?.since_ms, now);
+  if (since) parts.push(since);
+  const pct = look(task).pct;
+  if (pct !== null && pct !== undefined) parts.push(`${pct}%`);
+  return parts.filter(Boolean).join(" · ");
 }
 
 /**
@@ -78,28 +149,29 @@ export function agentsOfTask(state, taskId) {
  * - `sub`: for a working task its agent and progress (`claude · 62%`), else null.
  * - `last`: whether it is the space's last task, which gives it └─ not ├─.
  */
-export function treeTasks(state, space, spaceCount = 1) {
-  const rank = (task) => {
-    const at = STATUS_ORDER.indexOf(task?.derived?.status);
-    return at === -1 ? STATUS_ORDER.length : at;
-  };
+export function treeTasks(state, space, spaceCount = 1, now = Date.now()) {
+  const rank = (task) => TREE_RANK[task?.derived?.status] ?? 3;
+  const withAgent = new Set(
+    liveAgents(state, now)
+      .filter((agent) => agent.task && agent.state !== "done")
+      .map((agent) => agent.task),
+  );
   const mine = (state?.tasks ?? [])
     .filter(isLive)
+    .filter((task) => TREE_STATES.has(task?.derived?.status) || withAgent.has(task.id))
+    .filter((task) => task?.derived?.status !== "done")
     .filter((task) => (task.space ?? (spaceCount === 1 ? space.id : null)) === space.id)
     .sort((a, b) => rank(a) - rank(b) || String(a.id).localeCompare(String(b.id)));
   return mine.map((task, at) => {
     const shape = look(task);
-    const working = task.derived?.status === "working";
-    const worker = agentsOfTask(state, task.id).find((agent) => agent.role === "worker");
-    const pct = shape.pct;
     return {
       id: task.id,
       title: String(task.title ?? ""),
       status: task.derived?.status ?? "to_do",
       glyph: shape.glyph,
       tone: shape.tone,
-      pct,
-      sub: working ? [worker?.program, pct === null ? null : `${pct}%`].filter(Boolean).join(" · ") : null,
+      pct: shape.pct,
+      sub: taskLine(state, task, now),
       last: at === mine.length - 1,
     };
   });
@@ -109,20 +181,47 @@ export function treeTasks(state, space, spaceCount = 1) {
  * The Spaces section: one entry per space with its branch, its tasks and the two
  * numbers a row's badge would show.
  */
-export function spaceTree(state) {
+export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
   const list = spacesOf(state);
-  return list.map((space) => {
-    const tasks = treeTasks(state, space, list.length);
+  const own = list.map((space) => {
+    const tasks = treeTasks(state, space, list.length, now);
     return {
       id: space.id,
       name: space.name,
       branch: space.branch ?? "",
       folder: space.folder ?? "",
+      plain: false,
       tasks,
       needs: tasks.filter((task) => task.status === "needs_you").length,
       ready: tasks.filter((task) => task.status === "ready").length,
     };
   });
+  return [...own, ...plainSpaces(list, herdrSpaces)];
+}
+
+/**
+ * The spaces Herdr has that the service does not serve — the person's own and
+ * Herdr's — as plain rows: a name and a folder, no tree. A space shprd made for
+ * a repo it serves (`shprd · <repo>`) is that repo's row already.
+ */
+export function plainSpaces(served, herdrSpaces = []) {
+  const folders = new Set(served.map((space) => space.folder).filter(Boolean));
+  const names = new Set(served.map((space) => `shprd · ${space.name}`));
+  return (herdrSpaces ?? [])
+    .filter((space) => space?.id && !names.has(space.name) && !(space.folder && folders.has(space.folder)))
+    .filter((space) => !String(space.name ?? "").startsWith("shprd · "))
+    .map((space) => ({
+      id: `herdr:${space.id}`,
+      herdr: space.id,
+      name: String(space.name ?? space.id),
+      branch: "",
+      folder: space.folder ?? "",
+      plain: true,
+      active: Boolean(space.active),
+      tasks: [],
+      needs: 0,
+      ready: 0,
+    }));
 }
 
 /**
@@ -136,7 +235,7 @@ export function spaceTree(state) {
 export function agentRows(state, { grouped = false, now = Date.now() } = {}) {
   const spaces = new Map(spacesOf(state).map((space) => [space.id, space]));
   const order = { needs_you: 0, working: 1, done: 2, idle: 3 };
-  const rows = (state?.live_agents ?? []).map((agent) => {
+  const rows = liveAgents(state, now).map((agent) => {
     const task = taskOf(state, agent);
     const shape = agentLook(agent);
     return {

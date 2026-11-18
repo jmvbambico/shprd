@@ -33,7 +33,7 @@ import { closeOverlay, props, run, spaces, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import { agentChoices, MENU, NEW_WORDS, newMenu } from "./lib/menu.js";
-import { menuRow } from "./lib/panel.js";
+import { menuRow, openAddTask, openNewSpace } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
 export default class NewMenu extends View {
@@ -107,10 +107,12 @@ export default class NewMenu extends View {
       run(row.command.name, { ...(row.command.args ?? {}), ...(space ? { space } : {}) });
       return;
     }
+    if (row.id === "new-space") {
+      openNewSpace();
+      return;
+    }
     if (row.id === "new-task") {
-      run("layout.select", { stack: "panel-body", child: "tasks" });
-      run("layout.show", { id: "panel" });
-      run("shprd-tasks.add");
+      openAddTask();
       return;
     }
     if (row.action === "agent" && row.program) this.start(row.program);

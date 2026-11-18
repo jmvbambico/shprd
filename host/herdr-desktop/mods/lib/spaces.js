@@ -288,6 +288,8 @@ function findNode(node, id) {
  */
 export function menuItems(row) {
   const space = row?.space?.id ?? row?.space ?? null;
+  // A space Herdr made: take the window there, or close it by its own id.
+  if (row?.plain) return [{ id: "switch", label: "Open space" }, { sep: true }, { id: "close", label: "Close…" }];
   const items = [{ id: "open", label: "Open task" }];
   if (space) items.push({ sep: true }, { id: "close", label: "Close…" });
   return items;
@@ -307,7 +309,7 @@ export function menuHeight(items = []) {
  * derived (`shprd · shop · m11 · T4`), and the person picked the row by its id.
  */
 export function closeWords(p) {
-  const named = String(p?.task ?? "").trim();
+  const named = String(p?.task ?? p?.title ?? "").trim();
   return {
     title: `Close “${named || "this space"}”?`,
     detail: "Its tabs close and every program in them ends.",

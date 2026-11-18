@@ -41,12 +41,12 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, theme } from "herdr";
+import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, spaces, theme } from "herdr";
 
 import { attach, reason, singleFlight } from "./lib/client.js";
 import { MENU, closeWords, menuHeight, menuItems } from "./lib/spaces.js";
-import { spaceTree, spacesOf } from "./lib/tree.js";
-import { note, openThread, statusGlyph } from "./lib/panel.js";
+import { plainSpaces, spaceTree } from "./lib/tree.js";
+import { note, openNewSpace, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -108,8 +108,8 @@ export default class Spaces extends View {
     this.failure = null;
     this.client = null;
     this.watching = false;
-    // PROTOTYPE: the picked space and the folded ones are this copy's own state.
-    this.selected = shared("spaces.picked") ?? null;
+    // The picked space is shared (`spaces.picked`: the Tasks list and the Graph
+    // follow it; none is "All spaces"). The folded ones are this copy's own state.
     this.folded = new Set();
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
@@ -118,10 +118,10 @@ export default class Spaces extends View {
     cx.spawn(async () => {
       for (;;) {
         const command = String(await nextCommand());
-        const space = spaceTree(this.state ?? {}).find((entry) => command === `pick:${entry.id}`);
+        const space = spaceTree(this.state ?? {}, spaces()).find((entry) => command === `pick:${entry.id}`);
         if (space) this.pick(space);
         else if (command === "fold") {
-          const picked = spaceTree(this.state ?? {}).find((entry) => entry.id === this.selected);
+          const picked = spaceTree(this.state ?? {}, spaces()).find((entry) => entry.id === this.selected);
           if (picked) this.fold(picked);
         }
       }
@@ -157,7 +157,6 @@ export default class Spaces extends View {
       this.client = next.client;
       this.follow();
       this.state = await this.client.state();
-      this.selected = this.selected ?? spacesOf(this.state)[0]?.id ?? null;
       this.failure = null;
     } catch (err) {
       // A service that restarted answers with another id: forget the client so
@@ -178,39 +177,48 @@ export default class Spaces extends View {
     });
   }
 
-  /** Picks a space: its tree opens, and the pick is shared with the other panes. */
+  /** The picked space's id, or null for "All spaces". */
+  get selected() {
+    return shared("spaces.picked") ?? null;
+  }
+
+  /**
+   * Picks a space: its tree opens, and the pick is shared with the other panes.
+   * A space Herdr made has no tree and nothing to filter by, so a click there
+   * just takes the window to it. A served space's own Herdr space (`shprd · repo`,
+   * where its coordinator runs) is shown too.
+   */
   pick(space) {
-    this.selected = space.id;
+    if (space.plain) {
+      run("space.select", { id: space.herdr });
+      return;
+    }
     this.folded.delete(space.id);
     setShared("spaces.picked", space.id);
+    const home = spaces().find((entry) => entry.name === `shprd · ${space.name}`);
+    if (home) run("space.select", { id: home.id });
     this.cx.notify();
   }
 
-  /** Folds or unfolds the picked space's tree. */
+  /** Folds or unfolds a space's tree. */
   fold(space) {
     if (this.folded.has(space.id)) this.folded.delete(space.id);
     else this.folded.add(space.id);
     this.cx.notify();
   }
 
-  /**
-   * The heading's "+": a new task, which is shprd's counterpart of Shepherdr's
-   * "New space" — a task is what makes a space here, and the form that writes one
-   * lives in the Tasks panel.
-   *
-   * U1 gives the "+" a menu of its own (Terminal, New task…, Start an agent). It
-   * is not in this build: when it lands, this one call becomes
-   * `openOverlay({ mod: "shprd-new-menu", kind: "popup", … })` and nothing else
-   * here changes. Until then the "+" does the row that menu would offer for a
-   * space, so the heading's add is never a dead press.
-   */
-  addTask() {
-    run("layout.select", { stack: "panel-body", child: "tasks" });
-    run("layout.show", { id: "panel" });
-    run("shprd-tasks.add");
+  /** The heading's "+": the New space dialog (a folder, Browse…, Create). */
+  addSpace() {
+    openNewSpace();
   }
 
-  /** Opens the row's menu as this mod's own popup, at the pointer. */
+  /**
+   * Opens the row's menu as this mod's own popup, at the pointer.
+   *
+   * A task row offers Open task; a space Herdr made offers Open space and Close…
+   * with its own id. A served repo's space has no menu: closing it would end its
+   * coordinator and every agent in it, which is not the row's to do.
+   */
   menu(row) {
     const items = menuItems(row);
     openOverlay({
@@ -221,9 +229,10 @@ export default class Spaces extends View {
       at: "pointer",
       props: {
         view: "space",
-        task: row.id,
+        task: row.plain ? null : row.id,
         title: row.title,
-        space: row.space?.id ?? null,
+        space: row.plain ? row.herdr : (row.space?.id ?? null),
+        plain: Boolean(row.plain),
       },
     });
   }
@@ -254,7 +263,8 @@ export default class Spaces extends View {
     const item = items.filter((entry) => !entry.sep)[at];
     if (!item) return;
     closeOverlay(this.popup.overlay);
-    if (item.id === "open") this.openTask(this.popup);
+    if (item.id === "switch") run("space.select", { id: this.popup.space });
+    else if (item.id === "open") this.openTask(this.popup);
     else if (item.id === "close") this.askClose(this.popup);
   }
 
@@ -268,9 +278,12 @@ export default class Spaces extends View {
     if (this.popup) return this.popup.view === "confirm" ? this.confirm() : this.menuView();
     const t = theme();
     const colors = tone(t);
-    const tree = this.state ? spaceTree(this.state) : null;
+    const tree = this.state ? spaceTree(this.state, spaces()) : null;
     const sections = [];
     if (!tree) {
+      // The service is down or has no run: Herdr's own spaces still show.
+      const plain = plainSpaces([], spaces());
+      for (const space of plain) sections.push(this.spaceRow(t, colors, { ...space, branch: "" }));
       sections.push(
         note(t, this.failure ?? "No run yet."),
         note(t, this.failure ? "Start it from the footer below." : "Tasks appear here as the run adds them."),
@@ -292,9 +305,11 @@ export default class Spaces extends View {
       );
   }
 
-  /** Whether a space shows its tasks: the picked one, unless its ▾ folded it. */
+  /** Whether a space shows its tasks: the picked one (every one under "All spaces"), unless its ▾ folded it. */
   isOpen(space) {
-    return this.selected === space.id && !this.folded.has(space.id);
+    if (space.plain || this.folded.has(space.id)) return false;
+    const picked = this.selected;
+    return picked === null || picked === space.id;
   }
 
   /** "Spaces", and the "+" at the right that adds one (`S:mods/spaces-chat/main.js:818`). */
@@ -333,7 +348,7 @@ export default class Spaces extends View {
       .text_size(TEXT.title - 1)
       .text_color(t.dim)
       .hover((style) => style.bg(t.hover).text_color(t.foreground))
-      .on_click(() => this.addTask())
+      .on_click(() => this.addSpace())
       .child("+");
   }
 
@@ -343,7 +358,7 @@ export default class Spaces extends View {
    */
   spaceRow(t, colors, space) {
     const open = this.isOpen(space);
-    const picked = this.selected === space.id;
+    const picked = space.plain ? Boolean(space.active) : this.selected === space.id;
     return h_flex()
       .id(`space-${space.id}`)
       .h(44)
@@ -357,6 +372,9 @@ export default class Spaces extends View {
       .when(!picked, (el) => el.hover((style) => style.bg(t.hover)))
       .cursor_pointer()
       .on_click(() => this.pick(space))
+      .on_mouse_down("right", () => {
+        if (space.plain) this.menu({ id: space.id, title: space.name, plain: true, herdr: space.herdr, space: null });
+      })
       .child(
         v_flex()
           .flex_1()
@@ -376,7 +394,7 @@ export default class Spaces extends View {
       .when(space.needs > 0 || space.ready > 0, (el) =>
         el.child(rowBadge(t, { need: space.needs, ready: space.ready }, colors, picked ? t.selected : t.chrome)),
       )
-      .when(picked, (el) =>
+      .when(!space.plain && space.tasks.length > 0, (el) =>
         el.child(
           h_flex()
             .id(`space-fold-${space.id}`)

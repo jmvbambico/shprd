@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { age, agentLine, agentRows, agentsOfTask, graphRows, spaceTree, spacesOf } from "../mods/lib/tree.js";
+import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
 const NOW = 1_800_000_000_000;
 const state = JSON.parse(readFileSync(new URL("./fixtures/proto.json", import.meta.url), "utf8"));
@@ -24,21 +24,67 @@ test("an agent's line says its state and how long, and 'ago' once it is done", (
   assert.equal(agentLine({ state: "done", since_ms: NOW - 720_000 }, NOW), "done · 12m ago");
 });
 
-test("the tree has a space per repo, its branch, and its tasks needs-you first", () => {
-  const tree = spaceTree(state);
+test("the tree has a space per repo and only its live tasks, needs you first", () => {
+  const tree = spaceTree(state, [], NOW);
   assert.deepEqual(tree.map((space) => space.name), ["shprd", "shop", "relay"]);
   assert.equal(tree[0].branch, "integration/m11");
-  assert.equal(tree[0].tasks[0].id, "SHPR-23", "needs you leads");
-  assert.equal(tree[0].tasks.at(-1).status, "done");
+  // To do, queued and done tasks are the Tasks panel's, not the tree's.
+  assert.deepEqual(tree[0].tasks.map((task) => task.id), ["SHPR-23", "SHPR-22", "SHPR-26", "SHPR-28"]);
   assert.equal(tree[0].tasks.filter((task) => task.last).length, 1);
   assert.deepEqual([tree[0].needs, tree[0].ready], [1, 1]);
+  assert.deepEqual(tree[1].tasks.map((task) => task.id), ["SHOP-2"]);
 });
 
-test("a working task's second line is its worker and progress; others have none", () => {
-  const tasks = spaceTree(state)[0].tasks;
-  assert.equal(tasks.find((task) => task.id === "SHPR-22").sub, "claude · 62%");
-  assert.equal(tasks.find((task) => task.id === "SHPR-26").sub, "pi · 35%");
-  assert.equal(tasks.find((task) => task.id === "SHPR-24").sub, null);
+test("a queued task with an agent on it is in the tree; one without is not", () => {
+  const queued = { ...state, tasks: state.tasks.map((task) => (task.id === "SHPR-24" ? { ...task } : task)) };
+  assert.ok(!spaceTree(queued, [], NOW)[0].tasks.some((task) => task.id === "SHPR-24"));
+  queued.live_agents = [...state.live_agents, { id: "a9", space: "sp-shprd", task: "SHPR-24", role: "worker", program: "pi", state: "working", since_ms: NOW - 5000 }];
+  assert.ok(spaceTree(queued, [], NOW)[0].tasks.some((task) => task.id === "SHPR-24"));
+});
+
+test("a task row's second line says who is on it and where it stands", () => {
+  const tasks = spaceTree(state, [], NOW)[0].tasks;
+  const line = (id) => tasks.find((task) => task.id === id).sub;
+  assert.equal(line("SHPR-22"), "claude · working · 4m · 62%");
+  assert.equal(line("SHPR-26"), "pi · working · 9m · 35%");
+  assert.equal(line("SHPR-23"), "needs you");
+  assert.equal(line("SHPR-28"), "ready to approve");
+  assert.equal(spaceTree(state, [], NOW)[2].tasks[0].sub, "asks you · 3m ago");
+});
+
+test("a running review shows as the reviewer's line", () => {
+  const live = { ...state, live_agents: [...state.live_agents, { id: "r1", space: "sp-shop", task: "SHOP-2", role: "reviewer", program: "codex", state: "working", since_ms: NOW - 60_000 }] };
+  assert.equal(spaceTree(live, [], NOW)[1].tasks[0].sub.split(" · ").slice(0, 2).join(" · "), "codex · reviewing");
+});
+
+test("spaces Herdr made show as plain rows; the served repo's own space does not repeat", () => {
+  const herdr = [
+    { id: "s1", name: "shprd · shprd", folder: "/x/shprd" },
+    { id: "s2", name: "notes", folder: "/home/me/notes", active: true },
+    { id: "s3", name: "shprd · other", folder: "/x/other" },
+  ];
+  const tree = spaceTree(state, herdr, NOW);
+  assert.deepEqual(tree.map((space) => space.name), ["shprd", "shop", "relay", "notes"]);
+  const plain = tree.at(-1);
+  assert.deepEqual([plain.plain, plain.herdr, plain.tasks.length], [true, "s2", 0]);
+});
+
+test("the Tasks list's scope keeps one space's tasks, and all when none is picked", () => {
+  assert.equal(scopeToSpace(state, null), state);
+  assert.ok(scopeToSpace(state, "sp-shop").tasks.every((task) => task.space === "sp-shop"));
+  assert.equal(scopeToSpace(state, "gone"), state);
+});
+
+test("a finished agent stays in the Agents pane 30 minutes; a coordinator stays", () => {
+  const ended = (ms) => ({ id: "x", space: "sp-shprd", task: "SHPR-28", role: "reviewer", program: "codex", state: "done", ended_ms: NOW - ms });
+  assert.equal(agentKept(ended(29 * 60_000), NOW), true);
+  assert.equal(agentKept(ended(30 * 60_000), NOW), false);
+  assert.equal(agentKept({ ...ended(5 * 3600_000), role: "coordinator", task: null }, NOW), true);
+  assert.equal(agentKept({ ...ended(0), ended_ms: undefined, since_ms: NOW - 31 * 60_000 }, NOW), false);
+  const aged = { ...state, live_agents: [ended(31 * 60_000), ...state.live_agents.filter((agent) => agent.state !== "done")] };
+  assert.equal(agentRows(aged, { now: NOW }).filter((row) => row.state === "done").length, 0);
+  // The fixture's own done reviewer ended 12 minutes ago: still shown.
+  assert.equal(agentRows(state, { now: NOW }).filter((row) => row.state === "done").length, 1);
 });
 
 test("a state with no spaces still draws one, from its run", () => {
