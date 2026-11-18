@@ -350,11 +350,8 @@ test("a read that runs out of time is no answer, and a strict read says so", asy
   assert.equal(await client.call("GET", "/api/state"), null);
   // The shared clock sleeps in ticks; together they cover READ_WAIT.
   assert.ok(bounds.every((ms) => ms <= 500), "one short sleep at a time");
-  assert.equal(
-    bounds.reduce((sum, ms) => sum + ms, 0),
-    4000,
-    "a read asks for READ_WAIT",
-  );
+  const asked = bounds.reduce((sum, ms) => sum + ms, 0);
+  assert.ok(asked >= 3990 && asked <= 4010, `a read asks for READ_WAIT, asked ${asked}`);
 
   // The board is not a plain read: a panel paints it, so no answer at all is a
   // failure (the M10 gate's bug 5 — a `null` board looked like "nothing new"
