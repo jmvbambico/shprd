@@ -114,8 +114,8 @@ export default class Menu extends View {
    *
    * The commands are the app's own; the three that are not are this mod's:
    * *Rename…* opens the prompt dialog, *Restart* is the service's `task.retry`,
-   * *New task…* shows the Tasks panel's own form and *Keybinds* is Herdr's keys
-   * dialog (our own list is U6's).
+   * *New task…* shows the Tasks panel's own form and *Keybinds* is this window's own
+   * list (`shprd-keybinds`, Shepherdr's wording).
    */
   choose(index) {
     const row = this.rows()[index];
@@ -157,7 +157,7 @@ export default class Menu extends View {
       return;
     }
     if (row.id === "keybinds") {
-      run("app.help");
+      run("mod.open", { name: "shprd-keybinds" });
     }
   }
 

@@ -23,6 +23,10 @@ mods/shprd-new-menu/    the "+" menu: Terminal, New task…, and the roster's
 mods/shprd-menu/        the context menus: a tab's, the app's, and a terminal's
                         right-click menu
 mods/shprd-prompt/      the one text prompt (Rename tab)
+mods/shprd-jump/        Jump (Ctrl+K): a 620 × 480 popup at the top, one find box over
+                        the coordinator, spaces and tasks; ↑ ↓ Enter Esc
+mods/shprd-keybinds/    Keybinds (Ctrl+Shift+/): a 560 × 620 dialog, every key in
+                        words, grouped, type to filter
 mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
 mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Terminal ·
                         Pull request) and the Accept card, a 640×640 modal dialog
@@ -43,7 +47,9 @@ mods/lib/               the shared modules: tokens, panel parts, the menus' rows
                         source. Every mod carries a copy in its own `lib/`
                         because a mod may only import files inside its own
                         folder.
-keys.json               the keys the layout expects, merged by the installer
+keys.json               the keys the layout expects, merged by the installer: Shepherdr's
+                        Alt keys, Ctrl+K / Ctrl+Shift+/ and the layout's own (never one
+                        Herdr binds itself: F2 and Shift+F2 are Herdr's)
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
 bin/check               all of it: the copies, the tests, `herdr-app check`
 bin/gate-env            a private app home with the first-run screens answered

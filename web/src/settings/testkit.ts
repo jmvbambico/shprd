@@ -107,6 +107,7 @@ export const ROSTER: RosterDto = {
     {
       id: "claude",
       name: "Claude Code",
+      installed: true,
       vendor: "anthropic",
       multi_model: false,
       needs_provider: false,
@@ -122,6 +123,7 @@ export const ROSTER: RosterDto = {
     {
       id: "codex",
       name: "Codex",
+      installed: true,
       vendor: "openai",
       multi_model: false,
       needs_provider: false,

@@ -346,6 +346,46 @@ fn a_merge_keeps_the_keys_the_person_bound_and_takes_the_rest() {
 }
 
 #[test]
+fn an_m10_install_upgrades_to_the_new_keys_and_keeps_the_person_s_own() {
+    let fixture = Fixture::new();
+    // What M10 wrote (its two layout keys) beside a key the person bound for
+    // themselves: Shepherdr's own Ctrl+K, and Herdr's own F2 left alone.
+    fs::create_dir_all(fixture.app_path(".")).expect("the app home");
+    fs::write(
+        fixture.app_path("keys.json"),
+        r#"{
+  "global": {"ctrl-k": "mod.open:jump", "f2": "tab.rename"},
+  "layout:shprd": {"ctrl-shift-b": "layout.toggle:panel", "ctrl-shift-a": "layout.show:asks"}
+}
+"#,
+    )
+    .expect("their keys");
+
+    ok(&fixture.run(&[]));
+
+    let keys: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    // The new bindings arrive: Jump on Ctrl+Shift+K, Keybinds, the tab keys, the
+    // layout's close and new-task keys.
+    assert_eq!(keys["global"]["ctrl-shift-k"], "mod.open:shprd-jump");
+    assert_eq!(keys["global"]["ctrl-shift-/"], "mod.open:shprd-keybinds");
+    assert_eq!(keys["global"]["alt-up"], "space.prev");
+    assert_eq!(keys["layout:shprd"]["ctrl-shift-w"], "tab.close");
+    assert_eq!(keys["layout:shprd"]["ctrl-shift-n"], "shprd-tabs.new-task");
+    // Theirs stay: Ctrl+K is the person's, and Herdr's own F2 is never ours.
+    assert_eq!(keys["global"]["ctrl-k"], "mod.open:jump");
+    assert_eq!(keys["global"]["f2"], "tab.rename");
+    // The two mods came with it.
+    assert!(fixture.app_path("mods/shprd-jump/main.js").is_file());
+    assert!(fixture.app_path("mods/shprd-keybinds/main.js").is_file());
+    // A second install is quiet.
+    let again = ok(&fixture.run(&["--dry-run"]));
+    assert!(!again.is_empty());
+}
+
+#[test]
 fn an_uninstall_removes_only_what_the_manifest_lists() {
     let fixture = Fixture::new();
     // A file of the person's in the same folders shprd writes to.
