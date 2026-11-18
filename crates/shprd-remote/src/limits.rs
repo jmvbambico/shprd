@@ -128,6 +128,9 @@ struct Buckets {
     login_all: Vec<u64>,
     /// Wrong passwords for the one account, in the last hour.
     failures: Vec<u64>,
+    /// The last login stamp handed out: stamps are strictly increasing, so a
+    /// [`LoginTicket`] names exactly one attempt even within one millisecond.
+    last_stamp: u64,
     /// Until when the account is locked.
     account_locked_until: u64,
     /// Session creations per address.
@@ -214,6 +217,10 @@ impl RateLimiter {
     pub fn login(&self, ip: IpAddr) -> Result<LoginTicket, Retry> {
         let now = self.now();
         let mut buckets = self.lock();
+        // The attempt's own stamp: the time, nudged forward when another attempt
+        // already took this millisecond (a window's edge moves by less than that).
+        let stamp = now.max(buckets.last_stamp + 1);
+        buckets.last_stamp = stamp;
 
         // An address in a block is refused until the block ends. The block is
         // not extended by attempts inside it, or a client that retries would
@@ -250,7 +257,7 @@ impl RateLimiter {
                 after_ms: length.as_millis() as u64,
             });
         }
-        buckets.login_ip.entry(ip).or_default().push(now);
+        buckets.login_ip.entry(ip).or_default().push(stamp);
 
         // Everywhere, in the last hour.
         let hour = HOUR.as_millis() as u64;
@@ -260,8 +267,10 @@ impl RateLimiter {
         if buckets.login_all.len() as u32 >= LOGIN_GLOBAL {
             // A refused attempt is not one this address made against the
             // per-address limit.
-            if let Some(recent) = buckets.login_ip.get_mut(&ip) {
-                recent.pop();
+            if let Some(recent) = buckets.login_ip.get_mut(&ip)
+                && let Some(at) = recent.iter().rposition(|at| *at == stamp)
+            {
+                recent.remove(at);
             }
             self.storm.trip();
             let after = buckets
@@ -271,10 +280,10 @@ impl RateLimiter {
                 .unwrap_or(hour);
             return Err(Retry { after_ms: after });
         }
-        buckets.login_all.push(now);
+        buckets.login_all.push(stamp);
 
         self.sweep(&mut buckets, now);
-        Ok(LoginTicket(now))
+        Ok(LoginTicket(stamp))
     }
 
     /// Takes back the attempt [`RateLimiter::login`] counted for `ip` (the one
@@ -712,6 +721,16 @@ mod tests {
         limits.login(ip(2)).expect("another guess, still in flight");
         limits.login_succeeded(ip(1), mine);
         assert_eq!(limits.lock().login_all.len(), 1, "the other attempt stays");
+    }
+
+    #[test]
+    fn two_attempts_in_one_millisecond_have_their_own_tickets() {
+        let (_, limits) = limiter();
+        let first = limits.login(ip(1)).expect("inside");
+        limits.login(ip(1)).expect("the same millisecond");
+        limits.login_succeeded(ip(1), first);
+        assert_eq!(limits.lock().login_all.len(), 1);
+        assert_eq!(limits.lock().login_ip[&ip(1)].len(), 1);
     }
 
     #[test]
