@@ -27,7 +27,7 @@
   },
   "layout:shprd": {
     "ctrl-shift-b": "layout.toggle:panel",
-    "ctrl-shift-a": "layout.show:asks",
+    "ctrl-shift-a": "layout.show:tasks",
     "ctrl-shift-w": "tab.close",
     "ctrl-shift-n": "shprd-tabs.new-task"
   }

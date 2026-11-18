@@ -43,7 +43,7 @@ export const NAMES = {
   "layout.toggle": (id) =>
     ({ sidebar: "Show or hide the sidebar", panel: "Show or hide the side panel" })[id] ??
     `Show or hide ${id}`,
-  "layout.show": (id) => ({ asks: "Show the Asks panel" })[id] ?? `Show ${id}`,
+  "layout.show": (id) => ({ tasks: "Show the Tasks panel" })[id] ?? `Show ${id}`,
   "layout.switch": () => "Next layout",
   "mod.open": (name) =>
     ({
@@ -76,7 +76,7 @@ export function groupOf(section, action) {
   }
   if (/^tab\./.test(action)) return "Tabs";
   if (/^space\./.test(action)) return "Spaces";
-  if (/^shprd-(tabs|tasks)\.(new-task|add)$/.test(action) || /^layout\.(toggle|show):(panel|asks)$/.test(action)) {
+  if (/^shprd-(tabs|tasks)\.(new-task|add)$/.test(action) || /^layout\.(toggle|show):(panel|tasks)$/.test(action)) {
     return "Tasks";
   }
   if (/^pane\./.test(action)) return "Panes";

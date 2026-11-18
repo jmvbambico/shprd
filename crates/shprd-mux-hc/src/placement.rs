@@ -153,13 +153,37 @@ fn tab_from_value(value: &Value) -> Option<Tab> {
     })
 }
 
-/// Walk a pane tree, appending the terminal of every block that holds one.
-fn collect_terminals(node: &Value, out: &mut Vec<String>) {
-    if let Some(terminal) = node
-        .get("content")
-        .and_then(|content| content.get("terminal"))
+/// The desktop's chat mod: the pane the Chat │ Terminal switch puts in an agent
+/// pane's place, with the parked agent's terminal in its `props.terminal`.
+pub const CHAT_MOD: &str = "shprd-chat";
+
+/// The terminal a chat pane shows, when `content` is one.
+///
+/// The switch parks the agent's terminal (it keeps running, without a pane) and
+/// opens the chat mod in the slot, so the window's layout no longer lists the
+/// terminal as a pane. It is still the tab's agent, though: a chat line, a
+/// prompt and the janitor must find it where it was, so the chat's block counts
+/// as the terminal it shows.
+fn parked_terminal(content: &Value) -> Option<&str> {
+    if content.get("mod").and_then(Value::as_str) != Some(CHAT_MOD) {
+        return None;
+    }
+    content
+        .get("props")
+        .and_then(|props| props.get("terminal"))
         .and_then(Value::as_str)
-    {
+        .filter(|terminal| !terminal.is_empty())
+}
+
+/// Walk a pane tree, appending the terminal of every block that holds one, or
+/// that shows one parked behind a chat pane.
+fn collect_terminals(node: &Value, out: &mut Vec<String>) {
+    if let Some(terminal) = node.get("content").and_then(|content| {
+        content
+            .get("terminal")
+            .and_then(Value::as_str)
+            .or_else(|| parked_terminal(content))
+    }) {
         out.push(terminal.to_string());
         return;
     }
@@ -268,6 +292,36 @@ mod tests {
         // The mod panes carry no terminal, so only the terminal block counts.
         assert_eq!(space.tabs[1].terminals, vec!["t20"]);
         assert_eq!(space.tabs[1].name, "probe");
+    }
+
+    #[test]
+    fn an_agent_parked_behind_a_chat_pane_is_still_the_tabs_terminal() {
+        // The Chat │ Terminal switch parks the agent and opens the chat mod in its
+        // slot; the tab's root terminal must stay the agent, or a chat line, a
+        // prompt and the janitor would find a tab with nothing in it.
+        let document = json!({"spaces": [{
+            "id": "spc1", "name": "task", "tabs": [{
+                "id": "tb1", "name": "worker",
+                "root": {"type": "row", "id": "tb1", "children": [
+                    {"type": "block", "id": "p1", "content": {"mod": "shprd-chat",
+                        "props": {"space": "T1", "terminal": "t9"}}},
+                    {"type": "block", "id": "p2", "content": {"terminal": "t10"}}
+                ]}
+            }]
+        }]});
+        let spaces = spaces_from_document(&document);
+        assert_eq!(spaces[0].tabs[0].terminals, vec!["t9", "t10"]);
+        // Another mod, or a chat with no terminal named, is not a terminal.
+        let others = json!({"spaces": [{"id": "s", "tabs": [{"id": "t", "root": {"type": "row", "children": [
+            {"type": "block", "content": {"mod": "shprd-tasks", "props": {"terminal": "t1"}}},
+            {"type": "block", "content": {"mod": "shprd-chat", "props": {"space": "coordinator"}}},
+            {"type": "block", "content": {"mod": "shprd-chat", "props": {"terminal": ""}}}
+        ]}}]}]});
+        assert!(
+            spaces_from_document(&others)[0].tabs[0]
+                .terminals
+                .is_empty()
+        );
     }
 
     #[test]

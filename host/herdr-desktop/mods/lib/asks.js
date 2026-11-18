@@ -217,3 +217,14 @@ export function footer(card, now = Date.now()) {
   if (card?.from === "escalation") return card.default_action ?? "";
   return expiry(card?.expires, now);
 }
+
+/**
+ * The cards that belong in one chat's timeline (Shepherdr draws a task's cards in
+ * that task's thread): a task's own, or — for the coordinator's chat — the run's,
+ * the ones with no task. The Asks panel is gone, so every card has to land in
+ * exactly one of these.
+ */
+export function forSpace(list, space) {
+  const wanted = space === "coordinator" ? null : space;
+  return (list ?? []).filter((card) => (card.task ?? null) === wanted);
+}

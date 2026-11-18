@@ -40,19 +40,6 @@
           "resizable": false
         },
         {
-          "id": "coordinator",
-          "type": "block",
-          "content": {
-            "mod": "shprd-coordinator",
-            "props": {
-              "compact": true
-            }
-          },
-          "size": {
-            "px": 190
-          }
-        },
-        {
           "id": "sidebar-footer",
           "type": "block",
           "content": {
@@ -180,6 +167,16 @@
                               "type": "stack",
                               "children": [
                                 {
+                                  "id": "tasks-thread-chat",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-chat",
+                                    "props": {
+                                      "thread": true
+                                    }
+                                  }
+                                },
+                                {
                                   "id": "tasks-thread-term",
                                   "type": "block",
                                   "content": {
@@ -194,7 +191,7 @@
                                   }
                                 }
                               ],
-                              "active": "tasks-thread-term"
+                              "active": "tasks-thread-chat"
                             }
                           ],
                           "background": "background",
@@ -207,13 +204,6 @@
                         }
                       ],
                       "active": "tasks-list"
-                    },
-                    {
-                      "id": "asks",
-                      "type": "block",
-                      "content": {
-                        "mod": "shprd-asks"
-                      }
                     }
                   ],
                   "active": "tasks"

@@ -94,13 +94,16 @@ const MOD_PREFIX: &str = "shprd-";
 /// over the window, so that block went away. M11 U3 made the Accept card a dialog,
 /// so the task thread's stack lost its `tasks-thread-accept` block and opens on the
 /// terminal; the layout before that is `shprd-m11-menu.json` (and `shprd-m11.json` before the
-/// terminal menu was added).
+/// terminal menu was added). M11 U4 gave the task thread a Chat view it opens on and
+/// took the Asks stack and the sidebar's coordinator block away; the layout before
+/// that is `shprd-m11-accept.json`.
 const PREVIOUS_LAYOUTS: &[&str] = &[
     include_str!("previous-layouts/shprd-m10.3.json"),
     include_str!("previous-layouts/shprd-m10.4.json"),
     include_str!("previous-layouts/shprd-m10.json"),
     include_str!("previous-layouts/shprd-m11.json"),
     include_str!("previous-layouts/shprd-m11-menu.json"),
+    include_str!("previous-layouts/shprd-m11-accept.json"),
 ];
 
 /// Runs `shprd install`, whichever mode the command line asked for.
@@ -612,6 +615,12 @@ struct InstallPlan {
     kept_keys: Vec<(String, String, String)>,
     /// The merged `keys.json`, when it differs from the one on disk.
     keys_json: Option<Vec<u8>>,
+    /// Files an earlier install wrote that this build no longer ships (a mod that
+    /// was removed or renamed), still holding exactly what was written: they are
+    /// taken away. One the person edited is left alone and is no longer ours.
+    stale: Vec<String>,
+    /// The directories of those files, which go when they are empty.
+    stale_dirs: Vec<String>,
     /// The manifest this install records.
     manifest: Manifest,
 }
@@ -623,6 +632,7 @@ impl InstallPlan {
             && self.files.iter().all(|(_, plan)| *plan == Plan::Same)
             && self.keys.is_empty()
             && self.keys_json.is_none()
+            && self.stale.is_empty()
     }
 }
 
@@ -767,9 +777,32 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
         text.into_bytes()
     });
 
+    // What an earlier install wrote and this build does not ship: taken back, if
+    // nobody changed it since.
+    let mut stale = Vec::new();
+    for (rel, hash) in &previous.files {
+        if manifest.files.contains_key(rel) {
+            continue;
+        }
+        if let Ok(current) = fs::read(app_home.join(rel))
+            && sha256(&current) == *hash
+        {
+            stale.push(rel.clone());
+        }
+    }
+    let mut stale_dirs: Vec<String> = previous
+        .dirs
+        .iter()
+        .filter(|dir| !manifest.dirs.contains(*dir))
+        .cloned()
+        .collect();
+    stale_dirs.sort_by_key(|dir| std::cmp::Reverse(dir.matches('/').count()));
+
     Ok(InstallPlan {
         files,
         clashes,
+        stale,
+        stale_dirs,
         keys: listed,
         kept_keys: kept,
         keys_json,
@@ -808,6 +841,16 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
             }
             write_atomic(&target, &file.bytes)?;
         }
+        for rel in &plan.stale {
+            let path = app_home.join(rel);
+            fs::remove_file(&path).map_err(|err| {
+                CliError::other(anyhow!(err).context(format!("removing {}", path.display())))
+            })?;
+        }
+        // Deepest first; a directory the person filled stays.
+        for rel in &plan.stale_dirs {
+            let _ = fs::remove_dir(app_home.join(rel));
+        }
         if let Some(bytes) = &plan.keys_json {
             write_atomic(&app_home.join("keys.json"), bytes)?;
         }
@@ -828,6 +871,7 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
                 .filter(|(_, plan)| plan.writes())
                 .map(|(file, _)| file.rel.clone())
                 .collect::<Vec<_>>(),
+            "removed": plan.stale.clone(),
             "restored": plan
                 .files
                 .iter()
@@ -880,6 +924,13 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
         } else if *decision == Plan::Write {
             println!("{prefix}{}", app_home.join(&file.rel).display());
         }
+    }
+    for rel in &plan.stale {
+        let word = if dry_run { "would remove" } else { "removed" };
+        println!(
+            "{word} {} (this build no longer ships it)",
+            app_home.join(rel).display()
+        );
     }
     for (section, key, command) in &plan.keys {
         println!("{prefix}keys.json {section} {key} = {command}");

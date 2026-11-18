@@ -27,7 +27,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, spaces, theme } from "herdr";
+import { run, setShared, spaces, theme } from "herdr";
 
 import { attach, alive, POLL_WAIT } from "./lib/client.js";
 import { canReview } from "./lib/accept.js";
@@ -205,6 +205,13 @@ export default class Toasts extends View {
     const task = (this.state?.tasks ?? []).find((entry) => entry.id === item.task);
     if (task && canReview(task)) {
       openAccept({ task: task.id, title: task.title });
+      return;
+    }
+    // A toast that says a task needs the person opens that task's thread, where
+    // the card that asks is in the timeline (the Asks panel is gone).
+    if (item.level === "warning" && item.task && task) {
+      setShared("tasks.thread", { task: task.id, title: task.title ?? "", at: Date.now() });
+      run("shprd-tasks.open");
       return;
     }
     const space = spaceIndex(spaces()).tasks.get(item.task);

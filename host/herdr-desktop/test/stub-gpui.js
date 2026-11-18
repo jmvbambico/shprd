@@ -91,7 +91,28 @@ export const h_flex = () => element();
 export const v_flex = () => element();
 export const svg = () => element();
 export const image = () => element();
-export const ScrollHandle = { new: () => ({}) };
+export const ScrollHandle = {
+  new: () => ({
+    /** The row indexes a mod asked to reveal, in order. */
+    revealed: [],
+    scroll_to_item(index) {
+      this.revealed.push(index);
+    },
+    release: () => true,
+  }),
+};
+
+/** The window's text view, drawing nothing: a test reads what a mod handed it. */
+export const TextView = {
+  markdown: (id, text) => {
+    const node = element();
+    TextView.drawn.push({ id, text });
+    return node;
+  },
+  html: () => element(),
+  /** Every markdown a mod drew, in order. */
+  drawn: [],
+};
 
 export default {
   View,
@@ -101,6 +122,7 @@ export default {
   svg,
   image,
   ScrollHandle,
+  TextView,
   InputState,
   Input,
   TextareaState,

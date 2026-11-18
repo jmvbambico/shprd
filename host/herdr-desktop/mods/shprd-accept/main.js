@@ -291,7 +291,7 @@ export default class Accept extends View {
     const live = task ? spaceIndex(spaces()).tasks.has(task.id) : false;
     const shown = this.shownChild();
     // Showing the pull request of a task that has none: back to the terminal.
-    if (mustLeavePr(task, shown)) this.cx.timer.after(0, () => this.view("tasks-thread-term", task));
+    if (mustLeavePr(task, shown)) this.cx.timer.after(0, () => this.view("tasks-thread-chat", task));
     const segs = threadViews(task, { live, shown });
     const shape = task ? taskLook(task) : { glyph: "ring", tone: "dim" };
     const said = reportLine(task);
@@ -451,7 +451,7 @@ export default class Accept extends View {
       }
       return null;
     };
-    return find(layout())?.active ?? this.viewing ?? "tasks-thread-term";
+    return find(layout())?.active ?? this.viewing ?? "tasks-thread-chat";
   }
 
   /**
