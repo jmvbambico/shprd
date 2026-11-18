@@ -22,4 +22,11 @@
 | **host adapter** | the thin layer that talks to herdr or tuios |
 | **mux** | terminal multiplexer: herdr or tuios |
 | **relay** | herdr-mobile-relay, phone and browser access on herdr |
+| **space** | one per repo, labelled `shprd · <repo>`; holds the coordinator. A task gets no space of its own |
+| **coordinator** | the CLI the service starts in the space; shown as the space's Assistant chat |
+| **live agent** | a worker, reviewer or coordinator the host lists (`live_agents`); finished ones stay in the Agents pane for 30 minutes |
+| **thread** | a task's view, switching between Chat and Terminal |
+| **session** | a browser's login: a cookie naming a stored hash, ended by idle, age or `shprd web sessions --revoke` |
+| **gate (remote)** | the checks in front of every API route but health and login: `Host`, credential, `Origin`, `x-shprd`, rate limits |
+| **tunnel** | a provider's way of putting the loopback port at an address: Tailscale serve, cloudflared, ngrok, tunnl.gg |
 | **dagr** | the task-graph viewer; shprd writes its run file |
