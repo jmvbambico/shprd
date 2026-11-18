@@ -626,7 +626,7 @@ async fn the_session_list_marks_this_one_and_a_revoke_signs_the_other_out() {
 
     // Stale: the password is asked for again, and nothing is revoked.
     fixture.clock.advance(5 * 60 + 1);
-    let stale = fixture.send(revoke(&current.to_string())).await;
+    let stale = fixture.send(revoke(current)).await;
     assert_eq!(stale.status, StatusCode::UNAUTHORIZED, "{:?}", stale.body);
     assert_eq!(stale.json()["code"], json!("reauth"));
 }
