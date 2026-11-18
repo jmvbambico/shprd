@@ -269,6 +269,21 @@ pub fn spawn(
         effective_effort(env, &pick.agent, pick.model.as_deref(), effort.clone());
     let warnings: Vec<String> = effort_warning.into_iter().collect();
     let attempt = task.attempts.len() as u32 + 1;
+    // Without worktrees every attempt would edit and commit in the one checkout,
+    // so a second task starting while another is in flight would mix their work.
+    if !uses_worktrees(env)
+        && let Some(busy) = state
+            .tasks
+            .values()
+            .find(|other| other.id != task.id && !replaceable(other.status))
+    {
+        return Err(CliError::Invalid(anyhow!(
+            "tasks.worktrees is off, so one task at a time works in the repository, and {:?} is \
+             still {:?}: let it finish, or turn `tasks.worktrees` back on",
+            busy.id,
+            busy.status
+        )));
+    }
     let (worktree, branch) = work_place(env, &task.id)?;
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     // What the launch applies is decided before the brief is written, because
@@ -4847,6 +4862,33 @@ project_dirs = []
             "the repository is never a resource the janitor may remove: {:?}",
             state.resources
         );
+    }
+
+    #[test]
+    fn tasks_worktrees_off_runs_one_task_at_a_time() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::TaskAdded {
+            task: "T2".to_string(),
+            title: "A second task".to_string(),
+            scope: vec!["crates/shprd".to_string()],
+            acceptance: vec!["it works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let env = scratch.spawn_env_with(&ctx, "version = 1\n[tasks]\nworktrees = false\n");
+        let mux = FakeMux::default().with_ready_agent();
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let second = SpawnRequest {
+            task: "T2".to_string(),
+            agent: None,
+            effort: None,
+        };
+        let err = spawn(&mux, &env, &second).err();
+        let text = err.map(|err| err.to_string()).unwrap_or_default();
+        assert!(text.contains("one task at a time"), "{text}");
     }
 
     #[test]

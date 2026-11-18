@@ -2117,6 +2117,11 @@ pub fn pass_config(home: &Path, repo: &Path, base: &Config) -> (Config, Option<u
     if named(TaskKey::MaxRunning) {
         config.tick.max_running = tasks.max_running;
     }
+    // Without worktrees every task would work in the one checkout, so the pass
+    // starts them one at a time whatever `tasks.max_running` says.
+    if !tasks.worktrees {
+        config.tick.max_running = config.tick.max_running.min(1);
+    }
     // The review's policy is what the send-back and the out-of-rounds card are
     // decided by, so the person's own answer to the brief's `Review rounds` line
     // is what the pass must act on.
