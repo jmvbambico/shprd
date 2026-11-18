@@ -21,6 +21,10 @@ import { safeTerminalLink } from "./terminalSession";
 const MIN_COLS = 80;
 const MIN_ROWS = 24;
 
+/** The most columns and rows a screen is drawn at: a longer line wraps, so a 1 MiB line cannot allocate a 1 MiB grid. */
+export const MAX_COLS = 400;
+export const MAX_ROWS = 400;
+
 /** What the view needs from a drawn terminal; a test passes a fake. */
 export interface Screen {
   /** Draws the pane's whole screen. */
@@ -38,7 +42,10 @@ export type ScreenFactory = (host: HTMLElement, onData: (data: string) => void) 
 export function sizeOf(text: string): { cols: number; rows: number } {
   const lines = text.split("\n");
   const widest = lines.reduce((most, line) => Math.max(most, line.length), 0);
-  return { cols: Math.max(MIN_COLS, widest), rows: Math.max(MIN_ROWS, lines.length) };
+  return {
+    cols: Math.min(MAX_COLS, Math.max(MIN_COLS, widest)),
+    rows: Math.min(MAX_ROWS, Math.max(MIN_ROWS, lines.length)),
+  };
 }
 
 /** Opens a hyperlink a pane's program wrote, when it is a web page. */

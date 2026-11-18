@@ -88,6 +88,21 @@ describe("TerminalView", () => {
     expect(screen.getByText(STATUS_WORDS.reconnecting)).toBeDefined();
   });
 
+  it("says the terminal could not be opened after three refused handshakes", () => {
+    vi.useFakeTimers();
+    try {
+      const t = setup();
+      render(<TerminalView client={t.client} space="T9" screenFactory={t.factory} />);
+      for (let i = 0; i < 3; i += 1) {
+        act(() => t.sockets.at(-1)?.handlers.close?.(1006));
+        act(() => vi.advanceTimersByTime(20_000));
+      }
+      expect(screen.getAllByText(STATUS_WORDS.refused).length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("opens a new socket for another space", () => {
     const t = setup();
     const { rerender } = render(<TerminalView client={t.client} space="coordinator" screenFactory={t.factory} />);

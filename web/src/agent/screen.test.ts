@@ -41,7 +41,7 @@ vi.mock("@xterm/xterm", () => ({
   },
 }));
 
-import { openLink, sizeOf, xtermScreen } from "./screen";
+import { MAX_COLS, MAX_ROWS, openLink, sizeOf, xtermScreen } from "./screen";
 
 beforeEach(() => {
   made.length = 0;
@@ -51,6 +51,11 @@ describe("sizeOf", () => {
   it("never draws smaller than 80x24, and grows to fit the screen", () => {
     expect(sizeOf("hi")).toEqual({ cols: 80, rows: 24 });
     expect(sizeOf(`${"x".repeat(120)}\n${"\n".repeat(40)}`)).toEqual({ cols: 120, rows: 42 });
+  });
+
+  it("caps the grid, so a huge line or a huge screen cannot allocate without bound", () => {
+    expect(sizeOf("x".repeat(1024 * 1024))).toEqual({ cols: MAX_COLS, rows: 24 });
+    expect(sizeOf("\n".repeat(100_000))).toEqual({ cols: 80, rows: MAX_ROWS });
   });
 });
 
