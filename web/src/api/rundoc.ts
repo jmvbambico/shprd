@@ -248,7 +248,7 @@ export function isDropped(task: RunTask): boolean {
   return (
     task.state === "blocked" &&
     task.unblock === "human" &&
-    (task.note === "dropped" || (task.note?.startsWith("dropped: ") ?? false))
+    /^dropped(:|$)/.test(task.note ?? "")
   );
 }
 
