@@ -219,7 +219,7 @@ export function AcceptDialog({ client, board, taskId, device, reauthTick, onClos
             </h2>
             {task ? <p className="accept-sub">{task.title}</p> : null}
           </div>
-          <button type="button" className="icon-button" aria-label="Close" onClick={onClose}>
+          <button type="button" className="icon-button" aria-label="Close card" onClick={onClose}>
             ×
           </button>
         </header>

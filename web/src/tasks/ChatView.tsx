@@ -321,7 +321,7 @@ function Composer({
         <button
           type="submit"
           className="send-button"
-          aria-label="Send"
+          aria-label="Send message"
           disabled={sending || text.trim() === ""}
         >
           {sending ? "…" : "↑"}
