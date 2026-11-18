@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { criteria, evidenceMark, latestAttempt, parseRunDocument, taskTone } from "./rundoc";
+import { criteria, evidenceMark, latestAttempt, isDropped, parseRunDocument, runTaskTone, taskTone } from "./rundoc";
 
 /** A document with the spine the reader needs. */
 function document(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -187,5 +187,22 @@ describe("a task's derived words", () => {
       const task = result.document.tasks[0];
       expect(task === undefined ? [] : criteria(task)).toEqual(["it works", "it is small"]);
     }
+  });
+});
+
+describe("runTaskTone", () => {
+  const base = { id: "a", title: "a", kind: "impl", deps: [], criteria: "", attempts: [] };
+
+  it("reads a task the projector wrote as blocked-by-the-human-with-a-dropped-note as dropped", () => {
+    const dropped = { ...base, state: "blocked", unblock: "human", note: "dropped: not needed" };
+    expect(isDropped(dropped)).toBe(true);
+    expect(runTaskTone(dropped)).toEqual({ word: "Dropped", tone: "neutral" });
+    expect(isDropped({ ...dropped, note: "dropped" })).toBe(true);
+  });
+
+  it("leaves a really blocked task blocked", () => {
+    const blocked = { ...base, state: "blocked", unblock: "orchestrator", note: "clippy warning" };
+    expect(runTaskTone(blocked)).toEqual({ word: "Blocked", tone: "red" });
+    expect(isDropped({ ...blocked, unblock: "human", note: "stopped: no agent" })).toBe(false);
   });
 });

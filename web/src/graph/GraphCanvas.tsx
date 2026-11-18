@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
-import { evidenceMark, latestAttempt, taskTone, type RunTask } from "../api/rundoc";
+import { evidenceMark, isDropped, latestAttempt, runTaskTone, type RunTask } from "../api/rundoc";
 import type { Layout } from "../layout/layout";
 import { NODE, type GraphLayout, type GraphNode } from "./layout";
 import {
@@ -330,12 +330,13 @@ function NodeView({
   onTap: () => void;
 }) {
   const { task } = node;
-  const state = taskTone(task.state);
+  const state = runTaskTone(task);
   const attempt = latestAttempt(task);
   const mark = attempt?.outcome === undefined ? null : evidenceMark(attempt.outcome.evidence);
   const classes = [
     "graph-node",
     `tone-${state.tone}`,
+    isDropped(task) ? "dropped" : "",
     selected ? "selected" : "",
     dimmed ? "dimmed" : "",
   ]

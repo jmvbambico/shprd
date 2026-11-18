@@ -89,12 +89,15 @@ describe("RemotePage: the tunnel", () => {
     const link = await screen.findByText(/••••••/);
     expect(link.textContent).not.toContain("quiet-river");
     expect(document.body.textContent).not.toContain("quiet-river-1234");
-    const qr = screen.getByRole("img", { name: "QR code for the link" }) as HTMLImageElement;
-    expect(qr.src.startsWith("data:image/svg+xml")).toBe(true);
+    // The QR encodes the whole link, so it follows the mask.
+    expect(screen.queryByRole("img", { name: "QR code for the link" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
     expect(screen.getByText("https://quiet-river-1234.trycloudflare.com")).toBeDefined();
+    const qr = screen.getByRole("img", { name: "QR code for the link" }) as HTMLImageElement;
+    expect(qr.src.startsWith("data:image/svg+xml")).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Hide" }));
     expect(document.body.textContent).not.toContain("quiet-river-1234");
+    expect(screen.queryByRole("img", { name: "QR code for the link" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Stop tunnel" }));
     expect(await screen.findByText("Off")).toBeDefined();
     expect(calls.some((c) => c.url === "/api/tunnels/stop")).toBe(true);

@@ -65,6 +65,16 @@ describe("GraphCanvas", () => {
     expect(container.querySelectorAll("path.graph-edge")).toHaveLength(2);
   });
 
+  it("draws a dropped task as dropped, not blocked", () => {
+    const { container } = draw([
+      task("A", [], { state: "blocked", unblock: "human", note: "dropped: gate test" }),
+      task("B", [], { state: "blocked", unblock: "orchestrator", note: "gate failed" }),
+    ]);
+    expect(screen.getByRole("button", { name: "A: task A. Dropped." })).toBeDefined();
+    expect(screen.getByRole("button", { name: "B: task B. Blocked." })).toBeDefined();
+    expect(container.querySelectorAll("g.graph-node.dropped")).toHaveLength(1);
+  });
+
   it("badges a node with its attempts and their evidence", () => {
     draw([
       task("A", [], {
