@@ -1430,6 +1430,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "ts-rs",
+ "ureq",
 ]
 
 [[package]]
