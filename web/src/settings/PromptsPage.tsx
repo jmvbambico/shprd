@@ -134,25 +134,30 @@ function PromptEditor({
     if (flight.current !== null) {
       return flight.current;
     }
-    const words = latest.current;
-    if (words === stored.current) {
+    if (latest.current === stored.current) {
       return Promise.resolve();
     }
     if (alive.current) {
       setWriting(true);
     }
+    // The write loops until what is stored is what is in the box: words typed
+    // while a request was in flight are written by the same call, so a later
+    // caller that was handed this promise never leaves them behind.
     const run = async () => {
       try {
-        const reply = await client.putPrompt(prompt.id, { text: words });
-        stored.current = words;
-        if (alive.current) {
-          setShown(reply);
-          setJustSaved(true);
-          setTimeout(() => {
-            if (alive.current) {
-              setJustSaved(false);
-            }
-          }, SAVED_MS);
+        while (latest.current !== stored.current) {
+          const words = latest.current;
+          const reply = await client.putPrompt(prompt.id, { text: words });
+          stored.current = words;
+          if (alive.current) {
+            setShown(reply);
+            setJustSaved(true);
+            setTimeout(() => {
+              if (alive.current) {
+                setJustSaved(false);
+              }
+            }, SAVED_MS);
+          }
         }
       } catch (error) {
         // A refusal keeps the words in the box, unsaved, with the service's reason.

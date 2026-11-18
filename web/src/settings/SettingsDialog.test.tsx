@@ -286,6 +286,37 @@ describe("SettingsDialog: Prompts", () => {
     expect(box.value).toBe("");
   });
 
+  it("writes words typed while a save was in flight, even when leaving at once", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const bodies: unknown[] = [];
+    const { calls } = open(
+      reads({
+        "GET /api/prompts/worker": json(200, prompt("worker", "a")),
+        "PUT /api/prompts/worker": async (call) => {
+          bodies.push(call.body);
+          if (bodies.length === 1) {
+            await gate;
+          }
+          return json(200, prompt("worker", "stored", "edited"));
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(await screen.findByRole("button", { name: /worker/ }));
+    const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "draft A" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    fireEvent.change(box, { target: { value: "draft B" } });
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    release?.();
+    await waitFor(() => expect(bodies).toEqual([{ text: "draft A" }, { text: "draft B" }]));
+    void calls;
+  });
+
   it("says when there are no prompts", async () => {
     open(reads({ "GET /api/prompts": json(200, { prompts: [] }) }));
     fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
