@@ -63,6 +63,23 @@ fn request(fake: &Fake, method: &str) -> Value {
         .unwrap_or_else(|| panic!("the host never called {method}"))
 }
 
+/// Every frame the host wrote on an attached stream, in order.
+fn streams(fake: &Fake) -> Vec<Value> {
+    // The fake logs after reading, so give it a beat to flush the close frame.
+    for _ in 0..50 {
+        let frames: Vec<Value> = std::fs::read_to_string(fake.dir().join("streams.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a stream line"))
+            .collect();
+        if frames.iter().any(|frame| frame["kind"] == 2) {
+            return frames;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    panic!("the host never closed its stream");
+}
+
 /// Write what the fake's `terminal.read` should answer.
 fn screen(fake: &Fake, text: &str) {
     std::fs::write(fake.dir().join("screen"), text).expect("writes the screen");
@@ -334,14 +351,60 @@ fn text_is_sent_as_the_persons_own_typing() {
         "{sent}"
     );
 
-    // herdr-core's send always presses enter, so typing without submitting is
-    // refused rather than quietly submitted — and the flags say so first, which
-    // is what a caller plans from.
-    assert!(!host.capabilities().type_without_submit);
+    // herdr-core's send always presses enter, so text left at the cursor goes
+    // through a short attach stream instead: the bytes, unchanged, as one data
+    // frame on the attach's channel, then a close. No `terminal.send`, no keys.
+    assert!(host.capabilities().type_without_submit);
+    let before = requests(&fake).len();
+    host.write(&PaneId::new("t20"), "echo $HOME \"hi\"?", false)
+        .expect("the stream takes the text");
+    let asked = requests(&fake);
+    let asked = &asked[before..];
+    assert!(
+        asked
+            .iter()
+            .all(|request| request["method"] != "terminal.send"
+                && request["method"] != "terminal.keys"),
+        "{asked:?}"
+    );
+    let attach = request(&fake, "terminal.attach");
+    assert_eq!(attach["params"]["terminal"], "t20");
+    assert_eq!(attach["params"]["cols"], 80);
+    assert_eq!(attach["params"]["rows"], 24);
+    assert!(
+        attach["params"].get("observe").is_none_or(|v| v == false),
+        "typing is a full attach: {attach}"
+    );
+    let frames = streams(&fake);
+    assert_eq!(
+        frames,
+        vec![
+            serde_json::json!({"channel": 7, "kind": 0, "data": "echo $HOME \"hi\"?"}),
+            serde_json::json!({"channel": 7, "kind": 2, "data": ""}),
+        ],
+        "no enter is added and the stream is closed"
+    );
+}
+
+#[test]
+fn typing_nothing_attaches_to_nothing() {
+    let (fake, host) = host("normal");
+    host.write(&PaneId::new("t20"), "", false)
+        .expect("nothing to do");
+    assert!(
+        requests(&fake)
+            .iter()
+            .all(|request| request["method"] != "terminal.attach")
+    );
+}
+
+#[test]
+fn typing_into_a_missing_pane_says_so() {
+    let (_fake, host) = host("normal");
     let error = host
-        .write(&PaneId::new("t20"), "half a line", false)
-        .expect_err("no half-sent text on this host");
-    assert!(matches!(error, MuxError::Unsupported(_)), "{error}");
+        .write(&PaneId::new("t99"), "hi", false)
+        .expect_err("no such pane");
+    assert!(matches!(error, MuxError::NotFound { .. }), "{error}");
 }
 
 #[test]

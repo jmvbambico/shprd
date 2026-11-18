@@ -211,6 +211,15 @@ class Fake:
             self.write_frame(channel, FRAME_CREDIT, struct.pack("<I", len(body)))
         return {"stream": channel, "kind": kind, "body": body}
 
+    def log_stream(self, message):
+        # What a client wrote on an attached stream: channel, frame kind, bytes.
+        if message["kind"] == FRAME_CREDIT or not self.dir:
+            return
+        with open(self.path("streams.jsonl"), "a") as handle:
+            handle.write(json.dumps({
+                "channel": message["stream"], "kind": message["kind"],
+                "data": message["body"].decode("utf-8", "replace")}) + "\n")
+
     def read_exactly(self, count):
         buffer = b""
         while len(buffer) < count:
@@ -383,6 +392,15 @@ class Fake:
                 return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
                     "terminal": wanted, "ended": False, "reason": "timeout",
                     "status": None, "turn": 1, "exit_code": None, "signal": None}})
+        if method == "terminal.attach":
+            record, wanted = self.terminal_of(params)
+            if record is None:
+                return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32000, "message": f"no terminal {wanted!r}",
+                    "data": {"kind": "not_found"}}})
+            return self.write_rpc({"jsonrpc": "2.0", "id": message["id"], "result": {
+                "channel": 7, "automatic_input": True,
+                "resize_notifications": False, "terminal": record}})
         if method == "doc.set":
             name = params.get("name")
             held = self.documents.get(name, 0)
@@ -444,6 +462,7 @@ class Fake:
             if message is None:
                 return
             if "stream" in message:
+                self.log_stream(message)
                 continue
             if message.get("method"):
                 self.answer(message)
