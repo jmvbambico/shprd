@@ -334,16 +334,15 @@ export const VIEW = {
  *
  * Shepherdr's switcher (`mods/chat/panel.js`, `segs`): Pull request only once the
  * task has one (`hasPr`), Terminal dim when no agent is up (`live` false), and no
- * Files or Changes — a task's changes are its pull request's. **Chat** is held
- * here and dim ("Not built yet"): the task's chat is a later task (U4), and
- * until it lands nothing claims to work. `shown` is the stack child on screen.
+ * Files or Changes — a task's changes are its pull request's. Chat is always on:
+ * it reads the agent's record through the service, and says so when there is none
+ * yet. `shown` is the stack child on screen, and Chat is what a thread opens on.
  *
- * Each segment: `{ key, word, on, dead, child }`, `child` the stack child it
- * shows (null for Chat, which has none yet).
+ * Each segment: `{ key, word, on, dead, child }`, `child` the stack child it shows.
  */
-export function threadViews(task, { live = false, shown = VIEW.term.id } = {}) {
+export function threadViews(task, { live = false, shown = VIEW.chat.id } = {}) {
   const segs = [
-    { key: "chat", word: VIEW.chat.word, on: false, dead: true, child: null },
+    { key: "chat", word: VIEW.chat.word, on: shown === VIEW.chat.id, dead: false, child: VIEW.chat.id },
     { key: "term", word: VIEW.term.word, on: shown === VIEW.term.id, dead: !live, child: VIEW.term.id },
   ];
   if (task?.pr) {
@@ -354,7 +353,7 @@ export function threadViews(task, { live = false, shown = VIEW.term.id } = {}) {
 
 /**
  * Whether the thread must fall back to the terminal: it shows the pull request of
- * a task that has none (Shepherdr's `chat/panel.js:367`, "back to its chat").
+ * a task that has none (Shepherdr's `chat/panel.js:367`, "back to its chat": the view it opens on).
  */
 export function mustLeavePr(task, shown) {
   return shown === VIEW.pr.id && !task?.pr;

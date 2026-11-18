@@ -1,0 +1,490 @@
+// Unit tests for the coordinator's chat: the view model that folds a page into
+// rows, and the panel that sends a turn.
+//
+//   node --import ./test/boot.mjs --test test/       (node 22+)
+//   bun test --preload ./test/boot-bun.mjs test/     (bun)
+//
+// The pure half is `mods/lib/chat.js`; the panel half drives the mod's own
+// `send` and `refresh` with a client that records its calls, so nothing here
+// needs a window, a service or a transcript.
+
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import * as herdr from "herdr";
+import Chat from "../mods/shprd-chat/main.js";
+import { serviceFile } from "../mods/lib/client.js";
+import {
+  BUBBLE_MAX,
+  CHAT_MOD,
+  COORDINATOR,
+  FOLD,
+  FOLD_TALL,
+  PARK_LABEL,
+  WORDS,
+  agentOf,
+  firstCard,
+  folding,
+  literal,
+  markdownOf,
+  messageKey,
+  paneChat,
+  safeLink,
+  spaceOf,
+  spaceOfTab,
+  timeline,
+  typed,
+  KEEP,
+  bubble,
+  empty,
+  fold,
+  header,
+  latest,
+  mine,
+  nextCursor,
+  outgoing,
+  status,
+  toolLine,
+  when,
+} from "../mods/lib/chat.js";
+import { inputState } from "./stub-gpui.js";
+import { forSpace, cards as cardsOf } from "../mods/lib/asks.js";
+
+/** A context that answers `cx.sleep`, `cx.notify`, `cx.spawn` and `cx.timer`. */
+function context() {
+  const every = [];
+  const spawns = [];
+  return {
+    cx: {
+      sleep: async () => {},
+      notify: () => {},
+      timer: {
+        every: (ms, fn) => {
+          every.push({ ms, fn });
+          return { cancel: () => {} };
+        },
+      },
+      spawn: (work) => {
+        spawns.push(work);
+        return { cancel: () => {} };
+      },
+    },
+    every,
+    spawns,
+  };
+}
+
+/** One page as `GET /api/chat` answers it. */
+function page(overrides = {}) {
+  return {
+    space: COORDINATOR,
+    program: "pi",
+    session: "s1",
+    messages: [{ role: "assistant", text: "It landed T1.", tools: [], at_ms: 0 }],
+    cursor: "s1@10",
+    more: false,
+    note: null,
+    ...overrides,
+  };
+}
+
+test("a page is appended to what the panel holds", () => {
+  const first = fold(empty(), page());
+  assert.equal(first.messages.length, 1);
+  assert.equal(first.cursor, "s1@10");
+  const second = fold(
+    first,
+    page({
+      messages: [{ role: "user", text: "And T2?", tools: [] }],
+      cursor: "s1@20",
+    }),
+  );
+  assert.deepEqual(
+    second.messages.map((message) => message.text),
+    ["It landed T1.", "And T2?"],
+  );
+  assert.equal(second.cursor, "s1@20");
+  assert.equal(second.program, "pi");
+});
+
+test("a new session starts the panel over rather than gluing two conversations", () => {
+  const first = fold(empty(), page());
+  const second = fold(first, page({ session: "s2", messages: [{ role: "user", text: "fresh" }] }));
+  assert.deepEqual(
+    second.messages.map((message) => message.text),
+    ["fresh"],
+  );
+  assert.equal(second.session, "s2");
+});
+
+test("a message keeps its shape even when the service left a field out", () => {
+  const chat = fold(empty(), page({ messages: [{ role: "assistant", text: "hi" }] }));
+  assert.deepEqual(chat.messages[0], {
+    role: "assistant",
+    text: "hi",
+    tools: [],
+    at_ms: null,
+  });
+});
+
+test("the panel keeps a bounded tail of a long conversation", () => {
+  let chat = empty();
+  for (let n = 0; n < KEEP + 20; n += 1) {
+    chat = fold(chat, page({ messages: [{ role: "user", text: `m${n}` }] }));
+  }
+  assert.equal(chat.messages.length, KEEP);
+  assert.equal(chat.messages[0].text, "m20");
+  assert.equal(chat.messages[KEEP - 1].text, `m${KEEP + 19}`);
+});
+
+test("latest is the tail a short panel draws, oldest first", () => {
+  const chat = {
+    messages: [1, 2, 3, 4, 5].map((n) => ({ role: "user", text: `m${n}` })),
+  };
+  assert.deepEqual(
+    latest(chat, 2).map((message) => message.text),
+    ["m4", "m5"],
+  );
+  assert.deepEqual(latest(empty(), 3), []);
+});
+
+test("a tool call reads as one line, and the person's side is the right one", () => {
+  assert.equal(toolLine({ name: "Bash", summary: "shprd tick --once" }), "Bash · shprd tick --once");
+  assert.equal(toolLine({ name: "read" }), "read");
+  assert.equal(mine({ role: "user" }), true);
+  assert.equal(mine({ role: "assistant" }), false);
+});
+
+test("a long bubble is folded at a row length", () => {
+  assert.equal(bubble("short"), "short");
+  const long = bubble("x".repeat(BUBBLE_MAX + 50));
+  assert.equal(long.length, BUBBLE_MAX);
+  assert.ok(long.endsWith("…"));
+  assert.equal(bubble(""), "");
+});
+
+test("an empty chat says what it is waiting for, and the service's note wins", () => {
+  assert.equal(status(empty()), "Nothing yet.");
+  assert.equal(status(fold(empty(), page())), null);
+  assert.equal(
+    status(fold(empty(), page({ messages: [], note: "pi has not run in /work/repo yet" }))),
+    "pi has not run in /work/repo yet",
+  );
+});
+
+test("only words worth sending are sent, and they name a space", () => {
+  assert.deepEqual(outgoing(COORDINATOR, "  hello  "), { space: COORDINATOR, text: "hello" });
+  assert.deepEqual(outgoing("T1", "hi"), { space: "T1", text: "hi" });
+  assert.equal(outgoing(COORDINATOR, "   "), null);
+  assert.equal(outgoing(COORDINATOR, ""), null);
+});
+
+test("the header names the program and the session, and the time is a clock", () => {
+  assert.equal(header(empty()), "Coordinator");
+  assert.equal(header(fold(empty(), page({ session: null }))), "pi · no session yet");
+  assert.match(header(fold(empty(), page())), /^pi · s1/);
+  assert.equal(when(null), "");
+  assert.equal(when(0), "");
+  assert.match(when(1_700_000_000_000), /^\d\d:\d\d$/);
+});
+
+test("the next request asks from the cursor the last page answered with", () => {
+  assert.equal(nextCursor(empty()), "");
+  assert.equal(nextCursor(fold(empty(), page())), "s1@10");
+});
+
+/**
+ * A panel whose client records every call.
+ *
+ * `answer` is what a GET answers, or a list of answers given out in order, so a
+ * test can prove a page with `more` is followed by another call. The client has
+ * an `id()` and a `service.json` on disk naming the same one, because every panel
+ * now asks `attach` before it reads whether the service it holds is still the one
+ * that is running; a client with no record beside it would look like a restart.
+ */
+function panel(answers = [page()]) {
+  const run = context();
+  const calls = [];
+  const queue = Array.isArray(answers) ? answers.slice() : [answers];
+  herdr.putFile(serviceFile("/state"), '{"port": 7788, "id": "abc"}');
+  const client = {
+    dir: "/state",
+    record: { port: 7788, id: "abc" },
+    id: () => "abc",
+    state: async () => ({ tasks: [], needs: [] }),
+    asks: async () => ({ asks: [] }),
+    answerAsk: async (task, ask, answer) => {
+      calls.push({ method: "ANSWER", path: "/api/asks/answer", body: { task, ask, answer } });
+      return { ok: true };
+    },
+    call: async (method, path, options = {}) => {
+      calls.push({ method, path, body: options.body ?? null });
+      if (method === "GET") return queue.length > 1 ? queue.shift() : queue[0];
+      return { space: options.body?.space ?? COORDINATOR, sent: true };
+    },
+  };
+  const view = new Chat();
+  view.cx = run.cx;
+  view.space = COORDINATOR;
+  view.client = client;
+  view.chat = empty();
+  view.failure = null;
+  view.refusal = null;
+  view.sending = false;
+  view.watching = true;
+  view.opened = new Set();
+  view.answering = null;
+  view.answerRefusal = null;
+  view.typing = null;
+  view.draft = null;
+  view.input = inputState({ placeholder: "Message the coordinator" });
+  return { view, calls, ...run };
+}
+
+test("a submit types the composer's words into the coordinator and clears it", async () => {
+  const { view, calls } = panel([page({ messages: [] })]);
+  view.input.set_value("  what landed?  ");
+  await view.send();
+  const posted = calls.find((call) => call.method === "POST");
+  assert.deepEqual(posted.body, { space: COORDINATOR, text: "what landed?" });
+  assert.equal(view.input.value(), "", "the composer is empty after a send");
+  assert.equal(view.failure, null);
+});
+
+test("an empty composer sends nothing at all", async () => {
+  const { view, calls } = panel([page({ messages: [] })]);
+  view.input.set_value("   ");
+  await view.send();
+  assert.equal(calls.filter((call) => call.method === "POST").length, 0);
+});
+
+test("a refused turn keeps the words and says why", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  view.input.set_value("hello");
+  view.client.call = async (method) => {
+    if (method === "GET") return page({ messages: [] });
+    const error = new Error("no open pane for the coordinator");
+    error.name = "ServiceError";
+    throw error;
+  };
+  await view.send();
+  assert.equal(view.input.value(), "hello", "a refused line is retyped, not lost");
+  assert.equal(view.refusal, "no open pane for the coordinator");
+  assert.equal(view.sending, false);
+});
+
+test("a page is read from the cursor, and a page with more is followed at once", async () => {
+  const first = page({ messages: [{ role: "user", text: "one" }], cursor: "s1@5", more: true });
+  const second = page({ messages: [{ role: "user", text: "two" }], cursor: "s1@9", more: false });
+  const { view, calls } = panel([first, second]);
+  await view.refresh();
+  const reads = calls.filter((call) => call.method === "GET");
+  assert.equal(reads.length, 2, "the second page is asked for at once");
+  assert.equal(reads[0].path, `/api/chat?space=coordinator&since=`);
+  assert.equal(reads[1].path, `/api/chat?space=coordinator&since=s1%405`);
+  assert.deepEqual(
+    view.chat.messages.map((message) => message.text),
+    ["one", "two"],
+  );
+});
+
+test("a service that is not there says so in the panel rather than throwing", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  view.client.call = async () => {
+    const error = new Error("the service did not answer");
+    error.name = "ServiceError";
+    throw error;
+  };
+  await view.refresh();
+  assert.equal(view.failure, "the service did not answer");
+  assert.equal(view.client, null, "a dead client is dropped so the next look rediscovers");
+});
+
+// -- the full-size chat (M11 U4) ---------------------------------------------
+
+/** A repository's coordinator space and one task's, as Herdr lists them. */
+const SPACES = [
+  { id: "sp1", name: "shprd · repo", tabs: [{ id: "tb1" }] },
+  { id: "sp2", name: "shprd · repo · run1 · T1", tabs: [{ id: "tb2" }, { id: "tb3" }] },
+  { id: "sp3", name: "scratch", tabs: [{ id: "tb4" }] },
+];
+
+test("a reply folds past FOLD_TALL lines to its first FOLD, and opens whole", () => {
+  const short = "one\ntwo";
+  assert.deepEqual(folding(short), { text: short, foldable: false, folded: false });
+  const long = Array.from({ length: FOLD_TALL + 10 }, (_, n) => `line ${n}`).join("\n");
+  const shown = folding(long);
+  assert.equal(shown.folded, true);
+  assert.equal(shown.foldable, true);
+  assert.equal(shown.text.split("\n").length, FOLD);
+  const open = folding(long, true);
+  assert.deepEqual({ text: open.text, folded: open.folded, foldable: open.foldable }, { text: long, folded: false, foldable: true });
+  assert.equal(WORDS.showMore, "Show more");
+  assert.equal(WORDS.showLess, "Show less");
+});
+
+test("markup in what an agent wrote is text, in code and out of it", () => {
+  assert.equal(literal("use <b>x</b> & &amp; more"), "use \\<b>x\\</b> & \\&amp; more");
+  assert.equal(literal("see `<b>` and\n```\n<i>\n```"), "see `<b>` and\n```\n<i>\n```");
+  const person = { role: "user" };
+  assert.equal(typed("a\nb"), "a  \nb");
+  assert.equal(typed("```\na\nb\n```"), "```\na\nb\n```");
+  assert.equal(markdownOf(person, "a\nb <c>"), "a  \nb \\<c>");
+  assert.equal(markdownOf({ role: "assistant" }, "a\nb"), "a\nb");
+});
+
+test("only web links are opened from a bubble", () => {
+  assert.equal(safeLink("https://example.com/a?b=1"), true);
+  assert.equal(safeLink("http://localhost:3000"), true);
+  for (const bad of ["file:///etc/passwd", "javascript:alert(1)", "ssh://host", "mailto:a@b.c", "x", "", null, "https://a b"]) {
+    assert.equal(safeLink(bad), false, String(bad));
+  }
+});
+
+/** A card as `lib/asks.js` makes it. */
+function waiting(over = {}) {
+  return { id: "ask:T1:a1", from: "ask", task: "T1", ask: "a1", at: null, ...over };
+}
+
+test("the timeline puts waiting cards among the messages by time, and the rest last", () => {
+  const chat = fold(
+    empty("T1"),
+    page({
+      space: "T1",
+      messages: [
+        { role: "user", text: "go", at_ms: 100 },
+        { role: "assistant", text: "done", at_ms: 300 },
+      ],
+    }),
+  );
+  const rows = timeline(chat, [waiting({ id: "late", at: 900 }), waiting({ id: "mid", at: 200 }), waiting({ id: "none" })]);
+  assert.deepEqual(
+    rows.map((row) => row.kind === "card" ? row.key : row.kind),
+    ["top", "message", "mid", "message", "late", "none"],
+  );
+  assert.equal(firstCard(rows), 2);
+  assert.equal(firstCard(timeline(chat, [])), -1);
+  // A chat that has older pages to read has no "Start of conversation" yet.
+  assert.equal(timeline({ ...chat, more: true }, []).some((row) => row.kind === "top"), false);
+});
+
+test("a card belongs to its task's chat, and the run's to the coordinator's", () => {
+  const list = [waiting(), waiting({ id: "need:3", from: "escalation", task: null }), waiting({ id: "other", task: "T2" })];
+  assert.deepEqual(forSpace(list, "T1").map((card) => card.id), ["ask:T1:a1"]);
+  assert.deepEqual(forSpace(list, "coordinator").map((card) => card.id), ["need:3"]);
+  assert.deepEqual(forSpace(list, "T9"), []);
+});
+
+test("every card the Asks panel drew is in exactly one chat", () => {
+  const state = { needs: [{ seq: 3, task: "T1", body: "decide", default_action: "wait" }, { seq: 4, task: null, body: "run level" }] };
+  const asks = { asks: [{ task: "T2", id: "q", kind: "question", text: "which?", options: [] }] };
+  const all = cardsOf(state, asks);
+  const homes = all.map((card) => ["coordinator", "T1", "T2"].filter((space) => forSpace(all, space).includes(card)));
+  assert.deepEqual(homes.map((home) => home.length), [1, 1, 1]);
+});
+
+test("the space a chat shows is the thread's task, a pane's own, or the coordinator's", () => {
+  assert.equal(spaceOf({ props: { thread: true }, thread: { task: "T4" } }), "T4");
+  assert.equal(spaceOf({ props: { thread: true }, thread: null }), null);
+  assert.equal(spaceOf({ props: { space: "T2" } }), "T2");
+  assert.equal(spaceOf({ props: {} }), COORDINATOR);
+});
+
+test("a tab's chat space is its task, the coordinator, or none", () => {
+  assert.equal(spaceOfTab("tb1", SPACES), COORDINATOR);
+  assert.equal(spaceOfTab("tb3", SPACES), "T1");
+  assert.equal(spaceOfTab("tb4", SPACES), null);
+  assert.equal(spaceOfTab("nope", SPACES), null);
+});
+
+test("the switch is drawn on agent panes of a chat space, and on a chat with a live agent", () => {
+  const agent = { pane: "p1", terminal: "t1", tab: "tb2", status: "idle" };
+  assert.deepEqual(paneChat({ pane: agent, spaces: SPACES }), { chatMode: false, agent: "t1", space: "T1", canSwitch: true });
+  const coordinator = { pane: "p2", terminal: "t2", tab: "tb1", status: "working" };
+  assert.equal(paneChat({ pane: coordinator, spaces: SPACES }).space, COORDINATOR);
+  assert.equal(paneChat({ pane: { ...agent, status: null }, spaces: SPACES }).canSwitch, false, "a shell has no chat");
+  assert.equal(paneChat({ pane: { ...agent, tab: "tb4" }, spaces: SPACES }).canSwitch, false, "another space has none");
+  const parked = [{ address: "t1", state: "live", labels: { [PARK_LABEL]: "p9" } }];
+  const chat = { pane: "p9", terminal: null, mod: CHAT_MOD, tab: "tb2" };
+  assert.deepEqual(paneChat({ pane: chat, terminals: parked, spaces: SPACES }), {
+    chatMode: true,
+    agent: "t1",
+    space: "T1",
+    canSwitch: true,
+  });
+  assert.equal(agentOf("p9", [{ ...parked[0], state: "gone" }]), null, "a dead agent has nothing to go back to");
+  assert.equal(paneChat({ pane: chat, terminals: [], spaces: SPACES }).canSwitch, false);
+});
+
+test("the thread's chat reads the task it is shown and starts over for another", async () => {
+  const { view, calls } = panel([page({ space: "T1", messages: [{ role: "assistant", text: "hi" }], cursor: "s1@4" })]);
+  herdr.setProps({ thread: true });
+  herdr.setShared("tasks.thread", { task: "T1", title: "one" });
+  view.thread = true;
+  view.fixed = null;
+  view.space = "T1";
+  await view.refresh();
+  assert.equal(calls.find((call) => call.method === "GET").path, "/api/chat?space=T1&since=");
+  assert.equal(view.chat.messages.length, 1);
+  herdr.setShared("tasks.thread", { task: "T2", title: "two" });
+  view.follow_space();
+  assert.equal(view.space, "T2");
+  assert.equal(view.chat.messages.length, 0, "a different task is a different conversation");
+  assert.equal(view.chat.cursor, "");
+});
+
+test("a card is answered through the service, once, and a refusal stays on the card", async () => {
+  const { view, calls } = panel();
+  const card = { id: "ask:T1:a1", task: "T1", ask: "a1" };
+  await view.answer(card, "  Yes  ");
+  assert.deepEqual(calls.find((call) => call.method === "ANSWER").body, { task: "T1", ask: "a1", answer: "Yes" });
+  const { view: refused } = panel();
+  refused.client.answerAsk = async () => {
+    const error = new Error("the ask was already answered");
+    error.name = "ServiceError";
+    throw error;
+  };
+  await refused.answer(card, "Yes");
+  assert.deepEqual(refused.answerRefusal, { card: "ask:T1:a1", text: "the ask was already answered" });
+  assert.equal(refused.answering, null);
+  // Nothing is sent for a blank answer.
+  const { view: blank, calls: blankCalls } = panel();
+  await blank.answer(card, "   ");
+  assert.equal(blankCalls.some((call) => call.method === "ANSWER"), false);
+});
+
+test("a message's key is stable, so its fold state survives a page", () => {
+  const message = { role: "assistant", text: "hello world", at_ms: 5 };
+  assert.equal(messageKey(message), messageKey({ ...message }));
+  assert.notEqual(messageKey(message), messageKey({ ...message, role: "user" }));
+});
+
+// -- the layout (M11 U4) -------------------------------------------------------
+
+const LAYOUT = JSON.parse(readFileSync(new URL("../layouts/shprd.json", import.meta.url), "utf8"));
+
+/** The layout node called `id`, or null. */
+function node(id, at = LAYOUT) {
+  if (at?.id === id) return at;
+  for (const child of at?.children ?? []) {
+    const found = node(id, child);
+    if (found) return found;
+  }
+  return null;
+}
+
+test("the thread opens on its chat; the Asks panel and the sidebar's coordinator are gone", () => {
+  const body = node("tasks-thread-body");
+  assert.equal(body.active, "tasks-thread-chat");
+  assert.deepEqual(
+    body.children.map((child) => child.id),
+    ["tasks-thread-chat", "tasks-thread-term", "tasks-thread-pr"],
+  );
+  assert.deepEqual(node("tasks-thread-chat").content, { mod: "shprd-chat", props: { thread: true } });
+  assert.equal(node("asks"), null, "the cards are in the thread now");
+  assert.equal(node("coordinator"), null, "the coordinator's chat is its pane's Chat view");
+  const text = JSON.stringify(LAYOUT);
+  assert.equal(text.includes("shprd-asks"), false);
+  assert.equal(text.includes("shprd-coordinator"), false);
+});

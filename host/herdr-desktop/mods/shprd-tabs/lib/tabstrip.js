@@ -226,16 +226,15 @@ export const PANELS = [
   { id: "files", word: "Files" },
   { id: "changes", word: "Changes" },
   { id: "tasks", word: "Tasks" },
-  { id: "asks", word: "Asks" },
 ];
 
 /**
  * The side panel's buttons, with the counts each one's stack would show.
  *
  * The Tasks button carries shprd's two counts the way Shepherdr's did — what
- * needs the person, then what is ready for them — and Asks carries the number of
- * cards still open, because a button with no badge is a place a person forgets
- * to look. Settings has no button of its own: it is a dialog over the window
+ * needs the person, then what is ready for them. There is no Asks button: the
+ * cards a program raises are in its task's chat thread, and the Tasks button's red
+ * count is how a person knows one is waiting. Settings has no button of its own: it is a dialog over the window
  * (`openSettings()` in `lib/panel.js`), opened from the sidebar's footer, exactly
  * as Shepherdr's is, so nothing here names it.
  */
@@ -246,11 +245,10 @@ export function panelButtons(state, shown = "tasks") {
     if (task?.derived?.status === "needs_you") tally.needs += 1;
     else if (task?.derived?.status === "ready") tally.ready += 1;
   }
-  const asks = (state?.asks ?? []).length;
   return PANELS.map((panel) => ({
     ...panel,
     active: panel.id === shown,
-    needs: panel.id === "tasks" ? tally.needs : panel.id === "asks" ? asks : 0,
+    needs: panel.id === "tasks" ? tally.needs : 0,
     ready: panel.id === "tasks" ? tally.ready : 0,
   }));
 }

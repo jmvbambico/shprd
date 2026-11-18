@@ -456,10 +456,10 @@ test("a pill wears the program in its tab and counts what it needs", () => {
 });
 
 test("the side panel's buttons carry the counts of the stacks they open", () => {
-  const buttons = panelButtons(STATE, "asks");
+  const buttons = panelButtons(STATE, "files");
   assert.deepEqual(
     buttons.map((button) => button.id),
-    ["files", "changes", "tasks", "asks"],
+    ["files", "changes", "tasks"],
     "the panel's stacks only: settings is a dialog, not a tab of the panel",
   );
   const tasks = buttons.find((button) => button.id === "tasks");
@@ -468,7 +468,8 @@ test("the side panel's buttons carry the counts of the stacks they open", () => 
     ready: 1,
     active: false,
   });
-  assert.equal(buttons.find((button) => button.id === "asks").active, true);
+  assert.equal(buttons.find((button) => button.id === "files").active, true);
+  assert.equal(buttons.some((button) => button.id === "asks"), false, "the cards live in the task thread");
   assert.equal(buttons.find((button) => button.id === "files").needs, 0);
 });
 
@@ -781,10 +782,13 @@ test("the thread's switch is Chat, Terminal and, once it has one, Pull request",
   const words_ = (task, opts) => threadViews(task, opts).map((seg) => seg.word);
   assert.deepEqual(words_(without, { live: true }), ["Chat", "Terminal"], "no Pull request before it has one");
   assert.deepEqual(words_(T1, { live: true }), ["Chat", "Terminal", "Pull request"]);
-  // Chat is held and dim until U4 builds it; Terminal is dim when no agent is up.
+  // Chat is always on and is what a thread opens on; Terminal is dim when no agent is up.
+  const open = threadViews(T1, { live: false });
+  assert.equal(open[0].on, true, "a thread opens on its chat");
   const segs = threadViews(T1, { live: false, shown: "tasks-thread-term" });
-  assert.equal(segs[0].dead, true);
-  assert.equal(segs[0].child, null, "Chat shows no stack child yet");
+  assert.equal(segs[0].dead, false);
+  assert.equal(segs[0].child, "tasks-thread-chat");
+  assert.equal(segs[0].on, false);
   assert.equal(segs[1].dead, true, "Not running");
   assert.equal(segs[1].on, true);
   assert.equal(threadViews(T1, { live: true, shown: "tasks-thread-pr" }).find((seg) => seg.on).key, "pr");
@@ -792,6 +796,7 @@ test("the thread's switch is Chat, Terminal and, once it has one, Pull request",
   assert.equal(mustLeavePr(without, "tasks-thread-pr"), true);
   assert.equal(mustLeavePr(T1, "tasks-thread-pr"), false);
   assert.equal(mustLeavePr(without, "tasks-thread-term"), false);
+  assert.equal(mustLeavePr(without, "tasks-thread-chat"), false);
 });
 
 test("the head's Review is the Ready row's Review, and its status line is the agent's", () => {

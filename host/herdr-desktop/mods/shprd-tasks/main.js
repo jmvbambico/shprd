@@ -24,7 +24,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { nextCommand, run, setShared, shared, spaces, theme } from "herdr";
+import { nextCommand, run, setShared, shared, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import {
@@ -38,7 +38,6 @@ import {
   secondLine,
 } from "./lib/board.js";
 import { badge, card, cardHeader, countBadge, keycap, note, openAccept, statusGlyph } from "./lib/panel.js";
-import { spaceIndex } from "./lib/spaces.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -46,11 +45,12 @@ import { followChanges } from "./lib/watch.js";
 const FLOOR_MS = 4000;
 
 /**
- * The stack child a row's click opens: the task's agent terminal, in this panel.
+ * The stack child a row's click opens: the task's chat, in this panel (Shepherdr's
+ * `mods/tasks/main.js:1017`; the terminal is one click away on the head's switch).
  * The Accept card is not a child of the thread any more — Review opens it as a
  * dialog (`openAccept`).
  */
-const TERM = "tasks-thread-term";
+const CHAT = "tasks-thread-chat";
 
 export default class Tasks extends View {
   init(_props, cx) {
@@ -165,7 +165,7 @@ export default class Tasks extends View {
   }
 
   /**
-   * Opens a task in the panel's drill-in: its head over its terminal.
+   * Opens a task in the panel's drill-in: its head over its chat.
    *
    * Which task is shown is shared (`tasks.thread`, Shepherdr's own contract), so
    * the card, the head and the PR view all read the same one rather than each
@@ -173,12 +173,10 @@ export default class Tasks extends View {
    */
   open(task) {
     setShared("tasks.thread", { task: task?.id ?? null, title: task?.title ?? "", at: Date.now() });
-    // The terminal block shows the focused agent, so the task's own space is
-    // selected first: the terminal is then the task's, not whichever was up.
-    const space = task?.id ? spaceIndex(spaces()).tasks.get(task.id) : null;
-    if (space?.id) run("space.select", { id: space.id });
+    // The chat reads the task by its id, so nothing else moves: the window stays
+    // where the person was. The head's Terminal selects the task's space itself.
     run("layout.select", { stack: "tasks", child: "tasks-thread" });
-    run("layout.select", { stack: "tasks-thread-body", child: TERM });
+    run("layout.select", { stack: "tasks-thread-body", child: CHAT });
     run("layout.show", { id: "panel" });
     this.cx.notify();
   }
