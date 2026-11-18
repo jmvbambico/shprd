@@ -266,8 +266,103 @@ export function roles(document, roster) {
     return {
       ...base,
       picks: PICKS.map((field) => pickOf(base, field, rows, roster)),
+      ...extrasOf(base, rows, roster),
     };
   });
+}
+
+/**
+ * The rest of a role's fields as controls: Fast, Permissions and Fallback.
+ *
+ * Each is offered only where it means something, so none is drawn dead:
+ * Fast where the role's program has a fast mode, Permissions where its harness
+ * table lists access modes, and Fallback on the worker role (the tick
+ * reads the worker's list, `roles.worker.fallback`). `backup` is the Backup
+ * agent role's own switch: on while the role names a program.
+ */
+function extrasOf(role, rows, roster) {
+  const agentRow = rows.get(`roles.${role.id}.agent`);
+  const agent = textOf(agentRow);
+  const program = programOf(roster, agent);
+  const out = { fast: null, perm: null, fallback: null, backup: null };
+  const fastRow = rows.get(`roles.${role.id}.fast`);
+  if (program?.fast === true) {
+    out.fast = {
+      key: `roles.${role.id}.fast`,
+      label: "Fast mode",
+      about: `${program.name}'s higher-priority mode: quicker, at a higher price.`,
+      value: fastRow?.value === true,
+      display: fastRow?.value === true ? "On" : "Off",
+      source: fastRow?.source ?? null,
+      layer: layerOf(fastRow?.source),
+    };
+  }
+  const permRow = rows.get(`roles.${role.id}.perm`);
+  if (program && (program.permissions ?? []).length > 0) {
+    const value = textOf(permRow);
+    const fallbackId = program.default_permission ?? null;
+    const named = (id) => program.permissions.find((entry) => entry.id === id)?.label ?? id;
+    out.perm = {
+      key: `roles.${role.id}.perm`,
+      label: "Permissions",
+      about: "How much the program may do without asking.",
+      value,
+      display: value ? named(value) : fallbackId ? `${named(fallbackId)} (the program's default)` : PICK.effort.empty,
+      source: permRow?.source ?? null,
+      layer: layerOf(permRow?.source),
+      choices: [
+        { value: null, label: fallbackId ? `${named(fallbackId)} (default)` : PICK.effort.empty, hint: null },
+        ...program.permissions.map((entry) => ({ value: entry.id, label: entry.label, hint: null })),
+      ],
+    };
+  }
+  const fallbackRow = rows.get(`roles.${role.id}.fallback`);
+  if (role.id === "worker") {
+    const value = listOf(fallbackRow) ?? [];
+    out.fallback = {
+      key: `roles.${role.id}.fallback`,
+      label: "Fallback",
+      about: "Programs tried in this order when the first cannot go on.",
+      value,
+      display: value.length === 0 ? "None" : value.map((id) => programOf(roster, id)?.name ?? id).join(" → "),
+      source: fallbackRow?.source ?? null,
+      layer: layerOf(fallbackRow?.source),
+      choices: (roster?.programs ?? [])
+        .filter((entry) => entry.id !== agent)
+        .map((entry) => ({ value: entry.id, label: entry.name, hint: entry.installed ? entry.vendor : "not installed" })),
+    };
+  }
+  if (role.id === "backup") {
+    out.backup = {
+      key: "roles.backup.agent",
+      label: "Backup agent",
+      about: "The other program takes a task over, once, when its worker cannot go on.",
+      on: agent !== null,
+      source: agentRow?.source ?? null,
+      layer: layerOf(agentRow?.source),
+    };
+  }
+  return out;
+}
+
+/**
+ * The program a Backup switch turns on with: another program than the worker's,
+ * preferably another vendor and one that is installed, so a takeover is both
+ * possible and independent. Null when the roster has nothing to offer.
+ */
+export function backupChoice(document, roster) {
+  const worker = textOf(rowsOf(document).get("roles.worker.agent"));
+  const others = (roster?.programs ?? []).filter((program) => program.id !== worker);
+  const vendor = programOf(roster, worker)?.vendor ?? null;
+  const rank = (program) => (program.installed ? 0 : 2) + (program.vendor !== vendor ? 0 : 1);
+  const sorted = [...others].sort((a, b) => rank(a) - rank(b));
+  return sorted[0]?.id ?? null;
+}
+
+/** The list a Fallback pick would write after `id` is toggled in `list`. */
+export function toggled(list, id) {
+  const have = Array.isArray(list) ? list : [];
+  return have.includes(id) ? have.filter((entry) => entry !== id) : [...have, id];
 }
 
 /**
@@ -381,19 +476,19 @@ export function health(document) {
  * The window's pages, in the order its list draws them.
  *
  * Shepherdr's list is Agents, Tasks, Autopilot, Notify, Secrets, Machines,
- * Window, Web; shprd has three of those subjects today, and `Remote` is left in
- * the list for the page M11.7 gives it (`soon`: drawn, dim, and not a page yet).
- * A page shprd has nothing to put in is not invented: the list is the window's,
- * and a person reading it is reading what is there.
+ * Window, Web; shprd has four of those subjects today (`Remote` is Shepherdr's
+ * Web). A page shprd has nothing to put in is not invented: the list is the
+ * window's, and a person reading it is reading what is there.
  *
+ * `icon` is the line icon beside the page's name (`mods/shprd-tabs/icons`).
  * `repo: true` marks a page whose settings a repository can own, which is what
  * puts the level switch over it.
  */
 export const PAGES = [
-  { id: "agents", title: "Agents", repo: true },
-  { id: "tasks", title: "Tasks", repo: true },
-  { id: "prompts", title: "Prompts" },
-  { id: "remote", title: "Remote", soon: true },
+  { id: "agents", title: "Agents", icon: "bot", repo: true },
+  { id: "tasks", title: "Tasks", icon: "list-checks", repo: true },
+  { id: "prompts", title: "Prompts", icon: "file-text" },
+  { id: "remote", title: "Remote", icon: "globe" },
 ];
 
 /** The window's title, over the pages (Shepherdr's `TITLE`). */
@@ -452,12 +547,71 @@ export function levelNote(scope, repository = null) {
  * the service would answer with a sentence instead of a write.
  */
 export const RANGE = {
-  "tasks.review_rounds": [1, 10],
+  "tasks.review_rounds": [0, 10],
   "tasks.max_running": [1, 10],
   "tasks.archive_after": [0, 3650],
   "tasks.tick_secs": [1, 3600],
   "tasks.news_settle_secs": [0, 3600],
 };
+
+/** The days a finished task may stay before it is archived (Shepherdr's `ARCHIVE`). */
+export const ARCHIVE_PRESETS = [
+  [0, "Off"],
+  [1, "1 day"],
+  [3, "3 days"],
+  [7, "1 week"],
+  [30, "1 month"],
+];
+
+/**
+ * Settings keys the service stores but nothing reads yet, so no row draws them
+ * rather than a control that does nothing (`tasks.start_notes` and
+ * `tasks.finish_notes` only appear in a brief's Settings block; no spawn puts
+ * the words in a brief). They are listed here so a test can say they are
+ * hidden on purpose, and so the one task that wires them has the list.
+ */
+export const HIDDEN = ["tasks.start_notes", "tasks.finish_notes"];
+
+/**
+ * What is wrong with a branch-name pattern, in a sentence, or null when it is
+ * one git accepts and one every task gets its own name from.
+ *
+ * The pattern may use `{n}` (the task's number) and `{slug}` (its title); it
+ * must use at least one, or two tasks would share a branch. The rest is git's
+ * own rule for a ref name (`git check-ref-format`).
+ */
+export function branchProblem(text) {
+  const pattern = String(text ?? "").trim();
+  if (pattern === "") return null;
+  const left = pattern.replace(/\{(n|slug)\}/g, "");
+  if (/[{}]/.test(left)) return "only {n} and {slug} may be used between braces";
+  if (left.length === pattern.length) return "use {n} or {slug}, or two tasks would share a branch";
+  return refProblem(pattern.replace(/\{(n|slug)\}/g, "x"));
+}
+
+/** What is wrong with a git ref name (a base branch, or a pattern with its words filled), or null. */
+export function refProblem(text) {
+  const name = String(text ?? "").trim();
+  if (name === "") return null;
+  if (/[\s~^:?*[\\\x00-\x1f\x7f]/.test(name)) return "a branch name has no spaces or any of ~ ^ : ? * [ \\";
+  if (name.startsWith("/") || name.endsWith("/") || name.includes("//")) {
+    return "a branch name does not start or end with /, or hold //";
+  }
+  if (name.includes("..") || name.includes("@{")) return "a branch name has no .. or @{";
+  if (name === "@" || name.startsWith("-")) return "a branch name does not start with - or be just @";
+  for (const part of name.split("/")) {
+    if (part.startsWith(".") || part.endsWith(".lock")) return "no part of a branch name starts with . or ends with .lock";
+  }
+  if (name.endsWith(".")) return "a branch name does not end with .";
+  return null;
+}
+
+/** The check a key's box makes before it writes, or null: a sentence when the words are refused. */
+export function boxProblem(key, text) {
+  if (key === "tasks.branch") return branchProblem(text);
+  if (key === "tasks.base") return refProblem(text);
+  return null;
+}
 
 /**
  * The Tasks page's rows: the workflow keys `GET /api/settings` exposes, in the
@@ -472,25 +626,27 @@ export const WORKFLOW = [
   {
     key: "tasks.merge",
     title: "When a task lands",
-    about: "What has to be true before a finished task is merged.",
+    about: "When a finished task is merged: when you accept it, once its checks pass, or at once.",
     kind: "choice",
     choices: [
-      ["ask", "Ask me"],
-      ["checks", "Checks pass"],
-      ["auto", "By itself"],
+      ["ask", "On Accept"],
+      ["checks", "After checks pass"],
+      ["auto", "Right away"],
     ],
   },
   {
     key: "tasks.review_rounds",
     title: "Review rounds",
-    about: "How many times a task may go back to its worker before it needs you.",
+    about: "How many times a task may go back to its worker before it needs you; Off skips the review.",
     kind: "number",
+    zero: "Off",
   },
   {
     key: "tasks.must_fix",
     title: "Must-fix findings",
     about: "Findings this severe or worse fail a review.",
     kind: "choice",
+    needsReview: true,
     choices: [
       ["critical", "Critical"],
       ["major", "Major"],
@@ -513,9 +669,9 @@ export const WORKFLOW = [
   {
     key: "tasks.archive_after",
     title: "Archive done tasks",
-    about: "Days a finished task stays in your lists; 0 keeps it for ever.",
-    kind: "number",
-    unit: "days",
+    about: "How long a finished task stays in your lists before the janitor archives it.",
+    kind: "presets",
+    choices: ARCHIVE_PRESETS,
   },
   {
     key: "tasks.archive_namespace",
@@ -538,20 +694,8 @@ export const WORKFLOW = [
   {
     key: "tasks.branch",
     title: "Branch names",
-    about: "The pattern a task's branch is named after.",
+    about: "The pattern a task's branch is named after: {n} is its number, {slug} its title.",
     kind: "text",
-  },
-  {
-    key: "tasks.start_notes",
-    title: "When a task starts",
-    about: "Words every task's brief carries before its own work.",
-    kind: "notes",
-  },
-  {
-    key: "tasks.finish_notes",
-    title: "Before a task reports",
-    about: "Words every task's brief carries before it hands in.",
-    kind: "notes",
   },
   {
     key: "tasks.tick_secs",
@@ -592,8 +736,14 @@ function displayOf(spec, value) {
     const found = (spec.choices ?? []).find(([choice]) => choice === value);
     return found ? found[1] : String(value ?? "not set");
   }
+  if (spec.kind === "presets") {
+    if (value === null) return "not set";
+    const found = (spec.choices ?? []).find(([choice]) => choice === value);
+    return found ? found[1] : `${value} days`;
+  }
   if (spec.kind === "number") {
     if (value === null) return "not set";
+    if (spec.zero !== undefined && value === 0) return spec.zero;
     return spec.unit ? `${value} ${spec.unit}` : String(value);
   }
   const text = typeof value === "string" ? value : "";
@@ -611,14 +761,29 @@ function displayOf(spec, value) {
  */
 export function workflowRows(document) {
   const rows = rowsOf(document);
-  return WORKFLOW.map((spec) => {
+  // With no review rounds nothing is reviewed, so what a review must fix has
+  // nothing to decide and its row is not drawn.
+  const reviewed = valueOf(rows.get("tasks.review_rounds")) !== 0;
+  return WORKFLOW.filter((spec) => reviewed || !spec.needsReview).map((spec) => {
     const row = rows.get(spec.key);
     const value = valueOf(row);
     const control =
-      spec.kind === "choice" ? "segmented" : spec.kind === "switch" ? "switch" : spec.kind === "number" ? "stepper" : "box";
+      spec.kind === "choice" || spec.kind === "presets"
+        ? "segmented"
+        : spec.kind === "switch"
+          ? "switch"
+          : spec.kind === "number"
+            ? "stepper"
+            : "box";
     const bounds = RANGE[spec.key] ?? null;
+    // A value no preset names (set by hand) is still a segment, so the row shows it.
+    const choices =
+      spec.kind === "presets" && typeof value === "number" && !spec.choices.some(([choice]) => choice === value)
+        ? [...spec.choices, [value, `${value} days`]]
+        : spec.choices;
     return {
       ...spec,
+      choices,
       control,
       value,
       display: displayOf(spec, value),
@@ -649,4 +814,71 @@ export function stepped(value, by, key) {
  */
 export function forRepo(scope) {
   return scopeOf(scope).for_repo;
+}
+
+// -- the Remote page ---------------------------------------------------------
+//
+// Remote is the web app's Remote page (`web/src/settings/RemotePage.tsx`) in the
+// window: the tunnel (`GET /api/tunnels`, `POST /api/tunnels/start|stop`), the
+// devices signed in (`GET /api/sessions`, `DELETE /api/sessions/<id>`) and Log
+// out of all of them. The service decides every rule; the page only shows its
+// answers, and a tunnel's public link is masked until the person asks for it and
+// is never written to a log.
+
+/** The link with its secret part hidden: the scheme and the last label remain. */
+export function maskLink(link) {
+  const match = /^(https?:\/\/)([^/]+)(.*)$/.exec(String(link ?? ""));
+  if (!match) return "••••••••";
+  const host = match[2];
+  const dot = host.indexOf(".");
+  const rest = dot > 0 ? host.slice(dot) : "";
+  return `${match[1]}••••••${rest}/••••`;
+}
+
+/** "5 min ago" for a time in epoch seconds. */
+export function ago(seconds, now = Date.now() / 1000) {
+  const gap = Math.max(0, Math.round(now - Number(seconds)));
+  if (gap < 60) return "just now";
+  if (gap < 3600) return `${Math.floor(gap / 60)} min ago`;
+  if (gap < 86_400) return `${Math.floor(gap / 3600)} h ago`;
+  return `${Math.floor(gap / 86_400)} d ago`;
+}
+
+/**
+ * The tunnel section as the page draws it: the state word, whether a start is
+ * possible with the provider picked, and the words that say why not.
+ */
+export function tunnelView(status, picked = null) {
+  if (!status) return null;
+  const provider = picked ?? status.default_provider ?? status.providers?.[0]?.id ?? null;
+  const chosen = (status.providers ?? []).find((entry) => entry.id === provider) ?? null;
+  const needsPassword = chosen?.public_internet === true && status.password_set !== true;
+  return {
+    on: status.on === true,
+    starting: status.starting === true,
+    word: status.on ? "On" : status.starting ? "Starting…" : "Off",
+    provider,
+    providers: (status.providers ?? []).map((entry) => ({
+      id: entry.id,
+      word: entry.public_internet ? `${entry.id} · public` : entry.id,
+    })),
+    live: status.on ? (status.provider ?? null) : null,
+    version: status.version ?? null,
+    link: status.on ? (status.link ?? null) : null,
+    why: status.on ? null : (status.why ?? null),
+    tailnetUser: status.tailnet_user ?? null,
+    needsPassword,
+    note: needsPassword ? "A public tunnel needs a login password first: run `shprd web password set`." : null,
+  };
+}
+
+/** The signed-in devices, one row each, with this one marked. */
+export function sessionRows(list, now = Date.now() / 1000) {
+  return (list?.sessions ?? []).map((session) => ({
+    id: session.id,
+    label: session.label,
+    here: session.id === list.current,
+    remembered: session.remember === true,
+    seen: `last seen ${ago(session.last_seen, now)}`,
+  }));
 }

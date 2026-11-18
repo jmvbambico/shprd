@@ -121,7 +121,8 @@ SOFTWARE.
   the find box's groups, rows and keys from `mods/jump/main.js`, the grouped
   key list and its words from `mods/keybinds/{main.js,core/keys.js}`, the
   `keys.json` bindings from `keys.json`, and the `search.svg` icon from
-  `mods/workspace-chrome-shepherdr/` — in
+  `mods/workspace-chrome-shepherdr/`, and the settings window's nav icons
+  `bot`, `globe` and `list-checks` from `mods/shepherdr-settings/` — in
   `host/herdr-desktop/{layouts,mods,bin}/` and `crates/shprd/src/cmd/install.rs`
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —

@@ -1,0 +1,11 @@
+<!-- Shepherdr (MIT), path `mods/shepherdr-settings/list-checks.svg`, commit a3f327a (tag v3.1.34),
+     https://github.com/eliasstravik/shepherdr
+     Copyright (c) 2026 Elias Stravik. Copied whole; see
+     THIRD_PARTY_NOTICES.md at the repository root. -->
+<svg class="lucide lucide-list-checks" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="m3 17 2 2 4-4" />
+  <path d="m3 7 2 2 4-4" />
+  <path d="M13 6h8" />
+  <path d="M13 12h8" />
+  <path d="M13 18h8" />
+</svg>

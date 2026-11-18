@@ -16,7 +16,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import * as herdr from "herdr";
@@ -34,6 +34,16 @@ import {
   TITLE,
   UNSET_LAYER,
   WORKFLOW,
+  HIDDEN,
+  ARCHIVE_PRESETS,
+  backupChoice,
+  boxProblem,
+  branchProblem,
+  maskLink,
+  ago,
+  sessionRows,
+  toggled,
+  tunnelView,
   effortChoices,
   effortLevels,
   forRepo,
@@ -62,6 +72,7 @@ import {
   settingsWindow,
   settingsWindowClosed,
 } from "../mods/lib/panel.js";
+import { tone } from "../mods/lib/tokens.js";
 import Settings from "../mods/shprd-settings/main.js";
 
 /** One fixture, parsed. */
@@ -387,17 +398,21 @@ test("the layout no longer carries a settings block for the panel to show", () =
   assert.ok(panel.children.some((child) => child.id === panel.active), panel.active);
 });
 
-test("the pages are the three shprd has, in the window's order, and Remote is a place held", () => {
+test("the pages are the four shprd has, in the window's order, each with an icon", () => {
   assert.deepEqual(
     PAGES.map((page) => page.title),
     ["Agents", "Tasks", "Prompts", "Remote"],
   );
   assert.equal(TITLE, "Settings");
-  // Remote is drawn and inert: it is the page M11.7 gives it, and opening it
-  // must never land on a page that has nothing behind it.
-  const remote = PAGES.find((page) => page.id === "remote");
-  assert.equal(remote.soon, true);
-  assert.equal(pageOf("remote").id, "agents");
+  assert.deepEqual(
+    PAGES.map((page) => page.icon),
+    ["bot", "list-checks", "file-text", "globe"],
+  );
+  for (const page of PAGES) {
+    assert.ok(!page.soon, `${page.id} is a page, not a place held`);
+    assert.ok(existsSync(fileURLToPath(new URL(`../mods/shprd-tabs/icons/${page.icon}.svg`, import.meta.url))), page.icon);
+  }
+  assert.equal(pageOf("remote").id, "remote");
   assert.equal(pageOf("nope").id, "agents");
   assert.equal(pageOf("tasks").id, "tasks");
 });
@@ -444,9 +459,9 @@ test("the Tasks page shows the workflow keys the settings API exposes", () => {
   assert.deepEqual(
     merge.choices.map(([value, word]) => [value, word]),
     [
-      ["ask", "Ask me"],
-      ["checks", "Checks pass"],
-      ["auto", "By itself"],
+      ["ask", "On Accept"],
+      ["checks", "After checks pass"],
+      ["auto", "Right away"],
     ],
   );
   const running = rows.find((row) => row.key === "tasks.max_running");
@@ -458,12 +473,14 @@ test("the Tasks page shows the workflow keys the settings API exposes", () => {
   assert.equal(tick.display, "15 seconds");
   assert.equal(rows.find((row) => row.key === "tasks.proof").control, "switch");
   assert.equal(rows.find((row) => row.key === "tasks.proof").display, "On");
-  assert.equal(rows.find((row) => row.key === "tasks.start_notes").control, "box");
+  assert.equal(rows.find((row) => row.key === "tasks.archive_namespace").control, "box");
+  assert.equal(rows.find((row) => row.key === "tasks.archive_after").control, "segmented");
   assert.equal(rows.find((row) => row.key === "review.cross_vendor").value, true);
   // Every key the fixture answers is on the page, so no workflow setting is
   // reachable only from the command line.
   const shown = new Set(rows.map((row) => row.key));
   for (const row of SETTINGS.values) {
+    if (HIDDEN.includes(row.key)) continue;
     if (row.key.startsWith("tasks.") || row.key === "review.cross_vendor") {
       assert.ok(shown.has(row.key), `${row.key} is on the page`);
     }
@@ -580,7 +597,7 @@ test("the window opens on the page it was asked for, and keeps to the ones it ha
   assert.equal(window_({ page: "tasks" }).view.page, "tasks");
   assert.equal(window_({ page: "prompts" }).view.page, "prompts");
   assert.equal(window_({ page: "nope" }).view.page, "agents");
-  assert.equal(window_({ page: "remote" }).view.page, "agents", "Remote is a place held, not a page");
+  assert.equal(window_({ page: "remote" }).view.page, "remote", "Remote is a page now");
   assert.equal(window_().view.scope, "you", "the person's own settings come first");
 });
 
@@ -790,28 +807,28 @@ async function tasksWindow() {
 
 test("a note typed while the window has no client is written once one answers", async () => {
   const view = await tasksWindow();
-  const box = view.boxes.get("tasks.start_notes");
+  const box = view.boxes.get("tasks.archive_namespace");
   assert.ok(box, "the notes box exists");
   box.state.set_value("read the README first");
 
   // The service went away under the page: `refresh()` drops the client on a
   // timeout and leaves the page as it was.
   view.client = null;
-  await view.writeBox("tasks.start_notes");
+  await view.writeBox("tasks.archive_namespace");
   assert.deepEqual(view.client?.calls ?? [], [], "nothing could be written");
-  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.start_notes"], "the words wait their turn");
+  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.archive_namespace"], "the words wait their turn");
 
   // A re-read that finds the service again writes them, instead of replacing them
   // with the value the service still holds.
   const live = client();
   view.client = live;
   view.resetBoxes();
-  assert.equal(view.boxes.get("tasks.start_notes").state.value(), "read the README first");
+  assert.equal(view.boxes.get("tasks.archive_namespace").state.value(), "read the README first");
   await view.pump();
   assert.deepEqual(live.calls, [
-    { key: "tasks.start_notes", value: "read the README first", forRepo: false },
+    { key: "tasks.archive_namespace", value: "read the README first", forRepo: false },
   ]);
-  assert.equal(view.boxes.get("tasks.start_notes").saved, "read the README first");
+  assert.equal(view.boxes.get("tasks.archive_namespace").saved, "read the README first");
 });
 
 test("a note typed while another write is in flight is queued, not dropped", async () => {
@@ -837,15 +854,15 @@ test("a note typed while another write is in flight is queued, not dropped", asy
 
   const first = view.apply("tasks.max_running", 2);
   await began;
-  view.boxes.get("tasks.start_notes").state.set_value("second, and not lost");
+  view.boxes.get("tasks.archive_namespace").state.set_value("second, and not lost");
   // Not awaited: a box writes through the queue, and the queue is busy until the
   // write in front of it lands.
-  const second = view.writeBox("tasks.start_notes");
+  const second = view.writeBox("tasks.archive_namespace");
   assert.equal(view.writing, "tasks.max_running", "the first write is the one in flight");
   assert.equal(live.calls.length, 0, "and it has not answered yet");
   assert.deepEqual(
     view.queue.map((write) => write.key),
-    ["tasks.start_notes"],
+    ["tasks.archive_namespace"],
     "the note is queued, not dropped",
   );
 
@@ -854,24 +871,24 @@ test("a note typed while another write is in flight is queued, not dropped", asy
   await second;
   assert.deepEqual(
     live.calls.map((call) => `${call.key}=${call.value}`),
-    ["tasks.max_running=2", "tasks.start_notes=second, and not lost"],
+    ["tasks.max_running=2", "tasks.archive_namespace=second, and not lost"],
     "and goes out as soon as the first one lands",
   );
 });
 
 test("a re-read never replaces words the service does not have yet", async () => {
   const view = await tasksWindow();
-  const box = view.boxes.get("tasks.start_notes");
+  const box = view.boxes.get("tasks.archive_namespace");
   box.state.set_value("typed, not stored");
   // The service's answer has moved on for other keys, but this box's words are
   // still only in the box: the re-read must leave them, and queue them.
   view.client = null;
   view.resetBoxes();
   assert.equal(box.state.value(), "typed, not stored", "the words are still there");
-  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.start_notes"]);
+  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.archive_namespace"]);
   // A box the service owns and the person has not touched does take its value.
-  const archive = view.boxes.get("tasks.archive_namespace");
-  assert.equal(archive.state.value(), "shprd/");
+  const archive = view.boxes.get("tasks.base");
+  assert.equal(archive.state.value(), "");
 });
 
 test("Esc on the Prompts page says so when the words could not be stored", async () => {
@@ -890,16 +907,16 @@ test("Esc on the Prompts page says so when the words could not be stored", async
 
 test("a write whose service is back writes the queue before the page is redrawn", async () => {
   const view = await tasksWindow();
-  view.boxes.get("tasks.finish_notes").state.set_value("say what you tested");
+  view.boxes.get("tasks.archive_namespace").state.set_value("say what you tested");
   view.client = null;
-  await view.writeBox("tasks.finish_notes");
+  await view.writeBox("tasks.archive_namespace");
   const live = client();
   view.client = live;
   // What a successful read does before it resets the boxes.
   if (view.queue.length > 0) view.pump();
   await view.pump();
   assert.deepEqual(live.calls, [
-    { key: "tasks.finish_notes", value: "say what you tested", forRepo: false },
+    { key: "tasks.archive_namespace", value: "say what you tested", forRepo: false },
   ]);
 });
 
@@ -958,4 +975,219 @@ test("a refusal is the person's to read, not retried behind their back", async (
   view.client = live;
   await view.retryWrites();
   assert.equal(live.promptWrites.length, 0, "a refusal is not re-sent by a read");
+});
+
+// -- SHPR-22: the settings dialog completed -----------------------------------
+
+test("review rounds may be Off, and Off hides what a review must fix", () => {
+  assert.deepEqual(RANGE["tasks.review_rounds"], [0, 10]);
+  assert.equal(stepped(0, -1, "tasks.review_rounds"), 0);
+  const off = { values: SETTINGS.values.map((row) => (row.key === "tasks.review_rounds" ? { ...row, value: 0 } : row)) };
+  const rows = workflowRows(off);
+  assert.equal(rows.find((row) => row.key === "tasks.review_rounds").display, "Off");
+  assert.equal(rows.some((row) => row.key === "tasks.must_fix"), false, "nothing is reviewed, so nothing must be fixed");
+  const on = workflowRows(SETTINGS);
+  assert.ok(on.some((row) => row.key === "tasks.must_fix"));
+  assert.equal(on.find((row) => row.key === "tasks.review_rounds").display, "2");
+});
+
+test("archive is a row of presets, and a value set by hand is still a segment", () => {
+  assert.deepEqual(ARCHIVE_PRESETS.map(([value]) => value), [0, 1, 3, 7, 30]);
+  const row = (value) =>
+    workflowRows({ values: [{ key: "tasks.archive_after", value, source: "you" }] }).find((entry) => entry.key === "tasks.archive_after");
+  assert.equal(row(7).display, "1 week");
+  assert.equal(row(0).display, "Off");
+  assert.deepEqual(row(7).choices.length, 5);
+  const odd = row(12);
+  assert.equal(odd.choices.at(-1)[0], 12);
+  assert.equal(odd.display, "12 days");
+});
+
+test("notes nothing reads yet are hidden, not drawn dead", () => {
+  assert.deepEqual(HIDDEN, ["tasks.start_notes", "tasks.finish_notes"]);
+  const shown = workflowRows(SETTINGS).map((row) => row.key);
+  for (const key of HIDDEN) assert.equal(shown.includes(key), false, key);
+});
+
+test("a branch pattern git would refuse is refused with a sentence", () => {
+  assert.equal(branchProblem("task/{n}-{slug}"), null);
+  assert.equal(branchProblem("feature/{slug}"), null);
+  assert.equal(branchProblem(""), null, "empty means the default");
+  assert.match(branchProblem("task/fixed"), /{n} or {slug}/);
+  assert.match(branchProblem("task/{id}"), /only {n} and {slug}/);
+  assert.match(branchProblem("task/{n} x"), /spaces/);
+  assert.match(branchProblem("task//{n}"), /\//);
+  assert.match(branchProblem("task/{n}.lock"), /\.lock/);
+  assert.match(branchProblem("task/..{n}"), /\.\./);
+  assert.equal(boxProblem("tasks.base", "integration/m11"), null);
+  assert.match(boxProblem("tasks.base", "bad name"), /spaces/);
+  assert.equal(boxProblem("tasks.archive_namespace", "anything at all"), null);
+});
+
+test("a branch box never writes a name git would refuse", async () => {
+  const view = await tasksWindow();
+  const box = view.boxes.get("tasks.branch");
+  box.state.set_value("task/fixed");
+  await view.writeBox("tasks.branch");
+  assert.deepEqual(view.client.calls, [], "nothing was sent");
+  assert.equal(view.refusal.key, "tasks.branch");
+  assert.match(view.refusal.text, /{n} or {slug}/);
+  box.state.set_value("work/{n}-{slug}");
+  await view.writeBox("tasks.branch");
+  assert.deepEqual(view.client.calls, [{ key: "tasks.branch", value: "work/{n}-{slug}", forRepo: false }]);
+});
+
+test("Fast, Permissions and Fallback are offered where the program has them", () => {
+  const list = roles(SETTINGS, ROSTER);
+  const worker = list.find((entry) => entry.id === "worker");
+  const reviewer = list.find((entry) => entry.id === "reviewer");
+  assert.equal(worker.fast, null, "pi has no fast mode, so no dead switch");
+  assert.equal(reviewer.fast.key, "roles.reviewer.fast", "claude has one");
+  assert.equal(reviewer.fast.value, false);
+  assert.deepEqual(
+    reviewer.perm.choices.map((choice) => choice.value),
+    [null, "manual", "auto", "acceptEdits", "plan", "bypassPermissions"],
+  );
+  assert.match(reviewer.perm.display, /Ask/);
+  assert.equal(worker.fallback.key, "roles.worker.fallback");
+  assert.deepEqual(worker.fallback.choices.map((choice) => choice.value), ["claude", "codex", "kilo", "opencode"], "not the role's own program");
+  assert.equal(reviewer.fallback, null, "only the worker has a fallback list");
+  assert.deepEqual(toggled([], "codex"), ["codex"]);
+  assert.deepEqual(toggled(["codex", "claude"], "codex"), ["claude"]);
+});
+
+test("the Backup agent is a switch: on names another vendor's program, off takes it away", () => {
+  const backup = roles(SETTINGS, ROSTER).find((entry) => entry.id === "backup");
+  assert.equal(backup.backup.on, true);
+  assert.equal(backup.backup.key, "roles.backup.agent");
+  const off = roles({ values: SETTINGS.values.filter((row) => row.key !== "roles.backup.agent") }, ROSTER);
+  assert.equal(off.find((entry) => entry.id === "backup").backup.on, false);
+  // The worker runs pi; the first installed program of another vendor is claude.
+  assert.equal(backupChoice(SETTINGS, ROSTER), "claude");
+  assert.equal(backupChoice(SETTINGS, { programs: [] }), null);
+  assert.equal(roles(SETTINGS, ROSTER).find((entry) => entry.id === "worker").backup, null);
+});
+
+test("a role's fast, permission and fallback writes go to its own keys", async () => {
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  view.roster = ROSTER;
+  view.client = client();
+  await view.apply("roles.reviewer.fast", true);
+  await view.apply("roles.reviewer.perm", "plan");
+  await view.apply("roles.worker.fallback", toggled([], "codex"));
+  assert.deepEqual(view.client.calls, [
+    { key: "roles.reviewer.fast", value: true, forRepo: false },
+    { key: "roles.reviewer.perm", value: "plan", forRepo: false },
+    { key: "roles.worker.fallback", value: ["codex"], forRepo: false },
+  ]);
+});
+
+test("the remote page's words: a masked link, ages, devices and the tunnel", () => {
+  assert.equal(maskLink("https://abc123.trycloudflare.com/x?k=secret"), "https://••••••.trycloudflare.com/••••");
+  assert.ok(!maskLink("https://abc123.trycloudflare.com/x?k=secret").includes("secret"));
+  assert.equal(maskLink("nonsense"), "••••••••");
+  assert.equal(ago(100, 130), "just now");
+  assert.equal(ago(100, 100 + 5 * 60), "5 min ago");
+  assert.equal(ago(100, 100 + 3 * 3600), "3 h ago");
+  assert.equal(ago(100, 100 + 2 * 86_400), "2 d ago");
+  const rows = sessionRows(
+    { sessions: [{ id: "a1", label: "Phone", last_seen: 90, remember: true }, { id: "b2", label: "Laptop", last_seen: 0, remember: false }], current: "b2" },
+    100,
+  );
+  assert.deepEqual(rows.map((row) => [row.id, row.here, row.remembered]), [["a1", false, true], ["b2", true, false]]);
+  const status = {
+    on: false, starting: false, why: "cloudflared exited", password_set: false, default_provider: "tailscale",
+    providers: [{ id: "tailscale", public_internet: false }, { id: "ngrok", public_internet: true }],
+  };
+  assert.equal(tunnelView(status).provider, "tailscale");
+  assert.equal(tunnelView(status).needsPassword, false);
+  const pub = tunnelView(status, "ngrok");
+  assert.equal(pub.needsPassword, true);
+  assert.match(pub.note, /shprd web password set/);
+  assert.equal(pub.why, "cloudflared exited");
+  assert.equal(pub.word, "Off");
+  const up = tunnelView({ ...status, on: true, link: "https://x.example/y", provider: "ngrok" });
+  assert.equal(up.word, "On");
+  assert.equal(up.link, "https://x.example/y");
+  assert.equal(up.why, null);
+});
+
+/** A client for the Remote page: what each route answers, and every call made. */
+function remoteClient(answers) {
+  const calls = [];
+  return {
+    calls,
+    putSetting: async () => ({ outcome: "stored", settings: SETTINGS }),
+    call: async (method, path, options = {}) => {
+      calls.push({ method, path, body: options.body ?? null });
+      const answer = answers[`${method} ${path}`] ?? answers[path];
+      if (answer instanceof Error) throw answer;
+      return answer ?? null;
+    },
+  };
+}
+
+test("the Remote page reads the tunnel and the devices, and says when a route is missing", async () => {
+  const { view } = await settled({ page: "remote" });
+  view.client = remoteClient({
+    "/api/tunnels": { on: false, starting: false, at: 1, password_set: true, default_provider: "tailscale", providers: [] },
+    "/api/sessions": new ServiceError("not found", { status: 404 }),
+  });
+  await view.readRemote();
+  assert.equal(view.tunnelRead.data.default_provider, "tailscale");
+  assert.deepEqual(view.sessionRead, { unavailable: true });
+});
+
+test("Start and Stop go through the service, and its refusal is shown word for word", async () => {
+  const { view } = await settled({ page: "remote" });
+  const up = { on: true, starting: false, at: 2, password_set: true, default_provider: "tailscale", providers: [], link: "https://x.example", provider: "tailscale" };
+  view.client = remoteClient({ "POST /api/tunnels/start": up, "POST /api/tunnels/stop": { ...up, on: false, link: undefined } });
+  view.tunnelRead = { data: { ...up, on: false, providers: [{ id: "tailscale", public_internet: false }] } };
+  view.provider = "tailscale";
+  await view.tunnelCall("start");
+  assert.deepEqual(view.client.calls[0], { method: "POST", path: "/api/tunnels/start", body: { provider: "tailscale" } });
+  assert.equal(view.tunnelRead.data.on, true);
+  assert.equal(view.remoteBusy, null);
+  await view.tunnelCall("stop");
+  assert.equal(view.client.calls[1].path, "/api/tunnels/stop");
+  assert.equal(view.tunnelRead.data.on, false);
+  const refusal = new ServiceError("a public tunnel needs a password", { status: 409, code: "refused" });
+  view.client = remoteClient({ "POST /api/tunnels/start": refusal });
+  await view.tunnelCall("start");
+  assert.equal(view.refusal.text, reason(refusal));
+});
+
+test("Revoke ends one device and Log out all ends every one", async () => {
+  const { view } = await settled({ page: "remote" });
+  const list = { sessions: [{ id: "a1", label: "Phone" }, { id: "b2", label: "Laptop" }], current: "b2" };
+  view.client = remoteClient({ "/api/sessions": list, "/api/tunnels": { on: false, providers: [] } });
+  view.sessionRead = { data: list };
+  await view.revokeSession("a1");
+  assert.deepEqual(view.client.calls[0], { method: "DELETE", path: "/api/sessions/a1", body: null });
+  view.client.calls.length = 0;
+  await view.logoutAll();
+  assert.deepEqual(
+    view.client.calls.filter((call) => call.method === "DELETE").map((call) => call.path),
+    ["/api/sessions/a1", "/api/sessions/b2"],
+  );
+  assert.equal(view.remoteBusy, null);
+});
+
+test("every page, Remote included, draws without throwing", async () => {
+  for (const page of ["agents", "tasks", "prompts", "remote"]) {
+    const { view } = await settled({ page });
+    view.settings = SETTINGS;
+    view.roster = ROSTER;
+    view.prompts = PROMPTS;
+    view.tunnelRead = { data: { on: true, starting: false, at: 1, password_set: true, default_provider: "tailscale", link: "https://x.example/y", provider: "tailscale", providers: [{ id: "tailscale", public_internet: false }] } };
+    view.sessionRead = { data: { sessions: [{ id: "a1", label: "Phone", last_seen: 1, remember: true }], current: "a1" } };
+    view.page = page;
+    const t = herdr.theme();
+    const colors = tone(t);
+    assert.ok(view.nav(t, colors), `${page}: the page list`);
+    assert.ok(view.pageBody(t, colors).length > 0, page);
+    view.revealed = true;
+    assert.ok(view.pageBody(t, colors).length > 0, `${page} with the link showing`);
+  }
 });
