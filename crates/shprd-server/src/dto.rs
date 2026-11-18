@@ -742,8 +742,12 @@ impl SnapshotDto {
 pub struct HealthDto {
     /// Always true; a failing service does not answer at all.
     pub ok: bool,
-    /// The service's identity, as `service.json` records it.
-    pub id: String,
+    /// The service's identity, as `service.json` records it. Left out for a
+    /// caller that is not on loopback: the id is the local handshake's, and a
+    /// public caller has no use for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
     /// The service's version.
     pub version: String,
 }
@@ -1052,14 +1056,16 @@ impl Action {
         "task_resend_brief",
     ];
 
-    /// Whether this action undoes something a person cannot get back.
+    /// Whether this action undoes something a person cannot get back, or lands
+    /// work.
     ///
     /// Through the session door these need a password entered in the last five
     /// minutes ([`crate::remote`]); the loopback token door is exempt because the
-    /// token is already local. Landing, merging and "stop everything" join this
-    /// list when their actions exist; it is one place so the rule cannot drift.
+    /// token is already local. Dropping a task and accepting one (which merges
+    /// its work) are the two today; "stop everything" joins them when its action
+    /// exists. It is one place so the rule cannot drift.
     pub fn is_destructive(&self) -> bool {
-        matches!(self, Self::TaskDrop { .. })
+        matches!(self, Self::TaskDrop { .. } | Self::TaskAccept { .. })
     }
 
     /// The action's kind, as the envelope spells it.

@@ -127,7 +127,8 @@ pub struct GateRequest<'a> {
     pub write_header: bool,
     /// Whether the request asks to upgrade to a WebSocket.
     pub upgrade: bool,
-    /// The peer's address, which is what a rate limit is keyed on.
+    /// The client's address, which is what a rate limit is keyed on: the
+    /// socket's peer, or over the active tunnel the address its edge reported.
     pub peer: IpAddr,
 }
 
@@ -407,6 +408,9 @@ impl Gateway {
                 }),
             };
         }
+
+        // A right password is not an attempt to guess: hand the attempt back.
+        self.limits.login_succeeded(ip);
 
         if let Some(current) = current
             && let Some(record) = self

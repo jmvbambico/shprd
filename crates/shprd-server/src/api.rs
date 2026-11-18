@@ -20,7 +20,7 @@ use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, middleware};
@@ -765,15 +765,20 @@ pub(crate) fn router(state: AppState) -> Router {
             }),
         )
         .layer(middleware::from_fn_with_state(state.clone(), auth::host))
-        .layer(middleware::from_fn(auth::peer))
+        .layer(middleware::from_fn_with_state(state.clone(), auth::peer))
         .with_state(state)
 }
 
 /// `GET /api/health`: who this is, for the handshake.
-async fn health(State(state): State<AppState>) -> Json<HealthDto> {
+///
+/// The service's `id` is the local handshake's (the CLI and the desktop mods
+/// check it before they send the token), so it is answered to a loopback caller
+/// only: anyone reaching the service by its tunnel's name gets `ok` and the
+/// version.
+async fn health(State(state): State<AppState>, headers: HeaderMap) -> Json<HealthDto> {
     Json(HealthDto {
         ok: true,
-        id: state.id.clone(),
+        id: auth::is_local_caller(&headers).then(|| state.id.clone()),
         version: state.version.clone(),
     })
 }

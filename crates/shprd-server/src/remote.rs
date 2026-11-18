@@ -184,13 +184,21 @@ pub(crate) async fn revoke(
     }
 }
 
-/// A refused login: one message, and a `Retry-After` when it was a rate limit.
+/// A refused login: one message, and a `Retry-After` when it was a rate limit
+/// (whose message says the limit was hit instead).
 fn failure(status: StatusCode, retry_after: Option<u64>) -> Response {
+    // A rate limit says so and says when to come back: it is true of the
+    // request whatever the password was, so it leaks nothing, and "that password
+    // did not work" would send an owner who is locked out to retype a right one.
+    let message = match retry_after {
+        Some(after) => format!("too many sign-in attempts; try again in {after} seconds"),
+        None => FAILURE.to_string(),
+    };
     let mut response = (
         status,
         Json(LoginFailure {
             ok: false,
-            message: FAILURE.to_string(),
+            message,
             retry_after,
         }),
     )

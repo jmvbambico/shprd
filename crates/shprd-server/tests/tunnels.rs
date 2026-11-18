@@ -499,3 +499,187 @@ async fn a_malformed_start_body_is_a_bad_request_not_the_defaults() {
         StatusCode::MISDIRECTED_REQUEST
     );
 }
+
+/// A login at `host` from a client the edge calls `client`, with `password`.
+fn login_from(
+    host: &str,
+    client: Option<&str>,
+    password: &str,
+    cookie: Option<&str>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri("/api/login")
+        .header(header::HOST, host)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(client) = client {
+        builder = builder.header("x-forwarded-for", client);
+    }
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    builder
+        .body(Body::from(json!({"password": password}).to_string()))
+        .unwrap()
+}
+
+/// A fixture with the password set and an ngrok tunnel up at [`QUICK`].
+async fn with_ngrok_up() -> Fixture {
+    let fixture = Fixture::new().with_password();
+    let (status, body, _) = fixture
+        .send(fixture.token_post("/api/tunnels/start", json!({"provider": "ngrok"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    fixture
+}
+
+#[tokio::test]
+async fn over_the_tunnel_each_visitor_has_their_own_login_limit() {
+    let fixture = with_ngrok_up().await;
+    // A guesser, five wrong passwords: the sixth is a rate limit.
+    for _ in 0..5 {
+        let (status, _, _) = fixture
+            .send(login_from(
+                QUICK,
+                Some("203.0.113.1"),
+                "a wrong long password",
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body, _) = fixture
+        .send(login_from(QUICK, Some("203.0.113.1"), PASSWORD, None))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.contains("too many") && message.contains("try again in"),
+        "{message}"
+    );
+    assert!(!message.contains("did not work"), "{message}");
+
+    // The owner, from another address, is not locked out by it.
+    let (status, body, cookie) = fixture
+        .send(login_from(QUICK, Some("198.51.100.7"), PASSWORD, None))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(cookie.is_some());
+}
+
+#[tokio::test]
+async fn the_rightmost_forwarded_address_is_the_edges_not_the_visitors() {
+    let fixture = with_ngrok_up().await;
+    // The visitor writes a fresh address on the left each time; the edge's entry
+    // on the right is always the same one.
+    for n in 0..5 {
+        let claimed = format!("6.6.6.{n}, 203.0.113.1");
+        let (status, _, _) = fixture
+            .send(login_from(
+                QUICK,
+                Some(&claimed),
+                "a wrong long password",
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _, _) = fixture
+        .send(login_from(
+            QUICK,
+            Some("6.6.6.9, 203.0.113.1"),
+            PASSWORD,
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn a_spoofed_header_on_a_direct_request_changes_nothing() {
+    let fixture = with_ngrok_up().await;
+    for n in 0..5 {
+        let claimed = format!("203.0.113.{n}");
+        let (status, _, _) = fixture
+            .send(login_from(
+                HOST,
+                Some(&claimed),
+                "a wrong long password",
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // A sixth, "from" yet another address: still the one loopback bucket.
+    let (status, _, _) = fixture
+        .send(login_from(HOST, Some("198.51.100.99"), PASSWORD, None))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn right_logins_never_count_against_anyone() {
+    let fixture = with_ngrok_up().await;
+    // Wrong passwords first, so the address has failures to forget.
+    for _ in 0..3 {
+        let (status, _, _) = fixture
+            .send(login_from(
+                QUICK,
+                Some("203.0.113.1"),
+                "a wrong long password",
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _, cookie) = fixture
+        .send(login_from(QUICK, Some("203.0.113.1"), PASSWORD, None))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = cookie.unwrap().split(';').next().unwrap().to_owned();
+    // Many more right logins than the limit (they refresh the session).
+    for _ in 0..12 {
+        let (status, body, _) = fixture
+            .send(login_from(QUICK, Some("203.0.113.1"), PASSWORD, Some(&id)))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    // And the earlier failures were forgotten: four more wrong ones are allowed.
+    for _ in 0..4 {
+        let (status, _, _) = fixture
+            .send(login_from(
+                QUICK,
+                Some("203.0.113.1"),
+                "a wrong long password",
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
+async fn health_shows_its_id_to_loopback_and_hides_it_over_the_tunnel() {
+    let fixture = with_ngrok_up().await;
+    let health = |host: &str, forwarded: bool| {
+        let mut builder = Request::builder()
+            .uri("/api/health")
+            .header(header::HOST, host);
+        if forwarded {
+            builder = builder.header("x-forwarded-for", "203.0.113.1");
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+    let (status, body, _) = fixture.send(health(HOST, false)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["id"].is_string(), "loopback gets the id: {body}");
+
+    let (status, body, _) = fixture.send(health(QUICK, true)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], json!(true));
+    assert!(body.get("id").is_none(), "the tunnel does not: {body}");
+
+    // A loopback name carrying the headers an edge adds is not a local caller.
+    let (_, body, _) = fixture.send(health(HOST, true)).await;
+    assert!(body.get("id").is_none(), "{body}");
+}

@@ -5,7 +5,7 @@
 //!
 //! | | what it does |
 //! |---|---|
-//! | [`peer`] | records the address the request came from, which is what a rate limit is keyed on |
+//! | [`peer`] | records the client address the request came from (the socket's, or over the tunnel the one its edge reported), which is what a rate limit is keyed on |
 //! | [`host`] | refuses a request addressed to a name this service does not answer to, with `421` |
 //! | [`require`] | the gate itself: the token door or a session, `Origin` and `x-shprd` on a write, the limits |
 //!
@@ -21,7 +21,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, header};
+use axum::http::{HeaderMap, HeaderName, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -40,18 +40,52 @@ pub(crate) struct Peer(pub IpAddr);
 /// Records the address the request came from.
 ///
 /// The listener is served with `into_make_service_with_connect_info`, so the
-/// address is the kernel's, not a header's: `X-Forwarded-For` is ignored until
-/// the tunnel task decides when it may be trusted. A router driven without a
-/// socket — every test that uses `tower::ServiceExt` — has no peer, and is
-/// treated as loopback, which is what it is.
-pub(crate) async fn peer(mut request: Request, next: Next) -> Response {
-    let address = request
+/// socket address is the kernel's, not a header's. A request that came over the
+/// active tunnel (from the loopback agent, addressed to the tunnel's own host)
+/// is keyed on the address its provider's edge reported instead, since its
+/// socket address is the same for every visitor; any other request keeps its
+/// socket address and its headers are just text
+/// ([`shprd_remote::tunnel::client_address`]). A router driven without a socket
+/// — every test that uses `tower::ServiceExt` — has no peer, and is treated as
+/// loopback, which is what it is.
+pub(crate) async fn peer(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let socket = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip())
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let headers = request.headers();
+    let address = shprd_remote::tunnel::client_address(
+        state.tunnels.edge().as_ref(),
+        socket,
+        host_of(headers),
+        header_str(headers, HeaderName::from_static("x-forwarded-for")),
+        header_str(headers, HeaderName::from_static("cf-connecting-ip")),
+    );
     request.extensions_mut().insert(Peer(address));
     next.run(request).await
+}
+
+/// Whether the request is a local caller: addressed to a loopback name, with
+/// none of the headers a tunnel's edge adds. A tunnel's visitors are addressed
+/// to the tunnel's host, and their requests carry forwarding headers, so
+/// neither is loopback; the check is for what only a local client should see
+/// (the service's id on `GET /api/health`).
+pub(crate) fn is_local_caller(headers: &HeaderMap) -> bool {
+    shprd_remote::hosts::is_loopback_request(host_of(headers))
+        && [
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "forwarded",
+            "cf-connecting-ip",
+            "cf-ray",
+        ]
+        .iter()
+        .all(|name| !headers.contains_key(HeaderName::from_static(name)))
 }
 
 /// Refuses a request addressed to a name this service does not answer to.

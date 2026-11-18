@@ -549,6 +549,37 @@ async fn a_destructive_action_needs_the_password_again_after_five_minutes() {
 }
 
 #[tokio::test]
+async fn accepting_a_task_needs_the_password_again_like_dropping_does() {
+    let fixture = Fixture::new().with_password();
+    let id = fixture.login(PASSWORD).await;
+    let cookie = Fixture::cookie(&id);
+    let accept = || {
+        Call::post("/api/action", json!({"kind": "task.accept", "task": "T1"}))
+            .with_cookie(&cookie)
+            .with_origin(ORIGIN)
+            .with_write_header()
+    };
+    let fresh = fixture.send(accept()).await;
+    assert_ne!(fresh.status, StatusCode::UNAUTHORIZED, "{:?}", fresh.body);
+
+    fixture.clock.advance(5 * 60 + 1);
+    let stale = fixture.send(accept()).await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED, "{:?}", stale.body);
+    assert_eq!(stale.json()["code"], json!("reauth"), "{:?}", stale.body);
+
+    // The loopback token door (the desktop mods') is exempt, as for a drop.
+    let token = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "task.accept", "task": "T1"}))
+                .with_token(&fixture.token)
+                .with_origin(ORIGIN)
+                .with_write_header(),
+        )
+        .await;
+    assert_ne!(token.status, StatusCode::UNAUTHORIZED, "{:?}", token.body);
+}
+
+#[tokio::test]
 async fn a_logout_ends_the_session_it_names_and_clears_the_cookie() {
     let fixture = Fixture::new().with_password();
     let id = fixture.login(PASSWORD).await;
