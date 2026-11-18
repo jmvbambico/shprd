@@ -220,7 +220,6 @@ impl RateLimiter {
         // The attempt's own stamp: the time, nudged forward when another attempt
         // already took this millisecond (a window's edge moves by less than that).
         let stamp = now.max(buckets.last_stamp + 1);
-        buckets.last_stamp = stamp;
 
         // An address in a block is refused until the block ends. The block is
         // not extended by attempts inside it, or a client that retries would
@@ -258,6 +257,9 @@ impl RateLimiter {
             });
         }
         buckets.login_ip.entry(ip).or_default().push(stamp);
+        // Only an attempt that is counted takes its stamp, so refused requests
+        // cannot push stamps ahead of the clock.
+        buckets.last_stamp = stamp;
 
         // Everywhere, in the last hour.
         let hour = HOUR.as_millis() as u64;
