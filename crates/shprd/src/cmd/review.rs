@@ -999,6 +999,7 @@ fn open_reviewer(
             run: Some(env.spawn.run.clone()),
             repo: dir.to_path_buf(),
             home: Some(env.spawn.home.clone()),
+            bin: shprd_agents::env::service_bin(),
             data: env.spawn.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
@@ -2238,6 +2239,24 @@ project_dirs = []
                 "SHPRD_REPO".to_string(),
                 Some(report.dir.display().to_string())
             )),
+            "{pairs:?}"
+        );
+        // The agent's `shprd` is this service's own, first on its PATH.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let exe = exe.canonicalize().unwrap_or(exe);
+        assert!(
+            pairs.contains(&("SHPRD_BIN".to_string(), Some(exe.display().to_string()))),
+            "{pairs:?}"
+        );
+        let dir = exe
+            .parent()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default();
+        assert!(
+            pairs.iter().any(|(key, value)| key == "PATH"
+                && value
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(&format!("{dir}:")) || path == dir)),
             "{pairs:?}"
         );
         // A reviewer may not push, so the remote credentials are dropped.

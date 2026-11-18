@@ -430,6 +430,7 @@ mod tests {
             repo: PathBuf::from("/repo"),
             home: None,
             data: None,
+            bin: None,
         }
     }
 

@@ -718,6 +718,7 @@ pub(crate) fn open_agent(
             run: Some(env.run.clone()),
             repo: worktree.path.clone(),
             home: Some(env.home.clone()),
+            bin: shprd_agents::env::service_bin(),
             data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
@@ -2259,6 +2260,7 @@ pub(crate) fn ensure_coordinator(
             run: None,
             repo: env.ctx.root.clone(),
             home: Some(env.home.clone()),
+            bin: shprd_agents::env::service_bin(),
             data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
@@ -3521,6 +3523,16 @@ project_dirs = []
         assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
         assert_eq!(tabs[0].root_pane, pane);
         assert_eq!(tabs[0].title, ASSISTANT_TITLE);
+        let exe = std::env::current_exe().unwrap_or_default();
+        let exe = exe.canonicalize().unwrap_or(exe);
+        assert!(
+            mux.calls().iter().any(|call| matches!(call,
+                Call::Spawn(_, _, _, pairs, _)
+                    if pairs.contains(&("SHPRD_BIN".to_string(), Some(exe.display().to_string())))
+                        && pairs.iter().any(|(key, value)| key == "PATH"
+                            && value.as_deref().is_some_and(|path| path.starts_with(&format!("{}:", exe.parent().map(|d| d.display().to_string()).unwrap_or_default())))))),
+            "the coordinator carries the service's shprd"
+        );
         assert!(
             mux.calls()
                 .iter()
@@ -3772,6 +3784,24 @@ project_dirs = []
         assert!(pairs.contains(&("SHPRD_TASK".to_string(), Some("T1".to_string()))));
         assert!(pairs.contains(&("SHPRD_RUN".to_string(), Some("t1".to_string()))));
         assert!(pairs.contains(&("SHPRD_ACTOR".to_string(), Some("agent:sh".to_string()))));
+        // The agent's `shprd` is this service's own, first on its PATH.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let exe = exe.canonicalize().unwrap_or(exe);
+        assert!(
+            pairs.contains(&("SHPRD_BIN".to_string(), Some(exe.display().to_string()))),
+            "{pairs:?}"
+        );
+        let dir = exe
+            .parent()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default();
+        assert!(
+            pairs.iter().any(|(key, value)| key == "PATH"
+                && value
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(&format!("{dir}:")) || path == dir)),
+            "{pairs:?}"
+        );
         // The worker's own `shprd` must resolve this engine's config and
         // harnesses, not whatever `$HOME` holds (bug 11).
         assert!(

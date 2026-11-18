@@ -168,6 +168,7 @@ fn worker_env(worktree: &Path, run_id: &str) -> Vec<(String, Option<String>)> {
         // A gate step often runs `shprd` itself, and must resolve the config and
         // harness table this engine did.
         home: crate::ctx::resolve_home(None).ok(),
+        bin: shprd_agents::env::service_bin(),
         data: crate::cmd::roster::resolve_data_dir()
             .env_value()
             .map(Path::to_path_buf),
