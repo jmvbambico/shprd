@@ -188,7 +188,9 @@ export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
     const tasks = treeTasks(state, space, list.length, now);
     return {
       id: space.id,
-      name: space.name,
+      // The row carries Herdr's real space (id and name) when the service reports it.
+      name: space.herdr_name ?? space.name,
+      herdr: space.herdr_id ?? null,
       branch: space.branch ?? "",
       folder: space.folder ?? "",
       plain: false,
@@ -201,16 +203,17 @@ export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
 }
 
 /**
- * The spaces Herdr has that the service does not serve — the person's own and
- * Herdr's — as plain rows: a name and a folder, no tree. A space shprd made for
- * a repo it serves (`shprd · <repo>`) is that repo's row already.
+ * The spaces Herdr has that the service does not serve, as plain rows: a name
+ * and a folder, no tree. Only the exact Herdr space a served row stands for
+ * (`herdr_id`) is left out; every other space, including the person's own in the
+ * same folder, shows. A service that reports no `herdr_id` (the host was not
+ * asked) falls back to hiding the space named `shprd · <repo>`.
  */
 export function plainSpaces(served, herdrSpaces = []) {
-  const folders = new Set(served.map((space) => space.folder).filter(Boolean));
-  const names = new Set(served.map((space) => `shprd · ${space.name}`));
+  const ids = new Set(served.map((space) => space.herdr_id).filter(Boolean));
+  const names = new Set(served.filter((space) => !space.herdr_id).map((space) => `shprd · ${space.name}`));
   return (herdrSpaces ?? [])
-    .filter((space) => space?.id && !names.has(space.name) && !(space.folder && folders.has(space.folder)))
-    .filter((space) => !String(space.name ?? "").startsWith("shprd · "))
+    .filter((space) => space?.id && !ids.has(space.id) && !names.has(space.name))
     .map((space) => ({
       id: `herdr:${space.id}`,
       herdr: space.id,

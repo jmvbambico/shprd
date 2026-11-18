@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
+import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
 const NOW = 1_800_000_000_000;
 const state = JSON.parse(readFileSync(new URL("./fixtures/proto.json", import.meta.url), "utf8"));
@@ -66,12 +66,34 @@ test("spaces Herdr made show as plain rows; the served repo's own space does not
   const herdr = [
     { id: "s1", name: "shprd · shprd", folder: "/x/shprd" },
     { id: "s2", name: "notes", folder: "/home/me/notes", active: true },
-    { id: "s3", name: "shprd · other", folder: "/x/other" },
   ];
   const tree = spaceTree(state, herdr, NOW);
   assert.deepEqual(tree.map((space) => space.name), ["shprd", "shop", "relay", "notes"]);
   const plain = tree.at(-1);
   assert.deepEqual([plain.plain, plain.herdr, plain.tasks.length], [true, "s2", 0]);
+});
+
+// SHPR-32: the person's real Herdr, with `shprd serve` for ~/projects/jmanager.
+const JMANAGER = "/Users/cryogenix/projects/jmanager";
+const REAL = [
+  { id: "w1", name: "jmanager", folder: JMANAGER, active: true },
+  { id: "w2", name: "shprd", folder: "/Users/cryogenix/projects/shprd" },
+  { id: "w3", name: "shprd · jmanager", folder: JMANAGER },
+];
+const served = { run: null, tasks: [], spaces: [{ id: "sp-jmanager", name: "jmanager", folder: JMANAGER, branch: "main", herdr_id: "w3", herdr_name: "shprd · jmanager" }] };
+
+test("the served space is Herdr's real one, and only it is left out of the plain rows", () => {
+  const tree = spaceTree(served, REAL, NOW);
+  assert.deepEqual(tree.map((space) => space.name), ["shprd · jmanager", "jmanager", "shprd"]);
+  const [own, mine, other] = tree;
+  assert.deepEqual([own.plain, own.herdr, own.branch, own.id], [false, "w3", "main", "sp-jmanager"]);
+  assert.deepEqual([mine.plain, mine.herdr, other.plain, other.herdr], [true, "w1", true, "w2"], "the person's own space in the same folder still shows");
+});
+
+test("plainSpaces hides exactly the served space's id", () => {
+  assert.deepEqual(plainSpaces(served.spaces, REAL).map((space) => space.herdr), ["w1", "w2"]);
+  const noId = [{ id: "sp-jmanager", name: "jmanager", folder: JMANAGER, branch: "" }];
+  assert.deepEqual(plainSpaces(noId, REAL).map((space) => space.herdr), ["w1", "w2"], "without an id the `shprd · repo` name stands in");
 });
 
 test("the Tasks list's scope keeps one space's tasks, and all when none is picked", () => {

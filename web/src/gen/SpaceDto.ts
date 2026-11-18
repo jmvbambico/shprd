@@ -17,6 +17,17 @@ name: string,
  */
 folder: string, 
 /**
- * The branch the run integrates into, `""` before a run starts.
+ * The repository's current branch; the run's integration branch when HEAD is
+ * detached, `""` when neither is known.
  */
-branch: string, };
+branch: string, 
+/**
+ * Herdr's own id for the space this service made or reused for the
+ * repository (`shprd · <repo>`), so a window can select that real space.
+ * Absent when the host was not asked or has none.
+ */
+herdr_id?: string, 
+/**
+ * That space's real name in Herdr.
+ */
+herdr_name?: string, };

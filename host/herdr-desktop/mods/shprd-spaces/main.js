@@ -197,7 +197,11 @@ export default class Spaces extends View {
     }
     this.folded.delete(space.id);
     setShared("spaces.picked", space.id);
-    const home = spaces().find((entry) => entry.name === `shprd · ${space.name}`);
+    // Herdr's real space for the row, as the service reported it; a service that
+    // did not falls back to the space named `shprd · <repo>`.
+    const home = space.herdr
+      ? { id: space.herdr }
+      : spaces().find((entry) => entry.name === `shprd · ${space.name}`);
     if (home) run("space.select", { id: home.id });
     this.cx.notify();
   }

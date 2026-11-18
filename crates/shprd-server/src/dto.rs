@@ -650,8 +650,19 @@ pub struct SpaceDto {
     pub name: String,
     /// The repository's path.
     pub folder: String,
-    /// The branch the run integrates into, `""` before a run starts.
+    /// The repository's current branch; the run's integration branch when HEAD is
+    /// detached, `""` when neither is known.
     pub branch: String,
+    /// Herdr's own id for the space this service made or reused for the
+    /// repository (`shprd · <repo>`), so a window can select that real space.
+    /// Absent when the host was not asked or has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub herdr_id: Option<String>,
+    /// That space's real name in Herdr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub herdr_name: Option<String>,
 }
 
 /// One agent the host has: a worker, a reviewer, or the coordinator.
