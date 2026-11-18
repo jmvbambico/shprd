@@ -1798,6 +1798,27 @@ pub fn build_env_in<'a>(
     home: Option<&Path>,
     data: &DataDir,
 ) -> Result<SpawnEnv<'a>, CliError> {
+    build_env_with(ctx, home, data, true)
+}
+
+/// [`build_env_in`] for the coordinator, which belongs to the repository and not
+/// to a run: with no run started the environment carries an empty run id and
+/// base branch, which nothing but a task's spawn reads.
+pub(crate) fn build_repo_env<'a>(
+    ctx: &'a Ctx,
+    home: Option<&Path>,
+    data: &DataDir,
+) -> Result<SpawnEnv<'a>, CliError> {
+    build_env_with(ctx, home, data, false)
+}
+
+/// The one body of [`build_env_in`] and [`build_repo_env`].
+fn build_env_with<'a>(
+    ctx: &'a Ctx,
+    home: Option<&Path>,
+    data: &DataDir,
+    need_run: bool,
+) -> Result<SpawnEnv<'a>, CliError> {
     let home = crate::ctx::resolve_home(home)?;
     let specs = data.harness_specs().map_err(|err| {
         CliError::other(
@@ -1820,10 +1841,15 @@ pub fn build_env_in<'a>(
     let settings = Loaded::read(&home, Some(&ctx.root))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the settings")))?;
     let state = ctx.state()?;
-    let run = state
-        .run
-        .as_ref()
-        .ok_or_else(|| CliError::other(anyhow!("no run yet: start one with `shprd run start`")))?;
+    let (run_id, base_branch) = match state.run.as_ref() {
+        Some(run) => (run.run_id.clone(), run.integration_branch.clone()),
+        None if need_run => {
+            return Err(CliError::other(anyhow!(
+                "no run yet: start one with `shprd run start`"
+            )));
+        }
+        None => (String::new(), String::new()),
+    };
     let repo_name = repo_name(&ctx.root)?;
     let base_env: BTreeMap<String, String> = std::env::vars().collect();
     // The roots the agent CLIs write under are read from the same environment
@@ -1837,8 +1863,8 @@ pub fn build_env_in<'a>(
         prompts_dir: prompts::prompts_dir(&crate::ctx::resolve_config_home(&home)),
         home,
         settings,
-        run: run.run_id.clone(),
-        base_branch: run.integration_branch.clone(),
+        run: run_id,
+        base_branch,
         repo_name,
         programs,
         workers: config.roster.workers.clone(),
@@ -1955,42 +1981,33 @@ pub(crate) fn all_handles(mux: &dyn Host) -> Vec<shprd_mux::Tab> {
     handles
 }
 
-/// Where the pane shprd prepared for the coordinator is written.
+/// Where the pane of the coordinator shprd started is written.
 ///
-/// It is `<home>/.shprd/coordinator.pane`, beside the tab records: the service
-/// writes the pane it prepared when it made or found the repository's space,
-/// and a chat line is typed there. One line, the host's own pane id.
+/// It is `<home>/.shprd/coordinator.pane`, beside the tab records. Two lines:
+/// the host's own pane id, then the word `agent`, which says shprd started an
+/// agent there. A record without the second line names a pane shprd did not
+/// start (an older build recorded the space's starter shell), and is never typed
+/// into.
 pub(crate) fn coordinator_pane_path(home: &Path) -> PathBuf {
     home.join(".shprd").join("coordinator.pane")
 }
 
-/// Records the pane the repository's own space holds for the coordinator.
-///
-/// `shprd serve` calls this once it has made or found the space: the pane is
-/// the space's own first tab, which is where a person starts the coordinator, so
-/// it is the one pane a chat line may reach. Returns the pane it recorded, or
-/// `None` when the space has no tab to name.
-pub(crate) fn record_coordinator_pane(
-    home: &Path,
-    mux: &dyn Host,
-    space: &shprd_mux::Space,
-) -> Result<Option<PaneId>, CliError> {
-    let tabs = mux
-        .list_tabs(&space.id)
-        .map_err(|err| CliError::other(anyhow!(err).context("listing the space's tabs")))?;
-    let Some(tab) = tabs.first() else {
-        return Ok(None);
-    };
+/// The line that marks a recorded pane as an agent shprd started.
+const COORDINATOR_AGENT_MARK: &str = "agent";
+
+/// Records the pane of the coordinator agent shprd started.
+pub(crate) fn record_coordinator_pane(home: &Path, pane: &PaneId) -> Result<(), CliError> {
     let path = coordinator_pane_path(home);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|err| {
             CliError::other(anyhow!(err).context(format!("making {}", dir.display())))
         })?;
     }
-    std::fs::write(&path, format!("{}\n", tab.root_pane.as_str())).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("writing {}", path.display())))
-    })?;
-    Ok(Some(tab.root_pane.clone()))
+    std::fs::write(
+        &path,
+        format!("{}\n{COORDINATOR_AGENT_MARK}\n", pane.as_str()),
+    )
+    .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
 
 /// The coordinator running in `space`, for an agent to name as its parent.
@@ -2002,27 +2019,161 @@ pub(crate) fn coordinator_pane_of(
     recorded_coordinator_pane(home, mux, space)
 }
 
-/// The pane recorded for the coordinator, when it is still one of the space's.
+/// The coordinator agent shprd started, when it is still running in `space`.
 ///
-/// The record is only trusted while the pane is still a tab of the repository's
-/// own space: a person who closed that tab and left a shell in another one must
-/// not be typed into, so a stale record is a refusal rather than a fallback.
+/// News and chat lines are typed into this pane and no other, so it is trusted
+/// only while all three hold: the record carries the `agent` mark (shprd
+/// started a program there, not a shell), the pane is still one of the space's
+/// tabs, and the host does not say its program has ended. A person who closed
+/// the tab, or whose coordinator exited, gets a refusal and not a line typed
+/// into whatever is left.
 fn recorded_coordinator_pane(
     home: &Path,
     mux: &dyn Host,
     space: &shprd_mux::Space,
 ) -> Option<PaneId> {
-    let path = coordinator_pane_path(home);
-    let wanted = std::fs::read_to_string(path).ok()?;
-    let wanted = wanted.trim();
-    if wanted.is_empty() {
+    let text = std::fs::read_to_string(coordinator_pane_path(home)).ok()?;
+    let mut lines = text.lines().map(str::trim);
+    let wanted = lines.next().filter(|pane| !pane.is_empty())?;
+    if lines.next() != Some(COORDINATOR_AGENT_MARK) {
         return None;
     }
-    let tabs = mux.list_tabs(&space.id).ok()?;
-    tabs.into_iter()
+    let pane = mux
+        .list_tabs(&space.id)
+        .ok()?
+        .into_iter()
         .map(|tab| tab.root_pane)
-        .find(|pane| pane.as_str() == wanted)
+        .find(|pane| pane.as_str() == wanted)?;
+    match mux.agent_state(&pane) {
+        Ok(AgentState::Done) | Err(_) => None,
+        Ok(_) => Some(pane),
+    }
 }
+
+/// How `shprd serve` found the coordinator in the repository's space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CoordinatorStart {
+    /// A coordinator agent shprd started earlier is still running: reused.
+    Running(PaneId),
+    /// shprd started one now.
+    Started(PaneId),
+}
+
+impl CoordinatorStart {
+    /// The coordinator's pane.
+    pub(crate) fn pane(&self) -> &PaneId {
+        match self {
+            Self::Running(pane) | Self::Started(pane) => pane,
+        }
+    }
+}
+
+/// Starts the coordinator agent in the repository's space, unless one is
+/// already running there.
+///
+/// The program, model and effort are the `coordinator` role's settings; the
+/// words it is given are the role's prompt (`assistant`). It is the one agent
+/// that keeps a tab, because it is what a person talks to in the space. A
+/// restart of `shprd serve` reuses a running coordinator and starts a new one
+/// when the recorded one has ended. When the space was just made, the starter
+/// shell the host put in it is closed once the agent runs, so the space holds
+/// the coordinator and nothing a line could be typed into by mistake.
+pub(crate) fn ensure_coordinator(
+    mux: &dyn Host,
+    env: &SpawnEnv<'_>,
+    prepared: &PreparedSpace,
+) -> Result<CoordinatorStart, CliError> {
+    let space = &prepared.space;
+    if let Some(pane) = recorded_coordinator_pane(&env.home, mux, space) {
+        return Ok(CoordinatorStart::Running(pane));
+    }
+    let role = env.settings.resolve(None).role(COORDINATOR_ROLE);
+    let candidates = role_candidates(role.as_ref(), &env.workers);
+    let mut pick = choose_agent(None, &candidates, &env.programs)?;
+    if let Some(model) = role
+        .as_ref()
+        .and_then(|role| role.model.as_ref())
+        .filter(|model| !model.value.trim().is_empty())
+    {
+        pick.model = Some(model.value.clone());
+    }
+    let effort = role
+        .as_ref()
+        .and_then(|role| role.effort.as_ref())
+        .map(|effort| effort.value.clone())
+        .filter(|effort| !effort.trim().is_empty());
+    let program = program_of(env.programs.as_slice(), &pick.agent)?;
+    let chosen = applied(
+        &program.spec,
+        named(role.as_ref().and_then(|role| role.perm.as_ref())),
+        role.as_ref().is_some_and(|role| role.fast.value),
+    );
+    let prompt = role_prompt(env, COORDINATOR_ROLE)?;
+    let brief_path = env.briefs_dir.join("coordinator.md");
+    write_brief(&brief_path, &prompt)?;
+    let (argv, brief_in_args) = launch_argv(
+        &pick.launch,
+        &program.spec,
+        &chosen,
+        pick.model.as_deref(),
+        effort.as_deref(),
+        &prompt,
+        &brief_path,
+    )?;
+    let pairs = env_pairs(launch_env(
+        &env.base_env,
+        EnvRole::Orchestrator,
+        &EnvContext {
+            actor: format!("agent:{}", pick.agent),
+            task: None,
+            run: None,
+            repo: env.ctx.root.clone(),
+            home: Some(env.home.clone()),
+            data: env.data_dir.env_value().map(Path::to_path_buf),
+        },
+    ));
+    let starters = mux.list_tabs(&space.id).unwrap_or_default();
+    let tab = mux
+        .spawn_agent(&shprd_mux::AgentLaunch {
+            space: &space.id,
+            title: COORDINATOR_TITLE,
+            argv: &argv,
+            env: &pairs,
+            cwd: &env.ctx.root,
+            role: shprd_mux::AgentRole::Coordinator,
+            task: None,
+            program: &pick.agent,
+            parent: None,
+        })
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the coordinator")))?;
+    record_coordinator_pane(&env.home, &tab.root_pane)?;
+    if prepared.created {
+        for starter in starters {
+            close_tab(mux, &starter.id);
+        }
+    }
+    // A program with no system-prompt flag is given its words as its first turn,
+    // once it is ready; one that took them as an argument is left to wait.
+    if !brief_in_args {
+        let delivery = super::deliver::deliver_brief(
+            mux,
+            &tab.root_pane,
+            &prompt,
+            &pick.readiness(),
+            env.ready_wait,
+        );
+        if let Some(reason) = delivery.reason() {
+            eprintln!("warning: the coordinator's prompt was not delivered: {reason}");
+        }
+    }
+    Ok(CoordinatorStart::Started(tab.root_pane))
+}
+
+/// The settings role the repository's coordinator agent runs as.
+const COORDINATOR_ROLE: &str = "coordinator";
+
+/// The title of the coordinator's tab.
+const COORDINATOR_TITLE: &str = "coordinator";
 
 /// The pane a run's coordinator may be typed into, when one is reachable.
 ///
@@ -2086,9 +2237,9 @@ pub(crate) fn coordinator_pane(mux: &dyn Host, home: &Path, ctx: &Ctx) -> Result
 /// The refusal a coordinator with no recorded pane earns.
 fn no_coordinator(space: &str) -> CliError {
     CliError::Invalid(anyhow!(
-        "no pane is recorded for the coordinator: `shprd serve` records the first tab of the \
-         space {space:?} when it starts, so run the coordinator there and start the service \
-         (or restart it), then send again — nothing was typed"
+        "no coordinator is running in the space {space:?}: `shprd serve` starts it when it \
+         starts (the `coordinator` role's program), so start the service or restart it, then \
+         send again — nothing was typed"
     ))
 }
 
@@ -3026,6 +3177,18 @@ project_dirs = []
             .collect()
     }
 
+    /// Records the space's first tab as the coordinator agent's pane.
+    fn record_first_tab(home: &Path, mux: &FakeMux, space: &shprd_mux::Space) -> PaneId {
+        let pane = mux
+            .list_tabs(&space.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .first()
+            .map(|tab| tab.root_pane.clone())
+            .unwrap_or_else(|| panic!("the space has a pane to record"));
+        record_coordinator_pane(home, &pane).unwrap_or_else(|err| panic!("{err}"));
+        pane
+    }
+
     /// The pane the service records is the pane the chat types into: this is the
     /// path every coordinator line in the M10 flow takes, since nothing launches
     /// a coordinator for the run to record.
@@ -3035,9 +3198,7 @@ project_dirs = []
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_starter_tab();
         let space = repo_space(&mux, &scratch);
-        let pane = record_coordinator_pane(scratch.home.path(), &mux, &space)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("the space has a pane to record"));
+        let pane = record_first_tab(scratch.home.path(), &mux, &space);
         let _ = mux.take_calls();
 
         prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello coordinator")
@@ -3063,8 +3224,7 @@ project_dirs = []
         match prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello") {
             Ok(()) => panic!("nothing recorded, so nothing may be typed into"),
             Err(err) => assert!(
-                err.to_string()
-                    .contains("no pane is recorded for the coordinator"),
+                err.to_string().contains("no coordinator is running"),
                 "the refusal says what is missing: {err}"
             ),
         }
@@ -3090,9 +3250,7 @@ project_dirs = []
         assert!(writes(&mux).is_empty(), "nothing was typed");
 
         // And the space's own tab is still fine once it is the one recorded.
-        let pane = record_coordinator_pane(scratch.home.path(), &mux, &space)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("a pane"));
+        let pane = record_first_tab(scratch.home.path(), &mux, &space);
         let _ = mux.take_calls();
         prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
             .unwrap_or_else(|err| panic!("{err}"));
@@ -3100,6 +3258,92 @@ project_dirs = []
             writes(&mux),
             vec![(pane.as_str().to_string(), "hello".to_string())]
         );
+    }
+
+    /// `shprd serve` starts the coordinator agent in the space it made, closes
+    /// the starter shell it found there, and a restart finds it running instead
+    /// of starting a second one.
+    #[test]
+    fn the_coordinator_is_started_once_and_reused_on_a_restart() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_starter_tab().with_ready_agent();
+
+        let first = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(first.created);
+        let starter = mux
+            .list_tabs(&first.space.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(starter.len(), 1, "the host's starter shell");
+
+        let started = ensure_coordinator(&mux, &env, &first).unwrap_or_else(|err| panic!("{err}"));
+        let CoordinatorStart::Started(pane) = started else {
+            panic!("a coordinator is started, not {started:?}");
+        };
+        let tabs = mux
+            .list_tabs(&first.space.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
+        assert_eq!(tabs[0].root_pane, pane);
+        assert_eq!(tabs[0].title, COORDINATOR_TITLE);
+
+        // A restart: the space is there, the coordinator is running.
+        let again = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!again.created);
+        let calls_before = mux
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, Call::SpawnAgent(..)))
+            .count();
+        let reused = ensure_coordinator(&mux, &env, &again).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(reused, CoordinatorStart::Running(pane.clone()));
+        let calls_after = mux
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, Call::SpawnAgent(..)))
+            .count();
+        assert_eq!(calls_before, calls_after, "no second coordinator");
+
+        // The coordinator ended: the next start makes a new one.
+        mux.set_state(&pane, AgentState::Done);
+        let replaced = ensure_coordinator(&mux, &env, &again).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            matches!(replaced, CoordinatorStart::Started(_)),
+            "{replaced:?}"
+        );
+    }
+
+    /// News and chat are never typed into a shell: a record without the agent
+    /// mark (an older build's starter shell), or one whose coordinator has
+    /// ended, is refused.
+    #[test]
+    fn a_shell_or_an_ended_coordinator_is_never_typed_into() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_starter_tab().with_ready_agent();
+        let space = repo_space(&mux, &scratch);
+        let pane = mux
+            .list_tabs(&space.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .first()
+            .map(|tab| tab.root_pane.clone())
+            .unwrap_or_else(|| panic!("a pane"));
+        let path = coordinator_pane_path(scratch.home.path());
+        std::fs::create_dir_all(path.parent().unwrap_or(scratch.home.path()))
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&path, format!("{}\n", pane.as_str())).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            prompt_coordinator(&mux, scratch.home.path(), &ctx, "hi").is_err(),
+            "a bare record is a shell"
+        );
+        record_coordinator_pane(scratch.home.path(), &pane).unwrap_or_else(|err| panic!("{err}"));
+        mux.set_state(&pane, AgentState::Done);
+        assert!(
+            prompt_coordinator(&mux, scratch.home.path(), &ctx, "hi").is_err(),
+            "an ended coordinator is not typed into"
+        );
+        assert!(writes(&mux).is_empty(), "nothing was typed");
     }
 
     /// A run that recorded its own coordinator pane wins over the service's
@@ -3110,7 +3354,7 @@ project_dirs = []
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_starter_tab();
         let space = repo_space(&mux, &scratch);
-        let _ = record_coordinator_pane(scratch.home.path(), &mux, &space).unwrap_or_default();
+        let _ = record_first_tab(scratch.home.path(), &mux, &space);
         let launched = mux
             .spawn(
                 &space.id,
