@@ -572,6 +572,7 @@ fn worker_env(facts: &Facts) -> LaunchEnv {
         run: None,
         repo: std::env::current_dir().unwrap_or_default(),
         home: facts.home.clone(),
+        bin: shprd_agents::env::service_bin(),
         data: facts.data.env_value().map(Path::to_path_buf),
     };
     env::launch_env(&facts.current, Role::Worker, &ctx)
