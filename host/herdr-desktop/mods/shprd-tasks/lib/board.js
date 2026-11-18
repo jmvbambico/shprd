@@ -89,6 +89,117 @@ export function grouped(state) {
   return groups;
 }
 
+/** Done rows a group shows before "Show N more" (Shepherdr `DONE_SHOWN`). */
+export const DONE_SHOWN = 5;
+
+/** The words a filter chip may name, besides "all". */
+export const FILTER_PRIMARY = ["needs_you", "working", "ready"];
+
+/**
+ * Whether every word of `query` is somewhere in one of `fields`.
+ *
+ * Shepherdr's `matches` (`mods/tasks/main.js`): case-blind, words in any order,
+ * an empty query finds everything.
+ */
+export function matches(query, ...fields) {
+  const words = String(query ?? "").toLowerCase().split(/\s+/).filter((w) => w !== "");
+  if (words.length === 0) return true;
+  const hay = fields
+    .filter((f) => f !== null && f !== undefined)
+    .map((f) => String(f).toLowerCase())
+    .join("\n");
+  return words.every((w) => hay.includes(w));
+}
+
+/** Whether the search finds `task`: id, title, second line, status word, PR number. */
+export function found(task, query) {
+  const word = STATUS[task?.derived?.status]?.word ?? null;
+  const pr = task?.pr?.number ? `#${task.pr.number}` : null;
+  return matches(query, task?.id, task?.title, secondLine(task), word, pr);
+}
+
+/**
+ * Minutes left when the service reports an estimate, else null.
+ *
+ * The service does not send one today; a task that carries `eta_minutes` (or
+ * `derived.eta_minutes`) shows it under its glyph, and one that does not shows
+ * nothing rather than a guess.
+ */
+export function etaMinutes(task) {
+  const raw = task?.eta_minutes ?? task?.derived?.eta_minutes;
+  return Number.isFinite(raw) && raw > 0 ? Math.ceil(raw) : null;
+}
+
+/**
+ * The filter row's chips over the live tasks: `{key, word, count}` for each word
+ * a task is in, split into the chips drawn (Needs you, Working, Ready, when they
+ * have rows) and the ones that go under "More".
+ */
+export function filterChips(state) {
+  const rows = statusCounts(state);
+  const chip = (r) => ({ key: r.status, word: r.word, count: r.count });
+  return {
+    primary: FILTER_PRIMARY.map((k) => rows.find((r) => r.status === k)).filter(Boolean).map(chip),
+    more: rows.filter((r) => !FILTER_PRIMARY.includes(r.status)).map(chip),
+  };
+}
+
+/**
+ * What the Tasks list draws, as `{groups, doneLine}`.
+ *
+ * - `all` (default): "For you" first (needs you, then Ready), then each other word
+ *   in [`STATUS_ORDER`]; Done is one line ("N done") until `doneOpen`, then a
+ *   group showing [`DONE_SHOWN`] rows and "Show N more" unless `allDone`.
+ *   (Shepherdr groups by space as well; one service holds one run, so that
+ *   grouping is moot here.)
+ * - a status word: that word's tasks, flat, under no heading.
+ * - a query: every finding, Done included, all shown, headings not folding.
+ *
+ * `shut` is the set of folded heading keys. A group is
+ * `{key, label, top, tasks, count, shut, cut, more}`.
+ */
+export function listView(state, { query = "", filter = "all", shut = new Set(), doneOpen = false, allDone = false } = {}) {
+  const searching = String(query ?? "").trim() !== "";
+  const live = (state?.tasks ?? []).filter(isLive).filter((t) => !searching || found(t, query));
+  const word = (t) => t?.derived?.status;
+  const make = (key, label, tasks, extra = {}) => {
+    const done = key === "done";
+    const open = searching;
+    const all = open || allDone;
+    const cut = done && !all && tasks.length > DONE_SHOWN ? tasks.length - DONE_SHOWN : 0;
+    return {
+      key,
+      label,
+      top: key === "you",
+      count: tasks.length,
+      shut: !open && shut.has(key),
+      cut,
+      more: done && tasks.length > DONE_SHOWN,
+      tasks: cut > 0 ? tasks.slice(0, tasks.length - cut) : tasks,
+      ...extra,
+    };
+  };
+  if (filter !== "all" && STATUS[filter]) {
+    const tasks = live.filter((t) => word(t) === filter);
+    return { groups: tasks.length === 0 ? [] : [make(`flat-${filter}`, STATUS[filter].word, tasks, { flat: true })], doneLine: null };
+  }
+  const groups = [];
+  const you = [...live.filter((t) => word(t) === "needs_you"), ...live.filter((t) => word(t) === "ready")];
+  if (you.length > 0) groups.push(make("you", "For you", you));
+  let doneLine = null;
+  for (const w of STATUS_ORDER) {
+    if (w === "needs_you" || w === "ready") continue;
+    const tasks = live.filter((t) => word(t) === w);
+    if (tasks.length === 0) continue;
+    if (w === "done" && !searching && !doneOpen) {
+      doneLine = { count: tasks.length, label: `${tasks.length} done` };
+      continue;
+    }
+    groups.push(make(w, STATUS[w].word, tasks));
+  }
+  return { groups, doneLine };
+}
+
 /**
  * The task a panel's shared selection names, from the board it is reading.
  *
