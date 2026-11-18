@@ -61,7 +61,7 @@ export default class Prompt extends View {
     const wired = props();
     closeOverlay(wired?.overlay);
     if (!wired?.command?.name) return;
-    run(wired.command.name, { ...(wired.command.args ?? {}), name: this.text.trim() });
+    run(wired.command.name, { ...(wired.command.args ?? {}), name: `${wired.prefix ?? ""}${this.text.trim()}` });
   }
 
   render() {

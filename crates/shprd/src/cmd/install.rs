@@ -613,6 +613,9 @@ struct InstallPlan {
     keys: Vec<(String, String, String)>,
     /// The keys left alone because the person bound them, `(section, key, theirs)`.
     kept_keys: Vec<(String, String, String)>,
+    /// The keys an earlier build wrote that this one no longer ships, given back
+    /// because they still hold what was written, `(section, key, command)`.
+    retired_keys: Vec<(String, String, String)>,
     /// The merged `keys.json`, when it differs from the one on disk.
     keys_json: Option<Vec<u8>>,
     /// Files an earlier install wrote that this build no longer ships (a mod that
@@ -631,6 +634,7 @@ impl InstallPlan {
         self.clashes.is_empty()
             && self.files.iter().all(|(_, plan)| *plan == Plan::Same)
             && self.keys.is_empty()
+            && self.retired_keys.is_empty()
             && self.keys_json.is_none()
             && self.stale.is_empty()
     }
@@ -770,6 +774,27 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
             }
         }
     }
+    // A key an earlier build wrote and this one no longer ships (Ctrl+K moved from
+    // `global` to `layout:shprd`): given back if it still holds exactly what we
+    // wrote. One the person changed since is theirs and stays.
+    let mut retired = Vec::new();
+    for (section, bindings) in &previous.keys {
+        for (key, command) in bindings {
+            if ours.get(section).is_some_and(|map| map.contains_key(key)) {
+                continue;
+            }
+            let holds = theirs.get(section).and_then(|map| map.get(key)) == Some(command);
+            if holds {
+                if let Some(map) = theirs.get_mut(section) {
+                    map.remove(key);
+                    if map.is_empty() {
+                        theirs.remove(section);
+                    }
+                }
+                retired.push((section.clone(), key.clone(), command.clone()));
+            }
+        }
+    }
     manifest.keys = wrote;
     let keys_json = (theirs != before).then(|| {
         let mut text = serde_json::to_string_pretty(&theirs).unwrap_or_default();
@@ -805,6 +830,7 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
         stale_dirs,
         keys: listed,
         kept_keys: kept,
+        retired_keys: retired,
         keys_json,
         manifest,
     })
@@ -893,6 +919,15 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
                     "command": command,
                 }))
                 .collect::<Vec<_>>(),
+            "keys_retired": plan
+                .retired_keys
+                .iter()
+                .map(|(section, key, command)| serde_json::json!({
+                    "section": section,
+                    "key": key,
+                    "command": command,
+                }))
+                .collect::<Vec<_>>(),
             "keys_kept": plan
                 .kept_keys
                 .iter()
@@ -935,12 +970,17 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
     for (section, key, command) in &plan.keys {
         println!("{prefix}keys.json {section} {key} = {command}");
     }
+    for (section, key, command) in &plan.retired_keys {
+        let word = if dry_run { "would remove" } else { "removed" };
+        println!("{word} keys.json {section} {key} = {command} (this build binds it elsewhere)");
+    }
     for (section, key, theirs) in &plan.kept_keys {
-        println!("kept keys.json {section} {key} = {theirs} (bound by you)");
+        println!("kept keys.json {section} {key} = {theirs} (bound by you, not changed)");
     }
     if dry_run {
         println!(
-            "dry run: nothing was written; {changed} file(s) would change in {}",
+            "dry run: nothing was written; {changed} file(s) and {} key(s) would change in {}",
+            plan.keys.len() + plan.retired_keys.len(),
             app_home.display()
         );
     } else {

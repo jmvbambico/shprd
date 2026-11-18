@@ -19,13 +19,15 @@
     "ctrl-alt-left": "pane.go:left",
     "ctrl-alt-down": "pane.go:down",
     "ctrl-alt-up": "pane.go:up",
-    "ctrl-alt-right": "pane.go:right",
+    "ctrl-alt-right": "pane.go:right"
+  },
+  "layout:shprd": {
     "ctrl-k": "mod.open:shprd-jump",
     "ctrl-shift-k": "mod.open:shprd-jump",
     "ctrl-shift-/": "mod.open:shprd-keybinds",
-    "ctrl-shift-?": "mod.open:shprd-keybinds"
-  },
-  "layout:shprd": {
+    "ctrl-shift-?": "mod.open:shprd-keybinds",
+    "f2": "shprd-tabs.rename-tab",
+    "shift-f2": "shprd-tabs.rename-space",
     "ctrl-shift-b": "layout.toggle:panel",
     "ctrl-shift-a": "layout.show:tasks",
     "ctrl-shift-w": "tab.close",

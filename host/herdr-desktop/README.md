@@ -54,8 +54,10 @@ mods/lib/               the shared modules: tokens, panel parts, the menus' rows
                         because a mod may only import files inside its own
                         folder.
 keys.json               the keys the layout expects, merged by the installer: Shepherdr's
-                        Alt keys, Ctrl+K / Ctrl+Shift+/ and the layout's own (never one
-                        Herdr binds itself: F2 and Shift+F2 are Herdr's)
+                        Alt keys globally; Ctrl+K, Ctrl+Shift+K, Ctrl+Shift+/ and ?, F2 and
+                        Shift+F2 and the layout's own under `layout:shprd`, which wins over
+                        `global` inside the shprd layout. Never one a person bound: the
+                        installer reports it as kept (their global keys are never touched)
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
 bin/check               all of it: the copies, the tests, `herdr-app check`
 bin/gate-env            a private app home with the first-run screens answered

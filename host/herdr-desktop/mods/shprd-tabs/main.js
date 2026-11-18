@@ -118,6 +118,11 @@ export default class Tabs extends View {
           run("layout.show", { id: "panel" });
           run("shprd-tasks.add");
         }
+        // F2 and Shift+F2 (`layout:shprd`): Herdr's own rename keys would rename
+        // with its stock box, so inside this layout they come here and open
+        // shprd's prompt instead, which keeps shprd's naming.
+        if (command === "rename-tab") this.renameActiveTab();
+        if (command === "rename-space") this.renameActiveSpace();
       }
     });
   }
@@ -253,6 +258,49 @@ export default class Tabs extends View {
         value: row.named ? row.name : "",
         placeholder: row.name,
         command: { name: "tab.rename", args: { id: row.id } },
+        verb: "Save",
+      },
+    });
+  }
+
+  /** F2: the rename prompt for the shown tab, as a double-click on its pill. */
+  renameActiveTab() {
+    const row = tabRows(this.space(), panes(), this.state).find((entry) => entry.active);
+    if (row) this.rename(row);
+  }
+
+  /**
+   * Shift+F2: the rename prompt for the active space.
+   *
+   * A space shprd named (`shprd · <repo>`) keeps its `shprd · ` prefix, because
+   * the name is how the sidebar knows the space is shprd's; the person types only
+   * the part after it. A task's space is left alone (its name is the contract
+   * with its task), and a space that is not shprd's is renamed as it is.
+   */
+  renameActiveSpace() {
+    const space = this.space();
+    if (!space) return;
+    // shprd's naming (`lib/spaces.js` `splitSpaceName`): two parts is a repo's
+    // space, four is a task's.
+    const parts = String(space.name ?? "").split(" · ");
+    const shprds = parts[0] === "shprd" && parts.length >= 2;
+    // Only a well-formed repo space is renamed under its prefix; any other
+    // shprd-looking name is left as it is.
+    if (shprds && (parts.length !== 2 || parts[1] === "")) return;
+    const prefix = shprds ? "shprd · " : "";
+    const named = { repo: parts[1] };
+    openOverlay({
+      mod: "shprd-prompt",
+      kind: "dialog",
+      modal: true,
+      width: 400,
+      height: 196,
+      props: {
+        title: "Rename space",
+        value: prefix ? named.repo : String(space.name ?? ""),
+        placeholder: prefix ? named.repo : String(space.name ?? ""),
+        prefix,
+        command: { name: "space.rename", args: { id: space.id } },
         verb: "Save",
       },
     });
