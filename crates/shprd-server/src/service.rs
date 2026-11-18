@@ -533,6 +533,9 @@ pub struct Config {
     /// started without one answers `POST /api/chat` with a refusal rather than
     /// pretending the line went somewhere.
     pub chat: crate::chat::ChatHost,
+    /// What the terminal socket watches and types through, when the binary has a
+    /// host. A service started without one refuses `GET /api/terminal`.
+    pub terminal: crate::terminal::TerminalPort,
     /// What starts a program in a new tab, when the binary has a host.
     ///
     /// "Start an agent" is a tab and a CLI, so the binary passes the adapter that
@@ -611,6 +614,7 @@ impl Config {
             dagr: None,
             engine: None,
             chat: crate::chat::ChatHost::new(),
+            terminal: crate::terminal::TerminalPort::new(),
             agents: crate::agents::Agents::new(),
             transcript_roots: None,
             allowed_hosts: shprd_remote::AllowedHosts::loopback_only(),
@@ -684,6 +688,7 @@ impl Service {
         // which a client never sees: the record is written before either is
         // wired, and a request cannot arrive until the listener is serving.
         .with_chat_opt(config.chat.get().cloned())
+        .with_terminal_opt(config.terminal.get().cloned())
         // The "+" menu's *Start an agent* is that host too: one adapter, so a
         // program the tab bar starts and a chat line type into the same window.
         .with_agent_opener_opt(config.agents.get().cloned());

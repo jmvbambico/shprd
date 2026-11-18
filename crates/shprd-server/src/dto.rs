@@ -1084,6 +1084,69 @@ pub enum ClientMessage {
     },
 }
 
+/// One message the terminal socket pushes (`GET /api/terminal`).
+///
+/// The page watches a pane: the service reads the pane's screen and pushes it
+/// whole when it changed. Nothing here resizes the pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "TerminalServerMsg.ts")]
+pub enum TerminalServerMsg {
+    /// The first message: which pane this socket is attached to.
+    Hello {
+        /// The space the pane is in: `coordinator` or a task id.
+        space: String,
+        /// The host's own id for the pane.
+        pane: String,
+    },
+    /// The pane's screen, whole, because it changed.
+    Screen {
+        /// The screen as the host renders it, trailing blanks trimmed.
+        text: String,
+        /// Counts the screens sent on this socket.
+        seq: u64,
+        /// True when the screen was longer than the cap and its start was cut.
+        cut: bool,
+    },
+    /// Input is open: the first `input_open` was accepted.
+    InputReady,
+    /// A message was refused; the socket stays open.
+    Notice {
+        /// One line for the person.
+        message: String,
+    },
+    /// The pane is gone; the socket closes after this.
+    Ended {
+        /// Why the service stopped watching.
+        reason: String,
+    },
+    /// An answer to a client's `{"type":"ping"}`.
+    Pong,
+}
+
+/// One message a client may send on the terminal socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "TerminalClientMsg.ts")]
+pub enum TerminalClientMsg {
+    /// Ask to type. A socket only watches until this is sent (once, on the
+    /// first key the person presses).
+    InputOpen,
+    /// Text typed into the pane without pressing enter.
+    Input {
+        /// The text, at most 16 KiB.
+        data: String,
+    },
+    /// One named key: `enter`, `esc`, `tab`, `up`, `down`, `left`, `right`,
+    /// `pageup`, `pagedown`, `backspace`, `delete`, `home`, `end`, `ctrl+c`.
+    Key {
+        /// The key's word.
+        key: String,
+    },
+    /// A liveness check; answered with `pong`.
+    Ping,
+}
+
 /// The layer one settings value came from, nearest first.
 ///
 /// The same names `shprd settings show` prints: `task`, `repo_entry`, `you`,
@@ -1547,6 +1610,8 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ChatDto>()?,
         one::<ChatSendDto>()?,
         one::<ChatSendReply>()?,
+        one::<TerminalServerMsg>()?,
+        one::<TerminalClientMsg>()?,
         one::<SnapshotDto>()?,
         one::<HealthDto>()?,
         one::<EventNoticeDto>()?,

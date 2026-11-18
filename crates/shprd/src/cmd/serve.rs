@@ -148,6 +148,11 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         home: home.clone(),
         host: host.clone(),
     }));
+    config.terminal = shprd_server::TerminalPort::with(Arc::new(HostTerminal {
+        repo: ctx.root.clone(),
+        home: home.clone(),
+        host: host.clone(),
+    }));
     let tick = tick_config(
         ctx,
         &home,
@@ -266,6 +271,81 @@ impl shprd_server::ChatWriter for HostChat {
             }
         }
         .map_err(|err| err.to_string())
+    }
+}
+
+/// The host as the terminal socket uses it: watch a pane, type into it.
+///
+/// The pane is resolved by the chat's own path ([`crate::cmd::spawn::task_pane`]
+/// and [`crate::cmd::spawn::coordinator_pane`]), so a terminal can only ever be
+/// attached to a pane a chat line could reach, and a `pane` the client names is
+/// checked against it rather than used.
+struct HostTerminal {
+    /// The repository whose run log names each space's pane.
+    repo: std::path::PathBuf,
+    /// The home directory the pane records live under.
+    home: std::path::PathBuf,
+    /// The host this service drives.
+    host: Arc<dyn Host>,
+}
+
+impl shprd_server::TerminalHost for HostTerminal {
+    fn resolve(&self, space: &str, pane: Option<&str>) -> Result<String, String> {
+        let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
+        let found = match shprd_server::ChatSpace::parse(Some(space)) {
+            shprd_server::ChatSpace::Coordinator => {
+                crate::cmd::spawn::coordinator_pane(self.host.as_ref(), &self.home, &ctx)
+            }
+            shprd_server::ChatSpace::Task(task) => {
+                crate::cmd::spawn::task_pane(self.host.as_ref(), &self.home, &ctx, &task)
+            }
+        }
+        .map_err(|err| err.to_string())?;
+        match pane {
+            Some(wanted) if wanted != found.as_str() => Err(format!(
+                "{wanted:?} is not the pane {space} runs in: attach by space and let the service choose"
+            )),
+            _ => Ok(found.as_str().to_owned()),
+        }
+    }
+
+    fn read(&self, pane: &str, lines: usize) -> Result<String, String> {
+        self.host
+            .read(&shprd_mux::PaneId::new(pane.to_owned()), lines)
+            .map_err(|err| err.to_string())
+    }
+
+    fn write(&self, pane: &str, text: &str) -> Result<(), String> {
+        self.host
+            .write(&shprd_mux::PaneId::new(pane.to_owned()), text, false)
+            .map_err(|err| err.to_string())
+    }
+
+    fn keys(&self, pane: &str, keys: &[shprd_server::TermKey]) -> Result<(), String> {
+        use shprd_mux::Key;
+        use shprd_server::TermKey as K;
+        let keys: Vec<Key> = keys
+            .iter()
+            .map(|key| match key {
+                K::Enter => Key::Enter,
+                K::Esc => Key::Esc,
+                K::Tab => Key::Tab,
+                K::Up => Key::Up,
+                K::Down => Key::Down,
+                K::Left => Key::Left,
+                K::Right => Key::Right,
+                K::PageUp => Key::PageUp,
+                K::PageDown => Key::PageDown,
+                K::Backspace => Key::Backspace,
+                K::Delete => Key::Delete,
+                K::Home => Key::Home,
+                K::End => Key::End,
+                K::CtrlC => Key::CtrlC,
+            })
+            .collect();
+        self.host
+            .keys(&shprd_mux::PaneId::new(pane.to_owned()), &keys)
+            .map_err(|err| err.to_string())
     }
 }
 

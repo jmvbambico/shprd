@@ -22,6 +22,7 @@
 //! | `DELETE /api/prompts/:id` | the shipped words put back over an edit |
 //! | `GET /api/chat` | a space's conversation, read from its agent's own record, after a cursor |
 //! | `POST /api/chat` | one turn of the person's input, typed into that space's agent |
+//! | `GET /api/terminal` | a socket attached to one pane: its screen pushed, keys typed back |
 //! | `GET /api/ws` | the same change notices, pushed (for the web app) |
 //! | `POST /api/login` | the login password, exchanged for a session cookie |
 //! | `POST /api/logout` | ends the session the cookie names |
@@ -67,6 +68,7 @@ pub mod pass;
 pub mod service;
 pub mod snapshot;
 pub mod tasks;
+pub mod terminal;
 pub mod tick;
 mod tunnels;
 
@@ -96,6 +98,7 @@ pub use service::{
 };
 pub use shprd_remote::AllowedHosts;
 pub use snapshot::NO_RUN_HINT;
+pub use terminal::{TermKey, TerminalHost, TerminalPort};
 pub use tick::{
     FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, ReviewCloser, Reviewer,
     SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,

@@ -72,6 +72,8 @@ export * from "./TaskDto";
 export * from "./TaskPrDto";
 export * from "./TaskProgressDto";
 export * from "./TaskStatusDto";
+export * from "./TerminalClientMsg";
+export * from "./TerminalServerMsg";
 export * from "./TunnelProviderDto";
 export * from "./TunnelStartRequest";
 export * from "./TunnelStatusDto";
