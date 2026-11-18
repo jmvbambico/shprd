@@ -55,9 +55,15 @@ pub const PRIVATE_HC_SESSION: &str = "shprd-test";
 const HOST_VARS: &[&str] = &[
     "HC_SESSION",
     "HC_SOCKET",
+    "HC_TERMINAL_SOCKET",
     "HC_TERMINAL_ID",
+    "HC_SCOPE",
+    "HC_CORE_ID",
+    "HC_PARENT",
     "HC_ASK_ID",
     "HERDR_APP_HOME",
+    "HERDR_SESSION",
+    "HERDR_BIN_PATH",
 ];
 
 /// Prefixes whose variables are all removed from every child.
