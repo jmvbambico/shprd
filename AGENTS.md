@@ -70,7 +70,7 @@ design. Read [docs/plan.md](docs/plan.md) for what's being built now.
 
 - Rust edition 2024. The toolchain is pinned in `rust-toolchain.toml`.
 - Workspace layout and crate boundaries are fixed in
-  [docs/plan.md](docs/plan.md#workspace-layout-decided-in-m0-then-fixed). Don't
+  [docs/plan.md](docs/plan.md#workspace-layout-decided-in-m0-changed-from-m7-see-workspace-changes). Don't
   add a crate without the orchestrator's say-so.
 - `unsafe` is forbidden. Libraries return typed errors (`thiserror`); the
   binary uses `anyhow`. No `unwrap()` / `expect()` outside tests.
