@@ -35,6 +35,7 @@ import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import {
   layout,
+  nextCommand,
   openOverlay,
   panes,
   run,
@@ -105,6 +106,20 @@ export default class Tabs extends View {
     this.pressed = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // The keys' way in (`layout:shprd` in keys.json): Ctrl+Shift+N comes here as
+    // `new-task`, because this bar is always on screen and the Tasks panel's own
+    // mod is not when the panel is hidden — so it is shown first, then asked for
+    // its form (Shepherdr's `tabs-tasks.newspace`). One `nextCommand` at a time.
+    cx.spawn(async () => {
+      for (;;) {
+        const command = await nextCommand();
+        if (command === "new-task") {
+          run("layout.select", { stack: "panel-body", child: "tasks" });
+          run("layout.show", { id: "panel" });
+          run("shprd-tasks.add");
+        }
+      }
+    });
   }
 
   /**

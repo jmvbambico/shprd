@@ -108,7 +108,11 @@ SOFTWARE.
   `host/herdr-desktop/mods/{shprd-tabs,shprd-menu,shprd-new-menu}/icons/`, and the
   mod-to-service discovery — `service.json`'s port and id, the
   `/api/health` id handshake before the token is sent, bearer auth — from
-  `lib/local.js`, `lib/bridge.js` and `service/main.ts` — in
+  `lib/local.js`, `lib/bridge.js` and `service/main.ts`, and Jump and Keybinds —
+  the find box's groups, rows and keys from `mods/jump/main.js`, the grouped
+  key list and its words from `mods/keybinds/{main.js,core/keys.js}`, the
+  `keys.json` bindings from `keys.json`, and the `search.svg` icon from
+  `mods/workspace-chrome-shepherdr/` — in
   `host/herdr-desktop/{layouts,mods,bin}/` and `crates/shprd/src/cmd/install.rs`
 - Used for: the derived task status rules in
   `crates/shprd-views/src/derived.rs`, the per-task landing workflow —
