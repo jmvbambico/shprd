@@ -415,7 +415,11 @@ fn key_for_choice(mux: &dyn Host, pane: &PaneId, choice: &str) -> Option<Key> {
         let line = line.trim_start();
         line.starts_with('\u{276f}') || line.starts_with('>')
     })?;
-    Some(if marked.contains(&choice) { Key::Enter } else { Key::Down })
+    Some(if marked.contains(&choice) {
+        Key::Enter
+    } else {
+        Key::Down
+    })
 }
 
 /// The first of `patterns` the pane's screen is showing, whole, so a caller that
@@ -633,7 +637,6 @@ mod tests {
         );
     }
 
-
     /// The folder-trust prompt with the answer shprd may give it.
     fn answerable_trust() -> Vec<BlockingPrompt> {
         let mut patterns = trust_patterns();
@@ -658,8 +661,17 @@ mod tests {
             prompts: &patterns,
             own_status: true,
         };
-        let delivery = deliver_brief(&mux, &pane, "the brief", &readiness, Duration::from_secs(10));
-        assert!(matches!(delivery, Delivery::Delivered { .. }), "{delivery:?}");
+        let delivery = deliver_brief(
+            &mux,
+            &pane,
+            "the brief",
+            &readiness,
+            Duration::from_secs(10),
+        );
+        assert!(
+            matches!(delivery, Delivery::Delivered { .. }),
+            "{delivery:?}"
+        );
         assert!(
             mux.calls()
                 .iter()
@@ -683,7 +695,13 @@ mod tests {
             prompts: &patterns,
             own_status: true,
         };
-        let _ = deliver_brief(&mux, &pane, "the brief", &readiness, Duration::from_secs(20));
+        let _ = deliver_brief(
+            &mux,
+            &pane,
+            "the brief",
+            &readiness,
+            Duration::from_secs(20),
+        );
         let keys: Vec<Key> = mux
             .calls()
             .into_iter()
@@ -710,14 +728,23 @@ mod tests {
             prompts: &patterns,
             own_status: true,
         };
-        let delivery = deliver_brief(&mux, &pane, "the brief", &readiness, Duration::from_secs(20));
+        let delivery = deliver_brief(
+            &mux,
+            &pane,
+            "the brief",
+            &readiness,
+            Duration::from_secs(20),
+        );
         assert_eq!(
             delivery,
             Delivery::Blocked {
                 prompt: "folder trust".to_string()
             }
         );
-        assert!(prompts(&mux).is_empty(), "the brief is never typed over a dialog");
+        assert!(
+            prompts(&mux).is_empty(),
+            "the brief is never typed over a dialog"
+        );
     }
 
     #[test]
