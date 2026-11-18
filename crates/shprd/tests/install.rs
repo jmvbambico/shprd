@@ -802,8 +802,8 @@ fn assert_upgraded(fixture: &Fixture) {
         .collect();
     assert_eq!(
         ids,
-        vec!["files", "changes", "tasks"],
-        "the Asks stack went with the cards moving into the thread"
+        vec!["files", "changes", "tasks", "graph"],
+        "the Asks stack went with the cards moving into the thread; the graph joined the panel"
     );
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     assert!(
