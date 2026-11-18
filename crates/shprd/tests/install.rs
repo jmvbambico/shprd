@@ -568,9 +568,18 @@ fn an_install_with_no_host_tree_installs_the_copy_in_the_binary() {
     // The host folder's own `test/` and `bin/` are not part of an install.
     assert!(!fixture.app_path("test").exists());
     assert!(!fixture.app_path("bin").exists());
-    // And the manifest owns everything it wrote, so it can take it back.
-    let files = fixture.manifest_files();
-    assert_eq!(files.len(), 95, "the same count a checkout installs");
+    // And the manifest owns everything the working tree has — no more, no fewer —
+    // so an install from the tree beside the checkout and one from the copy in
+    // the binary are the same desktop, file for file (a count the tree outgrows
+    // is a test that fails for the right reason but says less).
+    let from_tree = Fixture::new();
+    ok(&from_tree.run(&[]));
+    let embedded: Vec<String> = fixture.manifest_files().into_keys().collect();
+    let checkout: Vec<String> = from_tree.manifest_files().into_keys().collect();
+    assert_eq!(
+        embedded, checkout,
+        "the embedded copy is the working tree, file for file"
+    );
 }
 
 #[test]

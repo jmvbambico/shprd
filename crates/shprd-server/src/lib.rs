@@ -15,6 +15,7 @@
 //! | `GET /api/settings` | every settings key, its value and the layer it came from |
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
 //! | `GET /api/roster` | the programs a role may run, with their models and levels |
+//! | `POST /api/agents` | start a program in a new tab, as the tab bar's "+" menu asks |
 //! | `GET /api/prompts` | the templates this machine has, without their words |
 //! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
 //! | `PUT /api/prompts/:id` | the person's words, stored over that prompt's file |
@@ -53,6 +54,7 @@
 //! Starting one is [`serve`]; a test that wants no socket builds
 //! an [`App`] and drives its router.
 
+pub mod agents;
 pub mod api;
 pub mod bindings;
 pub mod changes;
@@ -79,6 +81,7 @@ pub(crate) mod roster;
 pub(crate) mod settings;
 pub(crate) mod web;
 
+pub use agents::{AgentOpener, Agents, OpenedTab};
 pub use api::{App, BODY_LIMIT, WsLimits};
 pub use changes::Touch;
 pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};

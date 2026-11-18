@@ -21,6 +21,15 @@ id: string,
  */
 name: string, 
 /**
+ * Whether the CLI is on this machine's `PATH`.
+ *
+ * It is a fact about the machine, asked here because the mod has no
+ * environment of its own ([`shprd_agents::detect::find_binary`]). A menu
+ * that would start a program dims the ones it cannot find; a service that
+ * was told no `PATH` answers `false` rather than guessing.
+ */
+installed: boolean, 
+/**
  * The vendor that ships the CLI, e.g. `anthropic`.
  */
 vendor: string, 

@@ -88,6 +88,21 @@ export function parseTabName(name) {
   };
 }
 
+/**
+ * The program a tab shows, from the app's own table for its panes.
+ *
+ * Shepherdr's rule (`mods/tabs-tasks/main.js:155`): the first pane in the tab that
+ * reports as an agent, else the tab's first pane at all. That is what gives a pill
+ * its icon: an agent's own glyph when one runs there, else whatever the shell is.
+ * A tab with no pane reports nothing, and the pill draws no icon rather than
+ * guessing at one.
+ */
+export function tabProgram(panes, tabId) {
+  const mine = (panes ?? []).filter((pane) => pane?.tab === tabId);
+  const agent = mine.find((pane) => pane?.program?.agent);
+  return (agent ?? mine[0])?.program ?? null;
+}
+
 /** The most urgent agent status among a tab's panes, or null when none reports. */
 export function paneState(panes, tabId) {
   const mine = (panes ?? []).filter((pane) => pane?.tab === tabId);
@@ -126,6 +141,24 @@ export function tabState(tab, panes, state) {
 }
 
 /**
+ * What a pill is called: the title shprd gave the tab, else the name someone
+ * gave it, else what runs in it (Shepherdr's `tabName`, `core/menus.js:106`).
+ *
+ * Herdr names a tab nobody named by its position ("1"), which is not a name a
+ * person reads on a pill — the program's own name is ("zsh", "Claude Code"), and
+ * "Terminal" when even that is unknown.
+ */
+export function tabLabel(tab, named, program) {
+  if (named?.titled) return named.name;
+  const text = String(tab?.name ?? named?.name ?? "").trim();
+  // Herdr's own names for a tab nobody named are its position ("1") and, on
+  // older builds, "tb3"; neither is a name a pill should wear.
+  const automatic = text === "" || /^(tb)?\d+$/.test(text);
+  if (!automatic) return text;
+  return program?.name || "Terminal";
+}
+
+/**
  * Every pill of `space`, in the host's order.
  *
  * A pill carries what the mod draws and what a test asserts: the tab's id, the
@@ -139,11 +172,15 @@ export function tabRows(space, panes, state) {
     const named = parseTabName(tab?.name);
     const shape = tabState(tab, panes, state);
     const task = taskOf(state, named.task);
+    const program = tabProgram(panes, tab?.id);
     return {
       id: tab.id,
       index,
       name: named.name,
-      label: named.titled ? named.name : (tab.name || String(index + 1)),
+      label: tabLabel(tab, named, program),
+      // Whether a person named it (`tab.rename`, `tab.new {name}`): the rename
+      // prompt's field holds the name only when there is one.
+      named: Boolean(tab.named),
       agent: named.agent,
       role: named.role,
       roleWord: named.role ? ROLE[named.role] : null,
@@ -156,6 +193,16 @@ export function tabRows(space, panes, state) {
       glyph: shape.glyph,
       from: shape.from,
       needs: shape.tone === "red",
+      // The badge's two numbers: one task is one tab, so a pill's count is at most
+      // one of each — what needs the person (red) and what is ready (green). They
+      // are counts, not flags, because the badge is the one that takes two.
+      need: shape.tone === "red" ? 1 : 0,
+      ready: shape.tone === "green" ? 1 : 0,
+      // The pill's icon: the program's own, from the app's table (`name` for the
+      // tab's own title when nobody named it).
+      icon: program?.icon ?? null,
+      tint: Boolean(program?.tint),
+      program: program?.name ?? null,
       zoomed: Boolean(tab.zoomed),
       panes: Number.isInteger(tab.panes) ? tab.panes : 0,
     };
