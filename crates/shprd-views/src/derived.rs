@@ -601,7 +601,12 @@ pub fn derive_status(signal: &TaskSignal, live: &LiveAgents, now_ms: u64) -> Der
     // could not start — is the person's to settle, so it is read here too: a
     // row that kept saying Working while a card sat in `needs` is how a person
     // reading the board alone missed that nothing else would move.
-    if let Some(card) = signal.cards.first() {
+    // (The "ready to land" notice is the Ready row, not a card: see `derive_from_fold`.)
+    if let Some(card) = signal
+        .cards
+        .iter()
+        .find(|card| !is_ready_to_land(&card.body))
+    {
         return Derived::needs(Need::Attention, &card.body);
     }
     // A problem found a moment ago reads as the task would without it
