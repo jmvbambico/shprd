@@ -231,6 +231,20 @@ impl Gateway {
         &self.sessions
     }
 
+    /// Reports the sign-in limits that mean "someone is guessing" to `storm`.
+    ///
+    /// The tunnel manager holds the same handle and stops the tunnel when it
+    /// moves.
+    pub fn with_storm(mut self, storm: crate::limits::StormSignal) -> Self {
+        self.limits = self.limits.with_storm(storm);
+        self
+    }
+
+    /// The signal the sign-in limits report to.
+    pub fn storm(&self) -> crate::limits::StormSignal {
+        self.limits.storm()
+    }
+
     /// The rate limits.
     pub fn limits(&self) -> &RateLimiter {
         &self.limits

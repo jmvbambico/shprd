@@ -28,6 +28,7 @@ pub mod hosts;
 pub mod limits;
 pub mod password;
 pub mod session;
+pub mod tunnel;
 
 mod error;
 mod fsutil;
@@ -36,6 +37,6 @@ pub use error::{PasswordRefusal, RemoteError};
 pub use fsutil::secret_eq;
 pub use gate::{Door, GateError, GateRequest, Gateway, LoginOutcome};
 pub use hosts::AllowedHosts;
-pub use limits::{RateLimiter, Retry};
+pub use limits::{RateLimiter, Retry, StormSignal};
 pub use password::{MIN_LENGTH, PasswordStore};
 pub use session::{Revoked, SessionRecord, Sessions, UaClass};

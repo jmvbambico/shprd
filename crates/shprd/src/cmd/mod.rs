@@ -34,6 +34,7 @@ pub mod verdict;
 pub mod view;
 pub mod watch;
 pub mod web;
+mod web_tunnel;
 
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
