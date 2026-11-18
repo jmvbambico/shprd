@@ -283,9 +283,10 @@ fn every_key_is_reported_even_the_ones_nobody_set() {
     assert!(rows.iter().any(|row| row.key == "tasks.tick_secs"));
     assert_eq!(
         rows.last().map(|row| row.key.as_str()),
-        Some("host"),
-        "the host is the last row a settings page draws"
+        Some("web.cloudflared_host"),
+        "the web keys are the last rows a settings page draws"
     );
+    assert!(rows.iter().any(|row| row.key == "host"));
 }
 
 #[test]
@@ -949,4 +950,68 @@ fn a_value_round_trips_through_json() {
     }
     assert_eq!(Value::from_json(&serde_json::json!(null)), None);
     assert_eq!(Value::from_json(&serde_json::json!(1.5)), None);
+}
+
+#[test]
+fn the_web_keys_have_defaults_and_read_back_through_their_accessors() {
+    let resolved = resolve(&File::default(), &Request::default());
+    assert_eq!(shown(&resolved, "web.tunnel"), "\"tailscale\"");
+    assert_eq!(shown(&resolved, "web.stable"), "false");
+    assert_eq!(shown(&resolved, "web.cloudflared_name"), "\"\"");
+    assert_eq!(shown(&resolved, "web.cloudflared_host"), "\"\"");
+    assert_eq!(resolved.web_tunnel(), "tailscale");
+    assert!(!resolved.web_stable());
+    assert_eq!(resolved.web_cloudflared_name(), "");
+
+    let file = you(
+        "[web]\ntunnel = \"cloudflared-named\"\nstable = true\n\
+         cloudflared_name = \" shprd \"\ncloudflared_host = \"shprd.example.org\"\n",
+    );
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(resolved.web_tunnel(), "cloudflared-named");
+    assert!(resolved.web_stable());
+    assert_eq!(resolved.web_cloudflared_name(), "shprd");
+    assert_eq!(resolved.web_cloudflared_host(), "shprd.example.org");
+    assert_eq!(source_of(&resolved, "web.tunnel"), Some(Source::You));
+}
+
+#[test]
+fn web_tunnel_takes_only_the_provider_words() {
+    let key = Key::parse("web.tunnel").expect("the key parses");
+    for word in WEB_TUNNEL_WORDS {
+        assert!(key.value_from_text(word).is_ok(), "{word}");
+    }
+    assert!(key.value_from_text("carrier-pigeon").is_err());
+    assert!(File::parse("[web]\ntunnel = \"carrier-pigeon\"\n").is_err());
+    assert!(File::parse("[web]\nnonsense = 1\n").is_err());
+    assert!(Key::parse("web.nonsense").is_err());
+    assert!(Key::parse("web").is_err());
+}
+
+#[test]
+fn a_repository_may_not_choose_where_a_shell_is_exposed() {
+    for key in WEB_KEYS {
+        assert!(!Key::Web(key).is_repo_allowed(), "{}", key.name());
+    }
+    let repo = parse_repo_committed("[web]\ntunnel = \"ngrok\"\n");
+    assert!(repo.is_err(), "a committed [web] table is refused: {repo:?}");
+}
+
+#[test]
+fn a_web_key_is_written_into_the_web_table() {
+    let home = home();
+    let loaded = Loaded::read(home.path(), None).expect("an empty home loads");
+    let key = Key::parse("web.tunnel").expect("the key parses");
+    let written = loaded
+        .write(
+            home.path(),
+            &Scope::You,
+            &key,
+            Some(Value::Text("tunnl".to_owned())),
+            None,
+        )
+        .expect("the tunnel is stored");
+    assert_eq!(written.resolved.web_tunnel(), "tunnl");
+    let text = std::fs::read_to_string(user_file(home.path())).expect("the file was written");
+    assert!(text.contains("[web]") && text.contains("tunnel = \"tunnl\""), "{text}");
 }

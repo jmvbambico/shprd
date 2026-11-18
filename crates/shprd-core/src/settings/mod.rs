@@ -151,7 +151,7 @@ const REPO_LIMIT: &str = "a repository's committed settings file may only set `t
 
 /// The hint an unknown key's error carries.
 const KEY_HINT: &str = "keys are `roles.order`, `roles.<id>.<field>`, `tasks.<key>`, `graph.dagr`, \
-     `review.cross_vendor` and `host`";
+     `review.cross_vendor`, `host` and `web.<key>`";
 
 /// Where one layer of settings sits in the resolution chain, nearest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -582,6 +582,60 @@ impl TaskKey {
     }
 }
 
+/// The tunnel providers `web.tunnel` may name, in the words `shprd web up
+/// --tunnel` takes.
+///
+/// `shprd-remote` owns the providers; this list is the words only, because the
+/// settings model sits below it. A test there keeps the two the same.
+pub const WEB_TUNNEL_WORDS: [&str; 5] = [
+    "tailscale",
+    "cloudflared",
+    "cloudflared-named",
+    "ngrok",
+    "tunnl",
+];
+
+/// A `web.*` key: how remote access is reached.
+///
+/// None of these may be set by a repository's committed file: where a shell is
+/// exposed is the person's decision, and a cloned repository must not make it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WebKey {
+    /// The provider `shprd web up` uses when `--tunnel` is not given.
+    Tunnel,
+    /// tunnl.gg only: ask for the stable address.
+    Stable,
+    /// cloudflared-named: the tunnel's name.
+    CloudflaredName,
+    /// cloudflared-named: the hostname routed to it.
+    CloudflaredHost,
+}
+
+/// Every `web.*` key, in the order a settings UI lists them.
+pub const WEB_KEYS: [WebKey; 4] = [
+    WebKey::Tunnel,
+    WebKey::Stable,
+    WebKey::CloudflaredName,
+    WebKey::CloudflaredHost,
+];
+
+impl WebKey {
+    /// The key's name under `[web]`, e.g. `cloudflared_name`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tunnel => "tunnel",
+            Self::Stable => "stable",
+            Self::CloudflaredName => "cloudflared_name",
+            Self::CloudflaredHost => "cloudflared_host",
+        }
+    }
+
+    /// The key a `[web]` name is, or [`None`].
+    pub fn parse(name: &str) -> Option<WebKey> {
+        WEB_KEYS.into_iter().find(|key| key.name() == name)
+    }
+}
+
 /// One settings key, as the dotted path `settings get|set|unset` takes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
@@ -603,6 +657,8 @@ pub enum Key {
     CrossVendor,
     /// `host`: which terminal host shprd drives (`auto` picks one).
     Host,
+    /// A `web.<key>`: how remote access is reached.
+    Web(WebKey),
 }
 
 impl Key {
@@ -641,6 +697,7 @@ impl Key {
             ["graph", "dagr"] => Ok(Self::GraphDagr),
             ["review", "cross_vendor"] => Ok(Self::CrossVendor),
             ["host"] => Ok(Self::Host),
+            ["web", name] => WebKey::parse(name).map(Self::Web).ok_or_else(unknown),
             ["land", "merge"] => Ok(Self::Task(TaskKey::Merge)),
             ["tick", "max_running"] => Ok(Self::Task(TaskKey::MaxRunning)),
             ["tick", "interval_secs"] => Ok(Self::Task(TaskKey::TickSecs)),
@@ -661,6 +718,7 @@ impl Key {
             Self::GraphDagr => "graph.dagr".to_owned(),
             Self::CrossVendor => "review.cross_vendor".to_owned(),
             Self::Host => "host".to_owned(),
+            Self::Web(key) => format!("web.{}", key.name()),
         }
     }
 
@@ -690,6 +748,9 @@ impl Key {
             Self::GraphDagr => Kind::Text,
             Self::CrossVendor => Kind::Switch,
             Self::Host => Kind::OneOf(&HOST_WORDS),
+            Self::Web(WebKey::Tunnel) => Kind::OneOf(&WEB_TUNNEL_WORDS),
+            Self::Web(WebKey::Stable) => Kind::Switch,
+            Self::Web(_) => Kind::Text,
         }
     }
 
@@ -1272,6 +1333,17 @@ fn parse_sections(table: &toml::Table, origin: &str, limit: Limit) -> Result<Lay
                 }
             }
             "host" => store(&mut layer, Key::Host, item, origin, limit)?,
+            "web" => {
+                let section = item.as_table().ok_or_else(|| SettingsError::BadValue {
+                    key: named(origin, "web"),
+                    reason: "must be a table".to_owned(),
+                })?;
+                for (field, value) in section {
+                    let key =
+                        WebKey::parse(field).ok_or_else(|| unknown_key(origin, "web", field))?;
+                    store(&mut layer, Key::Web(key), value, origin, limit)?;
+                }
+            }
             other => {
                 return Err(SettingsError::UnknownKey {
                     key: named(origin, other),
@@ -1442,6 +1514,13 @@ pub fn builtin() -> Layer {
     layer.set(Key::GraphDagr, Value::Text(String::new()));
     layer.set(Key::CrossVendor, Value::Switch(true));
     layer.set(Key::Host, Value::Text(HostChoice::Auto.name().to_owned()));
+    layer.set(
+        Key::Web(WebKey::Tunnel),
+        Value::Text(WEB_TUNNEL_WORDS[0].to_owned()),
+    );
+    layer.set(Key::Web(WebKey::Stable), Value::Switch(false));
+    layer.set(Key::Web(WebKey::CloudflaredName), Value::Text(String::new()));
+    layer.set(Key::Web(WebKey::CloudflaredHost), Value::Text(String::new()));
     layer.set(
         Key::RolesOrder,
         Value::List(BUILTIN_ROLES.iter().map(|id| (*id).to_owned()).collect()),
@@ -1965,6 +2044,42 @@ impl Resolved {
             .unwrap_or_default()
     }
 
+    /// A `web.*` value's text, trimmed.
+    fn web_text(&self, key: WebKey) -> &str {
+        self.get(&Key::Web(key))
+            .and_then(|sourced| sourced.value.text())
+            .map(str::trim)
+            .unwrap_or_default()
+    }
+
+    /// The tunnel provider `web up` uses when none is named: one of
+    /// [`WEB_TUNNEL_WORDS`], `tailscale` when the value is not one.
+    pub fn web_tunnel(&self) -> &str {
+        let word = self.web_text(WebKey::Tunnel);
+        WEB_TUNNEL_WORDS
+            .into_iter()
+            .find(|candidate| *candidate == word)
+            .unwrap_or(WEB_TUNNEL_WORDS[0])
+    }
+
+    /// Whether tunnl.gg's stable address is asked for.
+    pub fn web_stable(&self) -> bool {
+        self.get(&Key::Web(WebKey::Stable))
+            .and_then(|sourced| sourced.value.switch())
+            .unwrap_or(false)
+    }
+
+    /// The named cloudflared tunnel's name; empty when none is set.
+    pub fn web_cloudflared_name(&self) -> &str {
+        self.web_text(WebKey::CloudflaredName)
+    }
+
+    /// The hostname routed to the named cloudflared tunnel; empty when none is
+    /// set.
+    pub fn web_cloudflared_host(&self) -> &str {
+        self.web_text(WebKey::CloudflaredHost)
+    }
+
     /// Whether a reviewer must be another vendor than the worker.
     pub fn cross_vendor(&self) -> bool {
         self.get(&Key::CrossVendor)
@@ -2017,6 +2132,9 @@ impl Resolved {
         self.push_row(&mut rows, Key::GraphDagr);
         self.push_row(&mut rows, Key::CrossVendor);
         self.push_row(&mut rows, Key::Host);
+        for key in WEB_KEYS {
+            self.push_row(&mut rows, Key::Web(key));
+        }
         rows
     }
 

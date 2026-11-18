@@ -255,3 +255,35 @@ pub trait Tunnel: Send {
     /// error.
     fn stop(&mut self) -> BoxFuture<'_, Result<(), TunnelError>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_settings_words_are_the_providers_words() {
+        let words: Vec<&str> = PROVIDERS.iter().map(|provider| provider.word()).collect();
+        assert_eq!(words, shprd_core::settings::WEB_TUNNEL_WORDS);
+        for provider in PROVIDERS {
+            assert_eq!(Provider::parse(provider.word()), Some(provider));
+        }
+        assert_eq!(Provider::parse("nope"), None);
+    }
+
+    #[test]
+    fn only_tailscale_is_private() {
+        for provider in PROVIDERS {
+            assert_eq!(provider.public_internet(), provider != Provider::Tailscale);
+        }
+    }
+
+    #[test]
+    fn an_endpoint_prints_masked() {
+        let endpoint =
+            PublicEndpoint::new("https://quiet-green-river.trycloudflare.com", Provider::Tunnl)
+                .expect("a plain name");
+        let shown = format!("{endpoint:?}");
+        assert!(!shown.contains("quiet-green"), "{shown}");
+        assert!(PublicEndpoint::new("http://x.example.com", Provider::Tunnl).is_none());
+    }
+}
