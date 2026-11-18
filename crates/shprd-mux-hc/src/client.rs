@@ -514,6 +514,18 @@ impl HcClient {
     /// call is the caller's to retry, not this client's.
     pub async fn call_with(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         let link = self.link_for(timeout).await?;
+        self.call_on(&link, method, params, timeout).await
+    }
+
+    /// [`HcClient::call_with`] on a link already chosen, for a call whose
+    /// answer names something that lives only on that connection.
+    async fn call_on(
+        &self,
+        link: &Link,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let id = self.next_id();
         let (reply, answer) = oneshot::channel();
         {
@@ -533,7 +545,7 @@ impl HcClient {
             );
         }
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if let Err(error) = self.write(&link, &message).await {
+        if let Err(error) = self.write(link, &message).await {
             if let Ok(mut pending) = link.pending.lock() {
                 pending.remove(&id);
             }
@@ -572,8 +584,13 @@ impl HcClient {
         bytes: &[u8],
         timeout: Duration,
     ) -> Result<()> {
+        // One link for the whole exchange: a channel exists only on the
+        // connection that opened it, so a reconnect in between fails the type
+        // rather than writing to a stranger's stream.
+        let link = self.link_for(timeout).await?;
         let attached = self
-            .call_with(
+            .call_on(
+                &link,
                 "terminal.attach",
                 json!({"terminal": terminal, "cols": cols, "rows": rows, "history": 0}),
                 timeout,
@@ -584,7 +601,6 @@ impl HcClient {
             .and_then(Value::as_u64)
             .and_then(|channel| u32::try_from(channel).ok())
             .ok_or_else(|| Error::Output("terminal.attach answered no channel".into()))?;
-        let link = self.link_for(timeout).await?;
         let sent = async {
             for chunk in bytes.chunks(TYPE_CHUNK) {
                 let frame = wire::encode_frame(channel, FrameKind::Data, chunk)?;
