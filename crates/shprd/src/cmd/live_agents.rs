@@ -72,13 +72,14 @@ impl HostLive {
             .map(|row| row.terminal)
     }
 
-    /// What the host lists right now, as rows without a clock.
-    fn current(&self) -> Vec<LiveAgentRow> {
+    /// What the host lists right now, as rows without a clock; `None` when the
+    /// host could not be asked, which is not the same as an empty list.
+    fn current(&self) -> Option<Vec<LiveAgentRow>> {
         let now = (self.now)();
         let mut rows: Vec<LiveAgentRow> = self
             .host
             .list_agents()
-            .unwrap_or_default()
+            .ok()?
             .into_iter()
             // The core keeps a finished terminal's record; the pane lists it for
             // as long as the rest do, then lets it go.
@@ -108,7 +109,7 @@ impl HostLive {
             })
             .collect();
         rows.extend(self.coordinator());
-        rows
+        Some(rows)
     }
 
     /// The coordinator shprd started in the repository's space, when it is there.
@@ -160,9 +161,14 @@ fn state_word(state: AgentState) -> &'static str {
 impl LiveSource for HostLive {
     fn agents(&self) -> Vec<LiveAgentRow> {
         let now = (self.now)();
-        let current = self.current();
         let Ok(mut seen) = self.seen.lock() else {
-            return current;
+            return self.current().unwrap_or_default();
+        };
+        // A host that cannot be asked right now (a transient error) says nothing
+        // about who is running: what was last seen is shown as it was, and no
+        // agent is marked finished on a failed listing.
+        let Some(current) = self.current() else {
+            return seen.values().map(|entry| entry.row.clone()).collect();
         };
         let mut listed: Vec<String> = Vec::new();
         for mut row in current {
