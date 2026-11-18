@@ -137,10 +137,13 @@ sources = ["hook", "screen"]
 #   ────…
 #    ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents   ◐ medium · /effort
 #
-# so the placeholder prompt is the line. The trust dialog that comes first names
+# so the placeholder prompt is the line. The placeholder is a different example each
+# start (SHPR-28 saw `Try "refactor <filepath>"`) and "for agents" drops out of a
+# narrow pane (a thread's Terminal view is narrow), but the mode footer under the
+# prompt always ends `(shift+tab to cycle)` or `? for shortcuts`, so those count too. The trust dialog that comes first names
 # itself in [[blocking_prompts]] below, which is reported as blocked rather than
 # waited out.
-screen = ["Try \"how do I log an error?\"", "for agents"]
+screen = ["Try \"how do I log an error?\"", "for agents", "(shift+tab to cycle)", "? for shortcuts"]
 
 [asks]
 # Claude Code fires one `PermissionRequest` hook for a permission, a question
