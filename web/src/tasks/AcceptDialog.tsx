@@ -98,6 +98,7 @@ export function AcceptDialog({ client, board, taskId, device, reauthTick, onClos
   useEffect(() => {
     let live = true;
     readAt.current = Date.now();
+    setChanges(null);
     client
       .taskChanges(taskId)
       .then((next) => {
@@ -119,16 +120,26 @@ export function AcceptDialog({ client, board, taskId, device, reauthTick, onClos
   }, [client, taskId, key]);
 
   useEffect(() => {
+    // An answer that arrives after the card moved to another task is not that
+    // task's changes: only the effect that asked may use it.
+    let live = true;
     const timer = setInterval(() => {
       if (Date.now() - readAt.current >= CHANGES_MS) {
         readAt.current = Date.now();
         client
           .taskChanges(taskId)
-          .then((next) => setChanges(next))
+          .then((next) => {
+            if (live) {
+              setChanges(next);
+            }
+          })
           .catch(() => undefined);
       }
     }, CHANGES_MS);
-    return () => clearInterval(timer);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
   }, [client, taskId]);
 
   useEffect(() => {
