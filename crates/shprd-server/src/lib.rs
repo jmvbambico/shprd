@@ -90,7 +90,7 @@ pub use agents::{AgentOpener, Agents, OpenedTab};
 pub use api::{App, BODY_LIMIT, WsLimits};
 pub use changes::Touch;
 pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
-pub use engine::Engine;
+pub use engine::{Engine, Resender};
 pub use error::{ApiReject, ServerError};
 pub use graph::{Dagr, Located, Missing, Origin};
 pub use live::{LiveAgentRow, LiveAgents, LiveSource};

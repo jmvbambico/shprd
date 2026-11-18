@@ -19,6 +19,9 @@ use std::path::Path;
 
 use crate::tick::{Starter, WorkerCloser};
 
+/// Types a task's latest brief into its agent again; answers one line.
+pub type Resender = std::sync::Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
+
 /// The binary's spawn path, and its way of closing a task's space.
 #[derive(Clone)]
 pub struct Engine {
@@ -30,6 +33,8 @@ pub struct Engine {
     /// person's stop and the engine's own close cannot disagree about what a
     /// task's space is.
     stop: Option<WorkerCloser>,
+    /// Delivers a task's brief to its agent again, when the caller has a host.
+    resend: Option<Resender>,
 }
 
 impl Engine {
@@ -38,13 +43,34 @@ impl Engine {
     /// It is what a caller without a host passes: a start works and a stop is
     /// refused, because there is no tab to close.
     pub fn new(start: Starter) -> Self {
-        Self { start, stop: None }
+        Self {
+            start,
+            stop: None,
+            resend: None,
+        }
     }
 
     /// The same engine, also able to close a task's space.
     pub fn with_stop(mut self, stop: WorkerCloser) -> Self {
         self.stop = Some(stop);
         self
+    }
+
+    /// The same engine, also able to deliver a brief again.
+    pub fn with_resend(mut self, resend: Resender) -> Self {
+        self.resend = Some(resend);
+        self
+    }
+
+    /// Delivers `task`'s latest brief to its agent again.
+    ///
+    /// A failure is the host's or the brief's own words: no agent to type into,
+    /// no brief on disk.
+    pub fn resend(&self, repo: &Path, task: &str) -> Result<String, String> {
+        let resend = self.resend.as_ref().ok_or_else(|| {
+            "this service was started without a host, so it cannot deliver a brief".to_string()
+        })?;
+        resend(repo, task)
     }
 
     /// Starts an attempt at `task` in `repo`, as `shprd agent spawn --task` does.
@@ -70,6 +96,7 @@ impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
             .field("stop", &self.stop.is_some())
+            .field("resend", &self.resend.is_some())
             .finish_non_exhaustive()
     }
 }

@@ -24,6 +24,9 @@ pub struct Card {
     pub default_action: String,
 }
 
+/// The body of the card a spawn records when the brief never reached the agent.
+pub const BRIEF_LOST: &str = "brief not delivered";
+
 /// The card `escalation` draws against `state`, or `None` when it is history.
 ///
 /// A card is history when nothing is left for the person to decide:
@@ -60,6 +63,16 @@ pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
         && task
             .latest_attempt()
             .is_some_and(|latest| latest.n > attempt)
+    {
+        return None;
+    }
+    // A lost brief is retired by any progress line recorded after it: the agent
+    // reported (so it had the brief) or a person's resend recorded one.
+    if escalation.body == BRIEF_LOST
+        && task
+            .last_status
+            .as_ref()
+            .is_some_and(|progress| progress.seq > escalation.seq)
     {
         return None;
     }

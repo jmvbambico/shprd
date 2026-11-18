@@ -174,6 +174,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         host: host.clone(),
         live,
     }));
+    let resend_host = host.clone();
     let tick = tick_config(
         ctx,
         &home,
@@ -191,7 +192,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // The person's start, retry and stop actions are the same two closures the
     // tick's steps run: one spawn path, one way of closing a task's space, so a
     // board's Start and the engine's own start cannot drift apart.
-    config.engine = Some(engine_of(&tick.worker));
+    config.engine = Some(engine_of(&tick.worker).with_resend(resender(resend_host, &home)));
     // The tab bar's "+" menu's *Start an agent* is the same host and the same
     // harness table: a program is a tab with its plain launch line in it, never
     // a task's attempt, so it goes through the service and not through the mod.
@@ -549,6 +550,15 @@ fn engine_of(worker: &std::sync::Arc<shprd_server::Worker>) -> Engine {
         Some(close) => engine.with_stop(close),
         None => engine,
     }
+}
+
+/// The board's Resend: types a task's latest brief into its agent again.
+fn resender(host: Arc<dyn Host>, home: &Path) -> shprd_server::Resender {
+    let home = home.to_path_buf();
+    Arc::new(move |repo: &Path, task: &str| {
+        let ctx = crate::ctx::Ctx::new(repo.to_path_buf(), Actor::Human, false, true);
+        crate::cmd::spawn::resend_brief(&*host, &home, &ctx, task).map_err(|err| err.to_string())
+    })
 }
 
 /// What the startup line says about the tick.
