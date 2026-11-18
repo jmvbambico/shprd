@@ -74,7 +74,7 @@ impl HostLive {
 
     /// What the host lists right now, as rows without a clock; `None` when the
     /// host could not be asked, which is not the same as an empty list.
-    fn current(&self) -> Option<Vec<LiveAgentRow>> {
+    fn current(&self) -> Option<(Vec<LiveAgentRow>, bool)> {
         let now = (self.now)();
         let mut rows: Vec<LiveAgentRow> = self
             .host
@@ -108,8 +108,25 @@ impl HostLive {
                 }
             })
             .collect();
-        rows.extend(self.coordinator());
-        Some(rows)
+        let coordinator = self.coordinator();
+        let unknown = coordinator.is_none() && self.coordinator_unreadable();
+        rows.extend(coordinator);
+        Some((rows, unknown))
+    }
+
+    /// Whether the host could not say where the coordinator is (a failed lookup),
+    /// as against it not being there: the last row is kept for the first.
+    fn coordinator_unreadable(&self) -> bool {
+        let Ok(name) = crate::cmd::spawn::repo_name(&self.repo)
+            .map(|name| crate::cmd::spawn::repo_space_name(&name))
+        else {
+            return false;
+        };
+        match self.host.find_space(&name) {
+            Err(_) => true,
+            Ok(None) => false,
+            Ok(Some(space)) => self.host.list_tabs(&space.id).is_err(),
+        }
     }
 
     /// The coordinator shprd started in the repository's space, when it is there.
@@ -162,12 +179,12 @@ impl LiveSource for HostLive {
     fn agents(&self) -> Vec<LiveAgentRow> {
         let now = (self.now)();
         let Ok(mut seen) = self.seen.lock() else {
-            return self.current().unwrap_or_default();
+            return self.current().map(|(rows, _)| rows).unwrap_or_default();
         };
         // A host that cannot be asked right now (a transient error) says nothing
         // about who is running: what was last seen is shown as it was, and no
         // agent is marked finished on a failed listing.
-        let Some(current) = self.current() else {
+        let Some((current, coordinator_unknown)) = self.current() else {
             return seen.values().map(|entry| entry.row.clone()).collect();
         };
         let mut listed: Vec<String> = Vec::new();
@@ -200,11 +217,12 @@ impl LiveSource for HostLive {
             if listed.contains(id) {
                 return true;
             }
-            entry.row.role != "coordinator"
-                && entry
-                    .row
-                    .ended_ms
-                    .is_some_and(|ended| now.saturating_sub(ended) < FINISHED_FOR_MS)
+            (entry.row.role == "coordinator" && coordinator_unknown)
+                || entry.row.role != "coordinator"
+                    && entry
+                        .row
+                        .ended_ms
+                        .is_some_and(|ended| now.saturating_sub(ended) < FINISHED_FOR_MS)
         });
         let mut rows: Vec<LiveAgentRow> = seen.values().map(|entry| entry.row.clone()).collect();
         rows.sort_by(|a, b| {

@@ -2160,7 +2160,12 @@ pub(crate) fn ensure_coordinator(
             parent: None,
         })
         .map_err(|err| CliError::other(anyhow!(err).context("starting the coordinator")))?;
-    record_coordinator_pane(&env.home, &tab.root_pane, &pick.agent)?;
+    // A coordinator nobody can find again is one a restart would start a second
+    // of, so a record that cannot be written stops the one just started.
+    if let Err(err) = record_coordinator_pane(&env.home, &tab.root_pane, &pick.agent) {
+        close_tab(mux, &tab.id);
+        return Err(err);
+    }
     if prepared.created {
         for starter in starters {
             close_tab(mux, &starter.id);
