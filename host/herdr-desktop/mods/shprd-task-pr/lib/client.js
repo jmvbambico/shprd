@@ -258,7 +258,118 @@ async function getJson(doFetch, url, wait) {
  * swallowed here: the call site says what to show.
  */
 function guard(work, wait, ms) {
-  return Promise.race([work, wait(ms).then(() => null)]).catch(() => null);
+  const deadline = after(wait, ms);
+  const settled = work.then(
+    (value) => value,
+    () => null,
+  );
+  return Promise.race([settled, deadline.promise.then(() => null)])
+    .catch(() => null)
+    .finally(() => deadline.cancel());
+}
+
+/** How long the shared clock sleeps at most, so a nearer deadline is met late by this much. */
+export const TICK_MS = 500;
+
+const deadlines = new Set();
+let ticking = false;
+let latestWait = null;
+let skew = 0;
+
+/**
+ * One deadline on the shared clock: `{promise, cancel}`.
+ *
+ * A mod's only clock is `cx.sleep`, and the runtime allows 1024 outstanding host
+ * tasks per mod. A `cx.sleep(ms)` per guarded call left every sleep outstanding
+ * until it ran out, long after its call had answered, and a busy panel reached
+ * the limit in minutes ("cx.sleep(ms) exceeded the per-runtime outstanding host
+ * task limit"). So all deadlines in this copy share **one** sleep at a time, of
+ * at most [`TICK_MS`], that exists only while a deadline is waiting; a call that
+ * answers cancels its deadline and leaves nothing behind.
+ */
+export function after(wait, ms) {
+  latestWait = wait;
+  let entry;
+  const promise = new Promise((resolve) => {
+    entry = { at: Date.now() + skew + ms, resolve };
+  });
+  deadlines.add(entry);
+  tick();
+  return {
+    promise,
+    cancel() {
+      deadlines.delete(entry);
+    },
+  };
+}
+
+/** How many deadlines are waiting on the shared clock (for the stress test). */
+export function pendingDeadlines() {
+  return deadlines.size;
+}
+
+function expire(now) {
+  for (const entry of [...deadlines]) {
+    if (entry.at <= now) {
+      deadlines.delete(entry);
+      entry.resolve();
+    }
+  }
+}
+
+function tick() {
+  if (ticking) return;
+  ticking = true;
+  (async () => {
+    try {
+      while (deadlines.size > 0) {
+        const now = Date.now() + skew;
+        let next = Infinity;
+        for (const entry of deadlines) next = Math.min(next, entry.at);
+        const nap = Math.max(10, Math.min(TICK_MS, next - now));
+        const began = Date.now();
+        await latestWait(nap);
+        // A wait that returns has let `nap` pass, whatever the clock says (a
+        // test's instant wait must still run a deadline out, not spin): the
+        // shortfall is kept as skew so later deadlines see the same time.
+        skew += Math.max(0, nap - (Date.now() - began));
+        expire(Date.now() + skew);
+      }
+    } catch {
+      // The copy that owned the clock is gone: nothing will wake these, so they
+      // all run out now rather than hang a panel for ever.
+      expire(Infinity);
+    } finally {
+      ticking = false;
+      // A deadline added while the loop was ending still needs a clock.
+      if (deadlines.size > 0) tick();
+    }
+  })();
+}
+
+/**
+ * Runs `work` unless a run is in flight, in which case one more run is queued
+ * for when it ends; any number of callers meanwhile share that one.
+ *
+ * A refresh started by the timer, by the change file and by a button must not
+ * overlap: each one used to hold its own reads and sleeps.
+ */
+export function singleFlight(owner, work) {
+  if (owner.__flight) {
+    owner.__again = true;
+    return owner.__flight;
+  }
+  owner.__flight = (async () => {
+    try {
+      do {
+        owner.__again = false;
+        await work();
+      } while (owner.__again);
+    } finally {
+      owner.__flight = null;
+    }
+  })();
+  return owner.__flight;
 }
 
 /**
@@ -532,13 +643,16 @@ export class Client {
 export async function attach(current, io = {}) {
   const read = io.read ?? readTextFile;
   const make = (found) => new Client(found, { fetch: io.fetch, wait: io.wait });
+  // One empty answer is not "not running": a busy service misses a health check
+  // now and then, so a null is looked for once more before it is believed.
+  const find = async () => (await discover(io)) ?? (await discover(io));
   if (!current) {
-    const found = await discover(io);
+    const found = await find();
     return { client: found ? make(found) : null, restarted: false };
   }
   const record = await readServiceRecord(serviceFile(current.dir), read);
   if (record && record.id === current.id()) return { client: current, restarted: false };
-  const found = await discover(io);
+  const found = await find();
   return { client: found ? make(found) : null, restarted: true };
 }
 

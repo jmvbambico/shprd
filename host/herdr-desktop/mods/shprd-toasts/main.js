@@ -29,7 +29,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { run, setShared, spaces, theme } from "herdr";
 
-import { attach, alive, POLL_WAIT } from "./lib/client.js";
+import { attach, alive, singleFlight, POLL_WAIT } from "./lib/client.js";
 import { canReview } from "./lib/accept.js";
 import { icon, openAccept } from "./lib/panel.js";
 import { spaceIndex } from "./lib/spaces.js";
@@ -155,27 +155,34 @@ export default class Toasts extends View {
     const cx = this.cx;
     const dir = this.client.dir;
     cx.spawn(async () => {
-      await followChanges(dir, () => {
-        this.watching = false;
-        this.reload(cx);
-      });
+      // One watcher for the life of this copy: it used to be re-armed on every
+      // change, which left a new followChanges loop (and its host reads)
+      // outstanding per ledger write until the runtime's 1024-task limit.
+      await followChanges(dir, () => this.reload(cx));
     });
   }
 
   /** Re-reads the board once, without waiting for the long poll to answer. */
   reload(cx) {
-    cx.spawn(async (cx) => {
-      try {
-        if (!this.client) return;
-        this.state = await this.client.state();
-        this.absorb([], this.state);
-        cx.notify();
-        this.follow();
-      } catch {
-        this.client = null;
-        this.since = null;
-      }
-    });
+    // A read already in flight is asked for one more run, without a new task
+    // waiting on it: spawned waiters would pile up when changes outrun a read.
+    if (this.__flight) {
+      this.__again = true;
+      return;
+    }
+    cx.spawn(() =>
+      singleFlight(this, async () => {
+        try {
+          if (!this.client) return;
+          this.state = await this.client.state();
+          this.absorb([], this.state);
+          cx.notify();
+        } catch {
+          this.client = null;
+          this.since = null;
+        }
+      }),
+    );
   }
 
   /** Adds what the events and the snapshot say, deduped by their seq. */

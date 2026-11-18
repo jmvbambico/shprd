@@ -47,7 +47,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { hc, layout, run, terminals, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import { card, cardHeader } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -95,7 +95,14 @@ export default class Graph extends View {
    * note forgets the old one's answer before reading the new: a graph of a run
    * that is gone is worse than no graph (M10 gate bug 5).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {

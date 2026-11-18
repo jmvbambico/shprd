@@ -45,7 +45,7 @@ import {
   window,
 } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import { MENU, appMenu, menuHeight, newMenu, restartable, tabMenu } from "./lib/menu.js";
 import { countsBadge } from "./lib/panel.js";
 import { panelButtons, tabRows } from "./lib/tabstrip.js";
@@ -134,7 +134,14 @@ export default class Tabs extends View {
    * so the bar takes the new client and re-reads the board instead of keeping the
    * old words beside it (M10 gate bug 5).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {

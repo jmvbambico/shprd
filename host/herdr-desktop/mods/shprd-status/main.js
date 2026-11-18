@@ -22,7 +22,7 @@ import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { keys, run, spaces, theme, window } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import { counts, lastFailure, runShort, since } from "./lib/board.js";
 import { badge, countBadge, icon } from "./lib/panel.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
@@ -62,7 +62,14 @@ export default class Status extends View {
    * board rather than keeping the old counts; a read that answers nothing is a
    * failure, not a board to keep painting (M10 gate bug 5).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {

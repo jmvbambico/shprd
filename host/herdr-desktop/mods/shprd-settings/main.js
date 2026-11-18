@@ -35,7 +35,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, Textarea, TextareaState, h_flex, v_flex } from "gpui-base";
 import { closeOverlay, props, theme } from "herdr";
 
-import { ServiceError, attach, reason } from "./lib/client.js";
+import { attach, reason, ServiceError, singleFlight } from "./lib/client.js";
 import {
   CHANGED_HERE,
   LEVEL,
@@ -184,7 +184,14 @@ export default class Settings extends View {
    * all again, so a page never shows one service's roles over another run (M10
    * gate bug 5).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     // The window says it is up before it asks anything: the copy's place is kept
     // by being renewed on every read, and a service that is down must not let the
     // record go stale — a window that says "shprd serve is not running" is still a
