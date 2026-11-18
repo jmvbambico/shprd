@@ -9,19 +9,20 @@
 /** One chainable element: every method answers itself, `child`/`children` included. */
 function element() {
   const node = {
-    id: () => node,
-    child: () => node,
-    children: () => node,
+    id: () => proxy,
+    child: () => proxy,
+    children: () => proxy,
   };
   // Every other builder is the same no-op, so a mod's chain never names one this
   // stub lacks: a `Proxy` answers any property with the chain itself.
-  return new Proxy(node, {
+  const proxy = new Proxy(node, {
     get(target, name) {
       if (name in target) return target[name];
       if (typeof name === "symbol") return undefined;
-      return () => node;
+      return () => proxy;
     },
   });
+  return proxy;
 }
 
 /** The base `View` a mod extends: `render` is the mod's own. */

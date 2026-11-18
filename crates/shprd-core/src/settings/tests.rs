@@ -742,6 +742,22 @@ fn a_role_id_may_not_be_order_or_a_key_path() {
 }
 
 #[test]
+fn review_rounds_may_be_off_but_not_negative_or_past_ten() {
+    let cases: [(i64, bool); 5] = [(0, true), (1, true), (10, true), (11, false), (-1, false)];
+    let key = Key::parse("tasks.review_rounds").expect("the key parses");
+    for (rounds, allowed) in cases {
+        let checked = key.check(&Value::Number(rounds));
+        assert_eq!(checked.is_ok(), allowed, "{rounds}: {checked:?}");
+    }
+    // Off survives the file: 0 rounds resolves as 0, so no review is asked for.
+    let resolved = resolve(
+        &you("version = 1\n[tasks]\nreview_rounds = 0\n"),
+        &Request::default(),
+    );
+    assert_eq!(shown(&resolved, "tasks.review_rounds"), "0");
+}
+
+#[test]
 fn a_value_is_checked_against_the_key_that_takes_it() {
     let cases: [(&str, Value, bool); 8] = [
         ("tasks.merge", Value::Text("checks".to_owned()), true),

@@ -567,7 +567,7 @@ impl TaskKey {
     /// The range a number must lie in, when the key takes one.
     fn range(self) -> Option<(i64, i64)> {
         match self {
-            Self::ReviewRounds => Some((1, 10)),
+            Self::ReviewRounds => Some((0, 10)),
             Self::MaxRunning => Some((1, 10)),
             Self::ArchiveAfter => Some((0, 3650)),
             Self::TickSecs => Some((1, 3600)),

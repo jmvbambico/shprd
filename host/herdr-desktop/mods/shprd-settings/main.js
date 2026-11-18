@@ -20,9 +20,8 @@
 //
 // Where it differs from Shepherdr is only where the data does:
 //
-// - The pages are shprd's three (Agents, Tasks, Prompts), and `Remote` is a place
-//   held in the list for the page M11.7 gives it — drawn and inert, never a page
-//   that pretends to work.
+// - The pages are shprd's four (Agents, Tasks, Prompts, Remote). Remote is the web
+//   app's Remote page: the tunnel, the devices signed in, and Log out.
 // - The layers are shprd's (`You`, `This repo`), and every value says the layer
 //   that answered it (`shprd_core::settings::Source`), because the service
 //   resolves the layers and the page never guesses.
@@ -38,6 +37,12 @@ import { closeOverlay, props, theme } from "herdr";
 import { attach, reason, ServiceError, singleFlight } from "./lib/client.js";
 import {
   CHANGED_HERE,
+  backupChoice,
+  boxProblem,
+  sessionRows,
+  toggled,
+  tunnelView,
+  maskLink,
   LEVEL,
   PAGES,
   RESET,
@@ -60,7 +65,7 @@ import {
 } from "./lib/settings.js";
 import {
   badge,
-  keycap,
+  icon,
   link,
   note,
   segmented,
@@ -149,6 +154,14 @@ export default class Settings extends View {
      * on, so those are never retried behind their back.
      */
     this.promptRetry = false;
+    /** The Remote page's reads: `{ data }`, `{ unavailable }` or `{ error }`, each. */
+    this.tunnelRead = null;
+    this.sessionRead = null;
+    /** The provider picked for a start, and whether the link is showing. */
+    this.provider = null;
+    this.revealed = false;
+    /** `start`, `stop`, `logout` or a session id while that call is out. */
+    this.remoteBusy = null;
     /** The id a new role gets, typed into a box made on the first Add. */
     this.newRole = null;
     /** The boxes under rows: `key -> { state, saved, gen, savedAt, rows }`. */
@@ -226,6 +239,7 @@ export default class Settings extends View {
       if (roster) this.roster = roster;
       const prompts = await this.client.prompts().catch(() => null);
       if (prompts) this.prompts = prompts;
+      if (this.page === "remote") await this.readRemote();
       if (this.wantFirst) {
         this.wantFirst = false;
         const rows = promptRows(this.prompts);
@@ -487,6 +501,13 @@ export default class Settings extends View {
     if (!box) return;
     const text = box.state.value?.() ?? "";
     if (text === box.saved) return;
+    // A branch name git would refuse is refused here, in a sentence, before it is stored.
+    const problem = boxProblem(key, text);
+    if (problem !== null) {
+      this.refusal = { key, text: problem };
+      this.cx.notify();
+      return;
+    }
     // The debounce that called this is the one that saves: bump the counter so a
     // timer armed a moment later does not write the same words again.
     box.gen += 1;
@@ -538,6 +559,84 @@ export default class Settings extends View {
   /** Takes a role the person made out of `roles.order`. */
   removeRole(role) {
     return this.apply("roles.order", withoutRole(this.settings, role.id));
+  }
+
+  // -- remote ----------------------------------------------------------------
+
+  /**
+   * Reads the tunnel and the signed-in devices.
+   *
+   * A service too old to have a route answers `404`, which is "not available" and
+   * not "empty": the page says so rather than showing a list that cannot be real.
+   */
+  async readRemote() {
+    if (!this.client) return;
+    const one = async (path) => {
+      try {
+        return { data: await this.client.call("GET", path, { strict: true }) };
+      } catch (err) {
+        return err?.status === 404 ? { unavailable: true } : { error: reason(err) };
+      }
+    };
+    const [tunnel, sessions] = await Promise.all([one("/api/tunnels"), one("/api/sessions")]);
+    this.tunnelRead = tunnel;
+    this.sessionRead = sessions;
+    this.cx.notify();
+  }
+
+  /** Starts or stops the tunnel; the service's own sentence is shown if it refuses. */
+  async tunnelCall(kind) {
+    if (!this.client || this.remoteBusy !== null) return;
+    this.remoteBusy = kind;
+    this.refusal = null;
+    this.cx.notify();
+    try {
+      const view = tunnelView(this.tunnelRead?.data, this.provider);
+      const reply =
+        kind === "start"
+          ? await this.client.call("POST", "/api/tunnels/start", { body: { provider: view?.provider } })
+          : await this.client.call("POST", "/api/tunnels/stop", { body: {} });
+      this.tunnelRead = { data: reply };
+      this.revealed = false;
+    } catch (err) {
+      this.refusal = refused("tunnel", err);
+    }
+    this.remoteBusy = null;
+    this.cx.notify();
+  }
+
+  /** Ends one signed-in device's session. */
+  async revokeSession(id) {
+    if (!this.client || this.remoteBusy !== null) return;
+    this.remoteBusy = id;
+    this.refusal = null;
+    this.cx.notify();
+    try {
+      await this.client.call("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+    } catch (err) {
+      this.refusal = refused("sessions", err);
+    }
+    this.remoteBusy = null;
+    await this.readRemote();
+  }
+
+  /** Log out all: ends every session, one after the other, and reads the list again. */
+  async logoutAll() {
+    if (!this.client || this.remoteBusy !== null) return;
+    this.remoteBusy = "logout";
+    this.refusal = null;
+    this.cx.notify();
+    const ids = (this.sessionRead?.data?.sessions ?? []).map((entry) => entry.id);
+    for (const id of ids) {
+      try {
+        await this.client.call("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+      } catch (err) {
+        this.refusal = refused("sessions", err);
+        break;
+      }
+    }
+    this.remoteBusy = null;
+    await this.readRemote();
   }
 
   // -- the prompts -----------------------------------------------------------
@@ -892,7 +991,7 @@ export default class Settings extends View {
   /** The page list on the left: the title, then one row a page. */
   nav(t, colors) {
     const row = (page) => {
-      const on = page.id === this.page && !page.soon;
+      const on = page.id === this.page;
       const base = h_flex()
         .id(`sh-s-${page.id}`)
         .h(30)
@@ -902,9 +1001,9 @@ export default class Settings extends View {
         .items_center()
         .rounded(RADIUS.card)
         .text_size(TEXT.body)
-        .text_color(page.soon ? t.dim : on ? t.foreground : t.muted)
+        .text_color(on ? t.foreground : t.muted)
         .when(on, (el) => el.bg(t.raised))
-        .when(!on && !page.soon, (el) =>
+        .when(!on, (el) =>
           el
             .cursor_pointer()
             .hover((style) => style.bg(t.hover))
@@ -913,11 +1012,11 @@ export default class Settings extends View {
               this.refusal = null;
               this.saved = null;
               this.keepKeyboard();
+              if (page.id === "remote") this.readRemote();
             }),
         )
-        .child(div().w(6).h(6).flex_none().rounded(3).bg(on ? colors.green : t.dim))
-        .child(div().flex_1().min_w(0).truncate().child(page.title))
-        .when(page.soon, (el) => el.child(keycap(t, "M11.7")));
+        .child(icon(page.icon, 14, on ? t.foreground : t.muted))
+        .child(div().flex_1().min_w(0).truncate().child(page.title));
       return base;
     };
     return v_flex()
@@ -993,6 +1092,7 @@ export default class Settings extends View {
     if (this.settings === null) return [];
     if (this.page === "tasks") return this.tasksPage(t);
     if (this.page === "prompts") return this.promptsPage(t, colors);
+    if (this.page === "remote") return this.remotePage(t, colors);
     return this.agentsPage(t, colors);
   }
 
@@ -1188,6 +1288,10 @@ export default class Settings extends View {
       .when(role.custom, (el) =>
         el.child(link(t, `remove-${role.id}`, "Remove", () => this.removeRole(role), this.writing !== null)),
       );
+    // The Backup agent is a switch first: with it off the role has no program,
+    // so its pickers would be rows about nothing.
+    const off = role.backup !== null && !role.backup.on;
+    const rows = off ? [this.backupRow(t, role)] : [...(role.backup ? [this.backupRow(t, role)] : []), ...this.roleRows(t, colors, role)];
     return v_flex()
       .w_full()
       .gap(2)
@@ -1196,7 +1300,94 @@ export default class Settings extends View {
       .when(role.about !== "", (el) =>
         el.child(div().pb(4).text_size(TEXT.label).text_color(t.dim).child(role.about)),
       )
-      .children(role.picks.map((pick) => this.pickRow(t, colors, role, pick)));
+      .children(rows);
+  }
+
+  /** A role's pickers, then Fast, Permissions and Fallback where the program has them. */
+  roleRows(t, colors, role) {
+    const rows = role.picks.map((pick) => this.pickRow(t, colors, role, pick));
+    if (role.fast) rows.push(this.switchRow(t, role.fast));
+    if (role.perm) {
+      rows.push(
+        this.pickRow(t, colors, role, {
+          ...role.perm,
+          field: "perm",
+          note: null,
+        }),
+      );
+    }
+    if (role.fallback) rows.push(this.fallbackRow(t, role.fallback));
+    return rows;
+  }
+
+  /** A role's yes-or-no field (Fast mode) as a switch, written where it is flipped. */
+  switchRow(t, field) {
+    return this.row(t, {
+      title: field.label,
+      about: field.about,
+      value: field.display,
+      control: toggleSwitch(t, field.key, field.value, (on) => this.apply(field.key, on)),
+      scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
+    });
+  }
+
+  /**
+   * The Backup agent's switch. On names the other program (another vendor, one
+   * that is installed, when there is one); off takes the program away again.
+   */
+  backupRow(t, role) {
+    const field = role.backup;
+    const flip = (on) => {
+      if (!on) return this.apply(field.key, null);
+      const program = backupChoice(this.settings, this.roster);
+      if (program === null) {
+        this.refusal = { key: field.key, text: "there is no other program to take a task over" };
+        this.cx.notify();
+        return undefined;
+      }
+      return this.apply(field.key, program);
+    };
+    return this.row(t, {
+      title: field.label,
+      about: field.about,
+      value: field.on ? "On" : "Off",
+      control: toggleSwitch(t, field.key, field.on, flip),
+      scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
+    });
+  }
+
+  /** Fallback: every other program as a chip; the ones picked are tried in the order they were picked. */
+  fallbackRow(t, field) {
+    const chip = (choice) => {
+      const at = field.value.indexOf(choice.value);
+      const on = at >= 0;
+      return h_flex()
+        .id(`fallback-${choice.value}`)
+        .h(H.sm)
+        .px(8)
+        .gap(4)
+        .flex_none()
+        .items_center()
+        .rounded(RADIUS.control)
+        .border_1()
+        .border_color(on ? t.accent : t.border)
+        .text_size(TEXT.label)
+        .text_color(on ? t.foreground : t.muted)
+        .cursor_pointer()
+        .hover((style) => style.bg(t.hover))
+        .on_click(() => this.apply(field.key, toggled(field.value, choice.value)))
+        .child(on ? `${at + 1}  ${choice.label}` : choice.label)
+        .when(choice.hint === "not installed", (el) =>
+          el.child(div().text_size(TEXT.id).text_color(t.dim).child("not installed")),
+        );
+    };
+    return this.row(t, {
+      title: field.label,
+      about: field.about,
+      value: field.display,
+      scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
+      below: h_flex().w_full().flex_wrap().gap(6).children(field.choices.map(chip)),
+    });
   }
 
   /** One pick: its words, its value and layer, and its choices underneath. */
@@ -1279,7 +1470,7 @@ export default class Settings extends View {
     }
     // A program that lists no models, or a model its catalog has not heard of, is
     // still a value a person may type: Shepherdr's "use the id typed".
-    if (pick.field !== "agent") {
+    if (pick.field === "model" || pick.field === "effort") {
       if (this.typedKey === pick.key) {
         blocks.push(
           h_flex()
@@ -1452,9 +1643,188 @@ export default class Settings extends View {
           .text_size(TEXT.label)
           .text_color(t.foreground)
           .whitespace_nowrap()
-          .child(String(row.value ?? row.min ?? 0)),
+          .child(row.value === 0 && row.zero !== undefined ? row.zero : String(row.value ?? row.min ?? 0)),
       )
       .child(button("plus", "+", 1));
+  }
+
+  // -- drawing: Remote -------------------------------------------------------
+
+  /** Remote: the tunnel, the devices signed in, and Log out. */
+  remotePage(t, colors) {
+    return [this.title(t, "Remote"), this.tunnelSection(t, colors), this.sessionsSection(t, colors)];
+  }
+
+  /** A section's heading inside Remote. */
+  heading(t, text) {
+    return div().pt(14).pb(4).text_size(TEXT.body).font_medium().text_color(t.foreground).child(text);
+  }
+
+  /** What a section says while it has no data: reading, not available, or the failure. */
+  remoteNote(t, colors, read, what) {
+    if (read === null) return note(t, `Reading ${what}…`);
+    if (read.unavailable) return note(t, `${what[0].toUpperCase()}${what.slice(1)} are not available on this service.`);
+    if (read.error) return div().px(12).py(6).text_size(TEXT.label).text_color(colors.red).child(read.error);
+    return null;
+  }
+
+  /** The tunnel: its state, its link (masked until asked for), and Start or Stop. */
+  tunnelSection(t, colors) {
+    const read = this.tunnelRead;
+    const missing = this.remoteNote(t, colors, read, "the tunnel");
+    const blocks = [this.heading(t, "Tunnel")];
+    if (missing) return v_flex().w_full().children([...blocks, missing]);
+    const view = tunnelView(read.data, this.provider);
+    const starting = view.starting || this.remoteBusy === "start";
+    blocks.push(
+      h_flex()
+        .gap(8)
+        .items_center()
+        .py(6)
+        .child(div().w(6).h(6).flex_none().rounded(3).bg(view.on ? colors.green : t.dim))
+        .child(div().text_size(TEXT.body).text_color(t.foreground).child(starting && !view.on ? "Starting…" : view.word))
+        .when(view.live !== null, (el) => el.child(div().text_size(TEXT.label).text_color(t.muted).child(view.live)))
+        .when(view.version !== null, (el) => el.child(div().text_size(TEXT.id).text_color(t.dim).child(view.version))),
+    );
+    if (view.why) blocks.push(note(t, view.why));
+    if (view.tailnetUser) blocks.push(note(t, `Signed in through Tailscale as ${view.tailnetUser}.`));
+    if (view.on && view.link) {
+      blocks.push(
+        h_flex()
+          .gap(10)
+          .items_center()
+          .py(6)
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .font_family("JetBrains Mono")
+              .text_size(TEXT.id)
+              .text_color(t.muted)
+              .child(this.revealed ? view.link : maskLink(view.link)),
+          )
+          .child(
+            link(t, "tunnel-reveal", this.revealed ? "Hide" : "Reveal", () => {
+              this.revealed = !this.revealed;
+              this.cx.notify();
+            }),
+          ),
+      );
+    }
+    if (view.on) {
+      blocks.push(
+        h_flex()
+          .py(6)
+          .child(link(t, "tunnel-stop", this.remoteBusy === "stop" ? "Stopping…" : "Stop tunnel", () => this.tunnelCall("stop"), this.remoteBusy !== null)),
+      );
+    } else {
+      blocks.push(
+        h_flex()
+          .py(6)
+          .gap(10)
+          .items_center()
+          .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child("Provider"))
+          .child(
+            h_flex()
+              .flex_1()
+              .min_w(0)
+              .flex_wrap()
+              .gap(6)
+              .children(
+                view.providers.map((entry) => {
+                  const on = entry.id === view.provider;
+                  return h_flex()
+                    .id(`provider-${entry.id}`)
+                    .h(H.sm)
+                    .px(8)
+                    .flex_none()
+                    .items_center()
+                    .rounded(RADIUS.control)
+                    .border_1()
+                    .border_color(on ? t.accent : t.border)
+                    .text_size(TEXT.label)
+                    .text_color(on ? t.foreground : t.muted)
+                    .cursor_pointer()
+                    .hover((style) => style.bg(t.hover))
+                    .on_click(() => {
+                      this.provider = entry.id;
+                      this.cx.notify();
+                    })
+                    .child(entry.word);
+                }),
+              ),
+          ),
+      );
+      if (view.note) blocks.push(note(t, view.note));
+      blocks.push(
+        h_flex()
+          .py(6)
+          .child(link(t, "tunnel-start", starting ? "Starting…" : "Start tunnel", () => this.tunnelCall("start"), starting || this.remoteBusy !== null)),
+      );
+    }
+    return v_flex().w_full().children(blocks);
+  }
+
+  /** The devices signed in, each with Revoke, and Log out all. */
+  sessionsSection(t, colors) {
+    const read = this.sessionRead;
+    const missing = this.remoteNote(t, colors, read, "the signed-in devices");
+    const blocks = [this.heading(t, "Signed in")];
+    if (missing) return v_flex().w_full().children([...blocks, missing]);
+    const rows = sessionRows(read.data);
+    if (rows.length === 0) blocks.push(note(t, "No device is signed in."));
+    for (const entry of rows) {
+      blocks.push(
+        h_flex()
+          .w_full()
+          .gap(10)
+          .py(8)
+          .items_center()
+          .border_b(1)
+          .border_color(t.border)
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(2)
+              .child(
+                h_flex()
+                  .gap(6)
+                  .items_center()
+                  .child(div().text_size(TEXT.body).text_color(t.foreground).child(entry.label))
+                  .when(entry.here, (el) => el.child(badge(t, "this device", t.raised, t.muted)))
+                  .when(entry.remembered, (el) => el.child(div().text_size(TEXT.id).text_color(t.dim).child("remembered"))),
+              )
+              .child(div().text_size(TEXT.id).text_color(t.dim).child(entry.seen)),
+          )
+          .child(
+            link(
+              t,
+              `revoke-${entry.id}`,
+              this.remoteBusy === entry.id ? "Revoking…" : "Revoke",
+              () => this.revokeSession(entry.id),
+              this.remoteBusy !== null,
+            ),
+          ),
+      );
+    }
+    if (rows.length > 0) {
+      blocks.push(
+        h_flex()
+          .py(10)
+          .child(
+            link(
+              t,
+              "logout-all",
+              this.remoteBusy === "logout" ? "Logging out…" : "Log out all",
+              () => this.logoutAll(),
+              this.remoteBusy !== null,
+            ),
+          ),
+      );
+    }
+    return v_flex().w_full().children(blocks);
   }
 
   // -- drawing: Prompts ------------------------------------------------------

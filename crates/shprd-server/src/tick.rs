@@ -429,7 +429,8 @@ impl Worker {
             phases: &phases,
             facts: &facts,
             config: &config,
-            review: self.review.is_some() && self.reviews_hand_ins(),
+            // `tasks.review_rounds = 0` is Off: no review is asked for at all.
+            review: self.review.is_some() && self.reviews_hand_ins() && config.review.rounds > 0,
         });
         let mut report = TickReport {
             run: state.run.as_ref().map(|run| run.run_id.clone()),
