@@ -15,11 +15,18 @@ design. Read [docs/plan.md](docs/plan.md) for what's being built now.
 | lint | `cargo clippy --workspace --all-targets -- -D warnings` | yes | yes | yes |
 | unit tests | `cargo test --workspace` | yes | yes | yes |
 | integration tests | `cargo test --workspace --features it -- --test-threads=1` | **no** | yes | no |
+| desktop mods | `host/herdr-desktop/bin/check` (`--no-app` where `herdr-app` is not installed) | yes, when the task touches `host/herdr-desktop` | yes | **no** (CI does not run it yet) |
+| web app | `cd web && npm ci && npx tsc --noEmit && npm run build && npm test` | yes, when the task touches `web/` or a DTO | yes | yes (the `web` job) |
+| generated types | `cargo run -p shprd-server --example export-ts`, then `git diff --exit-code web/src/gen` | yes, when a DTO in `shprd-server` or `shprd-remote` changed | yes | yes (the `web` job) |
 
 - Workers run the first three gates in their own worktree before reporting
   done, and say which ones they ran.
 - The integration tests run only on the integration branch, once per batch,
   and never in two places at once.
+- A DTO change is not done until `web/src/gen` is regenerated and committed:
+  CI fails on a stale binding.
+- `npm run build` writes `web/dist`, which release builds embed; a debug build
+  works without it.
 - Until a crate defines the `it` feature, the integration-tests row is run as
   `cargo test --workspace -- --test-threads=1`.
 - Tests that need a real CLI, a real multiplexer or a model call are
@@ -75,6 +82,18 @@ design. Read [docs/plan.md](docs/plan.md) for what's being built now.
   tested with fixtures.
 - Commit messages: Conventional Commits (`feat(core): …`, `fix(git): …`,
   `test(views): …`, `chore: …`), imperative, one logical change per commit.
+
+## Herdr desktop mods
+
+`host/herdr-desktop` is the Herdr desktop's layout and mods (JS).
+
+- A stack shows one child at a time, so an unselected child's mod is not loaded
+  and its commands are unknown (`unknown command`). Select the stack with
+  `layout.select` first; `openThread` in `host/herdr-desktop/mods/lib/panel.js`
+  is the pattern. Never call into a mod that may not be the shown child.
+- Everything under `mods/lib/` is copied into each mod by `bin/sync-shared`.
+  Edit `lib/`, then run `bin/sync-shared`; never edit a copy.
+  `bin/sync-shared --check` (part of `bin/check`) fails on a stale copy.
 
 ## Borrowed code
 

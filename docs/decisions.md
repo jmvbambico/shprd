@@ -1,6 +1,6 @@
 # Decisions
 
-Newest first. Each entry: what was decided, and why. Pages hold the current
+Oldest first; new entries go at the end. Each entry: what was decided, and why. Pages hold the current
 truth; this log holds how we got there.
 
 ## 2026-10-27
@@ -84,6 +84,7 @@ truth; this log holds how we got there.
   they can. rex is planned later.
 - **No setup wizard**; agent setup is a settings page. The tab-per-agent
   launcher (`shprd up`) is retired in favour of a space per task.
+  *Superseded by 2026-11-18: there is no space or tab per task.*
 - **The web app is TypeScript**; everything else stays in this repo in Rust.- **One PR per task, as in Shepherdr.** Each task's branch gets its own PR,
   merged by policy (`ask`, `checks`, `auto`). The run-level integration branch
   is retired from the product workflow.
@@ -99,3 +100,28 @@ truth; this log holds how we got there.
 - **Smaller calls:** agents report status through `shprd` commands that append
   to the ledger under its lock; a Shepherdr "space" maps to a repo; permission
   modes use Shepherdr's set; the look follows Herdr's default theme.
+
+## 2026-11-18
+
+The person's decisions after the M11 desktop audit. They replace 2026-11-14's
+"a space per task".
+
+- **Agents follow Shepherdr v3.1.34.** No tab or space per task or agent. Workers
+  and reviewers run as labelled `hc` children with a real terminal. There is one
+  space per repo, and its coordinator lives there. You reach an agent through its
+  task's thread, which switches between Chat and Terminal; the terminal is live
+  and you can type into it. A read-only stream of the screen is only the
+  fallback, for a client that cannot bind a terminal.
+- **Tasks and the graph are one panel**, with a Tasks | Graph switch. The graph
+  is drawn natively from the board's data, not by a dagr terminal.
+- **The Spaces sidebar is a tree:** space, then its live tasks, then the working
+  agent. It shows only live tasks: one with an agent on it, one that needs you,
+  one that is ready, or one that has gone wrong. The Tasks panel is the overall
+  view. "+" makes a new space, and there is no footer. An Agents pane below lists
+  the live agents; a finished one stays for 30 minutes. Picking a space filters
+  Tasks and the Graph.
+- **The coordinator is the space's Assistant chat tab**, not a terminal tab.
+
+Not yet true in the code: `layouts/shprd.json` on `integration/m11` still has a
+`sidebar-footer` block (the `shprd-chrome` mod's three rows). Removing it is the
+decision; it has not landed.
