@@ -81,6 +81,27 @@ test("the layout keeps the block the mod selects", () => {
   );
 });
 
+test("the graph is a child of the panel body, not the side column's tail", () => {
+  const find = (node, id) =>
+    node && typeof node === "object"
+      ? node.id === id
+        ? node
+        : (node.children ?? []).map((child) => find(child, id)).find(Boolean)
+      : undefined;
+  const body = find(layout, "panel-body");
+  assert.deepEqual(
+    body.children.map((child) => child.id),
+    ["files", "changes", "tasks", GRAPH_STACK],
+  );
+  const panel = find(layout, "panel");
+  assert.deepEqual(
+    panel.children.map((child) => child.id),
+    ["panel-body"],
+    "nothing under the body: the Tasks card reaches the status bar",
+  );
+  assert.equal(find(layout, GRAPH_STACK).size, undefined, "the stack no longer takes 300 px");
+});
+
 test("a block Herdr pruned says how to put it back", () => {
   const seen = graphView({ graph: ready, service: { port: 1 }, blockGone: true });
   assert.equal(seen.kind, "stop");

@@ -3,7 +3,7 @@
 // M11.4–M11.7 fill the screens; this task ships their placeholders, the
 // navigation, and the frame the screens will live in.
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 import type { ApiClient } from "../api/client";
 import { SCREENS, SCREEN_LABEL, type Screen } from "../layout/layout";
@@ -12,18 +12,23 @@ import { AgentScreen } from "../agent/AgentScreen";
 import { COORDINATOR } from "../agent/chatModel";
 import { GraphScreen } from "../graph/GraphScreen";
 import { SettingsDialog } from "../settings/SettingsDialog";
+import { AcceptDialog } from "../tasks/AcceptDialog";
+import { canReview } from "../tasks/accept";
+import { NEED, ref, taskById } from "../tasks/board";
+import { TaskThread } from "../tasks/TaskThread";
+import { TasksScreen } from "../tasks/TasksScreen";
+import type { Toast } from "../tasks/toasts";
+import { ToastStack } from "../tasks/ToastStack";
+import { useBoard } from "../tasks/useBoard";
 import { Login } from "./Login";
 
 /** What one screen's placeholder says: which milestone fills it. */
-const PLACEHOLDER: Record<Screen, { lead: string; note: string }> = {
-  tasks: {
-    lead: "The board lands here.",
-    note: "M11.4: every task with its derived status, the accept card, and the needs-you cards.",
-  },
+const PLACEHOLDER: Record<Exclude<Screen, "tasks">, { lead: string; note: string }> = {
   graph: {
     lead: "The graph lands here.",
     note: "M11.5: the run document the dagr block draws, as a graph.",
-  },  terminal: {
+  },
+  terminal: {
     lead: "The terminal lands here.",
     note: "M11.6: watch a task's agent by default, type on demand.",
   },
@@ -61,7 +66,13 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
   const [agentSpace, setAgentSpace] = useState<string>(COORDINATOR);
   const screen = selected === "settings" ? under : selected;
   const settingsOpen = selected === "settings";
-  const placeholder = PLACEHOLDER[screen];
+  const placeholder = screen === "tasks" ? null : PLACEHOLDER[screen];
+  const board = useBoard(client);
+  // The task whose thread is open, and the one whose Accept card is.
+  const [thread, setThread] = useState<string | null>(null);
+  const [accepting, setAccepting] = useState<string | null>(null);
+  // Counts up each time the password was entered again, so a refused verb is sent again.
+  const [reauthTick, setReauthTick] = useState(0);
 
   function setScreen(next: Screen) {
     if (next === "settings") {
@@ -70,6 +81,27 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
       }
     }
     setSelected(next);
+  }
+
+  const openThread = useCallback((id: string) => {
+    setSelected("tasks");
+    setThread(id);
+  }, []);
+
+  // A tap on a toast: the card for a task ready to review, the thread for one
+  // that needs the person, the list for anything else.
+  function openToast(toast: Toast) {
+    const task = taskById(board.state, toast.task);
+    if (task && canReview(task)) {
+      setSelected("tasks");
+      setThread(task.id);
+      setAccepting(task.id);
+    } else if (task && toast.level === "warning") {
+      openThread(task.id);
+    } else {
+      setSelected("tasks");
+      setThread(null);
+    }
   }
 
   function signOut() {
@@ -110,13 +142,25 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
             space={agentSpace}
             onSpace={setAgentSpace}
           />
+        ) : screen === "tasks" ? (
+          thread !== null && layout !== "phone" ? (
+            <TaskThread
+              client={client}
+              board={board}
+              taskId={thread}
+              onBack={() => setThread(null)}
+              onReview={setAccepting}
+            />
+          ) : (
+            <TasksScreen client={client} board={board} onOpen={openThread} onReview={setAccepting} />
+          )
         ) : (
           <section className="card placeholder" data-screen={screen}>
             <p className="placeholder-kicker">{SCREEN_LABEL[screen]}</p>
             <h1 id="screen-heading" className="placeholder-lead">
-              {placeholder.lead}
+              {placeholder?.lead}
             </h1>
-            <p className="placeholder-note">{placeholder.note}</p>
+            <p className="placeholder-note">{placeholder?.note}</p>
             <p className="placeholder-empty">
               Nothing to show yet — this build has no run to draw here.
             </p>
@@ -128,7 +172,7 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
         <aside className="side" aria-label="Needs you">
           <section className="card side-card">
             <h2 className="side-title">Needs you</h2>
-            <p className="side-note">Asks and blockers land here in M11.4.</p>
+            <NeedsYou board={board} onOpen={openThread} />
           </section>
           <section className="card side-card">
             <h2 className="side-title">Chat</h2>
@@ -151,6 +195,37 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
         </nav>
       ) : null}
 
+      {/* On a phone a task opens as a full-screen sheet over the board. */}
+      {screen === "tasks" && thread !== null && layout === "phone" ? (
+        <div className="thread-sheet" role="dialog" aria-modal="true" aria-label="Task">
+          <TaskThread
+            client={client}
+            board={board}
+            taskId={thread}
+            onBack={() => setThread(null)}
+            onReview={setAccepting}
+          />
+        </div>
+      ) : null}
+
+      {accepting !== null ? (
+        <AcceptDialog
+          client={client}
+          board={board}
+          taskId={accepting}
+          device={layout}
+          reauthTick={reauthTick}
+          onClose={() => setAccepting(null)}
+        />
+      ) : null}
+
+      <ToastStack
+        toasts={board.toasts}
+        dismissed={board.dismissed}
+        onDismiss={board.dismissToast}
+        onOpen={openToast}
+      />
+
       {settingsOpen ? (
         <SettingsDialog
           client={client}
@@ -161,7 +236,14 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
 
       {reauth ? (
         <div className="overlay" role="dialog" aria-modal="true" aria-label="Enter your password again">
-          <Login client={client} reauth onSignedIn={onReauthClose} />
+          <Login
+            client={client}
+            reauth
+            onSignedIn={() => {
+              onReauthClose();
+              setReauthTick((n) => n + 1);
+            }}
+          />
         </div>
       ) : null}
     </div>
@@ -190,6 +272,28 @@ function ScreenList({
           >
             <span className="screen-glyph" aria-hidden="true" />
             <span className="screen-label">{SCREEN_LABEL[name]}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The tasks that need the person, as the desktop's needs-you list shows them. */
+function NeedsYou({ board, onOpen }: { board: ReturnType<typeof useBoard>; onOpen: (id: string) => void }) {
+  const waiting = (board.state?.tasks ?? []).filter((task) => task.derived.status === "needs_you");
+  if (waiting.length === 0) {
+    return <p className="side-note">Nothing needs you right now.</p>;
+  }
+  return (
+    <ul className="needs-list">
+      {waiting.map((task) => (
+        <li key={task.id}>
+          <button type="button" onClick={() => onOpen(task.id)}>
+            <span className="mono dim">{ref(task.id)}</span>
+            <span className="needs-says">
+              {task.derived.reason ?? (task.derived.need ? NEED[task.derived.need] : task.title)}
+            </span>
           </button>
         </li>
       ))}
