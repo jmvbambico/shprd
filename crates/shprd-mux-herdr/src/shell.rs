@@ -100,8 +100,14 @@ pub(crate) fn typed_line(
         .mode(0o600)
         .open(&path)
         .map_err(|error| MuxError::command("run", format!("writing the launch script: {error}")))?;
-    file.write_all(format!("rm -f -- \"$0\"\n{full}\n").as_bytes())
-        .map_err(|error| MuxError::command("run", format!("writing the launch script: {error}")))?;
+    // `File` is unbuffered, so the bytes are the kernel's once `write_all` returns.
+    if let Err(error) = file.write_all(format!("rm -f -- \"$0\"\n{full}\n").as_bytes()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(MuxError::command(
+            "run",
+            format!("writing the launch script: {error}"),
+        ));
+    }
     Ok(format!("exec sh {}", quote(&path.display().to_string())?))
 }
 
