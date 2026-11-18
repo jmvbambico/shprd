@@ -739,7 +739,10 @@ fn assert_upgraded(fixture: &Fixture) {
     );
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     let thread = find_node(&mut probe, "tasks-thread-body").expect("the thread's body");
-    assert_eq!(thread["active"], "tasks-thread-term", "the thread opens on the terminal");
+    assert_eq!(
+        thread["active"], "tasks-thread-term",
+        "the thread opens on the terminal"
+    );
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     let panel = find_node(&mut probe, "panel-body").expect("the side panel");
     let ids: Vec<&str> = panel["children"]
