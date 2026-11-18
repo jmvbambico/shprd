@@ -37,7 +37,8 @@
 //! types, reads or asks the state of an agent (`write`, `read`, `agent_state`,
 //! `wait`) is the existing pane verbs. The tab id is a *handle*:
 //! [`Host::close_tab`](crate::Host::close_tab) on it **stops the agent** (a
-//! terminal kill on Herdr desktop), which is how landing, dropping, a review's
+//! terminal kill on Herdr desktop; the core keeps the finished record, so the
+//! agent stays listed as finished and its output stays readable), which is how landing, dropping, a review's
 //! verdict and a run's end already stop agents through their `.tab` records, with
 //! no cascade through parentage relied on. [`Host::list_agents`](crate::Host::list_agents)
 //! lists them (from the host's own fold, by label) so a caller can find a handle

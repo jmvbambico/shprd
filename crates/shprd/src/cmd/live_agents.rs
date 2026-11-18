@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use shprd_mux::{AgentRole, AgentState, Host, PaneId};
 use shprd_server::{LiveAgentRow, LiveSource};
 
-/// How long a finished agent stays listed.
+/// How long a finished agent stays listed: 30 minutes, the person's rule (Q4).
 pub(crate) const FINISHED_FOR_MS: u64 = 30 * 60 * 1000;
 
 /// What the cache remembers about one agent between two lists.
@@ -74,11 +74,20 @@ impl HostLive {
 
     /// What the host lists right now, as rows without a clock.
     fn current(&self) -> Vec<LiveAgentRow> {
+        let now = (self.now)();
         let mut rows: Vec<LiveAgentRow> = self
             .host
             .list_agents()
             .unwrap_or_default()
             .into_iter()
+            // The core keeps a finished terminal's record; the pane lists it for
+            // as long as the rest do, then lets it go.
+            .filter(|agent| {
+                agent.live
+                    || agent
+                        .ended_ms
+                        .is_none_or(|ended| now.saturating_sub(ended) < FINISHED_FOR_MS)
+            })
             .map(|agent| {
                 let state = if agent.live {
                     state_word(agent.state)

@@ -221,16 +221,19 @@ fn a_headless_worker_leaves_no_tab_on_a_private_window() {
     assert_eq!(ours.program, "sh");
     assert!(ours.live);
 
-    // Stopping the handle ends the terminal; the coordinator is untouched.
+    // Stopping the handle ends the program. The core keeps a finished terminal's
+    // record, so the agent is still listed — as finished, with its output still
+    // readable, which is what the Agents pane shows for a while — and the
+    // coordinator is untouched.
     host.close_tab(&worker.id).expect("the handle stops it");
-    assert!(
-        host.list_agents()
-            .expect("agents")
-            .iter()
-            .all(|agent| agent.tab.root_pane != worker.root_pane),
-        "the worker is gone"
-    );
-    assert!(host.read(&worker.root_pane, 5).is_err());
+    let after = host.list_agents().expect("agents");
+    let stopped = after
+        .iter()
+        .find(|agent| agent.tab.root_pane == worker.root_pane)
+        .unwrap_or_else(|| panic!("a finished agent stays listed: {after:?}"));
+    assert!(!stopped.live, "the worker's program ended");
+    assert!(stopped.ended_ms.is_some());
+    assert!(host.read(&worker.root_pane, 5).is_ok());
     assert!(host.read(&coordinator.root_pane, 5).is_ok());
 }
 

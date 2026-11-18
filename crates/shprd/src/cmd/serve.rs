@@ -85,7 +85,12 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         None => prepare_space(host.as_ref(), &ctx.root, |prepared| {
             let data = crate::cmd::roster::resolve_data_dir();
             let env = crate::cmd::spawn::build_repo_env(ctx, Some(&home), &data)?;
-            crate::cmd::spawn::ensure_coordinator(host.as_ref(), &env, prepared)
+            let delivering = host.clone();
+            crate::cmd::spawn::ensure_coordinator(host.as_ref(), &env, prepared, move |pending| {
+                // The wait for the program to take a turn runs beside the
+                // service: the banner and the API do not wait for a program.
+                std::thread::spawn(move || pending.deliver(delivering.as_ref()));
+            })
         }),
     };
     if let SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) = &workspace {

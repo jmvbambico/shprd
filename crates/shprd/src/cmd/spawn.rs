@@ -2095,6 +2095,7 @@ pub(crate) fn ensure_coordinator(
     mux: &dyn Host,
     env: &SpawnEnv<'_>,
     prepared: &PreparedSpace,
+    defer: impl FnOnce(PendingPrompt),
 ) -> Result<CoordinatorStart, CliError> {
     let space = &prepared.space;
     if let Some(pane) = recorded_coordinator_pane(&env.home, mux, space) {
@@ -2166,20 +2167,52 @@ pub(crate) fn ensure_coordinator(
         }
     }
     // A program with no system-prompt flag is given its words as its first turn,
-    // once it is ready; one that took them as an argument is left to wait.
+    // once it is ready; one that took them as an argument is left to wait. The
+    // wait for a program to become ready can be long, so it is the caller's to
+    // run beside the service rather than in front of it.
     if !brief_in_args {
+        defer(PendingPrompt {
+            pane: tab.root_pane.clone(),
+            text: prompt,
+            pick,
+            wait: env.ready_wait,
+        });
+    }
+    Ok(CoordinatorStart::Started(tab.root_pane))
+}
+
+/// The words a freshly started coordinator is still to be given, once it is
+/// ready for them.
+///
+/// Starting the agent is quick and waiting for it to accept a turn is not (a
+/// program the host cannot hear is waited for in full), so
+/// [`ensure_coordinator`] hands this to its caller to deliver beside the service.
+pub(crate) struct PendingPrompt {
+    /// The coordinator's pane.
+    pane: PaneId,
+    /// The role's words.
+    text: String,
+    /// The program, for what says it is ready.
+    pick: Pick,
+    /// How long to wait for it.
+    wait: Duration,
+}
+
+impl PendingPrompt {
+    /// Waits for the program to be ready and types the words in; a prompt that
+    /// does not arrive is a warning, never a failed coordinator.
+    pub(crate) fn deliver(self, mux: &dyn Host) {
         let delivery = super::deliver::deliver_brief(
             mux,
-            &tab.root_pane,
-            &prompt,
-            &pick.readiness(),
-            env.ready_wait,
+            &self.pane,
+            &self.text,
+            &self.pick.readiness(),
+            self.wait,
         );
         if let Some(reason) = delivery.reason() {
             eprintln!("warning: the coordinator's prompt was not delivered: {reason}");
         }
     }
-    Ok(CoordinatorStart::Started(tab.root_pane))
 }
 
 /// The settings role the repository's coordinator agent runs as.
@@ -3290,7 +3323,8 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(starter.len(), 1, "the host's starter shell");
 
-        let started = ensure_coordinator(&mux, &env, &first).unwrap_or_else(|err| panic!("{err}"));
+        let started = ensure_coordinator(&mux, &env, &first, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
         let CoordinatorStart::Started(pane) = started else {
             panic!("a coordinator is started, not {started:?}");
         };
@@ -3309,7 +3343,8 @@ project_dirs = []
             .iter()
             .filter(|call| matches!(call, Call::SpawnAgent(..)))
             .count();
-        let reused = ensure_coordinator(&mux, &env, &again).unwrap_or_else(|err| panic!("{err}"));
+        let reused = ensure_coordinator(&mux, &env, &again, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(reused, CoordinatorStart::Running(pane.clone()));
         let calls_after = mux
             .calls()
@@ -3320,7 +3355,8 @@ project_dirs = []
 
         // The coordinator ended: the next start makes a new one.
         mux.set_state(&pane, AgentState::Done);
-        let replaced = ensure_coordinator(&mux, &env, &again).unwrap_or_else(|err| panic!("{err}"));
+        let replaced = ensure_coordinator(&mux, &env, &again, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
         assert!(
             matches!(replaced, CoordinatorStart::Started(_)),
             "{replaced:?}"
