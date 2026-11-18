@@ -444,3 +444,39 @@ async fn x_forwarded_for_never_changes_who_the_peer_is() {
         "{statuses:?}"
     );
 }
+
+#[tokio::test]
+async fn a_login_through_the_tunnel_gets_the_secure_cookie_and_one_on_loopback_does_not() {
+    let fixture = Fixture::new().with_password();
+    fixture
+        .send(fixture.token_post("/api/tunnels/start", json!({"provider": "cloudflared"})))
+        .await;
+    let login = |host: &str| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/login")
+            .header(header::HOST, host)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"password": PASSWORD}).to_string()))
+            .unwrap()
+    };
+    // Every tunnel serves https at its edge whatever the loopback leg is, so a
+    // request under the tunnel's host gets the `__Host-` and `Secure` form.
+    let (status, _, cookie) = fixture.send(login(QUICK)).await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = cookie.unwrap();
+    assert!(cookie.starts_with("__Host-shprd="), "{cookie}");
+    assert!(cookie.contains("; Secure"), "{cookie}");
+    assert!(
+        cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"),
+        "{cookie}"
+    );
+    // On loopback http a browser would drop a Secure cookie, so it is plain.
+    let (_, _, cookie) = fixture.send(login(HOST)).await;
+    let cookie = cookie.unwrap();
+    assert!(cookie.starts_with("shprd="), "{cookie}");
+    assert!(!cookie.contains("Secure"), "{cookie}");
+    fixture
+        .send(fixture.token_post("/api/tunnels/stop", json!({})))
+        .await;
+}
