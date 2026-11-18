@@ -11,7 +11,7 @@
 # starts: `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_ENV`, `HERDR_WORKSPACE_ID`,
 # `HERDR_TAB_ID`, `HC_SESSION` and more. A `shprd serve` started from there drives
 # **the person's own session**: it prepares a workspace labelled `shprd · <repo>`
-# in the window they are looking at, and its graph block starts a terminal in
+# in the window they are looking at, and it used to start a graph terminal in
 # their core. That is what happened twice in one day (SHP-66's live login check,
 # SHP-70's screenshot run).
 #

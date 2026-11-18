@@ -112,21 +112,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // API reaches the same dagr projection a CLI write does.
     let write_ctx = ctx.clone().with_home(Some(home.clone()));
     config.after_write = Some(after_write(&write_ctx));
-    // Where the graph's program is, found once here: the window's graph block
-    // asks the service rather than probing this machine itself, and the answer
-    // is the same one the projection is checked with.
+    // Where the graph's program is, found once here: the web app's graph reads
+    // it from the service (`GET /api/graph`), and the answer is the same one the
+    // projection is checked with. The desktop draws no graph terminal any more.
     let dagr = crate::cmd::dagr::dagr(&write_ctx);
-    // The window's graph block is a layout terminal block, and Herdr prunes such
-    // a block when its terminal does not exist when the layout loads. The service
-    // is up before the window is, so it starts the terminal; the mod in the
-    // window keeps its own start as a fallback (M10.7).
-    //
-    // Not when the guard refused the host: a terminal in the person's core is
-    // the same leak as a space in their window, and the banner has already said
-    // why neither was made.
-    if leakage.is_none() {
-        crate::cmd::graph::ensure(&resolution, &dagr, &ctx.root);
-    }
     config.dagr = Some(dagr);
     config.home = Some(home.clone());
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(

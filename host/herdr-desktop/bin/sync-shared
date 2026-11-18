@@ -23,11 +23,11 @@ check=0
 # module:space-separated mods that import it under `./lib/<module>`
 mods_for() {
   case "$1" in
-    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-graph shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-prompt shprd-jump shprd-keybinds shprd-agents shprd-newspace shprd-task-view" ;;
-    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-graph shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-prompt shprd-jump shprd-keybinds shprd-agents shprd-task-view" ;;
-    board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-graph shprd-chat shprd-tabs shprd-pane shprd-spaces shprd-toasts shprd-jump shprd-agents shprd-task-view" ;;
-    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-graph shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-jump shprd-agents shprd-task-view" ;;
-    watch.js) echo "shprd-tasks shprd-chat shprd-status shprd-graph shprd-spaces shprd-toasts shprd-accept shprd-task-pr shprd-agents shprd-task-view" ;;
+    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-prompt shprd-jump shprd-keybinds shprd-agents shprd-newspace shprd-task-view" ;;
+    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-prompt shprd-jump shprd-keybinds shprd-agents shprd-task-view" ;;
+    board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-chat shprd-tabs shprd-pane shprd-spaces shprd-toasts shprd-jump shprd-agents shprd-task-view" ;;
+    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-settings shprd-chat shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-jump shprd-agents shprd-task-view" ;;
+    watch.js) echo "shprd-tasks shprd-chat shprd-status shprd-spaces shprd-toasts shprd-accept shprd-task-pr shprd-agents shprd-task-view" ;;
     spaces.js) echo "shprd-spaces shprd-toasts shprd-jump shprd-tasks shprd-accept shprd-chat shprd-pane" ;;
     newspace.js) echo "shprd-newspace" ;;
     tree.js) echo "shprd-spaces shprd-agents shprd-tasks shprd-accept shprd-toasts shprd-task-view" ;;

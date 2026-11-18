@@ -41,9 +41,6 @@ mods/shprd-task-view/   the thread's read-only Terminal stream (the fallback whe
 mods/shprd-task-pr/     the task's pull request: state, #n, size, branches, links (M10.5)
 mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
                         a dialog since M11 fix S)
-mods/shprd-graph/       (unused in the prototype layout: the Graph is a view of the Tasks panel)
-                        the graph: dagr in a terminal block, or the word on
-                        where dagr is          (M10.7)
 mods/shprd-chat/        the chat: bubbles, markdown, "Show more", the composer and
                         the question / permission / plan cards in the timeline.
                         The task thread's default view, and the pane a Chat │
@@ -102,8 +99,8 @@ one in whichever checkout the caller happens to stand in. The order is:
 ### A file Herdr pruned
 
 Herdr resolves a layout terminal block by name when the layout loads and **writes
-the layout file back without the block** when no such terminal exists (see "The
-graph block" below). That is the app's edit, not the person's. The installer owns
+the layout file back without the block** when no such terminal exists (an older build's
+graph block did this). That is the app's edit, not the person's. The installer owns
 the file its manifest still lists, so it recognises a prune — the two documents
 are compared with their terminal blocks removed — and puts its own file back:
 
@@ -168,42 +165,24 @@ prompt — the box underneath. Writes happen where they are made (a pick, a swit
 a step, leaving a box a moment after typing stops): there is no Save button, and
 the service, never the mod, is the one writer.
 
-## The graph block
+## The Graph is a view of the Tasks panel
 
-The side panel's last row is the run's graph: a stack with a terminal block
-running `dagr view <repo>/.dagr/run.json`, and the note (`mods/shprd-graph`) that
-explains it when there is nothing to draw. dagr draws the run's tasks, attempts and
-gates, and follows the file itself — the service rewrites it atomically after
-every ledger write (`crates/shprd-server/src/service.rs`'s after-write step,
-`shprd dagr sync`), so nothing relaunches it per write. The note is also what a
-person sees when there is no dagr: the message names `graph.dagr`, the setting
-that fixes it (`[graph] dagr = "/path/to/dagr"`, or
-`shprd settings set graph.dagr /path/to/dagr`). `shprd doctor` says which probe
-found it — the setting, `PATH` or the `herdr-dagr` plugin's checkout.
+There is no graph panel, mod or terminal. The Tasks panel's header carries a
+**Tasks │ Graph** switch (the look of Chat │ Terminal), remembered per panel; `G`
+in the focused panel toggles it. The Graph view is drawn natively by
+`mods/shprd-tasks` from the board it already has (`graphRows` in `mods/lib/tree.js`):
+the live tasks grouped by phase, each hung under its last dependency, with a
+right-aligned word per task (`done`, `working`, `needs you`, `ready`,
+`waits SHPR-23`). A node opens the task's thread on a click and carries the same
+act pill as the list's row, and the picked space narrows it as it narrows the list.
+`Ctrl+Shift+A` shows the side panel on Tasks.
 
-`layouts/shprd.json` holds the block: the stack `graph` with `graph-note` (the
-mod) and `graph-term` (`{ "terminal": "shprd-graph" }`). The terminal is started
-**before the window loads that layout**, by `shprd serve`
-(`crates/shprd/src/cmd/graph.rs`): Herdr resolves a layout terminal block by name
-when the layout loads and **prunes the block from the file** when no such terminal
-exists (measured), so a block that had to start its own terminal would be gone
-before it could. The service is up before the window is, so it does it there —
-`hc run --bg`, one `shprd-graph` terminal per session, reusing a live one that
-already draws this run and forgetting finished ones that would shadow the name.
-The terminal runs a shell loop that waits for the document and restarts
-`dagr view` when it exits (herdr-core keeps a terminal's address for its
-lifetime, so the block's binding stays right). It is started only when the host
-probe found a Herdr desktop; a machine on the herdr TUI has no window to draw a
-block in, and asking a core anything starts one.
-
-The mod is the note and the fallback. It reads `GET /api/graph` for where dagr is
-and what to run, keeps its own `hc run` in case the service did not start one (a
-service started before the window's core, a terminal someone ended), and selects
-the terminal's child once it is live — a mod may not edit a layout's structure on
-this build, so it only ever selects a node the layout already holds. If Herdr
-pruned the block anyway (a window opened on a fresh install with no service
-running), the note says so and gives the recovery: `shprd install herdr-desktop`,
-which puts its own layout back (see "A file Herdr pruned" above).
+Nothing runs dagr in the window any more, so the layout holds no terminal block for
+Herdr to prune, and `shprd serve` starts no terminal. `GET /api/graph` and the
+`.dagr/run.json` projection stay (the web app reads them; `graph.dagr` and
+`shprd doctor`'s Graph section still say where dagr is). An install over an older
+desktop takes back the `shprd-graph` mod's files like any mod this build no longer
+ships (see "Installing from anywhere").
 
 ## A private window for a test or a gate
 
