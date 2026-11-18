@@ -798,8 +798,16 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
     // The host is asked off the runtime: a host call blocks on its own.
     let live = state.live.clone();
-    let rows = blocking(move || live.rows()).await?;
-    crate::live::decorate(&mut snapshot, &state.repo, rows);
+    let repo = state.repo.clone();
+    let (rows, host_space, branch) = blocking(move || {
+        let branch = shprd_git::git::Git::new(&repo)
+            .current_branch()
+            .ok()
+            .flatten();
+        (live.rows(), live.space(), branch)
+    })
+    .await?;
+    crate::live::decorate(&mut snapshot, &state.repo, rows, host_space, branch);
     Ok(Json(snapshot))
 }
 

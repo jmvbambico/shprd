@@ -15,7 +15,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use shprd_core::event::Actor;
-use shprd_server::{App, LiveAgentRow, LiveSource};
+use shprd_server::{App, HostSpace, LiveAgentRow, LiveSource};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -26,6 +26,13 @@ const PORT: u16 = 18_097;
 struct Two;
 
 impl LiveSource for Two {
+    fn space(&self) -> Option<HostSpace> {
+        Some(HostSpace {
+            id: "w-7".into(),
+            name: "shprd · repo".into(),
+        })
+    }
+
     fn agents(&self) -> Vec<LiveAgentRow> {
         let row = |id: &str, role: &str, state: &str, ended: Option<u64>| LiveAgentRow {
             id: id.into(),
@@ -60,6 +67,28 @@ impl Fixture {
         let state = TempDir::new().expect("state");
         let repo = TempDir::new().expect("repo");
         fs::create_dir_all(repo.path().join(".shprd")).expect("shprd dir");
+        for args in [
+            &["init", "-q", "-b", "feature/x"][..],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git")
+                .success();
+            assert!(ok, "git {args:?}");
+        }
         let mut app =
             App::prepare(repo.path(), PORT, &Actor::Human, state.path(), None).expect("prepare");
         if let Some(source) = source {
@@ -110,6 +139,15 @@ async fn the_state_lists_the_space_and_the_agents_with_their_terminals() {
     let spaces = state["spaces"].as_array().expect("spaces");
     assert_eq!(spaces.len(), 1);
     let space = spaces[0]["id"].as_str().expect("space id");
+    assert_eq!(
+        spaces[0]["herdr_id"], "w-7",
+        "Herdr's own space id, not the synthetic one"
+    );
+    assert_eq!(spaces[0]["herdr_name"], "shprd · repo");
+    assert_eq!(
+        spaces[0]["branch"], "feature/x",
+        "the repo's current branch"
+    );
     let agents = state["live_agents"].as_array().expect("live_agents");
     assert_eq!(agents.len(), 2);
     assert_eq!(agents[0]["role"], "worker");

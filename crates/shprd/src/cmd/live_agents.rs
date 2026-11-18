@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use shprd_mux::{AgentRole, AgentState, Host, PaneId};
-use shprd_server::{LiveAgentRow, LiveSource};
+use shprd_server::{HostSpace, LiveAgentRow, LiveSource};
 
 /// How long a finished agent stays listed: 30 minutes, the person's rule (Q4).
 pub(crate) const FINISHED_FOR_MS: u64 = 30 * 60 * 1000;
@@ -38,6 +38,8 @@ pub(crate) struct HostLive {
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Every agent seen so far, by id.
     seen: Mutex<BTreeMap<String, Seen>>,
+    /// The host's space this service made or reused for the repository.
+    space: Option<HostSpace>,
 }
 
 impl HostLive {
@@ -60,7 +62,14 @@ impl HostLive {
             host,
             now,
             seen: Mutex::new(BTreeMap::new()),
+            space: None,
         }
+    }
+
+    /// Names the host's own space for the repository, which `spaces` reports.
+    pub(crate) fn with_space(mut self, space: Option<HostSpace>) -> Self {
+        self.space = space;
+        self
     }
 
     /// The terminal an agent runs in, when it is listed: what a terminal socket
@@ -176,6 +185,10 @@ fn state_word(state: AgentState) -> &'static str {
 }
 
 impl LiveSource for HostLive {
+    fn space(&self) -> Option<HostSpace> {
+        self.space.clone()
+    }
+
     fn agents(&self) -> Vec<LiveAgentRow> {
         let now = (self.now)();
         let Ok(mut seen) = self.seen.lock() else {

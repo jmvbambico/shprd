@@ -93,7 +93,7 @@ pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
 pub use engine::{Engine, Resender};
 pub use error::{ApiReject, ServerError};
 pub use graph::{Dagr, Located, Missing, Origin};
-pub use live::{LiveAgentRow, LiveAgents, LiveSource};
+pub use live::{HostSpace, LiveAgentRow, LiveAgents, LiveSource};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
 pub use service::{

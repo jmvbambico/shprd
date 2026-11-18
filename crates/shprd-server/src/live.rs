@@ -45,8 +45,23 @@ pub struct LiveAgentRow {
     pub since_ms: Option<u64>,
 }
 
+/// The host's own space for a served repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSpace {
+    /// The host's id for it.
+    pub id: String,
+    /// Its real name on the host.
+    pub name: String,
+}
+
 /// The binary's view of the agents the host has.
 pub trait LiveSource: Send + Sync {
+    /// The host's space this service created or reused for its repository, when
+    /// it knows one.
+    fn space(&self) -> Option<HostSpace> {
+        None
+    }
+
     /// Every agent worth showing now: the live ones, a finished agent for 30
     /// minutes after it ended, and the coordinator for as long as its space.
     fn agents(&self) -> Vec<LiveAgentRow>;
@@ -73,6 +88,11 @@ impl LiveAgents {
     /// The source, when one is wired.
     pub fn get(&self) -> Option<&Arc<dyn LiveSource>> {
         self.0.as_ref()
+    }
+
+    /// The host's space for the served repository, when one is wired.
+    pub fn space(&self) -> Option<HostSpace> {
+        self.0.as_ref().and_then(|source| source.space())
     }
 
     /// The agents as the state answer lists them, blocking.
@@ -153,7 +173,13 @@ pub(crate) fn space_id(repo: &Path) -> String {
 
 /// Adds what only the service knows to a snapshot: the space it serves, which
 /// space each task belongs to, and the agents the host lists.
-pub(crate) fn decorate(snapshot: &mut SnapshotDto, repo: &Path, rows: Vec<LiveAgentRow>) {
+pub(crate) fn decorate(
+    snapshot: &mut SnapshotDto,
+    repo: &Path,
+    rows: Vec<LiveAgentRow>,
+    host_space: Option<HostSpace>,
+    git_branch: Option<String>,
+) {
     let id = space_id(repo);
     let name = repo
         .file_name()
@@ -163,11 +189,17 @@ pub(crate) fn decorate(snapshot: &mut SnapshotDto, repo: &Path, rows: Vec<LiveAg
         id: id.clone(),
         name,
         folder: repo.display().to_string(),
-        branch: snapshot
-            .run
-            .as_ref()
-            .map(|run| run.integration_branch.clone())
+        branch: git_branch
+            .filter(|branch| !branch.is_empty())
+            .or_else(|| {
+                snapshot
+                    .run
+                    .as_ref()
+                    .map(|run| run.integration_branch.clone())
+            })
             .unwrap_or_default(),
+        herdr_id: host_space.as_ref().map(|space| space.id.clone()),
+        herdr_name: host_space.map(|space| space.name),
     }];
     for task in &mut snapshot.tasks {
         task.space = Some(id.clone());

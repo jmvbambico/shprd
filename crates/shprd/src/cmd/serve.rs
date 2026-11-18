@@ -151,11 +151,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // The agents the host lists, headless: `live_agents` on the state answer, the
     // output and attach routes, and the terminal socket's `agent:<id>` space all
     // read this one list, so a client can only reach an agent that was listed.
-    let live = Arc::new(crate::cmd::live_agents::HostLive::new(
-        ctx.root.clone(),
-        home.clone(),
-        host.clone(),
-    ));
+    let live = Arc::new(
+        crate::cmd::live_agents::HostLive::new(ctx.root.clone(), home.clone(), host.clone())
+            .with_space(host_space(host.as_ref(), &workspace)),
+    );
     config.live = shprd_server::LiveAgents::with(live.clone());
     config.terminal = shprd_server::TerminalPort::with(Arc::new(HostTerminal {
         repo: ctx.root.clone(),
@@ -406,6 +405,19 @@ impl shprd_server::AgentOpener for HostAgents {
             tab: opened.tab,
         })
     }
+}
+
+/// The host's real space for the repository, by the label the service
+/// created or reused, so the state can name Herdr's own id.
+fn host_space(host: &dyn Host, notice: &SpaceNotice) -> Option<shprd_server::HostSpace> {
+    let (SpaceNotice::Created(label, _) | SpaceNotice::Reused(label, _)) = notice else {
+        return None;
+    };
+    let found = host.find_space(label).ok().flatten()?;
+    Some(shprd_server::HostSpace {
+        id: found.id.as_str().to_string(),
+        name: found.name,
+    })
 }
 
 /// What the service did about the repository's own space when it started.
