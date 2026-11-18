@@ -115,7 +115,8 @@ pub struct HarnessSpec {
 /// One question the CLI asks its own user and blocks on until they answer.
 ///
 /// Claude Code asks whether a folder is trusted the first time it starts in
-/// it; shprd cannot answer that, so it only reports that the agent is waiting.
+/// it. A prompt that names an `answer` is answered by shprd for an agent it
+/// launched in its own worktree; any other is reported as the agent waiting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockingPrompt {
@@ -123,6 +124,12 @@ pub struct BlockingPrompt {
     pub name: String,
     /// Case-insensitive screen substring that means the prompt is showing.
     pub pattern: String,
+    /// The key that answers it safely, when shprd may press it for a person:
+    /// `enter` accepts the highlighted choice. Absent means the prompt is only
+    /// reported, never answered. It is used on the pane of an agent shprd
+    /// itself launched in its own worktree, never on the orchestrator's pane.
+    #[serde(default)]
+    pub answer: Option<String>,
 }
 
 impl HarnessSpec {

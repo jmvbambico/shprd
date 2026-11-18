@@ -96,11 +96,20 @@ impl ReviewEnv<'_> {
         }
         Ok(ReviewEnv {
             spawn,
-            reviews_dir: home.join(".shprd").join("reviews"),
+            reviews_dir: real_dir(&home).join(".shprd").join("reviews"),
             reviewer,
             brief_retry_wait: BRIEF_RETRY_WAIT,
         })
     }
+}
+
+/// `dir` with its symlinks resolved, or `dir` itself when it cannot be.
+///
+/// A packet's path is handed to a reviewer that reads it from inside a sandbox,
+/// and Codex's refuses a path that goes through a symlink (macOS's `/tmp` and
+/// `/var` are both links), so the folder is named by where it really is.
+pub(crate) fn real_dir(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// What the caller asked for.
@@ -1337,6 +1346,19 @@ pub fn review_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    #[test]
+    fn a_packet_folder_is_named_by_where_it_really_is() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(real_dir(&link), real.canonicalize().unwrap());
+        // A folder that is not there yet is left as it was named.
+        let missing = dir.path().join("missing");
+        assert_eq!(real_dir(&missing), missing);
+    }
 
     use std::collections::BTreeMap;
     use std::process::Command;
