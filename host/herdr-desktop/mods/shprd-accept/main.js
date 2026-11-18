@@ -55,6 +55,8 @@ import { followChanges } from "./lib/watch.js";
 
 /** How often the card reads the board when the change file says nothing. */
 const FLOOR_MS = 4000;
+/** How old the branch's changes may be before they are read again, ms. */
+const CHANGES_MS = 20_000;
 /** How long a merge policy is trusted before it is asked for again, ms. */
 const POLICY_MS = 60_000;
 
@@ -203,7 +205,10 @@ export default class Accept extends View {
     // An agent report or a status change is the log moving: the branch may have
     // new commits, so the read is made again (and not on every wake-up besides).
     const key = `${task.id}:${attemptCount}:${task.status}:${task.last_status?.seq ?? 0}`;
-    if (key === this.changesFor) return;
+    // A branch can gain commits with nothing in the log moving, so a read older
+    // than CHANGES_MS is made again even under the same key.
+    if (key === this.changesFor && Date.now() - (this.changesAt ?? 0) < CHANGES_MS) return;
+    this.changesAt = Date.now();
     this.changesFor = key;
     this.changesError = null;
     try {

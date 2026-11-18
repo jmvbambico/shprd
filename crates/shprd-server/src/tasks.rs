@@ -205,12 +205,17 @@ pub(crate) fn changes_in(
         })
         .collect();
     let range = format!("{merge_base}..{branch}");
-    let commit_count = git
+    let counted = git
         .run(&["rev-list", "--count", &range])
-        .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(0);
+        .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?;
+    let commit_count = counted.trim().parse::<u64>().map_err(|_| {
+        git_failure(
+            task_id,
+            &base,
+            &branch,
+            &format!("git counted its commits as {:?}", counted.trim()),
+        )
+    })?;
     let limit = format!("--max-count={COMMITS_LISTED}");
     let commits: Vec<CommitDto> = git
         .run(&["log", &limit, "--format=%h%x09%s", &range])
