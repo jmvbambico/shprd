@@ -1439,7 +1439,7 @@ input {
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--h-muted);
-  font-size: var(--text-id);
+  font-size: var(--text-body);
   cursor: pointer;
 }
 
@@ -1882,4 +1882,9 @@ textarea.input {
   .choice {
     min-height: 40px;
   }
+}
+
+.rsection > .button {
+  align-self: flex-start;
+  padding: 0 16px;
 }

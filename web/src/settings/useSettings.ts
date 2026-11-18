@@ -105,29 +105,41 @@ export function useSettings(client: ApiClient): SettingsState {
     }, SAVED_MS);
   }, []);
 
+  // The three reads are independent on purpose: the roster asks each program
+  // for its models and can take seconds, and the settings must not wait for it.
   const refresh = useCallback(async () => {
-    try {
-      const [nextSettings, nextRoster, nextPrompts] = await Promise.all([
-        client.settings(),
-        client.roster(),
-        client.prompts(),
-      ]);
-      if (!alive.current) {
-        return;
-      }
-      // A read that raced a write and finished after it carries the old words;
-      // while a write is queued the write's own answer is the newer one.
-      if (pending.current === 0) {
-        setSettings(nextSettings);
-      }
-      setRoster(nextRoster);
-      setPrompts(nextPrompts);
-      setFailure(null);
-    } catch (error) {
-      if (alive.current) {
-        setFailure(reason(error));
-      }
-    }
+    const reads = [
+      client.settings().then((next) => {
+        if (!alive.current) {
+          return;
+        }
+        // A read that raced a write and finished after it carries the old words;
+        // while a write is queued the write's own answer is the newer one.
+        if (pending.current === 0) {
+          setSettings(next);
+        }
+        setFailure(null);
+      }).catch((error: unknown) => {
+        if (alive.current) {
+          setFailure(reason(error));
+        }
+      }),
+      client.roster().then((next) => {
+        if (alive.current) {
+          setRoster(next);
+        }
+      }).catch(() => {
+        // Without the roster the pickers offer nothing; the settings still show.
+      }),
+      client.prompts().then((next) => {
+        if (alive.current) {
+          setPrompts(next);
+        }
+      }).catch(() => {
+        // The Prompts page says it is still reading.
+      }),
+    ];
+    await Promise.all(reads);
   }, [client]);
 
   useEffect(() => {
