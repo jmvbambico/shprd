@@ -669,7 +669,7 @@ export const WORKFLOW = [
   {
     key: "tasks.archive_after",
     title: "Archive done tasks",
-    about: "How long a finished task stays in your lists before the janitor archives it.",
+    about: "How long the janitor keeps an archived task's branch before letting it expire; Off keeps it for ever.",
     kind: "presets",
     choices: ARCHIVE_PRESETS,
   },
