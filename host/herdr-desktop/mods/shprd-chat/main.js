@@ -118,7 +118,17 @@ export default class Chat extends View {
    */
   follow_space() {
     const next = this.wanted();
-    if (next === this.space) return;
+    // Opening the same task again (a needs-you row, a toast) is a new open: it
+    // lands on the card again.
+    const at = this.thread ? (shared("tasks.thread")?.at ?? null) : null;
+    if (next === this.space) {
+      if (at !== this.openedAt) {
+        this.openedAt = at;
+        this.pinned = "card";
+      }
+      return;
+    }
+    this.openedAt = at;
     this.space = next;
     this.forget();
     this.pinned = "card";
