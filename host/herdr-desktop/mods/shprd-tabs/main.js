@@ -39,6 +39,7 @@ import {
   openOverlay,
   panes,
   run,
+  setShared,
   settings,
   spaces,
   theme,
@@ -127,7 +128,12 @@ export default class Tabs extends View {
         if (command === "new-task") openAddTask();
         if (command === "new-space") openNewSpace();
         // Ctrl+Shift+A: the Tasks panel, shown (never toggled away).
-        if (command === "show-tasks") this.showPanel("tasks");
+        if (command === "show-tasks") {
+          this.showPanel("tasks");
+          // On Tasks, not on whichever view the panel last had: the panel's mod
+          // takes this request (it may not be loaded until the stack is shown).
+          setShared("tasks.choice", { menu: "view", key: "tasks", at: Date.now() });
+        }
         // F2 and Shift+F2 (`layout:shprd`): Herdr's own rename keys would rename
         // with its stock box, so inside this layout they come here and open
         // shprd's prompt instead, which keeps shprd's naming.

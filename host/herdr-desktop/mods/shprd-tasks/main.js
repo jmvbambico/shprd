@@ -264,6 +264,7 @@ export default class Tasks extends View {
     if (Date.now() - req.at > 10_000) return;
     if (req.menu === "group") this.setGroup(req.key);
     else if (req.menu === "more") this.pick(req.key);
+    else if (req.menu === "view") this.show(req.key);
   }
 
   /** Picks how the list is grouped, remembered. */
@@ -584,7 +585,14 @@ export default class Tasks extends View {
       .child(div().flex_none().font_family(MONO).text_color(t.foreground).child(ref(row.id)))
       .child(div().flex_1().min_w(0).truncate().text_color(row.waits ? t.dim : t.muted).child(row.title))
       .child(div().flex_none().text_color(word).font_medium().child(row.word))
-      .when(acts.length > 0, (el) => el.child(this.act(t, task, acts[0])));
+      // A fixed slot for the pill, so every row's status word ends at the same edge.
+      .child(
+        h_flex()
+          .w(64)
+          .flex_none()
+          .justify_end()
+          .when(acts.length > 0, (el) => el.child(this.act(t, task, acts[0]))),
+      );
   }
 
   /**
