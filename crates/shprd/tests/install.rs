@@ -570,7 +570,7 @@ fn an_install_with_no_host_tree_installs_the_copy_in_the_binary() {
     assert!(!fixture.app_path("bin").exists());
     // And the manifest owns everything it wrote, so it can take it back.
     let files = fixture.manifest_files();
-    assert_eq!(files.len(), 95, "the same count a checkout installs");
+    assert_eq!(files.len(), 98, "the same count a checkout installs");
 }
 
 #[test]
