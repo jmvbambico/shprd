@@ -57,6 +57,7 @@ export * from "./RosterDto";
 export * from "./RunDto";
 export * from "./SessionDto";
 export * from "./SessionInfoDto";
+export * from "./SessionListDto";
 export * from "./SettingsDto";
 export * from "./SettingsOutcomeDto";
 export * from "./SettingsPutDto";

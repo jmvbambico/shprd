@@ -14,10 +14,13 @@
 
 use axum::Extension;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use shprd_remote::dto::{LoginFailure, LoginReply, LoginRequest, LogoutReply, SessionDto};
+use shprd_remote::dto::{
+    LoginFailure, LoginReply, LoginRequest, LogoutReply, SessionDto, SessionInfoDto, SessionListDto,
+};
+use shprd_remote::session::Revoked;
 use shprd_remote::{Door, GateError, cookie};
 
 use crate::api::AppState;
@@ -122,6 +125,63 @@ pub(crate) async fn session(
     let password_set = state.remote.password().is_set().unwrap_or(true);
     let view: SessionDto = state.remote.view(&door, password_set);
     ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
+}
+
+/// `GET /api/sessions`: every live session, with the one that asked marked.
+///
+/// Only short ids travel: the cookie value is never in an answer, so the list
+/// cannot be replayed into a session.
+pub(crate) async fn sessions(
+    State(state): State<AppState>,
+    Extension(door): Extension<Door>,
+) -> Result<Response, ApiReject> {
+    let now = state.remote.now();
+    let records = state
+        .remote
+        .sessions()
+        .list()
+        .map_err(|err| reject(GateError::Failed(err.to_string())))?;
+    let current = match &door {
+        Door::Session(record) => Some(record.short_id().to_string()),
+        Door::Token => None,
+    };
+    let list = SessionListDto {
+        sessions: records
+            .iter()
+            .map(|record| SessionInfoDto::new(record, now))
+            .collect(),
+        current,
+    };
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(list)).into_response())
+}
+
+/// `DELETE /api/sessions/{id}`: signs one device out, by its short id.
+///
+/// It needs a fresh password through the session door, as every destructive
+/// action does: a stolen cookie must not be able to sign the owner out of their
+/// own devices. An id that names nothing is a `404`, and one that names more
+/// than one session removes none of them.
+pub(crate) async fn revoke(
+    State(state): State<AppState>,
+    Extension(door): Extension<Door>,
+    Path(id): Path<String>,
+) -> Result<Json<LogoutReply>, ApiReject> {
+    state.remote.require_fresh(&door).map_err(reject)?;
+    match state.remote.sessions().revoke_by_id(&id) {
+        Ok(Revoked::Removed(_)) => Ok(Json(LogoutReply {
+            ok: true,
+            revoked: true,
+        })),
+        Ok(Revoked::Nothing) => Err(ApiReject::new(
+            StatusCode::NOT_FOUND,
+            crate::dto::ErrorCode::NotFound,
+            "no session has that id",
+        )),
+        Ok(Revoked::Ambiguous(_)) => Err(ApiReject::bad_request(
+            "that id names more than one session; give more of it",
+        )),
+        Err(err) => Err(reject(GateError::Failed(err.to_string()))),
+    }
 }
 
 /// A refused login: one message, and a `Retry-After` when it was a rate limit.

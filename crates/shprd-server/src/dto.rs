@@ -1561,6 +1561,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<shprd_remote::dto::ViaDto>()?,
         one::<shprd_remote::dto::SessionInfoDto>()?,
         one::<shprd_remote::dto::SessionDto>()?,
+        one::<shprd_remote::dto::SessionListDto>()?,
         one::<shprd_remote::UaClass>()?,
         one::<shprd_remote::dto::TunnelStartRequest>()?,
         one::<shprd_remote::dto::TunnelProviderDto>()?,

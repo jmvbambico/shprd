@@ -9,6 +9,7 @@ import type { ApiClient } from "../api/client";
 import { SCREENS, SCREEN_LABEL, type Screen } from "../layout/layout";
 import { useLayout } from "../layout/useLayout";
 import { GraphScreen } from "../graph/GraphScreen";
+import { SettingsDialog } from "../settings/SettingsDialog";
 import { Login } from "./Login";
 
 /** What one screen's placeholder says: which milestone fills it. */
@@ -49,8 +50,22 @@ export interface ShellProps {
 /** The signed-in frame. */
 export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps) {
   const layout = useLayout();
-  const [screen, setScreen] = useState<Screen>("tasks");
+  const [selected, setSelected] = useState<Screen>("tasks");
+  // Settings is a dialog over the app, not a place the board moves to: the screen
+  // under it stays as it was, and closing it goes back there.
+  const [under, setUnder] = useState<Screen>("tasks");
+  const screen = selected === "settings" ? under : selected;
+  const settingsOpen = selected === "settings";
   const placeholder = PLACEHOLDER[screen];
+
+  function setScreen(next: Screen) {
+    if (next === "settings") {
+      if (selected !== "settings") {
+        setUnder(selected);
+      }
+    }
+    setSelected(next);
+  }
 
   function signOut() {
     void client.logout().catch(() => {
@@ -75,7 +90,7 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
 
       {layout === "desktop" ? (
         <nav className="rail" aria-label="Screens">
-          <ScreenList screen={screen} onScreen={setScreen} />
+          <ScreenList screen={selected} onScreen={setScreen} />
         </nav>
       ) : null}
 
@@ -111,14 +126,22 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
 
       {layout === "phone" ? (
         <nav className="tabs" aria-label="Screens">
-          <ScreenList screen={screen} onScreen={setScreen} compact />
+          <ScreenList screen={selected} onScreen={setScreen} compact />
         </nav>
       ) : null}
 
       {layout === "tablet" ? (
         <nav className="rail rail-compact" aria-label="Screens">
-          <ScreenList screen={screen} onScreen={setScreen} compact />
+          <ScreenList screen={selected} onScreen={setScreen} compact />
         </nav>
+      ) : null}
+
+      {settingsOpen ? (
+        <SettingsDialog
+          client={client}
+          onClose={() => setSelected(under)}
+          onSignedOut={onSignedOut}
+        />
       ) : null}
 
       {reauth ? (
