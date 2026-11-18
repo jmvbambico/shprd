@@ -200,7 +200,9 @@ export default class Accept extends View {
       return;
     }
     const attemptCount = (task.attempts ?? []).length;
-    const key = `${task.id}:${attemptCount}`;
+    // An agent report or a status change is the log moving: the branch may have
+    // new commits, so the read is made again (and not on every wake-up besides).
+    const key = `${task.id}:${attemptCount}:${task.status}:${task.last_status?.seq ?? 0}`;
     if (key === this.changesFor) return;
     this.changesFor = key;
     this.changesError = null;

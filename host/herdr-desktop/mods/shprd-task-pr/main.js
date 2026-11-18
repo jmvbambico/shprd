@@ -92,7 +92,9 @@ export default class TaskPr extends View {
       this.changesFor = null;
       return;
     }
-    const key = `${task.id}:${(task.attempts ?? []).length}`;
+    // An agent report or a status change is the log moving: the branch may have
+    // new commits, so the read is made again (and not on every wake-up besides).
+    const key = `${task.id}:${(task.attempts ?? []).length}:${task.status}:${task.last_status?.seq ?? 0}`;
     if (key === this.changesFor) return;
     this.changesFor = key;
     this.changes = null;
