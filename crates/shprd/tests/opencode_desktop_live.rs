@@ -33,10 +33,17 @@
 #[path = "../../shprd-mux-hc/tests/support/live.rs"]
 mod live;
 
+// The shared isolation rule (M10 fix X), included with `#[path]` the same way
+// the live-desktop helper is: this test's private desktop is named *after* the
+// rule, so the rule holds for every name it does not mention too.
+#[path = "../../shprd-mux-herdr/tests/support/herdr_env.rs"]
+mod herdr_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use herdr_env::isolate;
 use live::Live;
 use shprd_mux::Host;
 
@@ -93,19 +100,13 @@ fn an_opencode_worker_on_a_private_desktop_receives_its_brief_with_nobody_typing
 
     let shprd = |args: &[&str]| -> Output {
         let mut command = Command::new(BIN);
-        // The private desktop's environment, not the person's: HC_SESSION names
-        // a core nobody else has, HERDR_APP_HOME a window this test starts, and
-        // the XDG dirs keep the core's socket out of the real state directory.
+        // The rule first: every `HERDR_*`, `HC_*` and `TUIOS_*` name this test
+        // inherited is removed, and the socket is one nothing listens on. Then
+        // the private desktop's own environment, which is what makes the run
+        // reach *this* test's core and window rather than the person's.
+        isolate(&mut command, live.root());
         for (key, value) in live.environment() {
             command.env(key, value);
-        }
-        for name in [
-            "HERDR_SOCKET_PATH",
-            "HERDR_PANE_ID",
-            "HERDR_ENV",
-            "TUIOS_SOCKET",
-        ] {
-            command.env_remove(name);
         }
         command
             .args(args)

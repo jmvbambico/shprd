@@ -33,6 +33,8 @@ keys.json               the keys the layout expects, merged by the installer
 bin/sync-shared         copies `mods/lib/*` into each mod's `lib/`; `--check`
 bin/check               all of it: the copies, the tests, `herdr-app check`
 bin/gate-env            a private app home with the first-run screens answered
+bin/isolate             runs one command with the person's herdr stripped out
+                        of the environment: every live check goes through it
 test/                   the unit tests (node or bun, see below); `fixtures/` holds
                         a real service's answers and a real window's list
 ```
@@ -179,6 +181,41 @@ herdr-app shot /tmp/shs/shot.png
 `bin/gate-env` refuses `$HOME/.config/herdr-app` outright: writing
 `frame.welcomed` into a person's own window would tell it that it had already
 shown them the welcome. `bin/check` runs that refusal as part of its own check.
+
+## Running a live check without touching the person's herdr
+
+A worker runs inside a herdr pane, and herdr exports that pane to everything it
+starts. A `shprd serve` from there drives the session the person is working in:
+it makes a workspace labelled `shprd · <repo>` in their window and starts a
+graph terminal in their core. It happened twice in one day (SHP-66's live login
+check, SHP-70's screenshot run), and both were a `serve` started with an
+inherited `HERDR_SOCKET_PATH`.
+
+Every live check, screenshot run or manual `serve` therefore goes through
+`bin/isolate`:
+
+```sh
+bin/isolate shprd --repo "$PWD" serve --port 7787
+bin/isolate --print shprd --repo "$PWD" serve      # say what it would change
+./target/debug/shprd --repo "$PWD" serve &         # wrong: your pane's socket
+```
+
+It removes every `HERDR_*`, `HC_*` and `TUIOS_*` variable, points
+`HERDR_SOCKET_PATH` at `/nonexistent/herdr.sock`, sets `HC_SESSION` to a session
+nobody runs (an unset one means the person's default), and puts
+`HERDR_APP_HOME`, `SHPRD_HOME` and the five `XDG_*` directories in a scratch
+folder of its own under `$TMPDIR`. Anything you set *after* it wins, so a check
+with a private `herdr server` of its own still gets everything else stripped:
+
+```sh
+bin/isolate env HERDR_SOCKET_PATH="$my_private_socket" shprd serve
+```
+
+`shprd serve` keeps the same rule from its own side (M11 fix Y): when its
+repository is under the temporary directory and its socket is not, it refuses to
+create a space or start the graph terminal, says so in its banner, and serves
+the API anyway. `SHPRD_ALLOW_DEFAULT_SOCKET=1` turns that off for a person whose
+own checkout really does live under `/tmp`.
 
 ## Tests
 
