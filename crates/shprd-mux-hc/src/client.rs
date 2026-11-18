@@ -47,6 +47,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// the number is Shepherdr's (`client.ts:103-127`).
 pub const MAX_PENDING: usize = 256;
 
+/// The most bytes one `data` frame of typed input carries.
+const TYPE_CHUNK: usize = 4096;
+
 /// The delay before each reconnect attempt: 0.5 s, 1 s, 2 s, then
 /// [`RECONNECT_CEILING`] forever.
 ///
@@ -511,6 +514,18 @@ impl HcClient {
     /// call is the caller's to retry, not this client's.
     pub async fn call_with(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         let link = self.link_for(timeout).await?;
+        self.call_on(&link, method, params, timeout).await
+    }
+
+    /// [`HcClient::call_with`] on a link already chosen, for a call whose
+    /// answer names something that lives only on that connection.
+    async fn call_on(
+        &self,
+        link: &Link,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let id = self.next_id();
         let (reply, answer) = oneshot::channel();
         {
@@ -530,7 +545,7 @@ impl HcClient {
             );
         }
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if let Err(error) = self.write(&link, &message).await {
+        if let Err(error) = self.write(link, &message).await {
             if let Ok(mut pending) = link.pending.lock() {
                 pending.remove(&id);
             }
@@ -551,6 +566,58 @@ impl HcClient {
                 })
             }
         }
+    }
+
+    /// Type raw `bytes` into `terminal` through a short attach stream.
+    ///
+    /// `terminal.send` pastes and presses enter and `terminal.keys` cannot spell
+    /// most punctuation, so text left at the cursor goes the way Shepherdr's
+    /// own web terminal does (M7ef §2.6): a full attach at the terminal's own
+    /// size, the bytes as `data` frames on its channel, then `close`. The
+    /// stream is credited by the read loop like any other, so its first paint
+    /// does not wedge the connection.
+    pub async fn type_raw(
+        &self,
+        terminal: &str,
+        cols: u32,
+        rows: u32,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        // One link for the whole exchange: a channel exists only on the
+        // connection that opened it, so a reconnect in between fails the type
+        // rather than writing to a stranger's stream.
+        let link = self.link_for(timeout).await?;
+        let attached = self
+            .call_on(
+                &link,
+                "terminal.attach",
+                json!({"terminal": terminal, "cols": cols, "rows": rows, "history": 0}),
+                timeout,
+            )
+            .await?;
+        let channel = attached
+            .get("channel")
+            .and_then(Value::as_u64)
+            .and_then(|channel| u32::try_from(channel).ok())
+            .ok_or_else(|| Error::Output("terminal.attach answered no channel".into()))?;
+        let sent = async {
+            for chunk in bytes.chunks(TYPE_CHUNK) {
+                let frame = wire::encode_frame(channel, FrameKind::Data, chunk)?;
+                link.outgoing.send(frame).await.map_err(|_| {
+                    link.bury("the core connection is gone");
+                    Error::Unreachable("the core connection is gone".into())
+                })?;
+            }
+            Ok(())
+        }
+        .await;
+        // Close even when the write failed: an attach left open keeps a viewer
+        // on the terminal.
+        if let Ok(frame) = wire::encode_frame(channel, FrameKind::Close, &[]) {
+            let _ = link.outgoing.send(frame).await;
+        }
+        sent
     }
 
     /// Read every document the fold is waiting for, and take the values.

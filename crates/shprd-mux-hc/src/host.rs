@@ -120,6 +120,9 @@ pub const WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
 /// program, so the trait's 15 s default is not enough (M7ef §2.3, §2.10's 120 s).
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long typing raw text may take: an attach and a frame, never a turn.
+const TYPE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The margin a blocking core call is given over what it waits for.
 const CALL_MARGIN: Duration = Duration::from_secs(15);
 
@@ -513,15 +516,16 @@ impl HcHost {
         // whose plugin-installed reporters silently go nowhere, which is what
         // makes a program like opencode invisible here even though the terminal
         // is plainly drawing its TUI (M10 gate, bug 3).
-        let agent_reports = driver
+        let methods: Vec<String> = driver
             .block_on(client.hello())
             .and_then(std::result::Result::ok)
-            .is_some_and(|hello| {
-                hello
-                    .methods
-                    .iter()
-                    .any(|method| method == "pane.report_agent")
-            });
+            .map(|hello| hello.methods)
+            .unwrap_or_default();
+        let has = |wanted: &str| methods.iter().any(|method| method == wanted);
+        let agent_reports = has("pane.report_agent");
+        // Typing without enter rides a `terminal.attach` stream, so a core that
+        // lacks the method says it cannot, instead of failing on the first key.
+        let can_attach = has("terminal.attach");
         let capabilities = Capabilities {
             spawn: true,
             split: attached,
@@ -534,9 +538,9 @@ impl HcHost {
             pane_grants: false,
             human_ask: false,
             keys: true,
-            // `terminal.send` pastes and then presses enter: the core has no
-            // spelling for text left at the cursor.
-            type_without_submit: false,
+            // `terminal.send` pastes and then presses enter, so text left at the
+            // cursor goes through a short attach stream (`HcClient::type_raw`).
+            type_without_submit: can_attach,
             // `terminal.wait` answers in one call.
             wait: true,
             kill: true,
@@ -667,6 +671,40 @@ impl HcHost {
             .driver
             .block_on(self.inner.client.call_with(method, params, timeout))
             .unwrap_or_else(|| Err(shutting_down()))
+    }
+
+    /// Leave `text` at the cursor of `pane`, byte for byte: an attach at the
+    /// terminal's own size, one `data` frame, then close (M7ef §2.6).
+    fn type_raw(&self, pane: &PaneId, text: &str) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let record = self.call_object(
+            "terminal.get",
+            json!({"terminal": pane.as_str()}),
+            "pane",
+            pane.as_str(),
+        )?;
+        let size = |key: &str, fallback: u32| {
+            record
+                .get(key)
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(fallback)
+        };
+        let (cols, rows) = (size("cols", 80), size("rows", 24));
+        self.inner
+            .driver
+            .block_on(self.inner.client.type_raw(
+                pane.as_str(),
+                cols,
+                rows,
+                text.as_bytes(),
+                TYPE_TIMEOUT,
+            ))
+            .unwrap_or_else(|| Err(shutting_down()))
+            .map_err(|error| core_error("terminal.attach", error))
     }
 
     /// One call, as the trait's error, for a verb that cannot be "not found".
@@ -1258,10 +1296,14 @@ impl Host for HcHost {
     /// `terminal.send` carries no `caller`: the text must arrive as the person's
     /// own, never wrapped in a from-another-machine note (M7ef §2.10,
     /// `hub.ts:30-42`). herdr-core's send always presses enter, so a caller that
-    /// wants the text left at the cursor is refused rather than lied to.
+    /// wants the text left at the cursor goes through a short attach stream
+    /// instead: the bytes reach the terminal unchanged and no enter is added.
     fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {
         if !submit {
-            return Err(MuxError::unsupported("typing text without submitting it"));
+            if !self.inner.capabilities.type_without_submit {
+                return Err(MuxError::unsupported("typing text without submitting it"));
+            }
+            return self.type_raw(pane, text);
         }
         self.core_with(
             "terminal.send",
