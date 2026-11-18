@@ -55,8 +55,11 @@ export function TerminalView({ client, space, screenFactory = xtermScreen }: Ter
     setNotice(null);
     setBlank(true);
     const live = new TerminalSession((handlers) => client.terminal(space, handlers), {
-      screen: (text) => {
+      screen: (text, cut) => {
         setBlank(false);
+        if (cut) {
+          setNotice("The screen was longer than 1 MiB, so its start is cut.");
+        }
         drawn?.show(text);
       },
       status: setStatus,

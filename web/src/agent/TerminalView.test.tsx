@@ -80,6 +80,14 @@ describe("TerminalView", () => {
     expect(screen.getByText(/The pane ended: pane not found/)).toBeDefined();
   });
 
+  it("says when the start of a screen was cut", () => {
+    const t = setup();
+    render(<TerminalView client={t.client} space="T1" screenFactory={t.factory} />);
+    t.say({ type: "hello", space: "T1", pane: "%2" });
+    t.say({ type: "screen", text: "tail", seq: 1, cut: true });
+    expect(screen.getByText(/its start is cut/)).toBeDefined();
+  });
+
   it("says it is reconnecting when the socket drops", () => {
     const t = setup();
     render(<TerminalView client={t.client} space="T1" screenFactory={t.factory} />);
