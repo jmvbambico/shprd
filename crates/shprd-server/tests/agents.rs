@@ -31,15 +31,21 @@ const PORT: u16 = 18_093;
 struct Recorder {
     /// The programs asked for, in order.
     asked: Mutex<Vec<String>>,
+    /// The space each ask named, in order.
+    spaces: Mutex<Vec<Option<String>>>,
     /// When set, every open fails with these words.
     refuse: Option<String>,
 }
 
 impl AgentOpener for Recorder {
-    fn open(&self, program: &str) -> Result<OpenedTab, String> {
+    fn open(&self, program: &str, space: Option<&str>) -> Result<OpenedTab, String> {
         if let Some(reason) = &self.refuse {
             return Err(reason.clone());
         }
+        self.spaces
+            .lock()
+            .expect("the lock")
+            .push(space.map(str::to_string));
         self.asked
             .lock()
             .expect("the lock")
@@ -166,6 +172,25 @@ async fn opening_an_agent_asks_the_host_for_the_program_and_answers_the_tab() {
 }
 
 #[tokio::test]
+async fn opening_an_agent_names_the_space_the_window_is_showing() {
+    let recorder = Arc::new(Recorder::default());
+    let fixture = Fixture::new(Some(recorder.clone()));
+    let (status, body) = fixture
+        .open(json!({ "program": "claude", "space": " w7 " }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = fixture
+        .open(json!({ "program": "claude", "space": "  " }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        recorder.spaces.lock().expect("the lock").as_slice(),
+        [Some("w7".to_string()), None],
+        "a named space is passed trimmed and a blank one means the repository's"
+    );
+}
+
+#[tokio::test]
 async fn a_service_without_a_host_refuses_and_says_why() {
     let fixture = Fixture::new(None);
     let (status, body) = fixture.open(json!({ "program": "claude" })).await;
@@ -178,6 +203,7 @@ async fn a_service_without_a_host_refuses_and_says_why() {
 async fn a_refused_open_is_the_hosts_words() {
     let fixture = Fixture::new(Some(Arc::new(Recorder {
         asked: Mutex::default(),
+        spaces: Mutex::default(),
         refuse: Some("no space called \"shop\" on the host".to_string()),
     })));
     let (status, body) = fixture.open(json!({ "program": "pi" })).await;

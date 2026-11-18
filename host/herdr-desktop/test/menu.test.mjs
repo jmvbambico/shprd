@@ -20,10 +20,16 @@ import {
   agentChoices,
   agentHint,
   appMenu,
+  firstPickable,
+  isCoordinator,
   menuHeight,
   newMenu,
   paneMenu,
+  pickable,
+  renamable,
   restartable,
+  stepPick,
+  switchAgentMenu,
   tabMenu,
 } from "../mods/lib/menu.js";
 
@@ -189,4 +195,56 @@ test("a menu's height is its rows' own, so a popup is never taller than its cont
     "three fixed rows, a heading and five programs",
   );
   assert.equal(menuHeight([]), MENU.pad * 2 + 1);
+});
+
+test("↑ and ↓ step over headings, notes, separators and dimmed rows, and wrap", () => {
+  const rows = newMenu({ roster: rosterWithout("opencode", "kilo", "pi") });
+  const picks = rows.map((row, i) => (pickable(row) ? i : null)).filter((i) => i !== null);
+  assert.ok(picks.every((i) => !rows[i].heading && !rows[i].note && !rows[i].disabled));
+  // Terminal, New space, New task: the heading after them is skipped.
+  assert.equal(firstPickable(rows), 0);
+  assert.equal(stepPick(rows, 2, 1), 4, "down from New task lands past the heading");
+  assert.equal(stepPick(rows, 4, -1), 2, "up from the first program lands past the heading");
+  // At the last pickable row down wraps to the first; at the first up wraps to the last.
+  assert.equal(stepPick(rows, picks.at(-1), 1), picks[0]);
+  assert.equal(stepPick(rows, picks[0], -1), picks.at(-1));
+  // A dimmed (not installed) row is never landed on.
+  const dim = rows.findIndex((row) => row.disabled);
+  assert.ok(dim > 0 && !picks.includes(dim));
+  // A menu with nothing to pick keeps its place instead of looping.
+  assert.equal(stepPick([{ heading: "x" }, { note: "y" }], 0, 1), 0);
+  assert.equal(firstPickable([{ heading: "x" }, { id: "a", label: "A" }]), 1);
+});
+
+test("the coordinator's tab menu adds Edit instructions… and Switch agent, and no Rename", () => {
+  assert.equal(isCoordinator({ name: "coordinator" }), true);
+  assert.equal(isCoordinator({ name: "claude·T1" }), false);
+  const rows = tabMenu({ id: "tb1", coordinator: true, renamable: renamable({ name: "coordinator" }) });
+  assert.deepEqual(words(rows), ["Edit instructions…", "Switch agent", "—", "Close tab"]);
+  assert.equal(rows.find((row) => row.id === "switch-agent").hint, "›");
+  // A person's own tab keeps Rename and has neither coordinator row.
+  assert.deepEqual(words(tabMenu({ id: "tb2" })), ["Rename…", "—", "Close tab"]);
+});
+
+test("a tab shprd titled is not renamed, so shprd can still find it", () => {
+  assert.equal(renamable({ name: "claude·T1" }), false);
+  assert.equal(renamable({ name: "claude·T1·review" }), false);
+  assert.equal(renamable({ name: "coordinator" }), false);
+  assert.equal(renamable({ name: "zsh" }), true);
+  assert.equal(renamable({ name: "1" }), true);
+});
+
+test("Switch agent lists the installed programs with Back first and the current one marked", () => {
+  const roster = rosterWithout("pi");
+  const rows = switchAgentMenu({ roster, current: "claude" });
+  assert.equal(rows[0].id, "back");
+  assert.deepEqual(words(rows).slice(0, 2), ["Back", "# Switch agent"]);
+  const programs = rows.filter((row) => row.action === "switch");
+  assert.ok(programs.length > 0 && programs.every((row) => row.program !== "pi"));
+  assert.equal(programs.find((row) => row.program === "claude").hint, "Current");
+  // The pointer starts on Back and ↓ lands on the first program, past the heading.
+  assert.equal(stepPick(rows, 0, 1), 2);
+  // Before the roster is read, and when it failed, a dim line says so.
+  assert.equal(switchAgentMenu({ loading: true }).at(-1).note, NEW_WORDS.loading);
+  assert.equal(switchAgentMenu({ roster: null }).at(-1).note, NEW_WORDS.failed);
 });

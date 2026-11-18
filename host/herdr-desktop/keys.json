@@ -29,7 +29,7 @@
     "f2": "shprd-tabs.rename-tab",
     "shift-f2": "shprd-tabs.rename-space",
     "ctrl-shift-b": "layout.toggle:panel",
-    "ctrl-shift-a": "layout.show:tasks",
+    "ctrl-shift-a": "shprd-tabs.show-tasks",
     "ctrl-shift-w": "tab.close",
     "ctrl-shift-n": "shprd-tabs.new-task"
   }

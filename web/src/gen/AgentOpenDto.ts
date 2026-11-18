@@ -7,4 +7,9 @@ export type AgentOpenDto = {
 /**
  * The harness id to start, e.g. `claude`.
  */
-program: string, };
+program: string, 
+/**
+ * The space the tab opens in: the one the window is showing. Left out, the
+ * tab opens in the repository's own space.
+ */
+space: string | null, };

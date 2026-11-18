@@ -5,8 +5,8 @@
 // What it lists and what a pick does is `lib/jump.js`'s (pure, tested); this
 // mod reads the board once as it opens, draws the rows and runs the pick:
 //
-// - a space, or a task whose space is up: Herdr's `space.select`;
-// - a task with no space of its own yet: the Tasks panel, on that task;
+// - a space: Herdr's `space.select`;
+// - a task: its thread in the Tasks panel (`openThread`);
 // - "Show N more": unfolds the group.
 //
 // Ported from Shepherdr's Jump (MIT):
@@ -27,11 +27,11 @@ import {
   v_flex,
   v_virtual_list,
 } from "gpui-base";
-import { closeOverlay, props, run, setShared, spaces, theme } from "herdr";
+import { closeOverlay, props, run, spaces, theme } from "herdr";
 
 import { attach } from "./lib/client.js";
 import { JUMP, JUMP_WORDS, jumpItems, jumpRows, jumpTarget, rowHeight } from "./lib/jump.js";
-import { statusGlyph } from "./lib/panel.js";
+import { openThread, statusGlyph } from "./lib/panel.js";
 import { RADIUS, TEXT, status as statusOf, tone } from "./lib/tokens.js";
 
 const SEARCH_ICON = "mods/shprd-jump/icons/search.svg";
@@ -102,11 +102,8 @@ export default class Jump extends View {
       run(target.command, target.args ?? {});
       return;
     }
-    // A task with no space yet: the Tasks panel, on that task.
-    setShared("tasks.thread", { task: target.task, title: target.title ?? "", at: Date.now() });
-    run("layout.select", { stack: "panel-body", child: "tasks" });
-    run("layout.show", { id: "panel" });
-    run("shprd-tasks.open");
+    // A task: its thread, Chat first.
+    openThread({ task: target.task, title: target.title ?? "" }, "chat");
   }
 
   /** The row's leading mark: a task's status glyph, or a space's "#". */

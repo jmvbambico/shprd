@@ -401,10 +401,15 @@ struct HostAgents {
 }
 
 impl shprd_server::AgentOpener for HostAgents {
-    fn open(&self, program: &str) -> Result<shprd_server::OpenedTab, String> {
-        let opened =
-            crate::cmd::spawn::open_program(self.host.as_ref(), &self.data, &self.repo, program)
-                .map_err(|err| err.to_string())?;
+    fn open(&self, program: &str, space: Option<&str>) -> Result<shprd_server::OpenedTab, String> {
+        let opened = crate::cmd::spawn::open_program(
+            self.host.as_ref(),
+            &self.data,
+            &self.repo,
+            program,
+            space,
+        )
+        .map_err(|err| err.to_string())?;
         Ok(shprd_server::OpenedTab {
             program: opened.program,
             name: opened.name,

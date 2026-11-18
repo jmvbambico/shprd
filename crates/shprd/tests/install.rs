@@ -334,7 +334,10 @@ fn a_merge_keeps_the_keys_the_person_bound_and_takes_the_rest() {
     // Their binding of a key shprd wanted is kept.
     assert_eq!(keys["layout:shprd"]["ctrl-shift-b"], "space.close");
     // The key they did not use is taken.
-    assert_eq!(keys["layout:shprd"]["ctrl-shift-a"], "layout.show:tasks");
+    assert_eq!(
+        keys["layout:shprd"]["ctrl-shift-a"],
+        "shprd-tabs.show-tasks"
+    );
     // And the kept key is not recorded as ours, so uninstall leaves it alone.
     let manifest = fixture.manifest();
     assert!(

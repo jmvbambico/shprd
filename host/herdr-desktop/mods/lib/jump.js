@@ -139,13 +139,13 @@ export function rowHeight(row) {
 
 /**
  * What a pick does, as data the mod runs: `{more}` unfolds a group;
- * `{command, args}` is a Herdr command; `{task, title}` opens the task in the
- * Tasks panel (a task with no space of its own yet).
+ * `{command, args}` is a Herdr command (a space is shown); `{task, title}` opens
+ * the task's thread in the Tasks panel (`openThread`), whether or not it has a
+ * space of its own: an agent is reached through its task, not through a tab.
  */
 export function jumpTarget(row) {
   if (!row || row.kind === "head") return null;
   if (row.kind === "more") return { more: row.group };
   if (row.kind === "space") return { command: "space.select", args: { id: row.id } };
-  if (row.space) return { command: "space.select", args: { id: row.space } };
   return { task: row.id, title: row.label };
 }

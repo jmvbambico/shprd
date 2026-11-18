@@ -39,6 +39,8 @@ import {
   panelButtons,
   parseTabName,
   pillCounts,
+  rememberPanel,
+  shownPanel,
   tabLabel,
   tabProgram,
   tabRows,
@@ -1077,4 +1079,49 @@ test("minutes left show only when the service reports them", () => {
   assert.equal(etaMinutes({ eta_minutes: 12.2 }), 13);
   assert.equal(etaMinutes({ derived: { eta_minutes: 4 } }), 4);
   assert.equal(etaMinutes({ eta_minutes: 0 }), null);
+});
+
+/** A layout as `layout()` answers it, the panel and its stack as given. */
+const layoutWith = (hidden, active) => ({
+  id: "root",
+  children: [
+    { id: "panel", hidden, children: [{ id: "panel-body", type: "stack", active }] },
+  ],
+});
+
+test("the panel button that is lit is the one the layout shows, not one the bar remembers", () => {
+  assert.equal(shownPanel(layoutWith(false, "changes")), "changes");
+  assert.equal(shownPanel(layoutWith(false, "tasks")), "tasks");
+  // A hidden panel lights nothing, and so does a stack that has no button.
+  assert.equal(shownPanel(layoutWith(true, "tasks")), null);
+  assert.equal(shownPanel(layoutWith(false, "settings")), null);
+  assert.equal(shownPanel(null), null);
+  const lit = panelButtons(STATE, shownPanel(layoutWith(false, "changes")))
+    .filter((button) => button.active)
+    .map((button) => button.id);
+  assert.deepEqual(lit, ["changes"]);
+  assert.deepEqual(panelButtons(STATE, null).filter((button) => button.active), []);
+});
+
+test("each space gets its own panel back when it is shown again", () => {
+  const memory = new Map();
+  let last = null;
+  const look = (space, current) => {
+    const seen = rememberPanel(memory, last, space, current);
+    last = seen.last;
+    return seen.restore;
+  };
+  // Space a: Changes open. Recorded, nothing to restore.
+  assert.equal(look("a", "changes"), undefined);
+  assert.equal(look("a", "changes"), undefined);
+  // Switch to space b, not seen before: the panel is left as it is.
+  assert.equal(look("b", "changes"), undefined);
+  // In b the person hides the panel.
+  assert.equal(look("b", null), undefined);
+  // Back to a: its Changes panel returns, even though the layout shows b's hidden one.
+  assert.equal(look("a", null), "changes");
+  // Then b again: hidden is what it had.
+  assert.equal(look("b", "changes"), null);
+  // No space at all changes nothing.
+  assert.equal(rememberPanel(memory, "b", null, "tasks").restore, undefined);
 });

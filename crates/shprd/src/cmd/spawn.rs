@@ -615,14 +615,15 @@ pub(crate) struct OpenedProgram {
 /// appended to it: no access mode, no model, no fast switch. Those belong to a
 /// role, and a role belongs to a task.
 ///
-/// The tab opens in the space `shprd serve` prepared for the repository, at the
-/// repository root, named with the program's own name (`Claude Code`), which is
+/// The tab opens in `space` when the window names the one it is showing, else in
+/// the space `shprd serve` prepared for the repository, at the repository root, named with the program's own name (`Claude Code`), which is
 /// what Shepherdr names it.
 pub(crate) fn open_program(
     mux: &dyn Host,
     data: &DataDir,
     repo: &Path,
     program: &str,
+    space: Option<&str>,
 ) -> Result<OpenedProgram, CliError> {
     let specs = data.harness_specs().map_err(|err| {
         CliError::other(
@@ -636,15 +637,12 @@ pub(crate) fn open_program(
             known.join(", ")
         )));
     };
-    let prepared = ensure_repo_space(mux, repo)?;
+    let target = match space {
+        Some(id) => shprd_mux::SpaceId::new(id),
+        None => ensure_repo_space(mux, repo)?.space.id,
+    };
     let tab = mux
-        .spawn(
-            &prepared.space.id,
-            &spec.name,
-            &spec.launch.interactive,
-            &[],
-            repo,
-        )
+        .spawn(&target, &spec.name, &spec.launch.interactive, &[], repo)
         .map_err(|err| CliError::other(anyhow!(err).context("starting the agent's tab")))?;
     Ok(OpenedProgram {
         program: spec.id.clone(),
@@ -4725,7 +4723,7 @@ project_dirs = []
     fn starting_an_agent_opens_its_plain_launch_line_in_the_repositorys_space() {
         let scratch = Scratch::new();
         let mux = FakeMux::default();
-        let opened = open_program(&mux, &shipped_data(), scratch.root(), "claude")
+        let opened = open_program(&mux, &shipped_data(), scratch.root(), "claude", None)
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(opened.program, "claude");
         assert_eq!(opened.name, "Claude Code");
@@ -4765,10 +4763,46 @@ project_dirs = []
     }
 
     #[test]
+    fn starting_an_agent_in_a_named_space_opens_there_and_makes_no_space() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let other = mux
+            .create_space("notes", scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        open_program(
+            &mux,
+            &shipped_data(),
+            scratch.root(),
+            "claude",
+            Some(other.id.as_str()),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let calls = mux.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, Call::Spawn(space, ..) if *space == other.id)),
+            "the tab opens in the space the window named: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| matches!(call, Call::FindSpace(..))),
+            "the repository's space is not looked for: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, Call::CreateSpace(..)))
+                .count(),
+            1,
+            "only the test's own space was made: {calls:?}"
+        );
+    }
+
+    #[test]
     fn a_program_the_harness_table_lacks_is_refused_with_the_ones_it_has() {
         let scratch = Scratch::new();
         let mux = FakeMux::default();
-        let refused = open_program(&mux, &shipped_data(), scratch.root(), "not-a-cli")
+        let refused = open_program(&mux, &shipped_data(), scratch.root(), "not-a-cli", None)
             .err()
             .unwrap_or_else(|| panic!("an unknown program was accepted"));
         let message = refused.to_string();

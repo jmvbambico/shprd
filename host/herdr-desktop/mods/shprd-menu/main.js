@@ -20,6 +20,11 @@
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
+// A coordinator tab's menu also has *Edit instructions…* (the Settings window on
+// Prompts) and *Switch agent ›*, which turns this popup into the roster's installed
+// programs with a *Back* row; a pick writes `roles.coordinator.agent` for this
+// repository through the service.
+//
 // What is shprd's own: *Restart* on a tab restarts the task's attempt through the
 // service (`POST /api/action {"action":"task.retry"}`) rather than relaunching a
 // program in the tab, and *New task…* and *Keybinds* are this window's
@@ -30,8 +35,18 @@ import { v_flex } from "gpui-base";
 import { closeOverlay, openOverlay, panes, props, run, spaces, terminals, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
-import { appMenu, paneMenu, restartable, tabMenu } from "./lib/menu.js";
-import { menuRow, openAddTask, openNewSpace } from "./lib/panel.js";
+import {
+  appMenu,
+  firstPickable,
+  isCoordinator,
+  paneMenu,
+  renamable,
+  restartable,
+  stepPick,
+  switchAgentMenu,
+  tabMenu,
+} from "./lib/menu.js";
+import { menuRow, openAddTask, openNewSpace, openSettings } from "./lib/panel.js";
 import { parseTabName } from "./lib/tabstrip.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
@@ -59,6 +74,13 @@ export default class Menu extends View {
     this.handle.focus();
     this.client = null;
     this.failure = null;
+    // A plain line under the rows: what a switch did.
+    this.notice = null;
+    // `null` is the menu itself; "switch" is the *Switch agent* list.
+    this.view = null;
+    // The roster, read when the list is first asked for.
+    this.roster = null;
+    this.at = firstPickable(this.rows());
   }
 
   /** What this copy is a menu for, from its props. */
@@ -81,6 +103,13 @@ export default class Menu extends View {
   /** The rows this menu draws, in the order `lib/menu.js` gives them. */
   rows() {
     const wired = props();
+    if (this.view === "switch") {
+      return switchAgentMenu({
+        roster: this.roster,
+        current: this.current ?? null,
+        loading: this.roster === null && !this.failure,
+      });
+    }
     switch (this.kind()) {
       case "tab": {
         const found = this.tab();
@@ -88,6 +117,8 @@ export default class Menu extends View {
         return tabMenu({
           id: found.tab.id,
           restartable: restartable(found.tab, panes()),
+          coordinator: isCoordinator(found.tab),
+          renamable: renamable(found.tab),
         });
       }
       case "pane": {
@@ -120,7 +151,30 @@ export default class Menu extends View {
   choose(index) {
     const row = this.rows()[index];
     if (!row || row.sep || row.heading || row.note || row.disabled) return;
+    // The two rows that move within the popup: they close nothing.
+    if (row.id === "switch-agent") {
+      this.view = "switch";
+      this.at = firstPickable(this.rows());
+      this.loadRoster();
+      this.cx?.notify?.();
+      return;
+    }
+    if (row.id === "back") {
+      this.view = null;
+      this.notice = null;
+      this.at = firstPickable(this.rows());
+      this.cx?.notify?.();
+      return;
+    }
+    if (row.action === "switch") {
+      this.switchTo(row.program);
+      return;
+    }
     closeOverlay(props()?.overlay);
+    if (row.id === "edit-instructions") {
+      openSettings({ page: "prompts" });
+      return;
+    }
     if (row.command) {
       run(row.command.name, row.command.args ?? {});
       return;
@@ -163,6 +217,55 @@ export default class Menu extends View {
     }
   }
 
+  /** Reads the roster and the coordinator's current program once. */
+  async loadRoster() {
+    if (this.roster !== null) return;
+    try {
+      const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
+      if (!next.client) {
+        this.failure = "shprd serve is not running";
+        this.cx?.notify?.();
+        return;
+      }
+      this.client = next.client;
+      this.roster = await this.client.roster();
+      const settings = await this.client.settings().catch(() => null);
+      const entry = (settings?.values ?? []).find(
+        (item) => item?.key === "roles.coordinator.agent",
+      );
+      this.current = entry?.value ?? null;
+    } catch (err) {
+      this.failure = reason(err);
+    }
+    this.cx?.notify?.();
+  }
+
+  /**
+   * Writes the coordinator's program for this repository.
+   *
+   * The running coordinator is not restarted: shprd starts it from the role when
+   * `shprd serve` starts, so the menu says when the change takes hold instead of
+   * implying it already has.
+   */
+  async switchTo(program) {
+    try {
+      const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
+      if (!next.client) {
+        this.failure = "shprd serve is not running";
+        this.cx?.notify?.();
+        return;
+      }
+      this.client = next.client;
+      await this.client.putSetting("roles.coordinator.agent", program, true);
+      this.current = program;
+      this.failure = null;
+      this.notice = "Saved. The coordinator runs it the next time it starts.";
+    } catch (err) {
+      this.failure = reason(err);
+    }
+    this.cx?.notify?.();
+  }
+
   /**
    * Restarts the task's agent: the service's retry, not a program started here.
    *
@@ -201,15 +304,20 @@ export default class Menu extends View {
       .bg(t.popover)
       .text_size(TEXT.body)
       .on_key_down((event, cx) => {
-        if (event.key === "down") this.at = (this.at + 1) % Math.max(1, list.length);
-        else if (event.key === "up")
-          this.at = (this.at + Math.max(1, list.length) - 1) % Math.max(1, list.length);
+        // ↑ and ↓ step over headings, notes, separators and dimmed rows.
+        if (event.key === "down") this.at = stepPick(list, this.at, 1);
+        else if (event.key === "up") this.at = stepPick(list, this.at, -1);
         else if (event.key === "enter") this.choose(this.at);
         else if (event.key === "escape") closeOverlay(props()?.overlay);
         else return;
         cx?.notify?.();
       })
       .children(list.map((row, index) => this.row(t, row, index)))
+      .when(Boolean(this.notice) && !this.failure, (el) =>
+        el.child(
+          div().px(8).pt(4).text_size(TEXT.label).text_color(t.dim).child(this.notice),
+        ),
+      )
       .when(Boolean(this.failure), (el) =>
         el.child(
           div()

@@ -32,14 +32,13 @@ import { v_flex } from "gpui-base";
 import { closeOverlay, props, run, spaces, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
-import { agentChoices, MENU, NEW_WORDS, newMenu } from "./lib/menu.js";
+import { agentChoices, firstPickable, MENU, NEW_WORDS, newMenu, stepPick } from "./lib/menu.js";
 import { menuRow, openAddTask, openNewSpace } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
 export default class NewMenu extends View {
   init(_props, cx) {
     this.cx = cx;
-    this.at = 0;
     this.client = null;
     this.roster = props()?.roster ?? null;
     // A refusal to *start* something is red, under the rows; a roster that could
@@ -49,6 +48,7 @@ export default class NewMenu extends View {
     this.loadFailure = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
+    this.at = firstPickable(this.rows());
     // A copy opened without a roster (the window's own click passes one; a bare
     // `mod.open` does not) reads it here, and then draws the same rows the bar
     // would have measured — a second look, never a second answer.
@@ -119,7 +119,8 @@ export default class NewMenu extends View {
   }
 
   /**
-   * Starts one program through the service, and selects the tab it opened.
+   * Starts one program through the service, in the shown space, and selects the
+   * tab it opened.
    *
    * A refusal is the service's words, drawn under the rows: a click that opened
    * no tab has to say why (no host, a space that is not there, a program this
@@ -134,7 +135,9 @@ export default class NewMenu extends View {
         return;
       }
       this.client = next.client;
-      const opened = await this.client.openAgent(program);
+      // In the space the window is showing, not whichever one the service keeps.
+      const shown = spaces().find((entry) => entry.active)?.id ?? null;
+      const opened = await this.client.openAgent(program, shown);
       this.failure = null;
       if (opened?.tab) run("tab.select", { id: opened.tab });
     } catch (err) {
@@ -168,9 +171,9 @@ export default class NewMenu extends View {
           }
           return;
         }
-        if (event.key === "down") this.at = (this.at + 1) % Math.max(1, list.length);
-        else if (event.key === "up")
-          this.at = (this.at + Math.max(1, list.length) - 1) % Math.max(1, list.length);
+        // ↑ and ↓ step over headings, notes, separators and dimmed rows.
+        if (event.key === "down") this.at = stepPick(list, this.at, 1);
+        else if (event.key === "up") this.at = stepPick(list, this.at, -1);
         else if (event.key === "enter") this.choose(this.at);
         else if (event.key === "escape") closeOverlay(props()?.overlay);
         else return;

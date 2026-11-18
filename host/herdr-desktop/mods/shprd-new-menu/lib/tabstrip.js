@@ -252,3 +252,48 @@ export function panelButtons(state, shown = "tasks") {
     ready: panel.id === "tasks" ? tally.ready : 0,
   }));
 }
+
+/** The layout node called `id` under `node`, or null. */
+function findNode(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * The side panel's stack that is showing, read from the layout itself, or null
+ * when the panel is hidden.
+ *
+ * The layout is the truth: a row elsewhere (a sidebar task, Jump, a key) moves
+ * the panel without telling the bar, so a flag the bar kept would drift.
+ */
+export function shownPanel(root) {
+  const panel = findNode(root, "panel");
+  if (!panel || panel.hidden) return null;
+  const body = findNode(root, "panel-body");
+  const active = body?.active ?? null;
+  return PANELS.some((entry) => entry.id === active) ? active : null;
+}
+
+/**
+ * Per-space panel memory: what the panel showed in each space, put back when the
+ * space is shown again.
+ *
+ * `memory` is a Map of space id to a stack id (or null for hidden), `last` the
+ * space seen on the previous look and `current` what the layout shows now.
+ * While the space stays the same the look is recorded; when it changes, nothing
+ * is recorded (the layout still shows the old space's panel) and `restore` says
+ * what to put back: `undefined` for a space not seen before (leave the panel
+ * alone), else a stack id or null.
+ */
+export function rememberPanel(memory, last, spaceId, current) {
+  if (!spaceId) return { last, restore: undefined };
+  if (spaceId === last) {
+    memory.set(spaceId, current);
+    return { last: spaceId, restore: undefined };
+  }
+  return { last: spaceId, restore: memory.has(spaceId) ? memory.get(spaceId) : undefined };
+}
