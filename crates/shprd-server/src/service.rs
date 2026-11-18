@@ -543,6 +543,8 @@ pub struct Config {
     /// started without one answers `POST /api/agents` with a refusal rather than
     /// pretending a tab exists.
     pub agents: crate::agents::Agents,
+    /// The agents the host lists. A service started without one lists none.
+    pub live: crate::live::LiveAgents,
     /// The home and data home the agent CLIs run with, when the binary resolved
     /// them.
     ///
@@ -616,6 +618,7 @@ impl Config {
             chat: crate::chat::ChatHost::new(),
             terminal: crate::terminal::TerminalPort::new(),
             agents: crate::agents::Agents::new(),
+            live: crate::live::LiveAgents::new(),
             transcript_roots: None,
             allowed_hosts: shprd_remote::AllowedHosts::loopback_only(),
         }
@@ -691,7 +694,8 @@ impl Service {
         .with_terminal_opt(config.terminal.get().cloned())
         // The "+" menu's *Start an agent* is that host too: one adapter, so a
         // program the tab bar starts and a chat line type into the same window.
-        .with_agent_opener_opt(config.agents.get().cloned());
+        .with_agent_opener_opt(config.agents.get().cloned())
+        .with_live_opt(config.live.get().cloned());
         let info = app.info();
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");

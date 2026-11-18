@@ -23,13 +23,14 @@
 //! two answers are the same fact said twice so that a caller may check first
 //! (the plan) and still degrade if it forgot (the act).
 //!
-//! # One space per task
+//! # One space per repository, no tab per agent
 //!
 //! The layout is [`Space`]s (a herdr workspace, a tuios session), each holding
-//! [`Tab`]s, each holding [`PaneId`]s. shprd gives **a task its own space**,
-//! labelled from the task, and keeps one repository-level space
-//! (`shprd · <folder>`) for the coordinator. [`Host::ensure_space`] finds or
-//! makes one, [`Host::close_space`] removes a task's when it lands.
+//! [`Tab`]s, each holding [`PaneId`]s. shprd keeps **one space per repository**
+//! (`shprd · <folder>`) for its coordinator. Workers and reviewers get no space
+//! and no tab: [`Host::spawn_agent`] starts them as labelled headless terminals
+//! where the host can ([`Capabilities::headless_agents`]) and as a tab of that
+//! space where it cannot. See [`agent`] for the design.
 //!
 //! # Shape of the trait
 //!
@@ -38,8 +39,11 @@
 //! never turn into a command. Text that is meant as a shell line is typed
 //! through [`Host::write`], which the caller chose to do.
 
+pub mod agent;
 pub mod fake;
 pub mod types;
+
+pub use agent::{AgentLaunch, AgentRole, LiveAgent};
 
 use std::path::Path;
 use std::time::Duration;
@@ -166,6 +170,33 @@ pub trait Host: Send + Sync {
         env: &[(String, Option<String>)],
         cwd: &Path,
     ) -> Result<Tab>;
+
+    /// Start one agent: a worker, a reviewer or the coordinator.
+    ///
+    /// Where [`Capabilities::headless_agents`] is true (Herdr desktop) a worker
+    /// or reviewer is a labelled terminal with **no tab and no space**, found by
+    /// [`Host::list_agents`], read and typed into through its `root_pane`, and
+    /// stopped by [`Host::close_tab`] on the returned handle. The coordinator
+    /// keeps a tab in `launch.space`. Everywhere else — the default — it is
+    /// [`Host::spawn`]: a tab of `launch.space` titled `launch.title`.
+    fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+        self.spawn(
+            launch.space,
+            launch.title,
+            launch.argv,
+            launch.env,
+            launch.cwd,
+        )
+    }
+
+    /// Every agent [`Host::spawn_agent`] started that the host still has, live
+    /// or finished and not yet stopped, found by label rather than by layout.
+    ///
+    /// A host that keeps tabs answers an empty list: its agents are tabs and
+    /// [`Host::list_tabs`] finds them.
+    fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+        Ok(Vec::new())
+    }
 
     /// Split `pane` into a second pane, returning the new one.
     ///
@@ -373,6 +404,14 @@ macro_rules! forward_a_wrapper {
                     (**self).spawn(space, title, argv, env, cwd)
                 }
 
+                fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+                    (**self).spawn_agent(launch)
+                }
+
+                fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+                    (**self).list_agents()
+                }
+
                 fn split(
                     &self,
                     pane: &PaneId,
@@ -479,20 +518,10 @@ pub(crate) fn wait_by_polling(
 /// line is never cut off.
 const SCREEN_LINES: usize = 200;
 
-/// The space shprd gives one task: its name, derived from the task and the run.
-///
-/// One task, one space: a person reading the host's bar sees which task each
-/// group of terminals belongs to, and closing a task's space closes exactly its
-/// tabs. The repository's own space ([`repo_space_name`]) stays, for the
-/// coordinator.
-pub fn task_space_name(repo_name: &str, run: &str, task: &str) -> String {
-    format!("shprd · {repo_name} · {run} · {task}")
-}
-
 /// The space the coordinator's tabs live in, named after the repository folder.
 ///
-/// This is the one space a run does not own, so it outlives every task and is
-/// only ever emptied, never closed.
+/// This is the one space shprd makes: it outlives every task and is only ever
+/// emptied, never closed.
 pub fn repo_space_name(repo_name: &str) -> String {
     format!("shprd · {repo_name}")
 }

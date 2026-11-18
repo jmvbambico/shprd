@@ -48,6 +48,8 @@ describe("Shell: tasks", () => {
     needs: [],
     asks: [],
     finished: false,
+    spaces: [],
+    live_agents: [],
   };
   const routes = () =>
     reads({

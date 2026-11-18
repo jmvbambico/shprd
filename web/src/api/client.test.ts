@@ -56,6 +56,8 @@ describe("requests", () => {
         needs: [],
         asks: [],
         finished: false,
+        spaces: [],
+        live_agents: [],
       }),
     ]);
     const client = new ApiClient({ fetch });

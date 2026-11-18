@@ -165,6 +165,10 @@ pub struct Capabilities {
     /// Spaces can be listed, so a caller can say which labels the host has when
     /// the one it wanted is missing.
     pub list_spaces: bool,
+    /// A worker or reviewer can run as a labelled terminal with no tab and no
+    /// space ([`crate::Host::spawn_agent`]). Without it every agent is a tab of
+    /// the repository's space.
+    pub headless_agents: bool,
 }
 
 impl Capabilities {
@@ -189,6 +193,7 @@ impl Capabilities {
             agent_reports: true,
             close_space: true,
             list_spaces: true,
+            headless_agents: true,
         }
     }
 
@@ -213,6 +218,7 @@ impl Capabilities {
             agent_reports: false,
             close_space: false,
             list_spaces: false,
+            headless_agents: false,
         }
     }
 }
@@ -366,14 +372,14 @@ pub struct Tab {
 /// A space (a herdr workspace, a tuios session), as found or created by an
 /// adapter.
 ///
-/// shprd gives one task one space, labelled from the task, and keeps the
-/// repository's own label for the coordinator's tabs.
+/// shprd makes one space per repository, labelled from its folder, for the
+/// coordinator's tab; tasks and agents get none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     /// The host's identifier for the space.
     pub id: WorkspaceId,
-    /// The space's name, which the caller picks: shprd names a task's space
-    /// after the task and the repository's after its folder.
+    /// The space's name, which the caller picks: shprd names a repository's
+    /// after its folder.
     pub name: String,
 }
 

@@ -263,8 +263,8 @@ fn an_opencode_worker_receives_its_brief_with_nobody_typing() {
         "the file is not what the brief asked for: {written:?}"
     );
 
-    // The task space is left for the test's own teardown: the service is what
-    // closes it on a landing, and no landing runs here.
+    // The worker is left for the test's own teardown: the service is what stops
+    // it on a landing, and no landing runs here.
 }
 
 /// The first free model `opencode models` lists, or the fallback the gate used.

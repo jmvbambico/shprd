@@ -20,7 +20,7 @@ use crate::types::{
     AgentState, Capabilities, Direction, Key, MuxError, MuxEvent, Outcome, PaneId, Tab, TabId,
     Waited, Workspace, WorkspaceId,
 };
-use crate::{Host, Result};
+use crate::{AgentLaunch, AgentRole, Host, LiveAgent, Result};
 
 /// One call the fake recorded, in the order it was made.
 ///
@@ -58,6 +58,10 @@ pub enum Call {
         Vec<(String, Option<String>)>,
         PathBuf,
     ),
+    /// `spawn_agent(...)`: the role, the task and the parent pane it named.
+    SpawnAgent(AgentRole, Option<String>, Option<PaneId>),
+    /// `list_agents()`.
+    ListAgents,
     /// `split(pane, direction, ratio, cwd)`.
     Split(PaneId, Direction, f32, PathBuf),
     /// `close_pane(pane)`.
@@ -103,6 +107,8 @@ struct Inner {
     spaces: Vec<Workspace>,
     /// Tabs with the space that owns each, so listing stays scoped.
     tabs: Vec<(WorkspaceId, Tab)>,
+    /// Headless agents: terminals with no tab and no space, by handle.
+    agents: Vec<(Tab, AgentMeta)>,
     panes: BTreeSet<PaneId>,
     /// What each pane's screen holds, and what a wait for output matches on.
     screens: HashMap<PaneId, String>,
@@ -132,6 +138,16 @@ struct Inner {
     next_space: usize,
     next_tab: usize,
     next_pane: usize,
+    next_agent: usize,
+}
+
+/// What a headless agent was started as, for [`Host::list_agents`].
+#[derive(Debug, Clone)]
+struct AgentMeta {
+    task: Option<String>,
+    role: AgentRole,
+    program: String,
+    space: WorkspaceId,
 }
 
 impl Inner {
@@ -140,6 +156,7 @@ impl Inner {
             calls: Vec::new(),
             spaces: Vec::new(),
             tabs: Vec::new(),
+            agents: Vec::new(),
             panes: BTreeSet::new(),
             screens: HashMap::new(),
             states: HashMap::new(),
@@ -156,6 +173,7 @@ impl Inner {
             next_space: 0,
             next_tab: 0,
             next_pane: 0,
+            next_agent: 0,
         }
     }
 
@@ -178,6 +196,15 @@ impl Inner {
         };
         self.tabs.push((space.clone(), tab.clone()));
         tab
+    }
+
+    /// Drop everything the fake remembers about a pane.
+    fn forget_pane(&mut self, pane: &PaneId) {
+        self.panes.remove(pane);
+        self.screens.remove(pane);
+        self.states.remove(pane);
+        self.read_failures.remove(pane);
+        self.exits.remove(pane);
     }
 
     /// Fail the way a real host does when the id is gone.
@@ -697,6 +724,15 @@ impl Host for FakeMux {
                 None => {}
             }
         }
+        if let Some(at) = inner
+            .agents
+            .iter()
+            .position(|(handle, _)| &handle.id == tab)
+        {
+            let (found, _) = inner.agents.remove(at);
+            inner.forget_pane(&found.root_pane);
+            return Ok(());
+        }
         let Some(found) = inner.tab(tab).cloned() else {
             return Err(MuxError::not_found("tab", tab));
         };
@@ -738,6 +774,95 @@ impl Host for FakeMux {
             return Err(MuxError::not_found("space", space));
         }
         Ok(inner.new_tab(space, title))
+    }
+
+    fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+        // A coordinator keeps its tab, and a host with no headless agents keeps
+        // every agent's: both are the ordinary spawn.
+        if !self.caps.headless_agents || launch.role == AgentRole::Coordinator {
+            {
+                let mut inner = self.lock()?;
+                inner.calls.push(Call::SpawnAgent(
+                    launch.role,
+                    launch.task.map(str::to_string),
+                    launch.parent.cloned(),
+                ));
+            }
+            return self.spawn(
+                launch.space,
+                launch.title,
+                launch.argv,
+                launch.env,
+                launch.cwd,
+            );
+        }
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::SpawnAgent(
+            launch.role,
+            launch.task.map(str::to_string),
+            launch.parent.cloned(),
+        ));
+        inner.calls.push(Call::Spawn(
+            launch.space.clone(),
+            launch.title.to_string(),
+            launch.argv.to_vec(),
+            launch.env.to_vec(),
+            launch.cwd.into(),
+        ));
+        if let Some(reason) = &self.spawn_forbidden {
+            return Err(MuxError::forbidden("spawn", reason.clone()));
+        }
+        if let Some(reason) = &self.spawn_failure {
+            return Err(MuxError::command("spawn", reason.clone()));
+        }
+        let root_pane = inner.new_pane();
+        inner.next_agent += 1;
+        let tab = Tab {
+            id: TabId::new(format!("agent-{}", inner.next_agent)),
+            title: launch.title.to_string(),
+            root_pane,
+        };
+        inner.agents.push((
+            tab.clone(),
+            AgentMeta {
+                task: launch.task.map(str::to_string),
+                role: launch.role,
+                program: launch.program.to_string(),
+                space: launch.space.clone(),
+            },
+        ));
+        Ok(tab)
+    }
+
+    fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+        let mut inner = self.lock()?;
+        inner.calls.push(Call::ListAgents);
+        let agents = inner.agents.clone();
+        Ok(agents
+            .into_iter()
+            .map(|(tab, meta)| {
+                let state = inner
+                    .states
+                    .get(&tab.root_pane)
+                    .copied()
+                    .unwrap_or(if self.ready {
+                        AgentState::Idle
+                    } else {
+                        AgentState::Unknown
+                    });
+                LiveAgent {
+                    live: state != AgentState::Done,
+                    state,
+                    tab,
+                    task: meta.task,
+                    role: meta.role,
+                    program: meta.program,
+                    space: meta.space,
+                    started_ms: None,
+                    ended_ms: None,
+                }
+            })
+            .collect())
     }
 
     fn split(&self, pane: &PaneId, direction: Direction, ratio: f32, cwd: &Path) -> Result<PaneId> {
@@ -934,11 +1059,11 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::{Call, FakeMux};
-    use crate::Host;
     use crate::types::{
         AgentState, Capabilities, Direction, Key, MuxError, MuxEvent, Outcome, PaneId, TabId,
         Waited, WorkspaceId,
     };
+    use crate::{AgentLaunch, AgentRole, Host};
     use std::fmt::Display;
     use std::path::Path;
     use std::time::Duration;
@@ -1363,6 +1488,34 @@ mod tests {
             .unwrap_or_else(|| panic!("a forbidden spawn must be refused"));
         assert!(matches!(err, MuxError::Forbidden { verb: "spawn", .. }));
         assert!(err.to_string().contains("admin grant"));
+    }
+
+    #[test]
+    fn a_headless_agent_has_no_tab_and_stops_on_close() {
+        let (mux, space, _) = fixture();
+        let argv = vec!["agent".to_string()];
+        let launch = AgentLaunch {
+            space: &space,
+            title: "claude·T1",
+            argv: &argv,
+            env: &[],
+            cwd: Path::new("/r"),
+            role: AgentRole::Worker,
+            task: Some("T1"),
+            program: "claude",
+            parent: None,
+        };
+        let before = ok(mux.list_tabs(&space)).len();
+        let handle = ok(mux.spawn_agent(&launch));
+        assert_eq!(ok(mux.list_tabs(&space)).len(), before, "no tab was made");
+        let agents = ok(mux.list_agents());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].task.as_deref(), Some("T1"));
+        assert_eq!(agents[0].tab.root_pane, handle.root_pane);
+        ok(mux.read(&handle.root_pane, 5));
+        ok(mux.close_tab(&handle.id));
+        assert!(ok(mux.list_agents()).is_empty());
+        assert!(mux.read(&handle.root_pane, 5).is_err());
     }
 
     #[test]

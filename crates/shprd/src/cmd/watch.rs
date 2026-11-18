@@ -906,8 +906,9 @@ fn awaiting_review(task: &Task) -> Option<u32> {
 fn pane_for(mux: &dyn Host, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
     let name = spawn::repo_space_name(&env.repo_name);
     let Some(space) = mux.find_space(&name)? else {
-        // The coordinator's space is gone, but a task's own space may still
-        // hold the tab: every space is asked before the agent is called gone.
+        // The repository's space is gone, but a tab may still be somewhere and
+        // a headless agent never had one: everything is asked before the agent
+        // is called gone.
         return Ok(every_tab(mux)?
             .into_iter()
             .find(|listed| listed.id.as_str() == tab)
@@ -915,7 +916,7 @@ fn pane_for(mux: &dyn Host, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<Pane
     };
     let mut tabs = mux.list_tabs(&space.id)?;
     if !tabs.iter().any(|listed| listed.id.as_str() == tab) {
-        // A task's tabs are in the task's own space, not the repository's.
+        // A headless agent is in no space at all.
         tabs = every_tab(mux)?;
     }
     Ok(tabs
@@ -930,13 +931,14 @@ fn pane_for(mux: &dyn Host, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<Pane
 /// pass: a task's tab is then simply not found, which is the answer a host that
 /// cannot say gives.
 fn every_tab(mux: &dyn Host) -> Result<Vec<shprd_mux::Tab>, MuxError> {
-    let Ok(spaces) = mux.list_spaces() else {
-        return Ok(Vec::new());
-    };
     let mut tabs = Vec::new();
-    for space in spaces {
-        tabs.extend(mux.list_tabs(&space.id)?);
+    if let Ok(spaces) = mux.list_spaces() {
+        for space in spaces {
+            tabs.extend(mux.list_tabs(&space.id)?);
+        }
     }
+    // Headless agents have no tab in any space: the host lists them by label.
+    tabs.extend(mux.list_agents()?.into_iter().map(|agent| agent.tab));
     Ok(tabs)
 }
 
@@ -1490,8 +1492,8 @@ project_dirs = []
 
     /// A fake multiplexer holding the coordinator's space.
     ///
-    /// A task's own space is made by the spawn that starts it, so a fixture only
-    /// has to provide the repository-level one a person would have opened.
+    /// A task has no space of its own, so a fixture only has to provide the
+    /// repository-level one a person would have opened.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
         mux.create_space(
@@ -1529,10 +1531,8 @@ project_dirs = []
     /// The pane the tab `tab` holds, in whichever space the task made.
     fn pane_of_tab(mux: &FakeMux, scratch: &Scratch, tab: &str) -> PaneId {
         let _ = scratch;
-        mux.list_spaces()
-            .unwrap_or_else(|err| panic!("{err}"))
-            .iter()
-            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
+        spawn::all_handles(mux)
+            .into_iter()
             .find(|listed| listed.id.as_str() == tab)
             .unwrap_or_else(|| panic!("no tab {tab}"))
             .root_pane

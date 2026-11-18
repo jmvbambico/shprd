@@ -205,6 +205,11 @@ impl ApiReject {
         Self::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, message)
     }
 
+    /// The request named something this service has not listed.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
+    }
+
     /// The action's kind is not one this service knows.
     pub fn unknown_action(kind: &str) -> Self {
         Self::new(

@@ -81,6 +81,8 @@ export function snapshot(tasks: TaskDto[], extra: Partial<SnapshotDto> = {}): Sn
     needs: [],
     asks: [],
     finished: false,
+    spaces: [],
+    live_agents: [],
     ...extra,
   };
 }

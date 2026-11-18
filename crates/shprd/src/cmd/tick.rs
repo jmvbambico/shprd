@@ -155,15 +155,8 @@ pub(crate) fn worker_with_hub(
     let close_worker: Option<shprd_server::WorkerCloser> = (!record_only()).then(|| {
         std::sync::Arc::new(move |repo: &Path, task: &str| {
             let (run, briefs) = run_and_briefs(repo, &close_worker_home)?;
-            let repo_name = crate::cmd::spawn::repo_name(repo).map_err(|err| err.to_string())?;
-            crate::cmd::spawn::close_task_space(
-                &*close_worker_host,
-                &briefs,
-                &run,
-                &repo_name,
-                task,
-            )
-            .map_err(|err| err.to_string())
+            crate::cmd::spawn::stop_task_agents(&*close_worker_host, &briefs, &run, task)
+                .map_err(|err| err.to_string())
         }) as shprd_server::WorkerCloser
     });
     // The fallback ladder's host: transcript facts, sign-in probes, and the two

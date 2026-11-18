@@ -89,9 +89,14 @@ mod tests {
             &crate::cmd::spawn::repo_name(repo.path()).expect("the repository's name"),
         );
         let space = mux.create_space(&name, repo.path()).expect("the space");
-        let recorded = crate::cmd::spawn::record_coordinator_pane(home.path(), &mux, &space)
-            .expect("recording the pane")
+        let recorded = mux
+            .list_tabs(&space.id)
+            .expect("the tabs")
+            .first()
+            .map(|tab| tab.root_pane.clone())
             .expect("the space's first tab");
+        crate::cmd::spawn::record_coordinator_pane(home.path(), &recorded, "sh")
+            .expect("recording the pane");
 
         let news = LiveNews::new(Box::new(mux), home.path(), repo.path());
         assert_eq!(

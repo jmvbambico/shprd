@@ -644,14 +644,10 @@ mod tests {
         Ok(())
     }
 
-    /// Run end takes every task space and leaves the coordinator's alone.
-    ///
-    /// A run with no task in flight still has the spaces its tasks were given
-    /// (a dropped or abandoned one, say); ending the run is what removes them,
-    /// and the repository-level space is where a person's coordinator lives, so
-    /// it is never shprd's to close.
+    /// Run end stops every agent a task left and never closes the repository's
+    /// space: it is where the coordinator lives, so it is not shprd's to close.
     #[test]
-    fn finish_closes_the_tasks_spaces_and_keeps_the_coordinators() -> Result<()> {
+    fn finish_stops_the_tasks_agents_and_keeps_the_repositorys_space() -> Result<()> {
         let fixture = Fixture::new()?;
         let ctx = fixture.ctx()?;
         ctx.commit(EventKind::TaskAdded {
@@ -671,15 +667,23 @@ mod tests {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
-        let coordinator = mux
+        let space = mux
             .create_space(&spawn::repo_space_name(&repo_name), fixture.repo.path())
             .map_err(|err| anyhow!("{err}"))?;
-        let task = mux
-            .create_space(
-                &spawn::task_space_name(&repo_name, RUN, "T2"),
-                fixture.repo.path(),
-            )
+        let agent = mux
+            .spawn_agent(&shprd_mux::AgentLaunch {
+                space: &space.id,
+                title: "worker",
+                argv: &[],
+                env: &[],
+                cwd: fixture.repo.path(),
+                role: shprd_mux::AgentRole::Worker,
+                task: Some("T2"),
+                program: "claude",
+                parent: None,
+            })
             .map_err(|err| anyhow!("{err}"))?;
+        fixture.record("T2-a1.tab", &agent.id)?;
 
         finish(
             &mux,
@@ -689,28 +693,25 @@ mod tests {
         )
         .map_err(failed)?;
 
-        let spaces: Vec<shprd_mux::SpaceId> = mux
-            .calls()
-            .into_iter()
-            .filter_map(|call| match call {
-                Call::CloseSpace(closed) => Some(closed),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(spaces, vec![task.id.clone()], "only the task's space goes");
+        assert!(
+            mux.list_agents()
+                .map_err(|err| anyhow!("{err}"))?
+                .is_empty(),
+            "the task's agent was stopped"
+        );
+        assert!(
+            !mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::CloseSpace(_))),
+            "no space is closed: {:?}",
+            mux.calls()
+        );
         assert!(
             mux.find_space(&spawn::repo_space_name(&repo_name))
                 .map_err(|err| anyhow!("{err}"))?
                 .is_some(),
             "the coordinator's space stayed"
         );
-        assert!(
-            mux.find_space(&spawn::task_space_name(&repo_name, RUN, "T2"))
-                .map_err(|err| anyhow!("{err}"))?
-                .is_none(),
-            "the task's space stayed"
-        );
-        assert!(coordinator.id != task.id);
         Ok(())
     }
 

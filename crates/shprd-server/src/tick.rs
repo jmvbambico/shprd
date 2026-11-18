@@ -308,15 +308,13 @@ pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + S
 /// log, and failing the step would tell the caller the review decided nothing.
 pub type ReviewCloser = Arc<dyn Fn(&Path, &str, u32) -> Result<(), String> + Send + Sync>;
 
-/// What the tick needs to close a landed task's space.
+/// What the tick needs to stop a landed task's agents.
 ///
-/// A landing is the engine's record and the space is the host's, so the binary
-/// passes the same `spawn::close_task_space` the CLI's `agent integrate` uses:
-/// one task, one space, so a landing closes the space rather than the worker's
-/// tab and leaves the reviewer's behind. Only the space labelled from that task
-/// is in reach, and only the records shprd wrote for it when the host cannot
-/// close a whole space. A host that refuses the close is logged and never fails
-/// the step: the landing is already in the log.
+/// A landing is the engine's record and the agents are the host's, so the binary
+/// passes the same `spawn::stop_task_agents` the CLI's `agent integrate` uses:
+/// the worker's and the reviewer's handles are in the records shprd wrote for
+/// the task, and only those are in reach. A host that refuses the close is
+/// logged and never fails the step: the landing is already in the log.
 pub type WorkerCloser = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
 
 /// Everything one pass runs against.

@@ -71,8 +71,8 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use shprd_mux::{
-    AgentState, Capabilities, Direction, Host, Key, MuxError, MuxEvent, Outcome, PaneId, Result,
-    Space, SpaceId, Tab, TabId, Waited,
+    AgentLaunch, AgentRole, AgentState, Capabilities, Direction, Host, Key, LiveAgent, MuxError,
+    MuxEvent, Outcome, PaneId, Result, Space, SpaceId, Tab, TabId, Waited,
 };
 use tokio::sync::watch;
 
@@ -81,6 +81,19 @@ use crate::error::Error;
 use crate::events::State;
 use crate::model::{self, Terminal};
 use crate::placement::{self, Placement};
+
+/// The label a headless agent's own program carries.
+const AGENT_LABEL: &str = "herdr.agent";
+/// The label that says what an agent is for.
+const ROLE_LABEL: &str = "herdr.role";
+/// The label naming the repository space an agent belongs to. Never
+/// `herdr.space`, which would make the window draw it.
+const TASK_SPACE_LABEL: &str = "herdr.task.space";
+/// The label naming the coordinator tab an agent reports to.
+const COORDINATOR_LABEL: &str = "herdr.coordinator";
+/// What a headless agent's handle starts with: the rest is its terminal's
+/// address, and closing the handle kills that terminal.
+const HANDLE_PREFIX: &str = "term:";
 
 /// How long one window command may take before the call gives up on it.
 ///
@@ -524,6 +537,7 @@ impl HcHost {
             agent_reports,
             close_space: attached,
             list_spaces: true,
+            headless_agents: true,
         };
         let host = Self {
             inner: Arc::new(Inner {
@@ -580,6 +594,51 @@ impl HcHost {
     /// layout verbs are promised.
     pub fn window_attached(&self) -> bool {
         self.inner.capabilities.close_space
+    }
+
+    /// One `terminal.run`: the terminal's address.
+    ///
+    /// `parent` is `None` for a terminal placed in a tab (it keeps the core's
+    /// default), and `Some(parent)` for a headless agent: that terminal when
+    /// there is one, outliving it, else no parent at all.
+    fn run_terminal(
+        &self,
+        title: &str,
+        argv: &[String],
+        env: &[(String, Option<String>)],
+        cwd: &Path,
+        labels: BTreeMap<String, String>,
+        parent: Option<Option<&str>>,
+    ) -> Result<String> {
+        let launch = launch_argv(argv, env);
+        let mut params = json!({
+            "argv": launch.argv,
+            "cwd": cwd.display().to_string(),
+            "labels": labels,
+            "keep": false,
+        });
+        match parent {
+            Some(Some(parent)) => {
+                params["parent"] = json!(parent);
+                params["outlive_parent"] = json!(true);
+            }
+            Some(None) => params["no_parent"] = json!(true),
+            None => {}
+        }
+        if !launch.variables.is_empty() {
+            params["env"] = Value::Object(launch.variables);
+        }
+        let started = self.call_object("terminal.run", params, "terminal", title)?;
+        started
+            .get("address")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                MuxError::command(
+                    "starting a terminal",
+                    format!("herdr-core answered without an address: {started}"),
+                )
+            })
     }
 
     /// One call, as the client's own error.
@@ -910,6 +969,11 @@ impl Host for HcHost {
     }
 
     fn close_tab(&self, tab: &TabId) -> Result<()> {
+        // A headless agent's handle: stopping it is a terminal kill, which also
+        // removes a finished one the core is keeping.
+        if let Some(address) = tab.as_str().strip_prefix(HANDLE_PREFIX) {
+            return self.kill(&PaneId::new(address));
+        }
         let (_, found) = self.tab_with(tab.as_str())?;
         self.window_call(
             "tab.close",
@@ -935,34 +999,103 @@ impl Host for HcHost {
         cwd: &Path,
     ) -> Result<Tab> {
         let label = tab_label(title);
-        let placement = Placement::new(space.as_str(), &label);
-        let launch = launch_argv(argv, env);
-        let mut params = json!({
-            "argv": launch.argv,
-            "cwd": cwd.display().to_string(),
-            "labels": placement.labels(),
-            "keep": false,
-        });
-        if !launch.variables.is_empty() {
-            params["env"] = Value::Object(launch.variables);
-        }
-        let started = self.call_object("terminal.run", params, "terminal", title)?;
-        let address = started
-            .get("address")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                MuxError::command(
-                    "starting a terminal",
-                    format!("herdr-core answered without an address: {started}"),
-                )
-            })?
-            .to_string();
+        let labels = Placement::new(space.as_str(), &label).labels();
+        let address = self.run_terminal(title, argv, env, cwd, labels, None)?;
         self.name_spawned_tab(&label, title);
         Ok(Tab {
             id: TabId::new(label),
             title: title.to_string(),
             root_pane: PaneId::new(address),
         })
+    }
+
+    /// Start an agent. A coordinator is placed in a tab of the repository's
+    /// space like any `spawn`, plus the agent labels; a worker or a reviewer
+    /// carries **no placement labels at all**, so the window draws nothing for
+    /// it (Shepherdr's `launch.py`: `herdr.task`, `herdr.task.space`,
+    /// `herdr.agent`, `herdr.role`, and `herdr.coordinator` under a parent that
+    /// outlives it).
+    fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
+        let mut labels = BTreeMap::new();
+        labels.insert(AGENT_LABEL.to_string(), launch.program.to_string());
+        labels.insert(ROLE_LABEL.to_string(), launch.role.as_str().to_string());
+        labels.insert(
+            TASK_SPACE_LABEL.to_string(),
+            model::bare(launch.space.as_str()).to_string(),
+        );
+        if let Some(task) = launch.task {
+            labels.insert(placement::TASK_LABEL.to_string(), task.to_string());
+        }
+        if launch.role == AgentRole::Coordinator {
+            let tab = tab_label(launch.title);
+            labels.extend(Placement::new(launch.space.as_str(), &tab).labels());
+            let address = self.run_terminal(
+                launch.title,
+                launch.argv,
+                launch.env,
+                launch.cwd,
+                labels,
+                None,
+            )?;
+            self.name_spawned_tab(&tab, launch.title);
+            return Ok(Tab {
+                id: TabId::new(tab),
+                title: launch.title.to_string(),
+                root_pane: PaneId::new(address),
+            });
+        }
+        if let Some(parent) = launch.parent
+            && let Some(terminal) = self.inner.client.state().terminals.get(parent.as_str())
+            && let Some(tab) = terminal.labels.get(placement::TAB_LABEL)
+        {
+            labels.insert(COORDINATOR_LABEL.to_string(), tab.clone());
+        }
+        let address = self.run_terminal(
+            launch.title,
+            launch.argv,
+            launch.env,
+            launch.cwd,
+            labels,
+            Some(launch.parent.map(PaneId::as_str)),
+        )?;
+        Ok(Tab {
+            id: TabId::new(format!("{HANDLE_PREFIX}{address}")),
+            title: launch.title.to_string(),
+            root_pane: PaneId::new(address),
+        })
+    }
+
+    /// Every headless agent, from the core's own fold by label.
+    fn list_agents(&self) -> Result<Vec<LiveAgent>> {
+        let state = self.inner.client.state();
+        Ok(state
+            .terminals()
+            .filter(|terminal| terminal.labels.contains_key(TASK_SPACE_LABEL))
+            .filter(|terminal| !terminal.labels.contains_key(placement::TAB_LABEL))
+            .filter_map(|terminal| {
+                let role = AgentRole::parse(terminal.labels.get(ROLE_LABEL)?)?;
+                let address = terminal.bare_address().to_string();
+                Some(LiveAgent {
+                    tab: Tab {
+                        id: TabId::new(format!("{HANDLE_PREFIX}{address}")),
+                        title: terminal.name.clone().unwrap_or_else(|| address.clone()),
+                        root_pane: PaneId::new(address),
+                    },
+                    task: terminal.labels.get(placement::TASK_LABEL).cloned(),
+                    role,
+                    program: terminal
+                        .labels
+                        .get(AGENT_LABEL)
+                        .cloned()
+                        .unwrap_or_default(),
+                    space: SpaceId::new(terminal.labels.get(TASK_SPACE_LABEL)?.clone()),
+                    state: reported_state(terminal),
+                    live: terminal.is_live(),
+                    started_ms: terminal.created_ms,
+                    ended_ms: terminal.finished_ms,
+                })
+            })
+            .collect())
     }
 
     /// Split the pane showing `pane` with the window's `pane.split`.

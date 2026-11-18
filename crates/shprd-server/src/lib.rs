@@ -16,6 +16,8 @@
 //! | `PUT /api/settings` | one settings key, written and checked like the CLI writes it |
 //! | `GET /api/roster` | the programs a role may run, with their models and levels |
 //! | `POST /api/agents` | start a program in a new tab, as the tab bar's "+" menu asks |
+//! | `GET /api/agents/:id/output` | one agent's recent screen, read-only (finished agents too) |
+//! | `POST /api/agents/:id/attach` | the terminal id and socket a client binds a real terminal to |
 //! | `GET /api/prompts` | the templates this machine has, without their words |
 //! | `GET /api/prompts/:id` | one role prompt: its words, its file and its state |
 //! | `PUT /api/prompts/:id` | the person's words, stored over that prompt's file |
@@ -76,6 +78,7 @@ pub(crate) mod actions;
 pub(crate) mod auth;
 pub mod hub;
 pub(crate) mod ledger;
+pub mod live;
 pub mod news;
 pub(crate) mod prompts;
 pub mod remote;
@@ -90,6 +93,7 @@ pub use chat::{COORDINATOR, ChatHost, ChatWriter, Space as ChatSpace};
 pub use engine::Engine;
 pub use error::{ApiReject, ServerError};
 pub use graph::{Dagr, Located, Missing, Origin};
+pub use live::{LiveAgentRow, LiveAgents, LiveSource};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
 pub use service::{

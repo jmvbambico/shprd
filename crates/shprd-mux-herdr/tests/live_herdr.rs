@@ -153,8 +153,9 @@ fn a_task_space_is_spawned_into_and_closed_as_one() {
     let repo = mux
         .ensure_space(&shprd_mux::repo_space_name("scratch"), &cwd)
         .unwrap();
-    // A task's space is labelled from the task.
-    let name = shprd_mux::task_space_name("scratch", "r1", "T1");
+    // A second space, to prove the adapter's space verbs (shprd itself makes only
+    // the repository's now).
+    let name = String::from("shprd \u{b7} scratch \u{b7} r1 \u{b7} T1");
     let task = mux.ensure_space(&name, &cwd).unwrap();
     assert_ne!(task.id, repo.id);
     assert_eq!(task.name, name);

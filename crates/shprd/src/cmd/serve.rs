@@ -22,9 +22,11 @@
 //! It also prepares the repository's own space before the first pass: the label
 //! is derived from the folder name, so a space nobody made is a run that cannot
 //! start a task until someone reads a refusal (M9 gate bug 6). That space is the
-//! coordinator's; a task gets its own when it is spawned, and loses it when it
-//! lands. The banner says whether it found the space, made it, or could not
-//! reach the host at all.
+//! coordinator's, and the service starts the coordinator agent in it (or finds
+//! it running after a restart): the one space shprd makes. A task gets no space
+//! and no tab: its worker and reviewer are headless agents the host lists. The
+//! banner says whether it found the space, made it, or could not reach the host
+//! at all.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -80,7 +82,16 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     let host: std::sync::Arc<dyn Host> = std::sync::Arc::from(host);
     let workspace = match &leakage {
         Some(reason) => SpaceNotice::Withheld(reason.clone()),
-        None => prepare_space(host.as_ref(), &ctx.root, &home),
+        None => prepare_space(host.as_ref(), &ctx.root, |prepared| {
+            let data = crate::cmd::roster::resolve_data_dir();
+            let env = crate::cmd::spawn::build_repo_env(ctx, Some(&home), &data)?;
+            let delivering = host.clone();
+            crate::cmd::spawn::ensure_coordinator(host.as_ref(), &env, prepared, move |pending| {
+                // The wait for the program to take a turn runs beside the
+                // service: the banner and the API do not wait for a program.
+                std::thread::spawn(move || pending.deliver(delivering.as_ref()));
+            })
+        }),
     };
     if let SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) = &workspace {
         tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
@@ -148,10 +159,20 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         home: home.clone(),
         host: host.clone(),
     }));
+    // The agents the host lists, headless: `live_agents` on the state answer, the
+    // output and attach routes, and the terminal socket's `agent:<id>` space all
+    // read this one list, so a client can only reach an agent that was listed.
+    let live = Arc::new(crate::cmd::live_agents::HostLive::new(
+        ctx.root.clone(),
+        home.clone(),
+        host.clone(),
+    ));
+    config.live = shprd_server::LiveAgents::with(live.clone());
     config.terminal = shprd_server::TerminalPort::with(Arc::new(HostTerminal {
         repo: ctx.root.clone(),
         home: home.clone(),
         host: host.clone(),
+        live,
     }));
     let tick = tick_config(
         ctx,
@@ -291,10 +312,21 @@ struct HostTerminal {
     home: std::path::PathBuf,
     /// The host this service drives.
     host: Arc<dyn Host>,
+    /// The agents the host lists, for the `agent:<id>` space.
+    live: Arc<crate::cmd::live_agents::HostLive>,
 }
 
 impl shprd_server::TerminalHost for HostTerminal {
     fn resolve(&self, space: &str, pane: Option<&str>) -> Result<String, String> {
+        // `agent:<id>` is a headless agent the service listed: its terminal and
+        // no other, never an address the client chose.
+        if let Some(id) = space.strip_prefix("agent:") {
+            return self
+                .live
+                .terminal_of(id)
+                .filter(|terminal| pane.is_none_or(|wanted| wanted == terminal))
+                .ok_or_else(|| format!("no agent {id} is listed"));
+        }
         let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
         let found = match shprd_server::ChatSpace::parse(Some(space)) {
             shprd_server::ChatSpace::Coordinator => {
@@ -409,22 +441,27 @@ pub(crate) enum SpaceNotice {
 /// states the convention, but the folder name is load-bearing and a label that
 /// was almost right made every pass refuse). A host that cannot be asked at all
 /// is reported rather than fatal, because the API is useful without one.
-fn prepare_space(mux: &dyn Host, repo: &Path, home: &Path) -> SpaceNotice {
+fn prepare_space(
+    mux: &dyn Host,
+    repo: &Path,
+    start: impl FnOnce(
+        &crate::cmd::spawn::PreparedSpace,
+    ) -> Result<crate::cmd::spawn::CoordinatorStart, CliError>,
+) -> SpaceNotice {
     let prepared = match crate::cmd::spawn::ensure_repo_space(mux, repo) {
         Ok(prepared) => prepared,
         Err(err) => return SpaceNotice::Unavailable(err.to_string()),
     };
-    // The coordinator's chat types into this space, and nothing lists the space
-    // for it later, so the pane is recorded here — once, by the start that made
-    // or found the space. A space with no tab records nothing, and a chat then
-    // refuses rather than guessing at a pane.
-    let pane = match crate::cmd::spawn::record_coordinator_pane(home, mux, &prepared.space) {
-        Ok(pane) => pane.map(|pane| pane.as_str().to_string()),
-        // A record that cannot be written is not a reason to refuse to serve:
-        // the board is still what a person reads, and the chat says why it has
-        // nowhere to type.
+    // The space holds the coordinator, which is an agent shprd starts: a chat
+    // line or the news is typed into it and nothing else, so it is started here
+    // (or found running again after a restart) and its pane recorded. A
+    // coordinator that cannot start (no CLI installed, a prompt that cannot be
+    // read) is a warning and not a refusal to serve: the board is still what a
+    // person reads, and the chat then says why it has nowhere to type.
+    let pane = match start(&prepared) {
+        Ok(start) => Some(start.pane().as_str().to_string()),
         Err(err) => {
-            tracing::warn!(%err, "the coordinator's pane could not be recorded");
+            tracing::warn!(%err, "the coordinator could not be started");
             None
         }
     };
@@ -676,12 +713,33 @@ mod tests {
     use shprd_mux::fake::{Call, FakeMux};
     use tempfile::TempDir;
 
-    /// The id of the space `label` names, for the calls that take one.
-    fn notice_space(mux: &FakeMux, label: &str) -> shprd_mux::SpaceId {
-        mux.find_space(label)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or_else(|| panic!("{label:?} is there"))
-            .id
+    /// A coordinator start that spawns a program tab and records its pane, as
+    /// [`crate::cmd::spawn::ensure_coordinator`] does, without a harness table.
+    fn start_in<'a>(
+        mux: &'a FakeMux,
+        home: &'a Path,
+        repo: &'a Path,
+    ) -> impl FnOnce(
+        &crate::cmd::spawn::PreparedSpace,
+    ) -> Result<crate::cmd::spawn::CoordinatorStart, CliError>
+    + 'a {
+        move |prepared| {
+            let tab = mux
+                .spawn_agent(&shprd_mux::AgentLaunch {
+                    space: &prepared.space.id,
+                    title: "coordinator",
+                    argv: &["sh".to_string()],
+                    env: &[],
+                    cwd: repo,
+                    role: shprd_mux::AgentRole::Coordinator,
+                    task: None,
+                    program: "sh",
+                    parent: None,
+                })
+                .map_err(|err| CliError::other(anyhow!(err)))?;
+            crate::cmd::spawn::record_coordinator_pane(home, &tab.root_pane, "sh")?;
+            Ok(crate::cmd::spawn::CoordinatorStart::Started(tab.root_pane))
+        }
     }
 
     /// The label a repository's own space carries, as the banner reports it.
@@ -702,7 +760,7 @@ mod tests {
         let label = label_of(repo.path());
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), home.path());
+        let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
 
         let SpaceNotice::Created(reported, pane) = &notice else {
             panic!("the space is created, not {notice:?}");
@@ -713,15 +771,22 @@ mod tests {
         let recorded =
             std::fs::read_to_string(crate::cmd::spawn::coordinator_pane_path(home.path()))
                 .unwrap_or_else(|err| panic!("the pane is recorded: {err}"));
-        assert_eq!(recorded.trim(), pane.clone().unwrap_or_default());
         assert_eq!(
-            mux.calls(),
-            vec![
-                Call::FindSpace(label.clone()),
-                Call::CreateSpace(label.clone(), repo.path().to_path_buf()),
-                Call::ListTabs(notice_space(&mux, &label)),
-            ],
-            "one lookup, one creation, one look at its tabs, and nothing else touched"
+            recorded.lines().next().unwrap_or_default(),
+            pane.clone().unwrap_or_default()
+        );
+        let calls = mux.calls();
+        assert_eq!(calls[0], Call::FindSpace(label.clone()));
+        assert_eq!(
+            calls[1],
+            Call::CreateSpace(label.clone(), repo.path().to_path_buf())
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                Call::SpawnAgent(shprd_mux::AgentRole::Coordinator, None, None)
+            )),
+            "the coordinator agent is started in it: {calls:?}"
         );
         let line = space_line(&notice, repo.path());
         assert!(line.contains("created"), "{line}");
@@ -739,7 +804,7 @@ mod tests {
         let _ = mux.take_calls();
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), home.path());
+        let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
 
         let SpaceNotice::Reused(reported, pane) = &notice else {
             panic!("the space is reused, not {notice:?}");
@@ -749,13 +814,13 @@ mod tests {
             pane.is_some(),
             "the pane the chat may reach is recorded on a reused space too"
         );
-        assert_eq!(
-            mux.calls(),
-            vec![
-                Call::FindSpace(label.clone()),
-                Call::ListTabs(notice_space(&mux, &label)),
-            ],
-            "a lookup, then the tabs to find the pane: nothing created, renamed or focused"
+        let calls = mux.calls();
+        assert_eq!(calls[0], Call::FindSpace(label.clone()));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, Call::CreateSpace(..) | Call::CloseSpace(_))),
+            "nothing created or closed: {calls:?}"
         );
         let found = mux
             .find_space(&made.name)
@@ -839,7 +904,7 @@ mod tests {
         });
         let notice = match &guard {
             Some(reason) => SpaceNotice::Withheld(reason.clone()),
-            None => prepare_space(&mux, repo.path(), repo.path()),
+            None => prepare_space(&mux, repo.path(), start_in(&mux, repo.path(), repo.path())),
         };
         assert!(matches!(notice, SpaceNotice::Withheld(_)), "{notice:?}");
         assert_eq!(
