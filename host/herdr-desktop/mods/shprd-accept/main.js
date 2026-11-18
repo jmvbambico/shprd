@@ -106,7 +106,10 @@ export default class Accept extends View {
       // The shown view is Herdr's (`layout()`), not this mod's state, so a view picked
       // from outside (a row's click, a command) is noticed on a short beat: the head
       // repaints, and its render settles the Terminal view onto the task's agent.
-      cx.timer.every(500, (cx) => cx.notify());
+      cx.timer.every(500, (cx) => {
+        this.settle();
+        cx.notify();
+      });
       cx.spawn(async () => {
         for (;;) {
           const command = await nextCommand();
@@ -296,6 +299,24 @@ export default class Accept extends View {
     this.cx.notify();
   }
 
+  /**
+   * Settles the shown view onto what the task can show, on a short beat (never in
+   * `render`, which may only read): the pull request or artifacts of a task that
+   * has none go back to the chat; the Terminal view is the agent's own terminal
+   * while the window holds it and the read-only stream when it does not; and a
+   * shown terminal is focused on the task's agent.
+   */
+  settle() {
+    const task = this.selected();
+    if (!task) return;
+    const agent = threadAgent(this.state, task.id);
+    const termChild = terminalChild(agent, terminals());
+    const shown = this.shownChild();
+    if (mustLeavePr(task, shown)) this.view(VIEW.chat.id, task);
+    else if ((shown === VIEW.term.id || shown === VIEW.stream.id) && shown !== termChild) this.view(termChild, task);
+    else if (shown === VIEW.term.id) this.focusAgent(task, false);
+  }
+
   /** Focuses the task's agent in the window, once per terminal, so the block shows it. */
   focusAgent(task, force = true) {
     const agent = task ? threadAgent(this.state, task.id) : null;
@@ -324,15 +345,6 @@ export default class Accept extends View {
     const agent = task ? threadAgent(this.state, task.id) : null;
     const termChild = terminalChild(agent, terminals());
     const shown = this.shownChild();
-    // Showing the pull request of a task that has none: back to the chat.
-    if (mustLeavePr(task, shown)) this.cx.timer.after(0, () => this.view(VIEW.chat.id, task));
-    // The Terminal view follows what the window can show: the agent's own terminal
-    // while it holds it, the read-only stream when it cannot (and back).
-    else if ((shown === VIEW.term.id || shown === VIEW.stream.id) && shown !== termChild) {
-      this.cx.timer.after(0, () => this.view(termChild, task));
-    } else if (shown === VIEW.term.id) {
-      this.focusAgent(task, false);
-    }
     const segs = threadViews(task, { live: agent !== null, shown, termChild });
     const shape = task ? taskLook(task) : { glyph: "ring", tone: "dim" };
     const said = reportLine(task);
