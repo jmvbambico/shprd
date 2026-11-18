@@ -387,7 +387,8 @@ impl Gateway {
         user_agent: Option<&str>,
         current: Option<&str>,
     ) -> Result<LoginOutcome, GateError> {
-        self.limits
+        let ticket = self
+            .limits
             .login(ip)
             .map_err(|retry| GateError::TooManyRequests {
                 after_ms: retry.after_ms,
@@ -410,7 +411,7 @@ impl Gateway {
         }
 
         // A right password is not an attempt to guess: hand the attempt back.
-        self.limits.login_succeeded(ip);
+        self.limits.login_succeeded(ip, ticket);
 
         if let Some(current) = current
             && let Some(record) = self

@@ -70,13 +70,15 @@ pub(crate) async fn peer(
     next.run(request).await
 }
 
-/// Whether the request is a local caller: addressed to a loopback name, with
+/// Whether the request is a local caller: its client address (the recorded
+/// [`Peer`]) is loopback, it is addressed to a loopback name, and it carries
 /// none of the headers a tunnel's edge adds. A tunnel's visitors are addressed
 /// to the tunnel's host, and their requests carry forwarding headers, so
 /// neither is loopback; the check is for what only a local client should see
 /// (the service's id on `GET /api/health`).
-pub(crate) fn is_local_caller(headers: &HeaderMap) -> bool {
-    shprd_remote::hosts::is_loopback_request(host_of(headers))
+pub(crate) fn is_local_caller(peer: IpAddr, headers: &HeaderMap) -> bool {
+    peer.is_loopback()
+        && shprd_remote::hosts::is_loopback_request(host_of(headers))
         && [
             "x-forwarded-for",
             "x-forwarded-host",
@@ -290,5 +292,29 @@ mod tests {
             .unwrap();
         assert_eq!(host_of(with.headers()), Some("127.0.0.1:18080"));
         assert_eq!(host_of(request("/api/state").headers()), None);
+    }
+
+    #[test]
+    fn only_a_loopback_peer_on_a_loopback_name_without_edge_headers_is_local() {
+        let with = |host: &str, extra: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            if let Some(name) = extra {
+                headers.insert(
+                    HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    "1.2.3.4".parse().unwrap(),
+                );
+            }
+            headers
+        };
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let lan: IpAddr = "192.168.1.9".parse().unwrap();
+        assert!(is_local_caller(local, &with("127.0.0.1:8080", None)));
+        assert!(!is_local_caller(lan, &with("127.0.0.1:8080", None)));
+        assert!(!is_local_caller(local, &with("abc.ngrok.app", None)));
+        assert!(!is_local_caller(
+            local,
+            &with("127.0.0.1:8080", Some("x-forwarded-for"))
+        ));
     }
 }

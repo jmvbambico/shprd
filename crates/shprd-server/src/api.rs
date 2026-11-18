@@ -775,10 +775,14 @@ pub(crate) fn router(state: AppState) -> Router {
 /// check it before they send the token), so it is answered to a loopback caller
 /// only: anyone reaching the service by its tunnel's name gets `ok` and the
 /// version.
-async fn health(State(state): State<AppState>, headers: HeaderMap) -> Json<HealthDto> {
+async fn health(
+    State(state): State<AppState>,
+    Extension(auth::Peer(peer)): Extension<auth::Peer>,
+    headers: HeaderMap,
+) -> Json<HealthDto> {
     Json(HealthDto {
         ok: true,
-        id: auth::is_local_caller(&headers).then(|| state.id.clone()),
+        id: auth::is_local_caller(peer, &headers).then(|| state.id.clone()),
         version: state.version.clone(),
     })
 }

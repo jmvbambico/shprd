@@ -166,6 +166,11 @@ impl StormSignal {
     }
 }
 
+/// The attempt a [`RateLimiter::login`] counted, handed back to
+/// [`RateLimiter::login_succeeded`] when the password turns out to be right.
+#[derive(Debug, Clone, Copy)]
+pub struct LoginTicket(u64);
+
 /// The limiter: one instance per service, shared by every route.
 #[derive(Clone)]
 pub struct RateLimiter {
@@ -207,7 +212,7 @@ impl RateLimiter {
     /// [`RateLimiter::login_succeeded`] takes it back when the password was
     /// right. A wrong password is counted a second time, against the account,
     /// by [`RateLimiter::failure`].
-    pub fn login(&self, ip: IpAddr) -> Result<(), Retry> {
+    pub fn login(&self, ip: IpAddr) -> Result<LoginTicket, Retry> {
         let now = self.now();
         let mut buckets = self.lock();
 
@@ -265,17 +270,21 @@ impl RateLimiter {
         buckets.login_all.push(now);
 
         self.sweep(&mut buckets, now);
-        Ok(())
+        Ok(LoginTicket(now))
     }
 
-    /// Takes back the attempt [`RateLimiter::login`] counted for `ip`, because the
-    /// password was right, and forgets that address's earlier failures and
-    /// blocks: a person who gets in is not a guesser.
-    pub fn login_succeeded(&self, ip: IpAddr) {
+    /// Takes back the attempt [`RateLimiter::login`] counted for `ip` (the one
+    /// `ticket` names), because the password was right, and forgets that
+    /// address's earlier failures and blocks: a person who gets in is not a
+    /// guesser. Only this attempt's own entry leaves the global count, so a
+    /// right password racing a wrong one never hands the wrong one back.
+    pub fn login_succeeded(&self, ip: IpAddr, ticket: LoginTicket) {
         let mut buckets = self.lock();
         buckets.login_ip.remove(&ip);
         buckets.blocked.remove(&ip);
-        buckets.login_all.pop();
+        if let Some(at) = buckets.login_all.iter().rposition(|at| *at == ticket.0) {
+            buckets.login_all.remove(at);
+        }
     }
 
     /// Counts one wrong password, and locks the account when there are too many.
@@ -673,18 +682,28 @@ mod tests {
         let (_, limits) = limiter();
         // Far more right logins than any limit, from one address: never refused.
         for _ in 0..(LOGIN_GLOBAL * 2) {
-            limits.login(ip(1)).expect("a right login is never refused");
-            limits.login_succeeded(ip(1));
+            let ticket = limits.login(ip(1)).expect("a right login is never refused");
+            limits.login_succeeded(ip(1), ticket);
         }
         // Four wrong passwords, then the owner gets in, and the slate is clean.
         for _ in 0..(LOGIN_PER_IP - 1) {
             limits.login(ip(2)).expect("inside");
         }
-        limits.login(ip(2)).expect("the fifth is allowed");
-        limits.login_succeeded(ip(2));
+        let ticket = limits.login(ip(2)).expect("the fifth is allowed");
+        limits.login_succeeded(ip(2), ticket);
         for _ in 0..LOGIN_PER_IP {
             limits.login(ip(2)).expect("the failures were forgotten");
         }
+    }
+
+    #[test]
+    fn a_success_hands_back_only_its_own_attempt_from_the_global_count() {
+        let (clock, limits) = limiter();
+        let mine = limits.login(ip(1)).expect("inside");
+        clock.advance(Duration::from_secs(1));
+        limits.login(ip(2)).expect("another guess, still in flight");
+        limits.login_succeeded(ip(1), mine);
+        assert_eq!(limits.lock().login_all.len(), 1, "the other attempt stays");
     }
 
     #[test]
