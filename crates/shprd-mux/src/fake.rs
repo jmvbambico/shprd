@@ -1059,11 +1059,11 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::{Call, FakeMux};
-    use crate::Host;
     use crate::types::{
         AgentState, Capabilities, Direction, Key, MuxError, MuxEvent, Outcome, PaneId, TabId,
         Waited, WorkspaceId,
     };
+    use crate::{AgentLaunch, AgentRole, Host};
     use std::fmt::Display;
     use std::path::Path;
     use std::time::Duration;
