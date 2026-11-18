@@ -584,7 +584,7 @@ export default class Tasks extends View {
       .child(statusGlyph(t, row, colors, 12))
       .child(div().flex_none().font_family(MONO).text_color(t.foreground).child(ref(row.id)))
       .child(div().flex_1().min_w(0).truncate().text_color(row.waits ? t.dim : t.muted).child(row.title))
-      .child(div().flex_none().text_color(word).font_medium().child(row.word))
+      .child(div().flex_none().max_w(150).truncate().text_color(word).font_medium().child(row.word))
       // A fixed slot for the pill, so every row's status word ends at the same edge.
       .child(
         h_flex()
