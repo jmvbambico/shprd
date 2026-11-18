@@ -18,42 +18,52 @@
 // send-back runs, Drop is `shprd drop` with the person's reason. Accept is drawn
 // only where `tasks.merge` is `ask`; where it is not, the card says so once.
 //
-// The layout mounts two copies: the head (`props.head`, 127 px) and the card
-// itself. Both read the one task the Tasks panel shared (`tasks.thread`), so the
-// drill-in is one selection with two views of it, never two selections.
+// Two shapes of one mod. The layout mounts the **head** (`props.head`, 127 px:
+// ‹ Tasks, the task, the switcher and Review) at the top of the task thread. The
+// **card** is not in the layout at all: Review opens it as a 640 × 640 modal
+// dialog (`openAccept`, `mods/lib/panel.js`) whose props name the task, and its ×,
+// Cancel and Esc close it — Shepherdr's own shape (`mods/accept-card/main.js`).
+// The head reads the one task the Tasks panel shared (`tasks.thread`); the dialog
+// reads the task it was opened for, so opening it never moves the panel beneath.
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { props, run, setShared, shared, theme } from "herdr";
+import { closeOverlay, layout, props, run, setShared, shared, spaces, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import {
   WORDS,
   card,
   changeRows,
-  changesLine,
+  changeCounts,
   checks,
+  commitRows,
+  canReview,
   findings,
-  head as cardHead,
+  mustLeavePr,
+  reportLine,
   reviewLine,
+  threadViews,
   verbs,
   whereNow,
   words,
 } from "./lib/accept.js";
-import { card as surface, cardHeader, note } from "./lib/panel.js";
-import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
+import { openAccept, segmented, statusGlyph } from "./lib/panel.js";
+import { spaceIndex, taskLook } from "./lib/spaces.js";
+import { H, RADIUS, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
 /** How often the card reads the board when the change file says nothing. */
 const FLOOR_MS = 4000;
+/** How old the branch's changes may be before they are read again, ms. */
+const CHANGES_MS = 20_000;
 /** How long a merge policy is trusted before it is asked for again, ms. */
 const POLICY_MS = 60_000;
 
-/** Which body stack child each switcher word shows. */
-const VIEWS = [
-  { id: "tasks-thread-accept", word: "Accept" },
-  { id: "tasks-thread-pr", word: "Pull request" },
-];
+/** The thread's body stack, whose active child the switcher moves. */
+const BODY = "tasks-thread-body";
+/** The thread head's left edge, where its three rows line up. */
+const EDGE = 12;
 
 export default class Accept extends View {
   init(_props, cx) {
@@ -61,6 +71,15 @@ export default class Accept extends View {
     // The layout mounts this mod twice: the head (`props.head`) and the card.
     // A copy's props never change, so this is read once and never again.
     this.headCopy = Boolean(props()?.head);
+    // The dialog is opened for one task and keeps it; `overlay` is its own id, for
+    // closing it. The head has neither: it follows the panel's selection.
+    // Opened with no task (`mod.open`, the bare overlay a key command gives), the
+    // dialog is about the one the panel has open.
+    this.taskId = props()?.task ?? (this.headCopy ? null : (shared("tasks.thread")?.task ?? null));
+    this.overlay = props()?.overlay ?? null;
+    this.handle = cx.focus_handle();
+    if (!this.headCopy) this.handle.focus();
+    this.viewing = null;
     this.state = null;
     this.client = null;
     this.failure = null;
@@ -78,10 +97,13 @@ export default class Accept extends View {
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
 
-  /** The task this copy is about, from the panel's shared selection. */
+  /**
+   * The task this copy is about: the panel's shared selection for the head, the
+   * task it was opened for for the dialog.
+   */
   selected() {
-    const thread = shared("tasks.thread");
-    return card(this.state, thread?.task ?? null);
+    const id = this.headCopy ? (shared("tasks.thread")?.task ?? null) : this.taskId;
+    return card(this.state, id);
   }
 
   /**
@@ -107,8 +129,12 @@ export default class Accept extends View {
       this.follow();
       this.state = await this.client.state();
       this.failure = null;
-      await this.readPolicy();
-      await this.readChanges();
+      // Only the dialog needs the merge policy and the branch's changes: the head
+      // would otherwise make a git read at the service for numbers it never draws.
+      if (!this.headCopy) {
+        await this.readPolicy();
+        await this.readChanges();
+      }
     } catch (err) {
       this.client = null;
       this.failure = reason(err);
@@ -176,8 +202,13 @@ export default class Accept extends View {
       return;
     }
     const attemptCount = (task.attempts ?? []).length;
-    const key = `${task.id}:${attemptCount}`;
-    if (key === this.changesFor) return;
+    // An agent report or a status change is the log moving: the branch may have
+    // new commits, so the read is made again (and not on every wake-up besides).
+    const key = `${task.id}:${attemptCount}:${task.status}:${task.last_status?.seq ?? 0}`;
+    // A branch can gain commits with nothing in the log moving, so a read older
+    // than CHANGES_MS is made again even under the same key.
+    if (key === this.changesFor && Date.now() - (this.changesAt ?? 0) < CHANGES_MS) return;
+    this.changesAt = Date.now();
     this.changesFor = key;
     this.changesError = null;
     try {
@@ -198,12 +229,20 @@ export default class Accept extends View {
       await this.client.action({ kind: action, task: task.id, ...extra });
       this.dropping = false;
       this.details = false;
-      await this.refresh();
+      this.busy = null;
+      // The decision is made: the dialog goes, as Shepherdr's does after Accept.
+      this.close();
+      return;
     } catch (err) {
       this.error = reason(err);
     }
     this.busy = null;
     this.cx.notify();
+  }
+
+  /** Closes the dialog: × , Cancel, Esc and a finished verb all end here. */
+  close() {
+    closeOverlay(this.overlay);
   }
 
   /** Back to the list, and the selection cleared with it. */
@@ -213,32 +252,56 @@ export default class Accept extends View {
     this.cx.notify();
   }
 
-  /** Shows one of the task's views inside this panel. */
-  view(id) {
-    run("layout.select", { stack: "tasks-thread-body", child: id });
+  /**
+   * Shows one of the task's views inside this panel.
+   *
+   * The terminal block is `{"agent":"focused"}`, so it shows the agent of the
+   * space that is selected: the task's own space is selected first, and the block
+   * is shown after.
+   */
+  view(id, task) {
+    if (id === "tasks-thread-term") this.selectSpace(task);
+    run("layout.select", { stack: BODY, child: id });
+    this.viewing = id;
     this.cx.notify();
+  }
+
+  /** Selects the task's space, so the focused agent is the task's. */
+  selectSpace(task) {
+    const space = task ? spaceIndex(spaces()).tasks.get(task.id) : null;
+    if (space?.id) run("space.select", { id: space.id });
   }
 
   render() {
     const t = theme();
-    return this.headCopy ? this.head(t) : this.body(t);
+    return this.headCopy ? this.head(t) : this.dialog(t);
   }
 
   /**
-   * The head: back to the list, the task's reference, its title and its status,
-   * then the switcher the task's other views hang off.
+   * The head, three rows on one left edge (Shepherdr's `chat/panel.js` head):
+   * ‹ Tasks with the one primary Review at the right; the task's glyph, id and
+   * title with the agent's last status line under them; then the switcher.
+   *
+   * There is no "→ base": a shprd task has no base of its own — every task lands
+   * in the run's integration branch — so there is nothing that "differs" to say.
    */
   head(t) {
     const task = this.selected();
-    const shape = cardHead(task);
     const colors = tone(t);
-    const toneName = shape.tone === "dim" ? t.dim : (colors[shape.tone] ?? t.dim);
+    const live = task ? spaceIndex(spaces()).tasks.has(task.id) : false;
+    const shown = this.shownChild();
+    // Showing the pull request of a task that has none: back to the terminal.
+    if (mustLeavePr(task, shown)) this.cx.timer.after(0, () => this.view("tasks-thread-term", task));
+    const segs = threadViews(task, { live, shown });
+    const shape = task ? taskLook(task) : { glyph: "ring", tone: "dim" };
+    const said = reportLine(task);
     const back = h_flex()
       .id("accept-back")
-      .h(H.xs)
+      .h(24)
+      .pl(2)
+      .pr(8)
+      .gap(2)
       .flex_none()
-      .px(6)
-      .gap(4)
       .items_center()
       .rounded(RADIUS.control)
       .text_size(TEXT.label)
@@ -247,147 +310,310 @@ export default class Accept extends View {
       .hover((style) => style.bg(t.hover).text_color(t.foreground))
       .on_click(() => this.back())
       .child("‹ Tasks");
-    const title = h_flex()
-      .min_w(0)
-      .items_center()
-      .gap(8)
-      .child(div().flex_none().font_family("JetBrains Mono").text_size(TEXT.label).text_color(t.dim).child(ref(shape.id ?? "—")))
-      .child(div().min_w(0).truncate().text_size(TEXT.body).text_color(t.foreground).child(shape.title))
-      .when(shape.id !== null, (el) =>
-        el.child(
-          h_flex()
-            .flex_none()
-            .gap(5)
-            .items_center()
-            .text_size(TEXT.id)
-            .text_color(toneName)
-            .child(div().w(6).h(6).rounded(3).bg(toneName))
-            .child(shape.word),
-        ),
-      );
-    const switcher = h_flex()
-      .h(H.sm)
-      .flex_none()
-      .gap(2)
-      .children(VIEWS.map((view) => this.viewTab(t, view)));
+    const review = canReview(task)
+      ? h_flex()
+          .id("accept-review")
+          .h(H.sm)
+          .flex_none()
+          .px(10)
+          .items_center()
+          .rounded(RADIUS.control)
+          .cursor_pointer()
+          .text_size(TEXT.label)
+          .bg(t.solid)
+          .text_color(t.solid_foreground)
+          .hover((style) => style.opacity(0.9))
+          .on_click(() => openAccept({ task: task.id, title: task.title }))
+          .child("Review")
+      : null;
     return v_flex()
       .size_full()
+      .pt(8)
+      .pb(12)
+      .gap(12)
       .bg(t.background)
       .border_1()
       .border_color(t.border)
       .rounded(RADIUS.panel)
       .overflow_hidden()
       .child(
-        h_flex()
-          .h(SPACE.panelHeader)
+        v_flex()
           .flex_none()
-          .px(10)
           .gap(8)
-          .items_center()
-          .border_b(1)
-          .border_color(t.border)
-          .child(back)
-          .child(title)
-          .child(div().flex_1()),
+          .child(
+            h_flex()
+              .h(24)
+              .flex_none()
+              .pl(EDGE - 6)
+              .pr(EDGE)
+              .gap(4)
+              .items_center()
+              .child(back)
+              .child(div().flex_1())
+              .when(this.failure !== null, (el) =>
+                el.child(div().text_size(TEXT.id).text_color(colors.red).child(this.failure)),
+              )
+              .when(review !== null, (el) => el.child(review)),
+          )
+          .child(
+            h_flex()
+              .flex_none()
+              .px(EDGE)
+              .gap(8)
+              .items_start()
+              .text_color(t.foreground)
+              .child(
+                h_flex()
+                  .w(16)
+                  .h(22)
+                  .flex_none()
+                  .items_center()
+                  .justify_center()
+                  .child(statusGlyph(t, shape, colors)),
+              )
+              .child(
+                v_flex()
+                  .flex_1()
+                  .min_w(0)
+                  .gap(2)
+                  .child(
+                    h_flex()
+                      .h(22)
+                      .min_w(0)
+                      .gap(8)
+                      .items_center()
+                      .when(task !== null, (el) =>
+                        el.child(
+                          div()
+                            .flex_none()
+                            .font_family("JetBrains Mono")
+                            .text_size(TEXT.label)
+                            .text_color(t.dim)
+                            .child(ref(task.id)),
+                        ),
+                      )
+                      .child(
+                        div()
+                          .flex_1()
+                          .min_w(0)
+                          .truncate()
+                          .text_size(TEXT.title)
+                          .font_medium()
+                          .child(task?.title ?? ""),
+                      ),
+                  )
+                  .child(
+                    h_flex()
+                      .h(16)
+                      .min_w(0)
+                      .items_center()
+                      .child(
+                        div()
+                          .flex_1()
+                          .min_w(0)
+                          .truncate()
+                          .text_size(TEXT.label)
+                          .text_color(t.muted)
+                          .child(said ?? ""),
+                      ),
+                  ),
+              ),
+          ),
       )
       .child(
         h_flex()
-          .flex_1()
-          .min_h(0)
-          .px(10)
-          .gap(6)
-          .items_center()
-          .child(switcher)
-          .child(div().flex_1())
-          .when(this.failure !== null, (el) =>
-            el.child(div().text_size(TEXT.id).text_color(colors.red).child(this.failure)),
+          .id("accept-views")
+          .flex_none()
+          .px(EDGE)
+          .child(
+            segmented(
+              t,
+              "accept-view",
+              segs.map((seg) => [seg.key, seg.word, { disabled: seg.dead }]),
+              segs.find((seg) => seg.on)?.key ?? null,
+              (key) => {
+                const seg = segs.find((entry) => entry.key === key);
+                if (seg?.child) this.view(seg.child, task);
+              },
+            ),
           ),
       );
   }
 
-  /** One switcher word: the view this panel is showing, or one to show. */
-  viewTab(t, view) {
-    const active = view.id === "tasks-thread-accept";
-    return h_flex()
-      .id(`accept-tab-${view.id}`)
-      .h(H.xs + 4)
-      .px(8)
-      .items_center()
-      .rounded(RADIUS.control)
-      .text_size(TEXT.label)
-      .text_color(active ? t.foreground : t.muted)
-      .when(active, (el) => el.bg(t.raised))
-      .when(!active, (el) =>
-        el
-          .cursor_pointer()
-          .hover((style) => style.bg(t.hover).text_color(t.foreground))
-          .on_click(() => this.view(view.id)),
-      )
-      .child(view.word);
+  /** The stack child the thread's body shows now, from the layout Herdr holds. */
+  shownChild() {
+    const find = (node) => {
+      if (!node) return null;
+      if (node.id === BODY) return node;
+      for (const child of node.children ?? []) {
+        const hit = find(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return find(layout())?.active ?? this.viewing ?? "tasks-thread-term";
   }
 
-  /** The card itself. */
-  body(t) {
+  /**
+   * The card, as a 640 × 640 modal dialog (Shepherdr's `accept-card`): the title
+   * ("Accept T1?", or the bare reference once there is nothing to accept) with the
+   * task's own title under it and a × at the right, the sections in a scrolling
+   * body, and a footer of Cancel and the verbs. Esc closes it like Cancel.
+   */
+  dialog(t) {
     const colors = tone(t);
     const task = this.selected();
     const wired = verbs(task, this.policy);
     const said = words(task);
-    const review = reviewLine(task);
-    const listed = changeRows(this.changes);
-    const checked = checks(task);
-    const found = findings(task);
+    const settled = Boolean(task) && (task.status === "integrated" || task.status === "dropped");
     // The question is only a question where there is something to accept: a task
     // that failed, or one that landed, is named by its reference instead (the
     // same distinction Shepherdr's card makes between "Accept X?" and the ref).
-    const title = !task
-      ? WORDS.title
-      : wired.accept
-        ? WORDS.question(task.id)
-        : task.id;
-    const header = cardHeader(
-      t,
-      h_flex()
-        .gap(6)
-        .items_center()
-        .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(title))
-        .when(task && !wired.accept, (el) =>
-          el.child(div().text_size(TEXT.id).text_color(t.dim).child(WORDS.notYet)),
-        ),
-    );
-    if (!task) {
-      return surface(t, [
-        header,
-        note(t, this.failure ?? WORDS.reading),
-        note(t, "Pick a task in the list; a ready one opens here."),
-        div().flex_1(),
-      ]);
+    const title = !task ? WORDS.title : wired.accept ? WORDS.question(task.id) : task.id;
+    const closer = div()
+      .id("accept-close")
+      .w(H.sm)
+      .h(H.sm)
+      .flex_none()
+      .flex()
+      .items_center()
+      .justify_center()
+      .rounded(RADIUS.control)
+      .text_color(t.muted)
+      .cursor_pointer()
+      .hover((style) => style.bg(t.hover).text_color(t.foreground))
+      .on_click((_event, cx) => {
+        cx.stop_propagation();
+        this.close();
+      })
+      .child("×");
+    const body = !task
+      ? div().text_color(t.dim).child(this.failure ?? WORDS.reading)
+      : v_flex()
+          .w_full()
+          .gap(16)
+          .pb(4)
+          // The summary first, one line for the person: it is what the agent says it
+          // did, and it is the top of the card in Shepherdr's too.
+          .child(
+            div()
+              .max_w(560)
+              .text_size(TEXT.body)
+              .text_color(said.summary === "" ? t.muted : t.foreground)
+              .child(said.summary === "" ? WORDS.noSummary : said.summary),
+          )
+          .child(this.section(t, WORDS.changes, this.changesBody(t, colors)))
+          .child(this.section(t, WORDS.checks, this.checksBody(t, colors, task)))
+          .child(this.section(t, WORDS.review, this.reviewBody(t, colors, task)))
+          .when(said.details !== "", (el) => el.child(this.detailsSection(t, said.details)));
+    return v_flex()
+      .id("accept-card")
+      .track_focus(this.handle)
+      .on_key_down((event, cx) => {
+        if (event?.key !== "escape") return;
+        cx.stop_propagation();
+        this.close();
+      })
+      .size_full()
+      .min_h(0)
+      .p(22)
+      .gap(18)
+      .bg(t.popover ?? t.background)
+      .text_size(TEXT.body)
+      .child(
+        h_flex()
+          .flex_none()
+          .gap(12)
+          .items_start()
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(4)
+              .child(div().text_size(TEXT.title).font_semibold().text_color(t.foreground).child(title))
+              .child(div().min_w(0).truncate().text_color(t.muted).child(task?.title ?? "")),
+          )
+          .child(div().mt(-2).mr(-6).child(closer)),
+      )
+      .child(div().id("accept-body").flex_1().min_h(0).overflow_y_scrollbar().pr(6).child(body))
+      .child(this.footer(t, colors, task, wired, settled));
+  }
+
+  /**
+   * Changes: one line of counts, the newest commits, the biggest files by name.
+   * "3 commits · 4 files changed +12 −4", then "And 2 more" for what was folded.
+   */
+  changesBody(t, colors) {
+    if (this.changesError !== null) {
+      return div().text_color(t.muted).child(this.changesError);
     }
-    const sections = [
-      // The summary first, one line for the person: it is what the agent says it
-      // did, and it is the top of the card in Shepherdr's too.
-      div()
-        .px(12)
-        .py(8)
-        .text_size(TEXT.body)
-        .text_color(said.summary === "" ? t.muted : t.foreground)
-        .child(said.summary === "" ? WORDS.noSummary : said.summary),
-      this.section(t, WORDS.changes, [
-        div().text_size(TEXT.label).text_color(t.muted).child(
-          this.changesError !== null ? this.changesError : changesLine(this.changes),
+    const counts = changeCounts(this.changes);
+    if (counts === null) return div().text_color(t.muted).child(WORDS.noChanges);
+    const commits = commitRows(this.changes);
+    const listed = changeRows(this.changes);
+    const mono = (el) => el.font_family("JetBrains Mono");
+    return v_flex()
+      .gap(8)
+      .min_w(0)
+      .child(
+        h_flex()
+          .gap(8)
+          .items_center()
+          .flex_wrap()
+          .when(counts.commits !== null, (el) =>
+            el
+              .child(div().text_color(t.foreground).child(counts.commits))
+              .child(div().text_color(t.dim).child("·")),
+          )
+          .child(div().text_color(t.foreground).child(counts.files))
+          .child(mono(div()).text_size(TEXT.label).text_color(colors.green).child(counts.added))
+          .child(mono(div()).text_size(TEXT.label).text_color(colors.red).child(counts.removed)),
+      )
+      .when(commits.rows.length > 0, (el) =>
+        el.child(
+          v_flex()
+            .gap(3)
+            .min_w(0)
+            .children(
+              commits.rows.map((row) =>
+                h_flex()
+                  .gap(8)
+                  .min_w(0)
+                  .items_center()
+                  .child(mono(div()).flex_none().text_size(12).text_color(t.dim).child(row.sha))
+                  .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(row.subject)),
+              ),
+            )
+            .when(commits.rest > 0, (more) =>
+              more.child(div().text_size(12).text_color(t.dim).child(WORDS.moreLine(commits.rest))),
+            ),
         ),
-        ...listed.rows.map((row) =>
-          h_flex()
-            .h(20)
-            .gap(8)
-            .items_center()
-            .child(div().flex_1().min_w(0).truncate().font_family("JetBrains Mono").text_size(TEXT.id).text_color(t.muted).child(row.path))
-            .child(div().flex_none().font_family("JetBrains Mono").text_size(TEXT.id).text_color(t.dim).child(row.stat)),
-        ),
-        ...(listed.rest > 0
-          ? [div().text_size(TEXT.id).text_color(t.dim).child(`and ${listed.rest} more`)]
-          : []),
-      ]),
-      this.section(t, WORDS.checks, [
+      )
+      .child(
+        v_flex()
+          .gap(2)
+          .min_w(0)
+          .children(
+            listed.rows.map((row) =>
+              h_flex()
+                .gap(8)
+                .items_center()
+                .child(mono(div()).flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(row.path))
+                .child(mono(div()).flex_none().text_size(TEXT.id).text_color(t.dim).child(row.stat)),
+            ),
+          )
+          .when(listed.rest > 0, (more) =>
+            more.child(div().text_size(12).text_color(t.dim).child(WORDS.moreLine(listed.rest))),
+          ),
+      );
+  }
+
+  /** Checks: the gates the hand-in ran, with the state each ended in. */
+  checksBody(t, colors, task) {
+    const checked = checks(task);
+    return v_flex()
+      .gap(4)
+      .children([
         ...checked.rows.map((row) =>
           h_flex()
             .h(20)
@@ -411,12 +637,17 @@ export default class Accept extends View {
                 : []),
             ]
           : []),
-      ]),
-      this.section(t, WORDS.review, [
-        div()
-          .text_size(TEXT.label)
-          .text_color(review.degraded ? colors.amber : t.muted)
-          .child(review.line),
+      ]);
+  }
+
+  /** Review: who reviewed it and what they found — shprd's own section. */
+  reviewBody(t, colors, task) {
+    const review = reviewLine(task);
+    const found = findings(task);
+    return v_flex()
+      .gap(4)
+      .children([
+        div().text_size(TEXT.label).text_color(review.degraded ? colors.amber : t.muted).child(review.line),
         ...found.map((finding) =>
           v_flex()
             .gap(2)
@@ -446,31 +677,19 @@ export default class Accept extends View {
               el.child(div().text_size(TEXT.label).text_color(t.muted).child(finding.detail)),
             ),
         ),
-      ]),
-      ...(said.details !== "" ? [this.detailsSection(t, said.details)] : []),
-    ];
-    return surface(t, [
-      header,
-      v_flex()
-        .flex_1()
-        .min_h(0)
-        .overflow_y_scrollbar()
-        .py(2)
-        .children(sections),
-      this.footer(t, colors, task, wired),
-    ]);
+      ]);
   }
 
-  /** One section: a quiet label, then what it says. */
-  section(t, label, children) {
+  /** One section: a hairline above, a quiet label, then what it says. */
+  section(t, label, content) {
     return v_flex()
-      .px(12)
-      .py(6)
-      .gap(4)
+      .w_full()
+      .gap(6)
+      .pt(14)
       .border_t(1)
       .border_color(t.border)
-      .child(div().text_size(TEXT.label).font_medium().text_color(t.dim).child(label))
-      .children(children);
+      .child(div().text_size(TEXT.label).font_medium().text_color(t.muted).child(label))
+      .child(content);
   }
 
   /**
@@ -482,9 +701,9 @@ export default class Accept extends View {
   detailsSection(t, text) {
     const open = this.details;
     return v_flex()
-      .px(12)
-      .py(6)
-      .gap(4)
+      .w_full()
+      .gap(8)
+      .pt(14)
       .border_t(1)
       .border_color(t.border)
       .child(
@@ -508,40 +727,49 @@ export default class Accept extends View {
   }
 
   /**
-   * The footer: the one primary, then the two verbs that move a task, and the
-   * reason a verb is missing when one is.
+   * The footer: a dim note at the left, plain Cancel, then the verbs — Drop task
+   * and Send back as secondaries and Accept the one primary (Shepherdr's dialog
+   * footer is Cancel and the primary; the two extra verbs are the engine's).
    *
    * Accept is the primary and only where `tasks.merge` is `ask`; Send back is
-   * drawn on a task whose attempt failed, and Drop always opens a reason field
+   * drawn on a task whose attempt failed, and Drop task opens a reason field
    * first — the reason is the person's, and it is what the run's pull request
-   * lists.
+   * lists. A task that is settled has nothing to decide: its footer is the line
+   * with a dot saying where it is, and **Close** alone.
    */
-  footer(t, colors, task, wired) {
-    const settled = task.status === "integrated" || task.status === "dropped";
-    const line = h_flex()
-      .flex_1()
-      .min_w(0)
-      .text_size(TEXT.id)
-      .text_color(this.error !== null ? colors.red : settled ? t.muted : t.dim)
-      .child(this.error ?? (settled ? whereNow(task) : (wired.note ?? "")));
-    if (settled) {
-      return h_flex()
-        .h(SPACE.panelHeader)
+  footer(t, colors, task, wired, settled) {
+    const noteColor = this.error !== null ? colors.red : t.dim;
+    if (!task || settled) {
+      return v_flex()
         .flex_none()
-        .px(12)
-        .gap(8)
-        .items_center()
-        .border_t(1)
-        .border_color(t.border)
-        .child(line);
+        .gap(10)
+        .when(Boolean(task), (el) =>
+          el.child(
+            h_flex()
+              .gap(8)
+              .items_center()
+              .child(div().w(7).h(7).flex_none().rounded(4).bg(task.status === "integrated" ? colors.green : t.muted))
+              .child(div().text_color(t.foreground).child(whereNow(task))),
+          ),
+        )
+        .child(
+          h_flex()
+            .h(H.lg)
+            .gap(8)
+            .items_center()
+            .child(div().flex_1())
+            .child(this.button(t, "cancel", WORDS.close, false, () => this.close())),
+        );
     }
-    const buttons = [];
+    const buttons = [this.button(t, "cancel", WORDS.cancel, false, () => this.close())];
     if (wired.drop) {
-      buttons.push(this.button(t, "drop", this.dropping ? WORDS.cancel : WORDS.drop, false, () => {
-        this.dropping = !this.dropping;
-        if (this.dropping) this.reason = InputState.new({ placeholder: WORDS.reasonPlaceholder });
-        this.cx.notify();
-      }));
+      buttons.push(
+        this.button(t, "drop", WORDS.drop, false, () => {
+          this.dropping = !this.dropping;
+          if (this.dropping) this.reason = InputState.new({ placeholder: WORDS.reasonPlaceholder });
+          this.cx.notify();
+        }),
+      );
     }
     if (wired.sendBack) {
       buttons.push(
@@ -559,23 +787,10 @@ export default class Accept extends View {
     }
     return v_flex()
       .flex_none()
-      .border_t(1)
-      .border_color(t.border)
-      .child(
-        h_flex()
-          .h(SPACE.panelHeader)
-          .flex_none()
-          .px(12)
-          .gap(8)
-          .items_center()
-          .child(line)
-          .children(buttons),
-      )
+      .gap(10)
       .when(this.dropping, (el) =>
         el.child(
           h_flex()
-            .px(12)
-            .pb(8)
             .gap(8)
             .items_center()
             .child(
@@ -602,6 +817,22 @@ export default class Accept extends View {
               }),
             ),
         ),
+      )
+      .child(
+        h_flex()
+          .h(H.lg)
+          .gap(8)
+          .items_center()
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .text_size(TEXT.label)
+              .text_color(noteColor)
+              .child(this.error ?? wired.note ?? ""),
+          )
+          .children(buttons),
       );
   }
 
@@ -609,9 +840,9 @@ export default class Accept extends View {
   button(t, id, label, primary, onClick) {
     return h_flex()
       .id(`accept-${id}`)
-      .h(H.sm)
+      .h(H.lg)
       .flex_none()
-      .px(10)
+      .px(12)
       .items_center()
       .rounded(RADIUS.control)
       .cursor_pointer()

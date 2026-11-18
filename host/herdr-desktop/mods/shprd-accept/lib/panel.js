@@ -234,8 +234,11 @@ export function segmented(t, id, options, value, onPick, { disabled = false } = 
     .bg(t.raised)
     .when(disabled, (el) => el.opacity(0.5))
     .children(
-      options.map(([choice, word]) => {
+      options.map(([choice, word, own]) => {
         const on = choice === value;
+        // A choice with `{ disabled: true }` is drawn dim and does nothing — a
+        // view that cannot open now (Shepherdr's `segmented()` takes it too).
+        const off = Boolean(own?.disabled);
         const base = h_flex()
           .id(`${id}-${choice}`)
           .h_full()
@@ -251,6 +254,8 @@ export function segmented(t, id, options, value, onPick, { disabled = false } = 
         const live =
           on || disabled
             ? styled
+            : off
+              ? styled.text_color(t.dim)
             : styled.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(() => onPick(choice));
         return live.child(String(word));
       }),
@@ -363,6 +368,27 @@ export function openSettings(p = {}) {
   });
   settingsWindowOpened(id, p.page ?? null);
   return id;
+}
+
+/**
+ * The Accept card, opened as a dialog over the window.
+ *
+ * Shepherdr's `accept()` (`mods/tasks/main.js`): a 640 × 640 modal dialog with
+ * its default frame, which `shprd-accept` fills. It is opened from a Ready row's
+ * Review pill, the task head's Review button and a toast about a task that is
+ * ready (the toast is shprd's own entry point). `p` is `{ task, title }`; the
+ * dialog reads its task from its own props, never from the panel's selection, so
+ * opening it leaves the panel underneath as it was.
+ */
+export function openAccept(p) {
+  return openOverlay({
+    mod: "shprd-accept",
+    kind: "dialog",
+    modal: true,
+    width: 640,
+    height: 640,
+    props: { task: p.task, title: p.title ?? "" },
+  });
 }
 
 /**

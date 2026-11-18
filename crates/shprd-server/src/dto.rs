@@ -718,6 +718,16 @@ pub struct FileChangeDto {
     pub binary: bool,
 }
 
+/// One commit on a task's branch: its short hash and its subject line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "CommitDto.ts")]
+pub struct CommitDto {
+    /// The abbreviated hash.
+    pub sha: String,
+    /// The first line of the message.
+    pub subject: String,
+}
+
 /// What `GET /api/tasks/{id}/changes` answers with.
 ///
 /// It is the task's branch against its base, read from the merge base, so the
@@ -734,6 +744,11 @@ pub struct TaskChangesDto {
     pub branch: String,
     /// The commit both branches meet at: what the diff is taken from.
     pub merge_base: String,
+    /// How many commits the task's branch holds past the merge base.
+    pub commit_count: u64,
+    /// The newest of them, newest first, at most [`COMMITS_LISTED`] (the card
+    /// says "And N more" for the rest).
+    pub commits: Vec<CommitDto>,
     /// Every changed file, in git's order.
     pub files: Vec<FileChangeDto>,
     /// Lines added across every file.
@@ -741,6 +756,9 @@ pub struct TaskChangesDto {
     /// Lines deleted across every file.
     pub deleted: u64,
 }
+
+/// How many commits `GET /api/tasks/{id}/changes` names; the count covers all.
+pub const COMMITS_LISTED: usize = 5;
 
 /// One event's footprint, as change notifications carry it.
 ///
@@ -1508,6 +1526,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<AgentOpenDto>()?,
         one::<AgentTabDto>()?,
         one::<FileChangeDto>()?,
+        one::<CommitDto>()?,
         one::<TaskChangesDto>()?,
         one::<TaskProgressDto>()?,
         one::<AttemptDto>()?,

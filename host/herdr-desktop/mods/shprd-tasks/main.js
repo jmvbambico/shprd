@@ -24,7 +24,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { nextCommand, run, setShared, shared, theme } from "herdr";
+import { nextCommand, run, setShared, shared, spaces, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import {
@@ -37,15 +37,20 @@ import {
   rowActions,
   secondLine,
 } from "./lib/board.js";
-import { badge, card, cardHeader, countBadge, keycap, note, statusGlyph } from "./lib/panel.js";
+import { badge, card, cardHeader, countBadge, keycap, note, openAccept, statusGlyph } from "./lib/panel.js";
+import { spaceIndex } from "./lib/spaces.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
 /** How often the panel reads the board when the change file says nothing. */
 const FLOOR_MS = 4000;
 
-/** The stack child a row's click opens: the Accept card, in this panel. */
-const CARD = "tasks-thread-accept";
+/**
+ * The stack child a row's click opens: the task's agent terminal, in this panel.
+ * The Accept card is not a child of the thread any more — Review opens it as a
+ * dialog (`openAccept`).
+ */
+const TERM = "tasks-thread-term";
 
 export default class Tasks extends View {
   init(_props, cx) {
@@ -160,7 +165,7 @@ export default class Tasks extends View {
   }
 
   /**
-   * Opens a task in the panel's drill-in: the Accept card's slot.
+   * Opens a task in the panel's drill-in: its head over its terminal.
    *
    * Which task is shown is shared (`tasks.thread`, Shepherdr's own contract), so
    * the card, the head and the PR view all read the same one rather than each
@@ -168,8 +173,12 @@ export default class Tasks extends View {
    */
   open(task) {
     setShared("tasks.thread", { task: task?.id ?? null, title: task?.title ?? "", at: Date.now() });
+    // The terminal block shows the focused agent, so the task's own space is
+    // selected first: the terminal is then the task's, not whichever was up.
+    const space = task?.id ? spaceIndex(spaces()).tasks.get(task.id) : null;
+    if (space?.id) run("space.select", { id: space.id });
     run("layout.select", { stack: "tasks", child: "tasks-thread" });
-    run("layout.select", { stack: "tasks-thread-body", child: CARD });
+    run("layout.select", { stack: "tasks-thread-body", child: TERM });
     run("layout.show", { id: "panel" });
     this.cx.notify();
   }
@@ -796,8 +805,8 @@ export default class Tasks extends View {
    * The one act a row ends with: a 24 px pill.
    *
    * A press stops at the pill — the row's own click opens the card — and posts
-   * the engine's verb. `Review` is not a verb: it opens the card, which is where
-   * the decision is made.
+   * the engine's verb. `Review` is not a verb: it opens the Accept dialog, which is
+   * where the decision is made.
    */
   act(t, task, act) {
     const el = h_flex()
@@ -816,7 +825,8 @@ export default class Tasks extends View {
       .child(act.label);
     return el.on_click((_event, cx) => {
       cx.stop_propagation();
-      if (act.action === null) this.open(task);
+      // Review is the card, as a dialog: the panel underneath stays as it was.
+      if (act.action === null) openAccept({ task: task.id, title: task.title });
       else this.verb(task, act.action);
     });
   }

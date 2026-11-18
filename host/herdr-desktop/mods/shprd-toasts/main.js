@@ -30,6 +30,8 @@ import { v_flex, h_flex } from "gpui-base";
 import { run, spaces, theme } from "herdr";
 
 import { attach, alive, POLL_WAIT } from "./lib/client.js";
+import { canReview } from "./lib/accept.js";
+import { openAccept } from "./lib/panel.js";
 import { spaceIndex } from "./lib/spaces.js";
 import {
   BODY_MAX,
@@ -192,8 +194,19 @@ export default class Toasts extends View {
     cx.notify();
   }
 
-  /** A click on a toast goes to the thing it is about. */
+  /**
+   * A click on a toast goes to the thing it is about.
+   *
+   * A toast about a task that is ready for review opens the Accept dialog, so the
+   * decision it announces is one click away. That entry point is shprd's own:
+   * Shepherdr's toast click goes to the agent.
+   */
   open(item) {
+    const task = (this.state?.tasks ?? []).find((entry) => entry.id === item.task);
+    if (task && canReview(task)) {
+      openAccept({ task: task.id, title: task.title });
+      return;
+    }
     const space = spaceIndex(spaces()).tasks.get(item.task);
     if (space?.id) {
       run("space.select", { id: space.id });

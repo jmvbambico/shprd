@@ -180,13 +180,6 @@
                               "type": "stack",
                               "children": [
                                 {
-                                  "id": "tasks-thread-accept",
-                                  "type": "block",
-                                  "content": {
-                                    "mod": "shprd-accept"
-                                  }
-                                },
-                                {
                                   "id": "tasks-thread-term",
                                   "type": "block",
                                   "content": {
@@ -201,7 +194,7 @@
                                   }
                                 }
                               ],
-                              "active": "tasks-thread-accept"
+                              "active": "tasks-thread-term"
                             }
                           ],
                           "background": "background",

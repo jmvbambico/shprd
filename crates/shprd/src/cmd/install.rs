@@ -91,11 +91,16 @@ const MOD_PREFIX: &str = "shprd-";
 /// not touch the file): M10.3's, M10.4's (`spaces` became `shprd-spaces`, and the
 /// tab bar and panel gained their buttons) and M10.7's, which is where M10 ended
 /// and whose side panel held settings as a tab. M11 fix S made settings a dialog
-/// over the window, so that block went away.
+/// over the window, so that block went away. M11 U3 made the Accept card a dialog,
+/// so the task thread's stack lost its `tasks-thread-accept` block and opens on the
+/// terminal; the layout before that is `shprd-m11-menu.json` (and `shprd-m11.json` before the
+/// terminal menu was added).
 const PREVIOUS_LAYOUTS: &[&str] = &[
     include_str!("previous-layouts/shprd-m10.3.json"),
     include_str!("previous-layouts/shprd-m10.4.json"),
     include_str!("previous-layouts/shprd-m10.json"),
+    include_str!("previous-layouts/shprd-m11.json"),
+    include_str!("previous-layouts/shprd-m11-menu.json"),
 ];
 
 /// Runs `shprd install`, whichever mode the command line asked for.

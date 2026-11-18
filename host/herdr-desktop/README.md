@@ -28,8 +28,10 @@ mods/shprd-jump/        Jump (Ctrl+K): a 620 × 480 popup at the top, one find b
 mods/shprd-keybinds/    Keybinds (Ctrl+Shift+/): a 560 × 620 dialog, every key in
                         words, grouped, type to filter
 mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
-mods/shprd-accept/      the Accept card            (M10.5)
-mods/shprd-task-pr/     the task's pull request    (M10.5)
+mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Terminal ·
+                        Pull request) and the Accept card, a 640×640 modal dialog
+                        that Review opens                         (M10.5, M11 U3)
+mods/shprd-task-pr/     the task's pull request: state, #n, size, branches, links (M10.5)
 mods/shprd-asks/        the needs-you cards        (M10.6)
 mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
                         a dialog since M11 fix S)

@@ -514,6 +514,16 @@ async fn the_changes_of_a_task_are_its_branch_against_its_base() {
     assert_eq!(kept["deleted"], json!(1), "two");
     assert_eq!(body["added"], json!(3));
     assert_eq!(body["deleted"], json!(1));
+    // The commits the branch holds past the merge base, newest first.
+    let listed = body["commits"].as_array().expect("the commits");
+    assert_eq!(
+        body["commit_count"],
+        json!(listed.len()),
+        "the count covers what is listed here"
+    );
+    assert!(!listed.is_empty(), "the branch has work on it");
+    assert!(listed[0]["sha"].as_str().is_some_and(|sha| !sha.is_empty()));
+    assert!(listed[0]["subject"].is_string());
 }
 
 /// Bug 8 of the M10 gate: another task lands on the integration branch after
