@@ -22,7 +22,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, middleware};
 use serde::Deserialize;
 use serde_json::Value;
@@ -655,6 +655,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/ws", get(socket))
         .route("/api/session", get(login::session))
         .route("/api/logout", post(login::logout))
+        .route("/api/sessions", get(login::sessions))
+        .route("/api/sessions/{id}", delete(login::revoke))
         .route("/api/tunnels", get(tunnels::list))
         .route("/api/tunnels/start", post(tunnels::start))
         .route("/api/tunnels/stop", post(tunnels::stop))
