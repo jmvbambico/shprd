@@ -17,6 +17,7 @@ export * from "./ChatSendReply";
 export * from "./ChatToolDto";
 export * from "./CheckDto";
 export * from "./ClientMessage";
+export * from "./CommitDto";
 export * from "./DagrDto";
 export * from "./DagrOriginDto";
 export * from "./DerivedStatusDto";

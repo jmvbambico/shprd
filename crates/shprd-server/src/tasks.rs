@@ -25,7 +25,9 @@ use shprd_git::changed;
 use shprd_git::git::Git;
 
 use crate::api::AppState;
-use crate::dto::{ActionReply, FileChangeDto, NewTaskDto, TaskChangesDto};
+use crate::dto::{
+    ActionReply, COMMITS_LISTED, CommitDto, FileChangeDto, NewTaskDto, TaskChangesDto,
+};
 use crate::error::ApiReject;
 use crate::hub::Hub;
 use crate::ledger;
@@ -202,7 +204,29 @@ pub(crate) fn changes_in(
             binary: stat.binary,
         })
         .collect();
+    let range = format!("{merge_base}..{branch}");
+    let commit_count = git
+        .run(&["rev-list", "--count", &range])
+        .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+    let limit = format!("--max-count={COMMITS_LISTED}");
+    let commits: Vec<CommitDto> = git
+        .run(&["log", &limit, "--format=%h%x09%s", &range])
+        .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?
+        .lines()
+        .filter_map(|line| {
+            let (sha, subject) = line.split_once('\t')?;
+            Some(CommitDto {
+                sha: sha.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect();
     Ok(TaskChangesDto {
+        commit_count,
+        commits,
         task: task_id.to_string(),
         added: files.iter().map(|file| file.added).sum(),
         deleted: files.iter().map(|file| file.deleted).sum(),
