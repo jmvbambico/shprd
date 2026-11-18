@@ -173,7 +173,8 @@ fn a_live_test_that_names_its_own_server_loses_the_rest_of_the_rule() {
 fn a_service_started_by_hand_from_a_temporary_checkout_refuses_the_host() {
     let (repo, state, home) = fixture();
     // A run, so the banner has something to name and the start is a real one.
-    let started = Command::new(BIN)
+    let mut start = Command::new(BIN);
+    start
         .args([
             "--repo",
             &repo.path().display().to_string(),
@@ -190,9 +191,9 @@ fn a_service_started_by_hand_from_a_temporary_checkout_refuses_the_host() {
         ])
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
-        .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
-        .output()
-        .expect("run start runs");
+        .env("XDG_DATA_HOME", home.path().join(".local").join("share"));
+    isolate(&mut start, state.path());
+    let started = start.output().expect("run start runs");
     assert!(
         started.status.success(),
         "run start failed: {}",
@@ -226,14 +227,9 @@ fn a_service_started_by_hand_from_a_temporary_checkout_refuses_the_host() {
             "0",
             "--json",
         ])
-        .env("HERDR_SOCKET_PATH", &outside)
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_DATA_HOME", home.path().join(".local").join("share"))
-        .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_ENV")
-        .env_remove("HERDR_APP_HOME")
-        .env_remove("HC_SESSION")
         .env_remove("SHPRD_ALLOW_DEFAULT_SOCKET")
         .stdout(Stdio::from(
             fs::File::create(&out_path).expect("the stdout file"),
@@ -241,6 +237,10 @@ fn a_service_started_by_hand_from_a_temporary_checkout_refuses_the_host() {
         .stderr(Stdio::from(
             fs::File::create(&err_path).expect("the stderr file"),
         ));
+    // Every host variable removed first; only the socket is then put outside the
+    // temp dir, which is exactly what makes the guard fire.
+    isolate(&mut command, state.path());
+    command.env("HERDR_SOCKET_PATH", &outside);
     let mut child = command.spawn().expect("the service starts");
 
     // The banner is one JSON document, written after the record.
