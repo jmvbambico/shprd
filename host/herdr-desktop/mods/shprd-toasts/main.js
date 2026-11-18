@@ -203,9 +203,11 @@ export default class Toasts extends View {
       this.hovered = id;
     } else if (this.hovered === id) {
       this.hovered = null;
-      const held = Date.now() - (this.frozen ?? Date.now());
+      const from = this.frozen ?? Date.now();
+      const held = Date.now() - from;
       this.frozen = null;
-      this.items = this.items.map((item) => ({ ...item, at: item.at + held }));
+      // Only the toasts that were there when the pointer arrived were held.
+      this.items = this.items.map((item) => (item.at <= from ? { ...item, at: item.at + held } : item));
     }
     cx?.notify?.();
   }
