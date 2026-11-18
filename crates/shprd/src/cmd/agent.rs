@@ -241,7 +241,7 @@ fn record_attempt_only(ctx: &Ctx, home: &Path, task: &str) -> Result<String, Str
     // The worktree is real, cut from the run's integration branch exactly as a
     // spawn cuts it: a test has to commit in it to make a landing possible, and
     // a landing reads the branch's head there.
-    let layout = shprd_git::worktree::Layout::default_for_home(home);
+    let layout = shprd_git::worktree::Layout::from_settings(home, &ctx.root);
     // A retry takes the same path and the same branch as the attempt it
     // replaces, so the failed one is archived and removed first, exactly as a
     // real spawn does it (`spawn::replace_previous`). This is what lets a test

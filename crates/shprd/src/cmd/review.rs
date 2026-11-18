@@ -71,12 +71,14 @@ impl ReviewEnv<'_> {
         // setting is: the person's settings file, then their old `config.toml`,
         // then this repository's committed file. A reviewer named the pre-M9 way
         // therefore still resolves, with the legacy layer as its source.
-        let mut reviewer = spawn
-            .settings
-            .resolve(None)
+        let resolved = spawn.settings.resolve(None);
+        let mut reviewer = resolved
             .role(REVIEWER_ROLE)
             .map(|role| ReviewerRole::resolved(&role))
             .unwrap_or_default();
+        // The rule is read here, on every review, from the same settings layer
+        // the validation reads, so turning it off takes effect on the next one.
+        reviewer.same_vendor_ok = !resolved.cross_vendor();
         if reviewer.agent().is_none() {
             // A repository's own `.shprd/config.toml` predates the settings model
             // and is not a settings layer, so its `[roster] reviewer` is the last
@@ -87,7 +89,9 @@ impl ReviewEnv<'_> {
                 .map_err(|err| CliError::other(anyhow!(err).context("loading the shprd config")))?;
             if let Some(written) = config.roster.reviewer.as_deref() {
                 let effort = config.roster.effort.get(written).map(String::as_str);
+                let same_vendor_ok = reviewer.same_vendor_ok;
                 reviewer = ReviewerRole::written(written, effort);
+                reviewer.same_vendor_ok = same_vendor_ok;
             }
         }
         Ok(ReviewEnv {
@@ -577,6 +581,10 @@ pub struct ReviewerRole {
     pub readonly: bool,
     /// Whether the role may review: its kind is `reviewer`, or it only reads.
     pub may_review: bool,
+    /// True when the person turned `review.cross_vendor` off: a reviewer of the
+    /// author's own vendor, or of an unknown one, is then no reason to refuse or
+    /// to label the review degraded. False (the default) holds the rule.
+    pub same_vendor_ok: bool,
 }
 
 impl ReviewerRole {
@@ -589,6 +597,7 @@ impl ReviewerRole {
             perm: role.perm.clone(),
             readonly: role.readonly.value,
             may_review: role.may_review(),
+            same_vendor_ok: false,
         }
     }
 
@@ -618,6 +627,7 @@ impl ReviewerRole {
             // built-in reviewer is a `reviewer` that only reads.
             readonly: true,
             may_review: true,
+            same_vendor_ok: false,
         }
     }
 
@@ -776,6 +786,11 @@ pub fn choose_reviewer(
         degraded: false,
         note: None,
     };
+    // `review.cross_vendor = false` is the person's own answer: any reviewer will
+    // do, and nothing about this review is labelled degraded.
+    if role.same_vendor_ok {
+        return Ok(reviewer);
+    }
     // The run log keeps the author's program and model apart; both name the
     // agent in a message.
     let author_label = match author_model {
@@ -2044,6 +2059,51 @@ project_dirs = []
         );
         assert!(message.contains("--degraded"), "{message}");
         assert!(!env.reviews_dir.exists(), "no packet may be written");
+    }
+
+    #[test]
+    fn turning_cross_vendor_off_lets_a_same_vendor_review_run_unlabelled() {
+        // The same pair `a_pi_worker_on_claude_cannot_be_reviewed_by_claude_code`
+        // refuses: with `review.cross_vendor = false` it runs, and is not labelled.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported_with(&ctx, "pi", Some("claude/claude-opus-5-5"));
+        let mut env =
+            scratch.review_env_with(&ctx, Some("claude/claude-opus-5-5"), family_programs());
+        env.reviewer.same_vendor_ok = true;
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.degraded, "nothing is labelled when the rule is off");
+        assert!(report.dir.is_dir(), "the packet was written");
+    }
+
+    #[test]
+    fn the_cross_vendor_setting_reaches_the_review_environment() {
+        // `ReviewEnv::build` reads the switch from the settings, so the verb that
+        // runs the review honours it without a restart.
+        let home = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let repo = tempfile::tempdir().unwrap_or_else(|err| panic!("{err}"));
+        let write = |text: &str| {
+            let dir = home.path().join(".config").join("shprd");
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
+            std::fs::write(dir.join("settings.toml"), text).unwrap_or_else(|err| panic!("{err}"));
+        };
+        let ctx = Ctx::new(repo.path().to_path_buf(), Actor::Human, false, true);
+        ctx.commit(EventKind::RunStarted {
+            run_id: "t1".to_string(),
+            repo: "r".to_string(),
+            base_branch: "main".to_string(),
+            integration_branch: "main".to_string(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        write("version = 1\n");
+        let on = ReviewEnv::build(&ctx, Some(home.path())).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!on.reviewer.same_vendor_ok);
+        write("version = 1\n[review]\ncross_vendor = false\n");
+        let off = ReviewEnv::build(&ctx, Some(home.path())).unwrap_or_else(|err| panic!("{err}"));
+        assert!(off.reviewer.same_vendor_ok);
     }
 
     #[test]

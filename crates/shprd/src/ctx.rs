@@ -421,15 +421,15 @@ pub fn resolve_data_dir() -> DataDir {
     DataDir::resolve(explicit.as_deref(), data_home.as_deref())
 }
 
-/// Resolves the layout shprd's git state lives in, with `namespace` as the
-/// branch prefix and archive namespace.
+/// Resolves the layout shprd's git state lives in for `repo`: the settings'
+/// `tasks.archive_namespace` is the branch prefix and archive namespace, and
+/// `tasks.branch` names the branches.
 ///
-/// The worktree root and the namespace both come from here, so a janitor can
-/// never be pointed at someone else's branches by a stale flag.
-pub fn resolve_layout(home: Option<&Path>, namespace: &str) -> Result<Layout, CliError> {
-    let mut layout = Layout::default_for_home(resolve_home(home)?);
-    layout.namespace = namespace.to_string();
-    Ok(layout)
+/// The worktree root, the namespace and the pattern all come from here, so a
+/// janitor can never be pointed at someone else's branches by a stale flag, and
+/// a spawn and the janitor never disagree about what a task's branch is called.
+pub fn resolve_layout(home: Option<&Path>, repo: &Path) -> Result<Layout, CliError> {
+    Ok(Layout::from_settings(&resolve_home(home)?, repo))
 }
 
 /// Parses `--as`, falling back to `$SHPRD_ACTOR`, then to `human`.

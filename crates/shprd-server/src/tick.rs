@@ -693,7 +693,14 @@ impl Worker {
             now_ms,
         );
         let snapshot = news::readings(&state, &self.repo, &rows, &events, &live, now_ms);
-        news::tell(desk, &self.repo, &state, &snapshot)
+        // The settle window is read afresh, so a change saved in the settings is
+        // the next pass's window and not the next service start's.
+        let desk = NewsDesk {
+            coordinator: std::sync::Arc::clone(&desk.coordinator),
+            settle_ms: settle_override_ms(&self.home, &self.repo).unwrap_or(desk.settle_ms),
+            clock: std::sync::Arc::clone(&desk.clock),
+        };
+        news::tell(&desk, &self.repo, &state, &snapshot)
     }
 
     /// Reads the ladder's facts and plans its actions.
@@ -1591,7 +1598,7 @@ impl Worker {
                     self.repo.display()
                 )
             })?;
-        let layout = Layout::default_for_home(&self.home);
+        let layout = Layout::from_settings(&self.home, &self.repo);
         let worktree = integrate::open_integration_branch(
             &self.repo,
             &layout,
@@ -2050,6 +2057,22 @@ fn describe_land_error(err: LandError, task: &str) -> String {
     }
 }
 
+/// The settle window `tasks.news_settle_secs` names, in ms, when some settings
+/// layer other than the built-in one sets it.
+///
+/// [`None`] leaves the window the news desk was wired with, so a caller that
+/// handed a pass its own desk (a test, say) keeps it until someone sets the key.
+pub fn settle_override_ms(home: &Path, repo: &Path) -> Option<u64> {
+    use shprd_core::settings::{Key, Source, TaskKey};
+
+    let loaded = shprd_core::settings::Loaded::read(home, Some(repo)).ok()?;
+    let resolved = loaded.resolve(None);
+    let named = resolved
+        .get(&Key::Task(TaskKey::NewsSettleSecs))
+        .is_some_and(|sourced| sourced.source != Source::BuiltIn);
+    named.then(|| resolved.tasks().news_settle_secs.saturating_mul(1_000))
+}
+
 /// The config a pass runs under, and how long the loop should wait before the
 /// next one.
 ///
@@ -2093,6 +2116,11 @@ pub fn pass_config(home: &Path, repo: &Path, base: &Config) -> (Config, Option<u
     }
     if named(TaskKey::MaxRunning) {
         config.tick.max_running = tasks.max_running;
+    }
+    // Without worktrees every task would work in the one checkout, so the pass
+    // starts them one at a time whatever `tasks.max_running` says.
+    if !tasks.worktrees {
+        config.tick.max_running = config.tick.max_running.min(1);
     }
     // The review's policy is what the send-back and the out-of-rounds card are
     // decided by, so the person's own answer to the brief's `Review rounds` line

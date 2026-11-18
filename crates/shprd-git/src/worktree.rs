@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use shprd_core::settings::{Key, Loaded, Source, TaskKey, Tasks};
+
 use crate::git::{Git, GitError};
 
 /// Where worktrees live, and what their branches are called.
@@ -22,6 +24,10 @@ pub struct Layout {
     pub root: PathBuf,
     /// Prefix every shprd branch carries.
     pub namespace: String,
+    /// What follows the namespace in a branch's name, with `{run}`, `{task}`,
+    /// `{n}` and `{slug}` filled in (`tasks.branch`). [`None`] names a branch
+    /// `<run>/<task>`.
+    pub pattern: Option<String>,
 }
 
 impl Layout {
@@ -31,12 +37,104 @@ impl Layout {
         Self {
             root: home.into().join(".shprd").join("wt"),
             namespace: "shprd/".to_string(),
+            pattern: None,
         }
     }
 
-    /// The branch a task attempt commits on: `<namespace><run>/<task>`.
+    /// The layout the settings describe for `repo`, read afresh: the namespace is
+    /// `tasks.archive_namespace` and the branch pattern `tasks.branch`.
+    ///
+    /// Every verb and every pass builds its layout here, so a change saved in the
+    /// settings is the next branch's name and the next janitor's prefix. A
+    /// settings file that cannot be read leaves the default layout.
+    pub fn from_settings(home: &Path, repo: &Path) -> Self {
+        let layout = Self::default_for_home(home);
+        // The old `config.toml` files (the person's, then the repository's own)
+        // stand where no settings layer names the namespace: a repository's file
+        // predates the settings model and is not one of its layers.
+        let global = home.join(".config").join("shprd").join("config.toml");
+        let local = repo.join(".shprd").join("config.toml");
+        let legacy = shprd_core::config::load(Some(&global), Some(&local))
+            .map(|config| config.janitor.namespace)
+            .unwrap_or_else(|_| layout.namespace.clone());
+        let Ok(loaded) = Loaded::read(home, Some(repo)) else {
+            return layout.with_settings(&legacy, "");
+        };
+        let resolved = loaded.resolve(None);
+        let tasks = resolved.tasks();
+        let named = resolved
+            .get(&Key::Task(TaskKey::ArchiveNamespace))
+            .is_some_and(|sourced| sourced.source != Source::BuiltIn);
+        let namespace = if named {
+            tasks.archive_namespace.as_str()
+        } else {
+            legacy.as_str()
+        };
+        layout.with_settings(namespace, &tasks.branch)
+    }
+
+    /// This layout with the resolved workflow values applied.
+    #[must_use]
+    pub fn for_tasks(self, tasks: &Tasks) -> Self {
+        self.with_settings(&tasks.archive_namespace, &tasks.branch)
+    }
+
+    /// This layout with the settings' namespace (`tasks.archive_namespace`) and
+    /// branch pattern (`tasks.branch`) applied.
+    ///
+    /// A namespace that does not end in `/` gets one, and an empty one keeps the
+    /// current namespace, so the janitor can never be handed a prefix that
+    /// matches branches shprd did not make. A pattern git could not take as part
+    /// of a branch name is ignored, and the plain `<run>/<task>` name stands.
+    #[must_use]
+    pub fn with_settings(mut self, namespace: &str, pattern: &str) -> Self {
+        let namespace = namespace.trim();
+        if !namespace.is_empty() {
+            self.namespace = if namespace.ends_with('/') {
+                namespace.to_owned()
+            } else {
+                format!("{namespace}/")
+            };
+        }
+        let pattern = pattern.trim();
+        self.pattern = valid_pattern(pattern).then(|| pattern.to_owned());
+        self
+    }
+
+    /// The branch a task attempt commits on: `<namespace><pattern>`, which is
+    /// `<namespace><run>/<task>` when no pattern is set.
+    ///
+    /// `{n}` is the last run of digits in the task id (the whole id when it has
+    /// none) and `{slug}` is the id lowercased with every other character a `-`,
+    /// so the name follows from the ids alone and the janitor can recompute it.
     pub fn branch_name(&self, run: &str, task: &str) -> String {
-        format!("{}{run}/{task}", self.namespace)
+        let Some(pattern) = &self.pattern else {
+            return format!("{}{run}/{task}", self.namespace);
+        };
+        let reversed: String = task
+            .chars()
+            .rev()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let digits: String = reversed.chars().rev().collect();
+        let n = if digits.is_empty() { task } else { &digits };
+        let slug: String = task
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let name = pattern
+            .replace("{run}", run)
+            .replace("{task}", task)
+            .replace("{n}", n)
+            .replace("{slug}", &slug);
+        format!("{}{name}", self.namespace)
     }
 
     /// The directory a task attempt works in:
@@ -49,6 +147,36 @@ impl Layout {
     pub fn owns_branch(&self, branch: &str) -> bool {
         branch.starts_with(&self.namespace)
     }
+}
+
+/// True when `pattern` can be the tail of a branch name once its tokens are
+/// filled in: non-empty, no whitespace or characters git refuses, no empty,
+/// dotted or `.lock` components, and a `{task}` or `{slug}` so two tasks never
+/// share a branch.
+fn valid_pattern(pattern: &str) -> bool {
+    if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
+        return false;
+    }
+    if pattern.contains("..") || pattern.contains("//") || pattern.contains("@{") {
+        return false;
+    }
+    // Two tasks must never share a branch: the id or its slug has to be in the
+    // name (`{n}` alone is the same for `T1` and `SHPR-1`).
+    if !pattern.contains("{task}") && !pattern.contains("{slug}") {
+        return false;
+    }
+    let mut rest = pattern.to_owned();
+    for token in ["{run}", "{task}", "{n}", "{slug}"] {
+        rest = rest.replace(token, "x");
+    }
+    if rest
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\{}".contains(c))
+    {
+        return false;
+    }
+    rest.split('/')
+        .all(|part| !part.starts_with('.') && !part.ends_with('.') && !part.ends_with(".lock"))
 }
 
 /// A worktree shprd created.
@@ -604,5 +732,37 @@ mod tests {
         assert!(text.contains("# mine\n*.local\n"), "{text}");
         assert!(text.contains("/.shprd/"), "{text}");
         assert!(text.contains("/.dagr/"), "{text}");
+    }
+
+    #[test]
+    fn the_branch_pattern_and_namespace_name_the_branch_and_the_worktree_uses_it() {
+        let (repo, home) = fixture();
+        let layout = Layout::default_for_home(home.path()).with_settings("work", "task/{n}-{slug}");
+        assert_eq!(layout.branch_name("m9", "SHPR-24"), "work/task/24-shpr-24");
+        let created = create(repo.path(), &layout, "m9", "SHPR-24", "main").expect("a worktree");
+        assert_eq!(created.branch, "work/task/24-shpr-24");
+        assert!(layout.owns_branch(&created.branch));
+        // Unset, the name is what it always was.
+        let plain = Layout::default_for_home(home.path()).with_settings("", "");
+        assert_eq!(plain.branch_name("m9", "T1"), "shprd/m9/T1");
+    }
+
+    #[test]
+    fn a_pattern_git_would_refuse_is_ignored() {
+        for bad in [
+            "a b",
+            "x..y",
+            "/x",
+            "x/",
+            "a:{task}",
+            "{task}.lock",
+            "a~{task}",
+            "fixed",
+            "{n}",
+            "{run}",
+        ] {
+            let layout = Layout::default_for_home("/h").with_settings("shprd/", bad);
+            assert_eq!(layout.branch_name("r", "T1"), "shprd/r/T1", "{bad}");
+        }
     }
 }

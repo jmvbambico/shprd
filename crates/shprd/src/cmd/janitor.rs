@@ -40,8 +40,11 @@ pub fn plan_verb(
     args: &JanitorArgs,
     home: Option<&std::path::Path>,
 ) -> Result<(), CliError> {
-    let (loaded, layout) = config_and_layout(ctx, home)?;
-    let archive_days = args.archive_days.unwrap_or(loaded.janitor.archive_days);
+    let (_config, layout) = config_and_layout(ctx, home)?;
+    let archive_days = match args.archive_days {
+        Some(days) => days,
+        None => settings_archive_days(ctx, home)?,
+    };
     let (state, events) = ctx.load()?;
     // A plan without a run would be empty; say so instead of printing nothing.
     let run = run_id(&state)?;
@@ -124,6 +127,32 @@ pub fn restore_verb(
     emit(ctx, &event)
 }
 
+/// Days a done task waits before the janitor archives it: `tasks.archive_after`
+/// as the settings resolve it (the old `[janitor] archive_days` is its lowest
+/// layer), where `0` means never.
+fn settings_archive_days(ctx: &Ctx, home: Option<&Path>) -> Result<u32, CliError> {
+    use shprd_core::settings::{Key, Source, TaskKey};
+
+    let home = resolve_home(home)?;
+    let loaded = shprd_core::settings::Loaded::read(&home, Some(&ctx.root))
+        .map_err(|err| CliError::other(anyhow!(err).context("loading the settings")))?;
+    let resolved = loaded.resolve(None);
+    let named = resolved
+        .get(&Key::Task(TaskKey::ArchiveAfter))
+        .is_some_and(|sourced| sourced.source != Source::BuiltIn);
+    // A repository's own `config.toml` is not a settings layer, so it answers
+    // only where no settings layer names the key.
+    let days = if named {
+        resolved.tasks().archive_after
+    } else {
+        config_and_layout(ctx, Some(&home))?.0.janitor.archive_days
+    };
+    Ok(match days {
+        0 => u32::MAX,
+        days => days,
+    })
+}
+
 /// The resolved config and the layout its janitor settings describe.
 ///
 /// The global file is `<home>/.config/shprd/config.toml`, the repo file is
@@ -134,7 +163,7 @@ fn config_and_layout(ctx: &Ctx, home: Option<&Path>) -> Result<(Config, Layout),
     let repo = ctx.root.join(".shprd").join("config.toml");
     let loaded = config::load(Some(&global), Some(&repo))
         .map_err(|err| CliError::other(anyhow!(err).context("loading the config")))?;
-    let layout = resolve_layout(Some(&home), &loaded.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     Ok((loaded, layout))
 }
 
@@ -378,6 +407,64 @@ mod tests {
         if let Err(err) = waiting.join() {
             panic!("the waiting thread panicked: {err:?}");
         }
+    }
+
+    /// Writes the person's settings file into the fixture's home.
+    fn write_settings(fixture: &Fixture, text: &str) {
+        let dir = fixture.home.join(".config").join("shprd");
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            panic!("mkdir {}: {err}", dir.display());
+        }
+        if let Err(err) = std::fs::write(dir.join("settings.toml"), text) {
+            panic!("write settings: {err}");
+        }
+    }
+
+    #[test]
+    fn tasks_archive_after_sets_how_long_the_janitor_waits() {
+        let fixture = Fixture::new();
+        let days =
+            |fixture: &Fixture| match settings_archive_days(&fixture.ctx, Some(&fixture.home)) {
+                Ok(days) => days,
+                Err(err) => panic!("days: {err}"),
+            };
+        assert_eq!(days(&fixture), 14, "unset, the built-in fortnight");
+        write_settings(&fixture, "version = 1\n[tasks]\narchive_after = 30\n");
+        assert_eq!(days(&fixture), 30);
+        write_settings(&fixture, "version = 1\n[tasks]\narchive_after = 0\n");
+        assert_eq!(days(&fixture), u32::MAX, "0 means never");
+    }
+
+    #[test]
+    fn tasks_archive_namespace_decides_which_branches_the_janitor_owns() {
+        let fixture = Fixture::new();
+        fixture.start();
+        let (_worktree, branch) = fixture.dropped_task();
+        let (state, events) = match fixture.ctx.load() {
+            Ok(loaded) => loaded,
+            Err(err) => panic!("load: {err}"),
+        };
+        let deletes = |fixture: &Fixture| -> bool {
+            let (_, layout) = match config_and_layout(&fixture.ctx, Some(&fixture.home)) {
+                Ok(pair) => pair,
+                Err(err) => panic!("layout: {err}"),
+            };
+            janitor::plan(&state, &events, &layout, 0, 30)
+                .iter()
+                .any(|action| action.describe() == format!("delete branch T1: {branch}"))
+        };
+        assert!(
+            deletes(&fixture),
+            "by default the shprd/ branch is the janitor's"
+        );
+        write_settings(
+            &fixture,
+            "version = 1\n[tasks]\narchive_namespace = \"other/\"\n",
+        );
+        assert!(
+            !deletes(&fixture),
+            "under another namespace the shprd/ branch is no longer the janitor's to delete"
+        );
     }
 
     #[test]

@@ -564,29 +564,29 @@ export const ARCHIVE_PRESETS = [
 ];
 
 /**
- * Settings keys the service stores but nothing reads yet, so no row draws them
- * rather than a control that does nothing (`tasks.start_notes` and
- * `tasks.finish_notes` only appear in a brief's Settings block; no spawn puts
- * the words in a brief). They are listed here so a test can say they are
- * hidden on purpose, and so the one task that wires them has the list.
+ * Settings keys the service stores but nothing reads, so no row draws them
+ * rather than a control that does nothing. Empty now: `tasks.start_notes` and
+ * `tasks.finish_notes` went into every worker's brief (SHPR-24), so they are
+ * rows like the rest.
  */
-export const HIDDEN = ["tasks.start_notes", "tasks.finish_notes"];
+export const HIDDEN = [];
 
 /**
  * What is wrong with a branch-name pattern, in a sentence, or null when it is
  * one git accepts and one every task gets its own name from.
  *
- * The pattern may use `{n}` (the task's number) and `{slug}` (its title); it
- * must use at least one, or two tasks would share a branch. The rest is git's
+ * The pattern may use `{run}` (the run's id), `{task}` (the task's id), `{n}`
+ * (its number) and `{slug}` (its id, lowercased); it must use `{task}` or
+ * `{slug}`, or two tasks would share a branch (`{n}` alone is the same for `T1` and `SHPR-1`). The rest is git's
  * own rule for a ref name (`git check-ref-format`).
  */
 export function branchProblem(text) {
   const pattern = String(text ?? "").trim();
   if (pattern === "") return null;
-  const left = pattern.replace(/\{(n|slug)\}/g, "");
-  if (/[{}]/.test(left)) return "only {n} and {slug} may be used between braces";
-  if (left.length === pattern.length) return "use {n} or {slug}, or two tasks would share a branch";
-  return refProblem(pattern.replace(/\{(n|slug)\}/g, "x"));
+  const left = pattern.replace(/\{(run|task|n|slug)\}/g, "");
+  if (/[{}]/.test(left)) return "only {run}, {task}, {n} and {slug} may be used between braces";
+  if (!/\{(task|slug)\}/.test(pattern)) return "use {task} or {slug}, or two tasks would share a branch";
+  return refProblem(pattern.replace(/\{(run|task|n|slug)\}/g, "x"));
 }
 
 /** What is wrong with a git ref name (a base branch, or a pattern with its words filled), or null. */
@@ -669,7 +669,7 @@ export const WORKFLOW = [
   {
     key: "tasks.archive_after",
     title: "Archive done tasks",
-    about: "How long a finished task stays in your lists before the janitor archives it.",
+    about: "How long the janitor keeps an archived task's branch before letting it expire; Off keeps it for ever.",
     kind: "presets",
     choices: ARCHIVE_PRESETS,
   },
@@ -688,14 +688,26 @@ export const WORKFLOW = [
   {
     key: "tasks.base",
     title: "Base branch",
-    about: "The branch a task is cut from, when the repository names none.",
+    about: "The branch a task is cut from; empty cuts it from the run's integration branch.",
     kind: "text",
   },
   {
     key: "tasks.branch",
     title: "Branch names",
-    about: "The pattern a task's branch is named after: {n} is its number, {slug} its title.",
+    about: "The pattern a task's branch is named after, under the archive branch prefix: {run}, {task}, {n} (its number) and {slug} (its id, lowercased).",
     kind: "text",
+  },
+  {
+    key: "tasks.start_notes",
+    title: "Start notes",
+    about: "Words every worker reads before its task.",
+    kind: "notes",
+  },
+  {
+    key: "tasks.finish_notes",
+    title: "Finish notes",
+    about: "Words every worker reads before it reports.",
+    kind: "notes",
   },
   {
     key: "tasks.tick_secs",

@@ -269,8 +269,22 @@ pub fn spawn(
         effective_effort(env, &pick.agent, pick.model.as_deref(), effort.clone());
     let warnings: Vec<String> = effort_warning.into_iter().collect();
     let attempt = task.attempts.len() as u32 + 1;
-    let worktree = env.layout.path(&env.repo_name, &env.run, &task.id);
-    let branch = env.layout.branch_name(&env.run, &task.id);
+    // Without worktrees every attempt would edit and commit in the one checkout,
+    // so a second task starting while another is in flight would mix their work.
+    if !uses_worktrees(env)
+        && let Some(busy) = state
+            .tasks
+            .values()
+            .find(|other| other.id != task.id && !replaceable(other.status))
+    {
+        return Err(CliError::Invalid(anyhow!(
+            "tasks.worktrees is off, so one task at a time works in the repository, and {:?} is \
+             still {:?}: let it finish, or turn `tasks.worktrees` back on",
+            busy.id,
+            busy.status
+        )));
+    }
+    let (worktree, branch) = work_place(env, &task.id)?;
     let skills = select_skills(&env.skills, &env.compat, &task.tags);
     // What the launch applies is decided before the brief is written, because
     // the Settings block names it.
@@ -290,12 +304,20 @@ pub fn spawn(
     // A retry replaces what the failed attempt left behind, so the fresh
     // worktree below can take the same path and branch name. A task still in
     // flight is refused here, before anything is removed.
-    let replaced = replace_previous(mux, env, &state, task, attempt)?;
+    // Without a worktree there is nothing of an earlier attempt's to remove: it
+    // worked in the repository itself, which a retry must never delete.
+    let replaced = if uses_worktrees(env) {
+        replace_previous(mux, env, &state, task, attempt)?
+    } else {
+        None
+    };
     let kind = spawned_event(&task.id, attempt, &pick, &worktree, &branch);
     // Refuse before any effect: a refused spawn must leave nothing behind.
     env.ctx.check(&kind)?;
-    for resource in resource_kinds(&task.id, &worktree, &branch) {
-        env.ctx.check(&resource)?;
+    if uses_worktrees(env) {
+        for resource in resource_kinds(&task.id, &worktree, &branch) {
+            env.ctx.check(&resource)?;
+        }
     }
     let brief = render_brief(&BriefInput {
         task,
@@ -1149,16 +1171,72 @@ fn resource_kinds(task: &str, worktree: &Path, branch: &str) -> [EventKind; 2] {
     ]
 }
 
-/// Creates the attempt's worktree from the integration branch.
+/// True when each attempt gets its own worktree (`tasks.worktrees`, on unless
+/// someone turned it off).
+fn uses_worktrees(env: &SpawnEnv<'_>) -> bool {
+    env.settings.resolve(None).tasks().worktrees
+}
+
+/// The branch a new worktree is cut from: `tasks.base` when it names one, else
+/// the run's integration branch.
+fn base_for_new_work(env: &SpawnEnv<'_>) -> String {
+    let tasks = env.settings.resolve(None).tasks();
+    match tasks.base.trim() {
+        "" => env.base_branch.clone(),
+        base => base.to_owned(),
+    }
+}
+
+/// Where an attempt works and the branch it commits on.
+///
+/// With worktrees on that is the layout's path and the branch `tasks.branch`
+/// names. With them off (`tasks.worktrees = false`) it is the repository itself
+/// on the branch it already has checked out.
+fn work_place(env: &SpawnEnv<'_>, task: &str) -> Result<(PathBuf, String), CliError> {
+    if uses_worktrees(env) {
+        return Ok((
+            env.layout.path(&env.repo_name, &env.run, task),
+            env.layout.branch_name(&env.run, task),
+        ));
+    }
+    let branch = Git::new(&env.ctx.root)
+        .current_branch()
+        .map_err(|err| CliError::other(anyhow!(err).context("reading the checked-out branch")))?
+        .unwrap_or_else(|| String::from("HEAD"));
+    Ok((env.ctx.root.clone(), branch))
+}
+
+/// Creates the attempt's worktree from [`base_for_new_work`], or, with
+/// worktrees off, points the attempt at the repository's own checkout.
 fn create_worktree(env: &SpawnEnv<'_>, task: &str) -> Result<Worktree, CliError> {
-    worktree::create(&env.ctx.root, &env.layout, &env.run, task, &env.base_branch).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("creating a worktree for {task}")))
-    })
+    if !uses_worktrees(env) {
+        let (path, branch) = work_place(env, task)?;
+        let base_sha = Git::new(&path).head_sha().map_err(|err| {
+            CliError::other(anyhow!(err).context("reading the repository's head"))
+        })?;
+        return Ok(Worktree {
+            path,
+            branch,
+            base_sha,
+        });
+    }
+    worktree::create(
+        &env.ctx.root,
+        &env.layout,
+        &env.run,
+        task,
+        &base_for_new_work(env),
+    )
+    .map_err(|err| CliError::other(anyhow!(err).context(format!("creating a worktree for {task}"))))
 }
 
 /// Removes a worktree this spawn created, ignoring the failure: the caller is
 /// already returning a more useful error.
 fn discard_worktree(env: &SpawnEnv<'_>, created: &Worktree) {
+    // The repository's own checkout is not ours to remove.
+    if !uses_worktrees(env) {
+        return;
+    }
     if let Err(err) = worktree::remove(&env.ctx.root, &env.layout, created, true) {
         eprintln!(
             "warning: could not remove {}: {err}",
@@ -1366,8 +1444,20 @@ fn branch_exists(env: &SpawnEnv<'_>, branch: &str) -> Result<bool, CliError> {
 
 /// The ledger entries a spawn writes, in order: its two resources, then the
 /// attempt itself.
-fn attempt_events(task: &str, attempt: u32, pick: &Pick, created: &Worktree) -> Vec<EventKind> {
-    let mut events = resource_kinds(task, &created.path, created.branch.as_str()).to_vec();
+fn attempt_events(
+    task: &str,
+    attempt: u32,
+    pick: &Pick,
+    created: &Worktree,
+    own_worktree: bool,
+) -> Vec<EventKind> {
+    // A worktree and a branch are ledger resources the janitor may remove; the
+    // repository's own checkout and branch are not, so they are never listed.
+    let mut events = if own_worktree {
+        resource_kinds(task, &created.path, created.branch.as_str()).to_vec()
+    } else {
+        Vec::new()
+    };
     events.push(spawned_event(
         task,
         attempt,
@@ -1449,7 +1539,7 @@ fn record_attempt(
     pick: &Pick,
     created: &Worktree,
 ) -> Result<(), CliError> {
-    let events = attempt_events(task, attempt, pick, created);
+    let events = attempt_events(task, attempt, pick, created, uses_worktrees(env));
     match append_in_order(events, |event| env.ctx.commit(event).map(|_| ())) {
         Ok(()) => Ok(()),
         Err((err, landed)) => {
@@ -1857,7 +1947,7 @@ fn build_env_with<'a>(
     let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
     Ok(SpawnEnv {
         ctx,
-        layout: Layout::default_for_home(&home),
+        layout: Layout::from_settings(&home, &ctx.root),
         briefs_dir: home.join(".shprd").join("briefs"),
         prompts_dir: prompts::prompts_dir(&crate::ctx::resolve_config_home(&home)),
         home,
@@ -2827,6 +2917,9 @@ project_dirs = []
             let mut env = self.spawn_env(ctx);
             env.settings =
                 Loaded::read(self.home.path(), None).unwrap_or_else(|err| panic!("{err}"));
+            // What `build_env` does: the layout follows the settings.
+            env.layout = Layout::default_for_home(self.home.path())
+                .for_tasks(&env.settings.resolve(None).tasks());
             env
         }
     }
@@ -2954,7 +3047,7 @@ project_dirs = []
         let created = create_worktree(&env, "T1").unwrap_or_else(|err| panic!("{err}"));
         // The third append is the `Spawned` event; the two resources land.
         let mut commits = 0;
-        let outcome = append_in_order(attempt_events("T1", 1, &pick(), &created), |event| {
+        let outcome = append_in_order(attempt_events("T1", 1, &pick(), &created, true), |event| {
             commits += 1;
             if commits == 3 {
                 return Err(CliError::other(anyhow!("the log went away")));
@@ -4689,6 +4782,139 @@ project_dirs = []
             "nothing was opened for a program that does not exist: {:?}",
             mux.calls()
         );
+    }
+
+    /// The short run the SHPR-24 settings make: what a spawn names and cuts from.
+    fn spawned_with(text: &str, scratch: &Scratch) -> (SpawnReport, String) {
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env_with(&ctx, text);
+        let mux = FakeMux::default().with_ready_agent();
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+        (report, brief)
+    }
+
+    #[test]
+    fn tasks_branch_and_archive_namespace_name_the_branch() {
+        let scratch = Scratch::new();
+        let (plain, _) = spawned_with("version = 1\n", &scratch);
+        assert_eq!(
+            plain.branch, "shprd/t1/T1",
+            "unset, the name is what it was"
+        );
+
+        let scratch = Scratch::new();
+        let (named, brief) = spawned_with(
+            "version = 1\n[tasks]\nbranch = \"task/{n}-{slug}\"\narchive_namespace = \"work/\"\n",
+            &scratch,
+        );
+        assert_eq!(named.branch, "work/task/1-t1");
+        assert_eq!(
+            git_out(&named.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "work/task/1-t1"
+        );
+        assert!(brief.contains("branch `work/task/1-t1`"), "{brief}");
+    }
+
+    #[test]
+    fn tasks_base_is_the_branch_a_worktree_is_cut_from() {
+        let scratch = Scratch::new();
+        git(scratch.root(), &["checkout", "-q", "-b", "trunk"]);
+        let trunk = commit_in(scratch.root(), "trunk.txt", "trunk\n");
+        git(scratch.root(), &["checkout", "-q", "main"]);
+        let integration = git_out(scratch.root(), &["rev-parse", "integration/m4"]);
+        assert_ne!(trunk, integration);
+
+        let (report, _) = spawned_with("version = 1\n[tasks]\nbase = \"trunk\"\n", &scratch);
+        assert_eq!(git_out(&report.worktree, &["rev-parse", "HEAD"]), trunk);
+
+        let scratch = Scratch::new();
+        let (report, _) = spawned_with("version = 1\n", &scratch);
+        let integration = git_out(scratch.root(), &["rev-parse", "integration/m4"]);
+        assert_eq!(
+            git_out(&report.worktree, &["rev-parse", "HEAD"]),
+            integration,
+            "unset, the run's integration branch is the base"
+        );
+    }
+
+    #[test]
+    fn tasks_worktrees_off_works_in_the_repository_itself() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env_with(&ctx, "version = 1\n[tasks]\nworktrees = false\n");
+        let mux = FakeMux::default().with_ready_agent();
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(report.worktree, scratch.root());
+        assert_eq!(
+            report.branch, "main",
+            "the checked-out branch, not a new one"
+        );
+        assert!(
+            !scratch.home.path().join(".shprd").join("wt").exists(),
+            "no worktree was made"
+        );
+        let branches = git_out(scratch.root(), &["branch", "--list", "shprd/*"]);
+        assert!(branches.is_empty(), "no task branch was made: {branches}");
+        let state = ctx.state().unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            state.resources.is_empty(),
+            "the repository is never a resource the janitor may remove: {:?}",
+            state.resources
+        );
+    }
+
+    #[test]
+    fn tasks_worktrees_off_runs_one_task_at_a_time() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        ctx.commit(EventKind::TaskAdded {
+            task: "T2".to_string(),
+            title: "A second task".to_string(),
+            scope: vec!["crates/shprd".to_string()],
+            acceptance: vec!["it works".to_string()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
+        let env = scratch.spawn_env_with(&ctx, "version = 1\n[tasks]\nworktrees = false\n");
+        let mux = FakeMux::default().with_ready_agent();
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let second = SpawnRequest {
+            task: "T2".to_string(),
+            agent: None,
+            effort: None,
+        };
+        let err = spawn(&mux, &env, &second).err();
+        let text = err.map(|err| err.to_string()).unwrap_or_default();
+        assert!(text.contains("one task at a time"), "{text}");
+    }
+
+    #[test]
+    fn start_and_finish_notes_are_in_the_workers_brief() {
+        let scratch = Scratch::new();
+        let (_, brief) = spawned_with(
+            "version = 1\n[tasks]\nstart_notes = \"READ-THE-DESIGN-FIRST\"\nfinish_notes = \"RUN-THE-LINTER-LAST\"\n",
+            &scratch,
+        );
+        let start = brief.find("READ-THE-DESIGN-FIRST").unwrap_or(usize::MAX);
+        let task = brief.find("# T1 ").unwrap_or(0);
+        let rules = brief.find("## Rules").unwrap_or(0);
+        let finish = brief.find("RUN-THE-LINTER-LAST").unwrap_or(0);
+        assert!(
+            start < task,
+            "the start notes come before the task: {brief}"
+        );
+        assert!(
+            finish > rules,
+            "the finish notes come with the rules: {brief}"
+        );
+
+        let scratch = Scratch::new();
+        let (_, brief) = spawned_with("version = 1\n", &scratch);
+        assert!(!brief.contains("Before you start"), "{brief}");
+        assert!(!brief.contains("Before you report"), "{brief}");
     }
 }
 

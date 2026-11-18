@@ -52,7 +52,7 @@ pub fn verb(
         .ok_or_else(|| CliError::other(anyhow!("unknown task {:?}", args.task)))?;
     let branch = latest_branch(&task)?;
     let home = resolve_home(home)?;
-    let layout = Layout::default_for_home(&home);
+    let layout = Layout::from_settings(&home, &ctx.root);
     let repo_name = repo_name(ctx)?;
     let _lock = lock_run(&home, &repo_name, &run.run_id)?;
     let worktree = integrate::open_integration(

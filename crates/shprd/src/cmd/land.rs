@@ -88,7 +88,7 @@ pub fn land_verb(ctx: &Ctx, args: &LandArgs, home: Option<&Path>) -> Result<(), 
         )));
     }
     let home = resolve_home(home)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let repo_name = repo_name(ctx)?;
     // Held from the head read to the push: a sync or a cherry-pick landing
     // meanwhile would move the head the gate is pinned to, and the branch would
@@ -282,7 +282,7 @@ fn land_task_local(
     // Held from the head read to the merge: a spawn replacing the attempt
     // meanwhile would move the branch under the merge.
     let _lock = run_lock::lock_run(&home, &repo_name, &run.run_id)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let worktree = integrate::open_integration_branch(
         &ctx.root,
         &layout,

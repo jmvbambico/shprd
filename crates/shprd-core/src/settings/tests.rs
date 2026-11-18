@@ -47,7 +47,7 @@ fn an_empty_file_resolves_to_the_built_in_values() {
     assert_eq!(shown(&resolved, "tasks.proof"), "true");
     assert_eq!(shown(&resolved, "tasks.worktrees"), "true");
     assert_eq!(shown(&resolved, "tasks.base"), "\"\"");
-    assert_eq!(shown(&resolved, "tasks.branch"), "\"task/{n}-{slug}\"");
+    assert_eq!(shown(&resolved, "tasks.branch"), "\"{run}/{task}\"");
     assert_eq!(shown(&resolved, "review.cross_vendor"), "true");
     assert_eq!(shown(&resolved, "host"), "\"auto\"");
     assert_eq!(
