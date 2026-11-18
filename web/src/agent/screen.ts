@@ -57,7 +57,8 @@ export const xtermScreen: ScreenFactory = (host, onData) => {
     cursorBlink: false,
     cursorStyle: "bar",
     scrollback: 0,
-    fontFamily: 'var(--font-mono), ui-monospace, "SF Mono", Menlo, monospace',
+    // A concrete list: xterm measures a cell with it, and a CSS variable does not resolve there.
+    fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
     fontSize: 12,
     allowProposedApi: false,
     linkHandler: {

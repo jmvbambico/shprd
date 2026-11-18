@@ -2081,6 +2081,7 @@ textarea.input {
 
 .md table {
   border-collapse: collapse;
+  margin: 0 0 8px;
 }
 
 .md th,
@@ -2200,4 +2201,16 @@ textarea.input {
 
 .terminal-status[data-status="refused"] {
   color: var(--h-red);
+}
+
+/*
+ * The conversation scrolls inside its card, with the composer always in view, so
+ * on these two screens the shell is exactly one viewport tall instead of growing
+ * with the messages.
+ */
+.shell[data-screen="chat"],
+.shell[data-screen="terminal"] {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
