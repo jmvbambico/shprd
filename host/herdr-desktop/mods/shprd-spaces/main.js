@@ -1,5 +1,9 @@
-// The spaces sidebar: the run's space, then one row per task space, one line each
-// — a status glyph, the task, and the red/green counts that need the person.
+// The spaces sidebar (PROTOTYPE, SHPR-18): one two-line row per space (name, branch
+// dimmed), and under the open space a tree of its tasks — a status glyph, the id
+// and title, and for a working task its agent and progress. Spaces and their tasks
+// come from `lib/tree.js` over `GET /api/state`; the Agents pane is its own mod
+// (`shprd-agents`). The older notes below describe the row menu and confirm, which
+// are kept.
 //
 // It replaces Herdr's own `spaces` list in this layout (the layout's `spaces`
 // block names this mod), because in shprd a space *is* work: one task, one space,
@@ -37,12 +41,12 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { closeOverlay, openOverlay, props, run, setShared, shared, theme } from "herdr";
+import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import { MENU, closeWords, menuHeight, menuItems } from "./lib/spaces.js";
 import { spaceTree, spacesOf } from "./lib/tree.js";
-import { note, statusGlyph } from "./lib/panel.js";
+import { note, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -107,9 +111,21 @@ export default class Spaces extends View {
     // PROTOTYPE: the picked space and the folded ones are this copy's own state.
     this.selected = shared("spaces.picked") ?? null;
     this.folded = new Set();
-    this.thread = shared("tasks.thread")?.task ?? null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // Commands, for a key, the palette or a script: `pick:<space id>` and
+    // `fold` act as their clicks do.
+    cx.spawn(async () => {
+      for (;;) {
+        const command = String(await nextCommand());
+        const space = spaceTree(this.state ?? {}).find((entry) => command === `pick:${entry.id}`);
+        if (space) this.pick(space);
+        else if (command === "fold") {
+          const picked = spaceTree(this.state ?? {}).find((entry) => entry.id === this.selected);
+          if (picked) this.fold(picked);
+        }
+      }
+    });
   }
 
   /**
@@ -206,18 +222,11 @@ export default class Spaces extends View {
   }
 
   /**
-   * Opens the task in the Tasks panel: its id is shared (`tasks.thread`, the
-   * panel's own contract) and the panel runs its drill-in from its own command,
-   * so this mod never names a stack child that a later task might move.
-   *
-   * The thread's only body today is the Accept card, so a task that is not ready
-   * lands on that card's own "pick a ready one" line; U3 gives the thread its
-   * views and the same row then opens the task itself.
+   * Opens the task's thread in the Tasks panel (`openThread` in `lib/panel.js`
+   * selects the stacks itself, so it works while another thread is open).
    */
   openTask(p) {
-    this.thread = p.task;
-    setShared("tasks.thread", { task: p.task, title: p.title ?? "", at: Date.now() });
-    run("shprd-tasks.open");
+    openThread(p);
     this.cx.notify();
   }
 
@@ -387,7 +396,7 @@ export default class Spaces extends View {
    * title, and for a working task a dim second line with its agent and progress.
    */
   taskRow(t, colors, task) {
-    const picked = this.thread === task.id;
+    const picked = (shared("tasks.thread")?.task ?? null) === task.id;
     const guide = (text) => div().h(text.h).flex().items_center().child(text.s);
     return h_flex()
       .id(`task-${task.id}`)

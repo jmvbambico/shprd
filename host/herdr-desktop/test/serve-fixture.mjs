@@ -4,7 +4,8 @@
 //
 // It writes the discovery record and token the mods look for under
 // `$XDG_STATE_HOME/shprd/`, answers `/api/health` and `/api/state` from a fixture
-// (default `fixtures/proto.json`), and nothing else. A task's `live_agents` entry
+// (default `fixtures/proto.json`; `chat` there is each task's conversation for
+// `/api/chat`), and nothing else. A task's `live_agents` entry
 // has `since_s` (seconds ago); it is turned into the absolute `since_ms` the
 // contract names (`mods/lib/tree.js`). Refuses to run without `XDG_STATE_HOME`,
 // so it can never write into a person's own state directory.
@@ -43,6 +44,21 @@ const server = http.createServer((req, res) => {
   };
   if (path === "/api/health") return send(200, { ok: true, id, version: "fixture" });
   if (path === "/api/state") return send(200, state());
+  if (path === "/api/chat") {
+    const query = new URL(req.url, "http://x").searchParams;
+    const space = query.get("space") ?? "coordinator";
+    const known = state().chat?.[space];
+    const from = Number((query.get("since") ?? "").split("@")[1] ?? 0) || 0;
+    return send(200, {
+      space,
+      program: known?.program ?? null,
+      session: known ? "s1" : null,
+      messages: known ? known.messages.slice(from) : [],
+      cursor: known ? `s1@${known.messages.length}` : "",
+      more: false,
+      note: known ? null : "No messages yet.",
+    });
+  }
   if (path === "/api/asks") return send(200, []);
   if (path === "/api/changes") return setTimeout(() => send(204, {}), 3000);
   return send(404, { error: "the fixture service has no such route" });

@@ -488,5 +488,91 @@
    "state": "needs_you",
    "since_s": 190
   }
- ]
+ ],
+ "chat": {
+  "SHPR-22": {
+   "program": "claude",
+   "messages": [
+    {
+     "role": "user",
+     "text": "Add an Agents pane under the Spaces tree: one two-line row per live agent, with a Grouped toggle.",
+     "tools": [],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "Reading the sidebar mod first, then I'll build the pane from the board's live agents.",
+     "tools": [
+      {
+       "name": "Read",
+       "summary": "mods/shprd-spaces/main.js"
+      },
+      {
+       "name": "Read",
+       "summary": "mods/lib/board.js"
+      }
+     ],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "The rows draw: dot, task, role · program, and a state line with its age. Grouping by space is next.",
+     "tools": [
+      {
+       "name": "Edit",
+       "summary": "mods/shprd-agents/main.js"
+      },
+      {
+       "name": "Bash",
+       "summary": "node --test test/tree.test.mjs"
+      }
+     ],
+     "at_ms": null
+    }
+   ]
+  },
+  "SHPR-23": {
+   "program": "codex",
+   "messages": [
+    {
+     "role": "user",
+     "text": "Review SHPR-23: the Tasks | Graph switch. Report blockers and majors with proof.",
+     "tools": [],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "Two majors. The switch resets the filter chip when you come back from Graph, and the graph's right column cuts a long wait list instead of wrapping it.",
+     "tools": [
+      {
+       "name": "Bash",
+       "summary": "git diff integration/m11 -- host/herdr-desktop"
+      },
+      {
+       "name": "Read",
+       "summary": "mods/shprd-tasks/main.js"
+      }
+     ],
+     "at_ms": null
+    }
+   ]
+  },
+  "coordinator": {
+   "program": "claude",
+   "messages": [
+    {
+     "role": "user",
+     "text": "What is left in m11?",
+     "tools": [],
+     "at_ms": null
+    },
+    {
+     "role": "assistant",
+     "text": "SHPR-22 and SHPR-26 are working; SHPR-23 needs you (two review majors). SHPR-24 and SHPR-27 wait on them.",
+     "tools": [],
+     "at_ms": null
+    }
+   ]
+  }
+ }
 }

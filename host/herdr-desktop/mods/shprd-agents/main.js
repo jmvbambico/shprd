@@ -13,10 +13,10 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, setShared, theme } from "herdr";
+import { nextCommand, run, setShared, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
-import { note, statusGlyph } from "./lib/panel.js";
+import { note, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { agentRows } from "./lib/tree.js";
 import { followChanges } from "./lib/watch.js";
@@ -35,6 +35,18 @@ export default class Agents extends View {
     this.picked = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // Commands, for a key, the palette or a script: `grouped` flips the toggle and
+    // `open:<agent id>` does what a click on that row does.
+    cx.spawn(async () => {
+      for (;;) {
+        const command = String(await nextCommand());
+        if (command === "grouped") this.toggle();
+        else if (command.startsWith("open:")) {
+          const row = agentRows(this.state, {}).find((entry) => entry.id === command.slice(5));
+          if (row) this.open(row);
+        }
+      }
+    });
   }
 
   /** Reads the board once; a service that went away is looked for again. */
@@ -103,8 +115,7 @@ export default class Agents extends View {
   open(row) {
     this.picked = row.id;
     if (row.task) {
-      setShared("tasks.thread", { task: row.task, title: row.title, view: "chat", at: Date.now() });
-      run("shprd-tasks.open");
+      openThread({ task: row.task, title: row.title }, "chat");
     } else if (row.space) {
       setShared("spaces.picked", row.space);
     }

@@ -37,7 +37,7 @@ import {
   rowActions,
   secondLine,
 } from "./lib/board.js";
-import { badge, card, cardHeader, countBadge, keycap, note, openAccept, segmented, statusGlyph } from "./lib/panel.js";
+import { badge, card, cardHeader, countBadge, keycap, note, openAccept, openThread, segmented, statusGlyph } from "./lib/panel.js";
 import { graphRows } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -45,15 +45,6 @@ import { followChanges } from "./lib/watch.js";
 /** How often the panel reads the board when the change file says nothing. */
 const FLOOR_MS = 4000;
 
-/**
- * The stack child a row's click opens: the task's chat, in this panel (Shepherdr's
- * `mods/tasks/main.js:1017`; the terminal is one click away on the head's switch).
- * The Accept card is not a child of the thread any more — Review opens it as a
- * dialog (`openAccept`).
- */
-const CHAT = "tasks-thread-chat";
-/** The thread's Terminal child, for a thread opened with `view: "terminal"`. */
-const TERM = "tasks-thread-term";
 /** The font shprd's ids and the graph's guide lines are set in. */
 const MONO = "JetBrains Mono";
 
@@ -181,12 +172,7 @@ export default class Tasks extends View {
    * keeping a copy that a reload can lose.
    */
   open(task, view = "chat") {
-    setShared("tasks.thread", { task: task?.id ?? null, title: task?.title ?? "", view, at: Date.now() });
-    // The chat reads the task by its id, so nothing else moves: the window stays
-    // where the person was. The head's Terminal selects the task's space itself.
-    run("layout.select", { stack: "tasks", child: "tasks-thread" });
-    run("layout.select", { stack: "tasks-thread-body", child: view === "terminal" ? TERM : CHAT });
-    run("layout.show", { id: "panel" });
+    openThread({ task: task?.id ?? null, title: task?.title ?? "" }, view);
     this.cx.notify();
   }
 
