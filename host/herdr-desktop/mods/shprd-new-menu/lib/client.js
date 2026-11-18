@@ -575,8 +575,9 @@ export class Client {
    * opened: `{program, name, tab}`. The roster's `installed` is what says whether
    * a program can be asked for at all.
    */
-  openAgent(program) {
-    return this.call("POST", "/api/agents", { body: { program } });
+  openAgent(program, space = null) {
+    const body = space ? { program, space } : { program };
+    return this.call("POST", "/api/agents", { body });
   }
 
   /** `GET /api/prompts`: every template this machine has, without its words. */

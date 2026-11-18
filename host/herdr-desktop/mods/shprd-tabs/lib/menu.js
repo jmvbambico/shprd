@@ -18,9 +18,13 @@
 //
 // What is shprd's own here, and why:
 //
-// - There is no *Edit instructions…* row (a coordinator's) and no *Switch agent*
-//   row (a coordinator's). shprd has no coordinator tab: its coordinator is the
-//   sidebar block (M10.8), and the per-task chat that replaces it is U4.
+// - *Edit instructions…* and *Switch agent ›* are the coordinator tab's rows, as
+//   in Shepherdr's Assistant tab menu. Edit instructions opens the Settings
+//   window on Prompts; Switch agent lists the roster's installed programs and
+//   writes the coordinator role's program (`roles.coordinator.agent`), which the
+//   coordinator takes when it next starts.
+// - A tab shprd named (`<agent>·<task>`, `coordinator`) has no *Rename…*: its
+//   title is how shprd finds it again, so only a person's own tabs rename.
 // - *Restart* restarts the task's agent through the service
 //   (`POST /api/action {"action":"task.retry"}`), never by relaunching a program
 //   in a tab: the attempt, its worktree and its brief are the engine's. A tab
@@ -78,6 +82,50 @@ export const NOT_INSTALLED_SHOWN = 2;
 
 /** A separator row. */
 const sep = () => ({ sep: true });
+
+/** The title shprd gives the coordinator's tab (`COORDINATOR_TITLE` in `spawn.rs`). */
+export const COORDINATOR_TAB = "coordinator";
+
+/** Whether a tab is the coordinator's, by the title shprd opened it with. */
+export function isCoordinator(tab) {
+  return String(tab?.name ?? "").trim().toLowerCase() === COORDINATOR_TAB;
+}
+
+/**
+ * Whether a person may rename a tab: not one shprd titled (`<agent>·<task>`,
+ * `coordinator`), because that title is how shprd finds the tab again.
+ */
+export function renamable(tab) {
+  return !parseTabName(tab?.name).titled && !isCoordinator(tab);
+}
+
+/**
+ * Whether a row can be picked: a heading, a note, a separator and a disabled row
+ * cannot, so ↑ and ↓ step over them.
+ */
+export function pickable(row) {
+  return Boolean(row) && !row.sep && !row.heading && !row.note && !row.disabled;
+}
+
+/** The index of the first row that can be picked, or 0 when none can. */
+export function firstPickable(rows) {
+  const at = (rows ?? []).findIndex(pickable);
+  return at === -1 ? 0 : at;
+}
+
+/**
+ * The row ↑ (`delta` -1) or ↓ (+1) lands on from `at`: the next one that can be
+ * picked, wrapping at the ends; `at` itself when none can.
+ */
+export function stepPick(rows, at, delta) {
+  const list = rows ?? [];
+  const n = list.length;
+  for (let i = 1; i <= n; i += 1) {
+    const next = (((at + delta * i) % n) + n) % n;
+    if (pickable(list[next])) return next;
+  }
+  return at;
+}
 
 /**
  * The installed programs first, then at most two that are not (Shepherdr's order).
@@ -150,9 +198,20 @@ export function newMenu({ roster = null, loading = false, failure = null } = {})
  * `restartable` is what `restartable()` answered for the tab, so a terminal or a
  * person's own tab offers no Restart rather than a row that would do nothing.
  */
-export function tabMenu({ id = null, restartable = false } = {}) {
+export function tabMenu({
+  id = null,
+  restartable = false,
+  coordinator = false,
+  renamable = true,
+} = {}) {
   return [
-    { id: "rename", label: "Rename…", icon: "square-pen" },
+    ...(renamable ? [{ id: "rename", label: "Rename…", icon: "square-pen" }] : []),
+    ...(coordinator
+      ? [
+          { id: "edit-instructions", label: "Edit instructions…", icon: "square-pen" },
+          { id: "switch-agent", label: "Switch agent", icon: "rotate-ccw", hint: "›" },
+        ]
+      : []),
     ...(restartable
       ? [{ id: "restart", label: "Restart", icon: "rotate-ccw", action: "restart" }]
       : []),
@@ -163,6 +222,31 @@ export function tabMenu({ id = null, restartable = false } = {}) {
       icon: "x",
       command: { name: "tab.close", args: id ? { id } : {} },
     },
+  ];
+}
+
+/**
+ * The *Switch agent* list: the installed programs, the coordinator's own marked.
+ *
+ * It is the second level of the tab menu, drawn in the same popup with a *Back*
+ * row first (Shepherdr's submenu is a side popup, which a popup that is its own
+ * window cannot open). Only installed programs are offered: a switch to one the
+ * machine lacks could not start.
+ */
+export function switchAgentMenu({ roster = null, current = null, loading = false } = {}) {
+  const rows = [{ id: "back", label: "Back", icon: "back" }, { heading: "Switch agent" }];
+  if (!roster) return [...rows, { note: loading ? NEW_WORDS.loading : NEW_WORDS.failed }];
+  const installed = (roster.programs ?? []).filter((program) => program?.id && program.installed);
+  if (installed.length === 0) return [...rows, { note: NEW_WORDS.failed }];
+  return [
+    ...rows,
+    ...installed.map((program) => ({
+      id: `switch:${program.id}`,
+      label: program.name || program.id,
+      hint: program.id === current ? "Current" : "",
+      action: "switch",
+      program: program.id,
+    })),
   ];
 }
 

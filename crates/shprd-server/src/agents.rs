@@ -51,7 +51,10 @@ pub trait AgentOpener: Send + Sync {
     ///
     /// `Err` is the program the harness table does not name, or a host that
     /// could not open the tab; the words are what a person reads.
-    fn open(&self, program: &str) -> Result<OpenedTab, String>;
+    ///
+    /// `space` is the host's id of the space the window is showing; `None` opens
+    /// the tab in the repository's own space.
+    fn open(&self, program: &str, space: Option<&str>) -> Result<OpenedTab, String>;
 }
 
 /// The opener a service holds, with a `Debug` that never prints a host.
@@ -99,7 +102,12 @@ impl Agents {
                 "this service was started without a host, so it cannot start an agent",
             )
         })?;
-        opener.open(program).map_err(ApiReject::refused)
+        let space = request
+            .space
+            .as_deref()
+            .map(str::trim)
+            .filter(|space| !space.is_empty());
+        opener.open(program, space).map_err(ApiReject::refused)
     }
 }
 
@@ -126,7 +134,7 @@ mod tests {
     }
 
     impl AgentOpener for Recorder {
-        fn open(&self, program: &str) -> Result<OpenedTab, String> {
+        fn open(&self, program: &str, _space: Option<&str>) -> Result<OpenedTab, String> {
             self.asked
                 .lock()
                 .expect("the lock")

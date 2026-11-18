@@ -775,6 +775,10 @@ pub struct NewTaskDto {
 pub struct AgentOpenDto {
     /// The harness id to start, e.g. `claude`.
     pub program: String,
+    /// The space the tab opens in: the one the window is showing. Left out, the
+    /// tab opens in the repository's own space.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// The tab `POST /api/agents` opened.

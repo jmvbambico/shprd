@@ -46,9 +46,18 @@ import {
 } from "herdr";
 
 import { attach, reason, singleFlight } from "./lib/client.js";
-import { MENU, appMenu, menuHeight, newMenu, restartable, tabMenu } from "./lib/menu.js";
+import {
+  MENU,
+  appMenu,
+  isCoordinator,
+  menuHeight,
+  newMenu,
+  renamable,
+  restartable,
+  tabMenu,
+} from "./lib/menu.js";
 import { countsBadge, openAddTask, openNewSpace } from "./lib/panel.js";
-import { panelButtons, tabRows } from "./lib/tabstrip.js";
+import { panelButtons, rememberPanel, shownPanel, tabRows } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the bar re-reads the board the pills borrow their words from. */
@@ -92,7 +101,10 @@ export default class Tabs extends View {
     this.cx = cx;
     this.state = null;
     this.client = null;
-    this.shown = "tasks";
+    // What the panel showed in each space, and the space seen last: the panel
+    // comes back as it was when a space is shown again (`rememberPanel`).
+    this.memory = new Map();
+    this.lastSpace = null;
     // The roster, read once from the service: the "+" menu's rows are its
     // programs, and the bar asks for the popup's height before it opens, so the
     // two must agree about how many rows there are. `undefined` is "not read
@@ -115,6 +127,8 @@ export default class Tabs extends View {
         const command = await nextCommand();
         if (command === "new-task") openAddTask();
         if (command === "new-space") openNewSpace();
+        // Ctrl+Shift+A: the Tasks panel, shown (never toggled away).
+        if (command === "show-tasks") this.showPanel("tasks");
         // F2 and Shift+F2 (`layout:shprd`): Herdr's own rename keys would rename
         // with its stock box, so inside this layout they come here and open
         // shprd's prompt instead, which keeps shprd's naming.
@@ -166,23 +180,52 @@ export default class Tabs extends View {
     cx.notify();
   }
 
-  /** Shows one of the side panel's stacks, or hides the panel when it is up. */
+  /**
+   * Shows one of the side panel's stacks, or hides the panel when that stack is
+   * the one already showing. What is showing is read from the layout, never kept
+   * here, so a button never disagrees with the panel.
+   */
   panel(child) {
-    const open = this.shown === child && this.panelShown();
-    this.shown = open ? null : child;
-    if (open) {
+    if (shownPanel(layout()) === child) {
       run("layout.hide", { id: "panel" });
+      this.memory.set(this.space()?.id, null);
     } else {
-      run("layout.select", { stack: "panel-body", child });
-      run("layout.show", { id: "panel" });
+      this.showPanel(child);
     }
     this.cx?.notify?.();
   }
 
-  /** Whether the layout's panel block is showing, from the layout itself. */
-  panelShown() {
-    const panel = find(layout(), "panel");
-    return !panel?.hidden;
+  /** Shows one stack of the side panel, whatever the panel was doing. */
+  showPanel(child) {
+    run("layout.select", { stack: "panel-body", child });
+    run("layout.show", { id: "panel" });
+    const space = this.space()?.id;
+    if (space) this.memory.set(space, child);
+    this.cx?.notify?.();
+  }
+
+  /**
+   * Puts back the panel a space had when it is shown again.
+   *
+   * It runs on a look of the bar and does something only on the look where the
+   * shown space changed to one that was seen before; the rest of the time it
+   * records what the layout shows.
+   */
+  syncPanel() {
+    const seen = rememberPanel(
+      this.memory,
+      this.lastSpace,
+      this.space()?.id ?? null,
+      shownPanel(layout()),
+    );
+    this.lastSpace = seen.last;
+    if (seen.restore === undefined) return;
+    if (seen.restore === null) {
+      run("layout.hide", { id: "panel" });
+    } else {
+      run("layout.select", { stack: "panel-body", child: seen.restore });
+      run("layout.show", { id: "panel" });
+    }
   }
 
   /** The space the bar is drawing, or null. */
@@ -198,7 +241,13 @@ export default class Tabs extends View {
    * draw, so a menu is never taller or shorter than what is in it.
    */
   tabMenu(row) {
-    const rows = tabMenu({ id: row.id, restartable: restartable(row, panes()) });
+    const tab = this.space()?.tabs?.find((entry) => entry.id === row.id) ?? { id: row.id, name: row.name };
+    const rows = tabMenu({
+      id: row.id,
+      restartable: restartable(row, panes()),
+      coordinator: isCoordinator(tab),
+      renamable: renamable(tab),
+    });
     openOverlay({
       mod: "shprd-menu",
       kind: "popup",
@@ -270,29 +319,23 @@ export default class Tabs extends View {
   /** F2: the rename prompt for the shown tab, as a double-click on its pill. */
   renameActiveTab() {
     const row = tabRows(this.space(), panes(), this.state).find((entry) => entry.active);
-    if (row) this.rename(row);
+    // A tab shprd titled keeps its title: it is how shprd finds the tab again.
+    if (row && renamable({ name: row.name })) this.rename(row);
   }
 
   /**
    * Shift+F2: the rename prompt for the active space.
    *
-   * A space shprd named (`shprd · <repo>`) keeps its `shprd · ` prefix, because
-   * the name is how the sidebar knows the space is shprd's; the person types only
-   * the part after it. A task's space is left alone (its name is the contract
-   * with its task), and a space that is not shprd's is renamed as it is.
+   * A space shprd named (`shprd · <repo>`, `shprd · <repo> · <task> · …`) is not
+   * renamed: shprd finds it by that exact label, so a new name would make the next
+   * run open a second space. Any other space is renamed as it is.
    */
   renameActiveSpace() {
     const space = this.space();
     if (!space) return;
-    // shprd's naming (`lib/spaces.js` `splitSpaceName`): two parts is a repo's
-    // space, four is a task's.
-    const parts = String(space.name ?? "").split(" · ");
-    const shprds = parts[0] === "shprd" && parts.length >= 2;
-    // Only a well-formed repo space is renamed under its prefix; any other
-    // shprd-looking name is left as it is.
-    if (shprds && (parts.length !== 2 || parts[1] === "")) return;
-    const prefix = shprds ? "shprd · " : "";
-    const named = { repo: parts[1] };
+    // A space shprd made (`shprd · …`) keeps its name: shprd finds it again by
+    // that exact label, so renaming it would make the next run open a second one.
+    if (String(space.name ?? "").startsWith("shprd · ")) return;
     openOverlay({
       mod: "shprd-prompt",
       kind: "dialog",
@@ -301,9 +344,8 @@ export default class Tabs extends View {
       height: 196,
       props: {
         title: "Rename space",
-        value: prefix ? named.repo : String(space.name ?? ""),
-        placeholder: prefix ? named.repo : String(space.name ?? ""),
-        prefix,
+        value: String(space.name ?? ""),
+        placeholder: String(space.name ?? ""),
         command: { name: "space.rename", args: { id: space.id } },
         verb: "Save",
       },
@@ -318,7 +360,8 @@ export default class Tabs extends View {
     const pills = rows.map((row) => this.pill(t, colors, row));
     // The buttons are data until they are drawn: the same list is what says which
     // stacks the panel has, and each becomes one element below.
-    const buttons = panelButtons(this.state, this.shown);
+    this.syncPanel();
+    const buttons = panelButtons(this.state, shownPanel(layout()));
     const w = window();
     // A bare window with its own title bar keeps the traffic lights clear: the
     // bar's left padding grows by whatever the sidebar does not cover.
@@ -429,6 +472,9 @@ export default class Tabs extends View {
       .text_size(TEXT.body)
       .text_color(t.dim)
       .hover((style) => style.bg(t.hover).text_color(t.foreground))
+      // The bar is the window's drag handle (`window_drag` in the layout), so a
+      // press on a control must not start a drag: it stops here.
+      .on_mouse_down("left", (_event, cx) => cx?.stop_propagation?.())
       .on_click(() => this.newMenu())
       .child("+");
   }
@@ -447,6 +493,9 @@ export default class Tabs extends View {
       .cursor_pointer()
       .text_color(t.dim)
       .hover((style) => style.bg(t.hover).text_color(t.foreground))
+      // The bar is the window's drag handle (`window_drag` in the layout), so a
+      // press on a control must not start a drag: it stops here.
+      .on_mouse_down("left", (_event, cx) => cx?.stop_propagation?.())
       .on_click(onClick)
       .child(glyph);
   }
@@ -483,7 +532,7 @@ export default class Tabs extends View {
         cx?.stop_propagation?.();
         this.pressed = row;
         // A double-click renames, as Shepherdr's pill does.
-        if ((event?.click_count ?? 0) === 2) this.rename(row);
+        if ((event?.click_count ?? 0) === 2 && renamable({ name: row.name })) this.rename(row);
       })
       .on_mouse_up("left", () => {
         const from = this.pressed;
@@ -583,6 +632,9 @@ export default class Tabs extends View {
       .text_color(button.active ? t.foreground : t.muted)
       .cursor_pointer()
       .hover((style) => style.bg(button.active ? t.selected : t.hover).text_color(t.foreground))
+      // The bar is the window's drag handle (`window_drag` in the layout), so a
+      // press on a control must not start a drag: it stops here.
+      .on_mouse_down("left", (_event, cx) => cx?.stop_propagation?.())
       .on_click(() => this.panel(button.id))
       .when(Boolean(PANEL_ICON[button.id]), (el) =>
         el.child(svg(PANEL_ICON[button.id]).size(14).flex_none()),

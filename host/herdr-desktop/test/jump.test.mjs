@@ -32,15 +32,16 @@ test("a space shprd did not make is a space row of its own", () => {
   assert.equal(items[0].id, "spx");
 });
 
-test("typing a task id finds it, and Enter selects its space", () => {
+test("typing a task id finds it, and Enter opens its thread", () => {
   const items = jumpItems(STATE, SPACES, "t2");
   const task = items.find((i) => i.kind === "task" && i.id === "T2");
   assert.ok(task, "T2 is found");
-  const space = SPACES.find((s) => s.name.endsWith(" · T2"));
-  assert.deepEqual(jumpTarget(task), { command: "space.select", args: { id: space.id } });
+  // A task's thread, even when it has a space of its own: an agent is reached
+  // through its task, not through a tab.
+  assert.deepEqual(jumpTarget(task), { task: "T2", title: task.label });
 });
 
-test("a task with no space of its own opens in the Tasks panel", () => {
+test("a task with no space of its own opens its thread in the Tasks panel", () => {
   const items = jumpItems(STATE, [], "T1");
   const task = items.find((i) => i.id === "T1");
   assert.deepEqual(jumpTarget(task), { task: "T1", title: task.label });

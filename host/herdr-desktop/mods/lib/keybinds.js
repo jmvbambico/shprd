@@ -59,6 +59,9 @@ export const NAMES = {
   "terminal.copy": () => "Copy",
   "terminal.paste": () => "Paste",
   "shprd-tabs.new-task": () => "New task",
+  "shprd-tabs.show-tasks": () => "Show the Tasks panel",
+  "shprd-tabs.rename-tab": () => "Rename tab",
+  "shprd-tabs.rename-space": () => "Rename space",
   "shprd-tasks.add": () => "New task",
 };
 
@@ -74,9 +77,9 @@ export function groupOf(section, action) {
   if (section.startsWith("mod:")) {
     return section.slice(4).replace(/^./, (c) => c.toUpperCase()).replace(/-/g, " ");
   }
-  if (/^tab\./.test(action)) return "Tabs";
-  if (/^space\./.test(action)) return "Spaces";
-  if (/^shprd-(tabs|tasks)\.(new-task|add)$/.test(action) || /^layout\.(toggle|show):(panel|tasks)$/.test(action)) {
+  if (/^tab\./.test(action) || action === "shprd-tabs.rename-tab") return "Tabs";
+  if (/^space\./.test(action) || action === "shprd-tabs.rename-space") return "Spaces";
+  if (/^shprd-(tabs|tasks)\.(new-task|add|show-tasks)$/.test(action) || /^layout\.(toggle|show):(panel|tasks)$/.test(action)) {
     return "Tasks";
   }
   if (/^pane\./.test(action)) return "Panes";
