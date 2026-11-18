@@ -275,7 +275,7 @@ export default class Tasks extends View {
 
   /** Whether there is more than one space to choose between. */
   hasSpaces() {
-    return (this.state?.spaces ?? []).length > 1;
+    return (this.state?.spaces ?? []).length > 1 || (shared("spaces.picked") ?? null) !== null;
   }
 
   /** Opens the add-task form for a fresh `tasks.add` request, once. */

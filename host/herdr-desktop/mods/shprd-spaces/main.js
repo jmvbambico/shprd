@@ -190,6 +190,8 @@ export default class Spaces extends View {
    */
   pick(space) {
     if (space.plain) {
+      // It has no tasks, so the Tasks list and the Graph go empty for it; "All spaces" brings them back.
+      setShared("spaces.picked", space.id);
       run("space.select", { id: space.herdr });
       return;
     }
@@ -358,7 +360,7 @@ export default class Spaces extends View {
    */
   spaceRow(t, colors, space) {
     const open = this.isOpen(space);
-    const picked = space.plain ? Boolean(space.active) : this.selected === space.id;
+    const picked = this.selected === space.id;
     return h_flex()
       .id(`space-${space.id}`)
       .h(44)

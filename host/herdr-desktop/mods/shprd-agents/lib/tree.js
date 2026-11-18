@@ -90,6 +90,7 @@ export function spacesOf(state) {
 export function scopeToSpace(state, spaceId) {
   if (!state || spaceId === null || spaceId === undefined) return state;
   const list = spacesOf(state);
+  if (String(spaceId).startsWith("herdr:")) return { ...state, tasks: [] };
   if (!list.some((space) => space.id === spaceId)) return state;
   const tasks = (state.tasks ?? []).filter((task) => (task.space ?? (list.length === 1 ? list[0].id : null)) === spaceId);
   return { ...state, tasks };

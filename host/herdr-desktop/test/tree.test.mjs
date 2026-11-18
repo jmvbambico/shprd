@@ -78,6 +78,7 @@ test("the Tasks list's scope keeps one space's tasks, and all when none is picke
   assert.equal(scopeToSpace(state, null), state);
   assert.ok(scopeToSpace(state, "sp-shop").tasks.every((task) => task.space === "sp-shop"));
   assert.equal(scopeToSpace(state, "gone"), state);
+  assert.deepEqual(scopeToSpace(state, "herdr:s2").tasks, [], "a space Herdr made has no tasks");
 });
 
 test("a finished agent stays in the Agents pane 30 minutes; a coordinator stays", () => {
