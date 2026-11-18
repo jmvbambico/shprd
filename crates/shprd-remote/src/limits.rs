@@ -293,6 +293,11 @@ impl RateLimiter {
     /// right password racing a wrong one never hands the wrong one back.
     pub fn login_succeeded(&self, ip: IpAddr, ticket: LoginTicket) {
         let mut buckets = self.lock();
+        // A success hands its stamp back too when nothing was stamped after it,
+        // so a burst of right logins cannot leave the stamp clock ahead of time.
+        if buckets.last_stamp == ticket.0 {
+            buckets.last_stamp = ticket.0 - 1;
+        }
         // Only this attempt's own entries leave, not the address's other
         // in-flight attempts: a right password racing wrong ones must not wipe
         // them. (Earlier failures therefore age out with the window.)
