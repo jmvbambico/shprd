@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
@@ -129,4 +129,13 @@ test("the graph groups by phase, hangs a task under its last dependency and says
   const at = (id) => rows.findIndex((row) => row.id === id);
   assert.ok(at("SHPR-24") > at("SHPR-23"), "a dependent follows what it waits for");
   assert.match(rows[at("SHPR-24")].guide, /└─/);
+});
+
+test("the Graph is a view of the Tasks panel: the layout holds no graph block, terminal block or graph mod", () => {
+  const layout = readFileSync(new URL("../layouts/shprd.json", import.meta.url), "utf8");
+  assert.ok(!/graph/i.test(layout), "no graph stack or block in the layout");
+  assert.ok(!layout.includes('"terminal"'), "no terminal block for Herdr to prune");
+  assert.ok(!existsSync(new URL("../mods/shprd-graph", import.meta.url)), "the graph mod is gone");
+  const tasks = readFileSync(new URL("../mods/shprd-tasks/main.js", import.meta.url), "utf8");
+  assert.ok(tasks.includes('this.show("graph")'), "G switches the Tasks panel to its Graph");
 });

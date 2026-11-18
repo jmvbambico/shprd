@@ -933,6 +933,11 @@ fn assert_upgraded(fixture: &Fixture) {
         find_node(&mut probe, "coordinator").is_none(),
         "the sidebar has no coordinator block: its chat is its pane's Chat view"
     );
+    let text = String::from_utf8_lossy(&installed);
+    assert!(
+        !text.contains("\"terminal\"") && !text.contains("graph"),
+        "the layout holds no graph block or terminal block for Herdr to prune"
+    );
 }
 
 #[test]
@@ -1005,12 +1010,13 @@ fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
 
 #[test]
 fn an_upgrade_takes_back_a_mod_this_build_no_longer_ships() {
-    // M11 U4 removed the Asks panel's and the sidebar coordinator's mods. A
-    // desktop installed before that holds both in its manifest, so the upgrade
+    // M11 U4 removed the Asks panel's and the sidebar coordinator's mods, and
+    // SHPR-29 the graph mod (the Graph is a view of the Tasks panel). A desktop
+    // installed before that holds them in its manifest, so the upgrade
     // takes them away — unless the person edited one, which is theirs now.
     let fixture = Fixture::new();
     let older = tree_with_layout("shprd-m11-accept.json");
-    for gone in ["shprd-asks", "shprd-coordinator"] {
+    for gone in ["shprd-asks", "shprd-coordinator", "shprd-graph"] {
         let dir = older.path().join("mods").join(gone);
         fs::create_dir_all(dir.join("lib")).expect("the old mod's folder");
         fs::write(dir.join("main.js"), format!("// {gone}\n")).expect("the old mod");
@@ -1030,6 +1036,10 @@ fn an_upgrade_takes_back_a_mod_this_build_no_longer_ships() {
     assert!(
         !fixture.app_path("mods/shprd-asks").exists(),
         "an untouched stale mod goes, folder and all"
+    );
+    assert!(
+        !fixture.app_path("mods/shprd-graph").exists(),
+        "the graph mod goes with the separate graph panel"
     );
     assert_eq!(
         fs::read_to_string(&edited).expect("their file"),

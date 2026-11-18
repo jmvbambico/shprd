@@ -501,6 +501,7 @@ export default class Tasks extends View {
       .on_key_down((e, cx) => {
         if (e.key === "escape" && (this.searching || query !== "")) this.clearSearch();
         else if ((e.key === "f" || e.key === "/") && !this.searching) this.query.focus();
+        else if (e.key === "g" && !this.searching) this.show("graph");
         else return;
         cx.notify();
       });
@@ -522,7 +523,15 @@ export default class Tasks extends View {
     return card(t, [
       cardHeader(t, head),
       v_flex().flex_1().min_h(0).px(8).py(6).gap(1).overflow_y_scrollbar().mode("always").children(body),
-    ]).id("tasks-card");
+    ])
+      .id("tasks-card")
+      .track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        // G toggles back to the list, as it toggles to the Graph from the list.
+        if (e.key !== "g") return;
+        this.show("tasks");
+        cx.notify();
+      });
   }
 
   /** A phase's heading: its name in capitals and how many of its tasks are done. */
@@ -555,6 +564,9 @@ export default class Tasks extends View {
             : row.waits || row.status === "done"
               ? t.dim
               : t.muted;
+    // The same act pill as the list's row.
+    const task = (this.state?.tasks ?? []).find((entry) => entry.id === row.id);
+    const acts = task ? rowActions(task) : [];
     return h_flex()
       .id(`graph-${row.id}`)
       .h(26)
@@ -571,7 +583,8 @@ export default class Tasks extends View {
       .child(statusGlyph(t, row, colors, 12))
       .child(div().flex_none().font_family(MONO).text_color(t.foreground).child(ref(row.id)))
       .child(div().flex_1().min_w(0).truncate().text_color(row.waits ? t.dim : t.muted).child(row.title))
-      .child(div().flex_none().text_color(word).font_medium().child(row.word));
+      .child(div().flex_none().text_color(word).font_medium().child(row.word))
+      .when(acts.length > 0, (el) => el.child(this.act(t, task, acts[0])));
   }
 
   /**

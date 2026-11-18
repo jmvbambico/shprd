@@ -88,7 +88,6 @@ const PANEL_ICON = {
   files: "mods/shprd-tabs/icons/files.svg",
   changes: "mods/shprd-tabs/icons/git-compare.svg",
   tasks: "mods/shprd-tabs/icons/tasks.svg",
-  graph: "mods/shprd-tabs/icons/graph.svg",
   settings: "mods/shprd-tabs/icons/settings.svg",
 };
 
