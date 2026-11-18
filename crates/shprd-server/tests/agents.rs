@@ -102,6 +102,7 @@ impl Fixture {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/api/agents")
+            .header(header::HOST, format!("127.0.0.1:{PORT}"))
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .header("x-shprd", "1")
             .header(header::CONTENT_TYPE, "application/json")
@@ -124,6 +125,7 @@ impl Fixture {
         let request = Request::builder()
             .method(Method::GET)
             .uri("/api/roster")
+            .header(header::HOST, format!("127.0.0.1:{PORT}"))
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .body(Body::empty())
             .expect("the request");
@@ -209,6 +211,7 @@ async fn the_gate_refuses_a_write_without_the_custom_header() {
     let request = Request::builder()
         .method(Method::POST)
         .uri("/api/agents")
+        .header(header::HOST, format!("127.0.0.1:{PORT}"))
         .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json!({ "program": "claude" }).to_string()))
