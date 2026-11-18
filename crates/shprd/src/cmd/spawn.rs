@@ -347,9 +347,8 @@ pub fn spawn(
         }
     };
     // The tab id goes next to the brief: a label is only 16 characters, so two
-    // tasks can share one, and the id cannot. With a space per task the tab is
-    // found inside the task's own space, and the record is what says which tab
-    // of it is the worker's.
+    // tasks can share one, and the id cannot. The record is what says which
+    // handle (a tab, or a headless agent's) is the worker's.
     write_tab(
         &tab_path(&env.briefs_dir, &env.run, &task.id, attempt),
         &tab_id,
@@ -1996,7 +1995,11 @@ pub(crate) fn coordinator_pane_path(home: &Path) -> PathBuf {
 const COORDINATOR_AGENT_MARK: &str = "agent";
 
 /// Records the pane of the coordinator agent shprd started.
-pub(crate) fn record_coordinator_pane(home: &Path, pane: &PaneId) -> Result<(), CliError> {
+pub(crate) fn record_coordinator_pane(
+    home: &Path,
+    pane: &PaneId,
+    program: &str,
+) -> Result<(), CliError> {
     let path = coordinator_pane_path(home);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|err| {
@@ -2005,7 +2008,7 @@ pub(crate) fn record_coordinator_pane(home: &Path, pane: &PaneId) -> Result<(), 
     }
     std::fs::write(
         &path,
-        format!("{}\n{COORDINATOR_AGENT_MARK}\n", pane.as_str()),
+        format!("{}\n{COORDINATOR_AGENT_MARK}\n{program}\n", pane.as_str()),
     )
     .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
 }
@@ -2019,6 +2022,16 @@ pub(crate) fn coordinator_pane_of(
     recorded_coordinator_pane(home, mux, space)
 }
 
+/// The program the recorded coordinator runs, from its record's third line.
+pub(crate) fn recorded_coordinator_program(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(coordinator_pane_path(home)).ok()?;
+    text.lines()
+        .nth(2)
+        .map(str::trim)
+        .filter(|program| !program.is_empty())
+        .map(str::to_string)
+}
+
 /// The coordinator agent shprd started, when it is still running in `space`.
 ///
 /// News and chat lines are typed into this pane and no other, so it is trusted
@@ -2027,7 +2040,7 @@ pub(crate) fn coordinator_pane_of(
 /// tabs, and the host does not say its program has ended. A person who closed
 /// the tab, or whose coordinator exited, gets a refusal and not a line typed
 /// into whatever is left.
-fn recorded_coordinator_pane(
+pub(crate) fn recorded_coordinator_pane(
     home: &Path,
     mux: &dyn Host,
     space: &shprd_mux::Space,
@@ -2146,7 +2159,7 @@ pub(crate) fn ensure_coordinator(
             parent: None,
         })
         .map_err(|err| CliError::other(anyhow!(err).context("starting the coordinator")))?;
-    record_coordinator_pane(&env.home, &tab.root_pane)?;
+    record_coordinator_pane(&env.home, &tab.root_pane, &pick.agent)?;
     if prepared.created {
         for starter in starters {
             close_tab(mux, &starter.id);
@@ -2936,7 +2949,7 @@ project_dirs = []
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default().with_ready_agent();
         let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
-        // The agent's tab is in the task's own space, which the spawn made.
+        // The agent is headless: found by the host's own listing.
         let pane = all_handles(&mux)
             .into_iter()
             .find(|tab| tab.title == report.tab)
@@ -3185,7 +3198,7 @@ project_dirs = []
             .first()
             .map(|tab| tab.root_pane.clone())
             .unwrap_or_else(|| panic!("the space has a pane to record"));
-        record_coordinator_pane(home, &pane).unwrap_or_else(|err| panic!("{err}"));
+        record_coordinator_pane(home, &pane, "sh").unwrap_or_else(|err| panic!("{err}"));
         pane
     }
 
@@ -3337,7 +3350,8 @@ project_dirs = []
             prompt_coordinator(&mux, scratch.home.path(), &ctx, "hi").is_err(),
             "a bare record is a shell"
         );
-        record_coordinator_pane(scratch.home.path(), &pane).unwrap_or_else(|err| panic!("{err}"));
+        record_coordinator_pane(scratch.home.path(), &pane, "sh")
+            .unwrap_or_else(|err| panic!("{err}"));
         mux.set_state(&pane, AgentState::Done);
         assert!(
             prompt_coordinator(&mux, scratch.home.path(), &ctx, "hi").is_err(),
@@ -4544,7 +4558,7 @@ project_dirs = []
     }
 
     #[test]
-    fn a_task_space_the_host_already_has_is_reused() {
+    fn the_repositorys_space_the_host_already_has_is_reused() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
@@ -4554,7 +4568,7 @@ project_dirs = []
 
         let again = agent_space(&mux, &env).unwrap_or_else(|err| panic!("{err}"));
 
-        assert_eq!(first, again, "one task, one space");
+        assert_eq!(first, again, "one repository, one space");
         assert!(
             !mux.calls()
                 .iter()

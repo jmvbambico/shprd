@@ -22,9 +22,11 @@
 //! It also prepares the repository's own space before the first pass: the label
 //! is derived from the folder name, so a space nobody made is a run that cannot
 //! start a task until someone reads a refusal (M9 gate bug 6). That space is the
-//! coordinator's; a task gets its own when it is spawned, and loses it when it
-//! lands. The banner says whether it found the space, made it, or could not
-//! reach the host at all.
+//! coordinator's, and the service starts the coordinator agent in it (or finds
+//! it running after a restart): the one space shprd makes. A task gets no space
+//! and no tab: its worker and reviewer are headless agents the host lists. The
+//! banner says whether it found the space, made it, or could not reach the host
+//! at all.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -152,10 +154,20 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         home: home.clone(),
         host: host.clone(),
     }));
+    // The agents the host lists, headless: `live_agents` on the state answer, the
+    // output and attach routes, and the terminal socket's `agent:<id>` space all
+    // read this one list, so a client can only reach an agent that was listed.
+    let live = Arc::new(crate::cmd::live_agents::HostLive::new(
+        ctx.root.clone(),
+        home.clone(),
+        host.clone(),
+    ));
+    config.live = shprd_server::LiveAgents::with(live.clone());
     config.terminal = shprd_server::TerminalPort::with(Arc::new(HostTerminal {
         repo: ctx.root.clone(),
         home: home.clone(),
         host: host.clone(),
+        live,
     }));
     let tick = tick_config(
         ctx,
@@ -295,10 +307,21 @@ struct HostTerminal {
     home: std::path::PathBuf,
     /// The host this service drives.
     host: Arc<dyn Host>,
+    /// The agents the host lists, for the `agent:<id>` space.
+    live: Arc<crate::cmd::live_agents::HostLive>,
 }
 
 impl shprd_server::TerminalHost for HostTerminal {
     fn resolve(&self, space: &str, pane: Option<&str>) -> Result<String, String> {
+        // `agent:<id>` is a headless agent the service listed: its terminal and
+        // no other, never an address the client chose.
+        if let Some(id) = space.strip_prefix("agent:") {
+            return self
+                .live
+                .terminal_of(id)
+                .filter(|terminal| pane.is_none_or(|wanted| wanted == terminal))
+                .ok_or_else(|| format!("no agent {id} is listed"));
+        }
         let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
         let found = match shprd_server::ChatSpace::parse(Some(space)) {
             shprd_server::ChatSpace::Coordinator => {
@@ -709,7 +732,7 @@ mod tests {
                     parent: None,
                 })
                 .map_err(|err| CliError::other(anyhow!(err)))?;
-            crate::cmd::spawn::record_coordinator_pane(home, &tab.root_pane)?;
+            crate::cmd::spawn::record_coordinator_pane(home, &tab.root_pane, "sh")?;
             Ok(crate::cmd::spawn::CoordinatorStart::Started(tab.root_pane))
         }
     }

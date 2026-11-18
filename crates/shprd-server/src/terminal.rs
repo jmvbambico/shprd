@@ -136,7 +136,8 @@ impl TermKey {
 /// wires the host it already drives. Every method is blocking (a host call is a
 /// process or a socket round trip), so the socket runs them off the runtime.
 pub trait TerminalHost: Send + Sync {
-    /// The pane `space` (`coordinator` or a task id) runs its agent in.
+    /// The pane `space` (`coordinator`, a task id, or `agent:<id>` for a headless
+    /// agent the service listed) runs its agent in.
     ///
     /// `pane`, when the client named one, must be that pane: `Err` otherwise.
     /// `Err` is also a space with no pane open. The message is shown to the

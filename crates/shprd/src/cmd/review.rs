@@ -1641,8 +1641,8 @@ project_dirs = []
 
         /// A fake host that already has this repository's coordinator space.
         ///
-        /// The reviewer's tab goes in the task's own space, which the spawn
-        /// makes, so the fixture only seeds what a person would have opened.
+        /// The reviewer is headless (no tab, no space of its own), so the fixture
+        /// only seeds what a person would have opened.
         fn mux(&self) -> FakeMux {
             self.with_workspace(FakeMux::default().with_ready_agent())
         }
@@ -2892,6 +2892,60 @@ project_dirs = []
         assert!(
             !open_tabs(&mux, &env).contains(&tab),
             "the reviewer tab {tab} outlived its verdict"
+        );
+    }
+
+    /// SHPR-23's contract on the fake host: a task's worker and its reviewer
+    /// start with no space and no tab of their own, both are listed as agents
+    /// (what `live_agents` is built from), and the one close a landing and a
+    /// drop share stops both.
+    #[test]
+    fn a_worker_and_a_reviewer_have_no_tab_and_stop_on_land_or_drop() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let (env, mux, reviewer_handle) = reviewed(&scratch, &ctx);
+        let space = spawn::agent_space(&mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
+        let worker = mux
+            .spawn_agent(&shprd_mux::AgentLaunch {
+                space: &space.id,
+                title: "sh·T1",
+                argv: &[],
+                env: &[],
+                cwd: scratch.root(),
+                role: shprd_mux::AgentRole::Worker,
+                task: Some("T1"),
+                program: "sh",
+                parent: None,
+            })
+            .unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(
+            spawn::tab_path(&env.spawn.briefs_dir, &env.spawn.run, "T1", 1),
+            worker.id.to_string(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        // No space but the repository's, and no tab in it.
+        let spaces = mux.list_spaces().unwrap_or_default();
+        assert_eq!(spaces.len(), 1, "{spaces:?}");
+        assert_eq!(spaces[0].name, spawn::repo_space_name(&scratch.repo_name()));
+        assert!(mux.list_tabs(&spaces[0].id).unwrap_or_default().is_empty());
+        // Both are listed, with their roles and their task.
+        let listed = mux.list_agents().unwrap_or_default();
+        let roles: Vec<(&str, Option<&str>)> = listed
+            .iter()
+            .map(|agent| (agent.role.as_str(), agent.task.as_deref()))
+            .collect();
+        assert!(roles.contains(&("worker", Some("T1"))), "{roles:?}");
+        assert!(roles.contains(&("reviewer", Some("T1"))), "{roles:?}");
+        assert!(open_tabs(&mux, &env).contains(&reviewer_handle));
+
+        // A landing and a drop both close through this one function.
+        spawn::stop_task_agents(&mux, &env.spawn.briefs_dir, &env.spawn.run, "T1")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            mux.list_agents().unwrap_or_default().is_empty(),
+            "both agents were stopped"
         );
     }
 

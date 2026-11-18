@@ -95,7 +95,7 @@ mod tests {
             .first()
             .map(|tab| tab.root_pane.clone())
             .expect("the space's first tab");
-        crate::cmd::spawn::record_coordinator_pane(home.path(), &recorded)
+        crate::cmd::spawn::record_coordinator_pane(home.path(), &recorded, "sh")
             .expect("recording the pane");
 
         let news = LiveNews::new(Box::new(mux), home.path(), repo.path());

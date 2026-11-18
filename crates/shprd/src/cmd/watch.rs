@@ -1492,8 +1492,8 @@ project_dirs = []
 
     /// A fake multiplexer holding the coordinator's space.
     ///
-    /// A task's own space is made by the spawn that starts it, so a fixture only
-    /// has to provide the repository-level one a person would have opened.
+    /// A task has no space of its own, so a fixture only has to provide the
+    /// repository-level one a person would have opened.
     fn mux_with_workspace(scratch: &Scratch) -> FakeMux {
         let mux = FakeMux::default().with_ready_agent();
         mux.create_space(
