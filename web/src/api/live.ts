@@ -49,7 +49,7 @@ export const LIVE_DEFAULTS = { waitMs: 10_000, retryMs: 2_000, socketTries: 2 } 
  */
 export class LiveFeed {
   readonly #client: LiveClient;
-  readonly #refresh: () => void;
+  readonly #refresh: (change: ChangeDto) => void;
   readonly #waitMs: number;
   readonly #retryMs: number;
   readonly #socketTries: number;
@@ -61,7 +61,7 @@ export class LiveFeed {
   #running = false;
 
   /** Builds a feed; nothing runs until [`LiveFeed::start`]. */
-  constructor(client: LiveClient, refresh: () => void, options: LiveOptions = {}) {
+  constructor(client: LiveClient, refresh: (change: ChangeDto) => void, options: LiveOptions = {}) {
     this.#client = client;
     this.#refresh = refresh;
     this.#waitMs = options.waitMs ?? LIVE_DEFAULTS.waitMs;
@@ -129,7 +129,7 @@ export class LiveFeed {
         },
         change: (change) => {
           this.#since = change.seq;
-          this.#refresh();
+          this.#refresh(change);
         },
         close: closed,
       });
@@ -169,7 +169,7 @@ export class LiveFeed {
         }
         if (change !== null) {
           this.#since = change.seq;
-          this.#refresh();
+          this.#refresh(change);
         }
       } catch (error) {
         // The session is gone: the app's own listener shows the login screen,

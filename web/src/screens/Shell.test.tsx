@@ -19,9 +19,9 @@ describe("Shell: settings", () => {
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
     fireEvent.click(screen.getAllByRole("button", { name: "Settings" })[0]!);
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeDefined();
-    expect(screen.getByRole("heading", { name: "The board lands here." })).toBeDefined();
+    expect(screen.getByRole("heading", { name: "Tasks" })).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
-    expect(screen.getByRole("heading", { name: "The board lands here." })).toBeDefined();
+    expect(screen.getByRole("heading", { name: "Tasks" })).toBeDefined();
   });
 });

@@ -2,11 +2,13 @@
 
 import { useEffect, useRef } from "react";
 
+import type { ChangeDto } from "../gen";
 import type { ApiClient } from "./client";
 import { LiveFeed, type LiveOptions } from "./live";
 
 /**
- * Calls `refresh` whenever the service says the run changed.
+ * Calls `refresh` whenever the service says the run changed, with the notice
+ * (a screen that only redraws ignores it; the toasts read its events).
  *
  * The callback is kept in a ref, so a screen that rebuilds its loader every
  * render does not restart the socket every render; the feed lives as long as the
@@ -14,14 +16,14 @@ import { LiveFeed, type LiveOptions } from "./live";
  */
 export function useLiveRefresh(
   client: Pick<ApiClient, "connect" | "changes">,
-  refresh: () => void,
+  refresh: (change: ChangeDto) => void,
   options: LiveOptions = {},
 ): void {
   const latest = useRef(refresh);
   latest.current = refresh;
 
   useEffect(() => {
-    const feed = new LiveFeed(client, () => latest.current(), options);
+    const feed = new LiveFeed(client, (change) => latest.current(change), options);
     feed.start();
     return () => feed.stop();
     // The options are a literal at every call site, so they are read once: a
