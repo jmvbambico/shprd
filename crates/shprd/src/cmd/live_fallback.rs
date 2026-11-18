@@ -100,19 +100,13 @@ impl LiveFallback {
 
     /// Every tab the host has, across every space, when it can say.
     ///
-    /// A task's tabs live in the task's own space, so there is no single space
-    /// to list: the tabs this seam looks for are named by the records a spawn
-    /// and a review wrote, and the answer is one flat list of every space's
-    /// tabs. A host that cannot list spaces (or a space that vanished)
-    /// contributes nothing rather than failing the fact.
+    /// Agents are headless or tabs of the repository's space, so there is no
+    /// single space to list: the handles this seam looks for are named by the
+    /// records a spawn and a review wrote, and the answer is one flat list of
+    /// every tab and headless agent. A host that cannot list contributes
+    /// nothing rather than failing the fact.
     fn tabs(&self) -> Vec<shprd_mux::Tab> {
-        let Ok(spaces) = self.mux.list_spaces() else {
-            return Vec::new();
-        };
-        spaces
-            .iter()
-            .flat_map(|space| self.mux.list_tabs(&space.id).unwrap_or_default())
-            .collect()
+        spawn::all_handles(&*self.mux)
     }
 
     /// What a backup needs to know about the work so far.

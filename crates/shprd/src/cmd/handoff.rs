@@ -15,7 +15,7 @@ use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::{Attempt, RunState, Task, TaskStatus};
 use shprd_git::git::Git;
 use shprd_git::worktree::Worktree;
-use shprd_mux::{Host, MuxError, Space, TabId};
+use shprd_mux::{Host, MuxError, TabId};
 
 use crate::cli::HandoffArgs;
 use crate::cmd::spawn::{self, BriefInput, Launching, Pick, Program, SpawnEnv};
@@ -264,7 +264,6 @@ const PANE_TAIL_LINES: usize = 30;
 /// error, the brief just says nothing about it.
 fn old_pane_tail(
     mux: &dyn Host,
-    space: &Space,
     env: &SpawnEnv<'_>,
     task: &str,
     attempt: &Attempt,
@@ -272,7 +271,7 @@ fn old_pane_tail(
     let record = spawn::tab_path(&env.briefs_dir, &env.run, task, attempt.n);
     let wanted = std::fs::read_to_string(record).ok()?;
     let wanted = wanted.trim().to_string();
-    let tabs = mux.list_tabs(&space.id).ok()?;
+    let tabs = spawn::all_handles(mux);
     let tab = tabs.iter().find(|tab| tab.id.as_str() == wanted)?;
     let text = mux.read(&tab.root_pane, PANE_TAIL_LINES).ok()?;
     let text = text.trim_end().to_string();
@@ -420,9 +419,9 @@ pub fn handoff(
     // The newcomer's words are read before the space and the pane are touched:
     // a prompt that cannot be read must cost nothing.
     let context = spawn::brief_context(env, role_id, &to, None, &chosen)?;
-    // A hand-off is the same attempt in the same task, so the newcomer joins the
-    // tab group the outgoing agent's space already holds.
-    let space = spawn::task_space(mux, env, &task.id)?;
+    // A hand-off is the same attempt in the same task: the newcomer starts the
+    // way the outgoing agent did, in the repository's one space.
+    let space = spawn::agent_space(mux, env)?;
     // The newcomer keeps the worktree the attempt already has, which an older
     // build may have made without shprd's state excluded. A warning, not a
     // failure: the hand-off is about the work, not a tidy `git status`.
@@ -432,7 +431,7 @@ pub fn handoff(
             worktree.display()
         );
     }
-    let pane_tail = old_pane_tail(mux, &space, env, &task.id, attempt);
+    let pane_tail = old_pane_tail(mux, env, &task.id, attempt);
     let stats = diffstat(&worktree, &env.base_branch);
     let start = BriefInput {
         task,
@@ -975,10 +974,9 @@ project_dirs = []
         );
         assert_eq!(task.attempts[0].agent, "pi");
         assert_eq!(task.status, TaskStatus::Working);
-        let space = spawn::task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
-        let tabs = mux
-            .list_tabs(&space.id)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let space = spawn::agent_space(&mux, &env).unwrap_or_else(|err| panic!("{err}"));
+        let _ = &space;
+        let tabs = spawn::all_handles(&mux);
         assert_eq!(tabs.len(), 1, "the old tab should be closed: {tabs:?}");
         assert_eq!(tabs[0].title, "pi·T1");
         assert!(
@@ -1091,11 +1089,8 @@ project_dirs = []
         let mux = mux_with_workspace(&scratch);
         let worktree = seed(&mux, &env);
         // What the outgoing agent last printed, which the newcomer should see.
-        let pane = mux
-            .list_spaces()
-            .unwrap_or_else(|err| panic!("{err}"))
-            .iter()
-            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
+        let pane = spawn::all_handles(&mux)
+            .into_iter()
             .next()
             .map(|tab| tab.root_pane)
             .unwrap_or_else(|| panic!("the CLI was never started"));
@@ -1423,10 +1418,9 @@ project_dirs = []
                 .map(|escalation| escalation.body.as_str()),
             Some("hand-off to pi could not be recorded")
         );
-        let space = spawn::task_space(&mux, &env, "T1").unwrap_or_else(|err| panic!("{err}"));
-        let tabs = mux
-            .list_tabs(&space.id)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let space = spawn::agent_space(&mux, &env).unwrap_or_else(|err| panic!("{err}"));
+        let _ = &space;
+        let tabs = spawn::all_handles(&mux);
         assert!(
             tabs.is_empty(),
             "the newcomer's tab was left open: {tabs:?}"

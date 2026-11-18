@@ -952,10 +952,10 @@ fn open_reviewer(
     brief: &ReviewBrief<'_>,
     brief_path: &Path,
 ) -> Result<(shprd_mux::TabId, String), CliError> {
-    // The reviewer joins the worker in the task's own space: one task, one
-    // group of terminals, so a person reading the host's bar sees the whole task
-    // and its reviewer beside it.
-    let space = spawn::task_space(mux, &env.spawn, task)?;
+    // The reviewer is a second agent of the task and starts the way the worker
+    // did: headless where the host can be, a tab of the repository's one space
+    // where it cannot. It is the coordinator's child, like the worker.
+    let space = spawn::agent_space(mux, &env.spawn)?;
     let title = reviewer_title(&reviewer.agent, task);
     let text = render_review_brief(brief);
     let (argv, brief_in_args) = reviewer_argv(
@@ -978,9 +978,20 @@ fn open_reviewer(
             data: env.spawn.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
+    let parent = spawn::coordinator_pane_of(&env.spawn.home, mux, &space);
     let tab = mux
-        .spawn(&space.id, &title, &argv, &pairs, dir)
-        .map_err(|err| CliError::other(anyhow!(err).context("starting the reviewer tab")))?;
+        .spawn_agent(&shprd_mux::AgentLaunch {
+            space: &space.id,
+            title: &title,
+            argv: &argv,
+            env: &pairs,
+            cwd: dir,
+            role: shprd_mux::AgentRole::Reviewer,
+            task: Some(task),
+            program: &reviewer.agent,
+            parent: parent.as_ref(),
+        })
+        .map_err(|err| CliError::other(anyhow!(err).context("starting the reviewer")))?;
     // The tab exists from here on, so every failure closes it again.
     let started = deliver_review_turn(mux, env, reviewer, task, &text, &tab, brief_in_args);
     match started {
@@ -2840,11 +2851,8 @@ project_dirs = []
     /// is the simplest way to be right about it.
     fn open_tabs(mux: &FakeMux, env: &ReviewEnv<'_>) -> Vec<String> {
         let _ = env;
-        let mut ids: Vec<String> = mux
-            .list_spaces()
-            .unwrap_or_else(|err| panic!("{err}"))
-            .iter()
-            .flat_map(|space| mux.list_tabs(&space.id).unwrap_or_default())
+        let mut ids: Vec<String> = spawn::all_handles(mux)
+            .into_iter()
             .map(|tab| tab.id.to_string())
             .collect();
         ids.sort();
@@ -2911,7 +2919,7 @@ project_dirs = []
         let (env, mux, reviewer) = reviewed(&scratch, &ctx);
         // A worker's record sits beside the reviewer's in the same run folder:
         // both are tabs this run opened, so run end closes both.
-        let space = spawn::task_space(&mux, &env.spawn, "T1").unwrap_or_else(|err| panic!("{err}"));
+        let space = spawn::agent_space(&mux, &env.spawn).unwrap_or_else(|err| panic!("{err}"));
         let worker = mux
             .spawn(&space.id, "worker", &[], &[], scratch.root())
             .unwrap_or_else(|err| panic!("{err}"));

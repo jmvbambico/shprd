@@ -82,7 +82,7 @@ pub fn drop_task(
     // into a task the run has decided against — its branch may be archived and
     // its worktree gone by the time it commits — so a close that genuinely
     // fails refuses the drop, and nothing is written.
-    stop_task_tabs(mux, ctx, home, &run.run_id, &args.task)?;
+    stop_task_tabs(mux, home, &run.run_id, &args.task)?;
     let event = ctx.commit(kind)?;
     crate::cmd::emit(ctx, &event)?;
     if !ctx.json {
@@ -121,7 +121,6 @@ fn dropped_phrase(task: &str, status: &str, task_record: &shprd_core::state::Tas
 /// that cannot check must not go ahead and leave the agent behind.
 fn stop_task_tabs(
     mux: &dyn Host,
-    ctx: &Ctx,
     home: Option<&Path>,
     run: &str,
     task: &str,
@@ -132,15 +131,10 @@ fn stop_task_tabs(
         )))
     })?;
     let briefs = home.join(".shprd").join("briefs");
-    let repo_name = spawn::repo_name(&ctx.root).map_err(|err| {
-        CliError::Invalid(anyhow!(err).context(format!(
-            "the repository's folder name could not be read, so the space of task {task} cannot be found: run `shprd drop` from the repository"
-        )))
-    })?;
-    spawn::close_task_space(mux, &briefs, run, &repo_name, task).map_err(|err| {
+    spawn::stop_task_agents(mux, &briefs, run, task).map_err(|err| {
         CliError::Invalid(
             anyhow!(err).context(format!(
-                "task {task} may still have an agent working in it: close the space or tab it names by hand, then run `shprd drop` again"
+                "task {task} may still have an agent working in it: stop the agent it names by hand, then run `shprd drop` again"
             )),
         )
     })
