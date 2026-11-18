@@ -120,6 +120,21 @@ impl SessionInfoDto {
     }
 }
 
+/// What `GET /api/sessions` answers: every live session, and which is this one.
+///
+/// Only the short ids are here, never a cookie value, so the list cannot be
+/// replayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SessionListDto.ts")]
+pub struct SessionListDto {
+    /// The live sessions, oldest first.
+    pub sessions: Vec<SessionInfoDto>,
+    /// The short id of the session that asked, when the door was a cookie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current: Option<String>,
+}
+
 /// What `GET /api/session` answers: who is asking, and how.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "SessionDto.ts")]

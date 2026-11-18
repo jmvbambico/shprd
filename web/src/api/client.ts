@@ -30,12 +30,16 @@ import type {
   PromptDto,
   PromptListDto,
   PromptPutDto,
+  LogoutReply,
   RosterDto,
+  SessionListDto,
   SettingsDto,
   SettingsPutDto,
   SettingsWriteDto,
   SnapshotDto,
   TaskChangesDto,
+  TunnelStartRequest,
+  TunnelStatusDto,
   WsMessage,
 } from "../gen";
 
@@ -325,6 +329,16 @@ export class ApiClient {
     return this.#get<PromptDto>(`/api/prompts/${encodeURIComponent(id)}`);
   }
 
+  /** `GET /api/tunnels`: whether a tunnel is up, where, and what could be started. */
+  tunnels(): Promise<TunnelStatusDto> {
+    return this.#get<TunnelStatusDto>("/api/tunnels");
+  }
+
+  /** `GET /api/sessions`: every signed-in device, with this one marked. */
+  sessions(): Promise<SessionListDto> {
+    return this.#get<SessionListDto>("/api/sessions");
+  }
+
   /** `GET /api/tasks/{id}/changes`: the task's branch against its base. */
   taskChanges(id: string): Promise<TaskChangesDto> {
     return this.#get<TaskChangesDto>(`/api/tasks/${encodeURIComponent(id)}/changes`);
@@ -376,6 +390,26 @@ export class ApiClient {
   /** `DELETE /api/prompts/{id}`: put the shipped words back. */
   resetPrompt(id: string): Promise<PromptDto> {
     return this.#request<PromptDto>("DELETE", `/api/prompts/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * `POST /api/tunnels/start`: start one tunnel.
+   *
+   * It answers once the tunnel is up or has failed, which can take most of a
+   * minute. A public provider with no password set is refused in words (`409`).
+   */
+  startTunnel(body: TunnelStartRequest = {}): Promise<TunnelStatusDto> {
+    return this.#write<TunnelStatusDto>("/api/tunnels/start", body);
+  }
+
+  /** `POST /api/tunnels/stop`: stop the tunnel; fine when none is up. */
+  stopTunnel(): Promise<TunnelStatusDto> {
+    return this.#write<TunnelStatusDto>("/api/tunnels/stop", {});
+  }
+
+  /** `DELETE /api/sessions/{id}`: signs one device out. Needs a fresh password. */
+  revokeSession(id: string): Promise<LogoutReply> {
+    return this.#request<LogoutReply>("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
   }
 
   // --- the socket ---------------------------------------------------------

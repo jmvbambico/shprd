@@ -579,6 +579,59 @@ async fn a_logout_ends_the_session_it_names_and_clears_the_cookie() {
 }
 
 #[tokio::test]
+async fn the_session_list_marks_this_one_and_a_revoke_signs_the_other_out() {
+    let fixture = Fixture::new().with_password();
+    let mine = fixture.login(PASSWORD).await;
+    let other = fixture.login(PASSWORD).await;
+    let my_cookie = Fixture::cookie(&mine);
+
+    let list = fixture
+        .send(Call::get("/api/sessions").with_cookie(&my_cookie))
+        .await;
+    assert_eq!(list.status, StatusCode::OK, "{:?}", list.body);
+    let sessions = list.json()["sessions"].as_array().expect("a list").clone();
+    assert_eq!(sessions.len(), 2);
+    let current = list.json()["current"].as_str().expect("a current id");
+    assert!(
+        sessions.iter().any(|s| s["id"] == json!(current)),
+        "the current id is one of the sessions"
+    );
+    let text = list.json().to_string();
+    assert!(!text.contains(&mine) && !text.contains(&other), "no raw id");
+
+    let theirs = sessions
+        .iter()
+        .find(|s| s["id"] != json!(current))
+        .and_then(|s| s["id"].as_str())
+        .expect("the other session")
+        .to_string();
+    let revoke = |id: &str| {
+        Call {
+            method: Method::DELETE,
+            ..Call::get(&format!("/api/sessions/{id}"))
+        }
+        .with_cookie(&my_cookie)
+        .with_origin(ORIGIN)
+        .with_write_header()
+    };
+    let gone = fixture.send(revoke(&theirs)).await;
+    assert_eq!(gone.status, StatusCode::OK, "{:?}", gone.body);
+    let after = fixture
+        .send(Call::get("/api/session").with_cookie(&Fixture::cookie(&other)))
+        .await;
+    assert_eq!(after.status, StatusCode::UNAUTHORIZED);
+
+    let missing = fixture.send(revoke("ffffffffffff")).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{:?}", missing.body);
+
+    // Stale: the password is asked for again, and nothing is revoked.
+    fixture.clock.advance(5 * 60 + 1);
+    let stale = fixture.send(revoke(current)).await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED, "{:?}", stale.body);
+    assert_eq!(stale.json()["code"], json!("reauth"));
+}
+
+#[tokio::test]
 async fn a_password_change_revokes_every_session() {
     let fixture = Fixture::new().with_password();
     let first = fixture.login(PASSWORD).await;
