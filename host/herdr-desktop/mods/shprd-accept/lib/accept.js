@@ -334,6 +334,12 @@ export const VIEW = {
   artifacts: { id: "tasks-thread-artifacts", word: "Artifacts" },
 };
 
+/** When an agent began: its `started_ms`, else the time it entered its state, else 0 (-1 for none). */
+function began(agent) {
+  if (!agent) return -1;
+  return agent.started_ms ?? agent.since_ms ?? 0;
+}
+
 /**
  * The agent a task's Terminal view is about: the newest agent of the task that is
  * still running, else the newest that ended (its screen stays readable), else null.
@@ -344,7 +350,7 @@ export const VIEW = {
 export function threadAgent(state, taskId, now = Date.now()) {
   const mine = agentsOfTask(state, taskId, now);
   const newest = (list) =>
-    list.reduce((best, agent) => ((agent.started_ms ?? 0) >= (best?.started_ms ?? -1) ? agent : best), null);
+    list.reduce((best, agent) => (began(agent) >= began(best) ? agent : best), null);
   return newest(mine.filter((agent) => agent.state !== "done")) ?? newest(mine);
 }
 

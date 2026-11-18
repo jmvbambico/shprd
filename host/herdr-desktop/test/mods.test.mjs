@@ -828,6 +828,9 @@ test("the Terminal view is the agent's own terminal, and a read-only stream only
   assert.equal(threadAgent({ live_agents: [worker, { ...reviewer, state: "done" }] }, "T1", now).id, "t1");
   assert.equal(threadAgent(state, "T9", now).id, "t3");
   assert.equal(threadAgent(state, "T7", now), null);
+  // An agent without a start time is ordered by when it entered its state.
+  const byState = { live_agents: [{ ...worker, started_ms: undefined, since_ms: now - 5 }, { ...reviewer, started_ms: undefined, since_ms: now - 9 }] };
+  assert.equal(threadAgent(byState, "T1", now).id, "t1");
   // The window holds a terminal it lists by address; a finished program is not one to type into.
   const held = [{ address: "t2", state: "running" }];
   assert.equal(terminalReachable(reviewer, held), true);
