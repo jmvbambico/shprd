@@ -523,7 +523,14 @@ export default class Chat extends View {
                     .text_color(colors.amber)
                     .child(card_.verb),
                 )
-                .when(card_.action !== null, (inner) => inner.child(this.button(t, "Run", () => this.act(card_), busy))),
+                .when(card_.action !== null, (inner) => inner.child(this.button(t, card_.actionLabel ?? "Run", () => this.act(card_), busy))),
+            ),
+          )
+          .when(card_.verb === null && card_.action !== null, (el) =>
+            el.child(
+              h_flex()
+                .gap(6)
+                .child(this.button(t, card_.actionLabel ?? "Run", () => this.act(card_), busy)),
             ),
           )
           .when(card_.options.length > 0, (el) =>

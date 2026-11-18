@@ -51,6 +51,8 @@ export const MENU = {
   pane: 236,
   /** The "+" menu (Shepherdr opens it 250 wide, `mods/tabs-tasks/main.js:208`). */
   new: 250,
+  /** The Tasks panel's Group by and More popups. */
+  tasks: 200,
   /** One row: `H.lg`, `lib/ui.js`'s menu row. */
   row: 32,
   /** A heading over a group of rows: `lib/ui.js`'s 28. */
@@ -333,6 +335,25 @@ export function restartable(tab, panes) {
   return (panes ?? []).some(
     (pane) => pane?.tab === tab?.id && Boolean(pane?.program?.agent),
   );
+}
+
+/**
+ * The Tasks panel's two popups: *Group by* (For you, Space, Status) and *More*
+ * (the status chips that do not fit in the filter row).
+ *
+ * A row's `pick` is what the menu mod hands back to the panel, through the
+ * shared `tasks.choice`, because the popup is its own window and cannot call the
+ * panel. `current` marks the row in force with a tick.
+ */
+export function tasksMenu({ menu = "group", items = [], current = null } = {}) {
+  const row = (key, label, count) => ({
+    id: `pick-${key}`,
+    label,
+    hint: current === key ? "✓" : count > 0 ? String(count) : null,
+    pick: { menu, key },
+  });
+  if (menu === "more") return items.map((item) => row(item.key, item.word, item.count));
+  return [{ heading: "Group by" }, ...items.map((item) => row(item.key, item.label, 0))];
 }
 
 /**

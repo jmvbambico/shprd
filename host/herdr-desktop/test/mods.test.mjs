@@ -708,6 +708,7 @@ test("the add-task form says what is missing before the press", () => {
     title: "Tabs",
     scope: ["a", "b"],
     acceptance: ["it works", "it stays"],
+    deps: [],
     why: "",
     ready: true,
   });
@@ -1124,4 +1125,78 @@ test("each space gets its own panel back when it is shown again", () => {
   assert.equal(look("b", "changes"), null);
   // No space at all changes nothing.
   assert.equal(rememberPanel(memory, "b", null, "tasks").restore, undefined);
+});
+
+// -- SHPR-27: deps in the form, group by, pins, the done tick ----------------
+
+import { GROUP_MODES, groupMode, splitIds, taskIds } from "../mods/lib/board.js";
+import { tasksMenu } from "../mods/lib/menu.js";
+import { status as statusWord } from "../mods/lib/tokens.js";
+
+test("the add-task form takes the ids a task waits for, and refuses one nobody has", () => {
+  const body = { title: "T2", scope: "a", acceptance: "ok", deps: "T1, T1  M2" };
+  assert.deepEqual(newTask(body).deps, ["T1", "M2"]);
+  assert.equal(newTask(body).ready, true, "without a board to check against, the service decides");
+  assert.equal(newTask({ ...body, deps: "" }).deps.length, 0);
+  const checked = newTask(body, ["T1"]);
+  assert.equal(checked.ready, false);
+  assert.match(checked.why, /No task named M2/);
+  assert.equal(newTask(body, ["T1", "M2"]).ready, true);
+  assert.deepEqual(splitIds(null), []);
+  assert.deepEqual(taskIds(STATE).slice(0, 1), [STATE.tasks[0].id]);
+});
+
+test("Group by Status gives every word its own heading, Needs you and Ready included", () => {
+  const view = listView(STATE, { groupBy: "status" });
+  assert.equal(view.groups.some((g) => g.key === "you"), false);
+  assert.equal(view.groups[0].key, "needs_you");
+  assert.equal(view.groups.find((g) => g.key === "ready").tasks.length, 1);
+  assert.match(view.doneLine.label, /done$/);
+});
+
+test("Group by Space gives each space its own heading, tasks in status order", () => {
+  const board = {
+    tasks: [
+      { id: "A1", title: "a", space: "s1", derived: { status: "working" } },
+      { id: "A2", title: "b", space: "s1", derived: { status: "needs_you" } },
+      { id: "B1", title: "c", space: "s2", derived: { status: "done" } },
+      { id: "C1", title: "d", derived: { status: "queued" } },
+    ],
+  };
+  const spaces = [{ id: "s1", name: "shop" }, { id: "s2", name: "docs" }];
+  const view = listView(board, { groupBy: "space", spaces });
+  assert.deepEqual(view.groups.map((g) => g.label), ["shop", "docs"]);
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["A2", "A1", "C1"], "a task with no space is in the first space");
+  assert.equal(view.groups[1].tasks.length, 1, "Done rows stay in a space group");
+});
+
+test("Pinned tasks come out of their group into a Pinned group on top, Done included", () => {
+  const view = listView(STATE, { pinned: new Set(["T3", "T1"]) });
+  assert.equal(view.groups[0].key, "pinned");
+  assert.equal(view.groups[0].label, "Pinned");
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id).sort(), ["T1", "T3"]);
+  const elsewhere = view.groups.slice(1).flatMap((g) => g.tasks.map((t) => t.id));
+  assert.equal(elsewhere.includes("T1"), false);
+  assert.equal(elsewhere.includes("T3"), false);
+  assert.equal(groupMode("nonsense"), "you");
+  assert.equal(groupMode("space"), "space");
+  assert.deepEqual(GROUP_MODES.map((m) => m.key), ["you", "space", "status"]);
+});
+
+test("Done is a grey tick, and only Ready is green", () => {
+  assert.deepEqual([statusWord("done").glyph, statusWord("done").tone], ["tick", "dim"]);
+  assert.deepEqual([statusWord("ready").glyph, statusWord("ready").tone], ["tick", "green"]);
+});
+
+test("the Tasks popups list their rows and mark the one in force", () => {
+  const group = tasksMenu({ menu: "group", items: GROUP_MODES, current: "space" });
+  assert.equal(group[0].heading, "Group by");
+  assert.deepEqual(group.slice(1).map((r) => r.pick), [
+    { menu: "group", key: "you" },
+    { menu: "group", key: "space" },
+    { menu: "group", key: "status" },
+  ]);
+  assert.equal(group[2].hint, "✓");
+  const more = tasksMenu({ menu: "more", items: [{ key: "done", word: "Done", count: 4 }], current: "all" });
+  assert.deepEqual(more.map((r) => [r.label, r.hint]), [["Done", "4"]]);
 });

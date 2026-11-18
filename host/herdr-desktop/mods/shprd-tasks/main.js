@@ -24,21 +24,25 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { nextCommand, run, setShared, shared, theme } from "herdr";
+import { nextCommand, openOverlay, run, setShared, shared, theme } from "herdr";
 
 import { attach, reason, singleFlight } from "./lib/client.js";
 import {
   counts,
   etaMinutes,
+  GROUP_MODES,
   filterChips,
+  groupMode,
   listView,
   look,
   newTask,
   rowActions,
   secondLine,
+  taskIds,
 } from "./lib/board.js";
+import { MENU, menuHeight, tasksMenu } from "./lib/menu.js";
 import { badge, card, cardHeader, countBadge, keycap, note, openAccept, openThread, segmented, statusGlyph } from "./lib/panel.js";
-import { graphRows, scopeToSpace } from "./lib/tree.js";
+import { graphRows, scopeToSpace, spacesOf } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -71,8 +75,13 @@ export default class Tasks extends View {
     this.filter = this.load("filter", "all");
     this.doneOpen = this.load("doneopen", false) === true;
     this.allDone = this.load("alldone", false) === true;
-    this.moreOpen = false;
     this.searching = false;
+    // Group by (For you / Space / Status) and the pinned tasks, remembered; the
+    // pins are also shared as `tasks.pinned`, Shepherdr's key.
+    this.groupBy = groupMode(this.load("groupby", "you"));
+    this.pinned = new Set(this.load("pinned", []));
+    setShared("tasks.pinned", [...this.pinned]);
+    this.chips = { primary: [], more: [] };
     // PROTOTYPE (SHPR-18): one panel, two views of the same board.
     this.view = this.load("view", "tasks") === "graph" ? "graph" : "tasks";
     // The search field: "Filter tasks", filters as you type. Esc clears it; F gets
@@ -92,7 +101,10 @@ export default class Tasks extends View {
     // New task from anywhere (`openAddTask` in `lib/panel.js`) is a shared request,
     // because this mod's commands do not exist while it is not the shown child.
     this.takeAdd(cx);
-    cx.timer.every(300, (cx) => this.takeAdd(cx));
+    cx.timer.every(300, (cx) => {
+      this.takeAdd(cx);
+      this.takeChoice();
+    });
     // The app's own way into a focusable mod: every command is delivered here by
     // name (`run("shprd-tasks.add")`, the palette, a key), and the loop is one
     // `nextCommand()` at a time so a slow read never queues a second press.
@@ -228,6 +240,52 @@ export default class Tasks extends View {
     }
   }
 
+  /**
+   * Takes what a popup picked (`tasks.choice`, written by the menu mod), once.
+   *
+   * The popups are the menu mod's own window, so the pick comes back as a shared
+   * request and not as a call.
+   */
+  takeChoice() {
+    const req = shared("tasks.choice");
+    if (!req || req.at === this.lastChoice) return;
+    this.lastChoice = req.at;
+    if (Date.now() - req.at > 10_000) return;
+    if (req.menu === "group") this.setGroup(req.key);
+    else if (req.menu === "more") this.pick(req.key);
+  }
+
+  /** Picks how the list is grouped, remembered. */
+  setGroup(key) {
+    this.groupBy = groupMode(key);
+    this.save("groupby", this.groupBy);
+    this.cx.notify();
+  }
+
+  /** Pins or unpins one task, remembered and shared. */
+  togglePin(id) {
+    if (this.pinned.has(id)) this.pinned.delete(id);
+    else this.pinned.add(id);
+    this.save("pinned", [...this.pinned]);
+    setShared("tasks.pinned", [...this.pinned]);
+    this.cx.notify();
+  }
+
+  /** Opens one of the panel's popups (Group by, More) over the header. */
+  popup(menu) {
+    const items = menu === "more" ? this.chips.more : GROUP_MODES;
+    const current = menu === "more" ? this.filter : this.groupBy;
+    const rows = tasksMenu({ menu, items, current });
+    if (rows.length === 0) return;
+    openOverlay({
+      mod: "shprd-menu",
+      kind: "popup",
+      width: MENU.tasks,
+      height: menuHeight(rows),
+      props: { tab: "tasks", tasks: { menu, items, current } },
+    });
+  }
+
   /** Folds or unfolds one heading, remembered. */
   fold(key) {
     if (this.shut.has(key)) this.shut.delete(key);
@@ -239,7 +297,6 @@ export default class Tasks extends View {
   /** Picks a filter chip (a status word, or `all`), remembered. */
   pick(key) {
     this.filter = key;
-    this.moreOpen = false;
     this.save("filter", key);
     this.cx.notify();
   }
@@ -297,7 +354,8 @@ export default class Tasks extends View {
     this.titleField = InputState.new({ placeholder: "What needs doing" });
     this.scopeField = InputState.new({ placeholder: "host/herdr-desktop, crates/shprd-server" });
     this.acceptanceField = InputState.new({ placeholder: "The board adds a task; a test says so" });
-    for (const field of [this.titleField, this.scopeField, this.acceptanceField]) {
+    this.depsField = InputState.new({ placeholder: "After (optional): task ids it waits for, e.g. T1, T2" });
+    for (const field of [this.titleField, this.scopeField, this.acceptanceField, this.depsField]) {
       field.on("change", (_e, cx) => cx.notify());
     }
     // A mod has no `setTimeout`: the form's first field takes the keyboard on the
@@ -312,19 +370,24 @@ export default class Tasks extends View {
     this.addError = null;
     this.sending = false;
     this.titleField = null;
-    this.scope_ = null;
-    this.acceptance_ = null;
+    this.scopeField = null;
+    this.acceptanceField = null;
+    this.depsField = null;
     this.cx.notify();
   }
 
   /** Sends the form to `POST /api/tasks`. */
   async submitAdd() {
     if (!this.client || this.sending) return;
-    const body = newTask({
-      title: this.titleField?.value(),
-      scope: this.scopeField?.value(),
-      acceptance: this.acceptanceField?.value(),
-    });
+    const body = newTask(
+      {
+        title: this.titleField?.value(),
+        scope: this.scopeField?.value(),
+        acceptance: this.acceptanceField?.value(),
+        deps: this.depsField?.value(),
+      },
+      taskIds(this.state),
+    );
     if (!body.ready) {
       this.addError = body.why;
       this.cx.notify();
@@ -337,6 +400,7 @@ export default class Tasks extends View {
         title: body.title,
         scope: body.scope,
         acceptance: body.acceptance,
+        ...(body.deps.length > 0 ? { deps: body.deps } : {}),
       });
       await this.refresh();
       this.endAdd();
@@ -357,6 +421,7 @@ export default class Tasks extends View {
     const tally = counts(board);
     const query = this.query.value() ?? "";
     const chips = filterChips(board);
+    this.chips = chips;
     // A chip kept for a word nobody is in any more would show an empty list: fall back.
     const known = [...chips.primary, ...chips.more].some((c) => c.key === this.filter);
     const filter = known ? this.filter : "all";
@@ -366,6 +431,9 @@ export default class Tasks extends View {
       shut: this.shut,
       doneOpen: this.doneOpen,
       allDone: this.allDone,
+      groupBy: this.groupBy,
+      pinned: this.pinned,
+      spaces: spacesOf(this.state).map((space) => ({ id: space.id, name: space.name })),
     });
     const empty = view.groups.length === 0 && view.doneLine === null;
     const head = h_flex()
@@ -390,6 +458,9 @@ export default class Tasks extends View {
         el.child(badge(t, countBadge(tally.ready), colors.green, colors.on)),
       )
       .child(div().flex_1())
+      .when(this.view === "tasks", (el) =>
+        el.child(this.icon("group", "⋯", t, () => this.popup("group"))),
+      )
       .when(!this.adding, (el) => el.child(this.icon("add", "+", t, () => this.beginAdd())));
 
     const body = v_flex()
@@ -542,8 +613,7 @@ export default class Tasks extends View {
    * Ready) and "More ⌄" for the rest, each with its count. A chip stays while
    * searching, so a search can be narrowed by status.
    *
-   * Shepherdr opens More as a popup mod; this panel opens the rest as a list under
-   * the row, since shprd ships no menu mod for it (assumption, brief U2).
+   * More opens as a popup (the menu mod's), as Shepherdr's does.
    */
   filterRow(t, chips, filter) {
     const pickedMore = chips.more.find((c) => c.key === filter) ?? null;
@@ -557,14 +627,20 @@ export default class Tasks extends View {
           .pt(6)
           .gap(2)
           .overflow_hidden()
-          .when(this.hasSpaces(), (el) =>
-            el.child(
-              this.chip(t, "space", "All spaces", 0, (shared("spaces.picked") ?? null) === null, () => {
-                setShared("spaces.picked", null);
-                this.cx.notify();
-              }),
-            ),
-          )
+          .when(this.hasSpaces(), (el) => {
+            // The picked space is a chip of its own (its name); "All spaces" puts
+            // every space back (Q1).
+            const picked = shared("spaces.picked") ?? null;
+            const named = picked === null ? null : spacesOf(this.state).find((space) => space.id === picked);
+            return el
+              .when(picked !== null, (e) => e.child(this.chip(t, "picked", named?.name ?? String(picked), 0, true, () => {})))
+              .child(
+                this.chip(t, "space", "All spaces", 0, picked === null, () => {
+                  setShared("spaces.picked", null);
+                  this.cx.notify();
+                }),
+              );
+          })
           .child(this.chip(t, "all", "All statuses", 0, filter === "all", () => this.pick("all")))
           .children(
             chips.primary.map((c) =>
@@ -578,45 +654,11 @@ export default class Tasks extends View {
                 "more",
                 pickedMore ? pickedMore.word : "More ⌄",
                 pickedMore ? pickedMore.count : 0,
-                pickedMore !== null || this.moreOpen,
-                () => {
-                  this.moreOpen = !this.moreOpen;
-                  this.cx.notify();
-                },
+                pickedMore !== null,
+                () => this.popup("more"),
               ),
             ),
           ),
-      )
-      .when(this.moreOpen, (el) =>
-        el.child(
-          v_flex()
-            .id("tasks-more")
-            .mx(12)
-            .mt(4)
-            .p(4)
-            .rounded(RADIUS.card)
-            .border_1()
-            .border_color(t.border)
-            .bg(t.popover)
-            .children(
-              chips.more.map((c) =>
-                h_flex()
-                  .id(`tasks-more-${c.key}`)
-                  .h(28)
-                  .px(8)
-                  .gap(6)
-                  .items_center()
-                  .rounded(RADIUS.control)
-                  .text_size(TEXT.label)
-                  .text_color(filter === c.key ? t.foreground : t.muted)
-                  .cursor_pointer()
-                  .hover((s) => s.bg(t.hover))
-                  .on_click(() => this.pick(c.key))
-                  .child(div().flex_1().child(c.word))
-                  .child(div().text_color(t.dim).child(String(c.count))),
-              ),
-            ),
-        ),
       );
   }
 
@@ -677,16 +719,21 @@ export default class Tasks extends View {
    * The add-task form: a title, the paths it may change, and what must be true
    * when it is done.
    *
-   * Three fields rather than Shepherdr's `herdr-task new` dialog, because three
-   * are what the rules require and what the service can name a task from. The
+   * Three required fields (and an optional "After" with the ids the task waits
+   * for) rather than Shepherdr's `herdr-task new` dialog, because three are what
+   * the rules require and what the service can name a task from. The
    * form says why it cannot be sent yet instead of failing after the press.
    */
   form(t, colors) {
-    const body = newTask({
-      title: this.titleField?.value(),
-      scope: this.scopeField?.value(),
-      acceptance: this.acceptanceField?.value(),
-    });
+    const body = newTask(
+      {
+        title: this.titleField?.value(),
+        scope: this.scopeField?.value(),
+        acceptance: this.acceptanceField?.value(),
+        deps: this.depsField?.value(),
+      },
+      taskIds(this.state),
+    );
     const field = (state, first) => {
       const el = Input.new(state)
         .h(28)
@@ -712,6 +759,7 @@ export default class Tasks extends View {
       .child(field(this.titleField, true))
       .child(field(this.scopeField, false))
       .child(field(this.acceptanceField, false))
+      .child(field(this.depsField, false))
       .child(
         h_flex()
           .h(H.xs)
@@ -915,9 +963,32 @@ export default class Tasks extends View {
           ),
       )
       .child(v_flex().flex_1().min_w(0).child(left))
+      .child(this.pin(t, task))
       .when(acts.length > 0, (el) =>
         el.child(this.act(t, task, acts[0])),
       );
+  }
+
+  /** The pin toggle at a row's end: ★ when pinned, ☆ when not; a press stops at it. */
+  pin(t, task) {
+    const on = this.pinned.has(task.id);
+    return h_flex()
+      .id(`task-${task.id}-pin`)
+      .h(H.xs)
+      .w(H.xs)
+      .flex_none()
+      .items_center()
+      .justify_center()
+      .rounded(RADIUS.control)
+      .text_size(TEXT.label)
+      .text_color(on ? tone(t).amber : t.dim)
+      .cursor_pointer()
+      .hover((style) => style.bg(t.hover).text_color(t.foreground))
+      .on_click((_event, cx) => {
+        cx.stop_propagation();
+        this.togglePin(task.id);
+      })
+      .child(on ? "★" : "☆");
   }
 
   /**

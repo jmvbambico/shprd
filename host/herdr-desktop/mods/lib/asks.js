@@ -124,15 +124,22 @@ function fromAsk(ask) {
     freeText: freeText(ask.kind, ask.options),
     verb: null,
     action: null,
+    actionLabel: "Run",
     default_action: null,
     at: Number.isFinite(ask.created_at_ms) ? ask.created_at_ms : null,
     expires: Number.isFinite(ask.expires_at_ms) ? ask.expires_at_ms : null,
   };
 }
 
+/** The body a spawn records when the brief never reached the agent. */
+export const BRIEF_LOST = "brief not delivered";
+
 /** One card from one escalation in the snapshot's `needs`. */
 function fromNeed(need) {
   const command = verbOf(need.body);
+  // A lost brief has a button: the service types it into the agent again, and the
+  // card goes once that worked.
+  const resend = need.body === BRIEF_LOST && need.task;
   return {
     id: `need:${need.seq}`,
     from: "escalation",
@@ -144,7 +151,8 @@ function fromNeed(need) {
     options: [],
     freeText: false,
     verb: command,
-    action: actionFor(command),
+    action: resend ? { kind: "task.resend_brief", task: need.task } : actionFor(command),
+    actionLabel: resend ? "Resend" : "Run",
     default_action: need.default_action ?? null,
     at: null,
     expires: null,
