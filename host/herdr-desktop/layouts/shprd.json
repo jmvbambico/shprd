@@ -221,13 +221,6 @@
                       "content": {
                         "mod": "shprd-asks"
                       }
-                    },
-                    {
-                      "id": "settings",
-                      "type": "block",
-                      "content": {
-                        "mod": "shprd-settings"
-                      }
                     }
                   ],
                   "active": "tasks"

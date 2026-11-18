@@ -40,6 +40,14 @@
 //! such terminal exists (measured, `crates/shprd/src/cmd/graph.rs`). The prune is
 //! the app's edit and not the person's, so an install whose manifest still owns
 //! the file restores it — only a change that is not a prune is refused.
+//!
+//! A prune is also recognised across a layout's own change ([`PREVIOUS_LAYOUTS`]):
+//! a build that adds or takes away a block ships a different layout, and a person
+//! who installed the build before may be holding that older layout with a
+//! terminal block pruned out of it. Refusing *that* would make every such upgrade
+//! a manual repair, so the layouts earlier builds shipped are carried here as the
+//! documents they were, and a file that is one of them with its terminal blocks
+//! pruned is the app's edit rather than the person's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -67,6 +75,28 @@ const MANIFEST_VERSION: u32 = 1;
 /// The mod folder prefix this verb owns. A folder named otherwise is Herdr's or
 /// the person's, and is never written to or removed.
 const MOD_PREFIX: &str = "shprd-";
+
+/// The layouts earlier builds shipped, as the documents they were.
+///
+/// One entry per version of a layout file this verb has installed that has since
+/// changed — every version, because a person upgrades from whichever one they last
+/// installed: a file Herdr pruned out of an *older* build's layout is still
+/// recognised as the app's edit when this build's layout is a different document,
+/// which is what makes such an upgrade one command rather than a manual repair. The
+/// rule for a later change is to add here the layout it replaces, and nothing else
+/// — a document here is a fact about what shprd shipped, never a guess about what a
+/// person meant.
+///
+/// The three M10 layouts are the ones that differ (the four M10 fix releases did
+/// not touch the file): M10.3's, M10.4's (`spaces` became `shprd-spaces`, and the
+/// tab bar and panel gained their buttons) and M10.7's, which is where M10 ended
+/// and whose side panel held settings as a tab. M11 fix S made settings a dialog
+/// over the window, so that block went away.
+const PREVIOUS_LAYOUTS: &[&str] = &[
+    include_str!("previous-layouts/shprd-m10.3.json"),
+    include_str!("previous-layouts/shprd-m10.4.json"),
+    include_str!("previous-layouts/shprd-m10.json"),
+];
 
 /// Runs `shprd install`, whichever mode the command line asked for.
 pub fn run(args: &InstallArgs, home: Option<&Path>, json: bool) -> Result<(), CliError> {
@@ -331,6 +361,32 @@ fn source_files(source: &Source) -> Result<Vec<SourceFile>, CliError> {
     }
     out.sort_by(|left, right| left.rel.cmp(&right.rel));
     Ok(out)
+}
+
+/// The layouts earlier builds shipped, for one path in the tree.
+///
+/// A path nothing has replaced has no history, which is every file but a layout.
+fn previous_layouts(rel: &str) -> &'static [&'static str] {
+    match rel {
+        "layouts/shprd.json" => PREVIOUS_LAYOUTS,
+        _ => &[],
+    }
+}
+
+/// Whether `on_disk` is what Herdr left of a layout an earlier build shipped.
+///
+/// It is the same comparison [`same_minus_terminals`] makes, against the document
+/// the build before wrote instead of this one: a file that is structurally the
+/// older layout with its terminal blocks pruned is the app's edit, and the shipped
+/// file replaces it. A person's own change to that older layout still differs from
+/// it, and is still refused.
+fn pruned_before(on_disk: &[u8], rel: &str) -> Result<bool, CliError> {
+    for previous in previous_layouts(rel) {
+        if same_minus_terminals(on_disk, previous.as_bytes())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `on_disk` and `shipped` differ only by the terminal blocks Herdr
@@ -599,7 +655,8 @@ fn plan(source: &Source, app_home: &Path, previous: &Manifest) -> Result<Install
                     Plan::Write
                 } else if ours.is_some()
                     && layout_file(&source.rel)
-                    && same_minus_terminals(&current, &source.bytes)?
+                    && (same_minus_terminals(&current, &source.bytes)?
+                        || pruned_before(&current, &source.rel)?)
                 {
                     // A file we wrote, then Herdr pruned a terminal block out of:
                     // the app's edit, so the block is put back.

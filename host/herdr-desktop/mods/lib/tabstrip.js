@@ -180,7 +180,6 @@ export const PANELS = [
   { id: "changes", word: "Changes" },
   { id: "tasks", word: "Tasks" },
   { id: "asks", word: "Asks" },
-  { id: "settings", word: "Settings" },
 ];
 
 /**
@@ -189,7 +188,9 @@ export const PANELS = [
  * The Tasks button carries shprd's two counts the way Shepherdr's did — what
  * needs the person, then what is ready for them — and Asks carries the number of
  * cards still open, because a button with no badge is a place a person forgets
- * to look.
+ * to look. Settings has no button of its own: it is a dialog over the window
+ * (`openSettings()` in `lib/panel.js`), opened from the sidebar's footer, exactly
+ * as Shepherdr's is, so nothing here names it.
  */
 export function panelButtons(state, shown = "tasks") {
   const tally = { needs: 0, ready: 0 };

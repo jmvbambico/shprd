@@ -19,7 +19,8 @@ mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the serv
 mods/shprd-accept/      the Accept card            (M10.5)
 mods/shprd-task-pr/     the task's pull request    (M10.5)
 mods/shprd-asks/        the needs-you cards        (M10.6)
-mods/shprd-settings/    roles, agents, prompts     (M10.6)
+mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
+                        a dialog since M11 fix S)
 mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
                         where dagr is          (M10.7)
 mods/shprd-coordinator/ the coordinator's chat     (M10.8)
@@ -111,6 +112,30 @@ throw, it just runs out of time and answers nothing, so a `null` board is treate
 as a failure. The panel drops its client, shows the failure, and the next look
 discovers the service again. Treating that `null` as "nothing new" is exactly
 what used to freeze the panels for ever (the M10 gate's bug 5).
+## Settings is a window, not a tab
+
+Settings opens over the window as Shepherdr's own do: `openSettings()` in
+`mods/lib/panel.js` asks Herdr for a **dialog** of `shprd-settings` with
+`frame: "none"`, 860 wide and 92% of the window's height, and the mod draws its
+own rounded panel inside it, capped at 900 px. A click beside the panel, `Esc`,
+and the window's own close button all close it, and opening it again while it is
+open keeps the one copy.
+
+It is opened from the sidebar footer's `shprd` row — the only way in, because it
+is the only way in in Shepherdr, which has no key and no palette entry for its
+settings either. Nothing in the side panel switches to it: `layouts/shprd.json`
+has no `settings` block, and the tab strip's and the tasks panel's Settings
+buttons are gone with it.
+
+Inside, the window is Shepherdr's anatomy: a page list on the left (Agents,
+Tasks, Prompts, and a `Remote` row held for M11.7), the page on the right, and
+over each page a repository can own the `Applies to` switch between **You** and
+**This repo**. Every row is a title, one line about it, the value and the layer
+that answered it at the right, the control beside them, and — for a note or a
+prompt — the box underneath. Writes happen where they are made (a pick, a switch,
+a step, leaving a box a moment after typing stops): there is no Save button, and
+the service, never the mod, is the one writer.
+
 ## The graph block
 
 The side panel's last row is the run's graph: a stack with a terminal block
@@ -244,11 +269,14 @@ real `shprd serve` (`test/fixtures/state.json`, `changes.json`) and a real
 the tab bar's pills, the toasts' news and the status bar's counts are all pure
 functions of those, so what a screenshot shows is what a test asserts.
 `test/settings.test.mjs` and `test/asks.test.mjs` do the same for the settings
-page and the needs-you cards, from the same service's `GET /api/settings`,
+window and the needs-you cards, from the same service's `GET /api/settings`,
 `GET /api/roster`, `GET /api/prompts`, `GET /api/state` and `GET /api/asks`
 (`test/fixtures/settings.json`, `roster.json`, `prompts.json`, `needs-state.json`,
-`needs-asks.json`): the rows, the layers, the picker choices, a refusal's words
-and the cards are all read off those answers.
+`needs-asks.json`): the pages, the level switch, the roles and workflow rows, the
+layers, the picker choices, a refusal's words, `Esc` closing what is open before
+it closes the window, and the cards are all read off those answers. It also reads
+`layouts/shprd.json` to prove the panel keeps no settings block for a tab to
+switch to.
 
 ## Starting the service
 

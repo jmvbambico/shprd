@@ -51,6 +51,8 @@ export function reset() {
   HC_CALLS.length = 0;
   SPACES = [];
   RUNS.length = 0;
+  OVERLAYS.length = 0;
+  CLOSED.length = 0;
   SHARED.clear();
   PROPS = {};
   LAYOUT = null;

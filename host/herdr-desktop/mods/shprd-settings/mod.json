@@ -1,4 +1,8 @@
 {
   "place": "none",
-  "title": "shprd settings"
+  "title": "Settings",
+  "overlay": {
+    "width": 820,
+    "height": 620
+  }
 }

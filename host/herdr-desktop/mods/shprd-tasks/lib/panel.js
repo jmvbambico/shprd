@@ -7,7 +7,8 @@
 //
 // - Source: <https://github.com/eliasstravik/shepherdr>
 // - Paths: `lib/ui.js` (`cardHeader`, `countBadge`, `heading`, `menuRow`,
-//   `button`), `lib/UI.md` (the house rules)
+//   `button`, `link`, `segmented`, `toggleSwitch`, `openSettings`), `lib/UI.md`
+//   (the house rules)
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
@@ -16,6 +17,7 @@
 
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
+import { openOverlay, setShared, shared } from "herdr";
 
 import { H, RADIUS, SPACE, TEXT } from "./tokens.js";
 
@@ -143,6 +145,178 @@ export function keycap(t, text) {
     .text_size(TEXT.id)
     .text_color(t.muted)
     .child(text);
+}
+
+/**
+ * A quiet text link: muted, foreground on hover, sized to its words.
+ *
+ * Shepherdr's `link()` (`lib/ui.js`): the words a row puts beside a value
+ * ("Reset", "Use an id typed") rather than a button, so a page of settings is
+ * not a page of boxes. `busy` dims it and takes its click, which is what a write
+ * in flight shows.
+ */
+export function link(t, id, word, onClick, busy = false) {
+  const base = div()
+    .id(id)
+    .flex_none()
+    .whitespace_nowrap()
+    .text_size(TEXT.label)
+    .text_color(busy ? t.dim : t.muted);
+  const live = busy
+    ? base
+    : base.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(() => onClick());
+  return live.child(word);
+}
+
+/**
+ * A segmented control: a `raised` track, the picked segment in the page's own
+ * background and `foreground`, the rest `muted`.
+ *
+ * Shepherdr's `segmented()` (`lib/ui.js`): accent-free (the accent is for the one
+ * primary and a live dot), every segment as wide as its words and never cut.
+ * `options` is `[[value, word], ...]`; `value` is what the setting holds now,
+ * so a value the choices do not name shows no segment picked rather than the
+ * wrong one.
+ */
+export function segmented(t, id, options, value, onPick, { disabled = false } = {}) {
+  return h_flex()
+    .h(H.sm)
+    .flex_none()
+    .p(2)
+    .gap(2)
+    .rounded(RADIUS.control)
+    .bg(t.raised)
+    .when(disabled, (el) => el.opacity(0.5))
+    .children(
+      options.map(([choice, word]) => {
+        const on = choice === value;
+        const base = h_flex()
+          .id(`${id}-${choice}`)
+          .h_full()
+          .px(8)
+          .flex_none()
+          .justify_center()
+          .items_center()
+          .rounded(RADIUS.control - 2)
+          .whitespace_nowrap()
+          .text_size(TEXT.label)
+          .text_color(on ? t.foreground : t.muted);
+        const styled = on ? base.bg(t.background).font_medium() : base;
+        const live =
+          on || disabled
+            ? styled
+            : styled.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(() => onPick(choice));
+        return live.child(String(word));
+      }),
+    );
+}
+
+/**
+ * A switch: 36 × 20, the accent track when on, a 16 px knob at the side it is on.
+ *
+ * Shepherdr's `toggleSwitch()` (`lib/ui.js`). A switch writes at once, so it is
+ * the whole of a setting that is a yes or a no.
+ */
+export function toggleSwitch(t, id, on, onToggle) {
+  return div()
+    .id(id)
+    .w(36)
+    .h(20)
+    .flex_none()
+    .rounded(10)
+    .p(2)
+    .flex()
+    .bg(on ? t.accent : t.hover)
+    .when(on, (el) => el.justify_end())
+    .cursor_pointer()
+    .on_click(() => onToggle(!on))
+    .child(div().w(16).h(16).rounded(8).bg(on ? t.background : t.muted));
+}
+
+/**
+ * The shared key the settings window records itself under, as `{ id, page, at }`.
+ *
+ * It is a *shared* value and not the app's `sessionStorage`, because the app
+ * gives every mod instance a storage of its own (measured: a key one copy writes
+ * is invisible to the next), and what this record has to answer is asked by a
+ * different copy every time — the footer's row, a menu, a key.
+ */
+export const SETTINGS_WINDOW = "shprd.settings.window";
+
+/**
+ * How long a window's word that it is open is believed, in ms.
+ *
+ * A live window renews it on its reads of the service (every ten seconds), so it
+ * is never doubted; a copy that went away without saying so — the app was
+ * killed, an overlay was closed by something that never told it — is forgotten
+ * within twenty seconds instead of shutting the settings out for the app's run.
+ */
+const ALIVE_MS = 20_000;
+
+/** How stale the record may be before a read of the service renews it. */
+const RENEW_MS = 8_000;
+
+/** The settings window that is on screen, as `{ id, page, at }`, or null. */
+export function settingsWindow() {
+  let kept = null;
+  try {
+    kept = shared(SETTINGS_WINDOW);
+    if (typeof kept === "string") kept = JSON.parse(kept);
+  } catch {
+    return null;
+  }
+  if (!kept || typeof kept !== "object" || typeof kept.id !== "string") return null;
+  if (!Number.isFinite(kept.at) || Date.now() - kept.at > ALIVE_MS) return null;
+  return kept;
+}
+
+/**
+ * Records that the settings window `id` is on screen, on `page`.
+ *
+ * The window calls this when it opens and again as it reads the service, and
+ * only when what is recorded has gone stale: the value is shared with every mod,
+ * so writing it is a repaint of the whole window.
+ */
+export function settingsWindowOpened(id, page = null) {
+  const kept = settingsWindow();
+  if (kept !== null && kept.id === id && Date.now() - kept.at < RENEW_MS) return;
+  setShared(SETTINGS_WINDOW, { id, page, at: Date.now() });
+}
+
+/** Forgets the settings window, when it closes. */
+export function settingsWindowClosed(id) {
+  const kept = settingsWindow();
+  if (kept !== null && id !== undefined && id !== null && kept.id !== id) return;
+  setShared(SETTINGS_WINDOW, null);
+}
+
+/**
+ * The one Settings window (`mods/shprd-settings`), opened over the window.
+ *
+ * Shepherdr's `openSettings()` (`lib/ui.js`): a dialog most of the window's
+ * height, at most 900 px, with `frame: "none"` so the mod draws its own rounded
+ * panel inside it. A click beside the panel and `Esc` close it.
+ *
+ * **One copy.** Herdr opens a second dialog of the same mod when it is asked
+ * twice, and two settings windows over one another is not what a click means, so
+ * a copy that is already up keeps its place and this asks for nothing (the mod
+ * puts it away again in its own `close(cx)`).
+ *
+ * `p` is `{ page }`, the page it opens on: `agents`, `tasks` or `prompts`.
+ */
+export function openSettings(p = {}) {
+  const open = settingsWindow();
+  if (open !== null) return open.id;
+  const id = openOverlay({
+    mod: "shprd-settings",
+    kind: "dialog",
+    frame: "none",
+    width: 860,
+    height: 0.92,
+    props: p,
+  });
+  settingsWindowOpened(id, p.page ?? null);
+  return id;
 }
 
 /**

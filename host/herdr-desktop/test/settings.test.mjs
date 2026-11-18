@@ -1,6 +1,7 @@
-// Unit tests for the settings page's view model: the roles table, the layers its
-// values came from, the choices the pickers offer, a refusal's words and the
-// template list.
+// Unit tests for the settings window's view model: the pages it lists, the level
+// its writes go to, the roles table, the workflow keys of the Tasks page, the
+// layers every value came from, the choices the pickers offer, a refusal's words
+// and the template list.
 //
 //   node --import ./test/boot.mjs --test test/          (node 22+)
 //   bun test --preload ./test/boot-bun.mjs test/        (bun)
@@ -18,18 +19,30 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import * as herdr from "herdr";
+
 import { ServiceError, reason } from "../mods/lib/client.js";
 import {
   BUILTIN,
+  CHANGED_HERE,
   LAYER,
+  LEVEL,
+  PAGES,
   PICKS,
+  RANGE,
+  SCOPES,
+  TITLE,
   UNSET_LAYER,
+  WORKFLOW,
   effortChoices,
   effortLevels,
+  forRepo,
   health,
   layerOf,
+  levelNote,
   modelChoices,
   outcomeOf,
+  pageOf,
   programChoices,
   programOf,
   promptLine,
@@ -38,9 +51,18 @@ import {
   roleIds,
   roleOf,
   roles,
+  scopeOf,
+  stepped,
   withRole,
   withoutRole,
+  workflowRows,
 } from "../mods/lib/settings.js";
+import {
+  openSettings,
+  settingsWindow,
+  settingsWindowClosed,
+} from "../mods/lib/panel.js";
+import Settings from "../mods/shprd-settings/main.js";
 
 /** One fixture, parsed. */
 function fixture(name) {
@@ -328,4 +350,612 @@ test("a role key is read back as its role and field", () => {
   assert.equal(roleOf("roles.order"), null);
   assert.equal(roleOf("tasks.merge"), null);
   assert.equal(roleOf(undefined), null);
+});
+
+// -- the window's frame ----------------------------------------------------
+//
+// Settings is a dialog over the window, not a tab of the side panel (Shepherdr's
+// own `openSettings()`): the page list, the level switch, and one row a setting
+// on the right. What a page draws is a pure function of the service's answers, so
+// these are the words and the choices a person reads.
+
+/** The layout file the window draws from, parsed. */
+const LAYOUT = JSON.parse(
+  readFileSync(new URL("../layouts/shprd.json", import.meta.url), "utf8"),
+);
+
+/** The layout node called `id`, or null. */
+function node(id, node_ = LAYOUT) {
+  if (node_?.id === id) return node_;
+  for (const child of node_?.children ?? []) {
+    const found = node(id, child);
+    if (found) return found;
+  }
+  return null;
+}
+
+test("the layout no longer carries a settings block for the panel to show", () => {
+  const panel = node("panel-body");
+  assert.ok(panel, "the side panel is still a stack");
+  assert.deepEqual(
+    panel.children.map((child) => child.id),
+    ["files", "changes", "tasks", "asks"],
+    "settings opens over the window, so it is not a stack the panel switches to",
+  );
+  assert.equal(node("settings"), null);
+  // And the stack's own selection still names a child that is there.
+  assert.ok(panel.children.some((child) => child.id === panel.active), panel.active);
+});
+
+test("the pages are the three shprd has, in the window's order, and Remote is a place held", () => {
+  assert.deepEqual(
+    PAGES.map((page) => page.title),
+    ["Agents", "Tasks", "Prompts", "Remote"],
+  );
+  assert.equal(TITLE, "Settings");
+  // Remote is drawn and inert: it is the page M11.7 gives it, and opening it
+  // must never land on a page that has nothing behind it.
+  const remote = PAGES.find((page) => page.id === "remote");
+  assert.equal(remote.soon, true);
+  assert.equal(pageOf("remote").id, "agents");
+  assert.equal(pageOf("nope").id, "agents");
+  assert.equal(pageOf("tasks").id, "tasks");
+});
+
+test("a page a repository can own takes the level switch; the others say they cannot", () => {
+  assert.equal(PAGES.find((page) => page.id === "agents").repo, true);
+  assert.equal(PAGES.find((page) => page.id === "tasks").repo, true);
+  assert.equal(Boolean(PAGES.find((page) => page.id === "prompts").repo), false);
+  assert.equal(LEVEL.label, "Applies to");
+  assert.match(LEVEL.one, /every repository/);
+});
+
+test("the level switch says what a write to each layer does", () => {
+  assert.deepEqual(
+    SCOPES.map((scope) => [scope.id, scope.word]),
+    [
+      ["you", "You"],
+      ["repo", "This repo"],
+    ],
+  );
+  assert.equal(forRepo("you"), false);
+  assert.equal(forRepo("repo"), true);
+  assert.equal(forRepo("nope"), false, "an unknown level writes the person's own file");
+  assert.match(levelNote("you"), /your own settings/i);
+  assert.match(levelNote("repo", "shop"), /only this repository \(shop\)/i);
+  assert.match(levelNote("repo", null), /inherited from you/);
+  assert.equal(scopeOf("repo").word, "This repo");
+  assert.equal(CHANGED_HERE, "Set for this repository");
+});
+
+test("the Tasks page shows the workflow keys the settings API exposes", () => {
+  const rows = workflowRows(SETTINGS);
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    WORKFLOW.map((row) => row.key),
+  );
+  // The three the task names, and the layers they came from, in the service's
+  // own words.
+  const merge = rows.find((row) => row.key === "tasks.merge");
+  assert.deepEqual(
+    { value: merge.value, layer: merge.layer, control: merge.control },
+    { value: "ask", layer: "built in", control: "segmented" },
+  );
+  assert.deepEqual(
+    merge.choices.map(([value, word]) => [value, word]),
+    [
+      ["ask", "Ask me"],
+      ["checks", "Checks pass"],
+      ["auto", "By itself"],
+    ],
+  );
+  const running = rows.find((row) => row.key === "tasks.max_running");
+  assert.equal(running.value, 1);
+  assert.equal(running.layer, "you");
+  assert.equal(running.control, "stepper");
+  const tick = rows.find((row) => row.key === "tasks.tick_secs");
+  assert.equal(tick.value, 15);
+  assert.equal(tick.display, "15 seconds");
+  assert.equal(rows.find((row) => row.key === "tasks.proof").control, "switch");
+  assert.equal(rows.find((row) => row.key === "tasks.proof").display, "On");
+  assert.equal(rows.find((row) => row.key === "tasks.start_notes").control, "box");
+  assert.equal(rows.find((row) => row.key === "review.cross_vendor").value, true);
+  // Every key the fixture answers is on the page, so no workflow setting is
+  // reachable only from the command line.
+  const shown = new Set(rows.map((row) => row.key));
+  for (const row of SETTINGS.values) {
+    if (row.key.startsWith("tasks.") || row.key === "review.cross_vendor") {
+      assert.ok(shown.has(row.key), `${row.key} is on the page`);
+    }
+  }
+});
+
+test("a workflow key the service did not answer is a row, not a hole", () => {
+  const rows = workflowRows({ values: [] });
+  assert.equal(rows.length, WORKFLOW.length);
+  for (const row of rows) {
+    assert.equal(row.value, null, row.key);
+    assert.equal(row.layer, UNSET_LAYER, row.key);
+  }
+  assert.equal(rows.find((row) => row.key === "tasks.merge").display, "not set");
+});
+
+test("a stepper never proposes a value the service would refuse", () => {
+  for (const [key, [min, max]] of Object.entries(RANGE)) {
+    assert.equal(stepped(min, -1, key), min, `${key} stays at its floor`);
+    assert.equal(stepped(max, 1, key), max, `${key} stays under its ceiling`);
+    assert.equal(stepped(min + 1, -1, key), min);
+  }
+  assert.deepEqual(RANGE["tasks.max_running"], [1, 10]);
+  assert.deepEqual(RANGE["tasks.tick_secs"], [1, 3600]);
+  // A row's own bounds are the ones its stepper uses.
+  const row = workflowRows(SETTINGS).find((entry) => entry.key === "tasks.tick_secs");
+  assert.equal(stepped(row.value, 1, row.key), 16);
+});
+
+// -- the window itself -----------------------------------------------------
+
+/**
+ * A context the window's `init` can be given: no timers of its own, and a focus
+ * handle that is only asked to take the keyboard.
+ */
+function context() {
+  const after = [];
+  return {
+    cx: {
+      // A clock that never runs out: `flush()`'s bound must not cut a test's
+      // writes short, and nothing here needs a read to time out.
+      sleep: () => new Promise(() => {}),
+      notify: () => {},
+      focus_handle: () => ({ focus: () => {} }),
+      spawn: () => ({ cancel: () => {} }),
+      timer: {
+        after: (ms, fn) => {
+          after.push({ ms, fn });
+          return { cancel: () => {} };
+        },
+        every: () => ({ cancel: () => {} }),
+      },
+    },
+    after,
+  };
+}
+
+/** A window opened the way the footer opens it: `props().overlay` names it. */
+function window_(props_ = {}) {
+  herdr.reset();
+  herdr.setProps({ overlay: "ov-1", ...props_ });
+  const run = context();
+  const view = new Settings();
+  view.init(props_, run.cx);
+  view.cx = run.cx;
+  return { view, ...run };
+}
+
+/**
+ * A window whose first look at the service is over, as it is in a test with no
+ * service running: `init` starts a read, and the read's own failure must not
+ * land in the middle of what a test is doing.
+ */
+async function settled(props_ = {}) {
+  const opened = window_(props_);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return opened;
+}
+
+/** A client that answers writes with what the service would, and records them. */
+function client(reply = null, error = null) {
+  const calls = [];
+  const promptWrites = [];
+  /** The words the service answers a prompt with, by id. */
+  const texts = new Map([["worker", "shipped words"]]);
+  return {
+    calls,
+    promptWrites,
+    texts,
+    putSetting: async (key, value, forRepo_) => {
+      calls.push({ key, value, forRepo: forRepo_ });
+      if (error) throw error;
+      return reply ?? { outcome: "stored", settings: SETTINGS };
+    },
+    prompts: async () => PROMPTS,
+    prompt: async (id) => ({
+      id,
+      text: texts.get(id) ?? "shipped words",
+      state: "default",
+      path: `/cfg/prompts/${id}.md`,
+    }),
+    resetPrompt: async (id) => ({ id, text: "shipped words", state: "default" }),
+    putPrompt: async (id, text) => {
+      promptWrites.push({ id, text });
+      if (error) throw error;
+      return { id, text, state: "edited", path: `/cfg/prompts/${id}.md` };
+    },
+    roster: async () => ROSTER,
+    call: async () => SETTINGS,
+  };
+}
+
+test("the window opens on the page it was asked for, and keeps to the ones it has", () => {
+  assert.equal(window_({ page: "tasks" }).view.page, "tasks");
+  assert.equal(window_({ page: "prompts" }).view.page, "prompts");
+  assert.equal(window_({ page: "nope" }).view.page, "agents");
+  assert.equal(window_({ page: "remote" }).view.page, "agents", "Remote is a place held, not a page");
+  assert.equal(window_().view.scope, "you", "the person's own settings come first");
+});
+
+test("Esc closes what is open inside the window before it closes the window", async () => {
+  const { view } = window_();
+  view.open = "worker.agent";
+  await view.escape();
+  assert.equal(view.open, null, "the first Esc closes the open picker");
+  assert.deepEqual(herdr.CLOSED, [], "and leaves the window up");
+
+  await view.escape();
+  assert.deepEqual(herdr.CLOSED, ["ov-1"], "the next Esc closes the overlay it was given");
+
+  // A prompt being edited is closed by Esc before the window is.
+  const editing = window_({ page: "prompts" }).view;
+  editing.prompt = { id: "worker", text: "mine", state: "edited", path: "/p/worker.md" };
+  await editing.escape();
+  assert.equal(editing.prompt, null);
+  assert.deepEqual(herdr.CLOSED, []);
+});
+
+test("a write goes to the layer the level switch names", async () => {
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  view.client = client();
+  await view.apply("tasks.max_running", 2);
+  view.scope = "repo";
+  await view.apply("tasks.max_running", 3);
+  assert.deepEqual(view.client.calls, [
+    { key: "tasks.max_running", value: 2, forRepo: false },
+    { key: "tasks.max_running", value: 3, forRepo: true },
+  ]);
+  // Reset is the same write with nothing: the repository's value goes, and what
+  // it inherits applies again.
+  await view.apply("tasks.max_running", null);
+  assert.deepEqual(view.client.calls[2], { key: "tasks.max_running", value: null, forRepo: true });
+  assert.equal(view.saved.text, "Saved");
+});
+
+test("a refused write keeps the service's sentence, and writes nothing twice", async () => {
+  const service = new ServiceError(
+    "`roles.reviewer.agent` would be refused: worker role is anthropic, reviewer role is anthropic",
+    { status: 409, code: "refused" },
+  );
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  view.client = client(null, service);
+  await view.apply("roles.reviewer.agent", "claude");
+  assert.equal(view.refusal.key, "roles.reviewer.agent");
+  assert.match(view.refusal.text, /both anthropic|worker role is anthropic/);
+  assert.equal(view.refusal.text, reason(service), "the words are passed through, not summarised");
+  assert.equal(view.writing, null, "the window is free to try another write");
+});
+
+test("opening the window again keeps the one copy that is up", async () => {
+  herdr.reset();
+  const first = openSettings({ page: "tasks" });
+  assert.equal(herdr.OVERLAYS.length, 1, "one window");
+  assert.equal(herdr.OVERLAYS[0].mod, "shprd-settings");
+  assert.equal(settingsWindow().id, first);
+
+  const again = openSettings();
+  assert.equal(herdr.OVERLAYS.length, 1, "a second ask opens no second window");
+  assert.equal(again, first);
+
+  // A window that is gone — closed by the app, not by our own button — is
+  // forgotten, and the next ask opens it again.
+  settingsWindowClosed(first);
+  assert.equal(settingsWindow(), null);
+  openSettings();
+  assert.equal(herdr.OVERLAYS.length, 2);
+});
+
+test("a window that stopped saying it is open is believed for twenty seconds only", () => {
+  herdr.reset();
+  const id = openSettings();
+  assert.equal(settingsWindow().id, id);
+  // The record the dialog renews on every read is stamped: one older than half a
+  // minute is a window that went away without saying so, and it does not shut the
+  // settings out of the rest of the app's run.
+  herdr.setShared("shprd.settings.window", { id: "overlay-9", at: Date.now() - 21_000 });
+  assert.equal(settingsWindow(), null);
+  openSettings();
+  assert.equal(herdr.OVERLAYS.length, 2);
+});
+
+test("closing the window gives its place back at once", async () => {
+  herdr.reset();
+  herdr.setProps({ overlay: "ov-7" });
+  const run = context();
+  const view = new Settings();
+  view.init({}, run.cx);
+  view.cx = run.cx;
+  assert.equal(settingsWindow().id, "ov-7");
+  await view.dismiss();
+  assert.equal(settingsWindow(), null, "a dismissal is not a window that is still up");
+  assert.deepEqual(herdr.CLOSED, ["ov-7"]);
+  // And the app's own last word does the same for a copy it takes away itself.
+  const second = window_({ overlay: "ov-8" }).view;
+  assert.equal(settingsWindow().id, "ov-8");
+  await second.close(run.cx);
+  assert.equal(settingsWindow(), null);
+});
+
+// -- leaving the prompt editor ---------------------------------------------
+
+/** A window on the Prompts page with the worker prompt open in its editor. */
+async function editing() {
+  const { view } = await settled({ page: "prompts" });
+  view.settings = SETTINGS;
+  view.client = client();
+  await view.openPrompt({ id: "worker" });
+  return view;
+}
+
+test("Esc on the Prompts page saves the words typed since the last pause", async () => {
+  // The defect the review found: Esc closed the editor and the pending autosave
+  // was cancelled by the close, so the last keystrokes vanished.
+  const view = await editing();
+  view.editor.set_value("the person's own words");
+  // What a keystroke does: the change handler, and the debounce armed behind it.
+  view.editor.handlers.get("change")?.({}, view.cx);
+
+  await view.escape();
+
+  assert.deepEqual(
+    view.client.promptWrites,
+    [{ id: "worker", text: "the person's own words" }],
+    "the words reached the service before the editor went",
+  );
+  assert.equal(view.prompt, null, "and the editor is closed afterwards");
+  // The debounce that was armed must not store them a second time.
+  assert.equal(view.client.promptWrites.length, 1);
+});
+
+test("Back saves the words and keeps the editor closed as the write lands", async () => {
+  // The other defect: a save that answered after the list was asked for put the
+  // editor back, so a first Back press looked like it had done nothing.
+  const view = await editing();
+  view.editor.set_value("mine, and worth keeping");
+  await view.leavePrompt();
+  assert.equal(view.prompt, null, "one press leaves the list showing");
+  assert.deepEqual(view.client.promptWrites, [{ id: "worker", text: "mine, and worth keeping" }]);
+});
+
+test("a prompt the service refused keeps the editor, and the next Esc closes the window", async () => {
+  // The words are still only in the box, so closing would lose them: the editor
+  // stays with the service's reason. The second Esc closes, so a broken service
+  // cannot trap a person in the editor.
+  const service = new ServiceError("`prompts.worker` could not be stored: the disk is full", {
+    status: 500,
+    code: "io",
+  });
+  const view = await editing();
+  view.client = client(null, service);
+  view.editor.set_value("words that will not store");
+  await view.escape();
+  assert.equal(view.prompt?.id, "worker", "the editor stays, with the words in it");
+  assert.match(view.refusal.text, /the disk is full/);
+  assert.deepEqual(herdr.CLOSED, [], "and the window is still up");
+
+  await view.escape();
+  assert.deepEqual(herdr.CLOSED, ["ov-1"], "the second Esc closes the window");
+});
+
+test("closing the window stores the last words before it goes", async () => {
+  const view = await editing();
+  view.editor.set_value("the last thing typed");
+  await view.dismiss();
+  assert.deepEqual(view.client.promptWrites, [{ id: "worker", text: "the last thing typed" }]);
+  assert.deepEqual(herdr.CLOSED, ["ov-1"]);
+});
+
+// -- the record a window keeps of itself -----------------------------------
+
+test("a window whose service is down still renews its place", async () => {
+  // The other defect the review found: the record was renewed only after a read
+  // answered, so with `shprd serve` down it went stale and the footer's next click
+  // stacked a second window.
+  const { view } = await settled();
+  assert.equal(settingsWindow().id, "ov-1");
+  herdr.setShared("shprd.settings.window", { id: "ov-1", at: Date.now() - 9_000 });
+  await view.refresh();
+  assert.ok(Date.now() - settingsWindow().at < 1_000, "the failed read renewed it anyway");
+
+  openSettings();
+  assert.equal(herdr.OVERLAYS.length, 0, "so a click keeps the one copy instead of stacking one");
+});
+
+// -- words typed while the window cannot write -----------------------------
+//
+// The save paths used to give up when the window had no client (a transient read
+// timeout drops it while the stale page stays drawn) or when another write was in
+// flight, and the next re-read then replaced the box's text with the service's
+// value: the person's words were gone, with no refusal and nothing to retry. Every
+// change is now queued and written when the service answers, and a re-read leaves a
+// changed box alone.
+
+/** A window on the Tasks page with the notes boxes drawn (as rendering makes them). */
+async function tasksWindow() {
+  const { view } = await settled({ page: "tasks" });
+  view.settings = SETTINGS;
+  view.client = client();
+  view.resetBoxes();
+  return view;
+}
+
+test("a note typed while the window has no client is written once one answers", async () => {
+  const view = await tasksWindow();
+  const box = view.boxes.get("tasks.start_notes");
+  assert.ok(box, "the notes box exists");
+  box.state.set_value("read the README first");
+
+  // The service went away under the page: `refresh()` drops the client on a
+  // timeout and leaves the page as it was.
+  view.client = null;
+  await view.writeBox("tasks.start_notes");
+  assert.deepEqual(view.client?.calls ?? [], [], "nothing could be written");
+  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.start_notes"], "the words wait their turn");
+
+  // A re-read that finds the service again writes them, instead of replacing them
+  // with the value the service still holds.
+  const live = client();
+  view.client = live;
+  view.resetBoxes();
+  assert.equal(view.boxes.get("tasks.start_notes").state.value(), "read the README first");
+  await view.pump();
+  assert.deepEqual(live.calls, [
+    { key: "tasks.start_notes", value: "read the README first", forRepo: false },
+  ]);
+  assert.equal(view.boxes.get("tasks.start_notes").saved, "read the README first");
+});
+
+test("a note typed while another write is in flight is queued, not dropped", async () => {
+  const view = await tasksWindow();
+  let release = null;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const live = client();
+  const putSetting = live.putSetting;
+  let started = null;
+  const began = new Promise((resolve) => {
+    started = resolve;
+  });
+  live.putSetting = async (key, value, forRepo_) => {
+    if (key !== "tasks.max_running") return putSetting(key, value, forRepo_);
+    // A write that takes its time: the first one has begun but not answered.
+    started();
+    await held;
+    return putSetting(key, value, forRepo_);
+  };
+  view.client = live;
+
+  const first = view.apply("tasks.max_running", 2);
+  await began;
+  view.boxes.get("tasks.start_notes").state.set_value("second, and not lost");
+  // Not awaited: a box writes through the queue, and the queue is busy until the
+  // write in front of it lands.
+  const second = view.writeBox("tasks.start_notes");
+  assert.equal(view.writing, "tasks.max_running", "the first write is the one in flight");
+  assert.equal(live.calls.length, 0, "and it has not answered yet");
+  assert.deepEqual(
+    view.queue.map((write) => write.key),
+    ["tasks.start_notes"],
+    "the note is queued, not dropped",
+  );
+
+  release();
+  await first;
+  await second;
+  assert.deepEqual(
+    live.calls.map((call) => `${call.key}=${call.value}`),
+    ["tasks.max_running=2", "tasks.start_notes=second, and not lost"],
+    "and goes out as soon as the first one lands",
+  );
+});
+
+test("a re-read never replaces words the service does not have yet", async () => {
+  const view = await tasksWindow();
+  const box = view.boxes.get("tasks.start_notes");
+  box.state.set_value("typed, not stored");
+  // The service's answer has moved on for other keys, but this box's words are
+  // still only in the box: the re-read must leave them, and queue them.
+  view.client = null;
+  view.resetBoxes();
+  assert.equal(box.state.value(), "typed, not stored", "the words are still there");
+  assert.deepEqual(view.queue.map((write) => write.key), ["tasks.start_notes"]);
+  // A box the service owns and the person has not touched does take its value.
+  const archive = view.boxes.get("tasks.archive_namespace");
+  assert.equal(archive.state.value(), "shprd/");
+});
+
+test("Esc on the Prompts page says so when the words could not be stored", async () => {
+  const view = await editing();
+  view.editor.set_value("words typed while the service was away");
+  // The client is dropped, as one timed-out read does.
+  view.client = null;
+  await view.escape();
+  assert.ok(view.prompt, "the editor stays with the words in it");
+  assert.match(view.refusal.text, /did not answer/);
+  assert.equal(view.editor.value(), "words typed while the service was away");
+  // And the next Esc closes the window rather than trapping the person.
+  await view.escape();
+  assert.deepEqual(herdr.CLOSED, ["ov-1"]);
+});
+
+test("a write whose service is back writes the queue before the page is redrawn", async () => {
+  const view = await tasksWindow();
+  view.boxes.get("tasks.finish_notes").state.set_value("say what you tested");
+  view.client = null;
+  await view.writeBox("tasks.finish_notes");
+  const live = client();
+  view.client = live;
+  // What a successful read does before it resets the boxes.
+  if (view.queue.length > 0) view.pump();
+  await view.pump();
+  assert.deepEqual(live.calls, [
+    { key: "tasks.finish_notes", value: "say what you tested", forRepo: false },
+  ]);
+});
+
+test("a second change is queued behind the first instead of being dropped", async () => {
+  const { view } = await settled();
+  view.settings = SETTINGS;
+  const live = client();
+  view.client = live;
+  await Promise.all([view.apply("tasks.max_running", 2), view.apply("tasks.max_running", 3)]);
+  assert.deepEqual(live.calls, [
+    { key: "tasks.max_running", value: 2, forRepo: false },
+    { key: "tasks.max_running", value: 3, forRepo: false },
+  ]);
+});
+
+test("a restarted service does not throw the editor's words away", async () => {
+  // `forget()` runs when `attach` sees a new id in service.json. A prompt is a file
+  // in the config directory, so the words typed over it are not that run's to drop:
+  // the editor stays, and the next read — from the service that is back — stores
+  // them.
+  const view = await editing();
+  view.editor.set_value("words from the run that went away");
+  view.forget();
+  assert.equal(view.prompt?.id, "worker", "the editor stays with its words");
+  // What a read that answers does with them (a unit test has no service for
+  // `refresh()` to find, so it drives the same branch the read runs).
+  const live = client();
+  view.client = live;
+  view.forget();
+  await view.retryWrites();
+  assert.deepEqual(live.promptWrites, [
+    { id: "worker", text: "words from the run that went away" },
+  ]);
+});
+
+test("a restarted service closes an editor with nothing typed in it", async () => {
+  const view = await editing();
+  view.forget();
+  assert.equal(view.prompt, null, "nothing typed, nothing kept");
+});
+
+test("a refusal is the person's to read, not retried behind their back", async () => {
+  const service = new ServiceError("`prompts.worker` could not be stored: read-only file", {
+    status: 500,
+    code: "io",
+  });
+  const view = await editing();
+  view.client = client(null, service);
+  view.editor.set_value("words the service refused");
+  await view.escape();
+  assert.ok(view.prompt, "the editor keeps them");
+  assert.ok(view.client.promptWrites.length > 0, "leaving tried to store them");
+  // The next read that answers must leave a refused prompt alone: only a transport
+  // failure is the window's to retry behind the person.
+  const live = client();
+  view.client = live;
+  await view.retryWrites();
+  assert.equal(live.promptWrites.length, 0, "a refusal is not re-sent by a read");
 });
