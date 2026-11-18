@@ -113,6 +113,8 @@ function PromptEditor({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flight = useRef<Promise<boolean> | null>(null);
   const [failed, setFailed] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const resettingRef = useRef(false);
   const alive = useRef(true);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -135,7 +137,8 @@ function PromptEditor({
     if (flight.current !== null) {
       return flight.current;
     }
-    if (latest.current === stored.current) {
+    // A reset is in progress: the words it brings back win over anything typed.
+    if (resettingRef.current || latest.current === stored.current) {
       return Promise.resolve(true);
     }
     if (alive.current) {
@@ -191,20 +194,32 @@ function PromptEditor({
   );
 
   async function reset() {
+    state.clearNotices();
+    // Reset is serialized with the autosave: nothing new starts while it runs, and
+    // a save already in flight finishes first, so it cannot land after the reset
+    // and write the old words back as an edit.
+    resettingRef.current = true;
+    setResetting(true);
     if (timer.current !== null) {
       clearTimeout(timer.current);
       timer.current = null;
     }
-    state.clearNotices();
     try {
+      if (flight.current !== null) {
+        await flight.current;
+      }
       const reply = await client.resetPrompt(prompt.id);
       stored.current = reply.text;
       latest.current = reply.text;
       setText(reply.text);
       setShown(reply);
+      setFailed(false);
       state.say("Reset: the shipped words are back");
     } catch (error) {
       state.refuse(`prompts.${prompt.id}`, error);
+    } finally {
+      resettingRef.current = false;
+      setResetting(false);
     }
   }
 
@@ -245,6 +260,7 @@ function PromptEditor({
         className="input prompt-editor"
         aria-label={`Prompt ${prompt.id}`}
         rows={16}
+        disabled={resetting}
         value={text}
         onChange={(event) => {
           setText(event.target.value);
@@ -257,7 +273,7 @@ function PromptEditor({
         onBlur={() => void save()}
       />
       <div>
-        <button type="button" className="link" disabled={writing} onClick={() => void reset()}>
+        <button type="button" className="link" disabled={writing || resetting} onClick={() => void reset()}>
           Reset to the shipped words
         </button>
       </div>

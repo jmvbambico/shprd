@@ -270,6 +270,42 @@ describe("SettingsDialog: Prompts", () => {
     expect(calls.some((c) => c.method === "DELETE")).toBe(true);
   });
 
+  it("a reset waits for a save in flight, so the old words never come back", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    open(
+      reads({
+        "GET /api/prompts/worker": json(200, prompt("worker", "a")),
+        "PUT /api/prompts/worker": async () => {
+          order.push("put");
+          await gate;
+          return json(200, prompt("worker", "typed", "edited"));
+        },
+        "DELETE /api/prompts/worker": () => {
+          order.push("delete");
+          return json(200, prompt("worker", "shipped"));
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
+    fireEvent.click(await screen.findByRole("button", { name: /worker/ }));
+    const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "typed" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(order).toEqual(["put"]));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to the shipped words" }));
+    // The reset button is disabled while the save is in flight, so nothing queues.
+    release?.();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reset to the shipped words" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to the shipped words" }));
+    await waitFor(() => expect(order).toEqual(["put", "delete"]));
+    await waitFor(() => expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("shipped"));
+    expect(order).toEqual(["put", "delete"]);
+  });
+
   it("keeps the words and shows the refusal when a save is refused", async () => {
     open(
       reads({

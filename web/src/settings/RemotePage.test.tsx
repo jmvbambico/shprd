@@ -132,6 +132,16 @@ describe("RemotePage: sessions and logout", () => {
     expect(screen.getByText("desktop · Firefox")).toBeDefined();
   });
 
+  it("signs the app out at once when this device's own session is revoked", async () => {
+    const { onSignedOut } = open({
+      "GET /api/tunnels": json(200, tunnelOff()),
+      "GET /api/sessions": json(200, SESSIONS),
+      "DELETE /api/sessions/bbbbbbbbbbbb": json(200, { ok: true, revoked: true }),
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /Revoke desktop · Firefox/ }));
+    await waitFor(() => expect(onSignedOut).toHaveBeenCalled());
+  });
+
   it("shows the refusal when the password has to be entered again", async () => {
     open({
       "GET /api/tunnels": json(200, tunnelOff()),

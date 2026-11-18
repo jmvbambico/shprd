@@ -97,7 +97,7 @@ export function RemotePage({
     <div className="spage" data-page="remote">
       <h2 className="spage-title">Remote</h2>
       <TunnelSection client={client} />
-      <SessionsSection client={client} />
+      <SessionsSection client={client} onSignedOut={onSignedOut} />
       <LogoutSection client={client} onSignedOut={onSignedOut} />
     </div>
   );
@@ -258,16 +258,28 @@ function TunnelBody({
   );
 }
 
-function SessionsSection({ client }: { client: ApiClient }) {
+function SessionsSection({
+  client,
+  onSignedOut,
+}: {
+  client: ApiClient;
+  onSignedOut: () => void;
+}) {
   const [load, , reload] = useLoad<SessionListDto>(() => client.sessions());
   const [refusal, setRefusal] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
 
-  async function revoke(id: string) {
+  async function revoke(id: string, here: boolean) {
     setRevoking(id);
     setRefusal(null);
     try {
       await client.revokeSession(id);
+      if (here) {
+        // This device's own session is gone: the app shows the login screen now,
+        // not after the next request happens to fail.
+        onSignedOut();
+        return;
+      }
       reload();
     } catch (error) {
       setRefusal(reason(error));
@@ -310,7 +322,7 @@ function SessionsSection({ client }: { client: ApiClient }) {
                   className="link"
                   aria-label={`Revoke ${session.label} (${session.id})`}
                   disabled={revoking !== null}
-                  onClick={() => void revoke(session.id)}
+                  onClick={() => void revoke(session.id, here)}
                 >
                   {revoking === session.id ? "Revoking…" : here ? "Sign out" : "Revoke"}
                 </button>
