@@ -47,9 +47,9 @@ pub fn sync_verb(ctx: &Ctx, home: Option<&Path>) -> Result<(), CliError> {
             actor: ctx.actor.clone(),
         }));
     }
-    let config = crate::cmd::land::load_config(ctx, home)?;
+    crate::cmd::land::load_config(ctx, home)?;
     let home = resolve_home(home)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let repo_name = crate::cmd::land::repo_name(ctx)?;
     // Held for the fetch, the merge and any abort, so a cherry-pick or a gate
     // never runs against a half-merged tree. The integration head is read only

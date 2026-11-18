@@ -1547,8 +1547,10 @@ pub fn builtin() -> Layer {
     layer
 }
 
-/// The branch pattern new tasks are named after, when nobody set one.
-pub const DEFAULT_BRANCH: &str = "task/{n}-{slug}";
+/// The branch pattern new tasks are named after, when nobody set one: what
+/// follows the archive namespace. `{run}`, `{task}`, `{n}` and `{slug}` stand
+/// for the run id, the task id, its number and its lowercased id.
+pub const DEFAULT_BRANCH: &str = "{run}/{task}";
 
 /// How long a change must hold before a space's coordinator is told about it,
 /// in seconds: Shepherdr's settle window (`news.py`'s `NEWS_SETTLE_MS`), used

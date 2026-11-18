@@ -52,7 +52,7 @@ pub fn gate_verb(ctx: &Ctx, args: &FullGateArgs, home: Option<&Path>) -> Result<
         return Err(CliError::Invalid(anyhow!(NO_GATE)));
     }
     let home = resolve_home(home)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let repo_name = ctx
         .root
         .file_name()

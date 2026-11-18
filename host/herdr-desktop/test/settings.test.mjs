@@ -1003,18 +1003,25 @@ test("archive is a row of presets, and a value set by hand is still a segment", 
   assert.equal(odd.display, "12 days");
 });
 
-test("notes nothing reads yet are hidden, not drawn dead", () => {
-  assert.deepEqual(HIDDEN, ["tasks.start_notes", "tasks.finish_notes"]);
-  const shown = workflowRows(SETTINGS).map((row) => row.key);
-  for (const key of HIDDEN) assert.equal(shown.includes(key), false, key);
+test("the two notes are rows now that a brief carries them", () => {
+  assert.deepEqual(HIDDEN, []);
+  const rows = workflowRows(SETTINGS);
+  for (const key of ["tasks.start_notes", "tasks.finish_notes"]) {
+    const row = rows.find((entry) => entry.key === key);
+    assert.ok(row, `${key} is drawn`);
+    assert.equal(row.control, "box");
+    assert.equal(row.kind, "notes");
+  }
 });
 
 test("a branch pattern git would refuse is refused with a sentence", () => {
   assert.equal(branchProblem("task/{n}-{slug}"), null);
   assert.equal(branchProblem("feature/{slug}"), null);
   assert.equal(branchProblem(""), null, "empty means the default");
-  assert.match(branchProblem("task/fixed"), /{n} or {slug}/);
-  assert.match(branchProblem("task/{id}"), /only {n} and {slug}/);
+  assert.equal(branchProblem("{run}/{task}"), null);
+  assert.match(branchProblem("task/fixed"), /{task}, {n} or {slug}/);
+  assert.match(branchProblem("{run}/x"), /{task}, {n} or {slug}/);
+  assert.match(branchProblem("task/{id}"), /only {run}, {task}, {n} and {slug}/);
   assert.match(branchProblem("task/{n} x"), /spaces/);
   assert.match(branchProblem("task//{n}"), /\//);
   assert.match(branchProblem("task/{n}.lock"), /\.lock/);
@@ -1031,7 +1038,7 @@ test("a branch box never writes a name git would refuse", async () => {
   await view.writeBox("tasks.branch");
   assert.deepEqual(view.client.calls, [], "nothing was sent");
   assert.equal(view.refusal.key, "tasks.branch");
-  assert.match(view.refusal.text, /{n} or {slug}/);
+  assert.match(view.refusal.text, /{task}, {n} or {slug}/);
   box.state.set_value("work/{n}-{slug}");
   await view.writeBox("tasks.branch");
   assert.deepEqual(view.client.calls, [{ key: "tasks.branch", value: "work/{n}-{slug}", forRepo: false }]);

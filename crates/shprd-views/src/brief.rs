@@ -348,7 +348,30 @@ pub fn task_brief(input: &BriefInput<'_>) -> String {
         out.push_str(prompt.trim_end());
         out.push_str("\n\n");
     }
+    // The person's words for how a task starts come before the task itself, so
+    // the agent reads them first; the words for how it ends come with the rules
+    // it reports under.
+    let notes = input.settings.map(|resolved| resolved.tasks());
+    if let Some(start) = notes
+        .as_ref()
+        .map(|tasks| tasks.start_notes.trim())
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str("## Before you start\n\n");
+        out.push_str(start);
+        out.push_str("\n\n");
+    }
     out.push_str(&task_sections(input));
+    if let Some(finish) = notes
+        .as_ref()
+        .map(|tasks| tasks.finish_notes.trim())
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str("\n## Before you report\n\n");
+        out.push_str("Do this before you run `shprd agent report`:\n\n");
+        out.push_str(finish);
+        out.push('\n');
+    }
     if let Some(resolved) = input.settings {
         out.push('\n');
         out.push_str(&settings_block(resolved, input.role));
@@ -601,7 +624,7 @@ pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> Strin
         ("Proof", TaskKey::Proof, "none"),
         ("Worktrees", TaskKey::Worktrees, "on"),
         ("Base branch", TaskKey::Base, "the repo's own branch"),
-        ("Branch pattern", TaskKey::Branch, "task/{n}-{slug}"),
+        ("Branch pattern", TaskKey::Branch, "{run}/{task}"),
         ("Tasks at once", TaskKey::MaxRunning, "10"),
         ("Start notes", TaskKey::StartNotes, "none"),
         ("Finish notes", TaskKey::FinishNotes, "none"),
@@ -953,7 +976,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Proof: on (built in)
 - Worktrees: on (built in)
 - Base branch: main (the repo's file)
-- Branch pattern: task/{n}-{slug} (built in)
+- Branch pattern: {run}/{task} (built in)
 - Tasks at once: 4 (built in)
 - Start notes: none (built in)
 - Finish notes: none (built in)
@@ -1050,7 +1073,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
 - Proof: on (built in)
 - Worktrees: on (built in)
 - Base branch: main (the repo's file)
-- Branch pattern: task/{n}-{slug} (built in)
+- Branch pattern: {run}/{task} (built in)
 - Tasks at once: 4 (built in)
 - Start notes: none (built in)
 - Finish notes: none (built in)

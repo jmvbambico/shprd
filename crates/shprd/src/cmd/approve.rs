@@ -105,7 +105,7 @@ fn approve_task(ctx: &Ctx, args: &ApproveArgs, task_id: &str) -> Result<(), CliE
 
 /// Approves the run's pull request at the integration head a human is shown.
 fn approve_run(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Result<(), CliError> {
-    let config = land::load_config(ctx, home)?;
+    land::load_config(ctx, home)?;
     let state = ctx.state()?;
     let run = state.run.as_ref().ok_or_else(|| {
         CliError::Invalid(anyhow!(
@@ -122,7 +122,7 @@ fn approve_run(ctx: &Ctx, args: &ApproveArgs, home: Option<&Path>) -> Result<(),
     let run_id = run.run_id.clone();
     let base_branch = run.base_branch.clone();
     let home = resolve_home(home)?;
-    let layout = resolve_layout(Some(&home), &config.janitor.namespace)?;
+    let layout = resolve_layout(Some(&home), &ctx.root)?;
     let repo_name = land::repo_name(ctx)?;
     // Held from the head read to the recorded approval: the head is what the
     // approval is about, so it must not move between the two.
