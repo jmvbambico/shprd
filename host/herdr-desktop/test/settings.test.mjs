@@ -379,7 +379,7 @@ test("the layout no longer carries a settings block for the panel to show", () =
   assert.ok(panel, "the side panel is still a stack");
   assert.deepEqual(
     panel.children.map((child) => child.id),
-    ["files", "changes", "tasks", "graph"],
+    ["files", "changes", "tasks"],
     "settings opens over the window, so it is not a stack the panel switches to",
   );
   assert.equal(node("settings"), null);

@@ -226,7 +226,6 @@ export const PANELS = [
   { id: "files", word: "Files" },
   { id: "changes", word: "Changes" },
   { id: "tasks", word: "Tasks" },
-  { id: "graph", word: "Graph" },
 ];
 
 /**

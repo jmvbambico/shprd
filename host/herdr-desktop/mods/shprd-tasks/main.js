@@ -37,7 +37,8 @@ import {
   rowActions,
   secondLine,
 } from "./lib/board.js";
-import { badge, card, cardHeader, countBadge, keycap, note, openAccept, statusGlyph } from "./lib/panel.js";
+import { badge, card, cardHeader, countBadge, keycap, note, openAccept, segmented, statusGlyph } from "./lib/panel.js";
+import { graphRows } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -51,6 +52,10 @@ const FLOOR_MS = 4000;
  * dialog (`openAccept`).
  */
 const CHAT = "tasks-thread-chat";
+/** The thread's Terminal child, for a thread opened with `view: "terminal"`. */
+const TERM = "tasks-thread-term";
+/** The font shprd's ids and the graph's guide lines are set in. */
+const MONO = "JetBrains Mono";
 
 export default class Tasks extends View {
   init(_props, cx) {
@@ -77,6 +82,8 @@ export default class Tasks extends View {
     this.allDone = this.load("alldone", false) === true;
     this.moreOpen = false;
     this.searching = false;
+    // PROTOTYPE (SHPR-18): one panel, two views of the same board.
+    this.view = this.load("view", "tasks") === "graph" ? "graph" : "tasks";
     // The search field: "Filter tasks", filters as you type. Esc clears it; F gets
     // to it while the list holds the keyboard (Shepherdr `mods/tasks/main.js`).
     this.query = InputState.new({ placeholder: "Filter tasks" });
@@ -99,6 +106,8 @@ export default class Tasks extends View {
         const command = await nextCommand();
         if (command === "add") this.beginAdd(cx);
         else if (command === "open") this.openShared();
+        else if (command === "graph") this.show("graph");
+        else if (command === "tasks") this.show("tasks");
         else if (command === "focus") {
           this.handle.focus();
           cx.notify();
@@ -171,12 +180,12 @@ export default class Tasks extends View {
    * the card, the head and the PR view all read the same one rather than each
    * keeping a copy that a reload can lose.
    */
-  open(task) {
-    setShared("tasks.thread", { task: task?.id ?? null, title: task?.title ?? "", at: Date.now() });
+  open(task, view = "chat") {
+    setShared("tasks.thread", { task: task?.id ?? null, title: task?.title ?? "", view, at: Date.now() });
     // The chat reads the task by its id, so nothing else moves: the window stays
     // where the person was. The head's Terminal selects the task's space itself.
     run("layout.select", { stack: "tasks", child: "tasks-thread" });
-    run("layout.select", { stack: "tasks-thread-body", child: CHAT });
+    run("layout.select", { stack: "tasks-thread-body", child: view === "terminal" ? TERM : CHAT });
     run("layout.show", { id: "panel" });
     this.cx.notify();
   }
@@ -192,7 +201,15 @@ export default class Tasks extends View {
   openShared() {
     const thread = shared("tasks.thread");
     if (!thread?.task) return;
-    this.open({ id: thread.task, title: thread.title ?? "" });
+    this.open({ id: thread.task, title: thread.title ?? "" }, thread.view ?? "chat");
+  }
+
+  /** Switches the panel between its Tasks list and its Graph, remembered. */
+  show(view) {
+    this.view = view === "graph" ? "graph" : "tasks";
+    this.save("view", this.view);
+    run("layout.select", { stack: "tasks", child: "tasks-list" });
+    this.cx.notify();
   }
 
   /** Reads one remembered value, or `fallback` when storage is missing or empty. */
@@ -338,7 +355,18 @@ export default class Tasks extends View {
     const head = h_flex()
       .gap(6)
       .items_center()
-      .child(div().text_size(TEXT.body).font_semibold().text_color(t.foreground).child("Tasks"))
+      .child(
+        segmented(
+          t,
+          "tasks-view",
+          [
+            ["tasks", "Tasks"],
+            ["graph", "Graph"],
+          ],
+          this.view,
+          (choice) => this.show(choice),
+        ),
+      )
       .when(tally.needs > 0, (el) =>
         el.child(badge(t, countBadge(tally.needs), colors.red, colors.on)),
       )
@@ -368,6 +396,7 @@ export default class Tasks extends View {
                 ]),
       ]);
 
+    if (this.view === "graph") return this.graph(t, colors, head);
     return card(t, [cardHeader(t, head), this.search(t, query), this.filterRow(t, chips, filter), body])
       .id("tasks-card")
       .track_focus(this.handle)
@@ -377,6 +406,74 @@ export default class Tasks extends View {
         else return;
         cx.notify();
       });
+  }
+
+  /**
+   * The Graph view: the same board as a layered tree, grouped by phase, each task
+   * with a right-aligned word (`done`, `working`, `waits SHPR-23`). Drawn here from
+   * `graphRows`; nothing is asked of a graph program.
+   */
+  graph(t, colors, head) {
+    const rows = this.state ? graphRows(this.state, shared("spaces.picked") ?? null) : [];
+    const body =
+      this.failure !== null
+        ? [note(t, this.failure)]
+        : rows.length === 0
+          ? [note(t, "No tasks yet.")]
+          : rows.map((row) => (row.kind === "phase" ? this.phase(t, row) : this.node(t, colors, row)));
+    return card(t, [
+      cardHeader(t, head),
+      v_flex().flex_1().min_h(0).px(8).py(6).gap(1).overflow_y_scrollbar().mode("always").children(body),
+    ]).id("tasks-card");
+  }
+
+  /** A phase's heading: its name in capitals and how many of its tasks are done. */
+  phase(t, row) {
+    return h_flex()
+      .h(30)
+      .flex_none()
+      .mt(6)
+      .px(8)
+      .gap(8)
+      .items_center()
+      .text_size(TEXT.label)
+      .font_semibold()
+      .text_color(t.foreground)
+      .child(div().font_family(MONO).text_color(t.dim).child("▾"))
+      .child(row.name)
+      .child(div().flex_1())
+      .child(div().text_size(TEXT.id).font_normal().text_color(t.dim).child(`${row.done}/${row.total} done`));
+  }
+
+  /** One task in the graph: guide lines, glyph, id, title, and its status word at the right. */
+  node(t, colors, row) {
+    const word =
+      row.status === "working"
+        ? colors.amber
+        : row.status === "needs_you"
+          ? colors.red
+          : row.status === "ready"
+            ? colors.green
+            : row.waits || row.status === "done"
+              ? t.dim
+              : t.muted;
+    return h_flex()
+      .id(`graph-${row.id}`)
+      .h(26)
+      .flex_none()
+      .px(8)
+      .gap(6)
+      .items_center()
+      .rounded(RADIUS.control)
+      .cursor_pointer()
+      .hover((style) => style.bg(t.hover))
+      .on_click(() => this.open({ id: row.id, title: row.title }))
+      .text_size(TEXT.label)
+      .child(div().flex_none().font_family(MONO).text_color(t.border).whitespace_nowrap().child(`  ${row.guide}`))
+      .child(statusGlyph(t, row, colors, 12))
+      .child(div().flex_none().font_family(MONO).text_color(t.foreground).child(ref(row.id)))
+      .child(div().flex_1().min_w(0).truncate().text_color(row.waits ? t.dim : t.muted).child(row.title))
+      .child(div().flex_none().text_color(word).font_medium().child(row.word));
   }
 
   /**
