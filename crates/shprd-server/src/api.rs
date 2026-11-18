@@ -592,12 +592,14 @@ impl App {
 
     /// A manager over this service's gate, with the factory it holds now.
     fn new_tunnels(&self) -> shprd_remote::tunnel::TunnelManager {
-        shprd_remote::tunnel::TunnelManager::new(
+        let manager = shprd_remote::tunnel::TunnelManager::new(
             &self.state.state_dir,
             &self.state.remote,
             Arc::new(SystemClock),
             self.state.tunnel_factory.clone(),
-        )
+        );
+        manager.reset();
+        manager
     }
 
     /// The tunnel manager, so the service can stop the tunnel on its way out.

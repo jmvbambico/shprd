@@ -480,3 +480,22 @@ async fn a_login_through_the_tunnel_gets_the_secure_cookie_and_one_on_loopback_d
         .send(fixture.token_post("/api/tunnels/stop", json!({})))
         .await;
 }
+
+#[tokio::test]
+async fn a_malformed_start_body_is_a_bad_request_not_the_defaults() {
+    let fixture = Fixture::new().with_password();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/tunnels/start")
+        .header(header::HOST, HOST)
+        .header(header::ORIGIN, ORIGIN)
+        .header("x-shprd", "1")
+        .header(header::AUTHORIZATION, format!("Bearer {}", fixture.token))
+        .body(Body::from("{not json"))
+        .unwrap();
+    assert_eq!(fixture.send(request).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        fixture.stranger(QUICK).await,
+        StatusCode::MISDIRECTED_REQUEST
+    );
+}

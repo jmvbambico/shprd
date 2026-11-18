@@ -94,10 +94,18 @@ pub(crate) async fn list(
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(door): Extension<Door>,
-    body: Option<Json<TunnelStartRequest>>,
+    body: axum::body::Bytes,
 ) -> Result<Json<TunnelStatusDto>, ApiReject> {
     state.remote.require_fresh(&door).map_err(reject)?;
-    let body = body.map(|Json(body)| body).unwrap_or_default();
+    // An empty body means "the settings' defaults"; a body that is not the
+    // request is a 400, never silently the defaults.
+    let body: TunnelStartRequest = if body.is_empty() {
+        TunnelStartRequest::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|err| {
+            ApiReject::bad_request(format!("the body is not a tunnel start request: {err}"))
+        })?
+    };
     let (default_provider, mut options) = crate::settings::tunnel_defaults(&state);
     let provider = match body.provider.as_deref() {
         Some(word) => Provider::parse(word).ok_or_else(|| {
