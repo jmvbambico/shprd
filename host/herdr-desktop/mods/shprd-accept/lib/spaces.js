@@ -29,7 +29,7 @@
 // every mod folder that imports it. Edit the source, never a copy.
 
 import { NEED, STATUS_ORDER, status as statusOf } from "./tokens.js";
-import { counts, isLive, secondLine } from "./board.js";
+import { counts, isLive, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
 export const COORDINATOR_ID = "coordinator";
@@ -121,6 +121,7 @@ export function taskLook(task) {
     word: look.word,
     tone: look.tone,
     glyph: look.glyph,
+    pct: progressOf(task),
   };
 }
 
@@ -172,6 +173,7 @@ export function sidebarRows(state, list = []) {
       word: look.word,
       tone: look.tone,
       glyph: look.glyph,
+      pct: look.pct,
       needs: look.status === "needs_you",
       ready: look.status === "ready",
       active: Boolean(space?.active),

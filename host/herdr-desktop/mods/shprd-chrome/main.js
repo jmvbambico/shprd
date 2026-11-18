@@ -39,8 +39,8 @@ import { h_flex } from "gpui-base";
 import { hc, run, spaces, theme } from "herdr";
 
 import { discover, reason } from "./lib/client.js";
-import { openSettings } from "./lib/panel.js";
-import { SPACE, TEXT } from "./lib/tokens.js";
+import { icon, openSettings } from "./lib/panel.js";
+import { SPACE, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the footer asks whether the service is up. */
 const FLOOR_MS = 8000;
@@ -120,22 +120,27 @@ export default class Chrome extends View {
 
   render() {
     const t = theme();
+    // Shepherdr's foot: `border_t`, `pt 4 pb 8`, three 28 px rows
+    // (`mods/workspace-chrome-shepherdr/main.js:59-69`).
     return div()
       .size_full()
       .v_flex()
       .px(8)
-      .py(6)
-      .gap(2)
+      .pt(4)
+      .pb(8)
+      .border_t(1)
+      .border_color(t.border)
       .children(this.actions(t).map((action) => this.row(t, action)));
   }
 
   /**
    * The footer's rows, in order: what each one says and what its click does.
    *
-   * The three are Shepherdr's own three (`mods/workspace-chrome-shepherdr`): the
-   * app's settings, its own, and — shprd's twist — the service. The middle row is
-   * the only way into the settings window, so it opens the dialog rather than
-   * moving the side panel.
+   * The first two are Shepherdr's (`mods/workspace-chrome-shepherdr`): the app's
+   * settings and shprd's own; the third — shprd's twist — is the service. A row is
+   * an icon and a word and nothing else, so the service's state is the word and
+   * the icon's colour: green when it answers, amber while it starts, red when it
+   * does not.
    */
   actions(t) {
     const online = this.service !== null;
@@ -144,34 +149,21 @@ export default class Chrome extends View {
       : this.starting
         ? "Starting the service…"
         : (this.failure ?? "Start the service");
-    const hint = online ? "shprd serve" : this.starting ? TERMINAL : "click to run it";
-    const dot = online ? t.done : this.starting ? t.working : t.blocked;
+    const colors = tone(t);
     return [
-      {
-        id: "settings",
-        word: "Settings",
-        hint: "The app's own",
-        dot: t.dim,
-        onClick: () => run("app.settings"),
-      },
-      {
-        id: "shprd",
-        word: "shprd",
-        hint: "Tasks, agents, roles",
-        dot: t.accent,
-        onClick: () => openSettings(),
-      },
+      { id: "settings", word: "Settings", icon: "settings", color: t.muted, onClick: () => run("app.settings") },
+      { id: "shprd", word: "shprd", icon: "crook", color: t.muted, onClick: () => openSettings() },
       {
         id: "service",
         word,
-        hint,
-        dot,
+        icon: "plug",
+        color: online ? colors.green : this.starting ? colors.amber : colors.red,
         onClick: online || this.starting ? null : () => this.start(),
       },
     ];
   }
 
-  /** One 28 px row: a dot, a word, and a dim hint at the right. */
+  /** One 28 px row: a 14 px line icon, then the word at 13 px. */
   row(t, action) {
     const base = h_flex()
       .id(action.id)
@@ -181,15 +173,11 @@ export default class Chrome extends View {
       .gap(8)
       .items_center()
       .rounded(8)
-      .text_size(TEXT.label)
+      .text_size(TEXT.body)
       .text_color(t.foreground)
       .hover((s) => s.bg(t.hover));
     const live = action.onClick ? base.cursor_pointer().on_click(action.onClick) : base;
-    return live
-      .child(div().w(6).h(6).flex_none().rounded(3).bg(action.dot))
-      .child(action.word)
-      .child(div().flex_1())
-      .child(div().text_size(TEXT.id).text_color(t.dim).child(action.hint));
+    return live.child(icon(action.icon, 14, action.color)).child(action.word);
   }
 }
 

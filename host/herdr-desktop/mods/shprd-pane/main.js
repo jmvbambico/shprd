@@ -27,13 +27,13 @@
 //
 // The Autopilot switch is not here: shprd has no Autopilot.
 
-import { View, div } from "gpui-kit";
+import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, openOverlay, panes, props, run, spaces, terminals, theme } from "herdr";
+import { exec, hc, home, openOverlay, panes, props, run, spaces, terminals, theme } from "herdr";
 
 import { CHAT_MOD, PARK_LABEL, chatLabel, endAgent, paneChat } from "./lib/chat.js";
 import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
-import { segmented } from "./lib/panel.js";
+import { button, iconFile, segmented } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
 /** When a switch last swapped a pane: one swap per 3 s, whichever copy asked. */
@@ -59,19 +59,16 @@ async function app(name, args) {
   return out;
 }
 
-const STATUS = {
-  working: "working",
-  blocked: "needs you",
-  done: "finished",
-  idle: "idle",
-};
+/** Under this width the header drops the word "Working…" and keeps its spinner. */
+const COMPACT_BELOW = 360;
 
 export default class Pane extends View {
-  /** A short folder: `~` at home, else the last two parts. */
+  /** The folder as a person writes it: `~` for home and `~/a/b` under it. */
   short(folder) {
     if (!folder) return "";
-    const parts = folder.replace(/\/+$/, "").split("/");
-    return parts.length <= 2 ? folder : `…/${parts.slice(-2).join("/")}`;
+    const root = String(home() ?? "").replace(/\/+$/, "");
+    if (root && folder === root) return "~";
+    return root && folder.startsWith(`${root}/`) ? `~${folder.slice(root.length)}` : folder;
   }
 
   /**
@@ -174,11 +171,15 @@ export default class Pane extends View {
     cx?.notify?.();
   }
 
-  /** A chat pane's ✕: ends its agent, then the pane goes. */
-  closeChat(chat, view) {
+  /**
+   * The answer "End agent": the agent's terminal is killed, then the pane goes (a
+   * chat pane's agent is the terminal parked under it; a terminal pane's is its own).
+   */
+  closeAgent(pane, view, self) {
     this.ending = false;
-    if (view.agent) run("terminal.kill", { terminal: view.agent });
-    run("pane.close", { pane: chat });
+    const terminal = view.chatMode ? view.agent : self?.terminal;
+    if (terminal) run("terminal.kill", { terminal });
+    run("pane.close", { pane });
   }
 
   render(cx) {
@@ -190,14 +191,19 @@ export default class Pane extends View {
     const agent = view.chatMode ? terminals().find((term) => term?.address === view.agent) : null;
     const pane = view.chatMode ? { ...(agent ?? {}), title: agent?.title, cwd: agent?.cwd ?? null } : self;
     const status = (view.chatMode ? agent?.status : (self?.agent?.status ?? self?.status)) ?? "idle";
-    const dot = status === "working" ? t.working : status === "blocked" ? t.blocked : t.dim;
-    const task = self?.labels?.["herdr.task"];
+    const program = view.chatMode ? agent?.program : self?.program;
     const name = view.chatMode
       ? (agent?.program?.name ?? "Chat")
       : (pane?.title ?? pane?.program?.name ?? "Terminal");
+    // An agent's × asks before it ends the agent; a shell's just closes its pane.
+    const isAgent = view.chatMode || Boolean(program?.agent);
+    const asking = isAgent && this.ending === true;
+    const id = wired?.pane;
+    const compact = (this.width ?? Infinity) < COMPACT_BELOW;
     return h_flex()
+      .id(`pane-head-${id}`)
       .size_full()
-      .px(8)
+      .px(10)
       .gap(8)
       .items_center()
       .bg(t.background)
@@ -205,82 +211,123 @@ export default class Pane extends View {
       .border_color(t.border)
       .text_size(TEXT.label)
       .text_color(t.muted)
-      .on_mouse_down("right", (_event, cx) => {
-        cx?.stop_propagation?.();
+      .on_hover((hovered, own) => {
+        this.hovered = hovered;
+        if (!hovered) this.ending = false;
+        own?.notify?.();
+      })
+      .on_size_change((size, own) => {
+        if (Math.round(size.width) !== this.width) {
+          this.width = Math.round(size.width);
+          own?.notify?.();
+        }
+      })
+      .on_mouse_down("right", (_event, own) => {
+        own?.stop_propagation?.();
         this.menu(wired);
       })
-      .child(div().w(6).h(6).flex_none().rounded(3).bg(dot))
-      .child(div().text_color(t.foreground).child(name))
-      .when(Boolean(task), (el) => el.child(div().text_color(t.dim).child(task)))
-      .child(div().text_color(t.dim).child(this.short(pane?.cwd)))
-      .when(status in STATUS, (el) => el.child(div().text_color(dot).child(STATUS[status])))
+      .when(Boolean(program?.icon), (el) =>
+        el.child(
+          program.tint
+            ? svg(program.icon).size(14).flex_none().text_color(t.dim)
+            : image(program.icon).size(14).flex_none(),
+        ),
+      )
+      .child(div().flex_none().max_w(260).min_w(0).truncate().font_medium().text_color(t.foreground).child(name))
+      // The folder gives way first; the gap after it pushes the rest right.
+      .child(div().flex_shrink_1().min_w(0).truncate().text_color(t.dim).child(this.short(pane?.cwd)))
       .child(div().flex_1())
-      // Ending a chat's agent asks first, in place of the buttons.
-      .when(view.chatMode && this.ending === true, (el) =>
+      // The state in words, at the right with the controls: "Working…" and its
+      // spinner, "Needs you" as a pill, nothing at rest.
+      .when(status === "working", (el) =>
+        el.child(
+          h_flex()
+            .flex_none()
+            .gap(6)
+            .items_center()
+            .child(svg(iconFile("spinner")).size(12).flex_none().text_color(t.working).spin(900))
+            .when(!compact, (inner) => inner.child(div().whitespace_nowrap().child("Working…"))),
+        ),
+      )
+      .when(status === "blocked", (el) =>
+        el.child(
+          div()
+            .flex_none()
+            .px(6)
+            .h(18)
+            .flex()
+            .items_center()
+            .rounded(RADIUS.control)
+            .bg(`${t.blocked}26`)
+            .text_size(TEXT.id)
+            .font_semibold()
+            .text_color(t.blocked)
+            .child("Needs you"),
+        ),
+      )
+      // Ending an agent asks first, in place of the hover buttons.
+      .when(asking, (el) =>
         el
           .child(div().flex_none().whitespace_nowrap().text_color(t.foreground).child(endAgent(name).ask))
-          .child(this.word(t, "end-no", endAgent(name).cancel, () => this.ask(false, cx)))
-          .child(this.word(t, "end-yes", endAgent(name).verb, () => this.closeChat(wired?.pane, view))),
-      )
-      .when(!(view.chatMode && this.ending === true), (el) =>
-        el
-          .child(this.action(t, "split", "⇥", () => run("pane.split", { direction: "right", pane: wired?.pane })))
-          .child(this.action(t, "zoom", "⤢", () => run("pane.zoom", { pane: wired?.pane })))
           .child(
-            this.action(t, "close", "✕", () =>
-              view.chatMode ? this.ask(true, cx) : run("pane.close", { pane: wired?.pane }),
+            button(t, `pane-end-no-${id}`, endAgent(name).cancel, {
+              kind: "plain",
+              onClick: () => this.ask(false, cx),
+            }),
+          )
+          .child(
+            button(t, `pane-end-${id}`, endAgent(name).verb, {
+              kind: "primary",
+              onClick: () => this.closeAgent(id, view, self),
+            }),
+          ),
+      )
+      // The buttons show on hover only, and come before the switch so Chat │
+      // Terminal never moves.
+      .when(this.hovered === true && !asking, (el) =>
+        el
+          .child(this.action(t, `split-${id}`, "split-right", () => run("pane.split", { direction: "right", pane: id })))
+          .child(this.action(t, `down-${id}`, "split-down", () => run("pane.split", { direction: "down", pane: id })))
+          .child(this.action(t, `zoom-${id}`, self?.zoomed ? "unzoom" : "zoom", () => run("pane.zoom", { pane: id })))
+          .child(
+            this.action(t, `close-${id}`, "x", () =>
+              isAgent ? this.ask(true, cx) : run("pane.close", { pane: id }),
             ),
           ),
       )
-      // After the buttons, so Chat │ Terminal never moves when they come and go.
       .when(view.canSwitch, (el) =>
         el.child(
           segmented(
             t,
-            `pane-mode-${wired?.pane}`,
+            `pane-mode-${id}`,
             [
               ["chat", "Chat"],
               ["terminal", "Terminal"],
             ],
             view.chatMode ? "chat" : "terminal",
-            (choice) => (choice === "chat" ? this.toChat(self, view, cx) : this.toTerminal(wired?.pane, view, cx)),
+            (choice) => (choice === "chat" ? this.toChat(self, view, cx) : this.toTerminal(id, view, cx)),
           ),
         ),
       );
   }
 
-  /** A small text button in the header (the end-agent question's answers). */
-  word(t, id, text, onClick) {
-    return div()
+  /** One header button: a 24 px box with a 14 px line icon, and the command it runs. */
+  action(t, id, name, onClick) {
+    return h_flex()
       .id(`pane-${id}`)
-      .h(20)
-      .px(8)
+      .size(24)
       .flex_none()
-      .flex()
-      .items_center()
-      .rounded(RADIUS.control)
-      .text_color(t.foreground)
-      .cursor_pointer()
-      .hover((s) => s.bg(t.hover))
-      .on_click(onClick)
-      .child(text);
-  }
-
-  /** One header button: a glyph, a hover, and the command it runs. */
-  action(t, id, glyph, onClick) {
-    return div()
-      .id(`pane-${id}`)
-      .w(20)
-      .h(20)
-      .flex_none()
-      .flex()
       .items_center()
       .justify_center()
       .rounded(RADIUS.control)
       .text_color(t.dim)
       .cursor_pointer()
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .on_click(onClick)
-      .child(glyph);
+      .on_click((_event, own) => {
+        own?.stop_propagation?.();
+        onClick();
+        own?.notify?.();
+      })
+      .child(svg(iconFile(name)).size(14));
   }
 }

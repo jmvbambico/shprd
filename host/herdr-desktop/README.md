@@ -10,7 +10,8 @@ mods/shprd-spaces/      the sidebar: one 30 px line a space — a status glyph, 
                         task, the red/green count badge — the "Spaces" heading's
                         "+", the row's right-click menu and its close confirm, and
                         the rail under 160 px
-mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
+mods/shprd-status/      the status bar: This computer and the run, the shown space's branch, the red
+                        "Needs you" badge, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
 mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons, and
                         an agent's Chat │ Terminal switch (M11 U4)
@@ -28,7 +29,8 @@ mods/shprd-jump/        Jump (Ctrl+K): a 620 × 480 popup at the top, one find b
                         the coordinator, spaces and tasks; ↑ ↓ Enter Esc
 mods/shprd-keybinds/    Keybinds (Ctrl+Shift+/): a 560 × 620 dialog, every key in
                         words, grouped, type to filter
-mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
+mods/shprd-chrome/      the sidebar footer: three 28 px rows, an icon and a word (settings, shprd's
+                        settings, the service)
 mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Terminal ·
                         Pull request) and the Accept card, a 640×640 modal dialog
                         that Review opens                         (M10.5, M11 U3)

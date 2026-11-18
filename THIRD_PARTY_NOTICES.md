@@ -105,7 +105,16 @@ SOFTWARE.
   from `mods/workspace-chrome-shepherdr/*.svg`, `mods/tasks/tasks.svg`,
   `mods/pane-chat/{split-right,split-down,zoom}.svg`,
   `mods/coordinator/rotate-ccw.svg` and `mods/keybinds/keyboard.svg` into
-  `host/herdr-desktop/mods/{shprd-tabs,shprd-menu,shprd-new-menu}/icons/`, and the
+  `host/herdr-desktop/mods/{shprd-tabs,shprd-menu,shprd-new-menu}/icons/`, the
+  status glyphs — the ring, tick, merging, queued, scheduled and dashed shapes
+  and the 20 pie steps — from `mods/tasks/{circle,tick,merging,queued,scheduled,off}.svg`
+  and `mods/tasks/pie/*.svg`, with the status bar's and the foot's `monitor`,
+  `branch`, `plus`, `search`, `chevron-down` and `crook` from
+  `mods/workspace-chrome-shepherdr/`, the pane header's `unzoom` from
+  `mods/pane-chat/`, all into `host/herdr-desktop/mods/shprd-tabs/icons/`, and the
+  status glyph's drawing, the pane header's hover buttons and "End <agent>?"
+  question and the toasts' hover × and hover pause from `lib/dot.js`,
+  `mods/pane-chat/main.js` and `mods/toasts/main.js`, and the
   mod-to-service discovery — `service.json`'s port and id, the
   `/api/health` id handshake before the token is sent, bearer auth — from
   `lib/local.js`, `lib/bridge.js` and `service/main.ts`, and Jump and Keybinds —

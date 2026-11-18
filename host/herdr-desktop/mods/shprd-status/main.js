@@ -20,11 +20,11 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { keys, run, theme, window } from "herdr";
+import { keys, run, spaces, theme, window } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
-import { lastFailure, runShort, since, statusCounts } from "./lib/board.js";
-import { badge, countBadge } from "./lib/panel.js";
+import { counts, lastFailure, runShort, since } from "./lib/board.js";
+import { badge, countBadge, icon } from "./lib/panel.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -126,40 +126,54 @@ export default class Status extends View {
     return key ? `${key}  Commands` : "Commands";
   }
 
+  /** An icon and its words, as Shepherdr's bar writes a machine and a branch. */
+  label(t, name, text, color) {
+    return h_flex()
+      .flex_none()
+      .gap(6)
+      .items_center()
+      .child(icon(name, 14, t.muted))
+      .child(div().text_color(color ?? t.muted).child(text));
+  }
+
   render() {
     const t = theme();
     const colors = tone(t);
     const live = this.service !== null;
     const failure = this.failure ?? lastFailure(this.state);
-    const counts = statusCounts(this.state);
+    const need = counts(this.state).needs;
+    const branch = spaces().find((space) => space.active)?.branch;
+    // Shepherdr's bar (`mods/workspace-status-chat/main.js:37-44`): the machine,
+    // the shown space's branch, the red badge and "Needs you", then the key hint.
+    // shprd adds the run beside the machine and the service's state when it is
+    // down; the failure line stays.
     return h_flex()
       .size_full()
-      .px(10)
-      .gap(8)
+      .px(14)
+      .gap(16)
       .items_center()
       .bg(t.chrome)
       .border_t(1)
       .border_color(t.border)
       .text_size(TEXT.label)
       .text_color(t.muted)
-      .child(
-        h_flex()
-          .gap(6)
-          .items_center()
-          .child(div().w(6).h(6).flex_none().rounded(3).bg(live ? colors.green : colors.red))
-          .child(div().text_color(live ? t.foreground : t.dim).child(live ? "shprd" : "shprd · down")),
+      .child(this.label(t, "monitor", "This computer"))
+      .when(live && Boolean(this.state), (el) =>
+        el.child(div().flex_none().text_color(t.foreground).child(this.failure ?? runShort(this.state))),
       )
-      .child(
-        div()
-          .flex_none()
-          .text_color(this.state ? t.foreground : t.dim)
-          .child(this.failure ?? runShort(this.state)),
+      .when(!live, (el) =>
+        el.child(div().flex_none().text_color(colors.red).child(this.failure ?? "shprd · down")),
       )
-      .when(live && counts.length > 0, (el) =>
-        el.children(counts.map((row) => this.count(t, colors, row))),
-      )
-      .when(live && counts.length === 0, (el) =>
-        el.child(div().text_color(t.dim).child("nothing to do yet")),
+      .when(Boolean(branch), (el) => el.child(this.label(t, "branch", branch)))
+      .when(live && need > 0, (el) =>
+        el.child(
+          h_flex()
+            .flex_none()
+            .gap(6)
+            .items_center()
+            .child(badge(t, countBadge(need), colors.red, colors.on))
+            .child(div().child("Needs you")),
+        ),
       )
       .child(div().flex_1())
       // The last pass's failure sits at the right, before the key hint and never
@@ -207,21 +221,5 @@ export default class Status extends View {
           .on_click(() => run("app.palette"))
           .child(this.hint()),
       );
-  }
-
-  /**
-   * One status's count: a filled badge in its tone, then its word.
-   *
-   * The badge is the app's count badge, so a count past nine reads `9+` and the
-   * bar never grows with the board.
-   */
-  count(t, colors, row) {
-    const fill = row.tone === "dim" ? t.dim : (colors[row.tone] ?? t.dim);
-    return h_flex()
-      .gap(4)
-      .flex_none()
-      .items_center()
-      .child(badge(t, countBadge(row.count), fill, colors.on))
-      .child(div().text_size(TEXT.id).text_color(t.muted).child(row.word.toLowerCase()));
   }
 }

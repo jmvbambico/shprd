@@ -31,7 +31,7 @@ import { run, setShared, spaces, theme } from "herdr";
 
 import { attach, alive, POLL_WAIT } from "./lib/client.js";
 import { canReview } from "./lib/accept.js";
-import { openAccept } from "./lib/panel.js";
+import { icon, openAccept } from "./lib/panel.js";
 import { spaceIndex } from "./lib/spaces.js";
 import {
   BODY_MAX,
@@ -62,6 +62,8 @@ export default class Toasts extends View {
     this.client = null;
     this.items = [];
     this.dismissed = new Set();
+    this.hovered = null;
+    this.frozen = null;
     this.since = null;
     this.shown = "";
     this.watching = false;
@@ -185,9 +187,32 @@ export default class Toasts extends View {
     this.items = mergeNews(this.items, items);
   }
 
+  /** The time toasts expire by: frozen at the moment the pointer came onto one. */
+  clock() {
+    return this.frozen ?? Date.now();
+  }
+
+  /**
+   * The pointer on a toast holds every toast's expiry (Shepherdr's rule,
+   * `mods/toasts/main.js:21-32`): time stops while it is there, and when it goes
+   * each toast gets back the time it was held, so none has lost any.
+   */
+  hover(id, on, cx) {
+    if (on) {
+      if (this.frozen === null || this.frozen === undefined) this.frozen = Date.now();
+      this.hovered = id;
+    } else if (this.hovered === id) {
+      this.hovered = null;
+      const held = Date.now() - (this.frozen ?? Date.now());
+      this.frozen = null;
+      this.items = this.items.map((item) => ({ ...item, at: item.at + held }));
+    }
+    cx?.notify?.();
+  }
+
   /** Notices a toast whose time is up, and redraws only when one went. */
   expire(cx) {
-    const list = visible(this.items, Date.now(), this.dismissed);
+    const list = visible(this.items, this.clock(), this.dismissed);
     const key = list.map((item) => item.id).join("|");
     if (key === this.shown) return;
     this.shown = key;
@@ -225,6 +250,8 @@ export default class Toasts extends View {
 
   /** The × on a toast: this one is read, and the person said so. */
   dismiss(id, cx) {
+    // The toast under the pointer is gone, so the pointer has left it.
+    this.hover(id, false, null);
     this.dismissed.add(id);
     this.items = dismiss(this.items, id);
     this.shown = "";
@@ -234,7 +261,7 @@ export default class Toasts extends View {
   render(cx) {
     const t = theme();
     const colors = tone(t);
-    const list = visible(this.items, Date.now(), this.dismissed);
+    const list = visible(this.items, this.clock(), this.dismissed);
     // A float sizes to its content: nothing to say is nothing drawn.
     if (list.length === 0) return div();
     return v_flex()
@@ -248,9 +275,8 @@ export default class Toasts extends View {
    * One toast: a dot in its level's colour, a one-line title, a body at three
    * lines, and the × that dismisses it.
    *
-   * The dot is filled rather than an icon, so a toast reads at a glance without
-   * an asset, and the × always keeps its place so nothing moves under the
-   * pointer.
+   * The dot is filled, so a toast reads at a glance, and the × keeps its place
+   * and shows only while the pointer is on the toast.
    */
   item(t, colors, item, cx) {
     const shape = levelTone(item.level);
@@ -268,6 +294,7 @@ export default class Toasts extends View {
       .border_color(t.border)
       .cursor_pointer()
       .hover((style) => style.bg(t.hover))
+      .on_hover((over, own) => this.hover(item.id, over, own ?? cx))
       .on_click(() => this.open(item))
       .child(div().w(8).h(8).mt(5).flex_none().rounded(4).bg(fill))
       .child(
@@ -296,6 +323,7 @@ export default class Toasts extends View {
             ),
           ),
       )
+      // The × keeps its place and shows on hover, so nothing moves when it does.
       .child(
         div()
           .id(`toast-x-${item.id}`)
@@ -305,14 +333,18 @@ export default class Toasts extends View {
           .items_center()
           .justify_center()
           .rounded(RADIUS.control)
-          .text_size(TEXT.body)
-          .text_color(t.dim)
-          .hover((style) => style.bg(t.hover).text_color(t.foreground))
-          .on_click((_event, own) => {
-            own?.stop_propagation?.();
-            this.dismiss(item.id, own ?? cx);
-          })
-          .child("×"),
+          .when(this.hovered === item.id, (el) =>
+            el
+              .cursor_pointer()
+              .text_color(t.dim)
+              .hover((style) => style.bg(t.hover).text_color(t.foreground))
+              .on_mouse_down("left", (_event, own) => own?.stop_propagation?.())
+              .on_click((_event, own) => {
+                own?.stop_propagation?.();
+                this.dismiss(item.id, own ?? cx);
+              })
+              .child(icon("x", 14, t.dim)),
+          ),
       );
   }
 }

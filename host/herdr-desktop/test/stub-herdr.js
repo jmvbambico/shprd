@@ -124,6 +124,28 @@ export function spaces() {
   return SPACES;
 }
 
+/** Herdr's live pane and terminal lists; a test sets them. */
+export let PANES = [];
+export let TERMINALS = [];
+
+/** Sets what `panes()` answers. */
+export function setPanes(next) {
+  PANES = next;
+}
+
+/** Sets what `terminals()` answers. */
+export function setTerminals(next) {
+  TERMINALS = next;
+}
+
+export function panes() {
+  return PANES;
+}
+
+export function terminals() {
+  return TERMINALS;
+}
+
 /** Herdr's layout tree, as `layout()` answers it; a test sets it. */
 export let LAYOUT = null;
 

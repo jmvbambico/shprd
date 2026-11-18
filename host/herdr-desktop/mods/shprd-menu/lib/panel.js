@@ -391,28 +391,85 @@ export function openAccept(p) {
   });
 }
 
+/** Where the window's line icons live: one folder, so a mod needs no assets of its own. */
+export const ICONS = "mods/shprd-tabs/icons";
+
+/** An icon's file, by name (`settings`, `plus`, `split-right`…). */
+export const iconFile = (name) => `${ICONS}/${name}.svg`;
+
 /**
- * The status glyph, in a fixed box so nothing moves when a state changes.
+ * The pie's picture for a progress: one file per 5 %, at least 5 (Shepherdr's
+ * `lib/dot.js`, `mods/tasks/pie/`). No progress reads half full.
+ */
+export function pieFile(pct) {
+  const steps = Number.isFinite(pct) ? Math.min(100, Math.max(5, Math.round(pct / 5) * 5)) : 50;
+  return `${ICONS}/pie/${steps}.svg`;
+}
+
+/**
+ * The file a glyph name draws, and whether it is a plain line shape: the rings
+ * (`ring`, `clock`, `calendar`, `off`) are strokes in the status's colour.
+ */
+const RINGS = {
+  ring: "circle",
+  clock: "queued",
+  calendar: "scheduled",
+  off: "off",
+};
+
+/**
+ * A line icon, `size` px, in `color` (a mod's own, 14 by default).
  *
- * It is drawn rather than shipped: the layout carries no icon assets, and a mod's
- * `svg()` needs a file beside it. The shapes are Shepherdr's (`lib/dot.js`): a
- * ring for what waits, a filled dot for *Needs you*, a disc for *Ready*, a
- * half-filled ring for *Working*, a paused ring for *Merging*. `shape` is a row's
- * `{glyph, tone}`, as `lib/spaces.js` and `lib/tabstrip.js` build it, and `colors`
- * is `tone(theme())`.
+ * The SVGs are Lucide-style line art in `currentColor`, so the colour is the
+ * text colour a caller passes and a hover only needs to change that.
+ */
+export function icon(name, size, color) {
+  return svg(iconFile(name)).size(size ?? 14).flex_none().text_color(color);
+}
+
+/**
+ * The status glyph, in a fixed 14 px box so nothing moves when a state changes.
+ *
+ * Shepherdr's shapes (`lib/dot.js`, ported with its SVGs): an amber pie filling
+ * with the progress (`shape.pct`, one picture per 5 %), a red dot with a faint
+ * halo for *Needs you*, a green disc with a tick for *Ready* (grey for *Done*), a
+ * green ring with a gap, turning, for *Merging*, and plain rings for what waits.
+ * `shape` is a row's `{glyph, tone, pct}`, as `lib/spaces.js` and
+ * `lib/tabstrip.js` build it, and `colors` is `tone(theme())`.
  */
 export function statusGlyph(t, shape, colors, size = 14) {
   const color = !shape || shape.tone === "dim" ? t.dim : (colors?.[shape.tone] ?? t.dim);
-  const box = div().w(size).h(size).flex_none().flex().items_center().justify_center();
   const kind = shape?.glyph ?? "ring";
-  const round = Math.floor(size / 2);
-  const inner =
-    kind === "dot"
-      ? div().w(size - 4).h(size - 4).rounded(Math.floor((size - 4) / 2)).bg(color)
-      : kind === "tick"
-        ? div().w(size).h(size).rounded(round).bg(color)
-        : div().w(size).h(size).rounded(round).border_1().border_color(color);
-  return box.child(inner);
+  const box = div().relative().w(size).h(size).flex_none().flex().items_center().justify_center();
+  if (kind === "pie") {
+    return svg(pieFile(shape?.pct)).size(size).flex_none().text_color(colors?.amber ?? color);
+  }
+  if (kind === "dot") {
+    const dot = size - 4;
+    return box
+      .child(div().w(dot).h(dot).flex_none().rounded(Math.floor(dot / 2)).bg(color))
+      .child(
+        div()
+          .absolute()
+          .top(-1)
+          .left(-1)
+          .w(size + 2)
+          .h(size + 2)
+          .rounded(Math.floor((size + 2) / 2))
+          .border(1.5)
+          .border_color(`${color}4d`),
+      );
+  }
+  if (kind === "tick") {
+    return box
+      .rounded(Math.floor(size / 2))
+      .bg(color)
+      .child(svg(iconFile("tick")).size(size).flex_none().text_color("#ffffff"));
+  }
+  if (kind === "spin") {
+    return svg(iconFile("merging")).size(size).flex_none().text_color(color).spin(1400);
+  }
+  return svg(iconFile(RINGS[kind] ?? "circle")).size(size).flex_none().text_color(color);
 }
 
 /**

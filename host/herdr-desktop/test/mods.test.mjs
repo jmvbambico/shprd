@@ -292,8 +292,9 @@ test("task looks are the tokens' words", () => {
     word: "Working",
     tone: "amber",
     glyph: "pie",
+    pct: 62,
   });
-  assert.deepEqual(taskLook({}), { status: "to_do", word: "To do", tone: "dim", glyph: "ring" });
+  assert.deepEqual(taskLook({}), { status: "to_do", word: "To do", tone: "dim", glyph: "ring", pct: null });
 });
 
 test("a needs-you row says the card's words when the service has a card", () => {

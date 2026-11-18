@@ -216,7 +216,16 @@ export function taskById(state, id) {
 
 /** One task's status, as the tone and glyph a row draws. */
 export function look(task) {
-  return statusOf(task?.derived?.status);
+  return { ...statusOf(task?.derived?.status), pct: progressOf(task) };
+}
+
+/**
+ * The percent an agent reported (`last_status.progress`), which fills a working
+ * task's pie; null when it reported none, and the pie reads half full.
+ */
+export function progressOf(task) {
+  const done = task?.last_status?.progress;
+  return typeof done === "number" && Number.isFinite(done) && done >= 0 ? done : null;
 }
 
 /**
