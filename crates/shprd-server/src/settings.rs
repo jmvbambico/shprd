@@ -64,6 +64,34 @@ pub(crate) fn read(state: &AppState) -> Result<SettingsDto, ApiReject> {
     Ok(document(state, &loaded, loaded.resolve(None)))
 }
 
+/// The provider and options `web up` uses when the request names none: the
+/// `web.*` settings, or their built-in values when this service cannot read
+/// them (no home directory, an unreadable file).
+///
+/// Unreadable settings are not an error here: the answer is the safe default —
+/// Tailscale, the one provider that is not on the public internet — so a
+/// broken settings file can only ever start a *more* private tunnel.
+pub(crate) fn tunnel_defaults(
+    state: &AppState,
+) -> (
+    shprd_remote::tunnel::Provider,
+    shprd_remote::tunnel::Options,
+) {
+    use shprd_core::settings::{File, Request, resolve};
+    let resolved = match Place::of(state).and_then(|place| place.load()) {
+        Ok(loaded) => loaded.resolve(None),
+        Err(_) => resolve(&File::default(), &Request::default()),
+    };
+    let provider = shprd_remote::tunnel::Provider::parse(resolved.web_tunnel())
+        .unwrap_or(shprd_remote::tunnel::Provider::Tailscale);
+    let options = shprd_remote::tunnel::Options {
+        stable: resolved.web_stable(),
+        cloudflared_name: resolved.web_cloudflared_name().to_owned(),
+        cloudflared_host: resolved.web_cloudflared_host().to_owned(),
+    };
+    (provider, options)
+}
+
 /// The merge policy this service resolves, when it can read the settings at all.
 ///
 /// It is the one setting an *action* reads: `task.accept` records a human's

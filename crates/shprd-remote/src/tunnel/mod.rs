@@ -258,6 +258,8 @@ pub trait Tunnel: Send {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -279,9 +281,11 @@ mod tests {
 
     #[test]
     fn an_endpoint_prints_masked() {
-        let endpoint =
-            PublicEndpoint::new("https://quiet-green-river.trycloudflare.com", Provider::Tunnl)
-                .expect("a plain name");
+        let endpoint = PublicEndpoint::new(
+            "https://quiet-green-river.trycloudflare.com",
+            Provider::Tunnl,
+        )
+        .expect("a plain name");
         let shown = format!("{endpoint:?}");
         assert!(!shown.contains("quiet-green"), "{shown}");
         assert!(PublicEndpoint::new("http://x.example.com", Provider::Tunnl).is_none());

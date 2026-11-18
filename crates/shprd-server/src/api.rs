@@ -49,6 +49,7 @@ use crate::roster as roster_api;
 use crate::service::{AfterWrite, ServiceFiles, ServiceInfo, VERSION};
 use crate::settings as settings_api;
 use crate::tasks;
+use crate::tunnels;
 
 /// The largest body any route accepts, in bytes.
 ///
@@ -205,6 +206,11 @@ pub(crate) struct AppState {
     /// SPA fallback and the cache headers are proven without needing `web/dist`
     /// to have been built.
     pub(crate) web: crate::web::Source,
+    /// The one tunnel, if there is one: started, watched and stopped here.
+    pub(crate) tunnels: shprd_remote::tunnel::TunnelManager,
+    /// How a tunnel is built, kept so the manager can be rebuilt when the `PATH`
+    /// it looks for programs on is replaced.
+    pub(crate) tunnel_factory: Arc<dyn shprd_remote::tunnel::TunnelFactory>,
 }
 
 /// The directories the binary resolved for the service.
@@ -318,6 +324,18 @@ impl App {
         if let Err(err) = gateway.sessions().purge() {
             tracing::warn!(%err, "could not tidy the expired sessions");
         }
+        // A new service has no tunnel, whatever a service that was killed left in
+        // `web.json`; the manager says so before anything can read it.
+        let tunnel_factory: Arc<dyn shprd_remote::tunnel::TunnelFactory> = Arc::new(
+            shprd_remote::tunnel::SystemTunnels::new(paths.path_env.clone().unwrap_or_default()),
+        );
+        let tunnels = shprd_remote::tunnel::TunnelManager::new(
+            state_dir,
+            &gateway,
+            Arc::new(SystemClock),
+            tunnel_factory.clone(),
+        );
+        tunnels.reset();
         files.write_record(port)?;
         let state = AppState {
             repo: repo.to_path_buf(),
@@ -343,6 +361,8 @@ impl App {
             chat: ChatHost::new(),
             transcript_roots: paths.transcript_roots,
             web: crate::web::Source::Embedded,
+            tunnels,
+            tunnel_factory,
         };
         let router = router(state.clone());
         Ok(Self {
@@ -457,6 +477,13 @@ impl App {
     /// A test passes a directory of its own — or nothing at all, which keeps
     /// every listing off the machine.
     pub fn with_path_env(mut self, path_env: Option<String>) -> Self {
+        // The tunnel programs are looked up on this same `PATH`, so the factory
+        // follows it. A service that has already started a tunnel is not
+        // re-pathed: this is a builder, used before the service serves.
+        self.state.tunnel_factory = Arc::new(shprd_remote::tunnel::SystemTunnels::new(
+            path_env.clone().unwrap_or_default(),
+        ));
+        self.state.tunnels = self.new_tunnels();
         self.state.path_env = path_env;
         self.router = router(self.state.clone());
         self
@@ -523,10 +550,15 @@ impl App {
     /// password, sessions and hostnames this service already had are kept.
     pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
         let hosts = self.state.remote.hosts();
+        // The storm signal is carried over: the tunnel manager holds the same
+        // handle, and a rebuilt gateway that started its own would leave it
+        // watching a counter nothing moves.
+        let storm = self.state.remote.storm();
         self.state.remote = Arc::new(
             shprd_remote::Gateway::new(&self.state.state_dir, clock)
                 .with_token(self.state.token.clone())
-                .with_hosts(hosts),
+                .with_hosts(hosts)
+                .with_storm(storm),
         );
         self.router = router(self.state.clone());
         self
@@ -542,6 +574,35 @@ impl App {
         self.state.web = crate::web::Source::Dir(dir);
         self.router = router(self.state.clone());
         self
+    }
+
+    /// Build tunnels with `factory` instead of the person's own programs.
+    ///
+    /// A test hands in a fake provider so the routes, the fail-closed rule and
+    /// the allowlist are proven without a network; production never calls it.
+    pub fn with_tunnel_factory(
+        mut self,
+        factory: Arc<dyn shprd_remote::tunnel::TunnelFactory>,
+    ) -> Self {
+        self.state.tunnel_factory = factory;
+        self.state.tunnels = self.new_tunnels();
+        self.router = router(self.state.clone());
+        self
+    }
+
+    /// A manager over this service's gate, with the factory it holds now.
+    fn new_tunnels(&self) -> shprd_remote::tunnel::TunnelManager {
+        shprd_remote::tunnel::TunnelManager::new(
+            &self.state.state_dir,
+            &self.state.remote,
+            Arc::new(SystemClock),
+            self.state.tunnel_factory.clone(),
+        )
+    }
+
+    /// The tunnel manager, so the service can stop the tunnel on its way out.
+    pub fn tunnels(&self) -> shprd_remote::tunnel::TunnelManager {
+        self.state.tunnels.clone()
     }
 
     /// The names this service answers to, as a shared handle.
@@ -592,6 +653,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/ws", get(socket))
         .route("/api/session", get(login::session))
         .route("/api/logout", post(login::logout))
+        .route("/api/tunnels", get(tunnels::list))
+        .route("/api/tunnels/start", post(tunnels::start))
+        .route("/api/tunnels/stop", post(tunnels::stop))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require));
     Router::new()
         .route("/api/health", get(health))

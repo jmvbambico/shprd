@@ -138,3 +138,77 @@ pub struct SessionDto {
     #[ts(optional)]
     pub session: Option<SessionInfoDto>,
 }
+
+/// The body of `POST /api/tunnels/start`. Both fields are optional: what is not
+/// given comes from the `web.*` settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TunnelStartRequest.ts")]
+pub struct TunnelStartRequest {
+    /// The provider's word (`tailscale`, `cloudflared`, `cloudflared-named`,
+    /// `ngrok`, `tunnl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider: Option<String>,
+    /// tunnl.gg only: the stable address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stable: Option<bool>,
+}
+
+/// One provider a tunnel can be started with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TunnelProviderDto.ts")]
+pub struct TunnelProviderDto {
+    /// The word `--tunnel` takes.
+    pub id: String,
+    /// Whether its address is on the public internet, which is what makes a
+    /// password a condition of starting it.
+    pub public_internet: bool,
+}
+
+/// What `GET /api/tunnels` and the start and stop routes answer: the tunnel as
+/// `web.json` records it, and what the page needs to offer a start.
+///
+/// It is only ever sent through the gate, so it carries the full link and its
+/// QR code — the person who is signed in is the person who may share it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "TunnelStatusDto.ts")]
+pub struct TunnelStatusDto {
+    /// Whether a tunnel is up.
+    pub on: bool,
+    /// Whether one is being started.
+    pub starting: bool,
+    /// The provider's word, while one is up or was last tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider: Option<String>,
+    /// The full link, while a tunnel is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub link: Option<String>,
+    /// The link as an SVG QR code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub qr_svg: Option<String>,
+    /// Why there is no tunnel, when the last start or run ended badly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub why: Option<String>,
+    /// When the record was written, in epoch seconds.
+    pub at: u64,
+    /// The provider program's version line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    /// Whether a login password is set: without one, no public provider starts.
+    pub password_set: bool,
+    /// The provider `start` uses when none is named.
+    pub default_provider: String,
+    /// Every provider.
+    pub providers: Vec<TunnelProviderDto>,
+    /// The tailnet login Tailscale vouches for, only on a request that arrived
+    /// through `tailscale serve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tailnet_user: Option<String>,
+}

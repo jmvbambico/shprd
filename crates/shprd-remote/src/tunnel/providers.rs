@@ -28,7 +28,7 @@ pub struct Options {
 
 /// Something that can make a tunnel. The service uses [`SystemTunnels`]; a test
 /// hands in a fake.
-pub trait TunnelFactory: Send + Sync {
+pub trait TunnelFactory: Send + Sync + std::fmt::Debug {
     /// A tunnel for `provider`, or why one cannot be made.
     fn create(&self, provider: Provider, options: &Options)
     -> Result<Box<dyn Tunnel>, TunnelError>;

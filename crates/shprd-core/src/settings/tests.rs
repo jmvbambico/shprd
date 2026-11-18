@@ -963,10 +963,8 @@ fn the_web_keys_have_defaults_and_read_back_through_their_accessors() {
     assert!(!resolved.web_stable());
     assert_eq!(resolved.web_cloudflared_name(), "");
 
-    let file = you(
-        "[web]\ntunnel = \"cloudflared-named\"\nstable = true\n\
-         cloudflared_name = \" shprd \"\ncloudflared_host = \"shprd.example.org\"\n",
-    );
+    let file = you("[web]\ntunnel = \"cloudflared-named\"\nstable = true\n\
+         cloudflared_name = \" shprd \"\ncloudflared_host = \"shprd.example.org\"\n");
     let resolved = resolve(&file, &Request::default());
     assert_eq!(resolved.web_tunnel(), "cloudflared-named");
     assert!(resolved.web_stable());
@@ -994,7 +992,10 @@ fn a_repository_may_not_choose_where_a_shell_is_exposed() {
         assert!(!Key::Web(key).is_repo_allowed(), "{}", key.name());
     }
     let repo = parse_repo_committed("[web]\ntunnel = \"ngrok\"\n");
-    assert!(repo.is_err(), "a committed [web] table is refused: {repo:?}");
+    assert!(
+        repo.is_err(),
+        "a committed [web] table is refused: {repo:?}"
+    );
 }
 
 #[test]
@@ -1013,5 +1014,8 @@ fn a_web_key_is_written_into_the_web_table() {
         .expect("the tunnel is stored");
     assert_eq!(written.resolved.web_tunnel(), "tunnl");
     let text = std::fs::read_to_string(user_file(home.path())).expect("the file was written");
-    assert!(text.contains("[web]") && text.contains("tunnel = \"tunnl\""), "{text}");
+    assert!(
+        text.contains("[web]") && text.contains("tunnel = \"tunnl\""),
+        "{text}"
+    );
 }

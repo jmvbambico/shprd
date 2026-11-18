@@ -436,6 +436,12 @@ mod tests {
         host: StdMutex<String>,
     }
 
+    impl std::fmt::Debug for Log {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Log")
+        }
+    }
+
     struct Fake {
         provider: Provider,
         log: Arc<Log>,
@@ -481,6 +487,7 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
     struct FakeFactory {
         log: Arc<Log>,
         /// Whether every tunnel claims to be public whatever its provider says.
@@ -821,6 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_start_is_recorded_off_with_the_reason() {
+        #[derive(Debug)]
         struct Broken;
         impl TunnelFactory for Broken {
             fn create(

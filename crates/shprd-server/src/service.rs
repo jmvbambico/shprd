@@ -762,6 +762,10 @@ impl Service {
         .await;
         let _ = stop.send(());
         watcher.abort();
+        // The tunnel dies with the service: stopped here, so a Tailscale mapping
+        // is removed too (a child process would also die with the runtime, but
+        // `tailscale serve` outlives its command).
+        app.tunnels().shutdown().await;
         if let Some(ticker) = ticker {
             let _ = ticker.await;
         }

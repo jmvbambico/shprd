@@ -1519,8 +1519,14 @@ pub fn builtin() -> Layer {
         Value::Text(WEB_TUNNEL_WORDS[0].to_owned()),
     );
     layer.set(Key::Web(WebKey::Stable), Value::Switch(false));
-    layer.set(Key::Web(WebKey::CloudflaredName), Value::Text(String::new()));
-    layer.set(Key::Web(WebKey::CloudflaredHost), Value::Text(String::new()));
+    layer.set(
+        Key::Web(WebKey::CloudflaredName),
+        Value::Text(String::new()),
+    );
+    layer.set(
+        Key::Web(WebKey::CloudflaredHost),
+        Value::Text(String::new()),
+    );
     layer.set(
         Key::RolesOrder,
         Value::List(BUILTIN_ROLES.iter().map(|id| (*id).to_owned()).collect()),
