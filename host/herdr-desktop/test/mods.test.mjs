@@ -59,8 +59,13 @@ import {
   visible,
 } from "../mods/lib/toasts.js";
 import {
+  DONE_SHOWN,
   counts,
+  etaMinutes,
+  filterChips,
+  found,
   lastFailure,
+  listView,
   newTask,
   rowActions,
   runLabel,
@@ -917,4 +922,93 @@ test("the pull request bar says how big the change is and which branches it join
   assert.equal(PR_WORDS.openOnGitHub, "Open on GitHub");
   assert.equal(PR_WORDS.copyLink, "Copy link");
   assert.equal(PR_WORDS.copied, "Copied");
+});
+
+// -- the tasks panel's search, filter row and groups (M11 U2) ---------------
+
+/** One task of the service fixture, by id. */
+function stateTask(id) {
+  return STATE.tasks.find((entry) => entry.id === id);
+}
+
+/** A board of `n` done tasks beside the fixture's other words. */
+function withDone(n) {
+  const extra = Array.from({ length: n }, (_, i) => ({
+    id: `D${i}`,
+    title: `finished ${i}`,
+    status: "done",
+    derived: { status: "done" },
+  }));
+  return { ...STATE, tasks: [...STATE.tasks.filter((t) => t.derived.status !== "done"), ...extra] };
+}
+
+test("the search finds a task by id, title, status word or PR number, and by nothing else", () => {
+  const t2 = stateTask("T2");
+  assert.equal(found(t2, "t2"), true);
+  assert.equal(found(t2, t2.title.split(" ")[0]), true);
+  assert.equal(found(t2, "ready"), true);
+  assert.equal(found({ ...t2, pr: { number: 42 } }, "#42"), true);
+  assert.equal(found(t2, "zzz-not-there"), false);
+  assert.equal(found(t2, ""), true);
+});
+
+test("typing an id leaves only that task's row", () => {
+  const view = listView(STATE, { query: "T3" });
+  const ids = view.groups.flatMap((g) => g.tasks.map((t) => t.id));
+  assert.deepEqual(ids, ["T3"]);
+});
+
+test("For you comes first: needs you, then Ready; Done is a line until opened", () => {
+  const view = listView(STATE, {});
+  assert.equal(view.groups[0].label, "For you");
+  assert.deepEqual(
+    view.groups[0].tasks.map((t) => t.derived.status),
+    ["needs_you", "ready"],
+  );
+  assert.equal(view.groups.some((g) => g.key === "done"), false);
+  assert.match(view.doneLine.label, /^\d+ done$/);
+  const opened = listView(STATE, { doneOpen: true });
+  assert.equal(opened.doneLine, null);
+  assert.equal(opened.groups.at(-1).key, "done");
+});
+
+test("an opened Done shows five rows and 'Show N more', whole once asked", () => {
+  const board = withDone(8);
+  const cut = listView(board, { doneOpen: true }).groups.find((g) => g.key === "done");
+  assert.equal(cut.tasks.length, DONE_SHOWN);
+  assert.equal(cut.cut, 3);
+  assert.equal(cut.count, 8);
+  const all = listView(board, { doneOpen: true, allDone: true }).groups.find((g) => g.key === "done");
+  assert.equal(all.tasks.length, 8);
+  assert.equal(all.more, true);
+});
+
+test("a folded heading is reported shut, except while searching", () => {
+  const shut = new Set(["working"]);
+  assert.equal(listView(STATE, { shut }).groups.find((g) => g.key === "working").shut, true);
+  assert.equal(listView(STATE, { shut, query: "T1" }).groups.find((g) => g.key === "working").shut, false);
+});
+
+test("a search finds Done tasks too, all shown", () => {
+  const view = listView(withDone(8), { query: "finished" });
+  assert.equal(view.doneLine, null);
+  assert.equal(view.groups.find((g) => g.key === "done").tasks.length, 8);
+});
+
+test("a status filter is that word's tasks, flat; the chips count what is there", () => {
+  const view = listView(STATE, { filter: "ready" });
+  assert.equal(view.groups.length, 1);
+  assert.equal(view.groups[0].flat, true);
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["T2"]);
+  const chips = filterChips(STATE);
+  assert.deepEqual(chips.primary.map((c) => c.key), ["needs_you", "working", "ready"]);
+  assert.equal(chips.more.some((c) => c.key === "done"), true);
+  assert.equal(chips.primary.find((c) => c.key === "ready").count, 1);
+});
+
+test("minutes left show only when the service reports them", () => {
+  assert.equal(etaMinutes(stateTask("T5")), null);
+  assert.equal(etaMinutes({ eta_minutes: 12.2 }), 13);
+  assert.equal(etaMinutes({ derived: { eta_minutes: 4 } }), 4);
+  assert.equal(etaMinutes({ eta_minutes: 0 }), null);
 });

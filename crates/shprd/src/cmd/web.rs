@@ -35,6 +35,9 @@ pub fn run(cmd: &WebCommand, home: Option<&Path>, json: bool) -> Result<(), CliE
     match cmd {
         WebCommand::Password { cmd } => password(cmd, &dir, json),
         WebCommand::Sessions(args) => sessions(args, &dir, json),
+        WebCommand::Up(args) => super::web_tunnel::up(args, &dir, json),
+        WebCommand::Down => super::web_tunnel::down(&dir, json),
+        WebCommand::Status(args) => super::web_tunnel::status(args, &dir, json),
     }
 }
 

@@ -66,6 +66,7 @@ pub mod service;
 pub mod snapshot;
 pub mod tasks;
 pub mod tick;
+mod tunnels;
 
 pub(crate) mod actions;
 pub(crate) mod auth;

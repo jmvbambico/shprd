@@ -300,6 +300,44 @@ pub enum WebCommand {
     },
     /// List the browser sessions, or end one or all of them.
     Sessions(SessionsArgs),
+    /// Put the web app on a tunnel, so a phone or another machine can reach it.
+    ///
+    /// The tunnel runs as a child of the running `shprd serve` and ends with it,
+    /// so this asks the service to start it. A provider on the public internet
+    /// (everything but `tailscale`) refuses to start unless a login password is
+    /// set — `shprd web password set` — and there is no flag around that. The
+    /// providers are your own programs from `PATH`; nothing is downloaded.
+    Up(UpArgs),
+    /// Stop the tunnel.
+    Down,
+    /// Show whether a tunnel is up. The link is masked unless `--show-url`.
+    Status(StatusArgs),
+}
+
+/// Arguments for `shprd web up`.
+#[derive(Debug, Args)]
+pub struct UpArgs {
+    /// Which provider: `tailscale`, `cloudflared`, `cloudflared-named`, `ngrok`
+    /// or `tunnl`. Without it, the `web.tunnel` setting decides (`tailscale`
+    /// unless you changed it).
+    #[arg(long, value_name = "PROVIDER", value_parser = ["tailscale", "cloudflared", "cloudflared-named", "ngrok", "tunnl"])]
+    pub tunnel: Option<String>,
+    /// tunnl.gg only: keep the same address between runs (it is tied to your SSH
+    /// key). Without it the `web.stable` setting decides.
+    #[arg(long)]
+    pub stable: bool,
+    /// Print the link and its QR code instead of a masked link. The link is the
+    /// address of a login page that reaches a shell: do not paste it in a chat.
+    #[arg(long = "show-url")]
+    pub show_url: bool,
+}
+
+/// Arguments for `shprd web status`.
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Print the link and its QR code instead of a masked link.
+    #[arg(long = "show-url")]
+    pub show_url: bool,
 }
 
 /// The `shprd web password` verbs.
