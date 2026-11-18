@@ -1002,6 +1002,18 @@ pub enum Action {
         /// The task to accept.
         task: String,
     },
+    /// Deliver a task's brief to its agent again, for a card that says the first
+    /// delivery was lost (`brief not delivered`).
+    ///
+    /// It types the latest attempt's brief into the agent's terminal, as
+    /// `shprd agent prompt --task <id> "$(cat <brief>)"` does, and records a
+    /// progress line so the card clears. A task with no agent to type into, or a
+    /// service without a host, refuses it with the reason.
+    #[serde(rename = "task.resend_brief")]
+    TaskResendBrief {
+        /// The task whose brief should be delivered again.
+        task: String,
+    },
 }
 
 impl Action {
@@ -1025,6 +1037,8 @@ impl Action {
         "task_drop",
         "task.accept",
         "task_accept",
+        "task.resend_brief",
+        "task_resend_brief",
     ];
 
     /// Whether this action undoes something a person cannot get back.
@@ -1047,6 +1061,7 @@ impl Action {
             Self::TaskStop { .. } => "task.stop",
             Self::TaskDrop { .. } => "task.drop",
             Self::TaskAccept { .. } => "task.accept",
+            Self::TaskResendBrief { .. } => "task.resend_brief",
         }
     }
 
@@ -1066,6 +1081,7 @@ impl Action {
                 "task_stop" => Some("task.stop"),
                 "task_drop" => Some("task.drop"),
                 "task_accept" => Some("task.accept"),
+                "task_resend_brief" => Some("task.resend_brief"),
                 _ => None,
             };
             if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {
@@ -1812,6 +1828,9 @@ mod tests {
             Action::TaskAccept {
                 task: "T1".to_string(),
             },
+            Action::TaskResendBrief {
+                task: "T1".to_string(),
+            },
         ] {
             assert!(
                 Action::KINDS.contains(&action.kind()),
@@ -1848,6 +1867,11 @@ mod tests {
         }))
         .expect("a start");
         assert_eq!(start.kind(), "task.start");
+        let resend = Action::from_value(serde_json::json!({
+            "kind": "task_resend_brief", "task": "T1",
+        }))
+        .expect("a resend");
+        assert_eq!(resend.kind(), "task.resend_brief");
     }
 
     #[test]

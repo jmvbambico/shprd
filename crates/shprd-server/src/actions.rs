@@ -113,7 +113,30 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
             commit(ctx, kind)
         }
         Action::TaskAccept { task } => accept(ctx, &task),
+        Action::TaskResendBrief { task } => resend_brief(ctx, &task),
     }
+}
+
+/// Delivers a task's latest brief to its agent again and records that it went.
+///
+/// The record is a progress line, which is what retires a `brief not delivered`
+/// card (`shprd_views::cards::card`): the card clears only once the delivery
+/// succeeded, so a refusal leaves it standing with its button.
+fn resend_brief(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
+    let engine = ctx.engine.ok_or_else(|| {
+        ApiReject::refused("this service was started without a host, so it cannot deliver a brief")
+    })?;
+    let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    if !folded.tasks.contains_key(task) {
+        return Err(ApiReject::unknown_task(task));
+    }
+    engine.resend(ctx.repo, task).map_err(ApiReject::refused)?;
+    let kind = EventKind::TaskStatus {
+        task: task.to_string(),
+        message: status_line("brief resent"),
+        progress: None,
+    };
+    commit(ctx, kind)
 }
 
 /// Starts an attempt at `task` through the binary's spawn path.

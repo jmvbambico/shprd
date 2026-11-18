@@ -32,7 +32,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { closeOverlay, openOverlay, panes, props, run, spaces, terminals, theme } from "herdr";
+import { closeOverlay, openOverlay, panes, props, run, setShared, spaces, terminals, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
 import {
@@ -45,6 +45,7 @@ import {
   stepPick,
   switchAgentMenu,
   tabMenu,
+  tasksMenu,
 } from "./lib/menu.js";
 import { menuRow, openAddTask, openNewSpace, openSettings } from "./lib/panel.js";
 import { parseTabName } from "./lib/tabstrip.js";
@@ -86,7 +87,7 @@ export default class Menu extends View {
   /** What this copy is a menu for, from its props. */
   kind() {
     const wired = props();
-    if (wired?.tab === "tab" || wired?.tab === "pane") return wired.tab;
+    if (wired?.tab === "tab" || wired?.tab === "pane" || wired?.tab === "tasks") return wired.tab;
     return "global";
   }
 
@@ -111,6 +112,8 @@ export default class Menu extends View {
       });
     }
     switch (this.kind()) {
+      case "tasks":
+        return tasksMenu(wired?.tasks ?? {});
       case "tab": {
         const found = this.tab();
         if (!found) return appMenu();
@@ -171,6 +174,12 @@ export default class Menu extends View {
       return;
     }
     closeOverlay(props()?.overlay);
+    // The Tasks panel's popups hand the pick back through a shared request the
+    // panel takes (its commands do not exist while it is not the shown child).
+    if (row.pick) {
+      setShared("tasks.choice", { ...row.pick, at: Date.now() });
+      return;
+    }
     if (row.id === "edit-instructions") {
       openSettings({ page: "prompts" });
       return;

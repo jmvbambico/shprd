@@ -144,24 +144,57 @@ export function filterChips(state) {
   };
 }
 
+/** The ways the Tasks list can be grouped (the header's Group by menu). */
+export const GROUP_MODES = [
+  { key: "you", label: "For you" },
+  { key: "space", label: "Space" },
+  { key: "status", label: "Status" },
+];
+
+/** A remembered group-by word, or `you` for anything this build does not know. */
+export function groupMode(value) {
+  return GROUP_MODES.some((m) => m.key === value) ? value : "you";
+}
+
 /**
  * What the Tasks list draws, as `{groups, doneLine}`.
  *
- * - `all` (default): "For you" first (needs you, then Ready), then each other word
- *   in [`STATUS_ORDER`]; Done is one line ("N done") until `doneOpen`, then a
- *   group showing [`DONE_SHOWN`] rows and "Show N more" unless `allDone`.
- *   (Shepherdr groups by space as well; one service holds one run, so that
- *   grouping is moot here.)
+ * - `all` (default): grouped by `groupBy`:
+ *   - `you` (default): "For you" first (needs you, then Ready), then each other
+ *     word in [`STATUS_ORDER`]; Done is one line ("N done") until `doneOpen`,
+ *     then a group showing [`DONE_SHOWN`] rows and "Show N more" unless `allDone`.
+ *   - `status`: one group per word, needs you and Ready included, same Done rule.
+ *   - `space`: one group per space in `spaces` (`{id, name}`), tasks in status
+ *     order, Done rows included.
+ *   Tasks in `pinned` (a set of ids) come out of their group into a "Pinned"
+ *   group on top, in status order, Done included.
  * - a status word: that word's tasks, flat, under no heading.
  * - a query: every finding, Done included, all shown, headings not folding.
  *
  * `shut` is the set of folded heading keys. A group is
  * `{key, label, top, tasks, count, shut, cut, more}`.
  */
-export function listView(state, { query = "", filter = "all", shut = new Set(), doneOpen = false, allDone = false } = {}) {
+export function listView(
+  state,
+  {
+    query = "",
+    filter = "all",
+    shut = new Set(),
+    doneOpen = false,
+    allDone = false,
+    groupBy = "you",
+    pinned = new Set(),
+    spaces = [],
+  } = {},
+) {
   const searching = String(query ?? "").trim() !== "";
   const live = (state?.tasks ?? []).filter(isLive).filter((t) => !searching || found(t, query));
   const word = (t) => t?.derived?.status;
+  const rank = (t) => {
+    const at = STATUS_ORDER.indexOf(word(t));
+    return at === -1 ? STATUS_ORDER.length : at;
+  };
+  const byRank = (list) => [...list].sort((a, b) => rank(a) - rank(b));
   const make = (key, label, tasks, extra = {}) => {
     const done = key === "done";
     const open = searching;
@@ -170,7 +203,7 @@ export function listView(state, { query = "", filter = "all", shut = new Set(), 
     return {
       key,
       label,
-      top: key === "you",
+      top: key === "you" || key === "pinned",
       count: tasks.length,
       shut: !open && shut.has(key),
       cut,
@@ -184,12 +217,31 @@ export function listView(state, { query = "", filter = "all", shut = new Set(), 
     return { groups: tasks.length === 0 ? [] : [make(`flat-${filter}`, STATUS[filter].word, tasks, { flat: true })], doneLine: null };
   }
   const groups = [];
-  const you = [...live.filter((t) => word(t) === "needs_you"), ...live.filter((t) => word(t) === "ready")];
-  if (you.length > 0) groups.push(make("you", "For you", you));
+  const pins = pinned instanceof Set ? pinned : new Set(pinned ?? []);
+  const pinnedTasks = byRank(live.filter((t) => pins.has(t.id)));
+  if (pinnedTasks.length > 0) groups.push(make("pinned", "Pinned", pinnedTasks, { shown: true }));
+  const rest = live.filter((t) => !pins.has(t.id));
   let doneLine = null;
+  if (groupBy === "space") {
+    const list = spaces.length > 0 ? spaces : [{ id: null, name: "Tasks" }];
+    const home = list[0].id;
+    const known = new Set(list.map((space) => space.id));
+    for (const space of list) {
+      const tasks = byRank(
+        rest.filter((t) => (t.space != null && known.has(t.space) ? t.space : home) === space.id),
+      );
+      if (tasks.length > 0) groups.push(make(`space-${space.id}`, space.name ?? String(space.id), tasks));
+    }
+    return { groups, doneLine };
+  }
+  const first = groupBy === "status" ? [] : ["needs_you", "ready"];
+  if (groupBy !== "status") {
+    const you = [...rest.filter((t) => word(t) === "needs_you"), ...rest.filter((t) => word(t) === "ready")];
+    if (you.length > 0) groups.push(make("you", "For you", you));
+  }
   for (const w of STATUS_ORDER) {
-    if (w === "needs_you" || w === "ready") continue;
-    const tasks = live.filter((t) => word(t) === w);
+    if (first.includes(w)) continue;
+    const tasks = rest.filter((t) => word(t) === w);
     if (tasks.length === 0) continue;
     if (w === "done" && !searching && !doneOpen) {
       doneLine = { count: tasks.length, label: `${tasks.length} done` };
@@ -371,7 +423,7 @@ export function rowActions(task) {
  * an empty one would be refused for it. `id` also says why a form cannot be
  * submitted yet, in words, or is empty when it can.
  */
-export function newTask(body) {
+export function newTask(body, known = null) {
   const title = String(body?.title ?? "").trim();
   const scope = String(body?.scope ?? "")
     .split(",")
@@ -381,12 +433,30 @@ export function newTask(body) {
     .split(";")
     .map((part) => part.trim())
     .filter((part) => part !== "");
+  const deps = splitIds(body?.deps);
+  const unknown = known === null ? [] : deps.filter((id) => !known.includes(id));
   const why = title === ""
     ? "A task needs a title"
     : scope.length === 0
       ? "Name the folder or path it may change"
       : acceptance.length === 0
         ? "Say what must be true when it is done"
-        : "";
-  return { title, scope, acceptance, why, ready: why === "" };
+        : unknown.length > 0
+          ? `No task named ${unknown.join(", ")} to wait for`
+          : "";
+  return { title, scope, acceptance, deps, why, ready: why === "" };
+}
+
+/** Task ids typed as a list ("T1, T2" or "T1 T2"), without blanks or repeats. */
+export function splitIds(text) {
+  const seen = new Set();
+  for (const part of String(text ?? "").split(/[\s,]+/)) {
+    if (part !== "") seen.add(part);
+  }
+  return [...seen];
+}
+
+/** The tasks a person may name in "After": every live task's id. */
+export function taskIds(state) {
+  return (state?.tasks ?? []).filter(isLive).map((task) => task.id);
 }

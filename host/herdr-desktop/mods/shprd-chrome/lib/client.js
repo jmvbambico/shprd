@@ -524,11 +524,17 @@ export class Client {
     return this.call("POST", "/api/action", { body: payload });
   }
 
+  /** `POST /api/action` `task.resend_brief`: type the task's brief into its agent again. */
+  resendBrief(task) {
+    return this.action({ kind: "task.resend_brief", task });
+  }
+
   /**
    * `POST /api/tasks`: add one task, as `shprd agent task add` does.
    *
    * The service names it from the title when `body.id` is left out, so a form
-   * that asks for a title, a scope and an acceptance line needs nothing else.
+   * that asks for a title, a scope and an acceptance line needs nothing else;
+   * `deps` (task ids it waits for) is passed through.
    */
   addTask(body) {
     return this.call("POST", "/api/tasks", { body });

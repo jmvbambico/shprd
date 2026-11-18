@@ -795,7 +795,7 @@ fn hand_over(
     );
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
-        body: "brief not delivered".to_string(),
+        body: shprd_views::cards::BRIEF_LOST.to_string(),
         default_action: "resend the brief".to_string(),
     };
     if let Err(err) = env.ctx.commit(escalation) {
@@ -2015,6 +2015,27 @@ pub(crate) fn prompt_in(
     let pane = task_pane(mux, home, ctx, task)?;
     mux.write(&pane, text, true)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// Types the latest attempt's brief into the agent's terminal again.
+///
+/// It is the resend the lost-brief warning names — `shprd agent prompt --task T
+/// "$(cat <brief>)"` — as one call, for the board's Resend button.
+pub(crate) fn resend_brief(
+    mux: &dyn Host,
+    home: &Path,
+    ctx: &Ctx,
+    task: &str,
+) -> Result<String, CliError> {
+    let run = active_run(ctx)?;
+    let briefs = home.join(".shprd").join("briefs");
+    let record = latest_tab_record(&briefs, &run, task).ok_or_else(|| no_open_tab(task))?;
+    let brief = record.with_extension("md");
+    let text = std::fs::read_to_string(&brief).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("reading {}", brief.display())))
+    })?;
+    prompt_in(mux, home, ctx, task, &text)?;
+    Ok(format!("brief delivered to {task}"))
 }
 
 /// The pane a task's agent runs in, resolved by the one path a prompt, a chat

@@ -33,10 +33,10 @@ mods_for() {
     tree.js) echo "shprd-spaces shprd-agents shprd-tasks" ;;
     accept.js) echo "shprd-accept shprd-toasts" ;;
     taskpr.js) echo "shprd-task-pr" ;;
-    tabstrip.js) echo "shprd-tabs shprd-menu shprd-new-menu shprd-pane" ;;
+    tabstrip.js) echo "shprd-tabs shprd-menu shprd-new-menu shprd-pane shprd-tasks" ;;
     toasts.js) echo "shprd-toasts" ;;
     settings.js) echo "shprd-settings" ;;
-    menu.js) echo "shprd-menu shprd-new-menu shprd-pane shprd-tabs" ;;
+    menu.js) echo "shprd-menu shprd-new-menu shprd-pane shprd-tabs shprd-tasks" ;;
     jump.js) echo "shprd-jump" ;;
     keybinds.js) echo "shprd-keybinds" ;;
     asks.js) echo "shprd-chat" ;;

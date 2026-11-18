@@ -757,6 +757,75 @@ fn with_a_working_task() -> Fixture {
 }
 
 #[tokio::test]
+async fn a_resend_delivers_the_brief_again_and_clears_the_lost_brief_card() {
+    let fixture = with_a_working_task();
+    append(
+        &fixture,
+        EventKind::Escalated {
+            task: Some("T1".to_string()),
+            body: "brief not delivered".to_string(),
+            default_action: "resend the brief".to_string(),
+        },
+    );
+    let sent: Calls = Arc::default();
+    let seen = Arc::clone(&sent);
+    let engine = Engine::new(Arc::new(|_repo: &Path, _task: &str| Ok(String::new()))).with_resend(
+        Arc::new(move |repo: &Path, task: &str| {
+            seen.lock()
+                .expect("the lock")
+                .push((repo.display().to_string(), task.to_string()));
+            Ok("delivered".to_string())
+        }),
+    );
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let before = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(before.json()["needs"].as_array().map(Vec::len), Some(1));
+    let reply = fixture
+        .act(json!({"kind": "task.resend_brief", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(calls(&sent).len(), 1);
+    let after = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(
+        after.json()["needs"].as_array().map(Vec::len),
+        Some(0),
+        "the card clears once the brief went: {}",
+        after.json()
+    );
+    let unknown = fixture
+        .act(json!({"kind": "task.resend_brief", "task": "T9"}))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_resend_without_a_host_is_refused_and_the_card_stays() {
+    let fixture = with_a_working_task();
+    append(
+        &fixture,
+        EventKind::Escalated {
+            task: Some("T1".to_string()),
+            body: "brief not delivered".to_string(),
+            default_action: "resend the brief".to_string(),
+        },
+    );
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.resend_brief", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    let after = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(after.json()["needs"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
 async fn a_stop_of_a_working_task_moves_to_needs_you_and_a_retry_is_allowed() {
     // Bug 1 of the M10 gate: the stop closed the space and wrote nothing, so the
     // task read Working for ever and every retry was refused with "attempt 1

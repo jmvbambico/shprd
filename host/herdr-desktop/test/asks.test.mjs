@@ -237,3 +237,14 @@ test("a card about no task names the run instead of a blank reference", () => {
   assert.equal(shown.task, null, "a card about no task names the run instead");
   assert.equal(shown.title, KIND.escalation);
 });
+
+test("a lost brief's card has a Resend button that posts task.resend_brief", () => {
+  const state = { needs: [{ task: "T1", body: "brief not delivered", default_action: "resend the brief", seq: 3 }] };
+  const [card] = cards(state, { asks: [] });
+  assert.deepEqual(card.action, { kind: "task.resend_brief", task: "T1" });
+  assert.equal(card.actionLabel, "Resend");
+  assert.equal(footer(card), "resend the brief");
+  // A review's lost kickoff is a different card with its own fix: no button.
+  const other = cards({ needs: [{ task: "T1", body: "review brief not delivered", default_action: "x", seq: 4 }] }, { asks: [] })[0];
+  assert.equal(other.action, null);
+});
