@@ -66,4 +66,13 @@ attempts: Array<AttemptDto>,
  * landing merges the branch into its base and opens nothing, so a card
  * that drew a pull request row for it would be inventing one.
  */
-pr?: TaskPrDto, };
+pr?: TaskPrDto, 
+/**
+ * The id of the space this task belongs to (`spaces[].id`): the one
+ * repository this service serves.
+ */
+space?: string, 
+/**
+ * A short group word for the Graph view, from a `phase:<word>` tag.
+ */
+phase?: string, };

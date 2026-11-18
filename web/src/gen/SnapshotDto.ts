@@ -2,8 +2,10 @@
 import type { AgentDto } from "./AgentDto";
 import type { AskDto } from "./AskDto";
 import type { LastTickDto } from "./LastTickDto";
+import type { LiveAgentDto } from "./LiveAgentDto";
 import type { NeedDto } from "./NeedDto";
 import type { RunDto } from "./RunDto";
+import type { SpaceDto } from "./SpaceDto";
 import type { TaskDto } from "./TaskDto";
 
 /**
@@ -52,4 +54,13 @@ asks: Array<AskDto>,
 /**
  * Whether the run has finished.
  */
-finished: boolean, };
+finished: boolean, 
+/**
+ * The spaces the sidebar's tree draws: one per repository this service
+ * serves.
+ */
+spaces: Array<SpaceDto>, 
+/**
+ * The agents the host has, headless: no tab and no space of their own.
+ */
+live_agents: Array<LiveAgentDto>, };

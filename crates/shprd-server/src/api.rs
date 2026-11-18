@@ -201,6 +201,8 @@ pub(crate) struct AppState {
     /// tick's spawn path. A service without one refuses `POST /api/agents`
     /// rather than pretending a tab exists.
     pub(crate) agents: crate::agents::Agents,
+    /// The agents the host lists, headless, for `live_agents`.
+    pub(crate) live: crate::live::LiveAgents,
     /// The home and data home the agent CLIs run with, when the caller resolved
     /// them.
     ///
@@ -373,6 +375,7 @@ impl App {
             chat: ChatHost::new(),
             terminal: crate::terminal::TerminalPort::new(),
             agents: crate::agents::Agents::new(),
+            live: crate::live::LiveAgents::new(),
             transcript_roots: paths.transcript_roots,
             web: crate::web::Source::Embedded,
             tunnels,
@@ -621,6 +624,24 @@ impl App {
         self
     }
 
+    /// List agents through `source`, for `live_agents` and the agent routes.
+    pub fn with_live_source(self, source: Arc<dyn crate::live::LiveSource>) -> Self {
+        self.with_live_opt(Some(source))
+    }
+
+    /// [`App::with_live_source`], for a caller that may not have one.
+    pub(crate) fn with_live_opt(
+        mut self,
+        source: Option<Arc<dyn crate::live::LiveSource>>,
+    ) -> Self {
+        self.state.live = match source {
+            Some(source) => crate::live::LiveAgents::with(source),
+            None => crate::live::LiveAgents::new(),
+        };
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Serve the web app from `dir` instead of the build embedded in the binary.
     ///
     /// Production always embeds `web/dist`; a test passes a temp directory
@@ -706,6 +727,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/settings", get(settings).put(put_settings))
         .route("/api/roster", get(roster))
         .route("/api/agents", post(open_agent))
+        .route("/api/agents/{id}/output", get(agent_output))
+        .route("/api/agents/{id}/attach", post(agent_attach))
         .route("/api/prompts", get(list_prompts))
         .route(
             "/api/prompts/{id}",
@@ -773,6 +796,10 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     let (folded, _) = folded.map_err(|err| ApiReject::internal(err.to_string()))?;
     let mut snapshot = SnapshotDto::from_state(&folded, SystemClock.now_ms());
     snapshot.last_tick = last.as_ref().map(crate::dto::LastTickDto::from);
+    // The host is asked off the runtime: a host call blocks on its own.
+    let live = state.live.clone();
+    let rows = blocking(move || live.rows()).await?;
+    crate::live::decorate(&mut snapshot, &state.repo, rows);
     Ok(Json(snapshot))
 }
 
@@ -1056,6 +1083,29 @@ async fn open_agent(
     let agents = state.agents.clone();
     let opened = blocking(move || agents.open(&body)).await?;
     Ok(Json(AgentTabDto::from(opened?)))
+}
+
+/// `GET /api/agents/{id}/output?lines=N`: one agent's recent screen.
+async fn agent_output(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<crate::dto::AgentOutputDto>, ApiReject> {
+    let lines = query
+        .get("lines")
+        .and_then(|lines| lines.parse::<usize>().ok())
+        .unwrap_or(120);
+    let live = state.live.clone();
+    Ok(Json(blocking(move || live.output(&id, lines)).await??))
+}
+
+/// `POST /api/agents/{id}/attach`: what to bind a real terminal to.
+async fn agent_attach(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<crate::dto::AgentAttachDto>, ApiReject> {
+    let live = state.live.clone();
+    Ok(Json(blocking(move || live.attach(&id)).await??))
 }
 
 /// `GET /api/roster`: the programs a role may run, with their models and levels.

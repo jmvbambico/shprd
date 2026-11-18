@@ -65,6 +65,8 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
             .collect(),
         asks: open_asks(state, now_ms),
         finished: state.finished,
+        spaces: Vec::new(),
+        live_agents: Vec::new(),
     }
 }
 
@@ -153,6 +155,13 @@ pub(crate) fn task_of(state: &RunState, task: &shprd_core::state::Task, now_ms: 
         }),
         attempts: task.attempts.iter().map(attempt).collect(),
         pr: task.pr.as_ref().map(task_pr),
+        space: None,
+        phase: task
+            .tags
+            .iter()
+            .find_map(|tag| tag.strip_prefix("phase:"))
+            .map(|word| word.trim().to_string())
+            .filter(|word| !word.is_empty()),
     }
 }
 

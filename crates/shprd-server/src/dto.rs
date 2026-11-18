@@ -287,6 +287,15 @@ pub struct TaskDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pr: Option<TaskPrDto>,
+    /// The id of the space this task belongs to (`spaces[].id`): the one
+    /// repository this service serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub space: Option<String>,
+    /// A short group word for the Graph view, from a `phase:<word>` tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
 }
 
 /// Whether a task's pull request has been merged.
@@ -622,6 +631,87 @@ pub struct SnapshotDto {
     pub asks: Vec<AskDto>,
     /// Whether the run has finished.
     pub finished: bool,
+    /// The spaces the sidebar's tree draws: one per repository this service
+    /// serves.
+    #[serde(default)]
+    pub spaces: Vec<SpaceDto>,
+    /// The agents the host has, headless: no tab and no space of their own.
+    #[serde(default)]
+    pub live_agents: Vec<LiveAgentDto>,
+}
+
+/// One space of the sidebar's tree: a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "SpaceDto.ts")]
+pub struct SpaceDto {
+    /// Its id, which a task's `space` and an agent's `space` name.
+    pub id: String,
+    /// The repository folder's name.
+    pub name: String,
+    /// The repository's path.
+    pub folder: String,
+    /// The branch the run integrates into, `""` before a run starts.
+    pub branch: String,
+}
+
+/// One agent the host has: a worker, a reviewer, or the coordinator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "LiveAgentDto.ts")]
+pub struct LiveAgentDto {
+    /// The id `GET /api/agents/{id}/output` takes.
+    pub id: String,
+    /// The space it belongs to (`spaces[].id`).
+    pub space: String,
+    /// The task it works on; `null` for the coordinator.
+    pub task: Option<String>,
+    /// `worker`, `reviewer` or `coordinator`.
+    pub role: String,
+    /// The harness id of its program, e.g. `claude`.
+    pub program: String,
+    /// `working`, `needs_you`, `idle` or `done`.
+    pub state: String,
+    /// The host's id for its terminal: a window binds a terminal block to it, the
+    /// web app opens a socket on it.
+    pub terminal: String,
+    /// When it started, ms since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub started_ms: Option<u64>,
+    /// When its program ended, when it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ended_ms: Option<u64>,
+    /// When it entered its current state, ms since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub since_ms: Option<u64>,
+}
+
+/// What `GET /api/agents/{id}/output` answers: the agent's recent screen.
+///
+/// It is the read-only fallback for a client that cannot bind a terminal; a
+/// finished agent's output stays readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AgentOutputDto.ts")]
+pub struct AgentOutputDto {
+    /// The agent's id.
+    pub id: String,
+    /// Whether its program is still running.
+    pub live: bool,
+    /// The last lines of its screen.
+    pub text: String,
+}
+
+/// What `POST /api/agents/{id}/attach` answers: what to bind a real terminal to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "AgentAttachDto.ts")]
+pub struct AgentAttachDto {
+    /// The agent's id.
+    pub id: String,
+    /// The host's id for its terminal.
+    pub terminal: String,
+    /// The route that types into it: `GET /api/terminal` with this query.
+    pub socket: String,
 }
 
 impl SnapshotDto {
@@ -1588,6 +1678,10 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<NewTaskDto>()?,
         one::<AgentOpenDto>()?,
         one::<AgentTabDto>()?,
+        one::<SpaceDto>()?,
+        one::<LiveAgentDto>()?,
+        one::<AgentOutputDto>()?,
+        one::<AgentAttachDto>()?,
         one::<FileChangeDto>()?,
         one::<CommitDto>()?,
         one::<TaskChangesDto>()?,

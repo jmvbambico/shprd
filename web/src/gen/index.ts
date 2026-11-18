@@ -2,8 +2,10 @@
 
 export * from "./Action";
 export * from "./ActionReply";
+export * from "./AgentAttachDto";
 export * from "./AgentDto";
 export * from "./AgentOpenDto";
+export * from "./AgentOutputDto";
 export * from "./AgentTabDto";
 export * from "./AnswerAsk";
 export * from "./AskDto";
@@ -33,6 +35,7 @@ export * from "./GateDto";
 export * from "./GraphDto";
 export * from "./HealthDto";
 export * from "./LastTickDto";
+export * from "./LiveAgentDto";
 export * from "./LoginFailure";
 export * from "./LoginReply";
 export * from "./LoginRequest";
@@ -66,6 +69,7 @@ export * from "./SettingsValueDto";
 export * from "./SettingsWriteDto";
 export * from "./SeverityDto";
 export * from "./SnapshotDto";
+export * from "./SpaceDto";
 export * from "./TaskChangesDto";
 export * from "./TaskDerivedDto";
 export * from "./TaskDto";
