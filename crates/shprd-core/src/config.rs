@@ -169,7 +169,8 @@ pub struct Gates {
 pub struct Review {
     /// The least severe finding that still blocks integration.
     pub must_fix: Severity,
-    /// Failed review rounds allowed before the review escalates to a human.
+    /// Failed review rounds allowed before the review escalates to a human; 0
+    /// turns review off (no review is asked for).
     pub rounds: u32,
 }
 
@@ -690,12 +691,6 @@ impl Config {
                 reason: format!("must end with '/', got {namespace:?}"),
             });
         }
-        if self.review.rounds < 1 {
-            return Err(ConfigError::Invalid {
-                field: "review.rounds",
-                reason: format!("must be at least 1, got {}", self.review.rounds),
-            });
-        }
         if self.tick.max_running < 1 {
             return Err(ConfigError::Invalid {
                 field: "tick.max_running",
@@ -1078,16 +1073,10 @@ mod tests {
     }
 
     #[test]
-    fn zero_review_rounds_is_invalid() {
+    fn zero_review_rounds_is_valid_and_means_review_is_off() {
         let mut config = Config::default();
         config.review.rounds = 0;
-        match config.validate() {
-            Err(ConfigError::Invalid { field, reason }) => {
-                assert_eq!(field, "review.rounds");
-                assert!(reason.contains('0'), "reason names the value: {reason}");
-            }
-            other => panic!("expected a review.rounds refusal, got {other:?}"),
-        }
+        assert!(config.validate().is_ok(), "0 is Off, not an error");
     }
 
     #[test]
