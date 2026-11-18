@@ -173,6 +173,12 @@ export function GraphScreen({ client }: { client: ApiClient }) {
             </span>{" "}
             Done
           </li>
+          <li className="tone-neutral graph-legend-dropped">
+            <span className="graph-dot" aria-hidden="true">
+              ●
+            </span>{" "}
+            Dropped
+          </li>
           <li className="graph-legend-badges">a2 ◆ verified</li>
         </ul>
       </header>

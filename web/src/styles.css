@@ -610,6 +610,10 @@ input {
   gap: 4px;
 }
 
+.graph-legend-dropped {
+  text-decoration: line-through;
+}
+
 .graph-legend-badges {
   font-family: var(--font-mono);
   color: var(--h-dim);
