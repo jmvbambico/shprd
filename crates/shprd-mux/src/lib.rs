@@ -218,6 +218,29 @@ pub trait Host: Send + Sync {
         Err(MuxError::Unsupported("closing a pane"))
     }
 
+    /// The name of every tab in `space`, mod-only tabs included, with its id.
+    ///
+    /// [`Host::list_tabs`] lists only tabs a program runs in. This is for the
+    /// question "is that name taken?", which another product's tab answers too:
+    /// the default is the listed tabs' titles.
+    fn tab_names(&self, space: &SpaceId) -> Result<Vec<(TabId, String)>> {
+        Ok(self
+            .list_tabs(space)?
+            .into_iter()
+            .map(|tab| (tab.id, tab.title))
+            .collect())
+    }
+
+    /// Show the agent in `pane` as a chat over `chat_space`'s conversation, in
+    /// the pane's own place: the chat takes the pane's spot and the terminal
+    /// keeps running behind it, one switch away (Shepherdr's Chat · Terminal).
+    ///
+    /// A host with no window answers [`MuxError::Unsupported`], and the agent
+    /// stays a plain terminal tab.
+    fn show_chat(&self, _pane: &PaneId, _chat_space: &str) -> Result<()> {
+        Err(MuxError::Unsupported("showing a chat"))
+    }
+
     /// Type `text` into `pane`, submitting it (pressing enter) when `submit`.
     ///
     /// With `submit`, this is one turn of input for an agent and one line for a
@@ -424,6 +447,14 @@ macro_rules! forward_a_wrapper {
 
                 fn close_pane(&self, pane: &PaneId) -> Result<()> {
                     (**self).close_pane(pane)
+                }
+
+                fn tab_names(&self, space: &SpaceId) -> Result<Vec<(TabId, String)>> {
+                    (**self).tab_names(space)
+                }
+
+                fn show_chat(&self, pane: &PaneId, chat_space: &str) -> Result<()> {
+                    (**self).show_chat(pane, chat_space)
                 }
 
                 fn write(&self, pane: &PaneId, text: &str, submit: bool) -> Result<()> {

@@ -91,6 +91,18 @@ const ROLE_LABEL: &str = "herdr.role";
 const TASK_SPACE_LABEL: &str = "herdr.task.space";
 /// The label naming the coordinator tab an agent reports to.
 const COORDINATOR_LABEL: &str = "herdr.coordinator";
+/// The tab id shprd gives the coordinator's tab.
+///
+/// Fixed and its own: the window makes a tab whose id is exactly the label, and
+/// a tab's *name* (what a person reads) is chosen separately, so the id can
+/// never be mistaken for another product's tab of the same name (Shepherdr's
+/// "Assistant").
+pub const COORDINATOR_TAB: &str = "shprd-coordinator";
+/// The mod a chat pane is (`mods/shprd-chat`).
+const CHAT_MOD: &str = "shprd-chat";
+/// The label a parked agent carries, naming the chat pane that shows it
+/// (`mods/lib/chat.js` `PARK_LABEL`).
+const PARK_LABEL: &str = "shprd.chat";
 /// What a headless agent's handle starts with: the rest is its terminal's
 /// address, and closing the handle kills that terminal.
 const HANDLE_PREFIX: &str = "term:";
@@ -952,6 +964,77 @@ impl Host for HcHost {
             .collect())
     }
 
+    /// Every tab's id and name from the layout, mod-only tabs included.
+    fn tab_names(&self, space: &SpaceId) -> Result<Vec<(TabId, String)>> {
+        let found = self.space_with(space.as_str(), "space")?;
+        Ok(found
+            .tabs
+            .iter()
+            .map(|tab| (TabId::new(tab.id.clone()), tab.name.clone()))
+            .collect())
+    }
+
+    /// Chat · Terminal, done as the pane header's own switch does it
+    /// (`mods/shprd-pane` `toChat`): split the chat mod in beside the agent's
+    /// pane, label the agent's terminal with the chat's pane, then park the
+    /// terminal — last, because parking removes its pane. The chat carries the
+    /// terminal in its props, so the tab still names its agent.
+    fn show_chat(&self, pane: &PaneId, chat_space: &str) -> Result<()> {
+        if !self.window_attached() {
+            return Err(MuxError::unsupported("showing a chat"));
+        }
+        // The window draws a placed terminal a moment after it starts.
+        let started = std::time::Instant::now();
+        let target = loop {
+            self.refresh_layout()?;
+            if let Some(target) = self.pane_of(pane.as_str()) {
+                break target;
+            }
+            if started.elapsed() >= PLACE_TIMEOUT {
+                return Err(MuxError::not_found("pane", pane.as_str()));
+            }
+            std::thread::sleep(PLACE_POLL);
+        };
+        let props = json!({"space": chat_space, "terminal": pane.as_str()}).to_string();
+        let made = self.window_call(
+            "pane.split",
+            &[
+                ("--direction", "right"),
+                ("--pane", &target),
+                ("--mod", CHAT_MOD),
+                ("--props", &props),
+            ],
+            "opening a chat",
+        )?;
+        let chat = made
+            .get("pane")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                MuxError::command(
+                    "opening a chat",
+                    format!("the window answered without a pane: {made}"),
+                )
+            })?
+            .to_string();
+        let mut labels = Map::new();
+        labels.insert(
+            PARK_LABEL.to_string(),
+            Value::String(model::bare(&chat).to_string()),
+        );
+        self.call_object(
+            "terminal.label",
+            json!({"terminal": pane.as_str(), "labels": labels}),
+            "terminal",
+            pane.as_str(),
+        )?;
+        self.window_call(
+            "terminal.park",
+            &[("--terminal", pane.as_str())],
+            "parking a terminal",
+        )?;
+        Ok(())
+    }
+
     fn rename_tab(&self, tab: &TabId, title: &str) -> Result<()> {
         let (_, found) = self.tab_with(tab.as_str())?;
         self.window_call(
@@ -1027,7 +1110,8 @@ impl Host for HcHost {
             labels.insert(placement::TASK_LABEL.to_string(), task.to_string());
         }
         if launch.role == AgentRole::Coordinator {
-            let tab = tab_label(launch.title);
+            // The tab's id is shprd's own; the title is only its name.
+            let tab = COORDINATOR_TAB.to_string();
             labels.extend(Placement::new(launch.space.as_str(), &tab).labels());
             let address = self.run_terminal(
                 launch.title,

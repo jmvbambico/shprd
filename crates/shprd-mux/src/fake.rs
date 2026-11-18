@@ -66,6 +66,8 @@ pub enum Call {
     Split(PaneId, Direction, f32, PathBuf),
     /// `close_pane(pane)`.
     ClosePane(PaneId),
+    /// `show_chat(pane, chat_space)`.
+    ShowChat(PaneId, String),
     /// `write(pane, text, submit)`.
     Write(PaneId, String, bool),
     /// `keys(pane, keys)`.
@@ -473,6 +475,26 @@ impl FakeMux {
         }
     }
 
+    /// Script a tab with a chosen id, as a window gives a tab made from a label.
+    pub fn with_tab_id(&self, space: &WorkspaceId, id: &str, title: &str) -> Tab {
+        let Ok(mut inner) = self.lock() else {
+            return Tab {
+                id: TabId::new(id),
+                title: title.to_string(),
+                root_pane: PaneId::new("pane-unavailable"),
+            };
+        };
+        let mut tab = inner.new_tab(space, title);
+        let old = tab.id.clone();
+        tab.id = TabId::new(id);
+        for (_, existing) in inner.tabs.iter_mut() {
+            if existing.id == old {
+                existing.id = tab.id.clone();
+            }
+        }
+        tab
+    }
+
     /// Every call made so far, oldest first.
     pub fn calls(&self) -> Vec<Call> {
         self.lock()
@@ -875,6 +897,14 @@ impl Host for FakeMux {
         }
         inner.require_pane(pane)?;
         Ok(inner.new_pane())
+    }
+
+    fn show_chat(&self, pane: &PaneId, chat_space: &str) -> Result<()> {
+        let mut inner = self.lock()?;
+        inner
+            .calls
+            .push(Call::ShowChat(pane.clone(), chat_space.to_string()));
+        inner.require_pane(pane)
     }
 
     fn close_pane(&self, pane: &PaneId) -> Result<()> {
