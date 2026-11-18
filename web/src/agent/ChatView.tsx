@@ -15,11 +15,13 @@ import {
   WORDS,
   emptyWords,
   folding,
-  messageKey,
   mine,
+  timeline,
   toolLine,
   when,
 } from "./chatModel";
+import { AskCard } from "../tasks/AskCard";
+import type { Card } from "../tasks/asks";
 import { renderMarkdown } from "./markdown";
 import { useChat } from "./useChat";
 
@@ -28,6 +30,10 @@ export interface ChatViewProps {
   client: ApiClient;
   /** `coordinator` or a task id. */
   space: string;
+  /** The cards waiting for an answer in this space, shown among the messages. */
+  cards?: Card[];
+  /** An answer to a card went through: the board should be read again. */
+  onAnswered?: () => Promise<void> | void;
 }
 
 /** The composer's hint, by whose chat this is. */
@@ -36,7 +42,7 @@ export function placeholderFor(space: string): string {
 }
 
 /** One space's chat. */
-export function ChatView({ client, space }: ChatViewProps) {
+export function ChatView({ client, space, cards = [], onAnswered }: ChatViewProps) {
   const { loading, chat, failure, refusal, sending, send, retry } = useChat(client, space);
   const [draft, setDraft] = useState("");
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -50,13 +56,15 @@ export function ChatView({ client, space }: ChatViewProps) {
     pinned.current = true;
   }, [space]);
 
+  const rows = useMemo(() => timeline(chat, cards), [chat, cards]);
+
   // Stay at the newest message unless the person scrolled up to read.
   useEffect(() => {
     const el = scroller.current;
     if (el && pinned.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [chat.messages.length, space]);
+  }, [rows.length, space]);
 
   function toggle(key: string) {
     setOpened((now) => {
@@ -105,23 +113,28 @@ export function ChatView({ client, space }: ChatViewProps) {
           <p className="chat-empty" role="status" aria-busy="true">
             Reading the conversation…
           </p>
-        ) : chat.messages.length === 0 ? (
+        ) : rows.length === 0 ? (
           <div className="chat-empty" data-state="empty">
             <p className="chat-empty-title">{WORDS.emptyTitle}</p>
             <p className="chat-empty-note">{emptyWords(space)}</p>
           </div>
         ) : (
-          <>
-            {!chat.more ? <p className="chat-top">{WORDS.top}</p> : null}
-            {chat.messages.map((message) => (
+          rows.map((row) =>
+            row.kind === "top" ? (
+              <p key={row.key} className="chat-top">
+                {WORDS.top}
+              </p>
+            ) : row.kind === "card" ? (
+              <AskCard key={row.key} client={client} card={row.card} onAnswered={async () => void (await onAnswered?.())} />
+            ) : (
               <Bubble
-                key={messageKey(message) + String(message.at_ms)}
-                message={message}
-                open={opened.has(messageKey(message))}
-                onToggle={() => toggle(messageKey(message))}
+                key={row.key + String(row.message.at_ms)}
+                message={row.message}
+                open={opened.has(row.key)}
+                onToggle={() => toggle(row.key)}
               />
-            ))}
-          </>
+            ),
+          )
         )}
       </div>
 

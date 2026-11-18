@@ -1,7 +1,7 @@
 // The app shell: one column on a phone, two on a tablet, three on a desktop.
 //
-// M11.4–M11.7 fill the screens; this task ships their placeholders, the
-// navigation, and the frame the screens will live in.
+// Every screen is real: the shell owns the navigation, the open thread and the
+// dialogs over them.
 
 import { useCallback, useState } from "react";
 
@@ -21,26 +21,6 @@ import type { Toast } from "../tasks/toasts";
 import { ToastStack } from "../tasks/ToastStack";
 import { useBoard } from "../tasks/useBoard";
 import { Login } from "./Login";
-
-/** What one screen's placeholder says: which milestone fills it. */
-const PLACEHOLDER: Record<Exclude<Screen, "tasks">, { lead: string; note: string }> = {
-  graph: {
-    lead: "The graph lands here.",
-    note: "M11.5: the run document the dagr block draws, as a graph.",
-  },
-  terminal: {
-    lead: "The terminal lands here.",
-    note: "M11.6: watch a task's agent by default, type on demand.",
-  },
-  chat: {
-    lead: "The coordinator chat lands here.",
-    note: "M11.6: the same conversation the Herdr space shows.",
-  },
-  settings: {
-    lead: "Settings land here.",
-    note: "M11.7: agents, roles, prompts, and Remote (tunnels, sessions, QR).",
-  },
-};
 
 /** What the shell needs from the app above it. */
 export interface ShellProps {
@@ -66,7 +46,6 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
   const [agentSpace, setAgentSpace] = useState<string>(COORDINATOR);
   const screen = selected === "settings" ? under : selected;
   const settingsOpen = selected === "settings";
-  const placeholder = screen === "tasks" ? null : PLACEHOLDER[screen];
   const board = useBoard(client);
   // The task whose thread is open, and the one whose Accept card is.
   const [thread, setThread] = useState<string | null>(null);
@@ -119,7 +98,6 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
           <span className="brand-mark" aria-hidden="true" />
           <span className="brand-word">shprd</span>
         </span>
-        {layout === "desktop" ? <span className="topbar-note">M11 web app · scaffold</span> : null}
         <button className="quiet" type="button" onClick={signOut}>
           Sign out
         </button>
@@ -154,18 +132,7 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
           ) : (
             <TasksScreen client={client} board={board} onOpen={openThread} onReview={setAccepting} />
           )
-        ) : (
-          <section className="card placeholder" data-screen={screen}>
-            <p className="placeholder-kicker">{SCREEN_LABEL[screen]}</p>
-            <h1 id="screen-heading" className="placeholder-lead">
-              {placeholder?.lead}
-            </h1>
-            <p className="placeholder-note">{placeholder?.note}</p>
-            <p className="placeholder-empty">
-              Nothing to show yet — this build has no run to draw here.
-            </p>
-          </section>
-        )}
+        ) : null}
       </main>
 
       {layout === "desktop" ? (
