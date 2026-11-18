@@ -2207,9 +2207,16 @@ pub(crate) fn ensure_coordinator(
     defer: impl FnOnce(PendingPrompt),
 ) -> Result<CoordinatorStart, CliError> {
     let space = &prepared.space;
+    // What older shprd left behind goes first: a coordinator in a bare terminal
+    // tab is replaced by the chat tab, never kept beside it.
+    tidy_old_coordinator_tabs(mux, space);
     if let Some(pane) = recorded_coordinator_pane(&env.home, mux, space) {
         return Ok(CoordinatorStart::Running(pane));
     }
+    // No coordinator is running, so a tab of ours that still holds a finished
+    // one is cleared: the new agent takes the tab's place, not a second pane.
+    close_own_tabs(mux, space, &[COORDINATOR_TAB]);
+    let title = assistant_title(mux, space);
     let role = env.settings.resolve(None).role(COORDINATOR_ROLE);
     let candidates = role_candidates(role.as_ref(), &env.workers);
     let mut pick = choose_agent(None, &candidates, &env.programs)?;
@@ -2259,7 +2266,7 @@ pub(crate) fn ensure_coordinator(
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
-            title: COORDINATOR_TITLE,
+            title: &title,
             argv: &argv,
             env: &pairs,
             cwd: &env.ctx.root,
@@ -2279,6 +2286,14 @@ pub(crate) fn ensure_coordinator(
         for starter in starters {
             close_tab(mux, &starter.id);
         }
+    }
+    // The tab shows the coordinator as a chat with the terminal one switch
+    // away, as Shepherdr's Assistant does. A host with no window keeps the
+    // plain terminal tab, and so does a window that cannot do it: the agent
+    // runs and takes news either way.
+    match mux.show_chat(&tab.root_pane, "coordinator") {
+        Ok(()) | Err(shprd_mux::MuxError::Unsupported(_)) => {}
+        Err(err) => eprintln!("warning: the coordinator's chat did not open: {err}"),
     }
     // A program with no system-prompt flag is given its words as its first turn,
     // once it is ready; one that took them as an argument is left to wait. The
@@ -2332,8 +2347,55 @@ impl PendingPrompt {
 /// The settings role the repository's coordinator agent runs as.
 const COORDINATOR_ROLE: &str = "coordinator";
 
-/// The title of the coordinator's tab.
-const COORDINATOR_TITLE: &str = "coordinator";
+/// What the coordinator's tab is called, as Shepherdr calls its own.
+const ASSISTANT_TITLE: &str = "Assistant";
+
+/// The name shprd's tab takes when another product already has an "Assistant"
+/// in the space.
+const ASSISTANT_FALLBACK_TITLE: &str = "shprd";
+
+/// The id the coordinator's tab had before the chat tab: its title, as a label.
+const OLD_COORDINATOR_TAB: &str = "coordinator";
+
+use shprd_mux_hc::host::COORDINATOR_TAB;
+
+/// The name for the coordinator's tab: "Assistant", unless a tab of that name
+/// that is not shprd's own is already in the space (Shepherdr adds one to every
+/// space), in which case "shprd". Another product's tab is never renamed.
+fn assistant_title(mux: &dyn Host, space: &shprd_mux::Space) -> String {
+    let taken = mux
+        .tab_names(&space.id)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|(id, name)| {
+            let own = matches!(id.as_str(), COORDINATOR_TAB | OLD_COORDINATOR_TAB);
+            !own && name.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
+        });
+    if taken {
+        ASSISTANT_FALLBACK_TITLE
+    } else {
+        ASSISTANT_TITLE
+    }
+    .to_string()
+}
+
+/// Closes the space's tabs whose id is exactly one of `ids`: tabs shprd made
+/// itself, named by the ids it gives them and never by a title a person or
+/// another product could have chosen.
+fn close_own_tabs(mux: &dyn Host, space: &shprd_mux::Space, ids: &[&str]) {
+    for tab in mux.list_tabs(&space.id).unwrap_or_default() {
+        if ids.contains(&tab.id.as_str()) {
+            close_tab(mux, &tab.id);
+        }
+    }
+}
+
+/// Removes the coordinator tab older shprd versions made: a bare terminal in a
+/// tab whose id is `coordinator`. Only that id, in shprd's own space; a tab
+/// with any other id is left alone, whatever it is called.
+fn tidy_old_coordinator_tabs(mux: &dyn Host, space: &shprd_mux::Space) {
+    close_own_tabs(mux, space, &[OLD_COORDINATOR_TAB]);
+}
 
 /// The pane a run's coordinator may be typed into, when one is reachable.
 ///
@@ -3450,7 +3512,13 @@ project_dirs = []
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
         assert_eq!(tabs[0].root_pane, pane);
-        assert_eq!(tabs[0].title, COORDINATOR_TITLE);
+        assert_eq!(tabs[0].title, ASSISTANT_TITLE);
+        assert!(
+            mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::ShowChat(shown, space) if *shown == pane && space == "coordinator")),
+            "the coordinator is shown as a chat"
+        );
 
         // A restart: the space is there, the coordinator is running.
         let again = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
@@ -3478,6 +3546,48 @@ project_dirs = []
             matches!(replaced, CoordinatorStart::Started(_)),
             "{replaced:?}"
         );
+    }
+
+    /// A tab named "Assistant" that shprd did not make is another product's: the
+    /// coordinator's tab takes another name beside it, and nothing of the other
+    /// tab is renamed or closed. An older shprd's `coordinator` tab is replaced.
+    #[test]
+    fn another_products_assistant_tab_is_left_alone_and_the_old_tab_goes() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let foreign = mux.with_tab_id(&prepared.space.id, "tb42", "Assistant");
+        let elsewhere = mux.with_tab_id(&prepared.space.id, "tb43", "coordinator");
+        let old = mux.with_tab_id(&prepared.space.id, OLD_COORDINATOR_TAB, "coordinator");
+        let _ = mux.take_calls();
+
+        ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let tabs = mux
+            .list_tabs(&prepared.space.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let titled = |title: &str| tabs.iter().filter(|tab| tab.title == title).count();
+        assert_eq!(titled("Assistant"), 1, "only the other product's: {tabs:?}");
+        assert_eq!(titled("shprd"), 1, "shprd's own tab takes another name");
+        assert!(tabs.iter().any(|tab| tab.id == foreign.id), "{tabs:?}");
+        assert!(
+            tabs.iter().any(|tab| tab.id == elsewhere.id),
+            "a tab that only shares the old name is not shprd's to close"
+        );
+        assert!(!tabs.iter().any(|tab| tab.id == old.id), "the old tab went");
+        let closed: Vec<_> = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::CloseTab(tab) => Some(tab),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closed, vec![old.id], "nothing else was closed");
     }
 
     /// News and chat are never typed into a shell: a record without the agent
