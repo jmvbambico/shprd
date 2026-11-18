@@ -151,12 +151,18 @@ impl Layout {
 
 /// True when `pattern` can be the tail of a branch name once its tokens are
 /// filled in: non-empty, no whitespace or characters git refuses, no empty,
-/// dotted or `.lock` components.
+/// dotted or `.lock` components, and a `{task}` or `{slug}` so two tasks never
+/// share a branch.
 fn valid_pattern(pattern: &str) -> bool {
     if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
         return false;
     }
     if pattern.contains("..") || pattern.contains("//") || pattern.contains("@{") {
+        return false;
+    }
+    // Two tasks must never share a branch: the id or its slug has to be in the
+    // name (`{n}` alone is the same for `T1` and `SHPR-1`).
+    if !pattern.contains("{task}") && !pattern.contains("{slug}") {
         return false;
     }
     let mut rest = pattern.to_owned();
@@ -743,7 +749,18 @@ mod tests {
 
     #[test]
     fn a_pattern_git_would_refuse_is_ignored() {
-        for bad in ["a b", "x..y", "/x", "x/", "a:{n}", "{n}.lock", "a~b"] {
+        for bad in [
+            "a b",
+            "x..y",
+            "/x",
+            "x/",
+            "a:{task}",
+            "{task}.lock",
+            "a~{task}",
+            "fixed",
+            "{n}",
+            "{run}",
+        ] {
             let layout = Layout::default_for_home("/h").with_settings("shprd/", bad);
             assert_eq!(layout.branch_name("r", "T1"), "shprd/r/T1", "{bad}");
         }

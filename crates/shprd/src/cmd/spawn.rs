@@ -1932,7 +1932,7 @@ fn build_env_with<'a>(
     let transcript_roots = shprd_agents::transcript::Roots::for_launch(&base_env);
     Ok(SpawnEnv {
         ctx,
-        layout: Layout::default_for_home(&home).for_tasks(&settings.resolve(None).tasks()),
+        layout: Layout::from_settings(&home, &ctx.root),
         briefs_dir: home.join(".shprd").join("briefs"),
         prompts_dir: prompts::prompts_dir(&crate::ctx::resolve_config_home(&home)),
         home,

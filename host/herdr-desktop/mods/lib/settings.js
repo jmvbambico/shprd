@@ -576,8 +576,8 @@ export const HIDDEN = [];
  * one git accepts and one every task gets its own name from.
  *
  * The pattern may use `{run}` (the run's id), `{task}` (the task's id), `{n}`
- * (its number) and `{slug}` (its id, lowercased); it must use `{task}`, `{n}` or
- * `{slug}`, or two tasks would share a branch. The rest is git's
+ * (its number) and `{slug}` (its id, lowercased); it must use `{task}` or
+ * `{slug}`, or two tasks would share a branch (`{n}` alone is the same for `T1` and `SHPR-1`). The rest is git's
  * own rule for a ref name (`git check-ref-format`).
  */
 export function branchProblem(text) {
@@ -585,7 +585,7 @@ export function branchProblem(text) {
   if (pattern === "") return null;
   const left = pattern.replace(/\{(run|task|n|slug)\}/g, "");
   if (/[{}]/.test(left)) return "only {run}, {task}, {n} and {slug} may be used between braces";
-  if (!/\{(task|n|slug)\}/.test(pattern)) return "use {task}, {n} or {slug}, or two tasks would share a branch";
+  if (!/\{(task|slug)\}/.test(pattern)) return "use {task} or {slug}, or two tasks would share a branch";
   return refProblem(pattern.replace(/\{(run|task|n|slug)\}/g, "x"));
 }
 
