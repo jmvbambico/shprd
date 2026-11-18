@@ -71,7 +71,9 @@ export default class Accept extends View {
     this.headCopy = Boolean(props()?.head);
     // The dialog is opened for one task and keeps it; `overlay` is its own id, for
     // closing it. The head has neither: it follows the panel's selection.
-    this.taskId = props()?.task ?? null;
+    // Opened with no task (`mod.open`, the bare overlay a key command gives), the
+    // dialog is about the one the panel has open.
+    this.taskId = props()?.task ?? (this.headCopy ? null : (shared("tasks.thread")?.task ?? null));
     this.overlay = props()?.overlay ?? null;
     this.handle = cx.focus_handle();
     if (!this.headCopy) this.handle.focus();
