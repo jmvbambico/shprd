@@ -73,4 +73,8 @@ reason: string, } | { "kind": "task.accept",
 /**
  * The task to accept.
  */
+task: string, } | { "kind": "task.resend_brief", 
+/**
+ * The task whose brief should be delivered again.
+ */
 task: string, };
