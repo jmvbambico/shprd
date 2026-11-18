@@ -35,7 +35,8 @@ describe("Shell: settings", () => {
     );
     render(<Shell client={api} reauth={false} onReauthClose={vi.fn()} onSignedOut={vi.fn()} />);
     fireEvent.click(screen.getAllByRole("button", { name: "Chat" })[0]!);
-    expect(screen.getByRole("heading", { name: "Chat" })).toBeDefined();
+    expect(screen.getAllByRole("heading", { name: "Chat" }).length).toBeGreaterThan(0);
+    expect(document.querySelector(".agent")).not.toBeNull();
     expect(await screen.findByText("No messages yet")).toBeDefined();
   });
 });
