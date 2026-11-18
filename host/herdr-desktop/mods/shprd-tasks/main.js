@@ -113,7 +113,13 @@ export default class Tasks extends View {
         const command = await nextCommand();
         if (command === "add") this.beginAdd(cx);
         else if (command === "open") this.openShared();
-        else if (command === "graph") this.show("graph");
+        else if (command.startsWith("thread:")) {
+          // `run("shprd-tasks.thread:T1")` or `…thread:T1:terminal`: the palette's and
+          // a script's way into one task's thread, by id.
+          const [, id, view] = command.split(":");
+          const task = (this.state?.tasks ?? []).find((entry) => entry.id === id);
+          if (task) this.open(task, view === "terminal" ? "terminal" : "chat");
+        } else if (command === "graph") this.show("graph");
         else if (command === "tasks") this.show("tasks");
         else if (command === "group") this.popup("group");
         else if (command === "more") this.popup("more");

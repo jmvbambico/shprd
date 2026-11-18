@@ -28,7 +28,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { closeOverlay, layout, props, run, setShared, shared, terminals, theme } from "herdr";
+import { closeOverlay, layout, nextCommand, props, run, setShared, shared, terminals, theme } from "herdr";
 
 import { attach, reason, singleFlight } from "./lib/client.js";
 import {
@@ -99,6 +99,20 @@ export default class Accept extends View {
     this.error = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // The head answers the thread's commands by name (`run("shprd-accept.view-term")`,
+    // the palette, a key): the switcher's four words and Review, for whoever has no
+    // pointer to hand. Only the head listens; the dialog has no commands.
+    if (this.headCopy) {
+      cx.spawn(async () => {
+        for (;;) {
+          const command = await nextCommand();
+          const task = this.selected();
+          const views = { "view-chat": VIEW.chat.id, "view-term": terminalChild(task ? threadAgent(this.state, task.id) : null, terminals()), "view-pr": VIEW.pr.id, "view-artifacts": VIEW.artifacts.id };
+          if (command in views && task) this.view(views[command], task);
+          else if (command === "review" && task) openAccept({ task: task.id, title: task.title });
+        }
+      });
+    }
   }
 
   /**

@@ -736,7 +736,15 @@ pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
         // settle: a row that said Working while a card sat unread beside it is
         // how a person reading `shprd status` alone missed that they were
         // needed.
-        if let Some(card) = signal.cards.first() {
+        //
+        // The engine's "ready to land: approve it" card is not one of those: it is
+        // the Ready row itself, whose Review opens the Accept card. Reading it as
+        // Needs you hid Review and Accept from the one task waiting for them.
+        if let Some(card) = signal
+            .cards
+            .iter()
+            .find(|card| !is_ready_to_land(&card.body))
+        {
             return Derived::needs(Need::Attention, &card.body);
         }
     }
@@ -748,6 +756,12 @@ pub fn derive_from_fold(signal: &TaskSignal, now_ms: u64) -> Derived {
         return derive_status(signal, &at_work, now_ms);
     }
     derive_status(signal, &LiveAgents::default(), now_ms)
+}
+
+/// Whether a card's body is the engine's "ready to land" notice, the one it
+/// raises when a reviewed task waits for the person's approval.
+fn is_ready_to_land(body: &str) -> bool {
+    body.contains(" is ready to land")
 }
 
 /// The first ask still open at `now_ms`, if one is.
@@ -1890,6 +1904,18 @@ mod tests {
         assert_eq!(
             derive_from_fold(&reported, NOW).status,
             DerivedStatus::NeedsYou
+        );
+
+        // The engine's "ready to land" notice is the Ready row, not a card to settle:
+        // the task keeps its Review and Accept.
+        let mut waiting = task(TaskStatus::Reported);
+        waiting.cards.push(CardFacts {
+            body: String::from("T1 is ready to land: run `shprd approve T1`"),
+        });
+        assert_eq!(
+            derive_from_fold(&waiting, NOW),
+            derive_from_fold(&task(TaskStatus::Reported), NOW),
+            "a reviewed task waiting for approval reads as it does without the notice"
         );
 
         // And a task that is already done says nothing it still needs.

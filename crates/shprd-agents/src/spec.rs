@@ -124,10 +124,11 @@ pub struct BlockingPrompt {
     pub name: String,
     /// Case-insensitive screen substring that means the prompt is showing.
     pub pattern: String,
-    /// The key that answers it safely, when shprd may press it for a person:
-    /// `enter` accepts the highlighted choice. Absent means the prompt is only
-    /// reported, never answered. It is used on the pane of an agent shprd
-    /// itself launched in its own worktree, never on the orchestrator's pane.
+    /// The text of the menu choice shprd may take for a person, e.g.
+    /// `Yes, I trust this folder`: it moves the highlight to the line naming it
+    /// and presses Enter. Absent means the prompt is only reported, never
+    /// answered. Used on the pane of an agent shprd itself launched in its own
+    /// worktree, never on the orchestrator's pane.
     #[serde(default)]
     pub answer: Option<String>,
 }

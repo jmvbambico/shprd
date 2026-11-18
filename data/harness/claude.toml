@@ -192,7 +192,8 @@ project_dirs = []
 [[blocking_prompts]]
 name = "folder trust"
 pattern = "Is this a project you created or one you trust"
-# shprd launches a worker or reviewer in a worktree it made itself, so the folder is
-# the person's own: the highlighted choice is "Yes, I trust this folder", and Enter
-# takes it. Without this a worker sat on the dialog until someone opened its terminal.
-answer = "enter"
+# shprd launches a worker or reviewer in a folder it made itself, so the folder is the
+# person's own. The dialog opens on "No, exit" in current builds (older ones opened on
+# "Yes"), so shprd moves the highlight to the line naming this choice, then presses
+# Enter. Without it a worker sat on the dialog until someone opened its terminal.
+answer = "Yes, I trust this folder"
