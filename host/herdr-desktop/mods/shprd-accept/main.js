@@ -28,7 +28,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { closeOverlay, layout, props, run, setShared, shared, spaces, theme } from "herdr";
+import { closeOverlay, layout, props, run, setShared, shared, terminals, theme } from "herdr";
 
 import { attach, reason, singleFlight } from "./lib/client.js";
 import {
@@ -40,16 +40,19 @@ import {
   commitRows,
   canReview,
   findings,
+  VIEW,
   mustLeavePr,
   reportLine,
   reviewLine,
+  terminalChild,
+  threadAgent,
   threadViews,
   verbs,
   whereNow,
   words,
 } from "./lib/accept.js";
 import { openAccept, segmented, statusGlyph } from "./lib/panel.js";
-import { spaceIndex, taskLook } from "./lib/spaces.js";
+import { taskLook } from "./lib/spaces.js";
 import { H, RADIUS, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -80,6 +83,7 @@ export default class Accept extends View {
     this.handle = cx.focus_handle();
     if (!this.headCopy) this.handle.focus();
     this.viewing = null;
+    this.focusedTerminal = null;
     this.state = null;
     this.client = null;
     this.failure = null;
@@ -262,21 +266,25 @@ export default class Accept extends View {
   /**
    * Shows one of the task's views inside this panel.
    *
-   * The terminal block is `{"agent":"focused"}`, so it shows the agent of the
-   * space that is selected: the task's own space is selected first, and the block
-   * is shown after.
+   * The Terminal view is the agent's own terminal: the block is
+   * `{"agent":"focused"}`, which shows the agent Herdr last focused, so the task's
+   * agent is focused (`agent.focus`) before the block is shown. A task's agents
+   * have no tab or space of their own, so there is no space to select instead.
    */
   view(id, task) {
-    if (id === "tasks-thread-term") this.selectSpace(task);
+    if (id === VIEW.term.id) this.focusAgent(task);
     run("layout.select", { stack: BODY, child: id });
     this.viewing = id;
     this.cx.notify();
   }
 
-  /** Selects the task's space, so the focused agent is the task's. */
-  selectSpace(task) {
-    const space = task ? spaceIndex(spaces()).tasks.get(task.id) : null;
-    if (space?.id) run("space.select", { id: space.id });
+  /** Focuses the task's agent in the window, once per terminal, so the block shows it. */
+  focusAgent(task, force = true) {
+    const agent = task ? threadAgent(this.state, task.id) : null;
+    if (!agent?.terminal) return;
+    if (!force && this.focusedTerminal === agent.terminal) return;
+    this.focusedTerminal = agent.terminal;
+    run("agent.focus", { terminal: agent.terminal });
   }
 
   render() {
@@ -295,11 +303,19 @@ export default class Accept extends View {
   head(t) {
     const task = this.selected();
     const colors = tone(t);
-    const live = task ? spaceIndex(spaces()).tasks.has(task.id) : false;
+    const agent = task ? threadAgent(this.state, task.id) : null;
+    const termChild = terminalChild(agent, terminals());
     const shown = this.shownChild();
-    // Showing the pull request of a task that has none: back to the terminal.
-    if (mustLeavePr(task, shown)) this.cx.timer.after(0, () => this.view("tasks-thread-chat", task));
-    const segs = threadViews(task, { live, shown });
+    // Showing the pull request of a task that has none: back to the chat.
+    if (mustLeavePr(task, shown)) this.cx.timer.after(0, () => this.view(VIEW.chat.id, task));
+    // The Terminal view follows what the window can show: the agent's own terminal
+    // while it holds it, the read-only stream when it cannot (and back).
+    else if ((shown === VIEW.term.id || shown === VIEW.stream.id) && shown !== termChild) {
+      this.cx.timer.after(0, () => this.view(termChild, task));
+    } else if (shown === VIEW.term.id) {
+      this.focusAgent(task, false);
+    }
+    const segs = threadViews(task, { live: agent !== null, shown, termChild });
     const shape = task ? taskLook(task) : { glyph: "ring", tone: "dim" };
     const said = reportLine(task);
     const back = h_flex()

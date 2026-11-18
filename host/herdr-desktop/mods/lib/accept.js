@@ -24,6 +24,7 @@
 // every mod folder that uses it. Edit the source, never a copy.
 
 import { attempt, cut, rowActions, taskById } from "./board.js";
+import { agentsOfTask } from "./tree.js";
 
 /** How much of an agent's summary a card shows before the rest folds away. */
 export const SUMMARY_MAX = 160;
@@ -326,27 +327,88 @@ export function head(task) {
 export const VIEW = {
   chat: { id: "tasks-thread-chat", word: "Chat" },
   term: { id: "tasks-thread-term", word: "Terminal" },
+  // The Terminal view's fallback: the agent's screen as read-only text, for an
+  // agent whose own terminal the window cannot show.
+  stream: { id: "tasks-thread-stream", word: "Terminal" },
   pr: { id: "tasks-thread-pr", word: "Pull request" },
+  artifacts: { id: "tasks-thread-artifacts", word: "Artifacts" },
 };
 
 /**
- * The segmented switch the thread head draws: `Chat · Terminal · Pull request`.
+ * The agent a task's Terminal view is about: the newest agent of the task that is
+ * still running, else the newest that ended (its screen stays readable), else null.
+ *
+ * A task has a worker and, once it handed in, a reviewer; the person who opens
+ * Terminal wants whoever is at work now, which is the newer of the two.
+ */
+export function threadAgent(state, taskId, now = Date.now()) {
+  const mine = agentsOfTask(state, taskId, now);
+  const newest = (list) =>
+    list.reduce((best, agent) => ((agent.started_ms ?? 0) >= (best?.started_ms ?? -1) ? agent : best), null);
+  return newest(mine.filter((agent) => agent.state !== "done")) ?? newest(mine);
+}
+
+/**
+ * Whether the window holds `agent`'s terminal, so its block can show it: the
+ * terminal list the window reads (`terminals()`) names it by `address`, and a
+ * finished program is not a terminal to type into.
+ */
+export function terminalReachable(agent, terminals) {
+  if (!agent?.terminal || agent.state === "done") return false;
+  return (terminals ?? []).some(
+    (entry) => entry?.address === agent.terminal && !["done", "exited", "finished"].includes(String(entry?.state ?? "")),
+  );
+}
+
+/**
+ * The stack child the Terminal word shows: the agent's own live terminal when the
+ * window holds it ([`VIEW.term`]), else its read-only screen ([`VIEW.stream`]).
+ */
+export function terminalChild(agent, terminals) {
+  return terminalReachable(agent, terminals) ? VIEW.term.id : VIEW.stream.id;
+}
+
+/**
+ * Whether a task has anything for the Artifacts view: a hand-in report, which is
+ * what a worker leaves behind (the summary, its checks, the files it changed and
+ * the proof it names).
+ */
+export function hasArtifacts(task) {
+  return (task?.attempts ?? []).some((attempt) => attempt?.report);
+}
+
+/**
+ * The segmented switch the thread head draws: `Chat · Terminal · Pull request ·
+ * Artifacts`.
  *
  * Shepherdr's switcher (`mods/chat/panel.js`, `segs`): Pull request only once the
- * task has one (`hasPr`), Terminal dim when no agent is up (`live` false), and no
- * Files or Changes — a task's changes are its pull request's. Chat is always on:
- * it reads the agent's record through the service, and says so when there is none
- * yet. `shown` is the stack child on screen, and Chat is what a thread opens on.
+ * task has one (`hasPr`), Terminal dim when the task has no agent at all (`live`
+ * false: "Not running"), Artifacts once there is a hand-in, and no Files or
+ * Changes — a task's changes are its pull request's. Chat is always on: it reads
+ * the agent's record through the service, and says so when there is none yet.
+ * `shown` is the stack child on screen, and Chat is what a thread opens on.
+ *
+ * `termChild` is the child the Terminal word shows ([`terminalChild`]); the
+ * Terminal segment is lit for either of its two children.
  *
  * Each segment: `{ key, word, on, dead, child }`, `child` the stack child it shows.
  */
-export function threadViews(task, { live = false, shown = VIEW.chat.id } = {}) {
+export function threadViews(task, { live = false, shown = VIEW.chat.id, termChild = VIEW.term.id } = {}) {
   const segs = [
     { key: "chat", word: VIEW.chat.word, on: shown === VIEW.chat.id, dead: false, child: VIEW.chat.id },
-    { key: "term", word: VIEW.term.word, on: shown === VIEW.term.id, dead: !live, child: VIEW.term.id },
+    {
+      key: "term",
+      word: VIEW.term.word,
+      on: shown === VIEW.term.id || shown === VIEW.stream.id,
+      dead: !live,
+      child: termChild,
+    },
   ];
   if (task?.pr) {
     segs.push({ key: "pr", word: VIEW.pr.word, on: shown === VIEW.pr.id, dead: false, child: VIEW.pr.id });
+  }
+  if (hasArtifacts(task)) {
+    segs.push({ key: "artifacts", word: VIEW.artifacts.word, on: shown === VIEW.artifacts.id, dead: false, child: VIEW.artifacts.id });
   }
   return segs;
 }
@@ -356,7 +418,7 @@ export function threadViews(task, { live = false, shown = VIEW.chat.id } = {}) {
  * a task that has none (Shepherdr's `chat/panel.js:367`, "back to its chat": the view it opens on).
  */
 export function mustLeavePr(task, shown) {
-  return shown === VIEW.pr.id && !task?.pr;
+  return (shown === VIEW.pr.id && !task?.pr) || (shown === VIEW.artifacts.id && !hasArtifacts(task));
 }
 
 /**

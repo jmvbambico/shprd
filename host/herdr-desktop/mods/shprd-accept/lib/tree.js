@@ -1,0 +1,336 @@
+// The sidebar's tree and the Graph view, as plain data: the Spaces tree, the
+// Agents pane's rows and the Graph's layered rows, all folded from one
+// `GET /api/state` answer. No Herdr, no clock of its own, no I/O, so a fixture
+// (`test/fixtures/proto.json`) tests the whole shape.
+//
+// PROTOTYPE (SHPR-18). Two fields are not in the service's answer yet; this is the
+// contract the real task must provide, and the prototype's fixture defines it:
+//
+// - `spaces[]`: `{id, name, folder, branch}`, one per repo/folder, and on each
+//   task `space` (a space id) and `phase` (a short group word, may be absent).
+//   A state without `spaces` gets one space made from `run`, so a real service
+//   still draws.
+// - `live_agents[]`: `{id, space, task|null, role, program, state, since_ms}`.
+//   `role` is worker | reviewer | coordinator; `task` is null for a coordinator;
+//   `state` is working | needs_you | idle | done; `since_ms` is when it entered
+//   that state, in ms since the epoch. Headless: an agent has no tab or space.
+//
+// Shared: the source is `mods/lib/tree.js`; `bin/sync-shared` copies it. Edit the
+// source, never a copy.
+
+import { isLive, look } from "./board.js";
+
+
+/** How long a finished agent stays in the Agents pane: 30 minutes. A coordinator stays as long as its space. */
+export const FINISHED_KEEP_MS = 30 * 60 * 1000;
+
+/** The task states the sidebar tree shows: the ones a person can act on or watch right now. */
+const TREE_STATES = new Set(["working", "needs_you", "ready", "merging"]);
+
+/** The tree's sort: needs you first, then working, then the rest (Q5). */
+const TREE_RANK = { needs_you: 0, working: 1, merging: 1, ready: 2 };
+
+/** Whether `agent` still belongs in the Agents pane at `now`: not a finished one older than 30 minutes. */
+export function agentKept(agent, now = Date.now()) {
+  if (agent?.state !== "done" || agent?.role === "coordinator") return true;
+  const ended = Number.isFinite(agent?.ended_ms) ? agent.ended_ms : agent?.since_ms;
+  if (!Number.isFinite(ended)) return true;
+  return now - ended < FINISHED_KEEP_MS;
+}
+
+/** The live agents that are still shown at `now`. */
+export function liveAgents(state, now = Date.now()) {
+  return (state?.live_agents ?? []).filter((agent) => agentKept(agent, now));
+}
+
+/** The words a role is shown as. */
+export const ROLE_WORDS = { worker: "Worker", reviewer: "Reviewer", coordinator: "Coordinator" };
+
+/** The words an agent's state is shown as. */
+export const AGENT_WORDS = { working: "working", needs_you: "needs you", idle: "idle", done: "done" };
+
+/** How long ago, in the shortest honest words: `now`, `4m`, `2h`, `3d`. */
+export function age(sinceMs, now = Date.now()) {
+  if (!Number.isFinite(sinceMs)) return "";
+  const seconds = Math.max(0, Math.floor((now - sinceMs) / 1000));
+  if (seconds < 45) return "now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+}
+
+/** An agent's second line: `working · 4m`, and `done · 12m ago` once it is over. */
+export function agentLine(agent, now = Date.now()) {
+  const word = AGENT_WORDS[agent?.state] ?? String(agent?.state ?? "");
+  const since = age(agent?.since_ms, now);
+  if (!since) return word;
+  return agent?.state === "done" ? `${word} · ${since} ago` : `${word} · ${since}`;
+}
+
+/** The status glyph an agent's dot takes: it reuses a task status's shape and tone. */
+export function agentLook(agent) {
+  if (agent?.state === "working") return look({ derived: { status: "working" } });
+  if (agent?.state === "needs_you") return look({ derived: { status: "needs_you" } });
+  if (agent?.state === "done") return look({ derived: { status: "ready" } });
+  return look({ derived: { status: "queued" } });
+}
+
+/** The spaces a state names, or one made from its run so a real service still draws. */
+export function spacesOf(state) {
+  if (Array.isArray(state?.spaces) && state.spaces.length > 0) return state.spaces;
+  const repo = String(state?.run?.repo ?? "").split("/").filter(Boolean).pop() ?? "this repo";
+  return [{ id: "run", name: repo, folder: state?.run?.repo ?? "", branch: state?.run?.integration_branch ?? "" }];
+}
+
+/**
+ * The state with only one space's tasks (`spaceId` null: all of them), for the
+ * Tasks list. A task with no space belongs to the only space there is.
+ */
+export function scopeToSpace(state, spaceId) {
+  if (!state || spaceId === null || spaceId === undefined) return state;
+  const list = spacesOf(state);
+  if (String(spaceId).startsWith("herdr:")) return { ...state, tasks: [] };
+  if (!list.some((space) => space.id === spaceId)) return state;
+  const tasks = (state.tasks ?? []).filter((task) => (task.space ?? (list.length === 1 ? list[0].id : null)) === spaceId);
+  return { ...state, tasks };
+}
+
+/** The task a state's agent works on, or null for a coordinator. */
+function taskOf(state, agent) {
+  return (state?.tasks ?? []).find((task) => task.id === agent?.task) ?? null;
+}
+
+/** The live agents of one task, in the order the service gave them. */
+export function agentsOfTask(state, taskId, now = Date.now()) {
+  return liveAgents(state, now).filter((agent) => agent.task === taskId);
+}
+
+/**
+ * A task row's dim second line: who is on it and where it stands, then progress
+ * and time to go when known — `claude · working · R#1 · 6m`, `codex · reviewing`,
+ * `asks you · 2m ago`, `ready to approve`. Time to go is not in the service's answer yet, so it is not drawn.
+ */
+export function taskLine(state, task, now = Date.now()) {
+  const agents = agentsOfTask(state, task.id, now).filter((agent) => agent.state !== "done");
+  const worker = agents.find((agent) => agent.role === "worker");
+  const reviewer = agents.find((agent) => agent.role === "reviewer");
+  const status = task.derived?.status;
+  const attempt = (task.attempts ?? []).at(-1);
+  const rounds = attempt?.reviews?.length ?? 0;
+  const parts = [];
+  if (status === "needs_you") {
+    const need = task.derived?.need;
+    parts.push(need === "asks" ? "asks you" : need === "reply" ? "waits for you" : "needs you");
+    const since = age(worker?.since_ms, now);
+    if (since) parts.push(since === "now" ? "now" : `${since} ago`);
+    return parts.join(" · ");
+  } else if (status === "ready") {
+    return "ready to approve";
+  } else if (reviewer) {
+    parts.push(reviewer.program, "reviewing");
+  } else if (status === "merging") {
+    return "merging";
+  } else {
+    if (worker?.program) parts.push(worker.program);
+    parts.push(status === "working" || worker?.state === "working" ? "working" : String(status ?? "").replace("_", " "));
+  }
+  if (rounds > 0) parts.push(`R#${rounds}`);
+  const since = age(worker?.since_ms ?? reviewer?.since_ms, now);
+  if (since) parts.push(since);
+  const pct = look(task).pct;
+  if (pct !== null && pct !== undefined) parts.push(`${pct}%`);
+  return parts.filter(Boolean).join(" · ");
+}
+
+/**
+ * The tasks of one space, ordered like the board (what needs the person first),
+ * each as the row the tree draws.
+ *
+ * - `sub`: for a working task its agent and progress (`claude · 62%`), else null.
+ * - `last`: whether it is the space's last task, which gives it └─ not ├─.
+ */
+export function treeTasks(state, space, spaceCount = 1, now = Date.now()) {
+  const rank = (task) => TREE_RANK[task?.derived?.status] ?? 3;
+  const withAgent = new Set(
+    liveAgents(state, now)
+      .filter((agent) => agent.task && agent.state !== "done")
+      .map((agent) => agent.task),
+  );
+  const mine = (state?.tasks ?? [])
+    .filter(isLive)
+    .filter((task) => TREE_STATES.has(task?.derived?.status) || withAgent.has(task.id))
+    .filter((task) => task?.derived?.status !== "done")
+    .filter((task) => (task.space ?? (spaceCount === 1 ? space.id : null)) === space.id)
+    .sort((a, b) => rank(a) - rank(b) || String(a.id).localeCompare(String(b.id)));
+  return mine.map((task, at) => {
+    const shape = look(task);
+    return {
+      id: task.id,
+      title: String(task.title ?? ""),
+      status: task.derived?.status ?? "to_do",
+      glyph: shape.glyph,
+      tone: shape.tone,
+      pct: shape.pct,
+      sub: taskLine(state, task, now),
+      last: at === mine.length - 1,
+    };
+  });
+}
+
+/**
+ * The Spaces section: one entry per space with its branch, its tasks and the two
+ * numbers a row's badge would show.
+ */
+export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
+  const list = spacesOf(state);
+  const own = list.map((space) => {
+    const tasks = treeTasks(state, space, list.length, now);
+    return {
+      id: space.id,
+      name: space.name,
+      branch: space.branch ?? "",
+      folder: space.folder ?? "",
+      plain: false,
+      tasks,
+      needs: tasks.filter((task) => task.status === "needs_you").length,
+      ready: tasks.filter((task) => task.status === "ready").length,
+    };
+  });
+  return [...own, ...plainSpaces(list, herdrSpaces)];
+}
+
+/**
+ * The spaces Herdr has that the service does not serve — the person's own and
+ * Herdr's — as plain rows: a name and a folder, no tree. A space shprd made for
+ * a repo it serves (`shprd · <repo>`) is that repo's row already.
+ */
+export function plainSpaces(served, herdrSpaces = []) {
+  const folders = new Set(served.map((space) => space.folder).filter(Boolean));
+  const names = new Set(served.map((space) => `shprd · ${space.name}`));
+  return (herdrSpaces ?? [])
+    .filter((space) => space?.id && !names.has(space.name) && !(space.folder && folders.has(space.folder)))
+    .filter((space) => !String(space.name ?? "").startsWith("shprd · "))
+    .map((space) => ({
+      id: `herdr:${space.id}`,
+      herdr: space.id,
+      name: String(space.name ?? space.id),
+      branch: "",
+      folder: space.folder ?? "",
+      plain: true,
+      active: Boolean(space.active),
+      tasks: [],
+      needs: 0,
+      ready: 0,
+    }));
+}
+
+/**
+ * The Agents pane's rows. Ungrouped: one row per live agent, needs-you first.
+ * Grouped: a `head` row per space, then its agents.
+ *
+ * A row is `{kind: "agent", id, name, role, program, line, glyph, tone, pct,
+ * task, space}`; `name` is the task's `id title`, or the space's name for a
+ * coordinator.
+ */
+export function agentRows(state, { grouped = false, now = Date.now() } = {}) {
+  const spaces = new Map(spacesOf(state).map((space) => [space.id, space]));
+  const order = { needs_you: 0, working: 1, done: 2, idle: 3 };
+  const rows = liveAgents(state, now).map((agent) => {
+    const task = taskOf(state, agent);
+    const shape = agentLook(agent);
+    return {
+      kind: "agent",
+      id: agent.id,
+      name: task ? `${task.id} ${task.title}` : (spaces.get(agent.space)?.name ?? agent.space ?? ""),
+      role: ROLE_WORDS[agent.role] ?? String(agent.role ?? ""),
+      program: String(agent.program ?? ""),
+      line: agentLine(agent, now),
+      glyph: shape.glyph,
+      tone: shape.tone,
+      pct: shape.pct,
+      state: agent.state,
+      task: task?.id ?? null,
+      title: task?.title ?? "",
+      space: agent.space ?? null,
+    };
+  });
+  const sorted = rows.slice().sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
+  if (!grouped) return sorted;
+  const out = [];
+  for (const [id, space] of spaces) {
+    const own = sorted.filter((row) => row.space === id);
+    if (own.length === 0) continue;
+    out.push({ kind: "head", id: `head-${id}`, name: space.name, count: own.length });
+    out.push(...own);
+  }
+  return out;
+}
+
+/**
+ * The Graph view's rows: the live tasks grouped by `phase`, each phase's tasks a
+ * layered tree (a task hangs under its last dependency inside the same phase),
+ * and a right-aligned word per task: `done`, `working`, `needs you`, `ready`, or
+ * `waits SHPR-23` for what is held back by an unfinished dependency.
+ *
+ * `guide` is the text before the id: the │ ├─ └─ lines of its ancestors.
+ */
+export function graphRows(state, spaceId = null) {
+  const list = spacesOf(state);
+  const tasks = (state?.tasks ?? [])
+    .filter(isLive)
+    .filter((task) => spaceId === null || (task.space ?? (list.length === 1 ? list[0].id : null)) === spaceId);
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const phases = [];
+  for (const task of tasks) {
+    const name = task.phase ?? "Tasks";
+    let phase = phases.find((entry) => entry.name === name);
+    if (!phase) phases.push((phase = { name, tasks: [] }));
+    phase.tasks.push(task);
+  }
+  const out = [];
+  for (const phase of phases) {
+    const ids = new Set(phase.tasks.map((task) => task.id));
+    const parentOf = (task) => [...(task.deps ?? [])].reverse().find((dep) => ids.has(dep)) ?? null;
+    const kids = new Map();
+    const roots = [];
+    for (const task of phase.tasks) {
+      const parent = parentOf(task);
+      if (parent === null) roots.push(task);
+      else kids.set(parent, [...(kids.get(parent) ?? []), task]);
+    }
+    const done = phase.tasks.filter((task) => task.derived?.status === "done").length;
+    out.push({ kind: "phase", name: phase.name.toUpperCase(), done, total: phase.tasks.length });
+    const walk = (task, prefix, last, top) => {
+      const shape = look(task);
+      const open = (task.deps ?? []).filter((dep) => byId.get(dep) && byId.get(dep).derived?.status !== "done");
+      const at = task.derived?.status;
+      const words =
+        at === "queued" || at === "to_do"
+          ? open.length > 0
+            ? `waits ${open.join(" ")}`
+            : "queued"
+          : at === "needs_you"
+            ? "needs you"
+            : at;
+      out.push({
+        kind: "task",
+        id: task.id,
+        title: String(task.title ?? ""),
+        guide: top ? "" : `${prefix}${last ? "└─ " : "├─ "}`,
+        status: task.derived?.status ?? "to_do",
+        glyph: shape.glyph,
+        tone: shape.tone,
+        pct: shape.pct,
+        word: words,
+        // The dependency a waiting task is held by, so the view can dim it.
+        waits: words.startsWith("waits"),
+      });
+      const next = top ? "" : `${prefix}${last ? "   " : "│  "}`;
+      const own = kids.get(task.id) ?? [];
+      own.forEach((kid, at) => walk(kid, next, at === own.length - 1, false));
+    };
+    roots.forEach((task) => walk(task, "", true, true));
+  }
+  return out;
+}
