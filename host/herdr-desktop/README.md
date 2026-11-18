@@ -12,7 +12,8 @@ mods/shprd-spaces/      the sidebar: one 30 px line a space — a status glyph, 
                         the rail under 160 px
 mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
-mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons
+mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons, and
+                        an agent's Chat │ Terminal switch (M11 U4)
 mods/shprd-tabs/        the tab bar: 24 px pills (the program's icon, the name,
                         a spinner while working, a count badge, the close mark
                         on the shown one), the "+", the side panel's buttons and
@@ -32,12 +33,15 @@ mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Termi
                         Pull request) and the Accept card, a 640×640 modal dialog
                         that Review opens                         (M10.5, M11 U3)
 mods/shprd-task-pr/     the task's pull request: state, #n, size, branches, links (M10.5)
-mods/shprd-asks/        the needs-you cards        (M10.6)
 mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
                         a dialog since M11 fix S)
 mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
                         where dagr is          (M10.7)
-mods/shprd-coordinator/ the coordinator's chat     (M10.8)
+mods/shprd-chat/        the chat: bubbles, markdown, "Show more", the composer and
+                        the question / permission / plan cards in the timeline.
+                        The task thread's default view, and the pane a Chat │
+                        Terminal switch opens in an agent pane's place, the
+                        coordinator's included (M11 U4)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
 mods/lib/               the shared modules: tokens, panel parts, the menus' rows
                         (`menu.js`), the board's

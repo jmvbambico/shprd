@@ -90,8 +90,8 @@ SOFTWARE.
   `mods/shepherdr-settings/settings.js`, the needs-you
   cards — a question, permission or plan as one card with its choices and the
   answer it waits on — from `mods/chat/main.js` and `core/asks.js` in
-  `host/herdr-desktop/mods/{shprd-settings,shprd-asks}/main.js` and their
-  `lib/{settings,asks}.js`, the Accept card's sections and folded Details, its
+  `host/herdr-desktop/mods/{shprd-settings,shprd-chat}/main.js` and their
+  `lib/{settings,asks}.js` (the cards are drawn in the chat's timeline since M11 U4), the Accept card's sections and folded Details, its
   summary rule and its Changes count line from `mods/accept-card/main.js` and
   `core/accept.js`, the task's pull-request card — the state word in a soft tint
   beside the number, and a quiet line when there is nothing — from
@@ -156,9 +156,13 @@ SOFTWARE.
   `crates/shprd-mux-hc/src/host.rs`; and the chat's reading of an agent's own
   record — the line kinds each CLI keeps, the fields a message and its tool calls
   are read from, and the newest-page-then-what-it-gained shape — in
-  `crates/shprd-agents/src/transcript.rs`; and the coordinator chat panel — the
-  transcript's bubbles, the composer and the sidebar placement — in
-  `host/herdr-desktop/mods/shprd-coordinator/`; and the tailnet share — the
+  `crates/shprd-agents/src/transcript.rs`; and the chat — the
+  transcript's bubbles, markdown in a text view, "Show more" folding, the
+  composer, the cards in the timeline and `literal` — in
+  `host/herdr-desktop/mods/shprd-chat/` and `lib/chat.js`, and the pane header's
+  Chat │ Terminal switch (`toChat`, `toTerminal`, the parked-agent label and the
+  end-agent question) from `mods/pane-chat/main.js` in
+  `host/herdr-desktop/mods/shprd-pane/`; and the tailnet share — the
   owner and machine name read from `status --json`, what `serve status --json`
   says about the mount, the refusal to serve where Funnel is on, never replacing
   a mount that points elsewhere, and the taken-HTTPS-port handling — from

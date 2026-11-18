@@ -789,8 +789,8 @@ fn assert_upgraded(fixture: &Fixture) {
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     let thread = find_node(&mut probe, "tasks-thread-body").expect("the thread's body");
     assert_eq!(
-        thread["active"], "tasks-thread-term",
-        "the thread opens on the terminal"
+        thread["active"], "tasks-thread-chat",
+        "the thread opens on its chat"
     );
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     let panel = find_node(&mut probe, "panel-body").expect("the side panel");
@@ -800,7 +800,16 @@ fn assert_upgraded(fixture: &Fixture) {
         .iter()
         .filter_map(|child| child["id"].as_str())
         .collect();
-    assert_eq!(ids, vec!["files", "changes", "tasks", "asks"]);
+    assert_eq!(
+        ids,
+        vec!["files", "changes", "tasks"],
+        "the Asks stack went with the cards moving into the thread"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    assert!(
+        find_node(&mut probe, "coordinator").is_none(),
+        "the sidebar has no coordinator block: its chat is its pane's Chat view"
+    );
 }
 
 #[test]
@@ -872,6 +881,51 @@ fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
 }
 
 #[test]
+fn an_upgrade_takes_back_a_mod_this_build_no_longer_ships() {
+    // M11 U4 removed the Asks panel's and the sidebar coordinator's mods. A
+    // desktop installed before that holds both in its manifest, so the upgrade
+    // takes them away — unless the person edited one, which is theirs now.
+    let fixture = Fixture::new();
+    let older = tree_with_layout("shprd-m11-accept.json");
+    for gone in ["shprd-asks", "shprd-coordinator"] {
+        let dir = older.path().join("mods").join(gone);
+        fs::create_dir_all(dir.join("lib")).expect("the old mod's folder");
+        fs::write(dir.join("main.js"), format!("// {gone}\n")).expect("the old mod");
+        fs::write(dir.join("mod.json"), "{\"place\": \"none\"}\n").expect("the old mod.json");
+        fs::write(dir.join("lib/tokens.js"), "// a copy\n").expect("the old mod's lib");
+    }
+    install_tree(&fixture, &older);
+    assert!(fixture.app_path("mods/shprd-asks/main.js").is_file());
+    let edited = fixture.app_path("mods/shprd-coordinator/main.js");
+    fs::write(&edited, "// mine now\n").expect("the person's edit");
+
+    let out = ok(&fixture.run(&[]));
+    assert!(
+        out.contains("removed"),
+        "the upgrade says what it took back: {out}"
+    );
+    assert!(
+        !fixture.app_path("mods/shprd-asks").exists(),
+        "an untouched stale mod goes, folder and all"
+    );
+    assert_eq!(
+        fs::read_to_string(&edited).expect("their file"),
+        "// mine now\n",
+        "a file the person edited is left alone"
+    );
+    assert!(
+        fixture.app_path("mods/shprd-chat/main.js").is_file(),
+        "the mod that replaced them is there"
+    );
+    assert_upgraded(&fixture);
+    let again = ok(&fixture.run(&[]));
+    assert!(
+        again.contains("nothing to do"),
+        "and it is idempotent: {again}"
+    );
+}
+
+#[test]
 fn a_desktop_from_an_earlier_layout_upgrades_too() {
     // The layout changed twice inside M10 and again in M11, so a person's last
     // install may be the M10.3, M10.4 or M11 (before the Accept dialog) layout
@@ -882,6 +936,7 @@ fn a_desktop_from_an_earlier_layout_upgrades_too() {
         "shprd-m10.4.json",
         "shprd-m11.json",
         "shprd-m11-menu.json",
+        "shprd-m11-accept.json",
     ] {
         // As the older install left it, and as Herdr leaves it after pruning the
         // terminal block it could not resolve.

@@ -92,6 +92,8 @@ export default class Chat extends View {
     this.scroll = ScrollHandle.new();
     this.pinned = "bottom";
     this.drawn = { rows: 0, cards: 0 };
+    this.loading = false;
+    this.loadedAt = Date.now();
     this.input = InputState.new({ placeholder: this.placeholder() });
     // A submit is Enter in the composer: the same act as the send button.
     this.input.on("submit", () => this.send());
@@ -280,8 +282,26 @@ export default class Chat extends View {
     this.cx.notify();
   }
 
+  /**
+   * Reads again when the chat is drawn with an old answer.
+   *
+   * A block that is hidden in a stack (the thread's chat, while its terminal is
+   * shown) is not guaranteed to keep the timer `init` started, so being drawn is
+   * also when a stale chat catches up. `loading` keeps one read in flight and the
+   * floor keeps a repaint from becoming a poll.
+   */
+  revalidate() {
+    if (this.loading || Date.now() - this.loadedAt < FLOOR_MS) return;
+    this.loading = true;
+    this.refresh().finally(() => {
+      this.loading = false;
+      this.loadedAt = Date.now();
+    });
+  }
+
   render() {
     if (this.thread || this.fixed === null) this.follow_space();
+    this.revalidate();
     const t = theme();
     const colors = tone(t);
     const list = this.space === null ? [] : forSpace(cardsOf(this.state, this.asks), this.space);
