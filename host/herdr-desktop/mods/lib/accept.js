@@ -23,7 +23,7 @@
 // Shared: the source is `mods/lib/accept.js`; `bin/sync-shared` copies it into
 // every mod folder that uses it. Edit the source, never a copy.
 
-import { attempt, cut, taskById } from "./board.js";
+import { attempt, cut, rowActions, taskById } from "./board.js";
 
 /** How much of an agent's summary a card shows before the rest folds away. */
 export const SUMMARY_MAX = 160;
@@ -52,6 +52,8 @@ export const WORDS = {
   drop: "Drop task",
   dropping: "Dropping…",
   cancel: "Cancel",
+  close: "Close",
+  moreLine: (n) => `And ${n} more`,
   reasonLabel: "Why drop it",
   reasonPlaceholder: "One line, kept on the pull request",
 };
@@ -106,12 +108,52 @@ export function words(task) {
   return { summary: cutAt, details: said };
 }
 
-/** `3 files changed · +12 −4`, the line above the list. */
-export function changesLine(changes) {
+/** `3 commits`, `1 commit`. */
+export function commitsLine(count) {
+  return `${count} ${count === 1 ? "commit" : "commits"}`;
+}
+
+/** `4 files changed`, `1 file changed`. */
+export function filesLine(count) {
+  return `${count} ${count === 1 ? "file" : "files"} changed`;
+}
+
+/**
+ * The line above the list, in its parts: `3 commits · 4 files changed +12 −4`.
+ *
+ * Shepherdr's Changes line (`mods/accept-card/main.js` `changes()`): the counts
+ * are drawn in separate runs so the `+a` is green and the `−r` red. `commits` is
+ * null when the service did not say (an older service has no `commit_count`), and
+ * the line is then the files alone, never a made-up zero.
+ */
+export function changeCounts(changes) {
   const files = (changes?.files ?? []).length;
-  if (files === 0) return WORDS.noChanges;
-  const plural = files === 1 ? "file" : "files";
-  return `${files} ${plural} changed · +${changes.added ?? 0} −${changes.deleted ?? 0}`;
+  if (files === 0) return null;
+  return {
+    commits: typeof changes?.commit_count === "number" ? commitsLine(changes.commit_count) : null,
+    files: filesLine(files),
+    added: `+${changes.added ?? 0}`,
+    removed: `−${changes.deleted ?? 0}`,
+  };
+}
+
+/** The Changes line as plain text; the card draws [`changeCounts`] in colour. */
+export function changesLine(changes) {
+  const parts = changeCounts(changes);
+  if (parts === null) return WORDS.noChanges;
+  return `${[parts.commits, parts.files].filter(Boolean).join(" · ")} ${parts.added} ${parts.removed}`;
+}
+
+/**
+ * The newest commits the service named, and how many more there are.
+ *
+ * `rest` is the count past what is listed, so the card says "And 2 more" instead
+ * of showing five of seven as if they were all of them.
+ */
+export function commitRows(changes) {
+  const rows = (changes?.commits ?? []).map((commit) => ({ sha: commit.sha, subject: commit.subject }));
+  const total = typeof changes?.commit_count === "number" ? changes.commit_count : rows.length;
+  return { rows, rest: Math.max(0, total - rows.length) };
 }
 
 /**
@@ -278,4 +320,64 @@ export function head(task) {
     tone: derived.status === "ready" ? "green" : derived.status === "needs_you" ? "red" : "dim",
     question: WORDS.question(task.id),
   };
+}
+
+/** The thread's views, by the stack child each one shows. */
+export const VIEW = {
+  chat: { id: "tasks-thread-chat", word: "Chat" },
+  term: { id: "tasks-thread-term", word: "Terminal" },
+  pr: { id: "tasks-thread-pr", word: "Pull request" },
+};
+
+/**
+ * The segmented switch the thread head draws: `Chat · Terminal · Pull request`.
+ *
+ * Shepherdr's switcher (`mods/chat/panel.js`, `segs`): Pull request only once the
+ * task has one (`hasPr`), Terminal dim when no agent is up (`live` false), and no
+ * Files or Changes — a task's changes are its pull request's. **Chat** is held
+ * here and dim ("Not built yet"): the task's chat is a later task (U4), and
+ * until it lands nothing claims to work. `shown` is the stack child on screen.
+ *
+ * Each segment: `{ key, word, on, dead, child }`, `child` the stack child it
+ * shows (null for Chat, which has none yet).
+ */
+export function threadViews(task, { live = false, shown = VIEW.term.id } = {}) {
+  const segs = [
+    { key: "chat", word: VIEW.chat.word, on: false, dead: true, child: null },
+    { key: "term", word: VIEW.term.word, on: shown === VIEW.term.id, dead: !live, child: VIEW.term.id },
+  ];
+  if (task?.pr) {
+    segs.push({ key: "pr", word: VIEW.pr.word, on: shown === VIEW.pr.id, dead: false, child: VIEW.pr.id });
+  }
+  return segs;
+}
+
+/**
+ * Whether the thread must fall back to the terminal: it shows the pull request of
+ * a task that has none (Shepherdr's `chat/panel.js:367`, "back to its chat").
+ */
+export function mustLeavePr(task, shown) {
+  return shown === VIEW.pr.id && !task?.pr;
+}
+
+/**
+ * The agent's last status line under the title, `message` and how far it said it
+ * had got (`· 40%`), or null when it said nothing.
+ *
+ * Shepherdr's `reportLine` ends with minutes left; the service reports none, so
+ * this ends with the progress percent it does report.
+ */
+export function reportLine(task) {
+  const said = String(task?.last_status?.message ?? "").trim();
+  if (said === "") return null;
+  const done = task?.last_status?.progress;
+  return typeof done === "number" ? `${said} · ${done}%` : said;
+}
+
+/**
+ * Whether the task head offers Review: the same rule as the Ready row's pill
+ * (`rowActions`), so the two never disagree.
+ */
+export function canReview(task) {
+  return rowActions(task).some((act) => act.id === "review");
 }

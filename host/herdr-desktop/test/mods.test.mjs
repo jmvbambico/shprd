@@ -76,7 +76,13 @@ import {
   WORDS,
   card as acceptCard,
   changeRows,
+  changeCounts,
   changesLine,
+  commitRows,
+  canReview,
+  mustLeavePr,
+  reportLine,
+  threadViews,
   checks as handInChecks,
   findings as reviewFindings,
   head as acceptHead,
@@ -85,7 +91,9 @@ import {
   whereNow,
   words as summaryWords,
 } from "../mods/lib/accept.js";
-import { PR_WORDS, openUrl, taskPr } from "../mods/lib/taskpr.js";
+import { PR_WORDS, branchLine, openUrl, prSize, taskPr } from "../mods/lib/taskpr.js";
+import { openAccept } from "../mods/lib/panel.js";
+import * as herdr from "herdr";
 
 /** One fixture, parsed. */
 function fixture(name) {
@@ -683,10 +691,52 @@ test("a long summary keeps its first sentence and folds the rest away", () => {
 });
 
 test("the changes are counted once, from the branch git read", () => {
-  assert.equal(changesLine(CHANGES), "3 files changed · +6 −0");
-  assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed · +1 −2");
+  // The service names the commits too: "N commits · N files changed +a −r".
+  assert.equal(changesLine(CHANGES), "7 commits · 3 files changed +6 −0");
+  assert.deepEqual(changeCounts(CHANGES), { commits: "7 commits", files: "3 files changed", added: "+6", removed: "−0" });
+  // An older service has no commit count, and the line is the files alone.
+  assert.equal(changesLine({ files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 file changed +1 −2");
+  assert.equal(changesLine({ commit_count: 1, files: [{ path: "a", added: 1, deleted: 2 }], added: 1, deleted: 2 }), "1 commit · 1 file changed +1 −2");
   assert.equal(changesLine({ files: [] }), WORDS.noChanges);
   assert.equal(changesLine(null), WORDS.noChanges);
+});
+
+test("the newest commits are listed and the rest are counted", () => {
+  const { rows, rest } = commitRows(CHANGES);
+  assert.equal(rows.length, 5);
+  assert.deepEqual(rows[0], { sha: "a1b2c3d", subject: "feat(tasks): page the list" });
+  assert.equal(rest, 2, "seven commits, five listed: And 2 more");
+  assert.equal(WORDS.moreLine(rest), "And 2 more");
+  assert.deepEqual(commitRows(null), { rows: [], rest: 0 });
+});
+
+test("the thread's switch is Chat, Terminal and, once it has one, Pull request", () => {
+  const T1 = boardTask("T1");
+  const without = { ...boardTask("T2"), pr: undefined };
+  const words_ = (task, opts) => threadViews(task, opts).map((seg) => seg.word);
+  assert.deepEqual(words_(without, { live: true }), ["Chat", "Terminal"], "no Pull request before it has one");
+  assert.deepEqual(words_(T1, { live: true }), ["Chat", "Terminal", "Pull request"]);
+  // Chat is held and dim until U4 builds it; Terminal is dim when no agent is up.
+  const segs = threadViews(T1, { live: false, shown: "tasks-thread-term" });
+  assert.equal(segs[0].dead, true);
+  assert.equal(segs[0].child, null, "Chat shows no stack child yet");
+  assert.equal(segs[1].dead, true, "Not running");
+  assert.equal(segs[1].on, true);
+  assert.equal(threadViews(T1, { live: true, shown: "tasks-thread-pr" }).find((seg) => seg.on).key, "pr");
+  // The pull request of a task that lost it falls back to the terminal.
+  assert.equal(mustLeavePr(without, "tasks-thread-pr"), true);
+  assert.equal(mustLeavePr(T1, "tasks-thread-pr"), false);
+  assert.equal(mustLeavePr(without, "tasks-thread-term"), false);
+});
+
+test("the head's Review is the Ready row's Review, and its status line is the agent's", () => {
+  for (const id of ["T1", "T2", "T3", "T4", "T5", "T6"]) {
+    const task = boardTask(id);
+    assert.equal(canReview(task), rowActions(task).some((act) => act.id === "review"), id);
+  }
+  assert.equal(reportLine({ last_status: { message: " Fixing the tests ", progress: 40 } }), "Fixing the tests · 40%");
+  assert.equal(reportLine({ last_status: { message: "Done" } }), "Done");
+  assert.equal(reportLine({}), null);
 });
 
 test("the changed files are the biggest first, and a binary file says so", () => {
@@ -811,6 +861,21 @@ test("the card offers Accept only where a merge policy asks", () => {
   assert.equal(whereNow(null), "This task is no longer on the board.");
 });
 
+test("Review opens the Accept card as a 640 by 640 modal dialog for that task", () => {
+  const before = herdr.OVERLAYS.length;
+  const id = openAccept({ task: "T2", title: "Paging" });
+  assert.equal(herdr.OVERLAYS.length, before + 1);
+  const spec = herdr.OVERLAYS[herdr.OVERLAYS.length - 1];
+  assert.equal(spec.id, id);
+  assert.equal(spec.mod, "shprd-accept");
+  assert.equal(spec.kind, "dialog");
+  assert.equal(spec.modal, true, "it blocks the window under it, as Shepherdr's does");
+  assert.equal(spec.width, 640);
+  assert.equal(spec.height, 640);
+  assert.equal(spec.props.task, "T2", "the dialog is about the task it was opened for");
+  assert.equal(spec.props.overlay, id, "and knows its own id, to close itself on Esc");
+});
+
 // -- the task PR's reading of a landing ------------------------------------
 
 test("a task that landed through a forge shows its number, state and link", () => {
@@ -841,4 +906,15 @@ test("a local landing and a task that never landed say so, and open nothing", ()
   // nothing.
   assert.equal(openUrl({ kind: "pr", url: "" }), null);
   assert.equal(openUrl({ kind: "pr", url: "/pull/1" }), null);
+});
+
+test("the pull request bar says how big the change is and which branches it joins", () => {
+  assert.deepEqual(prSize(CHANGES), { files: "3 files", added: "+6", removed: "−0" });
+  assert.deepEqual(prSize({ files: [{ path: "a" }], added: 2, deleted: 1 }), { files: "1 file", added: "+2", removed: "−1" });
+  assert.equal(prSize(null), null, "before the changes were read there is no size to draw");
+  assert.equal(branchLine({ head: "shprd/m10b/T2" }, CHANGES), "shprd/m10b/T2 → main");
+  assert.equal(branchLine({ head: "shprd/m10b/T2" }, null), "shprd/m10b/T2", "no base known, only the head");
+  assert.equal(PR_WORDS.openOnGitHub, "Open on GitHub");
+  assert.equal(PR_WORDS.copyLink, "Copy link");
+  assert.equal(PR_WORDS.copied, "Copied");
 });

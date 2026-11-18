@@ -3,6 +3,29 @@
   "base": "main",
   "branch": "shprd/m10b/T2",
   "merge_base": "f8954bcf012692554b4c831e7cae81833d842080",
+  "commit_count": 7,
+  "commits": [
+    {
+      "sha": "a1b2c3d",
+      "subject": "feat(tasks): page the list"
+    },
+    {
+      "sha": "e4f5a6b",
+      "subject": "test(tasks): the paging"
+    },
+    {
+      "sha": "1234abc",
+      "subject": "fix(tasks): keep the act at the end"
+    },
+    {
+      "sha": "9876fed",
+      "subject": "feat(board): rows"
+    },
+    {
+      "sha": "0f0f0f0",
+      "subject": "chore: scaffold"
+    }
+  ],
   "files": [
     {
       "path": "host/herdr-desktop/board.js",

@@ -25,7 +25,7 @@ import { shared, theme } from "herdr";
 import { attach, reason } from "./lib/client.js";
 import { taskById } from "./lib/board.js";
 import { card as surface, cardHeader, note } from "./lib/panel.js";
-import { PR_WORDS, openUrl, taskPr } from "./lib/taskpr.js";
+import { PR_WORDS, branchLine, openUrl, prSize, taskPr } from "./lib/taskpr.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -39,6 +39,10 @@ export default class TaskPr extends View {
     this.client = null;
     this.failure = null;
     this.watching = false;
+    this.changes = null;
+    this.changesFor = null;
+    // The link last copied, so its button says "Copied" until another task opens.
+    this.copied = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
@@ -68,11 +72,36 @@ export default class TaskPr extends View {
       this.follow();
       this.state = await this.client.state();
       this.failure = null;
+      await this.readChanges();
     } catch (err) {
       this.client = null;
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * The task's branch, for the size the bar shows and the base the branch line
+   * ends in. A git read at the service, so it is made once per task and attempt
+   * and only for a task that has a pull request.
+   */
+  async readChanges() {
+    const task = this.selected();
+    if (!this.client || !task?.pr) {
+      this.changes = null;
+      this.changesFor = null;
+      return;
+    }
+    const key = `${task.id}:${(task.attempts ?? []).length}`;
+    if (key === this.changesFor) return;
+    this.changesFor = key;
+    this.changes = null;
+    try {
+      this.changes = await this.client.taskChanges(task.id);
+    } catch {
+      // The size and the base are extras: a pull request is still shown without them.
+      this.changes = null;
+    }
   }
 
   /** Follows the service's change file for as long as this copy lives. */
@@ -112,15 +141,34 @@ export default class TaskPr extends View {
       return surface(t, [header, note(t, card_.line), div().flex_1()]);
     }
     const fill = card_.tone === "green" ? colors.green : colors.amber;
+    const size = prSize(this.changes);
+    const url = openUrl(card_);
+    const button = (id, label, onClick) =>
+      h_flex()
+        .id(id)
+        .h(28)
+        .flex_none()
+        .px(10)
+        .gap(6)
+        .items_center()
+        .rounded(RADIUS.control)
+        .border_1()
+        .border_color(t.input)
+        .text_size(TEXT.label)
+        .text_color(t.foreground)
+        .cursor_pointer()
+        .hover((style) => style.bg(t.hover))
+        .on_click(onClick)
+        .child(label);
     return surface(t, [
       header,
       v_flex()
         .flex_1()
-        .min_h(0)
+        .min_w(0)
         .p(12)
         .gap(8)
-        // The state word in its own tint, the forge's number, then the link: what
-        // a person decides by, in the order Shepherdr's card has them.
+        // The bar: the state in its own tint, the number, the size of the change.
+        // The service reports open or merged only, so there is no Draft or Closed.
         .child(
           h_flex()
             .gap(8)
@@ -138,6 +186,12 @@ export default class TaskPr extends View {
                 .child(card_.state),
             )
             .child(div().flex_none().font_family("JetBrains Mono").text_size(TEXT.body).text_color(t.foreground).child(card_.number))
+            .when(size !== null, (el) =>
+              el
+                .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child(size.files))
+                .child(div().flex_none().font_family("JetBrains Mono").text_size(TEXT.label).text_color(colors.green).child(size.added))
+                .child(div().flex_none().font_family("JetBrains Mono").text_size(TEXT.label).text_color(colors.red).child(size.removed)),
+            )
             .child(div().flex_1())
             .child(
               div()
@@ -147,34 +201,32 @@ export default class TaskPr extends View {
                 .child(card_.line),
             ),
         )
+        .child(div().min_w(0).text_size(TEXT.body).font_medium().text_color(t.foreground).child(task.title ?? ""))
         .child(
           h_flex()
             .gap(6)
             .items_center()
             .text_size(TEXT.label)
             .text_color(t.muted)
-            .child(div().min_w(0).truncate().font_family("JetBrains Mono").child(card_.head)),
+            .child(div().min_w(0).truncate().font_family("JetBrains Mono").child(branchLine(card_, this.changes))),
         )
         .child(
           h_flex()
-            .id("task-pr-open")
-            .h(28)
-            .flex_none()
-            .px(10)
-            .gap(6)
+            .gap(8)
             .items_center()
-            .rounded(RADIUS.control)
-            .border_1()
-            .border_color(t.input)
-            .text_size(TEXT.label)
-            .text_color(t.foreground)
-            .cursor_pointer()
-            .hover((style) => style.bg(t.hover))
-            .when(openUrl(card_) !== null, (el) =>
-              el.on_click((_event, cx) => cx.open_url(openUrl(card_))),
+            .child(
+              button("task-pr-open", PR_WORDS.openOnGitHub, (_event, cx) => {
+                if (url !== null) cx.open_url(url);
+              }),
             )
-            .child(PR_WORDS.openOnTheForge)
-            .child(div().text_size(TEXT.id).text_color(t.dim).child(card_.url)),
+            .child(
+              button("task-pr-copy", this.copied === card_.url ? PR_WORDS.copied : PR_WORDS.copyLink, (_event, cx) => {
+                if (url === null) return;
+                cx.write_to_clipboard(url);
+                this.copied = card_.url;
+                cx.notify();
+              }),
+            ),
         ),
     ]);
   }

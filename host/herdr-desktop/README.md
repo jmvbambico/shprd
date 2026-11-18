@@ -16,8 +16,10 @@ mods/shprd-pane/        one pane header per terminal: agent, task, state, button
 mods/shprd-tabs/        the tab bar (each tab's agent, role and state) and the
                         side panel's buttons
 mods/shprd-chrome/      the sidebar footer: settings, shprd's settings, the service
-mods/shprd-accept/      the Accept card            (M10.5)
-mods/shprd-task-pr/     the task's pull request    (M10.5)
+mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Terminal ·
+                        Pull request) and the Accept card, a 640×640 modal dialog
+                        that Review opens                         (M10.5, M11 U3)
+mods/shprd-task-pr/     the task's pull request: state, #n, size, branches, links (M10.5)
 mods/shprd-asks/        the needs-you cards        (M10.6)
 mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
                         a dialog since M11 fix S)

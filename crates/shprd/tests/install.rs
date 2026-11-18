@@ -733,6 +733,14 @@ fn assert_upgraded(fixture: &Fixture) {
         "the side panel keeps no settings block"
     );
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    assert!(
+        find_node(&mut probe, "tasks-thread-accept").is_none(),
+        "the Accept card is a dialog, not a block of the task thread"
+    );
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
+    let thread = find_node(&mut probe, "tasks-thread-body").expect("the thread's body");
+    assert_eq!(thread["active"], "tasks-thread-term", "the thread opens on the terminal");
+    let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     let panel = find_node(&mut probe, "panel-body").expect("the side panel");
     let ids: Vec<&str> = panel["children"]
         .as_array()
@@ -812,11 +820,12 @@ fn an_upgrade_puts_back_a_layout_herdr_pruned_from_the_build_before() {
 }
 
 #[test]
-fn a_desktop_from_earlier_in_m10_upgrades_too() {
-    // The layout changed twice inside M10, so a person's last install may be the
-    // M10.3 or M10.4 layout rather than M10's last one. Every version is carried,
+fn a_desktop_from_an_earlier_layout_upgrades_too() {
+    // The layout changed twice inside M10 and again in M11, so a person's last
+    // install may be the M10.3, M10.4 or M11 (before the Accept dialog) layout
+    // rather than M10's last one. Every version is carried,
     // pruned or not, because that is what an upgrade may meet on disk.
-    for name in ["shprd-m10.3.json", "shprd-m10.4.json"] {
+    for name in ["shprd-m10.3.json", "shprd-m10.4.json", "shprd-m11.json"] {
         // As the older install left it, and as Herdr leaves it after pruning the
         // terminal block it could not resolve.
         for prune in [false, true] {
