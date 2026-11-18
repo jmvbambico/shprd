@@ -486,6 +486,9 @@ input {
   position: fixed;
   inset: 0;
   display: grid;
+  /* One column that may shrink: an auto column grows to the widest nowrap line
+     and pushes the card (and its buttons) off a phone's screen. */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 24px;
   background: rgb(0 0 0 / 55%);
@@ -607,6 +610,10 @@ input {
   gap: 4px;
 }
 
+.graph-legend-dropped {
+  text-decoration: line-through;
+}
+
 .graph-legend-badges {
   font-family: var(--font-mono);
   color: var(--h-dim);
@@ -692,6 +699,15 @@ input {
 
 .graph-node.dimmed {
   opacity: 0.55;
+}
+
+.graph-node.dropped .graph-node-box {
+  stroke-dasharray: 4 3;
+}
+
+.graph-node.dropped .graph-node-title {
+  fill: var(--h-dim);
+  text-decoration: line-through;
 }
 
 .graph-node-id {
@@ -2905,6 +2921,19 @@ textarea.input {
   overflow: auto;
   background: var(--h-canvas);
   padding: 6px;
+  /* A scrollbar that stays drawn: a phone's hidden one makes a wide screen look
+     cut off at the right edge. */
+  scrollbar-width: thin;
+}
+
+.terminal-screen::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+.terminal-screen::-webkit-scrollbar-thumb {
+  background: var(--h-border);
+  border-radius: 4px;
 }
 
 .terminal-host {
@@ -3018,6 +3047,9 @@ textarea.input {
   inset: 0;
   z-index: 20;
   display: grid;
+  /* One column that may shrink: an auto column grows to the widest line and
+     pushes the card (and its buttons) off a phone's screen. */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 24px;
   background: rgb(0 0 0 / 55%);
@@ -3033,6 +3065,8 @@ textarea.input {
   display: flex;
   flex-direction: column;
   width: min(640px, 100%);
+  min-width: 0;
+  max-width: 100%;
   max-height: min(640px, 100%);
   background: var(--h-popover);
   border: 1px solid var(--h-border);
@@ -3077,7 +3111,9 @@ textarea.input {
 .accept-body {
   flex: 1;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
   padding: 0 18px 8px;
   display: flex;
   flex-direction: column;
@@ -3134,14 +3170,21 @@ textarea.input {
   min-width: 0;
 }
 
-.accept-commit-subject,
-.accept-path,
-.accept-check-command {
+.accept-commit-subject {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A path or a check command is read whole: it wraps inside the card. */
+.accept-path,
+.accept-check-command {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .accept-path {
@@ -3206,6 +3249,7 @@ textarea.input {
 }
 
 .accept-foot {
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: 10px;

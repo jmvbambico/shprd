@@ -206,7 +206,7 @@ function TunnelBody({
               {revealed ? "Hide" : "Reveal"}
             </button>
           </div>
-          {status.qr_svg ? (
+          {status.qr_svg && revealed ? (
             <img
               className="qr"
               alt="QR code for the link"

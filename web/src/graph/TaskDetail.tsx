@@ -14,6 +14,7 @@ import {
   criteria,
   evidenceMark,
   latestAttempt,
+  runTaskTone,
   taskTone,
   type RunDocument,
   type RunTask,
@@ -98,7 +99,7 @@ function TaskBody({
   document: RunDocument;
   onSelect: (id: string) => void;
 }) {
-  const state = taskTone(task.state);
+  const state = runTaskTone(task);
   const attempt = latestAttempt(task);
   const mark = attempt?.outcome === undefined ? null : evidenceMark(attempt.outcome.evidence);
   const deps = waitsOn(task, document.tasks);

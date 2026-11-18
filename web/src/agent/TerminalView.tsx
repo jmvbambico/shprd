@@ -45,6 +45,25 @@ export function TerminalView({ client, space, screenFactory = xtermScreen }: Ter
   const [status, setStatus] = useState<TerminalStatus>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [blank, setBlank] = useState(true);
+  const [wide, setWide] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+
+  // The pane is drawn at its own width and never resized to the screen, so on a
+  // phone a wide screen scrolls sideways inside its box. Say so, rather than
+  // letting the right edge look cut off.
+  useEffect(() => {
+    const measure = () => {
+      const el = box.current;
+      setWide(el !== null && el.scrollWidth > el.clientWidth + 1);
+    };
+    const timer = window.setInterval(measure, 500);
+    window.addEventListener("resize", measure);
+    measure();
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
 
   useEffect(() => {
     const el = host.current;
@@ -79,7 +98,7 @@ export function TerminalView({ client, space, screenFactory = xtermScreen }: Ter
 
   return (
     <section className="terminal" aria-label={`Terminal of ${space}`}>
-      <div className="terminal-screen" data-blank={blank}>
+      <div ref={box} className="terminal-screen" data-blank={blank} data-wide={wide}>
         <div ref={host} className="terminal-host" />
         {blank ? (
           <p className="terminal-wait" role="status">
@@ -102,6 +121,7 @@ export function TerminalView({ client, space, screenFactory = xtermScreen }: Ter
       </div>
       <p className="terminal-status" role="status" data-status={status}>
         {notice ?? STATUS_WORDS[status]}
+        {wide ? " Scroll sideways for the rest of the line." : ""}
       </p>
     </section>
   );

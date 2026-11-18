@@ -239,6 +239,24 @@ export function taskTone(state: string): { word: string; tone: Tone } {
   }
 }
 
+/**
+ * Whether the document is saying a task was dropped. dagr's states have no word
+ * for work that will not happen, so the projector writes a dropped task as
+ * `blocked`, owned by the human, with a note that starts `dropped`.
+ */
+export function isDropped(task: RunTask): boolean {
+  return (
+    task.state === "blocked" &&
+    task.unblock === "human" &&
+    /^dropped(:|$)/.test(task.note ?? "")
+  );
+}
+
+/** [`taskTone`] for a task, which also knows a dropped task is not blocked. */
+export function runTaskTone(task: RunTask): { word: string; tone: Tone } {
+  return isDropped(task) ? { word: "Dropped", tone: "neutral" } : taskTone(task.state);
+}
+
 /** The glyph and word for an evidence tier: the contract's ◆ ◇ ≈ ! ladder. */
 export function evidenceMark(evidence: string): { glyph: string; word: string; tone: Tone } {
   switch (evidence) {
