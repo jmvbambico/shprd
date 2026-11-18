@@ -826,28 +826,41 @@ pub async fn serve(
 }
 
 /// Resolves when the process is asked to stop: `SIGINT` or `SIGTERM`.
-pub async fn shutdown_signal() {
+///
+/// The handlers are installed when this is *called*, not when the future is
+/// first polled, so a caller that takes the future before it announces itself
+/// (writes its record) can be signalled at once and still stop quietly rather
+/// than die of the default action. It must be called inside a Tokio runtime.
+pub fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
     #[cfg(unix)]
     {
-        let terminate = async {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut signal) => {
-                    signal.recv().await;
+        use tokio::signal::unix::{SignalKind, signal};
+        let interrupt = signal(SignalKind::interrupt());
+        let terminate = signal(SignalKind::terminate());
+        async move {
+            let wait = |listener: std::io::Result<tokio::signal::unix::Signal>,
+                        name: &'static str| async move {
+                match listener {
+                    Ok(mut signal) => {
+                        signal.recv().await;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "could not listen for {name}");
+                        std::future::pending::<()>().await;
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "could not listen for SIGTERM; waiting for SIGINT only");
-                    std::future::pending::<()>().await;
-                }
+            };
+            tokio::select! {
+                _ = wait(interrupt, "SIGINT") => {}
+                _ = wait(terminate, "SIGTERM") => {}
             }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate => {}
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

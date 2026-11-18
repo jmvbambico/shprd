@@ -187,6 +187,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         .map_err(|err| CliError::other(anyhow!(err).context("starting the async runtime")))?;
 
     runtime.block_on(async move {
+        // Stop handling is installed before the service announces itself: the
+        // record `Service::start` writes is what a supervisor waits for, and a
+        // signal sent right after it must stop the service quietly.
+        let shutdown = shutdown_signal();
         // A second service for the same state directory would take the record
         // over and leave the running one undiscoverable, so it is refused with
         // the exit code a refused verb uses rather than an error's.
@@ -207,7 +211,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
             &resolution,
         );
         service
-            .run(shutdown_signal())
+            .run(shutdown)
             .await
             .map_err(|err| CliError::other(anyhow!(err).context("serving the run")))
     })
