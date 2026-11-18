@@ -127,7 +127,7 @@ pub(crate) async fn stop(
 ) -> Result<Json<TunnelStatusDto>, ApiReject> {
     let file = state
         .tunnels
-        .stop(Some("stopped from the web app"))
+        .stop(Some("stopped on request"))
         .await
         .map_err(tunnel_reject)?;
     Ok(Json(dto(&state, file, false, None)))
