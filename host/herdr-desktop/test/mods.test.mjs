@@ -18,11 +18,16 @@ import { fileURLToPath } from "node:url";
 import {
   COORDINATOR_ID,
   KIND,
+  MENU,
+  NARROW_PX,
+  attention,
+  closeWords,
   coordinatorRow,
+  menuHeight,
+  menuItems,
+  narrowSidebar,
   needWords,
   orderedTasks,
-  rowBadge,
-  rowCounts,
   sidebarRows,
   spaceIndex,
   splitSpaceName,
@@ -226,17 +231,47 @@ test("the dropped tasks a run keeps are history, not rows", () => {
   assert.deepEqual(sidebarRows(stale, []).tasks, []);
 });
 
-test("a row's badge is a count on the run and a mark on a task", () => {
+test("a row's badge counts what needs the person and what is ready", () => {
   const rows = sidebarRows(STATE, SPACES);
-  assert.equal(rowBadge(rows.coordinator), "1", "how many tasks need the person");
-  assert.equal(rowBadge(rows.tasks.find((row) => row.id === "T3")), "!");
-  assert.equal(rowBadge(rows.tasks.find((row) => row.id === "T2")), null);
-  assert.equal(rowBadge(null), null);
+  assert.deepEqual(attention(rows.coordinator), { need: 1, ready: 1 }, "the run's own counts");
+  assert.deepEqual(attention(rows.tasks.find((row) => row.id === "T3")), { need: 1, ready: 0 });
+  assert.deepEqual(attention(rows.tasks.find((row) => row.id === "T2")), { need: 0, ready: 1 });
+  assert.deepEqual(attention(rows.tasks.find((row) => row.id === "T1")), { need: 0, ready: 0 });
+  assert.deepEqual(attention(null), { need: 0, ready: 0 });
 });
 
-test("row counts and task looks are the tokens' words", () => {
-  const tally = rowCounts(sidebarRows(STATE, SPACES));
-  assert.deepEqual(tally, { needs: 1, ready: 1, working: 1, total: 6 });
+test("the rail is read from the sidebar's width, as Shepherdr reads it", () => {
+  const tree = (px) => ({ id: "root", children: [{ id: "sidebar", size: { px }, children: [] }] });
+  assert.equal(narrowSidebar(tree(NARROW_PX)), false, "160 is still wide");
+  assert.equal(narrowSidebar(tree(NARROW_PX - 1)), true);
+  assert.equal(narrowSidebar(tree(391)), false);
+  assert.equal(narrowSidebar({ id: "root", children: [] }), false, "no sidebar node: the wide form");
+  assert.equal(narrowSidebar(null), false);
+});
+
+test("a space's row menu is Open task then Close…, and only what a space can do", () => {
+  const rows = sidebarRows(STATE, SPACES);
+  const withSpace = menuItems(rows.tasks.find((row) => row.id === "T2"));
+  assert.deepEqual(withSpace, [{ id: "open", label: "Open task" }, { sep: true }, { id: "close", label: "Close…" }]);
+  // The popup has only the props: the space is its id there, and the words are the same.
+  assert.deepEqual(menuItems({ task: "T2", space: "s4" }), withSpace);
+  // A task with no space has nothing to close, so it has no Close… row.
+  assert.deepEqual(menuItems(rows.waiting.find((row) => row.id === "T6")), [{ id: "open", label: "Open task" }]);
+  // Shepherdr's `heightOf`: 5 px of padding, 32 px a row, 9 px a separator.
+  assert.equal(menuHeight(withSpace), MENU.pad * 2 + MENU.row + MENU.sep + MENU.row);
+  assert.equal(menuHeight(menuItems({ task: "T6" })), MENU.pad * 2 + MENU.row);
+});
+
+test("closing a space asks in Shepherdr's words", () => {
+  assert.deepEqual(closeWords({ task: "T2" }), {
+    title: "Close “T2”?",
+    detail: "Its tabs close and every program in them ends.",
+    verb: "Close space",
+  });
+  assert.equal(closeWords({}).title, "Close “this space”?");
+});
+
+test("task looks are the tokens' words", () => {
   assert.deepEqual(taskLook(task("T1")), {
     status: "working",
     word: "Working",

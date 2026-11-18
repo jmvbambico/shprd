@@ -6,8 +6,10 @@ This folder is shprd's set of them.
 
 ```
 layouts/shprd.json      the window: sidebar, coordinator area, tab bar, pane, board
-mods/shprd-spaces/      the sidebar: the coordinator's space, then one row a task
-                        space, with its word, its colour and what needs you
+mods/shprd-spaces/      the sidebar: one 30 px line a space — a status glyph, the
+                        task, the red/green count badge — the "Spaces" heading's
+                        "+", the row's right-click menu and its close confirm, and
+                        the rail under 160 px
 mods/shprd-status/      the status bar: the run, its counts, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
 mods/shprd-pane/        one pane header per terminal: agent, task, state, buttons
