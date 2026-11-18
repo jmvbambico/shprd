@@ -8,6 +8,8 @@ import { useState } from "react";
 import type { ApiClient } from "../api/client";
 import { SCREENS, SCREEN_LABEL, type Screen } from "../layout/layout";
 import { useLayout } from "../layout/useLayout";
+import { AgentScreen } from "../agent/AgentScreen";
+import { COORDINATOR } from "../agent/chatModel";
 import { GraphScreen } from "../graph/GraphScreen";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { Login } from "./Login";
@@ -54,6 +56,9 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
   // Settings is a dialog over the app, not a place the board moves to: the screen
   // under it stays as it was, and closing it goes back there.
   const [under, setUnder] = useState<Screen>("tasks");
+  // The space the Chat and Terminal screens show: one choice for both, as a
+  // pane's Chat │ Terminal switch is one pane.
+  const [agentSpace, setAgentSpace] = useState<string>(COORDINATOR);
   const screen = selected === "settings" ? under : selected;
   const settingsOpen = selected === "settings";
   const placeholder = PLACEHOLDER[screen];
@@ -97,6 +102,14 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
       <main className="board" aria-labelledby="screen-heading">
         {screen === "graph" ? (
           <GraphScreen client={client} />
+        ) : screen === "chat" || screen === "terminal" ? (
+          <AgentScreen
+            client={client}
+            view={screen}
+            onView={setScreen}
+            space={agentSpace}
+            onSpace={setAgentSpace}
+          />
         ) : (
           <section className="card placeholder" data-screen={screen}>
             <p className="placeholder-kicker">{SCREEN_LABEL[screen]}</p>
@@ -119,7 +132,9 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
           </section>
           <section className="card side-card">
             <h2 className="side-title">Chat</h2>
-            <p className="side-note">The coordinator's conversation lands here in M11.6.</p>
+            <button type="button" className="quiet" onClick={() => setScreen("chat")}>
+              Open the coordinator&rsquo;s chat
+            </button>
           </section>
         </aside>
       ) : null}

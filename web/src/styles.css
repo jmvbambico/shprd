@@ -1888,3 +1888,316 @@ textarea.input {
   align-self: flex-start;
   padding: 0 16px;
 }
+
+/* --- the Chat and Terminal screens -------------------------------------- */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.agent {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--h-border);
+  flex-wrap: wrap;
+}
+
+.agent-title {
+  margin: 0;
+  font-size: var(--text-title);
+  font-weight: 600;
+  margin-right: auto;
+}
+
+.agent-pick select {
+  height: 28px;
+  max-width: 220px;
+  padding: 0 8px;
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-control);
+  background: var(--h-input);
+  color: var(--h-foreground);
+}
+
+.agent-switch {
+  display: inline-flex;
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+
+.agent-switch-button {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--h-muted);
+  cursor: pointer;
+}
+
+.agent-switch-button[aria-pressed="true"] {
+  background: var(--h-selected);
+  color: var(--h-foreground);
+}
+
+.agent .quiet {
+  margin-left: 0;
+}
+
+/* the chat */
+
+.chat,
+.terminal {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-rows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-top,
+.chat-time,
+.chat-tool {
+  margin: 0;
+  font-size: var(--text-id);
+  color: var(--h-dim);
+}
+
+.chat-top {
+  text-align: center;
+}
+
+.chat-tool {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.chat-empty {
+  margin: auto;
+  max-width: 320px;
+  text-align: center;
+  color: var(--h-muted);
+}
+
+.chat-empty-title {
+  margin: 0 0 4px;
+  color: var(--h-foreground);
+  font-weight: 500;
+}
+
+.chat-empty-note {
+  margin: 0;
+  font-size: var(--text-label);
+}
+
+.chat-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  max-width: 100%;
+}
+
+.chat-row[data-from="you"] {
+  align-items: flex-end;
+}
+
+.chat-bubble {
+  max-width: min(560px, 92%);
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--h-raised);
+  overflow-wrap: anywhere;
+}
+
+.chat-row[data-from="you"] .chat-bubble {
+  background: color-mix(in srgb, var(--h-accent) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--h-accent) 30%, transparent);
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md pre,
+.md blockquote {
+  margin: 0 0 8px;
+}
+
+.md a {
+  color: var(--h-accent);
+}
+
+.md code {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  background: var(--h-input);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.md pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--h-input);
+}
+
+.md pre code {
+  padding: 0;
+  background: none;
+}
+
+.md table {
+  border-collapse: collapse;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--h-border);
+  padding: 2px 8px;
+}
+
+.chat-fold {
+  margin-top: 4px;
+  height: 24px;
+  font-size: var(--text-label);
+}
+
+.chat-said {
+  margin: 0;
+  padding: 4px 12px;
+  font-size: var(--text-label);
+  color: var(--h-muted);
+}
+
+.chat-said[data-kind="problem"] {
+  color: var(--h-red);
+}
+
+.chat-retry {
+  margin-left: 8px;
+}
+
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--h-border);
+}
+
+.chat-input {
+  flex: 1;
+  min-height: 36px;
+  max-height: 140px;
+  resize: none;
+  padding: 8px 10px;
+  border: 1px solid var(--h-border);
+  border-radius: 8px;
+  background: var(--h-input);
+  color: var(--h-foreground);
+  font: inherit;
+}
+
+.chat-send {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--h-accent);
+  color: var(--h-accent-foreground);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.chat-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* the terminal */
+
+.terminal-screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--h-canvas);
+  padding: 6px;
+}
+
+.terminal-host {
+  width: max-content;
+}
+
+.terminal-wait {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 16px;
+  text-align: center;
+  color: var(--h-muted);
+}
+
+.terminal-screen[data-blank="false"] .terminal-wait {
+  display: none;
+}
+
+.terminal-keys {
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  overflow-x: auto;
+  border-top: 1px solid var(--h-border);
+}
+
+.terminal-key {
+  flex: none;
+  min-width: 44px;
+  height: 36px;
+}
+
+.terminal-status {
+  margin: 0;
+  padding: 4px 12px 8px;
+  font-size: var(--text-label);
+  color: var(--h-muted);
+}
+
+.terminal-status[data-status="refused"] {
+  color: var(--h-red);
+}

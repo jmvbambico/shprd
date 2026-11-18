@@ -96,7 +96,7 @@ SOFTWARE.
   `core/accept.js`, the task's pull-request card — the state word in a soft tint
   beside the number, and a quiet line when there is nothing — from
   `mods/task-pr/main.js`, and the task's head with its back link and switcher
-  from `mods/chat/main.js`'s `head` branch, the installer's
+  from `mods/chat/main.js`'s `head` branch, the web app's Chat screen (`web/src/agent/`: the bubbles, the show-more folding, the literal-markdown rule and the composer) from `mods/chat/main.js` and `core/chat-view.js`, the installer's
   ownership rules — own only what we wrote, never overwrite a file that is not
   ours, merge keys rather than replace them, back a change out on uninstall —
   from `bin/shepherdr` (`plan_files`, `merge_keys`) and `lib/UI.md`'s house
