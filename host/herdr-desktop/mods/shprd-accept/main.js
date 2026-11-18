@@ -103,6 +103,10 @@ export default class Accept extends View {
     // the palette, a key): the switcher's four words and Review, for whoever has no
     // pointer to hand. Only the head listens; the dialog has no commands.
     if (this.headCopy) {
+      // The shown view is Herdr's (`layout()`), not this mod's state, so a view picked
+      // from outside (a row's click, a command) is noticed on a short beat: the head
+      // repaints, and its render settles the Terminal view onto the task's agent.
+      cx.timer.every(500, (cx) => cx.notify());
       cx.spawn(async () => {
         for (;;) {
           const command = await nextCommand();
