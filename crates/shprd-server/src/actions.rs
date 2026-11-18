@@ -124,9 +124,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
 /// succeeded, so a refusal leaves it standing with its button.
 fn resend_brief(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
     let engine = ctx.engine.ok_or_else(|| {
-        ApiReject::refused(
-            "this service was started without a host, so it cannot deliver a brief",
-        )
+        ApiReject::refused("this service was started without a host, so it cannot deliver a brief")
     })?;
     let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
     if !folded.tasks.contains_key(task) {

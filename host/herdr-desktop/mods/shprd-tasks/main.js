@@ -79,7 +79,7 @@ export default class Tasks extends View {
     // Group by (For you / Space / Status) and the pinned tasks, remembered; the
     // pins are also shared as `tasks.pinned`, Shepherdr's key.
     this.groupBy = groupMode(this.load("groupby", "you"));
-    this.pinned = new Set(this.load("pinned", []));
+    this.pinned = new Set(this.load("pinned", shared("tasks.pinned") ?? []));
     setShared("tasks.pinned", [...this.pinned]);
     this.chips = { primary: [], more: [] };
     // PROTOTYPE (SHPR-18): one panel, two views of the same board.
@@ -115,6 +115,11 @@ export default class Tasks extends View {
         else if (command === "open") this.openShared();
         else if (command === "graph") this.show("graph");
         else if (command === "tasks") this.show("tasks");
+        else if (command === "group") this.popup("group");
+        else if (command === "more") this.popup("more");
+        else if (command === "group-you" || command === "group-space" || command === "group-status") {
+          this.setGroup(command.slice("group-".length));
+        } else if (command === "filter-all") this.pick("all");
         else if (command === "focus") {
           this.handle.focus();
           cx.notify();
