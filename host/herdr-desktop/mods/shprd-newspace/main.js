@@ -6,6 +6,9 @@
 // source, paths and commit). Left out on purpose: another machine (shprd serves
 // this computer's repos), the recent-folder suggestions and the icon picker.
 //
+// It opens on `props.folder` when given (a script's or a check's way to start it
+// on a folder), else on the person's home.
+//
 // A space here is a place in Herdr. shprd's own per-repo space (`shprd · <repo>`,
 // where the coordinator runs) is made by `shprd serve` for the repo it serves, so
 // a space made here shows in the sidebar as a plain row until a service serves it.
@@ -28,7 +31,7 @@ export default class NewSpace extends View {
     this.makeRepo = true;
     this.busy = false;
     this.error = "";
-    this.input = InputState.new({ placeholder: WORDS.placeholder, value: tilde(this.home, this.home) });
+    this.input = InputState.new({ placeholder: WORDS.placeholder, value: tilde(String(props()?.folder ?? this.home), this.home) });
     this.text = this.input.value();
     this.input.on("change", (_e, cx) => {
       const value = this.input.value();

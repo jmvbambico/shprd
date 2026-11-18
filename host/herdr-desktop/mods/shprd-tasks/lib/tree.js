@@ -132,7 +132,7 @@ export function taskLine(state, task, now = Date.now()) {
     return "merging";
   } else {
     if (worker?.program) parts.push(worker.program);
-    parts.push(status === "working" ? "working" : (task.derived?.status ?? ""));
+    parts.push(status === "working" || worker?.state === "working" ? "working" : String(status ?? "").replace("_", " "));
   }
   if (rounds > 0) parts.push(`R#${rounds}`);
   const since = age(worker?.since_ms ?? reviewer?.since_ms, now);

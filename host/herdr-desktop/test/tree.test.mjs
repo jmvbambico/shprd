@@ -52,6 +52,11 @@ test("a task row's second line says who is on it and where it stands", () => {
   assert.equal(spaceTree(state, [], NOW)[2].tasks[0].sub, "asks you · 3m ago");
 });
 
+test("a queued task whose agent already works reads working, not its raw status", () => {
+  const queued = { ...state, live_agents: [...state.live_agents, { id: "a9", space: "sp-shprd", task: "SHPR-24", role: "worker", program: "pi", state: "working", since_ms: NOW - 5000 }] };
+  assert.equal(spaceTree(queued, [], NOW)[0].tasks.find((task) => task.id === "SHPR-24").sub, "pi · working · now");
+});
+
 test("a running review shows as the reviewer's line", () => {
   const live = { ...state, live_agents: [...state.live_agents, { id: "r1", space: "sp-shop", task: "SHOP-2", role: "reviewer", program: "codex", state: "working", since_ms: NOW - 60_000 }] };
   assert.equal(spaceTree(live, [], NOW)[1].tasks[0].sub.split(" · ").slice(0, 2).join(" · "), "codex · reviewing");
