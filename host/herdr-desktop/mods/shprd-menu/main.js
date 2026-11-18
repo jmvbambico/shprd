@@ -173,6 +173,7 @@ export default class Menu extends View {
       const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
       if (!next.client) {
         this.failure = "shprd serve is not running";
+        this.cx?.notify?.();
         return;
       }
       this.client = next.client;
@@ -183,6 +184,7 @@ export default class Menu extends View {
     } catch (err) {
       this.failure = reason(err);
     }
+    this.cx?.notify?.();
   }
 
   render() {

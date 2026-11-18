@@ -275,8 +275,9 @@ export default class Tabs extends View {
       .on_mouse_up("left", () => {
         this.pressed = null;
       })
-      // A wheel over the bar steps the tabs: down goes to the next one, as every
-      // tab strip does, and less than one line of movement is a stray event.
+      // A wheel over the bar steps the tabs: wheeling down (a negative delta.y in
+      // gpui, where a positive one scrolls the content down) goes to the next one,
+      // as every tab strip does; less than one line of movement is a stray event.
       .on_scroll_wheel((event) => {
         if (Math.abs(event?.delta?.y ?? 0) >= 1) {
           run(event.delta.y > 0 ? "tab.prev" : "tab.next");
