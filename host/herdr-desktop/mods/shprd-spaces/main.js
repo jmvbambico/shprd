@@ -1,5 +1,9 @@
-// The spaces sidebar: the run's space, then one row per task space, one line each
-// — a status glyph, the task, and the red/green counts that need the person.
+// The spaces sidebar (PROTOTYPE, SHPR-18): one two-line row per space (name, branch
+// dimmed), and under the open space a tree of its tasks — a status glyph, the id
+// and title, and for a working task its agent and progress. Spaces and their tasks
+// come from `lib/tree.js` over `GET /api/state`; the Agents pane is its own mod
+// (`shprd-agents`). The older notes below describe the row menu and confirm, which
+// are kept.
 //
 // It replaces Herdr's own `spaces` list in this layout (the layout's `spaces`
 // block names this mod), because in shprd a space *is* work: one task, one space,
@@ -37,26 +41,17 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { closeOverlay, layout, openOverlay, props, run, setShared, spaces, theme } from "herdr";
+import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, theme } from "herdr";
 
 import { attach, reason } from "./lib/client.js";
-import { KIND, MENU, attention, closeWords, menuHeight, menuItems, narrowSidebar, sidebarRows } from "./lib/spaces.js";
-import { note, statusGlyph } from "./lib/panel.js";
+import { MENU, closeWords, menuHeight, menuItems } from "./lib/spaces.js";
+import { spaceTree, spacesOf } from "./lib/tree.js";
+import { note, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
 /** How often the sidebar reads the board when the change file says nothing. */
 const FLOOR_MS = 5000;
-/**
- * A row's height: one line, as Shepherdr's space rows are.
- *
- * 30 px, not the 28 of the brief: Shepherdr's `rowHeight` gives 30 to a space and
- * 28 only to a worktree child under its checkout (`mods/spaces-chat/main.js:66`),
- * and shprd has no worktree rows.
- */
-const ROW_H = 30;
-/** The rail's row (under 160 px): a number and a glyph, Shepherdr's `compact()`. */
-const RAIL_H = 26;
 /** The face shprd's ids are set in. */
 const MONO = "JetBrains Mono";
 /** The close confirm's size: Shepherdr's `closeSpace` asks in a 400×168 dialog. */
@@ -113,8 +108,24 @@ export default class Spaces extends View {
     this.failure = null;
     this.client = null;
     this.watching = false;
+    // PROTOTYPE: the picked space and the folded ones are this copy's own state.
+    this.selected = shared("spaces.picked") ?? null;
+    this.folded = new Set();
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // Commands, for a key, the palette or a script: `pick:<space id>` and
+    // `fold` act as their clicks do.
+    cx.spawn(async () => {
+      for (;;) {
+        const command = String(await nextCommand());
+        const space = spaceTree(this.state ?? {}).find((entry) => command === `pick:${entry.id}`);
+        if (space) this.pick(space);
+        else if (command === "fold") {
+          const picked = spaceTree(this.state ?? {}).find((entry) => entry.id === this.selected);
+          if (picked) this.fold(picked);
+        }
+      }
+    });
   }
 
   /**
@@ -139,6 +150,7 @@ export default class Spaces extends View {
       this.client = next.client;
       this.follow();
       this.state = await this.client.state();
+      this.selected = this.selected ?? spacesOf(this.state)[0]?.id ?? null;
       this.failure = null;
     } catch (err) {
       // A service that restarted answers with another id: forget the client so
@@ -159,10 +171,19 @@ export default class Spaces extends View {
     });
   }
 
-  /** Brings a space to the front, which is what a row is for. */
-  focus(row) {
-    if (!row?.space?.id) return;
-    run("space.select", { id: row.space.id });
+  /** Picks a space: its tree opens, and the pick is shared with the other panes. */
+  pick(space) {
+    this.selected = space.id;
+    this.folded.delete(space.id);
+    setShared("spaces.picked", space.id);
+    this.cx.notify();
+  }
+
+  /** Folds or unfolds the picked space's tree. */
+  fold(space) {
+    if (this.folded.has(space.id)) this.folded.delete(space.id);
+    else this.folded.add(space.id);
+    this.cx.notify();
   }
 
   /**
@@ -201,17 +222,12 @@ export default class Spaces extends View {
   }
 
   /**
-   * Opens the task in the Tasks panel: its id is shared (`tasks.thread`, the
-   * panel's own contract) and the panel runs its drill-in from its own command,
-   * so this mod never names a stack child that a later task might move.
-   *
-   * The thread's only body today is the Accept card, so a task that is not ready
-   * lands on that card's own "pick a ready one" line; U3 gives the thread its
-   * views and the same row then opens the task itself.
+   * Opens the task's thread in the Tasks panel (`openThread` in `lib/panel.js`
+   * selects the stacks itself, so it works while another thread is open).
    */
   openTask(p) {
-    setShared("tasks.thread", { task: p.task, title: p.title ?? "", at: Date.now() });
-    run("shprd-tasks.open");
+    openThread(p);
+    this.cx.notify();
   }
 
   /** Asks before closing the space, in Shepherdr's words and dialog size. */
@@ -245,30 +261,17 @@ export default class Spaces extends View {
     if (this.popup) return this.popup.view === "confirm" ? this.confirm() : this.menuView();
     const t = theme();
     const colors = tone(t);
-    // The rail goes by the column's width, as Shepherdr's does: dragging the edge
-    // narrows it too, so no flag has to be kept in step with the layout.
-    this.narrowed = narrowSidebar(layout());
-    const rows = this.state ? sidebarRows(this.state, spaces()) : null;
+    const tree = this.state ? spaceTree(this.state) : null;
     const sections = [];
-    let no = 0;
-    const row = (t, colors, entry) => this.row(t, colors, entry, ++no);
-    if (!rows) {
+    if (!tree) {
       sections.push(
         note(t, this.failure ?? "No run yet."),
         note(t, this.failure ? "Start it from the footer below." : "Tasks appear here as the run adds them."),
       );
-    } else if (this.narrowed) {
-      if (rows.coordinator) sections.push(row(t, colors, rows.coordinator));
-      for (const entry of [...rows.tasks, ...rows.waiting]) sections.push(row(t, colors, entry));
     } else {
-      if (rows.coordinator) sections.push(row(t, colors, rows.coordinator));
-      if (rows.tasks.length > 0) {
-        sections.push(this.heading(t, "Task spaces", rows.tasks.length));
-        for (const entry of rows.tasks) sections.push(row(t, colors, entry));
-      }
-      if (rows.waiting.length > 0) {
-        sections.push(this.heading(t, "Waiting for a space", rows.waiting.length));
-        for (const entry of rows.waiting) sections.push(row(t, colors, entry));
+      for (const space of tree) {
+        sections.push(this.spaceRow(t, colors, space));
+        if (this.isOpen(space)) space.tasks.forEach((task) => sections.push(this.taskRow(t, colors, task)));
       }
     }
     return v_flex()
@@ -278,16 +281,13 @@ export default class Spaces extends View {
       .text_size(TEXT.body)
       .child(this.title(t))
       .child(
-        v_flex()
-          .flex_1()
-          .min_h(0)
-          .px(8)
-          .pb(10)
-          .gap(1)
-          .overflow_y_scrollbar()
-          .mode("always")
-          .children(sections),
+        v_flex().flex_1().min_h(0).px(8).pb(10).gap(1).overflow_y_scrollbar().mode("always").children(sections),
       );
+  }
+
+  /** Whether a space shows its tasks: the picked one, unless its ▾ folded it. */
+  isOpen(space) {
+    return this.selected === space.id && !this.folded.has(space.id);
   }
 
   /** "Spaces", and the "+" at the right that adds one (`S:mods/spaces-chat/main.js:818`). */
@@ -303,16 +303,15 @@ export default class Spaces extends View {
       .text_size(TEXT.label)
       .font_medium()
       .text_color(t.dim)
-      .when(!this.narrowed, (el) => el.child("Spaces"))
+      .child("Spaces")
       .child(this.addButton(t));
   }
 
   /**
    * The heading's "+": 24 px square, dim, bright on hover, its glyph 15 px.
    *
-   * Shepherdr draws a 14 px `plus.svg` in it. shprd ships no SVG assets yet (T5
-   * brings the icon set), so the glyph is the character, in the same box and the
-   * same colour rules — a shape that will not move when the asset arrives.
+   * Shepherdr draws a 14 px `plus.svg` in it; the character is the same box and
+   * colour rules, a shape that will not move when the asset arrives.
    */
   addButton(t) {
     return h_flex()
@@ -331,102 +330,116 @@ export default class Spaces extends View {
       .child("+");
   }
 
-  /** A quiet section heading: a word, and how many rows are under it. */
-  heading(t, word, count) {
-    return h_flex()
-      .h(SPACE.sidebarRow)
-      .flex_none()
-      .mt(4)
-      .px(8)
-      .gap(6)
-      .items_center()
-      .text_size(TEXT.id)
-      .text_color(t.dim)
-      .child(word)
-      .child(String(count));
-  }
-
   /**
-   * One space on one line: the status glyph, the task, the count that needs the
-   * person (`S:mods/spaces-chat/main.js:711-772`).
-   *
-   * The status is the glyph's shape and colour only — no word and no second line,
-   * which is what Shepherdr's rows do; the board in the Tasks panel is where a
-   * task says what it is doing. The coordinator's row carries the run in the slot
-   * Shepherdr gives a repo's git state, because that is the one thing about it a
-   * person cannot see anywhere else in this column.
+   * A space: two lines, its name and its branch dimmed under it, the badge of what
+   * needs the person, and a ▾ on the open one that folds its tasks.
    */
-  row(t, colors, entry, no) {
-    if (this.narrowed) return this.rail(t, colors, entry, no);
-    const clickable = Boolean(entry.space?.id);
-    const counts = attention(entry);
-    const coordinator = entry.kind === KIND.coordinator;
+  spaceRow(t, colors, space) {
+    const open = this.isOpen(space);
+    const picked = this.selected === space.id;
     return h_flex()
-      .id(`space-${entry.id}`)
-      .h(ROW_H)
+      .id(`space-${space.id}`)
+      .h(44)
       .flex_none()
+      .mt(3)
       .px(8)
-      .gap(9)
+      .gap(8)
       .items_center()
       .rounded(RADIUS.card)
-      .when(entry.active, (el) => el.bg(t.selected))
-      .when(!entry.active, (el) => el.hover((style) => style.bg(t.hover)))
-      .when(clickable, (el) => el.cursor_pointer().on_click(() => this.focus(entry)))
-      .on_mouse_down("right", () => this.menu(entry))
-      .child(statusGlyph(t, entry, colors))
+      .when(picked, (el) => el.bg(t.selected))
+      .when(!picked, (el) => el.hover((style) => style.bg(t.hover)))
+      .cursor_pointer()
+      .on_click(() => this.pick(space))
       .child(
-        div()
-          .flex_none()
-          .when(!coordinator, (el) => el.font_family(MONO))
-          .text_color(entry.kind === KIND.waiting ? t.muted : t.foreground)
-          .child(coordinator ? entry.label : ref(entry.label)),
+        v_flex()
+          .flex_1()
+          .min_w(0)
+          .child(div().h(22).flex().items_center().truncate().text_color(t.foreground).child(space.name))
+          .child(
+            div()
+              .h(16)
+              .flex()
+              .items_center()
+              .truncate()
+              .text_size(TEXT.label)
+              .text_color(t.dim)
+              .child(space.branch || space.folder),
+          ),
       )
-      .when(coordinator, (el) => el.child(div().flex_1().min_w(0)))
-      .when(!coordinator, (el) =>
+      .when(space.needs > 0 || space.ready > 0, (el) =>
+        el.child(rowBadge(t, { need: space.needs, ready: space.ready }, colors, picked ? t.selected : t.chrome)),
+      )
+      .when(picked, (el) =>
         el.child(
-          div()
-            .flex_1()
-            .min_w(0)
-            .truncate()
+          h_flex()
+            .id(`space-fold-${space.id}`)
+            .w(H.sm)
+            .h(H.sm)
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded(RADIUS.control)
             .text_size(TEXT.label)
-            .text_color(t.muted)
-            .child(entry.title),
+            .text_color(t.dim)
+            .hover((style) => style.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => {
+              cx.stop_propagation();
+              this.fold(space);
+            })
+            .child(open ? "▾" : "▸"),
         ),
-      )
-      .when(Boolean(entry.tail), (el) =>
-        el.child(div().flex_none().text_size(TEXT.label).text_color(t.dim).child(entry.tail)),
-      )
-      .when(counts.need > 0 || counts.ready > 0, (el) =>
-        el.child(rowBadge(t, counts, colors, entry.active ? t.selected : t.chrome)),
       );
   }
 
   /**
-   * The rail's row, under 160 px: the row's number and a glyph, nothing else
-   * (`S:mods/spaces-chat/main.js:768-783`). Names do not fit, and the order is the
-   * order, so a number is enough to find a space again; right-click still works.
+   * One task in a space's tree: ├─ or └─ guide, the status glyph, its id and
+   * title, and for a working task a dim second line with its agent and progress.
    */
-  rail(t, colors, entry, no) {
+  taskRow(t, colors, task) {
+    const picked = (shared("tasks.thread")?.task ?? null) === task.id;
+    const guide = (text) => div().h(text.h).flex().items_center().child(text.s);
     return h_flex()
-      .id(`space-${entry.id}`)
-      .h(RAIL_H)
+      .id(`task-${task.id}`)
       .flex_none()
-      .justify_center()
-      .items_center()
-      .gap(4)
+      .ml(14)
+      .pl(4)
+      .pr(8)
+      .items_start()
       .rounded(RADIUS.card)
-      .when(entry.active, (el) => el.bg(t.raised))
-      .when(!entry.active, (el) => el.hover((style) => style.bg(t.hover)))
+      .when(picked, (el) => el.bg(t.selected))
+      .when(!picked, (el) => el.hover((style) => style.bg(t.hover)))
       .cursor_pointer()
-      .on_click(() => this.focus(entry))
-      .on_mouse_down("right", () => this.menu(entry))
+      .on_click(() => this.openTask({ task: task.id, title: task.title }))
+      .on_mouse_down("right", () => this.menu({ id: task.id, title: task.title, space: null }))
       .child(
-        div()
+        v_flex()
+          .w(24)
+          .flex_none()
+          .font_family(MONO)
           .text_size(TEXT.label)
-          .text_color(entry.active ? t.foreground : t.muted)
-          .child(String(no)),
+          .text_color(t.border)
+          .child(guide({ h: 28, s: task.last ? "└─" : "├─" }))
+          .when(task.sub, (el) => el.child(guide({ h: 16, s: task.last ? "" : "│" }))),
       )
-      .child(statusGlyph(t, entry, colors, 12));
+      .child(
+        v_flex()
+          .flex_1()
+          .min_w(0)
+          .child(
+            h_flex()
+              .h(28)
+              .gap(8)
+              .items_center()
+              .child(statusGlyph(t, task, colors))
+              .child(div().flex_none().font_family(MONO).text_size(TEXT.label).text_color(t.foreground).child(ref(task.id)))
+              .child(div().flex_1().min_w(0).truncate().text_size(TEXT.label).text_color(t.muted).child(task.title)),
+          )
+          .when(task.sub, (el) =>
+            el.child(
+              div().h(16).pl(22).flex().items_center().truncate().text_size(TEXT.id).text_color(t.dim).child(task.sub),
+            ),
+          ),
+      );
   }
 
   // -- the overlay views ----------------------------------------------------

@@ -10,6 +10,8 @@ mods/shprd-spaces/      the sidebar: one 30 px line a space — a status glyph, 
                         task, the red/green count badge — the "Spaces" heading's
                         "+", the row's right-click menu and its close confirm, and
                         the rail under 160 px
+mods/shprd-agents/      PROTOTYPE (SHPR-18): the sidebar's Agents pane, one two-line row per live
+                        agent, a Grouped toggle; a click opens the task's thread
 mods/shprd-status/      the status bar: This computer and the run, the shown space's branch, the red
                         "Needs you" badge, the last pass's failure
 mods/shprd-tasks/       the board: one row a task, grouped by shprd's derived status
@@ -37,7 +39,8 @@ mods/shprd-accept/      the task thread's head (‹ Tasks, Review, Chat · Termi
 mods/shprd-task-pr/     the task's pull request: state, #n, size, branches, links (M10.5)
 mods/shprd-settings/    the settings window: agents, tasks, prompts (M10.6,
                         a dialog since M11 fix S)
-mods/shprd-graph/       the graph: dagr in a terminal block, or the word on
+mods/shprd-graph/       (unused in the prototype layout: the Graph is a view of the Tasks panel)
+                        the graph: dagr in a terminal block, or the word on
                         where dagr is          (M10.7)
 mods/shprd-chat/        the chat: bubbles, markdown, "Show more", the composer and
                         the question / permission / plan cards in the timeline.
@@ -45,7 +48,9 @@ mods/shprd-chat/        the chat: bubbles, markdown, "Show more", the composer a
                         Terminal switch opens in an agent pane's place, the
                         coordinator's included (M11 U4)
 mods/shprd-toasts/      toasts over the work area  (M10.4)
-mods/lib/               the shared modules: tokens, panel parts, the menus' rows
+mods/lib/               the shared modules (`tree.js`: the sidebar tree, agent rows and graph
+                        rows, and the `spaces` / `live_agents` contract; `test/serve-fixture.mjs`
+                        serves `fixtures/proto.json` as a stand-in service): tokens, panel parts, the menus' rows
                         (`menu.js`), the board's
                         reading (`board.js`), the sidebar's (`spaces.js`), the
                         tab bar's (`tabstrip.js`), the toasts' (`toasts.js`), the

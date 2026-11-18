@@ -32,12 +32,23 @@
                 "mod": "shprd-spaces"
               },
               "size": {
-                "weight": 1
+                "weight": 3
               },
               "min": 90
+            },
+            {
+              "id": "agents",
+              "type": "block",
+              "content": {
+                "mod": "shprd-agents"
+              },
+              "size": {
+                "weight": 2
+              },
+              "min": 120
             }
           ],
-          "resizable": false
+          "resizable": true
         },
         {
           "id": "sidebar-footer",
@@ -204,27 +215,6 @@
                         }
                       ],
                       "active": "tasks-list"
-                    },
-                    {
-                      "id": "graph",
-                      "type": "stack",
-                      "active": "graph-note",
-                      "children": [
-                        {
-                          "id": "graph-note",
-                          "type": "block",
-                          "content": {
-                            "mod": "shprd-graph"
-                          }
-                        },
-                        {
-                          "id": "graph-term",
-                          "type": "block",
-                          "content": {
-                            "terminal": "shprd-graph"
-                          }
-                        }
-                      ]
                     }
                   ],
                   "active": "tasks"

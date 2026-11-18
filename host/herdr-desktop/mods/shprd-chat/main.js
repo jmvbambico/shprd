@@ -145,6 +145,20 @@ export default class Chat extends View {
    * for again rather than kept.
    */
   async refresh(cx = this.cx) {
+    // One read at a time: the first read and the change file's first look both
+    // start one as the thread opens, and two reads from the same cursor would fold
+    // the same page twice (the conversation showed twice).
+    if (this.reading) return;
+    this.reading = true;
+    try {
+      await this.read(cx);
+    } finally {
+      this.reading = false;
+    }
+  }
+
+  /** One read of the board, the asks and the conversation (see [`refresh`]). */
+  async read(cx) {
     const space = this.space;
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
