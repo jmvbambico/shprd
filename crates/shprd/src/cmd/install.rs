@@ -979,7 +979,8 @@ fn install(source: &Source, app_home: &Path, dry_run: bool, json: bool) -> Resul
     }
     if dry_run {
         println!(
-            "dry run: nothing was written; {changed} file(s) would change in {}",
+            "dry run: nothing was written; {changed} file(s) and {} key(s) would change in {}",
+            plan.keys.len() + plan.retired_keys.len(),
             app_home.display()
         );
     } else {

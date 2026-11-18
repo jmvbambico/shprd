@@ -284,7 +284,9 @@ export default class Tabs extends View {
     // space, four is a task's.
     const parts = String(space.name ?? "").split(" · ");
     const shprds = parts[0] === "shprd" && parts.length >= 2;
-    if (shprds && parts.length !== 2) return;
+    // Only a well-formed repo space is renamed under its prefix; any other
+    // shprd-looking name is left as it is.
+    if (shprds && (parts.length !== 2 || parts[1] === "")) return;
     const prefix = shprds ? "shprd · " : "";
     const named = { repo: parts[1] };
     openOverlay({
