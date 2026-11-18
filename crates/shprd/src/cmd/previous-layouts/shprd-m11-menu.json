@@ -1,0 +1,304 @@
+{
+  "id": "root",
+  "cloned_from": {
+    "name": "main",
+    "version": "0.1.15"
+  },
+  "type": "row",
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "children": [
+        {
+          "id": "brand",
+          "type": "block",
+          "content": {
+            "mod": "workspace-chrome"
+          },
+          "size": {
+            "px": 46
+          },
+          "window_drag": true
+        },
+        {
+          "id": "sidebar-lists",
+          "type": "column",
+          "children": [
+            {
+              "id": "spaces",
+              "type": "block",
+              "content": {
+                "mod": "shprd-spaces"
+              },
+              "size": {
+                "weight": 1
+              },
+              "min": 90
+            }
+          ],
+          "resizable": false
+        },
+        {
+          "id": "coordinator",
+          "type": "block",
+          "content": {
+            "mod": "shprd-coordinator",
+            "props": {
+              "compact": true
+            }
+          },
+          "size": {
+            "px": 190
+          }
+        },
+        {
+          "id": "sidebar-footer",
+          "type": "block",
+          "content": {
+            "mod": "shprd-chrome",
+            "props": {
+              "footer": true
+            }
+          },
+          "size": {
+            "px": 97
+          }
+        }
+      ],
+      "size": {
+        "px": 391
+      },
+      "min": 44,
+      "max": 480,
+      "background": "chrome",
+      "resizable": false
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "content": {
+            "mod": "shprd-tabs"
+          },
+          "size": {
+            "px": 42
+          },
+          "window_drag": true
+        },
+        {
+          "id": "work-body",
+          "type": "row",
+          "children": [
+            {
+              "id": "main",
+              "type": "block",
+              "content": {
+                "tab": "active",
+                "pane": {
+                  "header": {
+                    "content": {
+                      "mod": "shprd-pane"
+                    },
+                    "reveal": "always",
+                    "height": 30,
+                    "position": "top"
+                  },
+                  "background": "background",
+                  "border": {
+                    "width": 1,
+                    "color": "border"
+                  },
+                  "focus": {
+                    "width": 1,
+                    "color": "accent"
+                  },
+                  "radius": 10,
+                  "gap": 8,
+                  "lone": true
+                }
+              }
+            },
+            {
+              "id": "panel",
+              "type": "column",
+              "children": [
+                {
+                  "id": "panel-body",
+                  "type": "stack",
+                  "size": {
+                    "weight": 1
+                  },
+                  "children": [
+                    {
+                      "id": "files",
+                      "type": "block",
+                      "content": {
+                        "mod": "files"
+                      }
+                    },
+                    {
+                      "id": "changes",
+                      "type": "block",
+                      "content": {
+                        "mod": "changes"
+                      }
+                    },
+                    {
+                      "id": "tasks",
+                      "type": "stack",
+                      "children": [
+                        {
+                          "id": "tasks-list",
+                          "type": "block",
+                          "content": {
+                            "mod": "shprd-tasks"
+                          }
+                        },
+                        {
+                          "id": "tasks-thread",
+                          "type": "column",
+                          "children": [
+                            {
+                              "id": "tasks-thread-head",
+                              "type": "block",
+                              "content": {
+                                "mod": "shprd-accept",
+                                "props": {
+                                  "head": true
+                                }
+                              },
+                              "size": {
+                                "px": 127
+                              }
+                            },
+                            {
+                              "id": "tasks-thread-body",
+                              "type": "stack",
+                              "children": [
+                                {
+                                  "id": "tasks-thread-accept",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-accept"
+                                  }
+                                },
+                                {
+                                  "id": "tasks-thread-term",
+                                  "type": "block",
+                                  "content": {
+                                    "agent": "focused"
+                                  }
+                                },
+                                {
+                                  "id": "tasks-thread-pr",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-task-pr"
+                                  }
+                                }
+                              ],
+                              "active": "tasks-thread-accept"
+                            }
+                          ],
+                          "background": "background",
+                          "border": {
+                            "width": 1,
+                            "color": "border"
+                          },
+                          "radius": 10,
+                          "resizable": false
+                        }
+                      ],
+                      "active": "tasks-list"
+                    },
+                    {
+                      "id": "asks",
+                      "type": "block",
+                      "content": {
+                        "mod": "shprd-asks"
+                      }
+                    }
+                  ],
+                  "active": "tasks"
+                },
+                {
+                  "id": "graph",
+                  "type": "stack",
+                  "size": {
+                    "px": 300
+                  },
+                  "min": 120,
+                  "active": "graph-note",
+                  "children": [
+                    {
+                      "id": "graph-note",
+                      "type": "block",
+                      "content": {
+                        "mod": "shprd-graph"
+                      }
+                    },
+                    {
+                      "id": "graph-term",
+                      "type": "block",
+                      "content": {
+                        "terminal": "shprd-graph"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "resizable": false,
+              "size": {
+                "px": 510
+              },
+              "min": 280,
+              "max": 900
+            }
+          ],
+          "padding": 8,
+          "gap": 8,
+          "floating": [
+            {
+              "id": "toasts",
+              "content": {
+                "mod": "shprd-toasts"
+              },
+              "edge": "bottom",
+              "align": "end"
+            }
+          ]
+        },
+        {
+          "id": "status",
+          "type": "block",
+          "content": {
+            "mod": "shprd-status"
+          },
+          "size": {
+            "px": 28
+          }
+        }
+      ],
+      "resizable": false
+    }
+  ],
+  "background": "canvas",
+  "terminal_padding": [
+    14,
+    12
+  ],
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "titlebar": "none",
+  "terminal_menu": "shprd-menu",
+  "traffic_lights": [
+    12,
+    16
+  ]
+}

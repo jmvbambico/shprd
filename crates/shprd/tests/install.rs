@@ -568,9 +568,18 @@ fn an_install_with_no_host_tree_installs_the_copy_in_the_binary() {
     // The host folder's own `test/` and `bin/` are not part of an install.
     assert!(!fixture.app_path("test").exists());
     assert!(!fixture.app_path("bin").exists());
-    // And the manifest owns everything it wrote, so it can take it back.
-    let files = fixture.manifest_files();
-    assert_eq!(files.len(), 98, "the same count a checkout installs");
+    // And the manifest owns everything the working tree has — no more, no fewer —
+    // so an install from the tree beside the checkout and one from the copy in
+    // the binary are the same desktop, file for file (a count the tree outgrows
+    // is a test that fails for the right reason but says less).
+    let from_tree = Fixture::new();
+    ok(&from_tree.run(&[]));
+    let embedded: Vec<String> = fixture.manifest_files().into_keys().collect();
+    let checkout: Vec<String> = from_tree.manifest_files().into_keys().collect();
+    assert_eq!(
+        embedded, checkout,
+        "the embedded copy is the working tree, file for file"
+    );
 }
 
 #[test]
@@ -828,7 +837,12 @@ fn a_desktop_from_an_earlier_layout_upgrades_too() {
     // install may be the M10.3, M10.4 or M11 (before the Accept dialog) layout
     // rather than M10's last one. Every version is carried,
     // pruned or not, because that is what an upgrade may meet on disk.
-    for name in ["shprd-m10.3.json", "shprd-m10.4.json", "shprd-m11.json"] {
+    for name in [
+        "shprd-m10.3.json",
+        "shprd-m10.4.json",
+        "shprd-m11.json",
+        "shprd-m11-menu.json",
+    ] {
         // As the older install left it, and as Herdr leaves it after pruning the
         // terminal block it could not resolve.
         for prune in [false, true] {

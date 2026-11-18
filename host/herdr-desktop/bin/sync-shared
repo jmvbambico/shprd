@@ -23,17 +23,18 @@ check=0
 # module:space-separated mods that import it under `./lib/<module>`
 mods_for() {
   case "$1" in
-    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
-    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
+    tokens.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-prompt" ;;
+    panel.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu shprd-prompt" ;;
     board.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-spaces shprd-toasts" ;;
-    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces" ;;
+    client.js) echo "shprd-status shprd-tasks shprd-accept shprd-task-pr shprd-asks shprd-settings shprd-graph shprd-coordinator shprd-tabs shprd-pane shprd-chrome shprd-toasts shprd-spaces shprd-menu shprd-new-menu" ;;
     watch.js) echo "shprd-tasks shprd-asks shprd-coordinator shprd-status shprd-graph shprd-spaces shprd-toasts shprd-accept shprd-task-pr" ;;
     spaces.js) echo "shprd-spaces shprd-toasts shprd-tasks shprd-accept" ;;
     accept.js) echo "shprd-accept shprd-toasts" ;;
     taskpr.js) echo "shprd-task-pr" ;;
-    tabstrip.js) echo "shprd-tabs" ;;
+    tabstrip.js) echo "shprd-tabs shprd-menu shprd-new-menu shprd-pane" ;;
     toasts.js) echo "shprd-toasts" ;;
     settings.js) echo "shprd-settings" ;;
+    menu.js) echo "shprd-menu shprd-new-menu shprd-pane shprd-tabs" ;;
     asks.js) echo "shprd-asks" ;;
     chat.js) echo "shprd-coordinator" ;;
     *) echo "no mod list for $1" >&2; exit 2 ;;
