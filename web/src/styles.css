@@ -496,8 +496,9 @@ input {
   .login {
     padding: 22px;
   }
+}
 
-  @media (prefers-reduced-motion: no-preference) {
+@media (prefers-reduced-motion: no-preference) {
   .overlay,
   .login {
     animation: rise 120ms ease-out;
@@ -1848,7 +1849,6 @@ textarea.input {
   white-space: nowrap;
 }
 
-.agent {
 /* --- tasks: the board, the thread, the accept card, the toasts ------------ */
 
 /* The tasks screen scrolls inside its card, so the shell is as tall as the window. */
@@ -2031,6 +2031,7 @@ textarea.input {
 
 /* The list */
 
+.agent,
 .tasks,
 .thread {
   flex: 1;
@@ -2348,6 +2349,12 @@ textarea.input {
   height: 36px;
   border: 0;
   border-radius: 50%;
+  background: var(--h-accent);
+  color: var(--h-accent-foreground);
+  font-size: 16px;
+  cursor: pointer;
+}
+
 .chip:hover {
   color: var(--h-foreground);
 }
