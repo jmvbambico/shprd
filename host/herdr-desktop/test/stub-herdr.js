@@ -173,31 +173,6 @@ export function run(name, args) {
   return null;
 }
 
-/** Every overlay a mod opened, in order, as `openOverlay(spec)` recorded it. */
-export const OVERLAYS = [];
-
-/** The overlays `closeOverlay(id)` closed, in order. */
-export const CLOSED = [];
-
-/**
- * `openOverlay(spec)`: the only way a mod floats something.
- *
- * A test reads what a click asked for — the mod, the kind, the frame and the
- * size — from [`OVERLAYS`], so the footer's row and the settings window can be
- * checked without a window.
- */
-export function openOverlay(spec) {
-  const id = `overlay-${OVERLAYS.length + 1}`;
-  OVERLAYS.push({ id, ...spec });
-  return id;
-}
-
-/** `closeOverlay(id)`: a mod closing itself, as `props().overlay` names it. */
-export function closeOverlay(id) {
-  CLOSED.push(id ?? null);
-  return null;
-}
-
 /** The shared key/value space, as `shared(k)` and `setShared(k, v)` see it. */
 export const SHARED = new Map();
 

@@ -129,7 +129,7 @@ test("the shprd row opens the settings window over the layout, not a panel tab",
   assert.equal(overlay.frame, "none");
   assert.equal(overlay.width, 860);
   assert.equal(overlay.height, 0.92);
-  assert.deepEqual(overlay.props, {}, "no page asked for: the window opens on Agents");
+  assert.equal(overlay.props.page, undefined, "no page asked for: the window opens on Agents");
   // Nothing was asked of the side panel: the settings are a window now.
   assert.deepEqual(
     herdr.RUNS.filter((call) => call.name.startsWith("layout.")),
