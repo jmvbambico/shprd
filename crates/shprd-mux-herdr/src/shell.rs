@@ -67,6 +67,44 @@ pub(crate) fn line(argv: &[String], env: &[(String, Option<String>)]) -> Result<
     Ok(line)
 }
 
+/// The longest line typed into a pane as it is. A terminal's input line is
+/// limited (about 1 KiB on macOS), and a longer one is cut mid-word, leaving the
+/// shell at an open quote; the service's `PATH` prefix made that real.
+const MAX_TYPED_LINE: usize = 700;
+
+/// The line to type into a pane to start `argv` with `env`.
+///
+/// A short command is typed as [`line`] builds it. A long one is written to a
+/// private (`0600`) one-shot script in `dir` that deletes itself and runs the
+/// same `exec env …` line, and the pane is typed `exec sh <script>` instead.
+pub(crate) fn typed_line(
+    argv: &[String],
+    env: &[(String, Option<String>)],
+    dir: &std::path::Path,
+) -> Result<String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let full = line(argv, env)?;
+    if full.len() <= MAX_TYPED_LINE {
+        return Ok(full);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let path = dir.join(format!("shprd-launch-{}-{stamp}.sh", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| MuxError::command("run", format!("writing the launch script: {error}")))?;
+    file.write_all(format!("rm -f -- \"$0\"\n{full}\n").as_bytes())
+        .map_err(|error| MuxError::command("run", format!("writing the launch script: {error}")))?;
+    Ok(format!("exec sh {}", quote(&path.display().to_string())?))
+}
+
 #[cfg(test)]
 mod tests {
     // Tests may panic: a failed assertion is the point.
@@ -194,5 +232,23 @@ mod tests {
             "va'lue $x `y`|unset"
         );
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn a_long_line_goes_through_a_self_deleting_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "x".repeat(2000);
+        let env = vec![("BIG".to_string(), Some(long.clone()))];
+        let typed = typed_line(&argv(&["printenv", "BIG"]), &env, dir.path()).unwrap();
+        assert!(typed.len() < 200, "{typed}");
+        let out = Command::new("sh").arg("-c").arg(&typed).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), long);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "script removed"
+        );
+        let short = typed_line(&argv(&["true"]), &[], dir.path()).unwrap();
+        assert_eq!(short, "exec env 'true'");
     }
 }
