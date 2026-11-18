@@ -1,0 +1,216 @@
+// The settings dialog's state: what the service resolved, the writes in flight,
+// and the refusal a write got.
+//
+// Every write goes through one queue, one key at a time, because the service
+// takes one key per call and a second answer would overwrite the first's
+// settings. A refusal is the service's own sentence, kept verbatim: a
+// cross-vendor review is refused in words that name both roles and both vendors,
+// and a person needs exactly those words.
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { ApiError, type ApiClient } from "../api/client";
+import type { PromptListDto, RosterDto, SettingsDto } from "../gen";
+import { outcomeOf, type SettingValue } from "./model";
+
+/** How often the dialog re-reads the service, so another window's write shows. */
+export const POLL_MS = 10_000;
+
+/** How long "Saved" stays beside a write. */
+export const SAVED_MS = 2100;
+
+/** A refused write: the key it was about, and the service's words. */
+export interface Refusal {
+  /** The key (or `prompts.<id>`) that was refused. */
+  key: string;
+  /** The service's sentence, unedited. */
+  text: string;
+}
+
+/** The words of a failure, for the person. */
+export function reason(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.status === 0 ? "shprd serve is not running" : error.message;
+  }
+  return error instanceof Error ? error.message : "something went wrong";
+}
+
+/** What the dialog reads and does. */
+export interface SettingsState {
+  /** The resolved settings, or null before the first answer. */
+  settings: SettingsDto | null;
+  /** The programs and their models. */
+  roster: RosterDto | null;
+  /** The prompt list. */
+  prompts: PromptListDto | null;
+  /** Why nothing could be read, when nothing could. */
+  failure: string | null;
+  /** The last refused write. */
+  refusal: Refusal | null;
+  /** What the last accepted write did, in words. */
+  saved: string | null;
+  /** The key being written now. */
+  writing: string | null;
+  /**
+   * Writes one key; `null` removes it so it inherits again.
+   *
+   * Resolves once the write has been answered, whether stored or refused.
+   */
+  write: (key: string, value: SettingValue, forRepo: boolean) => Promise<boolean>;
+  /** Clears the refusal and the saved word. */
+  clearNotices: () => void;
+  /** Reads the prompt list again. */
+  reloadPrompts: () => Promise<void>;
+  /** Sets the prompt list directly (after an edit or a reset). */
+  setPrompts: (list: PromptListDto) => void;
+  /** Records a refusal from outside the settings keys (a prompt write). */
+  refuse: (key: string, error: unknown) => void;
+  /** Records a saved word from outside the settings keys. */
+  say: (text: string) => void;
+}
+
+/** Reads the settings, the roster and the prompt list, and owns the write queue. */
+export function useSettings(client: ApiClient): SettingsState {
+  const [settings, setSettings] = useState<SettingsDto | null>(null);
+  const [roster, setRoster] = useState<RosterDto | null>(null);
+  const [prompts, setPrompts] = useState<PromptListDto | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [writing, setWriting] = useState<string | null>(null);
+  const tail = useRef<Promise<unknown>>(Promise.resolve());
+  const pending = useRef(0);
+  const alive = useRef(true);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (savedTimer.current !== null) {
+        clearTimeout(savedTimer.current);
+      }
+    };
+  }, []);
+
+  const say = useCallback((text: string) => {
+    setSaved(text);
+    if (savedTimer.current !== null) {
+      clearTimeout(savedTimer.current);
+    }
+    savedTimer.current = setTimeout(() => {
+      if (alive.current) {
+        setSaved(null);
+      }
+    }, SAVED_MS);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [nextSettings, nextRoster, nextPrompts] = await Promise.all([
+        client.settings(),
+        client.roster(),
+        client.prompts(),
+      ]);
+      if (!alive.current) {
+        return;
+      }
+      // A read that raced a write and finished after it carries the old words;
+      // while a write is queued the write's own answer is the newer one.
+      if (pending.current === 0) {
+        setSettings(nextSettings);
+      }
+      setRoster(nextRoster);
+      setPrompts(nextPrompts);
+      setFailure(null);
+    } catch (error) {
+      if (alive.current) {
+        setFailure(reason(error));
+      }
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => {
+      if (pending.current === 0) {
+        void refresh();
+      }
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  const write = useCallback(
+    (key: string, value: SettingValue, forRepo: boolean): Promise<boolean> => {
+      pending.current += 1;
+      const run = async (): Promise<boolean> => {
+        if (alive.current) {
+          setWriting(key);
+          setRefusal(null);
+          setSaved(null);
+        }
+        try {
+          const body: { key: string; value?: Exclude<SettingValue, null>; for_repo?: boolean } = {
+            key,
+          };
+          if (value !== null) {
+            body.value = value;
+          }
+          if (forRepo) {
+            body.for_repo = true;
+          }
+          const reply = await client.putSetting(body);
+          if (alive.current) {
+            setSettings(reply.settings);
+            say(outcomeOf(reply.outcome));
+          }
+          return true;
+        } catch (error) {
+          if (alive.current) {
+            setRefusal({ key, text: reason(error) });
+          }
+          return false;
+        } finally {
+          pending.current -= 1;
+          if (alive.current && pending.current === 0) {
+            setWriting(null);
+          }
+        }
+      };
+      const next = tail.current.then(run, run);
+      tail.current = next;
+      return next;
+    },
+    [client, say],
+  );
+
+  const reloadPrompts = useCallback(async () => {
+    try {
+      const list = await client.prompts();
+      if (alive.current) {
+        setPrompts(list);
+      }
+    } catch {
+      // The list is re-read on the next poll; a failed reload keeps what is shown.
+    }
+  }, [client]);
+
+  return {
+    settings,
+    roster,
+    prompts,
+    failure,
+    refusal,
+    saved,
+    writing,
+    write,
+    reloadPrompts,
+    setPrompts,
+    refuse: (key, error) => setRefusal({ key, text: reason(error) }),
+    say,
+    clearNotices: () => {
+      setRefusal(null);
+      setSaved(null);
+    },
+  };
+}
