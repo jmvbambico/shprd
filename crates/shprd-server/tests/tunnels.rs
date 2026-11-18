@@ -644,8 +644,9 @@ async fn right_logins_never_count_against_anyone() {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
-    // And the earlier failures were forgotten: four more wrong ones are allowed.
-    for _ in 0..4 {
+    // The right logins counted for nothing: of the five wrong ones an address
+    // may make, three are used, so two more are allowed.
+    for _ in 0..2 {
         let (status, _, _) = fixture
             .send(login_from(
                 QUICK,

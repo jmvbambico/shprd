@@ -22,8 +22,7 @@
 //! The per-address and global rows count *failed* logins: an attempt is counted
 //! when it arrives (so a burst of parallel guesses cannot all slip in before
 //! the first is judged) and handed back by [`RateLimiter::login_succeeded`] when
-//! the password was right. A right password never counts against anyone, and
-//! also clears that address's failures. The account row counts **wrong
+//! the password was right. A right password never counts against anyone. The account row counts **wrong
 //! passwords**, which is what "someone is guessing" means.
 //!
 //! **The trade-off.** Any limit shared by every visitor is a lever an attacker
@@ -259,6 +258,11 @@ impl RateLimiter {
             .login_all
             .retain(|at| now.saturating_sub(*at) < hour);
         if buckets.login_all.len() as u32 >= LOGIN_GLOBAL {
+            // A refused attempt is not one this address made against the
+            // per-address limit.
+            if let Some(recent) = buckets.login_ip.get_mut(&ip) {
+                recent.pop();
+            }
             self.storm.trip();
             let after = buckets
                 .login_all
@@ -274,14 +278,18 @@ impl RateLimiter {
     }
 
     /// Takes back the attempt [`RateLimiter::login`] counted for `ip` (the one
-    /// `ticket` names), because the password was right, and forgets that
-    /// address's earlier failures and blocks: a person who gets in is not a
-    /// guesser. Only this attempt's own entry leaves the global count, so a
+    /// `ticket` names), because the password was right. Only this attempt's own entry leaves each count, so a
     /// right password racing a wrong one never hands the wrong one back.
     pub fn login_succeeded(&self, ip: IpAddr, ticket: LoginTicket) {
         let mut buckets = self.lock();
-        buckets.login_ip.remove(&ip);
-        buckets.blocked.remove(&ip);
+        // Only this attempt's own entries leave, not the address's other
+        // in-flight attempts: a right password racing wrong ones must not wipe
+        // them. (Earlier failures therefore age out with the window.)
+        if let Some(recent) = buckets.login_ip.get_mut(&ip)
+            && let Some(at) = recent.iter().rposition(|at| *at == ticket.0)
+        {
+            recent.remove(at);
+        }
         if let Some(at) = buckets.login_all.iter().rposition(|at| *at == ticket.0) {
             buckets.login_all.remove(at);
         }
@@ -678,22 +686,22 @@ mod tests {
     }
 
     #[test]
-    fn a_right_password_is_not_counted_and_forgets_the_addresss_failures() {
+    fn a_right_password_is_not_counted_against_anyone() {
         let (_, limits) = limiter();
         // Far more right logins than any limit, from one address: never refused.
         for _ in 0..(LOGIN_GLOBAL * 2) {
             let ticket = limits.login(ip(1)).expect("a right login is never refused");
             limits.login_succeeded(ip(1), ticket);
         }
-        // Four wrong passwords, then the owner gets in, and the slate is clean.
+        // Four wrong passwords, then the owner gets in: the success took back
+        // only its own attempt, so exactly one more is allowed.
         for _ in 0..(LOGIN_PER_IP - 1) {
             limits.login(ip(2)).expect("inside");
         }
         let ticket = limits.login(ip(2)).expect("the fifth is allowed");
         limits.login_succeeded(ip(2), ticket);
-        for _ in 0..LOGIN_PER_IP {
-            limits.login(ip(2)).expect("the failures were forgotten");
-        }
+        limits.login(ip(2)).expect("the success was not counted");
+        limits.login(ip(2)).expect_err("but the four failures were");
     }
 
     #[test]
