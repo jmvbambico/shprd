@@ -2262,7 +2262,15 @@ pub(crate) fn ensure_coordinator(
             data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
-    let starters = mux.list_tabs(&space.id).unwrap_or_default();
+    // The starter shell is whatever the space held before the coordinator, except
+    // a tab named "Assistant": that is another product's, added to a space the
+    // moment it exists, and never ours to close.
+    let starters: Vec<_> = mux
+        .list_tabs(&space.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tab| !tab.title.trim().eq_ignore_ascii_case(ASSISTANT_TITLE))
+        .collect();
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
@@ -3557,8 +3565,10 @@ project_dirs = []
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
         let mux = FakeMux::default().with_ready_agent();
-        let prepared =
+        // A space that was already there, so no tab in it is a starter shell.
+        let mut prepared =
             ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        prepared.created = false;
         let foreign = mux.with_tab_id(&prepared.space.id, "tb42", "Assistant");
         let elsewhere = mux.with_tab_id(&prepared.space.id, "tb43", "coordinator");
         let old = mux.with_tab_id(&prepared.space.id, OLD_COORDINATOR_TAB, "coordinator");
