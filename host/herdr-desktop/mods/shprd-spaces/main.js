@@ -39,7 +39,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { closeOverlay, layout, openOverlay, props, run, setShared, spaces, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import { KIND, MENU, attention, closeWords, menuHeight, menuItems, narrowSidebar, sidebarRows } from "./lib/spaces.js";
 import { note, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
@@ -126,7 +126,14 @@ export default class Spaces extends View {
    * the same port is a new client and a whole re-read rather than a sidebar that
    * keeps painting old rows while the run has moved on (M10 gate bug 5).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {

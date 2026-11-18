@@ -32,7 +32,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, ScrollHandle, TextView, h_flex, v_flex } from "gpui-base";
 import { exec, props, shared, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
   COORDINATOR,
@@ -144,7 +144,14 @@ export default class Chat extends View {
    * bug 5). A read that answers nothing is a failure, so a dead port is looked
    * for again rather than kept.
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     const space = this.space;
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });

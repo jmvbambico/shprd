@@ -26,7 +26,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { nextCommand, run, setShared, shared, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import {
   counts,
   etaMinutes,
@@ -119,7 +119,14 @@ export default class Tasks extends View {
    * why a task added while the service was down appears without reloading the
    * layout (bug 5 of the M10 gate).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {

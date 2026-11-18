@@ -15,6 +15,9 @@ import assert from "node:assert/strict";
 import * as herdr from "herdr";
 import {
   Client,
+  attach,
+  pendingDeadlines,
+  singleFlight,
   ServiceError,
   baseUrl,
   changeFile,
@@ -345,7 +348,13 @@ test("a read that runs out of time is no answer, and a strict read says so", asy
 
   // A plain read is bounded at 4 s (`READ_WAIT`) and answers null.
   assert.equal(await client.call("GET", "/api/state"), null);
-  assert.deepEqual(bounds, [4000], "a read asks for READ_WAIT");
+  // The shared clock sleeps in ticks; together they cover READ_WAIT.
+  assert.ok(bounds.every((ms) => ms <= 500), "one short sleep at a time");
+  assert.equal(
+    bounds.reduce((sum, ms) => sum + ms, 0),
+    4000,
+    "a read asks for READ_WAIT",
+  );
 
   // The board is not a plain read: a panel paints it, so no answer at all is a
   // failure (the M10 gate's bug 5 — a `null` board looked like "nothing new"
@@ -519,4 +528,84 @@ test("a watcher that rejects ends the loop instead of the panel", async () => {
     },
   );
   assert.equal(read, 1, "the first reading still happened");
+});
+
+// SHPR-19: a mod's only clock is `cx.sleep` and the runtime allows 1024
+// outstanding ones. Guarded calls share one sleep at a time.
+test("a busy client never has more than one sleep outstanding", async () => {
+  let outstanding = 0;
+  let peak = 0;
+  let total = 0;
+  const wait = (ms) => {
+    outstanding += 1;
+    total += 1;
+    peak = Math.max(peak, outstanding);
+    return new Promise((resolve) =>
+      setTimeout(() => {
+        outstanding -= 1;
+        resolve();
+      }, ms),
+    );
+  };
+  const client = new Client(
+    { base: "http://127.0.0.1:1", dir: "/s", record: { id: "a" }, token: "t" },
+    { fetch: async () => ({ ok: true, text: async () => '{"a":1}' }), wait },
+  );
+  for (let round = 0; round < 40; round += 1) {
+    await Promise.all(Array.from({ length: 50 }, () => client.state()));
+  }
+  assert.equal(pendingDeadlines(), 0, "every answered call cancelled its deadline");
+  assert.ok(peak <= 1, `peak outstanding sleeps was ${peak}`);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(outstanding, 0, "the clock stops when nothing waits");
+  assert.ok(total < 5, `2000 calls used ${total} sleeps`);
+});
+
+test("a call that never answers still runs out", async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const client = new Client(
+    { base: "http://127.0.0.1:1", dir: "/s", record: { id: "a" }, token: "t" },
+    { fetch: () => new Promise(() => {}), wait },
+  );
+  const started = Date.now();
+  assert.equal(await client.call("GET", "/x", { wait: 300 }), null);
+  assert.ok(Date.now() - started < 1500);
+  await assert.rejects(client.call("GET", "/x", { wait: 200, strict: true }));
+});
+
+test("singleFlight never overlaps and folds callers into one rerun", async () => {
+  const owner = {};
+  let running = 0;
+  let peak = 0;
+  let runs = 0;
+  const work = async () => {
+    running += 1;
+    runs += 1;
+    peak = Math.max(peak, running);
+    await new Promise((r) => setTimeout(r, 20));
+    running -= 1;
+  };
+  await Promise.all(Array.from({ length: 10 }, () => singleFlight(owner, work)));
+  assert.equal(peak, 1);
+  assert.equal(runs, 2, "one run plus one folded rerun");
+});
+
+test("attach looks once more before believing a null", async () => {
+  let health = 0;
+  const files = {
+    "/s/shprd/service.json": '{"port": 7788, "id": "abc"}',
+    "/s/shprd/token": "tok",
+  };
+  const io = {
+    dir: "/s/shprd",
+    read: async (path) => files[path] ?? null,
+    fetch: async () => {
+      health += 1;
+      return health === 1
+        ? null
+        : { ok: true, json: async () => ({ ok: true, id: "abc" }) };
+    },
+  };
+  const next = await attach(null, io);
+  assert.ok(next.client, "the second look found the service");
 });

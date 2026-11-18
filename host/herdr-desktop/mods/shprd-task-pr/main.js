@@ -22,7 +22,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { shared, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, reason, singleFlight } from "./lib/client.js";
 import { taskById } from "./lib/board.js";
 import { card as surface, cardHeader, note } from "./lib/panel.js";
 import { PR_WORDS, branchLine, openUrl, prSize, taskPr } from "./lib/taskpr.js";
@@ -60,7 +60,14 @@ export default class TaskPr extends View {
    * again, and the card's whole state is re-read rather than kept (M10 gate
    * bug 5).
    */
-  async refresh(cx = this.cx) {
+  refresh(cx = this.cx) {
+    // One read at a time: a refresh asked for while another runs is folded into
+    // one more run after it, never started beside it.
+    return singleFlight(this, () => this.readOnce(cx));
+  }
+
+  /** One read of the service and one repaint; [`refresh`] is what callers use. */
+  async readOnce(cx) {
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
