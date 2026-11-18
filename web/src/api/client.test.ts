@@ -276,3 +276,35 @@ describe("the socket", () => {
     socket.close();
   });
 });
+
+describe("the terminal socket", () => {
+  it("asks for one space, with no token in the address", () => {
+    const client = new ApiClient({ base: "https://shprd.example.test", WebSocket: FakeCtor });
+    client.terminal("T-1 x", {});
+    expect(FakeSocket.last?.url).toBe("wss://shprd.example.test/api/terminal?space=T-1+x");
+    expect(FakeSocket.last?.url).not.toContain("token");
+  });
+
+  it("delivers messages and the close code, and ignores what it does not understand", () => {
+    const client = new ApiClient({ base: "http://127.0.0.1:7787", WebSocket: FakeCtor });
+    const messages: string[] = [];
+    const closed: number[] = [];
+    client.terminal("coordinator", { message: (m) => messages.push(m.type), close: (code) => closed.push(code) });
+    const fake = FakeSocket.last;
+    fake?.receive({ type: "hello", space: "coordinator", pane: "%1" });
+    fake?.receive("not json");
+    fake?.receive("[1]");
+    fake?.receive({ no: "type" });
+    expect(messages).toEqual(["hello"]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (fake as any).onclose({ code: 1013 });
+    expect(closed).toEqual([1013]);
+  });
+
+  it("sends input as JSON", () => {
+    const client = new ApiClient({ base: "http://127.0.0.1:7787", WebSocket: FakeCtor });
+    const socket = client.terminal("coordinator", {});
+    socket.send({ type: "key", key: "enter" });
+    expect(FakeSocket.last?.sent).toEqual([JSON.stringify({ type: "key", key: "enter" })]);
+  });
+});

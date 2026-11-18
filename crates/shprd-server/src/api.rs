@@ -183,6 +183,9 @@ pub(crate) struct AppState {
     /// A service without one answers `POST /api/chat` with a refusal rather
     /// than pretending the line went somewhere.
     pub(crate) chat: ChatHost,
+    /// What watches and types into a pane for the terminal socket, when the
+    /// caller has a host ([`App::with_terminal_host`]).
+    pub(crate) terminal: crate::terminal::TerminalPort,
     /// The login, the sessions and the gate that stands in front of a tunnel.
     ///
     /// It is always present: the gate is what decides whether a request has a
@@ -368,6 +371,7 @@ impl App {
             path_env: paths.path_env,
             dagr: paths.dagr,
             chat: ChatHost::new(),
+            terminal: crate::terminal::TerminalPort::new(),
             agents: crate::agents::Agents::new(),
             transcript_roots: paths.transcript_roots,
             web: crate::web::Source::Embedded,
@@ -553,6 +557,27 @@ impl App {
         self
     }
 
+    /// Watch and type into panes through `host`, for `GET /api/terminal`.
+    ///
+    /// The binary passes the host it drives; a test passes a fake pane, so no
+    /// terminal is ever reached by a test.
+    pub fn with_terminal_host(self, host: Arc<dyn crate::terminal::TerminalHost>) -> Self {
+        self.with_terminal_opt(Some(host))
+    }
+
+    /// [`App::with_terminal_host`], for a caller that may not have one.
+    pub(crate) fn with_terminal_opt(
+        mut self,
+        host: Option<Arc<dyn crate::terminal::TerminalHost>>,
+    ) -> Self {
+        self.state.terminal = match host {
+            Some(host) => crate::terminal::TerminalPort::with(host),
+            None => crate::terminal::TerminalPort::new(),
+        };
+        self.router = router(self.state.clone());
+        self
+    }
+
     /// Count the login's rate limits and session clocks against `clock`.
     ///
     /// A test moves time rather than waiting for it; the service itself always
@@ -672,6 +697,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/asks", get(asks))
         .route("/api/asks/answer", post(answer))
         .route("/api/chat", get(chat_page).post(chat_send))
+        .route("/api/terminal", get(crate::terminal::socket))
         .route("/api/action", post(action))
         .route("/api/graph", get(graph))
         .route("/api/graph/run", get(graph_run))

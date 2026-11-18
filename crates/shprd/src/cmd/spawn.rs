@@ -2003,6 +2003,19 @@ pub(crate) fn prompt_in(
     task: &str,
     text: &str,
 ) -> Result<(), CliError> {
+    let pane = task_pane(mux, home, ctx, task)?;
+    mux.write(&pane, text, true)
+        .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+}
+
+/// The pane a task's agent runs in, resolved by the one path a prompt, a chat
+/// line and the terminal all share.
+pub(crate) fn task_pane(
+    mux: &dyn Host,
+    home: &Path,
+    ctx: &Ctx,
+    task: &str,
+) -> Result<PaneId, CliError> {
     let run = active_run(ctx)?;
     // A task's tabs live in the task's own space, so the prompt goes to the tab
     // the record names, looked up in that space only. A space that is not there
@@ -2027,8 +2040,7 @@ pub(crate) fn prompt_in(
         .iter()
         .find(|tab| tab.id.as_str() == wanted.trim())
         .ok_or_else(|| no_open_tab(task))?;
-    mux.write(&tab.root_pane, text, true)
-        .map_err(|err| CliError::other(anyhow!(err).context("prompting the agent")))
+    Ok(tab.root_pane.clone())
 }
 
 /// Where the pane shprd prepared for the coordinator is written.
@@ -2137,13 +2149,17 @@ pub(crate) fn prompt_coordinator(
     ctx: &Ctx,
     text: &str,
 ) -> Result<(), CliError> {
-    let state = ctx.state()?;
-    let name = repo_space_name(&repo_name(&ctx.root)?);
-    let Some(pane) = coordinator_pane_for(mux, home, &state, &name)? else {
-        return Err(no_coordinator(&name));
-    };
+    let pane = coordinator_pane(mux, home, ctx)?;
     mux.write(&pane, text, true)
         .map_err(|err| CliError::other(anyhow!(err).context("prompting the coordinator")))
+}
+
+/// The pane the coordinator's chat reaches, or the refusal a coordinator with
+/// no reachable pane earns. The terminal resolves its pane through here too.
+pub(crate) fn coordinator_pane(mux: &dyn Host, home: &Path, ctx: &Ctx) -> Result<PaneId, CliError> {
+    let state = ctx.state()?;
+    let name = repo_space_name(&repo_name(&ctx.root)?);
+    coordinator_pane_for(mux, home, &state, &name)?.ok_or_else(|| no_coordinator(&name))
 }
 
 /// The refusal a coordinator with no recorded pane earns.

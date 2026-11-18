@@ -38,6 +38,8 @@ import type {
   SettingsWriteDto,
   SnapshotDto,
   TaskChangesDto,
+  TerminalClientMsg,
+  TerminalServerMsg,
   TunnelStartRequest,
   TunnelStatusDto,
   WsMessage,
@@ -152,8 +154,8 @@ export interface WebSocketLike {
   onopen: (() => void) | null;
   /** Called for every frame the service sends. */
   onmessage: ((event: { data: unknown }) => void) | null;
-  /** Called when the socket closes. */
-  onclose: (() => void) | null;
+  /** Called when the socket closes, with the close code when the browser gives one. */
+  onclose: ((event?: { code?: number }) => void) | null;
   /** Called when the socket cannot connect. */
   onerror: (() => void) | null;
   /** Sends one frame. */
@@ -460,6 +462,38 @@ export class ApiClient {
     };
   }
 
+  /**
+   * `GET /api/terminal`: watch one space's pane, and type into it on demand.
+   *
+   * The space is the only thing in the URL: the session cookie travels with the
+   * handshake, and no token is ever put in a query string. The caller decides
+   * when to reconnect; this opens exactly one socket.
+   */
+  terminal(space: string, handlers: TerminalHandlers): TerminalSocket {
+    const Ctor = this.#WebSocket;
+    if (!Ctor) {
+      throw new ApiError(0, "unsupported", "this browser has no WebSocket");
+    }
+    const query = new URLSearchParams({ space });
+    const socket = new Ctor(`${this.#socketUrl().replace(/\/api\/ws$/, "")}/api/terminal?${query.toString()}`);
+    socket.onopen = () => handlers.open?.();
+    socket.onclose = (event) => handlers.close?.(event?.code ?? 0);
+    socket.onerror = () => {
+      // A refused handshake fires `error` and then `close`; the close carries
+      // the outcome, so this only keeps the browser from logging it unhandled.
+    };
+    socket.onmessage = (event) => {
+      const message = parseTerminalMessage(event.data);
+      if (message) {
+        handlers.message?.(message);
+      }
+    };
+    return {
+      send: (message) => socket.send(JSON.stringify(message)),
+      close: () => socket.close(),
+    };
+  }
+
   // --- internals ----------------------------------------------------------
 
   #get<T>(path: string): Promise<T> {
@@ -538,6 +572,40 @@ export class ApiClient {
     const host = location?.host ?? "127.0.0.1";
     return `${scheme}//${host}/api/ws`;
   }
+}
+
+/** What a terminal socket tells its page. */
+export interface TerminalHandlers {
+  /** The socket opened. */
+  open?: () => void;
+  /** One message from the service. */
+  message?: (message: TerminalServerMsg) => void;
+  /** The socket closed; `code` is the WebSocket close code, `0` when unknown. */
+  close?: (code: number) => void;
+}
+
+/** The page's end of a terminal socket. */
+export interface TerminalSocket {
+  /** Sends one message. */
+  send(message: TerminalClientMsg): void;
+  /** Closes the socket; safe to call twice. */
+  close(): void;
+}
+
+/** Turns one terminal frame into a message, or `null` when it is not one. */
+function parseTerminalMessage(data: unknown): TerminalServerMsg | null {
+  if (typeof data !== "string") {
+    return null;
+  }
+  try {
+    const value: unknown = JSON.parse(data);
+    if (typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string") {
+      return value as TerminalServerMsg;
+    }
+  } catch {
+    // Not JSON: not ours.
+  }
+  return null;
 }
 
 /** Turns one socket frame into a message, or `null` when it is not one. */
