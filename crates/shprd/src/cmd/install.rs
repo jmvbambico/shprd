@@ -96,7 +96,9 @@ const MOD_PREFIX: &str = "shprd-";
 /// terminal; the layout before that is `shprd-m11-menu.json` (and `shprd-m11.json` before the
 /// terminal menu was added). M11 U4 gave the task thread a Chat view it opens on and
 /// took the Asks stack and the sidebar's coordinator block away; the layout before
-/// that is `shprd-m11-accept.json`.
+/// that is `shprd-m11-accept.json`. SHPR-28 gave the thread a read-only stream child
+/// (the Terminal view's fallback) and an Artifacts child; the layout before that is
+/// `shprd-m11-thread.json`.
 const PREVIOUS_LAYOUTS: &[&str] = &[
     include_str!("previous-layouts/shprd-m10.3.json"),
     include_str!("previous-layouts/shprd-m10.4.json"),
@@ -104,6 +106,7 @@ const PREVIOUS_LAYOUTS: &[&str] = &[
     include_str!("previous-layouts/shprd-m11.json"),
     include_str!("previous-layouts/shprd-m11-menu.json"),
     include_str!("previous-layouts/shprd-m11-accept.json"),
+    include_str!("previous-layouts/shprd-m11-thread.json"),
 ];
 
 /// Runs `shprd install`, whichever mode the command line asked for.

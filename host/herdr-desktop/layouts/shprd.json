@@ -195,10 +195,30 @@
                                   }
                                 },
                                 {
+                                  "id": "tasks-thread-stream",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-task-view",
+                                    "props": {
+                                      "view": "stream"
+                                    }
+                                  }
+                                },
+                                {
                                   "id": "tasks-thread-pr",
                                   "type": "block",
                                   "content": {
                                     "mod": "shprd-task-pr"
+                                  }
+                                },
+                                {
+                                  "id": "tasks-thread-artifacts",
+                                  "type": "block",
+                                  "content": {
+                                    "mod": "shprd-task-view",
+                                    "props": {
+                                      "view": "artifacts"
+                                    }
                                   }
                                 }
                               ],

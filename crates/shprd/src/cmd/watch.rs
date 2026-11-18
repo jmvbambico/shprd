@@ -1378,6 +1378,7 @@ project_dirs = []
             .push(shprd_agents::spec::BlockingPrompt {
                 name: "folder trust".to_string(),
                 pattern: "Is this a project you created or one you trust".to_string(),
+                answer: None,
             });
         spec
     }

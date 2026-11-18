@@ -89,8 +89,13 @@ import {
   changesLine,
   commitRows,
   canReview,
+  VIEW,
+  hasArtifacts,
   mustLeavePr,
   reportLine,
+  terminalChild,
+  terminalReachable,
+  threadAgent,
   threadViews,
   checks as handInChecks,
   findings as reviewFindings,
@@ -780,12 +785,15 @@ test("the newest commits are listed and the rest are counted", () => {
   assert.deepEqual(commitRows(null), { rows: [], rest: 0 });
 });
 
-test("the thread's switch is Chat, Terminal and, once it has one, Pull request", () => {
+test("the thread's switch is Chat, Terminal, then Pull request and Artifacts once it has them", () => {
   const T1 = boardTask("T1");
-  const without = { ...boardTask("T2"), pr: undefined };
+  const bare = { ...boardTask("T2"), pr: undefined, attempts: [] };
   const words_ = (task, opts) => threadViews(task, opts).map((seg) => seg.word);
-  assert.deepEqual(words_(without, { live: true }), ["Chat", "Terminal"], "no Pull request before it has one");
-  assert.deepEqual(words_(T1, { live: true }), ["Chat", "Terminal", "Pull request"]);
+  assert.deepEqual(words_(bare, { live: true }), ["Chat", "Terminal"], "no Pull request or Artifacts before it has one");
+  assert.deepEqual(words_({ ...bare, pr: T1.pr }, { live: true }), ["Chat", "Terminal", "Pull request"]);
+  assert.deepEqual(words_(T1, { live: true }), ["Chat", "Terminal", "Pull request", "Artifacts"]);
+  assert.equal(hasArtifacts(T1), true);
+  assert.equal(hasArtifacts(bare), false);
   // Chat is always on and is what a thread opens on; Terminal is dim when no agent is up.
   const open = threadViews(T1, { live: false });
   assert.equal(open[0].on, true, "a thread opens on its chat");
@@ -795,12 +803,43 @@ test("the thread's switch is Chat, Terminal and, once it has one, Pull request",
   assert.equal(segs[0].on, false);
   assert.equal(segs[1].dead, true, "Not running");
   assert.equal(segs[1].on, true);
+  // Terminal is lit for its live terminal and for its read-only stream, and shows the one given.
+  assert.equal(threadViews(T1, { live: true, shown: VIEW.stream.id, termChild: VIEW.stream.id })[1].on, true);
+  assert.equal(threadViews(T1, { live: true, termChild: VIEW.stream.id })[1].child, VIEW.stream.id);
   assert.equal(threadViews(T1, { live: true, shown: "tasks-thread-pr" }).find((seg) => seg.on).key, "pr");
-  // The pull request of a task that lost it falls back to the terminal.
-  assert.equal(mustLeavePr(without, "tasks-thread-pr"), true);
+  assert.equal(threadViews(T1, { live: true, shown: VIEW.artifacts.id }).find((seg) => seg.on).key, "artifacts");
+  // The pull request of a task that lost it, or artifacts it has none of, fall back to the chat.
+  assert.equal(mustLeavePr(bare, "tasks-thread-pr"), true);
+  assert.equal(mustLeavePr(bare, VIEW.artifacts.id), true);
   assert.equal(mustLeavePr(T1, "tasks-thread-pr"), false);
-  assert.equal(mustLeavePr(without, "tasks-thread-term"), false);
-  assert.equal(mustLeavePr(without, "tasks-thread-chat"), false);
+  assert.equal(mustLeavePr(T1, VIEW.artifacts.id), false);
+  assert.equal(mustLeavePr(bare, "tasks-thread-term"), false);
+  assert.equal(mustLeavePr(bare, "tasks-thread-chat"), false);
+});
+
+test("the Terminal view is the agent's own terminal, and a read-only stream only when it cannot be shown", () => {
+  const now = Date.now();
+  const worker = { id: "t1", terminal: "t1", task: "T1", role: "worker", state: "working", started_ms: now - 60_000 };
+  const reviewer = { id: "t2", terminal: "t2", task: "T1", role: "reviewer", state: "working", started_ms: now - 10_000 };
+  const ended = { id: "t3", terminal: "t3", task: "T9", role: "worker", state: "done", ended_ms: now - 1000, started_ms: now - 5000 };
+  const state = { live_agents: [worker, reviewer, ended, { id: "c", terminal: "c", task: null, role: "coordinator", state: "idle" }] };
+  // Whoever is at work now: the newer of a worker and its reviewer; a finished agent when none runs.
+  assert.equal(threadAgent(state, "T1", now).id, "t2");
+  assert.equal(threadAgent({ live_agents: [worker, { ...reviewer, state: "done" }] }, "T1", now).id, "t1");
+  assert.equal(threadAgent(state, "T9", now).id, "t3");
+  assert.equal(threadAgent(state, "T7", now), null);
+  // An agent without a start time is ordered by when it entered its state.
+  const byState = { live_agents: [{ ...worker, started_ms: undefined, since_ms: now - 5 }, { ...reviewer, started_ms: undefined, since_ms: now - 9 }] };
+  assert.equal(threadAgent(byState, "T1", now).id, "t1");
+  // The window holds a terminal it lists by address; a finished program is not one to type into.
+  const held = [{ address: "t2", state: "running" }];
+  assert.equal(terminalReachable(reviewer, held), true);
+  assert.equal(terminalReachable(worker, held), false, "a terminal the window does not list");
+  assert.equal(terminalReachable(ended, [{ address: "t3", state: "running" }]), false);
+  assert.equal(terminalReachable(null, held), false);
+  assert.equal(terminalChild(reviewer, held), VIEW.term.id);
+  assert.equal(terminalChild(worker, held), VIEW.stream.id);
+  assert.equal(terminalChild(null, held), VIEW.stream.id);
 });
 
 test("the head's Review is the Ready row's Review, and its status line is the agent's", () => {

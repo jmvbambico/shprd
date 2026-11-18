@@ -550,6 +550,16 @@ export class Client {
     return this.call("GET", `/api/tasks/${encodeURIComponent(id)}/changes`);
   }
 
+  /**
+   * `GET /api/agents/{id}/output`: the agent's recent screen, as text.
+   *
+   * It is the read-only fallback of a thread's Terminal view, for an agent whose
+   * terminal the window cannot show (it has ended, or lives on another machine).
+   */
+  agentOutput(id, lines = 120) {
+    return this.call("GET", `/api/agents/${encodeURIComponent(id)}/output?lines=${lines}`);
+  }
+
   /** `GET /api/settings`: every key, its value and the layer it came from. */
   settings() {
     return this.call("GET", "/api/settings");

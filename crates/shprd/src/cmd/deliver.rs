@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use shprd_agents::spec::{BlockingPrompt, LaunchSpec};
-use shprd_mux::{AgentState, Host, PaneId};
+use shprd_mux::{AgentState, Host, Key, PaneId};
 
 /// The model-argument template to render, empty when no model is chosen.
 ///
@@ -36,6 +36,10 @@ const BLOCKING_PROMPT_LINES: usize = 40;
 /// but how far up depends on the program and the pane's height, and a line of
 /// scrollback above it may still belong to the start-up banner.
 const READY_LINES: usize = 40;
+
+/// How many times a prompt shprd may answer is answered before the pane is left
+/// to the person: Enter on a dialog that comes back is not what fixes it.
+const MAX_ANSWERS: u8 = 6;
 
 /// How often the wait re-asks the host whether the agent is up yet.
 const READY_POLL: Duration = Duration::from_millis(250);
@@ -249,13 +253,26 @@ fn await_ready(
     let own_word = host_reports && readiness.own_status;
     let named = !readiness.lines.is_empty();
     let start = Instant::now();
+    let mut answered = 0u8;
     loop {
         // The CLI may ask its own user something before it ever becomes an
         // agent, and wait there silently: report that instead of timing out.
         // This is checked first on every poll, because a blocking prompt is the
         // one screen shprd must never type over.
-        if let Some(prompt) = blocking_prompt(mux, pane, readiness.prompts) {
-            return Ok(Ready::Blocked(prompt));
+        if let Some(prompt) = showing_prompt(mux, pane, readiness.prompts) {
+            // A prompt shprd may answer (the folder shprd itself made) is answered
+            // a few times, then the pane is left to the person: a dialog that does
+            // not go away is not one Enter fixes.
+            if let Some(choice) = prompt.answer.as_deref()
+                && answered < MAX_ANSWERS
+                && let Some(key) = key_for_choice(mux, pane, choice)
+                && mux.keys(pane, &[key]).is_ok()
+            {
+                answered += 1;
+                std::thread::sleep(READY_POLL);
+                continue;
+            }
+            return Ok(Ready::Blocked(prompt.name.clone()));
         }
         if own_word {
             if host_is_up(mux, pane) {
@@ -382,6 +399,36 @@ pub(crate) fn blocking_prompt(
     pane: &PaneId,
     patterns: &[BlockingPrompt],
 ) -> Option<String> {
+    showing_prompt(mux, pane, patterns).map(|pattern| pattern.name.clone())
+}
+
+/// The key that moves a menu dialog toward `choice`: Enter when the highlighted
+/// line (the one with the `❯` or `>` marker) already names it, Down otherwise.
+///
+/// Claude Code's folder-trust dialog opens on "No, exit" in current builds and
+/// on "Yes" in older ones, so the key is chosen from the screen, never assumed.
+/// `None` when no line is highlighted, which is a dialog shprd cannot read.
+fn key_for_choice(mux: &dyn Host, pane: &PaneId, choice: &str) -> Option<Key> {
+    let screen = mux.read(pane, BLOCKING_PROMPT_LINES).ok()?.to_lowercase();
+    let choice = choice.to_lowercase();
+    let marked = screen.lines().find(|line| {
+        let line = line.trim_start();
+        line.starts_with('\u{276f}') || line.starts_with('>')
+    })?;
+    Some(if marked.contains(&choice) {
+        Key::Enter
+    } else {
+        Key::Down
+    })
+}
+
+/// The first of `patterns` the pane's screen is showing, whole, so a caller that
+/// may answer it can read its `answer`.
+fn showing_prompt<'p>(
+    mux: &dyn Host,
+    pane: &PaneId,
+    patterns: &'p [BlockingPrompt],
+) -> Option<&'p BlockingPrompt> {
     if patterns.is_empty() {
         return None;
     }
@@ -390,7 +437,6 @@ pub(crate) fn blocking_prompt(
     patterns
         .iter()
         .find(|pattern| screen.contains(&pattern.pattern.to_lowercase()))
-        .map(|pattern| pattern.name.clone())
 }
 
 #[cfg(test)]
@@ -542,6 +588,7 @@ mod tests {
         vec![BlockingPrompt {
             name: "folder trust".to_string(),
             pattern: "Is this a project you created or one you trust".to_string(),
+            answer: None,
         }]
     }
 
@@ -587,6 +634,116 @@ mod tests {
         assert!(
             prompts(&mux).is_empty(),
             "a prompt waiting on a human is never answered, and the brief is never typed over it"
+        );
+    }
+
+    /// The folder-trust prompt with the answer shprd may give it.
+    fn answerable_trust() -> Vec<BlockingPrompt> {
+        let mut patterns = trust_patterns();
+        patterns[0].answer = Some("Yes, I trust".to_string());
+        patterns
+    }
+
+    #[test]
+    fn an_answerable_trust_prompt_gets_enter_and_then_the_brief() {
+        use shprd_mux::fake::Call;
+        let (mux, pane) = fixture();
+        mux.set_screen(&pane, "claude ready\n> ");
+        mux.set_state(&pane, AgentState::Idle);
+        mux.set_screen_after(
+            &pane,
+            2,
+            "Is this a project you created or one you trust?\n  > 1. Yes, I trust",
+        );
+        let patterns = answerable_trust();
+        let readiness = Readiness {
+            lines: &[],
+            prompts: &patterns,
+            own_status: true,
+        };
+        let delivery = deliver_brief(
+            &mux,
+            &pane,
+            "the brief",
+            &readiness,
+            Duration::from_secs(10),
+        );
+        assert!(
+            matches!(delivery, Delivery::Delivered { .. }),
+            "{delivery:?}"
+        );
+        assert!(
+            mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::Keys(_, keys) if keys == &[Key::Enter])),
+            "Enter must have been pressed on the dialog"
+        );
+        assert_eq!(prompts(&mux), ["the brief".to_string()]);
+    }
+
+    #[test]
+    fn a_trust_prompt_that_opens_on_no_is_moved_down_first() {
+        use shprd_mux::fake::Call;
+        let (mux, pane) = fixture();
+        mux.set_screen(
+            &pane,
+            "Is this a project you created or one you trust?\n \u{276f} No, exit\n   Yes, I trust this folder",
+        );
+        let patterns = answerable_trust();
+        let readiness = Readiness {
+            lines: &[],
+            prompts: &patterns,
+            own_status: true,
+        };
+        let _ = deliver_brief(
+            &mux,
+            &pane,
+            "the brief",
+            &readiness,
+            Duration::from_secs(20),
+        );
+        let keys: Vec<Key> = mux
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Keys(_, keys) => Some(keys),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(keys.first(), Some(&Key::Down), "never Enter on No");
+        assert!(!keys.contains(&Key::Enter));
+    }
+
+    #[test]
+    fn a_trust_prompt_that_will_not_go_is_left_to_the_person() {
+        let (mux, pane) = fixture();
+        mux.set_screen(
+            &pane,
+            "Is this a project you created or one you trust?\n  > 1. Yes, I trust",
+        );
+        let patterns = answerable_trust();
+        let readiness = Readiness {
+            lines: &[],
+            prompts: &patterns,
+            own_status: true,
+        };
+        let delivery = deliver_brief(
+            &mux,
+            &pane,
+            "the brief",
+            &readiness,
+            Duration::from_secs(20),
+        );
+        assert_eq!(
+            delivery,
+            Delivery::Blocked {
+                prompt: "folder trust".to_string()
+            }
+        );
+        assert!(
+            prompts(&mux).is_empty(),
+            "the brief is never typed over a dialog"
         );
     }
 

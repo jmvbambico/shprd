@@ -479,7 +479,7 @@ test("the thread opens on its chat; the Asks panel and the sidebar's coordinator
   assert.equal(body.active, "tasks-thread-chat");
   assert.deepEqual(
     body.children.map((child) => child.id),
-    ["tasks-thread-chat", "tasks-thread-term", "tasks-thread-pr"],
+    ["tasks-thread-chat", "tasks-thread-term", "tasks-thread-stream", "tasks-thread-pr", "tasks-thread-artifacts"],
   );
   assert.deepEqual(node("tasks-thread-chat").content, { mod: "shprd-chat", props: { thread: true } });
   assert.equal(node("asks"), null, "the cards are in the thread now");
