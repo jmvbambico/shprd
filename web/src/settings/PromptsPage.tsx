@@ -111,7 +111,8 @@ function PromptEditor({
   const stored = useRef(prompt.text);
   const latest = useRef(prompt.text);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const flight = useRef<Promise<void> | null>(null);
+  const flight = useRef<Promise<boolean> | null>(null);
+  const [failed, setFailed] = useState(false);
   const alive = useRef(true);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -123,7 +124,7 @@ function PromptEditor({
     };
   }, []);
 
-  const save = useCallback((): Promise<void> => {
+  const save = useCallback((): Promise<boolean> => {
     if (timer.current !== null) {
       clearTimeout(timer.current);
       timer.current = null;
@@ -135,7 +136,7 @@ function PromptEditor({
       return flight.current;
     }
     if (latest.current === stored.current) {
-      return Promise.resolve();
+      return Promise.resolve(true);
     }
     if (alive.current) {
       setWriting(true);
@@ -143,7 +144,7 @@ function PromptEditor({
     // The write loops until what is stored is what is in the box: words typed
     // while a request was in flight are written by the same call, so a later
     // caller that was handed this promise never leaves them behind.
-    const run = async () => {
+    const run = async (): Promise<boolean> => {
       try {
         while (latest.current !== stored.current) {
           const words = latest.current;
@@ -159,9 +160,17 @@ function PromptEditor({
             }, SAVED_MS);
           }
         }
+        if (alive.current) {
+          setFailed(false);
+        }
+        return true;
       } catch (error) {
         // A refusal keeps the words in the box, unsaved, with the service's reason.
         stateRef.current.refuse(`prompts.${prompt.id}`, error);
+        if (alive.current) {
+          setFailed(true);
+        }
+        return false;
       } finally {
         flight.current = null;
         if (alive.current) {
@@ -214,10 +223,20 @@ function PromptEditor({
           type="button"
           className="link"
           onClick={() => {
-            void save().then(onBack);
+            // Words the service refused stay in the box: the first Back keeps
+            // them and shows why, and only a second one (now "Discard…") leaves.
+            if (failed && latest.current !== stored.current) {
+              onBack();
+              return;
+            }
+            void save().then((stored_) => {
+              if (stored_) {
+                onBack();
+              }
+            });
           }}
         >
-          Back
+          {failed && text !== stored.current ? "Discard and go back" : "Back"}
         </button>
       </div>
       <div className="prompt-path">{shown.path}</div>

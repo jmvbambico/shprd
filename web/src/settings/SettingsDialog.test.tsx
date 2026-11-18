@@ -281,9 +281,13 @@ describe("SettingsDialog: Prompts", () => {
     fireEvent.click(await screen.findByRole("button", { name: /worker/ }));
     const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "" } });
-    fireEvent.blur(box);
+    // Back saves first; a refusal keeps the words in the box and stays.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect((await screen.findByRole("alert")).textContent).toContain("a prompt cannot be empty");
-    expect(box.value).toBe("");
+    const discard = await screen.findByRole("button", { name: "Discard and go back" });
+    expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("");
+    fireEvent.click(discard);
+    await waitFor(() => expect(screen.queryByLabelText("Prompt worker")).toBeNull());
   });
 
   it("writes words typed while a save was in flight, even when leaving at once", async () => {
