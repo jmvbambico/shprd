@@ -54,10 +54,11 @@ function rosterWithout(...missing) {
 const words = (rows) =>
   rows.map((row) => (row.sep ? "—" : row.heading ? `# ${row.heading}` : row.label));
 
-test("the + menu offers Terminal, New task, then the roster", () => {
+test("the + menu offers Terminal, New space, New task, then the roster", () => {
   const rows = newMenu({ roster: ROSTER });
   assert.deepEqual(words(rows), [
     NEW_WORDS.terminal,
+    NEW_WORDS.newSpace,
     NEW_WORDS.newTask,
     `# ${NEW_WORDS.agents}`,
     "Claude Code",
@@ -73,8 +74,10 @@ test("the + menu offers Terminal, New task, then the roster", () => {
   );
   // The fixed rows carry what they run; the terminal's space is the caller's.
   assert.deepEqual(rows[0].command, { name: "tab.new", args: {} });
-  assert.equal(rows[1].id, "new-task");
-  assert.equal(rows[1].command, undefined, "New task… is this window's, not a command");
+  assert.equal(rows[1].id, "new-space");
+  assert.equal(rows[2].id, "new-task");
+  assert.equal(rows[1].command, undefined, "New space… is this window's dialog, not a command");
+  assert.equal(rows[2].command, undefined, "New task… is this window's, not a command");
 });
 
 test("a program this machine lacks is offered dimmed and says so", () => {
@@ -139,8 +142,8 @@ test("only a tab shprd titled, with an agent in it, can be restarted", () => {
   );
 });
 
-test("the app's menu is New task… and Keybinds, with no theme rows", () => {
-  assert.deepEqual(words(appMenu()), ["New task…", "—", "Keybinds"]);
+test("the app's menu is New space…, New task… and Keybinds, with no theme rows", () => {
+  assert.deepEqual(words(appMenu()), ["New space…", "New task…", "—", "Keybinds"]);
   assert.equal(
     appMenu().some((row) => String(row.label).startsWith("Theme")),
     false,
@@ -177,13 +180,13 @@ test("a menu's height is its rows' own, so a popup is never taller than its cont
   const rows = appMenu();
   assert.equal(
     menuHeight(rows),
-    MENU.pad * 2 + MENU.row * 2 + MENU.sep + 1,
+    MENU.pad * 2 + MENU.row * 3 + MENU.sep + 1,
   );
   const plus = newMenu({ roster: ROSTER });
   assert.equal(
     menuHeight(plus),
-    MENU.pad * 2 + MENU.row * 7 + MENU.heading + 1,
-    "two fixed rows, a heading and five programs",
+    MENU.pad * 2 + MENU.row * 8 + MENU.heading + 1,
+    "three fixed rows, a heading and five programs",
   );
   assert.equal(menuHeight([]), MENU.pad * 2 + 1);
 });

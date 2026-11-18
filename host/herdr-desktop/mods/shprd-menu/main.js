@@ -31,7 +31,7 @@ import { closeOverlay, openOverlay, panes, props, run, spaces, terminals, theme 
 
 import { attach, reason } from "./lib/client.js";
 import { appMenu, paneMenu, restartable, tabMenu } from "./lib/menu.js";
-import { menuRow } from "./lib/panel.js";
+import { menuRow, openAddTask, openNewSpace } from "./lib/panel.js";
 import { parseTabName } from "./lib/tabstrip.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
@@ -150,10 +150,12 @@ export default class Menu extends View {
       if (task) this.restart(task);
       return;
     }
+    if (row.id === "new-space") {
+      openNewSpace();
+      return;
+    }
     if (row.id === "new-task") {
-      run("layout.select", { stack: "panel-body", child: "tasks" });
-      run("layout.show", { id: "panel" });
-      run("shprd-tasks.add");
+      openAddTask();
       return;
     }
     if (row.id === "keybinds") {

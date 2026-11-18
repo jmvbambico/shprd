@@ -60,6 +60,7 @@ export const MENU = {
 /** The "+" menu's fixed words (Shepherdr's `NEW_MENU`, with shprd's New task…). */
 export const NEW_WORDS = {
   terminal: "Terminal",
+  newSpace: "New space…",
   newTask: "New task…",
   agents: "Start an agent",
   notInstalled: "Not installed",
@@ -106,7 +107,7 @@ export function agentHint(program, index) {
 }
 
 /**
- * The "+" menu's rows: Terminal, New task…, then *Start an agent* and the roster.
+ * The "+" menu's rows: Terminal, New space…, New task…, then *Start an agent* and the roster.
  *
  * `roster` is the service's answer (`{programs}`), or null while it is being read
  * or when it failed — then one dim line says which, in the group's own place, so
@@ -122,6 +123,7 @@ export function newMenu({ roster = null, loading = false, failure = null } = {})
       icon: "terminal",
       command: { name: "tab.new", args: {} },
     },
+    { id: "new-space", label: NEW_WORDS.newSpace, icon: "plus" },
     { id: "new-task", label: NEW_WORDS.newTask, icon: "plus" },
     { heading: NEW_WORDS.agents },
   ];
@@ -165,7 +167,7 @@ export function tabMenu({ id = null, restartable = false } = {}) {
 }
 
 /**
- * The app's menu, opened from the bar's empty part: New task…, then Keybinds.
+ * The app's menu, opened from the bar's empty part: New space…, New task…, then Keybinds.
  *
  * Shepherdr's has *New space*, *Keybinds* and four *Theme: …* rows; New task… and
  * Keybinds are its counterparts here and the themes are left to Herdr's own
@@ -173,6 +175,7 @@ export function tabMenu({ id = null, restartable = false } = {}) {
  */
 export function appMenu() {
   return [
+    { id: "new-space", label: NEW_WORDS.newSpace, icon: "plus" },
     { id: "new-task", label: NEW_WORDS.newTask, icon: "plus" },
     sep(),
     { id: "keybinds", label: "Keybinds", icon: "keyboard" },

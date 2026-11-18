@@ -389,6 +389,33 @@ export function openThread(p, view = "chat") {
 }
 
 /**
+ * Opens the New task form from anywhere, with no toast.
+ *
+ * `shprd-tasks.add` is unknown while the list is not the shown child (a stack
+ * shows one child at a time and an unselected child's mod is not loaded), so the
+ * request is shared as `tasks.add` (`{at}`) and the list takes it: a list that
+ * loads after this call reads it on start, one that is already up reads it on its
+ * short timer.
+ */
+export function openAddTask() {
+  setShared("tasks.add", { at: Date.now() });
+  run("layout.select", { stack: "panel-body", child: "tasks" });
+  run("layout.select", { stack: "tasks", child: "tasks-list" });
+  run("layout.show", { id: "panel" });
+}
+
+/** The New space dialog: a folder, Browse… and Create (`shprd-newspace`). */
+export function openNewSpace() {
+  return openOverlay({
+    mod: "shprd-newspace",
+    kind: "dialog",
+    modal: true,
+    width: 460,
+    height: 252,
+  });
+}
+
+/**
  * The Accept card, opened as a dialog over the window.
  *
  * Shepherdr's `accept()` (`mods/tasks/main.js`): a 640 × 640 modal dialog with

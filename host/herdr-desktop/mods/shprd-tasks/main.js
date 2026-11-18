@@ -38,7 +38,7 @@ import {
   secondLine,
 } from "./lib/board.js";
 import { badge, card, cardHeader, countBadge, keycap, note, openAccept, openThread, segmented, statusGlyph } from "./lib/panel.js";
-import { graphRows } from "./lib/tree.js";
+import { graphRows, scopeToSpace } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -89,6 +89,10 @@ export default class Tasks extends View {
     });
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // New task from anywhere (`openAddTask` in `lib/panel.js`) is a shared request,
+    // because this mod's commands do not exist while it is not the shown child.
+    this.takeAdd(cx);
+    cx.timer.every(300, (cx) => this.takeAdd(cx));
     // The app's own way into a focusable mod: every command is delivered here by
     // name (`run("shprd-tasks.add")`, the palette, a key), and the loop is one
     // `nextCommand()` at a time so a slow read never queues a second press.
@@ -269,6 +273,22 @@ export default class Tasks extends View {
     this.cx.notify();
   }
 
+  /** Whether there is more than one space to choose between. */
+  hasSpaces() {
+    return (this.state?.spaces ?? []).length > 1 || (shared("spaces.picked") ?? null) !== null;
+  }
+
+  /** Opens the add-task form for a fresh `tasks.add` request, once. */
+  takeAdd(cx = this.cx) {
+    const req = shared("tasks.add");
+    if (!req || req.at === this.lastAdd) return;
+    this.lastAdd = req.at;
+    if (Date.now() - req.at < 10_000 && !this.adding) {
+      this.show("tasks");
+      this.beginAdd(cx);
+    }
+  }
+
   /** Opens the add-task form with three empty fields. */
   beginAdd(cx = this.cx) {
     this.adding = true;
@@ -331,13 +351,16 @@ export default class Tasks extends View {
   render() {
     const t = theme();
     const colors = tone(t);
-    const tally = counts(this.state);
+    // The picked space (`spaces.picked`) narrows the list and the Graph; the
+    // "All spaces" chip puts every space back.
+    const board = scopeToSpace(this.state, shared("spaces.picked") ?? null);
+    const tally = counts(board);
     const query = this.query.value() ?? "";
-    const chips = filterChips(this.state);
+    const chips = filterChips(board);
     // A chip kept for a word nobody is in any more would show an empty list: fall back.
     const known = [...chips.primary, ...chips.more].some((c) => c.key === this.filter);
     const filter = known ? this.filter : "all";
-    const view = listView(this.state, {
+    const view = listView(board, {
       query,
       filter,
       shut: this.shut,
@@ -534,6 +557,14 @@ export default class Tasks extends View {
           .pt(6)
           .gap(2)
           .overflow_hidden()
+          .when(this.hasSpaces(), (el) =>
+            el.child(
+              this.chip(t, "space", "All spaces", 0, (shared("spaces.picked") ?? null) === null, () => {
+                setShared("spaces.picked", null);
+                this.cx.notify();
+              }),
+            ),
+          )
           .child(this.chip(t, "all", "All statuses", 0, filter === "all", () => this.pick("all")))
           .children(
             chips.primary.map((c) =>

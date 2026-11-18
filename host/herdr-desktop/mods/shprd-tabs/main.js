@@ -47,7 +47,7 @@ import {
 
 import { attach, reason, singleFlight } from "./lib/client.js";
 import { MENU, appMenu, menuHeight, newMenu, restartable, tabMenu } from "./lib/menu.js";
-import { countsBadge } from "./lib/panel.js";
+import { countsBadge, openAddTask, openNewSpace } from "./lib/panel.js";
 import { panelButtons, tabRows } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
@@ -113,11 +113,8 @@ export default class Tabs extends View {
     cx.spawn(async () => {
       for (;;) {
         const command = await nextCommand();
-        if (command === "new-task") {
-          run("layout.select", { stack: "panel-body", child: "tasks" });
-          run("layout.show", { id: "panel" });
-          run("shprd-tasks.add");
-        }
+        if (command === "new-task") openAddTask();
+        if (command === "new-space") openNewSpace();
         // F2 and Shift+F2 (`layout:shprd`): Herdr's own rename keys would rename
         // with its stock box, so inside this layout they come here and open
         // shprd's prompt instead, which keeps shprd's naming.
