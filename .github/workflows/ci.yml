@@ -44,9 +44,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The web app is embedded with rust-embed, built with `allow_missing`:
-      # this job does not need Node, and a checkout without `web/dist` compiles
-      # and serves the API (plus a page saying how to build the app). The `web`
-      # job below is what builds and checks the app itself.
+      # this (debug) job does not need Node, and a checkout without `web/dist`
+      # compiles and serves the API. The `web` job below builds and checks the
+      # app itself, and the `release` job proves a release build carries it.
       - name: Test
         run: cargo test --workspace
 
@@ -88,3 +88,40 @@ jobs:
         run: |
           cargo run -p shprd-server --example export-ts
           git diff --exit-code web/src/gen
+
+  # A release build embeds the web app and refuses to build without it
+  # (`crates/shprd-server/build.rs`): build `web/dist` first, then build the
+  # release binary and check the app is inside it.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.99.1
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Install Node LTS
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the web app
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Build the release binary
+        run: cargo build --release -p shprd
+
+      - name: The binary carries the app
+        run: |
+          # The hashed bundle's name is embedded in the binary beside index.html.
+          bundle="$(ls web/dist/assets/index-*.js | head -n1 | xargs basename)"
+          grep -q "$bundle" target/release/shprd

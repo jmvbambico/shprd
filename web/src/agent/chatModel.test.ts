@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChatDto } from "../gen";
-import { COORDINATOR, FOLD, KEEP, empty, fold, folding, outgoing, toolLine, when } from "./chatModel";
+import { ask, snapshot } from "../tasks/fixtures";
+import { cards } from "../tasks/asks";
+import { COORDINATOR, FOLD, KEEP, empty, fold, folding, outgoing, timeline, toolLine, when } from "./chatModel";
 
 function page(over: Partial<ChatDto> = {}): ChatDto {
   return {
@@ -77,5 +79,24 @@ describe("words", () => {
     expect(when(0)).toBe("");
     expect(when(new Date(2026, 10, 18, 9, 5).getTime())).toBe("09:05");
     expect(empty("T1").space).toBe("T1");
+  });
+});
+
+describe("timeline", () => {
+  it("puts a card before the first message written after it, and the rest at the end", () => {
+    const chat = fold(
+      null,
+      page({ space: "T1", messages: ["a", "b", "c"].map((text, i) => ({ ...say(text), at_ms: 1000 * (i + 1) })) }),
+    );
+    const list = cards(snapshot([]), { asks: [ask("T1", "q1", { created_at_ms: 1500 }), ask("T1", "q2", { created_at_ms: 9000 })] });
+    const rows = timeline(chat, list);
+    expect(rows.map((r) => (r.kind === "message" ? r.message.text : r.kind === "card" ? `card:${r.card.ask}` : r.kind))).toEqual([
+      "top",
+      "a",
+      "card:q1",
+      "b",
+      "c",
+      "card:q2",
+    ]);
   });
 });

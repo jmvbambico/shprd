@@ -17,7 +17,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { openOverlay, setShared, shared } from "herdr";
+import { openOverlay, run, setShared, shared } from "herdr";
 
 import { H, RADIUS, SPACE, TEXT, red } from "./tokens.js";
 
@@ -368,6 +368,24 @@ export function openSettings(p = {}) {
   });
   settingsWindowOpened(id, p.page ?? null);
   return id;
+}
+
+/**
+ * Opens a task's thread in the Tasks panel from anywhere: the sidebar's task and
+ * agent rows, and the panel's own rows.
+ *
+ * It selects the stacks itself and never calls `shprd-tasks.open`: a stack shows
+ * one child at a time and an unselected child's mod is not loaded, so while a
+ * thread is open the list's commands do not exist (`unknown command`). The task
+ * is shared as `tasks.thread` (`{task, title, view}`), which the thread's head and
+ * chat read. `view` is `chat` or `terminal`.
+ */
+export function openThread(p, view = "chat") {
+  setShared("tasks.thread", { task: p.task, title: p.title ?? "", view, at: Date.now() });
+  run("layout.select", { stack: "panel-body", child: "tasks" });
+  run("layout.select", { stack: "tasks", child: "tasks-thread" });
+  run("layout.select", { stack: "tasks-thread-body", child: view === "terminal" ? "tasks-thread-term" : "tasks-thread-chat" });
+  run("layout.show", { id: "panel" });
 }
 
 /**

@@ -322,12 +322,6 @@ input {
   border-width: 0 0 1px;
 }
 
-.topbar-note {
-  color: var(--h-dim);
-  font-size: var(--text-id);
-  letter-spacing: 0.02em;
-}
-
 .rail {
   grid-area: rail;
   min-height: 0;
@@ -462,53 +456,12 @@ input {
   font-size: var(--text-body);
 }
 
-/* --- cards and placeholders --------------------------------------------- */
+/* --- cards --------------------------------------------- */
 
 .card {
   background: var(--h-surface);
   border: 1px solid var(--h-border);
   border-radius: var(--radius-panel);
-}
-
-.placeholder {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 10px;
-  padding: 32px;
-}
-
-.placeholder-kicker {
-  margin: 0;
-  color: var(--h-mark-1);
-  font-family: var(--font-mono);
-  font-size: var(--text-id);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.placeholder-lead {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.placeholder-note {
-  max-width: 52ch;
-  margin: 0;
-  color: var(--h-muted);
-}
-
-.placeholder-empty {
-  max-width: 52ch;
-  margin: 12px 0 0;
-  padding-top: 14px;
-  border-top: 1px dashed var(--h-border);
-  color: var(--h-dim);
-  font-size: var(--text-label);
 }
 
 .side-card {
@@ -542,10 +495,6 @@ input {
 @media (max-width: 799px) {
   .login {
     padding: 22px;
-  }
-
-  .placeholder {
-    padding: 24px 20px;
   }
 }
 
@@ -1900,7 +1849,6 @@ textarea.input {
   white-space: nowrap;
 }
 
-.agent {
 /* --- tasks: the board, the thread, the accept card, the toasts ------------ */
 
 /* The tasks screen scrolls inside its card, so the shell is as tall as the window. */
@@ -2083,6 +2031,7 @@ textarea.input {
 
 /* The list */
 
+.agent,
 .tasks,
 .thread {
   flex: 1;
@@ -2227,6 +2176,7 @@ textarea.input {
 .chat,
 .terminal {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -2400,6 +2350,12 @@ textarea.input {
   height: 36px;
   border: 0;
   border-radius: 50%;
+  background: var(--h-accent);
+  color: var(--h-accent-foreground);
+  font-size: 16px;
+  cursor: pointer;
+}
+
 .chip:hover {
   color: var(--h-foreground);
 }
@@ -2944,6 +2900,7 @@ textarea.input {
 .terminal-screen {
   position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   background: var(--h-canvas);

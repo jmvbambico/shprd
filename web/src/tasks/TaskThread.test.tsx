@@ -4,7 +4,7 @@
 
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, refusal, scripted, type Answer } from "../settings/testkit";
@@ -60,7 +60,7 @@ describe("TaskThread", () => {
     await waitFor(() => expect(screen.getByText("claude has not written a session yet")).toBeDefined());
     cleanup();
     open([task("T1", "working")], {}, { "GET /api/chat": refusal(500, "internal", "transcript unreadable") });
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("transcript unreadable"));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("transcript unreadable"));
   });
 
   it("Review shows only for work that is ready, and opens the card", () => {
@@ -95,7 +95,8 @@ describe("TaskThread", () => {
     await waitFor(() => expect(screen.getByText("Which branch?")).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Type an answer" }));
     fireEvent.change(screen.getByLabelText("Your answer"), { target: { value: "main" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const form = screen.getByLabelText("Your answer").closest("form") as HTMLElement;
+    fireEvent.click(within(form).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(screen.getByText("that ask was already answered")).toBeDefined());
   });
 
@@ -112,7 +113,7 @@ describe("TaskThread", () => {
   it("sends a turn from the composer and never an empty one", async () => {
     const { calls } = open([task("T1", "working")], {}, { "POST /api/chat": json(200, { ok: true }) });
     await waitFor(() => expect(screen.getByText("On it.")).toBeDefined());
-    const send = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+    const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("Message the agent"), { target: { value: " go " } });
     fireEvent.click(send);

@@ -51,37 +51,13 @@ const missing = {
     "dagr was not found: set `graph.dagr` to its path, put `dagr` on PATH, or install the herdr-dagr plugin",
 };
 
-test("the layout keeps the block the mod selects", () => {
-  assert.ok(hasNode(layout, GRAPH_STACK), "the graph stack is in the layout");
-  assert.ok(hasNode(layout, GRAPH_NOTE), "the note half is in the layout");
-  assert.ok(hasNode(layout, GRAPH_TERM), "the terminal half is in the layout");
-
-  const find = (node, id) =>
-    node && typeof node === "object"
-      ? node.id === id
-        ? node
-        : (node.children ?? []).map((child) => find(child, id)).find(Boolean)
-      : undefined;
-  const stack = find(layout, GRAPH_STACK);
-  assert.equal(stack.type, "stack", "the block is a stack: it shows one of two");
-  assert.equal(
-    stack.active,
-    GRAPH_NOTE,
-    "the note is what a window shows first, so it can start the terminal",
-  );
-  assert.deepEqual(
-    stack.children.map((child) => child.id),
-    [GRAPH_NOTE, GRAPH_TERM],
-  );
-  const term = find(layout, GRAPH_TERM);
-  assert.deepEqual(
-    term.content,
-    { terminal: GRAPH_TERMINAL },
-    "the terminal block names the terminal the mod starts",
-  );
+test("the prototype layout has no graph stack: the Graph is a view of the Tasks panel", () => {
+  assert.equal(hasNode(layout, GRAPH_STACK), false);
+  assert.equal(hasNode(layout, GRAPH_NOTE), false);
+  assert.equal(hasNode(layout, GRAPH_TERM), false);
 });
 
-test("the graph is a child of the panel body, not the side column's tail", () => {
+test("the panel body holds files, changes and tasks only", () => {
   const find = (node, id) =>
     node && typeof node === "object"
       ? node.id === id
@@ -91,7 +67,7 @@ test("the graph is a child of the panel body, not the side column's tail", () =>
   const body = find(layout, "panel-body");
   assert.deepEqual(
     body.children.map((child) => child.id),
-    ["files", "changes", "tasks", GRAPH_STACK],
+    ["files", "changes", "tasks"],
   );
   const panel = find(layout, "panel");
   assert.deepEqual(
@@ -99,7 +75,6 @@ test("the graph is a child of the panel body, not the side column's tail", () =>
     ["panel-body"],
     "nothing under the body: the Tasks card reaches the status bar",
   );
-  assert.equal(find(layout, GRAPH_STACK).size, undefined, "the stack no longer takes 300 px");
 });
 
 test("a block Herdr pruned says how to put it back", () => {

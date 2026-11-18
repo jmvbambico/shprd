@@ -367,14 +367,21 @@ fn an_m10_install_upgrades_to_the_new_keys_and_keeps_the_person_s_own() {
         &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
     )
     .expect("JSON keys");
-    // The new bindings arrive: Jump on Ctrl+Shift+K, Keybinds, the tab keys, the
-    // layout's close and new-task keys.
-    assert_eq!(keys["global"]["ctrl-shift-k"], "mod.open:shprd-jump");
-    assert_eq!(keys["global"]["ctrl-shift-/"], "mod.open:shprd-keybinds");
+    // The new bindings arrive: the Alt keys globally, Jump and Keybinds inside
+    // the shprd layout, the layout's close and new-task keys.
+    assert_eq!(keys["layout:shprd"]["ctrl-shift-k"], "mod.open:shprd-jump");
+    assert_eq!(
+        keys["layout:shprd"]["ctrl-shift-/"],
+        "mod.open:shprd-keybinds"
+    );
     assert_eq!(keys["global"]["alt-up"], "space.prev");
     assert_eq!(keys["layout:shprd"]["ctrl-shift-w"], "tab.close");
     assert_eq!(keys["layout:shprd"]["ctrl-shift-n"], "shprd-tabs.new-task");
-    // Theirs stay: Ctrl+K is the person's, and Herdr's own F2 is never ours.
+    // Theirs stay: their global Ctrl+K and Herdr's own F2 are never touched; the
+    // layout's own Ctrl+K and F2 win inside the shprd layout.
+    assert_eq!(keys["layout:shprd"]["ctrl-k"], "mod.open:shprd-jump");
+    assert_eq!(keys["layout:shprd"]["f2"], "shprd-tabs.rename-tab");
+    assert_eq!(keys["layout:shprd"]["shift-f2"], "shprd-tabs.rename-space");
     assert_eq!(keys["global"]["ctrl-k"], "mod.open:jump");
     assert_eq!(keys["global"]["f2"], "tab.rename");
     // The two mods came with it.
@@ -383,6 +390,119 @@ fn an_m10_install_upgrades_to_the_new_keys_and_keeps_the_person_s_own() {
     // A second install is quiet.
     let again = ok(&fixture.run(&["--dry-run"]));
     assert!(!again.is_empty());
+}
+
+/// A copy of a real `keys.json` (Herdr's defaults, Shepherdr's section, and the
+/// global Ctrl+K / Ctrl+Shift+K / Ctrl+Shift+/ / F2 bindings that made shprd's
+/// keys do nothing) with the person's global bindings.
+const REAL_KEYS: &str = include_str!("fixtures/keys-herdr-defaults.json");
+
+#[test]
+fn the_shprd_keys_land_in_the_layout_and_no_global_key_changes() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path(".")).expect("the app home");
+    fs::write(fixture.app_path("keys.json"), REAL_KEYS).expect("their keys");
+
+    let dry = ok(&fixture.run(&["--dry-run"]));
+    assert!(
+        dry.contains("keys.json layout:shprd ctrl-k = mod.open:shprd-jump"),
+        "the dry run shows the layout keys: {dry}"
+    );
+    assert!(dry.contains("keys.json layout:shprd f2 = shprd-tabs.rename-tab"));
+    assert_eq!(
+        fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+        REAL_KEYS,
+        "a dry run writes nothing"
+    );
+
+    ok(&fixture.run(&[]));
+    let before: Value = serde_json::from_str(REAL_KEYS).expect("fixture JSON");
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    // Every global key the person had is exactly as it was.
+    for (key, command) in before["global"].as_object().expect("global") {
+        assert_eq!(after["global"][key], *command, "global {key} changed");
+    }
+    assert!(after["layout:shprd"]["ctrl-k"] == "mod.open:shprd-jump");
+    assert_eq!(after["layout:shprd"]["ctrl-shift-k"], "mod.open:shprd-jump");
+    assert_eq!(
+        after["layout:shprd"]["ctrl-shift-/"],
+        "mod.open:shprd-keybinds"
+    );
+    assert_eq!(
+        after["layout:shprd"]["ctrl-shift-?"],
+        "mod.open:shprd-keybinds"
+    );
+    assert_eq!(after["layout:shprd"]["f2"], "shprd-tabs.rename-tab");
+    assert_eq!(after["layout:shprd"]["shift-f2"], "shprd-tabs.rename-space");
+    // The sections that are not shprd's are untouched.
+    assert_eq!(after["layout:shepherdr"], before["layout:shepherdr"]);
+    assert_eq!(after["terminal"], before["terminal"]);
+    // Nothing shprd's is left in `global` that shadows nothing: the person's own
+    // Ctrl+K stays Herdr's outside this layout.
+    assert_eq!(after["global"]["ctrl-k"], "mod.open:jump");
+    // A second install is quiet.
+    assert!(ok(&fixture.run(&[])).contains("nothing to do"));
+}
+
+#[test]
+fn a_layout_key_the_person_bound_is_kept_and_reported() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path(".")).expect("the app home");
+    fs::write(
+        fixture.app_path("keys.json"),
+        r#"{"layout:shprd": {"ctrl-k": "app.palette", "f2": "tab.rename"}}"#,
+    )
+    .expect("their keys");
+
+    let report = ok(&fixture.run(&[]));
+    assert!(
+        report.contains("kept keys.json layout:shprd ctrl-k = app.palette"),
+        "{report}"
+    );
+    assert!(report.contains("kept keys.json layout:shprd f2 = tab.rename"));
+    let json = ok(&fixture.run(&["--dry-run", "--json"]));
+    assert!(json.contains("keys_kept"), "{json}");
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    assert_eq!(after["layout:shprd"]["ctrl-k"], "app.palette");
+    assert_eq!(after["layout:shprd"]["f2"], "tab.rename");
+}
+
+#[test]
+fn an_older_install_gives_back_the_global_keys_it_wrote() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.app_path("data/shprd-desktop")).expect("the manifest folder");
+    // What the earlier build wrote: Ctrl+K and Ctrl+Shift+K globally; the person
+    // has since bound Ctrl+Shift+K to something of their own.
+    fs::write(
+        fixture.app_path("keys.json"),
+        r#"{"global": {"ctrl-k": "mod.open:shprd-jump", "ctrl-shift-k": "app.palette", "alt-1": "tab.select:1"}}"#,
+    )
+    .expect("their keys");
+    fs::write(
+        fixture.app_path("data/shprd-desktop/manifest.json"),
+        r#"{"version": 1, "files": {}, "dirs": [], "keys": {"global": {"ctrl-k": "mod.open:shprd-jump", "ctrl-shift-k": "mod.open:shprd-jump", "alt-1": "tab.select:1"}}}"#,
+    )
+    .expect("the old manifest");
+
+    let report = ok(&fixture.run(&[]));
+    assert!(
+        report.contains("removed keys.json global ctrl-k"),
+        "{report}"
+    );
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.app_path("keys.json")).expect("keys.json"),
+    )
+    .expect("JSON keys");
+    assert!(after["global"].get("ctrl-k").is_none());
+    // The one the person rebound stays.
+    assert_eq!(after["global"]["ctrl-shift-k"], "app.palette");
+    assert_eq!(after["layout:shprd"]["ctrl-k"], "mod.open:shprd-jump");
 }
 
 #[test]
@@ -802,8 +922,8 @@ fn assert_upgraded(fixture: &Fixture) {
         .collect();
     assert_eq!(
         ids,
-        vec!["files", "changes", "tasks", "graph"],
-        "the Asks stack went with the cards moving into the thread; the graph joined the panel"
+        vec!["files", "changes", "tasks"],
+        "the Asks stack went with the cards moving into the thread, and the graph is a view of the Tasks panel, not a stack of its own"
     );
     let mut probe: Value = serde_json::from_slice(&installed).expect("JSON");
     assert!(
