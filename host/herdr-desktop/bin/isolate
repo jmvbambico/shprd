@@ -88,7 +88,13 @@ fi
 mkdir -p "$scratch"
 # One folder per run, removed on the way out unless the caller says otherwise.
 # `SHPRD_ISOLATE_KEEP=1` keeps it, for a check whose log a person wants to read.
-if [ "${SHPRD_ISOLATE_KEEP:-0}" != "1" ]; then
+#
+# The command is *not* `exec`'d: an `exec` replaces this shell, so the trap below
+# would never run and every live check would leave a folder under `$TMPDIR`.
+# `"$@"` runs as a child, its status is this script's, and signals reach it
+# because it is in the same process group.
+keep=${SHPRD_ISOLATE_KEEP:-0}
+if [ "$keep" != "1" ]; then
   trap 'rm -rf "$scratch"' EXIT INT TERM
 fi
 
@@ -103,7 +109,7 @@ for name in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
 done
 
 # shellcheck disable=SC2086 # the argument list is built here, one name at a time.
-exec env $unset_args \
+env $unset_args \
   HERDR_SOCKET_PATH=/nonexistent/herdr.sock \
   HC_SESSION=shprd-isolated \
   HERDR_APP_HOME="$scratch/app" \
@@ -114,3 +120,11 @@ exec env $unset_args \
   XDG_CACHE_HOME="$scratch/cache" \
   XDG_RUNTIME_DIR="$scratch/run" \
   "$@"
+status=$?
+# Signals that killed the child are not this script's to report as its own: a
+# `SIGTERM` a supervisor sent to the wrapper must stop it, not turn into exit 0.
+if [ "$status" -gt 128 ] && [ "$keep" != "1" ]; then
+  rm -rf "$scratch"
+  trap - EXIT
+fi
+exit "$status"
