@@ -344,7 +344,8 @@ export default class Chat extends View {
     }
     if (rows.length > 0 && (grew || this.pinned !== null)) {
       const card = firstCard(rows);
-      const at = (this.pinned === "card" || cards > this.drawn.cards) && card !== -1 ? card : rows.length - 1;
+      // The newest is the spacer after the last row, so a tall last reply shows its end.
+      const at = (this.pinned === "card" || cards > this.drawn.cards) && card !== -1 ? card : rows.length;
       this.scroll.scroll_to_item(at);
       // A "card" request waits for the rows it names; the rest are spent now.
       if (this.pinned !== "card" || card !== -1 || this.chat.messages.length > 0) this.pinned = null;
