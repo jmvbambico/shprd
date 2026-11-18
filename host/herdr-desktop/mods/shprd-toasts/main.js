@@ -164,6 +164,12 @@ export default class Toasts extends View {
 
   /** Re-reads the board once, without waiting for the long poll to answer. */
   reload(cx) {
+    // A read already in flight is asked for one more run, without a new task
+    // waiting on it: spawned waiters would pile up when changes outrun a read.
+    if (this.__flight) {
+      this.__again = true;
+      return;
+    }
     cx.spawn(() =>
       singleFlight(this, async () => {
         try {
