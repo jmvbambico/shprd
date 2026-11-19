@@ -341,7 +341,7 @@ test("a write says what it did", () => {
   assert.equal(outcomeOf({ outcome: "stored" }).text, "Saved");
   assert.equal(
     outcomeOf({ outcome: "equal_to_inherited" }).text,
-    "That is what it would inherit, so nothing was stored",
+    "That is what it inherits anyway, so the override here was removed",
   );
   assert.equal(outcomeOf({ outcome: "removed" }).text, "Removed: it inherits again");
   assert.equal(outcomeOf(null).text, "Saved");

@@ -2556,7 +2556,7 @@ impl WriteOutcome {
         match self {
             Self::Stored => format!("ok {} stored", key.name()),
             Self::EqualToInherited => format!(
-                "ok {} not stored: it equals what this scope inherits",
+                "ok {} is back to what this scope inherits: it is no longer overridden here, and any earlier override was removed",
                 key.name()
             ),
             Self::Removed => format!("ok {} unset", key.name()),

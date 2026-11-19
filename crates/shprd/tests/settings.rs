@@ -298,7 +298,7 @@ fn a_value_equal_to_the_inherited_one_is_not_stored() {
     fixture.ok(&["set", "tasks.merge", "checks"]);
     let printed = fixture.ok(&["set", "tasks.merge", "ask"]);
     assert!(
-        printed.contains("not stored: it equals what this scope inherits"),
+        printed.contains("is back to what this scope inherits"),
         "{printed}"
     );
     let text = Fixture::text(&fixture.settings());
