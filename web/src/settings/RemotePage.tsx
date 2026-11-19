@@ -206,7 +206,7 @@ function TunnelBody({
           <div className="srow-words">
             <div className="srow-title">
               <span className={status.on ? "dot tone-green" : "dot"} aria-hidden="true" />
-              Tunnel
+              Status
             </div>
             <div className="srow-about" data-status={status.on ? "on" : starting ? "starting" : "off"}>
               {status.on ? (

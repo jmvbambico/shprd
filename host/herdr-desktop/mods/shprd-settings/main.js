@@ -2022,7 +2022,7 @@ export default class Settings extends View {
         });
     blocks.push(
       this.row(t, {
-        title: h_flex().gap(8).items_center().child(dot).child("Tunnel"),
+        title: h_flex().gap(8).items_center().child(dot).child("Status"),
         about,
         control: action,
       }),
