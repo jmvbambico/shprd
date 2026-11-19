@@ -82,6 +82,26 @@ pub trait Host: Send + Sync {
     /// [`Capabilities::list_spaces`] is about.
     fn find_space(&self, name: &str) -> Result<Option<Space>>;
 
+    /// The space shprd marked as `mark`, wherever it is called now.
+    ///
+    /// shprd's own label on a space, kept apart from the display name so a
+    /// person can rename the space and shprd still finds it. `Ok(None)` when
+    /// nothing carries the mark (or the host cannot keep one). A mark whose
+    /// space is gone is `None` too.
+    fn marked_space(&self, _mark: &str) -> Result<Option<Space>> {
+        Ok(None)
+    }
+
+    /// Put shprd's `mark` on `space`, replacing the space the mark named before.
+    ///
+    /// The mark lives on the host's own record of the space, not on anything
+    /// inside it, so a space with no terminals keeps it. A host that cannot keep
+    /// a mark answers [`MuxError::Unsupported`], and the caller falls back to
+    /// the name.
+    fn mark_space(&self, _space: &SpaceId, _mark: &str) -> Result<()> {
+        Err(MuxError::Unsupported("marking a space"))
+    }
+
     /// Every space the host has, in the host's display order.
     ///
     /// Only where a name cannot be guessed: a refusal is worth reading when it
@@ -493,6 +513,14 @@ macro_rules! forward_a_wrapper {
                     (**self).subscribe(timeout)
                 }
 
+                fn marked_space(&self, mark: &str) -> Result<Option<Space>> {
+                    (**self).marked_space(mark)
+                }
+
+                fn mark_space(&self, space: &SpaceId, mark: &str) -> Result<()> {
+                    (**self).mark_space(space, mark)
+                }
+
                 fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {
                     (**self).doc(space, name, body)
                 }
@@ -555,4 +583,42 @@ const SCREEN_LINES: usize = 200;
 /// emptied, never closed.
 pub fn repo_space_name(repo_name: &str) -> String {
     format!("shprd · {repo_name}")
+}
+
+/// The space shprd keeps under `name`, found by shprd's own mark first.
+///
+/// A person may rename the space, so the display name is not the identity: the
+/// mark is. Order: the space carrying the mark; else (back-compat, a space made
+/// before marks existed) the space with that exact name, which then gets the
+/// mark; else a new space made in `cwd` and marked. Returns the space and
+/// whether this call made it. A host that cannot keep marks still works by name.
+pub fn ensure_marked_space(host: &dyn Host, name: &str, cwd: &Path) -> Result<(Space, bool)> {
+    if let Some(space) = host.marked_space(name)? {
+        return Ok((space, false));
+    }
+    let (space, created) = match host.find_space(name)? {
+        Some(space) => (space, false),
+        None => match host.create_space(name, cwd) {
+            Ok(space) => (space, true),
+            // The loser of a creation race reads back what the winner made.
+            Err(err) => match host.find_space(name) {
+                Ok(Some(space)) => (space, false),
+                _ => return Err(err),
+            },
+        },
+    };
+    match host.mark_space(&space.id, name) {
+        Ok(()) | Err(MuxError::Unsupported(_)) => {}
+        Err(err) => return Err(err),
+    }
+    Ok((space, created))
+}
+
+/// The space shprd keeps under `name` if the host has it: by mark first, then
+/// (a space nobody has marked yet) by name. Never creates or marks anything.
+pub fn find_marked_space(host: &dyn Host, name: &str) -> Result<Option<Space>> {
+    match host.marked_space(name)? {
+        Some(space) => Ok(Some(space)),
+        None => host.find_space(name),
+    }
 }

@@ -582,33 +582,15 @@ pub(crate) struct PreparedSpace {
 /// [`PreparedSpace`]: find the coordinator's space, or create it.
 pub(crate) fn ensure_repo_space(mux: &dyn Host, repo: &Path) -> Result<PreparedSpace, CliError> {
     let name = repo_space_name(&repo_name(repo)?);
-    let found = mux.find_space(&name).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
+    // Found by shprd's own mark, so a space the person renamed is still the
+    // one; a space with no mark is found by its old name once and gets marked.
+    let (space, created) = shprd_mux::ensure_marked_space(mux, &name, repo).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!(
+            "finding or creating the space {name:?} at {}",
+            repo.display()
+        )))
     })?;
-    if let Some(space) = found {
-        return Ok(PreparedSpace {
-            space,
-            created: false,
-        });
-    }
-    match mux.create_space(&name, repo) {
-        Ok(space) => Ok(PreparedSpace {
-            space,
-            created: true,
-        }),
-        // Two services can start at once; the loser of the race finds what the
-        // winner made rather than reporting a failure it can do nothing about.
-        Err(err) => match mux.find_space(&name) {
-            Ok(Some(space)) => Ok(PreparedSpace {
-                space,
-                created: false,
-            }),
-            _ => Err(CliError::other(anyhow!(err).context(format!(
-                "creating the space {name:?} at {}",
-                repo.display()
-            )))),
-        },
-    }
+    Ok(PreparedSpace { space, created })
 }
 
 /// One program the "+" menu started, as `POST /api/agents` answers it.
@@ -2623,7 +2605,7 @@ pub(crate) fn rename_coordinator_tab(
     wanted: &str,
 ) -> Result<bool, CliError> {
     let name = repo_space_name(&repo_name(repo)?);
-    let Some(space) = mux.find_space(&name).map_err(|err| {
+    let Some(space) = shprd_mux::find_marked_space(mux, &name).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
     })?
     else {
@@ -2689,7 +2671,7 @@ pub(crate) fn coordinator_pane_for(
     if let Some(orchestrator) = state.orchestrator.as_ref() {
         return Ok(Some(PaneId::new(orchestrator.pane.clone())));
     }
-    let space = mux.find_space(space_name).map_err(|err| {
+    let space = shprd_mux::find_marked_space(mux, space_name).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("looking for the space {space_name:?}")))
     })?;
     let Some(space) = space else {
@@ -3810,6 +3792,46 @@ project_dirs = []
             writes(&mux),
             vec![(pane.as_str().to_string(), "hello".to_string())]
         );
+    }
+
+    /// A person renames the repository's space; the next lookup (serve, spawn,
+    /// live_news all share it) reuses the same space and makes no second one.
+    #[test]
+    fn a_renamed_repo_space_is_reused_not_made_again() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let first = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(first.created);
+        mux.rename_space(&first.space.id, "my own name");
+        let again = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!again.created, "the renamed space was found");
+        assert_eq!(again.space.id, first.space.id);
+        let creates = mux
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, Call::CreateSpace(..)))
+            .count();
+        assert_eq!(creates, 1, "no second `shprd · <repo>` space is created");
+    }
+
+    /// A space made before marks existed is found by its old name and marked.
+    #[test]
+    fn an_unmarked_repo_space_is_found_by_name_and_gets_the_mark() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let name =
+            repo_space_name(&repo_name(scratch.root()).unwrap_or_else(|err| panic!("{err}")));
+        let old = mux
+            .create_space(&name, scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let found = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(!found.created);
+        assert_eq!(found.space.id, old.id);
+        mux.rename_space(&old.id, "renamed");
+        let marked = mux
+            .marked_space(&name)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(marked.map(|space| space.id), Some(old.id));
     }
 
     /// `shprd serve` starts the coordinator agent in the space it made, closes
