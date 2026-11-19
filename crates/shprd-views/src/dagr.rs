@@ -121,7 +121,12 @@ pub fn project(
             what: "a RunStarted event".to_string(),
         })?;
     let run_id = run.run_id.clone();
-    let title = format!("{} · {run_id}", repo_basename(&run.repo));
+    let title = match repo_basename(&run.repo) {
+        // A run started in the current folder names no repository: `. · q1`
+        // would read as a typo, so the title is the run alone.
+        "" | "." | ".." => run_id.clone(),
+        name => format!("{name} · {run_id}"),
+    };
     let (times, dropped) = times_by_attempt(events);
 
     let mut tasks: Vec<Value> = state
@@ -1112,6 +1117,22 @@ mod tests {
         assert_eq!(task(&doc, "e")["state"], "blocked");
         assert_eq!(task(&doc, "e")["unblock"], "human");
         assert_eq!(task(&doc, "e")["note"], "dropped: not needed");
+    }
+
+    #[test]
+    fn a_run_in_the_current_folder_is_titled_by_its_run_alone() {
+        let events = vec![event(
+            1,
+            T0,
+            EventKind::RunStarted {
+                run_id: "q1".to_string(),
+                repo: ".".to_string(),
+                base_branch: "main".to_string(),
+                integration_branch: "integration/q1".to_string(),
+            },
+        )];
+        let doc = project_doc(&state(&events), &events, T0 + MINUTE);
+        assert_eq!(doc["run"]["title"], "q1");
     }
 
     #[test]
