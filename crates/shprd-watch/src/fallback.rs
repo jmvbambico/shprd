@@ -617,6 +617,7 @@ mod tests {
                 String::from("worker"),
                 vec![String::from("claude"), String::from("codex")],
             )]),
+            lines: BTreeMap::new(),
             installed: BTreeSet::from([String::from("claude"), String::from("codex")]),
             signed_in: BTreeSet::from([String::from("claude"), String::from("codex")]),
         }
