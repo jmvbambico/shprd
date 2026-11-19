@@ -52,6 +52,8 @@ export interface AcceptDialogProps {
   device: Layout;
   /** Counts up each time the password was entered again; a refused verb is then sent again. */
   reauthTick: number;
+  /** Opens the card on its Drop step, as a row's Drop does. */
+  startDropping?: boolean;
   /** Closes the card. */
   onClose: () => void;
 }
@@ -60,13 +62,21 @@ export interface AcceptDialogProps {
 const CHANGES_MS = 20_000;
 
 /** The Accept card. */
-export function AcceptDialog({ client, board, taskId, device, reauthTick, onClose }: AcceptDialogProps) {
+export function AcceptDialog({
+  client,
+  board,
+  taskId,
+  device,
+  reauthTick,
+  startDropping = false,
+  onClose,
+}: AcceptDialogProps) {
   const task = taskById(board.state, taskId);
   const [policy, setPolicy] = useState<string | null>(null);
   const [changes, setChanges] = useState<TaskChangesDto | null>(null);
   const [changesError, setChangesError] = useState<string | null>(null);
   const [details, setDetails] = useState(false);
-  const [dropping, setDropping] = useState(false);
+  const [dropping, setDropping] = useState(startDropping);
   const [why, setWhy] = useState("");
   const [busy, setBusy] = useState<Verb | null>(null);
   const [error, setError] = useState<string | null>(null);

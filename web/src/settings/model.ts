@@ -77,7 +77,7 @@ export const PICK: Record<PickField, { label: string; about: string; empty: stri
 /** The words for what one write did. */
 export const OUTCOME: Record<SettingsOutcomeDto, string> = {
   stored: "Saved",
-  equal_to_inherited: "That is what it would inherit, so nothing was stored",
+  equal_to_inherited: "That is what it inherits anyway, so the override here was removed",
   removed: "Removed: it inherits again",
   was_unset: "It was already unset",
 };

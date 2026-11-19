@@ -27,6 +27,8 @@ design. Read [docs/plan.md](docs/plan.md) for what's being built now.
   CI fails on a stale binding.
 - `npm run build` writes `web/dist`, which release builds embed; a debug build
   works without it.
+- For QA, a release build needs web/dist (cd web && npm ci && npm run build); keep
+  SHPRD_HOME free of symlinks such as /tmp (use /private/tmp).
 - Until a crate defines the `it` feature, the integration-tests row is run as
   `cargo test --workspace -- --test-threads=1`.
 - Tests that need a real CLI, a real multiplexer or a model call are

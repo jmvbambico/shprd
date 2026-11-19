@@ -44,11 +44,28 @@ export function secondLine(task) {
   const derived = task?.derived ?? {};
   const said = derived.reason ?? (derived.need ? NEED[derived.need] : null);
   if (said) return cut(said);
+  // A task that handed in is past its agent's progress line: that line is the
+  // last thing the worker said while working, and stale once a reviewer runs.
+  const handed = handedInLine(task);
+  if (handed) return handed;
   const line = task?.last_status?.message;
   // The engine's own "Waiting: <why>" line says why a step is refused: it keeps
   // the room it was written with (120) so the path and task id are not cut.
   if (line) return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   return cut(task?.title ?? "");
+}
+
+/**
+ * What a task that handed its work in is waiting on, in a word: its review, its
+ * gates or the person. Null for a task still being worked on.
+ */
+export function handedInLine(task) {
+  if (task?.status === "passed") return "Reviewed";
+  if (task?.status !== "reported") return null;
+  const attempts = task.attempts ?? [];
+  const latest = attempts[attempts.length - 1];
+  const reviewed = (latest?.gates ?? []).some((gate) => gate.gate === "review");
+  return (latest?.reviews ?? []).length > 0 && !reviewed ? "In review" : "Running its gates";
 }
 
 /** Whether a task still wants drawing: a dropped task is history, not work. */
@@ -282,6 +299,7 @@ export function look(task) {
  * task's pie; null when it reported none, and the pie reads half full.
  */
 export function progressOf(task) {
+  if (handedInLine(task) !== null) return null;
   const done = task?.last_status?.progress;
   return typeof done === "number" && Number.isFinite(done) && done >= 0 ? done : null;
 }
@@ -405,19 +423,22 @@ export function rowActions(task) {
   const word = task?.derived?.status;
   const status = task?.status;
   if (!isLive(task)) return [];
+  // A task that is stuck (stopped, failed, waiting on the person) can be given up
+  // from its row. Drop needs a reason, so it opens the card on its Drop step.
+  const drop = status === "failed" || word === "needs_you" ? [{ id: "drop", label: "Drop", action: null }] : [];
   if (word === "ready" || status === "passed" || status === "reported") {
-    return [{ id: "review", label: "Review", action: null }];
+    return [{ id: "review", label: "Review", action: null }, ...(word === "needs_you" ? drop : [])];
   }
   if (status === "queued" && (word === "to_do" || word === "scheduled")) {
     return [{ id: "start", label: "Start", action: "task.start" }];
   }
   if (status === "failed") {
-    return [{ id: "retry", label: "Retry", action: "task.retry" }];
+    return [{ id: "retry", label: "Retry", action: "task.retry" }, ...drop];
   }
   if (status === "working" && word === "working") {
     return [{ id: "stop", label: "Stop", action: "task.stop" }];
   }
-  return [];
+  return drop;
 }
 
 /**

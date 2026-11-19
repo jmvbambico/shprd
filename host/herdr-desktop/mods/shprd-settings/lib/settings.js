@@ -78,7 +78,7 @@ export const PICK = {
 /** The words for what one write did (`SettingsOutcomeDto`). */
 export const OUTCOME = {
   stored: "Saved",
-  equal_to_inherited: "That is what it would inherit, so nothing was stored",
+  equal_to_inherited: "That is what it inherits anyway, so the override here was removed",
   removed: "Removed: it inherits again",
   was_unset: "It was already unset",
 };

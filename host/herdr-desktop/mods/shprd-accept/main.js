@@ -95,7 +95,9 @@ export default class Accept extends View {
     this.changesFor = null;
     this.changesError = null;
     this.details = false;
-    this.dropping = false;
+    // A row's Drop opens the card on its Drop step, with the reason box ready.
+    this.dropping = Boolean(props()?.drop);
+    this.reason = this.dropping ? InputState.new({ placeholder: WORDS.reasonPlaceholder }) : null;
     this.busy = null;
     this.error = null;
     this.refresh();

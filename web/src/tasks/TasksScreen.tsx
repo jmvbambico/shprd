@@ -17,7 +17,7 @@ import { useCallback, useId, useState, type FormEvent } from "react";
 
 import type { ApiClient } from "../api/client";
 import type { TaskDto } from "../gen";
-import { counts, filterChips, listView, look, newTask, ref, rowActions, secondLine } from "./board";
+import { counts, filterChips, isLive, listView, look, newTask, progressOf, ref, rowActions, secondLine } from "./board";
 import { Glyph } from "./Glyph";
 import { reason, type Board } from "./useBoard";
 
@@ -31,6 +31,8 @@ export interface TasksScreenProps {
   onOpen: (id: string) => void;
   /** Opens a task's Accept card. */
   onReview: (id: string) => void;
+  /** Opens the card on its Drop step. */
+  onDrop?: (id: string) => void;
 }
 
 /** Reads one remembered value; storage may be missing or throw. */
@@ -53,7 +55,7 @@ function save(key: string, value: unknown): void {
 }
 
 /** The Tasks screen. */
-export function TasksScreen({ client, board, onOpen, onReview }: TasksScreenProps) {
+export function TasksScreen({ client, board, onOpen, onReview, onDrop }: TasksScreenProps) {
   const { state } = board;
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<string>(() => load("filter", "all"));
@@ -189,6 +191,7 @@ export function TasksScreen({ client, board, onOpen, onReview }: TasksScreenProp
         {adding ? (
           <AddTask
             client={client}
+            known={(board.state?.tasks ?? []).filter(isLive).map((task) => task.id)}
             onDone={async () => {
               setAdding(false);
               await board.reload();
@@ -253,7 +256,7 @@ export function TasksScreen({ client, board, onOpen, onReview }: TasksScreenProp
                   {group.shut ? null : (
                     <ul className="tasks-rows">
                       {group.tasks.map((task) => (
-                        <TaskRow key={task.id} task={task} onOpen={onOpen} onReview={onReview} onVerb={verb} />
+                        <TaskRow key={task.id} task={task} onOpen={onOpen} onReview={onReview} onDrop={onDrop} onVerb={verb} />
                       ))}
                     </ul>
                   )}
@@ -328,20 +331,24 @@ function TaskRow({
   task,
   onOpen,
   onReview,
+  onDrop,
   onVerb,
 }: {
   task: TaskDto;
   onOpen: (id: string) => void;
   onReview: (id: string) => void;
+  onDrop?: (id: string) => void;
   onVerb: (task: TaskDto, action: "task.start" | "task.retry" | "task.stop") => void;
 }) {
   const shape = look(task);
-  const act = rowActions(task)[0];
+  const acts = rowActions(task);
+  const act = acts.find((a) => a.id !== "drop");
+  const drop = acts.find((a) => a.id === "drop");
   return (
     <li className="task-row" data-status={task.derived.status}>
       <button type="button" className="task-row-main" onClick={() => onOpen(task.id)}>
         <span className="task-row-glyph">
-          <Glyph shape={shape.glyph} tone={shape.tone} progress={task.last_status?.progress} label={shape.word} />
+          <Glyph shape={shape.glyph} tone={shape.tone} progress={progressOf(task)} label={shape.word} />
         </span>
         <span className="task-row-text">
           <span className="task-row-title">{task.title || task.id}</span>
@@ -367,6 +374,16 @@ function TaskRow({
           {act.label}
         </button>
       ) : null}
+      {drop && onDrop ? (
+        <button
+          type="button"
+          className="pill"
+          aria-label={`${drop.label} ${task.id}`}
+          onClick={() => onDrop(task.id)}
+        >
+          {drop.label}
+        </button>
+      ) : null}
     </li>
   );
 }
@@ -377,20 +394,24 @@ function TaskRow({
  */
 function AddTask({
   client,
+  known,
   onDone,
   onCancel,
 }: {
   client: ApiClient;
+  /** The ids of the tasks on the board, which "After" may name. */
+  known: readonly string[];
   onDone: () => Promise<void>;
   onCancel: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [scope, setScope] = useState("");
   const [acceptance, setAcceptance] = useState("");
+  const [after, setAfter] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const id = useId();
-  const check = newTask({ title, scope, acceptance });
+  const check = newTask({ title, scope, acceptance, deps: after }, known);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -410,7 +431,7 @@ function AddTask({
         acceptance: check.acceptance,
         tags: [],
         skills: [],
-        deps: [],
+        deps: check.deps,
       });
       await onDone();
     } catch (failure) {
@@ -433,7 +454,7 @@ function AddTask({
       />
       <input
         className="input"
-        placeholder="host/herdr-desktop, crates/shprd-server"
+        placeholder="src/parser, docs/usage.md"
         aria-label="Paths it may change"
         value={scope}
         onChange={(event) => setScope(event.target.value)}
@@ -444,6 +465,13 @@ function AddTask({
         aria-label="What must be true when it is done"
         value={acceptance}
         onChange={(event) => setAcceptance(event.target.value)}
+      />
+      <input
+        className="input"
+        placeholder="After (optional): ids of tasks it waits for, e.g. fix-parser"
+        aria-label="After: tasks it waits for"
+        value={after}
+        onChange={(event) => setAfter(event.target.value)}
       />
       <div className="add-task-foot">
         <span className="add-task-why" data-bad={error !== null} role={error === null ? undefined : "alert"}>

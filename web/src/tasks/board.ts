@@ -88,12 +88,39 @@ export function secondLine(task: TaskDto | null | undefined): string {
   if (said) {
     return cut(said);
   }
+  // A task that handed in is past its agent's progress line: that line is the
+  // last thing the worker said while working, and stale once a reviewer runs.
+  const handed = handedInLine(task);
+  if (handed) {
+    return handed;
+  }
   const line = task?.last_status?.message;
   if (line) {
     // The engine's own "Waiting: <why>" line keeps the room it was written with.
     return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   }
   return cut(task?.title ?? "");
+}
+
+/**
+ * What a task that handed its work in is waiting on, in a word: its review, its
+ * gates or the person. Null for a task still being worked on.
+ */
+export function handedInLine(task: TaskDto | null | undefined): string | null {
+  if (task?.status === "passed") {
+    return "Reviewed";
+  }
+  if (task?.status !== "reported") {
+    return null;
+  }
+  const latest = (task.attempts ?? [])[task.attempts.length - 1];
+  const reviewed = (latest?.gates ?? []).some((gate) => gate.gate === "review");
+  return (latest?.reviews ?? []).length > 0 && !reviewed ? "In review" : "Running its gates";
+}
+
+/** The percent an agent reported while it worked; null once it handed in, so a stale one is not drawn. */
+export function progressOf(task: TaskDto | null | undefined): number | undefined {
+  return handedInLine(task) === null ? task?.last_status?.progress : undefined;
 }
 
 /** Whether a task still wants drawing: a dropped task is history. */
@@ -285,7 +312,7 @@ export function review(task: TaskDto | null | undefined): ReviewDto | null {
 
 /** The one act a row offers. `action` is null for Review, which opens the Accept card. */
 export interface RowAct {
-  id: "review" | "start" | "retry" | "stop";
+  id: "review" | "start" | "retry" | "stop" | "drop";
   label: string;
   action: "task.start" | "task.retry" | "task.stop" | null;
 }
@@ -300,19 +327,23 @@ export function rowActions(task: TaskDto | null | undefined): RowAct[] {
   }
   const word = task.derived.status;
   const status = task.status;
+  // A task that is stuck (stopped, failed, waiting on the person) can be given
+  // up from its row. Drop needs a reason, so it opens the card's Drop step.
+  const drop: RowAct[] =
+    status === "failed" || word === "needs_you" ? [{ id: "drop", label: "Drop", action: null }] : [];
   if (word === "ready" || status === "passed" || status === "reported") {
-    return [{ id: "review", label: "Review", action: null }];
+    return [{ id: "review", label: "Review", action: null }, ...(word === "needs_you" ? drop : [])];
   }
   if (status === "queued" && (word === "to_do" || word === "scheduled")) {
     return [{ id: "start", label: "Start", action: "task.start" }];
   }
   if (status === "failed") {
-    return [{ id: "retry", label: "Retry", action: "task.retry" }];
+    return [{ id: "retry", label: "Retry", action: "task.retry" }, ...drop];
   }
   if (status === "working" && word === "working") {
     return [{ id: "stop", label: "Stop", action: "task.stop" }];
   }
-  return [];
+  return drop;
 }
 
 /** What the add-task form says about its fields. */
@@ -320,6 +351,7 @@ export interface NewTaskCheck {
   title: string;
   scope: string[];
   acceptance: string[];
+  deps: string[];
   why: string;
   ready: boolean;
 }
@@ -328,7 +360,10 @@ export interface NewTaskCheck {
  * The add-task form's reading of its fields: a title, the paths it may change
  * (comma separated) and what must be true when it is done (semicolon separated).
  */
-export function newTask(body: { title?: string; scope?: string; acceptance?: string }): NewTaskCheck {
+export function newTask(
+  body: { title?: string; scope?: string; acceptance?: string; deps?: string },
+  known: readonly string[] | null = null,
+): NewTaskCheck {
   const title = String(body.title ?? "").trim();
   const split = (text: string | undefined, sep: string) =>
     String(text ?? "")
@@ -337,6 +372,8 @@ export function newTask(body: { title?: string; scope?: string; acceptance?: str
       .filter((part) => part !== "");
   const scope = split(body.scope, ",");
   const acceptance = split(body.acceptance, ";");
+  const deps = [...new Set(String(body.deps ?? "").split(/[\s,]+/).filter((id) => id !== ""))];
+  const unknown = known === null ? [] : deps.filter((id) => !known.includes(id));
   const why =
     title === ""
       ? "A task needs a title"
@@ -344,8 +381,10 @@ export function newTask(body: { title?: string; scope?: string; acceptance?: str
         ? "Name the folder or path it may change"
         : acceptance.length === 0
           ? "Say what must be true when it is done"
-          : "";
-  return { title, scope, acceptance, why, ready: why === "" };
+          : unknown.length > 0
+            ? `No task named ${unknown.join(", ")} to wait for`
+            : "";
+  return { title, scope, acceptance, deps, why, ready: why === "" };
 }
 
 /** How long ago `at` was: `just now`, `4m ago`, `2h ago`. */

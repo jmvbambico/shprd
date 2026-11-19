@@ -501,7 +501,7 @@ fn asking_section(route: AskRoute) -> String {
             out.push_str(
                 "It blocks until the person answers, prints their answer on stdout and exits 0: carry \
                  on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a \
-                 plan; both offer Allow and Deny unless you name your own options. If it exits non-zero, \
+                 plan; a permission offers Allow and Deny and a plan Approve and Reject, unless you name your own options. If it exits non-zero, \
                  nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the \
                  card stays open, so raise it again if the decision still blocks you, or hand in as \
                  `blocked` with the question in your summary.\n",
@@ -1239,7 +1239,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
     #[test]
     fn a_program_without_an_ask_hook_is_told_the_raise_verb_and_how_it_waits() {
         let text = plain_brief(AskRoute::Command);
-        let expected = "\n## Asking the person\n\nThis program's CLI has no ask hook, so a question with its own question tool reaches nobody: nothing turns it into a card and the person never sees it. Raise the card yourself, from your worktree, and wait for the answer:\n\n```\nshprd ask raise --kind question \\\n    --text \"Can I take the window for 30s to screenshot the menu?\" \\\n    --option \"Take it, 30s\" --option \"Wait for my go-ahead\" --option \"Skip the screenshot\"\n```\n\nIt blocks until the person answers, prints their answer on stdout and exits 0: carry on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a plan; both offer Allow and Deny unless you name your own options. If it exits non-zero, nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the card stays open, so raise it again if the decision still blocks you, or hand in as `blocked` with the question in your summary.\n";
+        let expected = "\n## Asking the person\n\nThis program's CLI has no ask hook, so a question with its own question tool reaches nobody: nothing turns it into a card and the person never sees it. Raise the card yourself, from your worktree, and wait for the answer:\n\n```\nshprd ask raise --kind question \\\n    --text \"Can I take the window for 30s to screenshot the menu?\" \\\n    --option \"Take it, 30s\" --option \"Wait for my go-ahead\" --option \"Skip the screenshot\"\n```\n\nIt blocks until the person answers, prints their answer on stdout and exits 0: carry on with that answer. `--kind permission` asks to run a tool and `--kind plan` offers a plan; a permission offers Allow and Deny and a plan Approve and Reject, unless you name your own options. If it exits non-zero, nobody answered within its wait (30 minutes by default; `--timeout-secs` changes it): the card stays open, so raise it again if the decision still blocks you, or hand in as `blocked` with the question in your summary.\n";
         let Some(start) = text.find("\n## Asking the person") else {
             panic!("the brief has an Asking section: {text}");
         };

@@ -992,6 +992,25 @@ async fn changes(
     }
 }
 
+/// A sentence for an action body serde could not read.
+///
+/// A missing field is the common slip, and serde's own text for it
+/// (`missing field `reason``) reads as an internal error to the person whose
+/// button sent it, so it is said in words; anything else keeps serde's detail.
+fn malformed_action(kind: &str, detail: &str) -> String {
+    let missing = detail
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split_once('`'))
+        .map(|(field, _)| field);
+    match (kind, missing) {
+        ("task.drop" | "task_drop", Some("reason")) => {
+            "dropping a task needs a reason: say why it is not wanted".to_string()
+        }
+        (_, Some(field)) => format!("a {kind:?} action needs a {field:?}"),
+        (_, None) => format!("a {kind:?} action is malformed: {detail}"),
+    }
+}
+
 /// `POST /api/action`: one envelope, run against the same log the CLI writes.
 async fn action(
     State(state): State<AppState>,
@@ -1014,7 +1033,7 @@ async fn action(
         return Err(ApiReject::unknown_action(&kind));
     }
     let action: Action = Action::from_value(value)
-        .map_err(|err| ApiReject::bad_request(format!("a {kind:?} action is malformed: {err}")))?;
+        .map_err(|err| ApiReject::bad_request(malformed_action(&kind, &err.to_string())))?;
 
     // A destructive action needs a password entered in the last five minutes
     // through a session. The loopback token door is exempt: the token is already
@@ -1347,4 +1366,23 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|err| ApiReject::internal(format!("the ledger task did not finish: {err}")))
+}
+
+#[cfg(test)]
+mod malformed_action_tests {
+    use super::malformed_action;
+
+    #[test]
+    fn a_missing_field_is_said_in_words() {
+        assert_eq!(
+            malformed_action("task.drop", "missing field `reason` at line 1 column 30"),
+            "dropping a task needs a reason: say why it is not wanted"
+        );
+        assert_eq!(
+            malformed_action("task.stop", "missing field `task` at line 1 column 9"),
+            "a \"task.stop\" action needs a \"task\""
+        );
+        let other = malformed_action("task.add", "invalid type: string, expected a sequence");
+        assert!(other.contains("is malformed"), "{other}");
+    }
 }

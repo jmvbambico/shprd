@@ -177,7 +177,7 @@ must_fix = "major"   # findings this severe or worse fail the review
 rounds = 2           # failed reviews before shprd escalates to you
 
 [land]
-merge = "ask"        # "ask": merge only after your approval (GitHub or `shprd approve`); "allow": also without it, never into a protected branch
+merge = "ask"        # "ask": merge only after your approval (GitHub or `shprd approve`); "checks": also once the checks pass; "auto": also without waiting, never into a protected branch
 protected = ["main", "master"]
 ```
 
