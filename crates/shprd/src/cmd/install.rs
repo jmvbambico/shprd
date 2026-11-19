@@ -162,8 +162,9 @@ fn env_home(env: &[(String, String)]) -> Option<PathBuf> {
 /// Names what marks this process as started by an agent, if anything does.
 ///
 /// A pure function over the environment as `(name, value)` pairs: an `HC_*` or
-/// `HERDR_*` variable with a value (a Herdr child's markers; `HERDR_APP_HOME` is
-/// configuration, not a marker, so it does not count), or `SHPRD_ACTOR` naming an
+/// `HERDR_*` variable with a value (a Herdr child's markers, `HERDR_APP_HOME`
+/// included: Herdr hands it to every child, and one pointing at the real home is
+/// exactly the case this guards), or `SHPRD_ACTOR` naming an
 /// `agent:` actor.
 fn agent_marker(env: &[(String, String)]) -> Option<String> {
     env.iter().find_map(|(key, value)| {
@@ -1372,7 +1373,8 @@ mod tests {
     fn no_marker_and_empty_markers_pass() {
         assert!(gate(&[("PATH", "/bin")], REAL, false).is_ok());
         assert!(gate(&[("HC_SESSION", "")], REAL, false).is_ok());
-        assert!(gate(&[("HERDR_APP_HOME", REAL)], REAL, false).is_ok());
+        assert!(gate(&[("HERDR_APP_HOME", REAL)], REAL, false).is_err());
+        assert!(gate(&[("HERDR_APP_HOME", "/tmp/p")], "/tmp/p", false).is_ok());
     }
 
     #[test]
