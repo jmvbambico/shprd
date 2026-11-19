@@ -26,13 +26,15 @@
 //!   person has edited since (a change is theirs, not stale ours).
 //!
 //! The source tree is the one this *binary* carries, not one the caller happens
-//! to stand in: `--from`, then `$SHPRD_HOST_DIR`, then a `host/herdr-desktop`
-//! beside the working directory (a checkout or worktree of shprd), then the
-//! checkout this binary was compiled from in a debug build, and finally the copy
+//! to stand in: `--from`, then `$SHPRD_HOST_DIR`, then `--repo`'s
+//! `host/herdr-desktop`, then the checkout this binary was compiled from in a
+//! debug build, and finally the copy
 //! embedded in the binary at build time (`build.rs`, the same shape as
 //! `shprd-agents`'s `data/`). An installed `shprd` therefore installs its own
 //! desktop with no checkout at all, and a worker's worktree installs the worktree
-//! rather than the canonical checkout (the M10 gate's bug 6). Every path here is
+//! rather than the canonical checkout (the M10 gate's bug 6). The working
+//! directory is never searched: an install run from an old checkout must not
+//! install that checkout's old layout over the one this binary ships. Every path here is
 //! carried in as a value; this module reads no environment variable itself.
 //!
 //! A file Herdr pruned is put back: Herdr resolves a layout terminal block by
@@ -205,13 +207,12 @@ fn layout_file(rel: &str) -> bool {
 }
 
 /// The tree to install from: `--from`, then `$SHPRD_HOST_DIR`, then a checkout
-/// under the working directory, then the checkout this binary was built from in
-/// a debug build, then the embedded copy.
+/// named by `--repo`, then the checkout this binary was built from in a debug
+/// build, then the embedded copy.
 ///
 /// A tree named outright (`--from`, `$SHPRD_HOST_DIR`) must be one: falling back
 /// to the embedded copy would install something other than what was asked for.
-/// The search under the working directory is quiet, because most directories a
-/// person runs `shprd` from hold no host tree at all.
+/// The working directory and its parent are not searched.
 fn resolve_source(args: &InstallArgs) -> Result<Source, CliError> {
     if let Some(path) = &args.from {
         return Ok(Source::Tree(checked_tree(path, "--from")?));
@@ -231,10 +232,9 @@ fn resolve_source(args: &InstallArgs) -> Result<Source, CliError> {
 /// The `host/herdr-desktop` folders to try, best first, for a caller who named
 /// none.
 ///
-/// The order is "what this binary is", not "where the person happens to be": a
-/// worktree the caller stands in, then the folder above it (a `host/` block
-/// inside a checkout), then — in a debug build only — the checkout the binary was
-/// compiled from, which is the same tree by another name. A release build has no
+/// The order is "what this binary is", not "where the person happens to be":
+/// `--repo`, then — in a debug build only — the checkout the binary was compiled
+/// from, which is the same tree by another name. A release build has no
 /// such path to offer and says nothing about it.
 fn search_places(args: &InstallArgs) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -244,16 +244,9 @@ fn search_places(args: &InstallArgs) -> Vec<PathBuf> {
             out.push(candidate);
         }
     };
-    // `--repo` is the caller naming the checkout outright, so it comes before the
-    // working directory's own guess.
+    // `--repo` is the caller naming the checkout outright, so it comes first.
     if let Some(repo) = &args.repo {
         push(repo.clone());
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        push(cwd.clone());
-        if let Some(parent) = cwd.parent() {
-            push(parent.to_path_buf());
-        }
     }
     if cfg!(debug_assertions) {
         push(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
