@@ -239,6 +239,7 @@ fn report(report: &shprd_core::state::Report) -> ReportDto {
         changed_paths: report.changed_paths.clone(),
         commit: report.commit.clone(),
         skills_used: report.skills_used.clone(),
+        proofs: report.proofs.clone(),
     }
 }
 
@@ -251,6 +252,24 @@ mod tests {
     use shprd_core::ask::AskKind;
     use shprd_core::event::{Actor, Event, EventKind};
     use shprd_core::state::{AskAnswerRecord, AskRecord};
+
+    #[test]
+    fn a_report_carries_the_proof_it_named() {
+        let report = shprd_core::state::Report {
+            status: shprd_core::event::ReportStatus::Completed,
+            summary: "s".to_string(),
+            tests: Vec::new(),
+            checks: Vec::new(),
+            changed_paths: Vec::new(),
+            commit: None,
+            skills_used: Vec::new(),
+            proofs: vec![".shprd/proof/T5-usage.txt".to_string()],
+        };
+        assert_eq!(
+            super::report(&report).proofs,
+            vec![".shprd/proof/T5-usage.txt".to_string()]
+        );
+    }
 
     /// The moment the tests read the snapshot at.
     const NOW: u64 = 1_700_000_000_000;

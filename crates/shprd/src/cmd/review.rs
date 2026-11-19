@@ -209,6 +209,10 @@ pub struct ContractInput<'a> {
     /// the task raised: there is nothing to tell them apart by, and showing too
     /// much is never what hides an acceptance criterion.
     pub asks: &'a [(TaskId, AskId, AskRecord)],
+    /// The proof files copied into the packet, as `(path the worker named,
+    /// path inside the packet)`. A proof the worker named that is not here
+    /// could not be copied, and the contract says so.
+    pub proof_copies: &'a [(String, Option<String>)],
 }
 
 /// Renders the contract a reviewer checks the diff against.
@@ -255,8 +259,76 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     out.push_str(&listed("tests", &report.tests));
     out.push_str(&listed("changed paths", &report.changed_paths));
     out.push_str(&listed("proof", &report.proofs));
+    out.push_str(&proof_section(input.proof_copies));
     if let Some(commit) = &report.commit {
         out.push_str(&format!("- commit: {commit}\n"));
+    }
+    out
+}
+
+/// Where each proof the worker named sits in the packet, or that it is missing.
+///
+/// Empty when the worker named none: the "proof" list above already says so.
+fn proof_section(copies: &[(String, Option<String>)]) -> String {
+    if copies.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Proof files in this packet\n\n");
+    for (named, copy) in copies {
+        match copy {
+            Some(copy) => out.push_str(&format!("- `{named}` is at `{copy}`\n")),
+            None => out.push_str(&format!(
+                "- `{named}` could not be copied into the packet: it is missing, outside the worktree or too large\n"
+            )),
+        }
+    }
+    out
+}
+
+/// The most a single proof file may weigh to be copied into a packet.
+const PROOF_COPY_LIMIT: u64 = 2 * 1024 * 1024;
+
+/// Copies the proof files an attempt named from its worktree into
+/// `<packet>/proof/`, and returns where each one went.
+///
+/// Proof is usually left untracked (`.shprd/proof/…`), so the diff never holds
+/// it and a reviewer reading only the packet could not check a claim about it.
+/// A path that resolves outside the worktree, a missing file, a directory and a
+/// file over [`PROOF_COPY_LIMIT`] are reported as not copied rather than
+/// failing the review. The folder is rebuilt each time so a re-run does not
+/// keep a stale proof.
+fn copy_proofs(worktree: &Path, proofs: &[String], packet: &Path) -> Vec<(String, Option<String>)> {
+    let target = packet.join("proof");
+    let _ = std::fs::remove_dir_all(&target);
+    if proofs.is_empty() {
+        return Vec::new();
+    }
+    let root = real_dir(worktree);
+    let mut out = Vec::new();
+    for (index, named) in proofs.iter().enumerate() {
+        let path = Path::new(named);
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            worktree.join(path)
+        };
+        let copied = absolute
+            .canonicalize()
+            .ok()
+            .filter(|real| real.starts_with(&root))
+            .filter(|real| {
+                std::fs::metadata(real)
+                    .map(|meta| meta.is_file() && meta.len() <= PROOF_COPY_LIMIT)
+                    .unwrap_or(false)
+            })
+            .and_then(|real| {
+                let name = real.file_name()?.to_string_lossy().into_owned();
+                std::fs::create_dir_all(&target).ok()?;
+                let relative = format!("proof/{index}-{name}");
+                std::fs::copy(&real, packet.join(&relative)).ok()?;
+                Some(relative)
+            });
+        out.push((named.clone(), copied));
     }
     out
 }
@@ -400,9 +472,17 @@ fn write_packet(env: &ReviewEnv<'_>, task: &Task, attempt: &Attempt) -> Result<P
         .filter(|((ask_task, _), _)| *ask_task == task.id)
         .map(|((ask_task, ask), record)| (ask_task.clone(), ask.clone(), record.clone()))
         .collect();
+    let proof_copies = match attempt.report.as_ref() {
+        Some(report) => copy_proofs(Path::new(&attempt.worktree), &report.proofs, &dir),
+        None => Vec::new(),
+    };
     write_file(
         &dir.join("contract.md"),
-        &render_contract(&ContractInput { task, asks: &asks }),
+        &render_contract(&ContractInput {
+            task,
+            asks: &asks,
+            proof_copies: &proof_copies,
+        }),
     )?;
     write_file(&dir.join("findings.schema.json"), &schema_text()?)?;
     Ok(dir)
@@ -999,8 +1079,11 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
         "- `contract.md` — the task, what \"done\" meant, what the agent reported, and the \
          asks it raised with the person's answers\n",
     );
-    out.push_str("- `findings.schema.json` — the shape of what you write\n\n");
-    out.push_str("- Read those three files, in this folder, and nothing else.\n");
+    out.push_str("- `findings.schema.json` — the shape of what you write\n");
+    out.push_str(
+        "- `proof/` — copies of the proof files the worker named, when it named any; `contract.md` says where each one is\n\n",
+    );
+    out.push_str("- Read those files, in this folder, and nothing else.\n");
     out.push_str("- Never open or edit the repository or any worktree; the diff is the truth you judge. If the packet does not show something you need, record that as a finding.\n");
     out.push_str("- Write nothing outside this folder.\n\n");
     out.push_str("## What to write\n\n");
@@ -1051,20 +1134,24 @@ fn open_reviewer(
             actor: format!("agent:{}", reviewer.agent),
             task: Some(task.to_string()),
             run: Some(env.spawn.run.clone()),
-            repo: dir.to_path_buf(),
+            repo: real_dir(dir),
             home: Some(env.spawn.home.clone()),
             bin: shprd_agents::env::service_bin(),
             data: env.spawn.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
     let parent = spawn::coordinator_pane_of(&env.spawn.home, &env.spawn.ctx.root, mux, &space);
+    // Codex refuses to start a shell when a writable root goes through a
+    // symlink, and the reviewer's cwd is its writable root: always hand it the
+    // folder's real path, whatever spelling the packet was reached by.
+    let real_cwd = real_dir(dir);
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
             title: &title,
             argv: &argv,
             env: &pairs,
-            cwd: dir,
+            cwd: &real_cwd,
             role: shprd_mux::AgentRole::Reviewer,
             task: Some(task),
             program: &reviewer.agent,
@@ -1401,6 +1488,35 @@ pub fn review_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    #[test]
+    fn proof_files_are_copied_into_the_packet() {
+        let dir = TempDir::new().unwrap();
+        let tree = dir.path().join("wt");
+        std::fs::create_dir_all(tree.join(".shprd/proof")).unwrap();
+        std::fs::write(tree.join(".shprd/proof/run.txt"), "ok 9 passed").unwrap();
+        let packet = dir.path().join("packet");
+        std::fs::create_dir(&packet).unwrap();
+        let copies = copy_proofs(
+            &tree,
+            &[
+                ".shprd/proof/run.txt".to_string(),
+                ".shprd/proof/missing.txt".to_string(),
+                "../outside.txt".to_string(),
+            ],
+            &packet,
+        );
+        let first = copies[0].1.clone().expect("the first proof is copied");
+        assert_eq!(
+            std::fs::read_to_string(packet.join(&first)).unwrap(),
+            "ok 9 passed"
+        );
+        assert_eq!(copies[1].1, None, "a missing file is reported");
+        assert_eq!(copies[2].1, None, "a path outside the worktree is refused");
+        let text = proof_section(&copies);
+        assert!(text.contains(&format!("`.shprd/proof/run.txt` is at `{first}`")));
+        assert!(text.contains("`.shprd/proof/missing.txt` could not be copied"));
+    }
 
     #[test]
     fn a_packet_folder_is_named_by_where_it_really_is() {
@@ -1929,7 +2045,11 @@ project_dirs = []
             .iter()
             .map(|((task, ask), record)| (task.clone(), ask.clone(), record.clone()))
             .collect();
-        render_contract(&ContractInput { task, asks: &asks })
+        render_contract(&ContractInput {
+            task,
+            asks: &asks,
+            proof_copies: &[],
+        })
     }
 
     #[test]
@@ -2239,6 +2359,33 @@ project_dirs = []
     }
 
     #[test]
+    fn the_reviewer_starts_in_the_real_path_of_a_symlinked_packet() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let mut env = scratch.review_env(&ctx, Some("codex/m1"));
+        let real = scratch.home.path().join("real-reviews");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = scratch.home.path().join("link-reviews");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        env.reviews_dir = link;
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let cwd = mux
+            .calls()
+            .iter()
+            .find_map(|call| match call {
+                Call::Spawn(_, title, _, _, cwd) if title == &report.tab => Some(cwd.clone()),
+                _ => None,
+            })
+            .expect("the reviewer was spawned");
+        assert_eq!(cwd, report.dir.canonicalize().unwrap());
+        assert!(cwd.starts_with(real.canonicalize().unwrap()), "{cwd:?}");
+    }
+
+    #[test]
     fn the_reviewer_tab_starts_in_the_packet_not_the_worktree() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
@@ -2256,13 +2403,15 @@ project_dirs = []
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no tab was created: {calls:?}"));
-        assert_eq!(cwd, report.dir, "the tab must start in the packet");
-        assert_eq!(cwd, packet_dir(&env.reviews_dir, "t1", "T1", 1));
         assert_eq!(
             cwd,
-            scratch
-                .home
-                .path()
+            real_dir(&report.dir),
+            "the tab must start in the packet"
+        );
+        assert_eq!(cwd, real_dir(&packet_dir(&env.reviews_dir, "t1", "T1", 1)));
+        assert_eq!(
+            cwd,
+            real_dir(scratch.home.path())
                 .join(".shprd")
                 .join("reviews")
                 .join("t1")
@@ -2291,7 +2440,7 @@ project_dirs = []
         assert!(
             pairs.contains(&(
                 "SHPRD_REPO".to_string(),
-                Some(report.dir.display().to_string())
+                Some(real_dir(&report.dir).display().to_string())
             )),
             "{pairs:?}"
         );
