@@ -531,3 +531,45 @@ fn the_prompts_directory_sits_under_the_config_root() {
         Path::new("/xdg/shprd/prompts")
     );
 }
+
+/// SHPR-66: every role's words open by saying it is shprd's, so another
+/// product's session note in the same CLI cannot make it answer as that one.
+#[test]
+fn every_role_opens_with_who_it_is() {
+    for (id, first) in [
+        ("assistant", "You are shprd's coordinator"),
+        ("worker", "You are a shprd worker"),
+        ("reviewer", "You are a shprd reviewer"),
+    ] {
+        let text = shipped_prompt(id).expect("shipped").text;
+        let body = text.split("-->").nth(1).expect("a licence header");
+        assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
+        assert!(text.contains("Shepherdr"), "{id} names what it is not");
+    }
+}
+
+#[test]
+fn the_pre_identity_defaults_are_retired_and_upgrade() {
+    for (id, old, old_digest) in [
+        (
+            "assistant",
+            ASSISTANT_PRE_IDENTITY,
+            ASSISTANT_PRE_IDENTITY_DIGEST,
+        ),
+        ("worker", WORKER_PRE_IDENTITY, WORKER_PRE_IDENTITY_DIGEST),
+        (
+            "reviewer",
+            REVIEWER_PRE_IDENTITY,
+            REVIEWER_PRE_IDENTITY_DIGEST,
+        ),
+    ] {
+        let shipped = shipped_prompt(id).expect("shipped");
+        assert_eq!(digest(old.as_bytes()), old_digest, "{id}");
+        assert!(shipped.old.contains(&old_digest), "{id}");
+        let temp = dir();
+        std::fs::create_dir_all(temp.path()).expect("dir");
+        std::fs::write(temp.path().join(format!("{id}.md")), old).expect("an old install");
+        let installed = ensure(temp.path(), id).expect("the upgrade runs");
+        assert_eq!(installed.change, Change::Upgraded, "{id}: {installed:?}");
+    }
+}

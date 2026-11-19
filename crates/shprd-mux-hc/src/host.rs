@@ -83,14 +83,29 @@ use crate::model::{self, Terminal};
 use crate::placement::{self, Placement};
 
 /// The label a headless agent's own program carries.
-const AGENT_LABEL: &str = "herdr.agent";
+///
+/// The agent labels are in shprd's own `shprd.*` namespace, never `herdr.*`:
+/// Shepherdr reads `herdr.role=coordinator` as "this pane is my Assistant" and
+/// injects its own context into it (SHPR-66), so shprd claims none of its keys
+/// except the two the window itself needs for placement.
+const AGENT_LABEL: &str = "shprd.agent";
 /// The label that says what an agent is for.
-const ROLE_LABEL: &str = "herdr.role";
+const ROLE_LABEL: &str = "shprd.role";
 /// The label naming the repository space an agent belongs to. Never
 /// `herdr.space`, which would make the window draw it.
-const TASK_SPACE_LABEL: &str = "herdr.task.space";
+const TASK_SPACE_LABEL: &str = "shprd.task.space";
 /// The label naming the coordinator tab an agent reports to.
-const COORDINATOR_LABEL: &str = "herdr.coordinator";
+const COORDINATOR_LABEL: &str = "shprd.coordinator";
+/// An agent label's value, from the `shprd.*` key or, for a terminal an older
+/// build started, the `herdr.*` key it used then, so a restart adopts the
+/// coordinator and workers already running instead of starting a second set.
+fn agent_label<'a>(terminal: &'a Terminal, key: &str) -> Option<&'a String> {
+    terminal.labels.get(key).or_else(|| {
+        let legacy = key.replacen("shprd.", "herdr.", 1);
+        terminal.labels.get(&legacy)
+    })
+}
+
 /// The tab id shprd gives the coordinator's tab.
 ///
 /// Fixed and its own: the window makes a tab whose id is exactly the label, and
@@ -1010,7 +1025,7 @@ impl Host for HcHost {
         Ok(state
             .terminals()
             .filter_map(|terminal| {
-                let role = AgentRole::parse(terminal.labels.get(ROLE_LABEL)?)?;
+                let role = AgentRole::parse(agent_label(terminal, ROLE_LABEL)?)?;
                 if role != AgentRole::Coordinator {
                     return None;
                 }
@@ -1023,12 +1038,10 @@ impl Host for HcHost {
                     },
                     task: None,
                     role,
-                    program: terminal
-                        .labels
-                        .get(AGENT_LABEL)
+                    program: agent_label(terminal, AGENT_LABEL)
                         .cloned()
                         .unwrap_or_default(),
-                    space: SpaceId::new(terminal.labels.get(TASK_SPACE_LABEL)?.clone()),
+                    space: SpaceId::new(agent_label(terminal, TASK_SPACE_LABEL)?.clone()),
                     state: reported_state(terminal),
                     live: terminal.is_live(),
                     started_ms: terminal.created_ms,
@@ -1240,9 +1253,8 @@ impl Host for HcHost {
     /// Start an agent. A coordinator is placed in a tab of the repository's
     /// space like any `spawn`, plus the agent labels; a worker or a reviewer
     /// carries **no placement labels at all**, so the window draws nothing for
-    /// it (Shepherdr's `launch.py`: `herdr.task`, `herdr.task.space`,
-    /// `herdr.agent`, `herdr.role`, and `herdr.coordinator` under a parent that
-    /// outlives it).
+    /// it (the `shprd.task`, `shprd.task.space`, `shprd.agent`, `shprd.role`
+    /// and, under a parent that outlives it, `shprd.coordinator` labels).
     fn spawn_agent(&self, launch: &AgentLaunch<'_>) -> Result<Tab> {
         let mut labels = BTreeMap::new();
         labels.insert(AGENT_LABEL.to_string(), launch.program.to_string());
@@ -1299,10 +1311,10 @@ impl Host for HcHost {
         let state = self.inner.client.state();
         Ok(state
             .terminals()
-            .filter(|terminal| terminal.labels.contains_key(TASK_SPACE_LABEL))
+            .filter(|terminal| agent_label(terminal, TASK_SPACE_LABEL).is_some())
             .filter(|terminal| !terminal.labels.contains_key(placement::TAB_LABEL))
             .filter_map(|terminal| {
-                let role = AgentRole::parse(terminal.labels.get(ROLE_LABEL)?)?;
+                let role = AgentRole::parse(agent_label(terminal, ROLE_LABEL)?)?;
                 let address = terminal.bare_address().to_string();
                 Some(LiveAgent {
                     tab: Tab {
@@ -1310,14 +1322,12 @@ impl Host for HcHost {
                         title: terminal.name.clone().unwrap_or_else(|| address.clone()),
                         root_pane: PaneId::new(address),
                     },
-                    task: terminal.labels.get(placement::TASK_LABEL).cloned(),
+                    task: agent_label(terminal, placement::TASK_LABEL).cloned(),
                     role,
-                    program: terminal
-                        .labels
-                        .get(AGENT_LABEL)
+                    program: agent_label(terminal, AGENT_LABEL)
                         .cloned()
                         .unwrap_or_default(),
-                    space: SpaceId::new(terminal.labels.get(TASK_SPACE_LABEL)?.clone()),
+                    space: SpaceId::new(agent_label(terminal, TASK_SPACE_LABEL)?.clone()),
                     state: reported_state(terminal),
                     live: terminal.is_live(),
                     started_ms: terminal.created_ms,

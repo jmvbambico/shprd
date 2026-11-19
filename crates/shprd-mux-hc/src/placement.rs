@@ -27,8 +27,9 @@ pub const SPACE_LABEL: &str = "herdr.space";
 /// The label that puts a terminal in a tab of its space.
 pub const TAB_LABEL: &str = "herdr.tab";
 
-/// The label that names the shprd task a terminal belongs to (`<slug>#<id>`).
-pub const TASK_LABEL: &str = "herdr.task";
+/// The label that names the shprd task (`shprd.*`, not `herdr.task`, which
+/// Shepherdr reads as one of its own tasks) a terminal belongs to (`<slug>#<id>`).
+pub const TASK_LABEL: &str = "shprd.task";
 
 /// Where a task's terminals belong: the space and the tab.
 ///

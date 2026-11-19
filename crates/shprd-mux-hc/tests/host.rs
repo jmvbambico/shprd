@@ -714,3 +714,53 @@ fn the_probe_names_the_cores_version() {
     assert_eq!(version, "0.1.21");
     assert!(Outcome::running().exit_code.is_none());
 }
+
+/// SHPR-66: an agent shprd starts must not look like another product's agent.
+/// Shepherdr reads `herdr.role=coordinator` as "this pane is my Assistant", so
+/// shprd's agent labels are its own (`shprd.*`); only the two placement labels
+/// the window needs stay `herdr.*`, and only on the coordinator.
+#[test]
+fn agents_carry_shprd_labels_not_shepherdrs() {
+    let (fake, host) = host("normal");
+    let space = SpaceId::new(SPACE);
+    let env = vec![("HC_TERMINAL_ID".to_string(), None)];
+    for (role, task) in [
+        (shprd_mux::AgentRole::Coordinator, None),
+        (shprd_mux::AgentRole::Worker, Some("T1#1")),
+        (shprd_mux::AgentRole::Reviewer, Some("T1#1")),
+    ] {
+        host.spawn_agent(&shprd_mux::AgentLaunch {
+            space: &space,
+            title: "agent",
+            argv: &["claude".to_string()],
+            env: &env,
+            cwd: Path::new("/work"),
+            role,
+            task,
+            program: "claude",
+            parent: None,
+        })
+        .expect("the core starts it");
+        let sent = requests(&fake)
+            .into_iter()
+            .rfind(|r| r["method"] == "terminal.run")
+            .expect("a terminal.run");
+        let labels = sent["params"]["labels"].as_object().expect("labels");
+        assert_eq!(labels["shprd.role"], role.as_str());
+        assert_eq!(labels["shprd.agent"], "claude");
+        assert!(labels.contains_key("shprd.task.space"));
+        for key in labels.keys() {
+            assert!(
+                matches!(key.as_str(), "herdr.space" | "herdr.tab") || key.starts_with("shprd."),
+                "{role:?}: {key} is another product's namespace"
+            );
+        }
+        let placed = labels.contains_key("herdr.space");
+        assert_eq!(placed, role == shprd_mux::AgentRole::Coordinator);
+        // The launch drops the terminal id Shepherdr's hook keys off.
+        let argv = sent["params"]["argv"].as_array().expect("argv");
+        assert_eq!(argv[0], "/usr/bin/env");
+        assert_eq!(argv[1], "-u");
+        assert_eq!(argv[2], "HC_TERMINAL_ID");
+    }
+}

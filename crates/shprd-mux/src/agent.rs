@@ -13,13 +13,13 @@
 //! ## Starting one
 //!
 //! Shepherdr's `launch.py` runs `hc run --bg --keep --parent <coordinator>
-//! --outlive-parent --label herdr.task=<id> --label herdr.task.space=<space>
-//! --label herdr.agent=<program> --label herdr.coordinator=<tab> [--label
-//! herdr.role=reviewer]`, and **never** `herdr.space`/`herdr.tab`, which is what
+//! --outlive-parent --label shprd.task=<id> --label shprd.task.space=<space>
+//! --label shprd.agent=<program> --label shprd.coordinator=<tab> [--label
+//! shprd.role=reviewer]`, and **never** `herdr.space`/`herdr.tab`, which is what
 //! would make the window draw a tab for it. [`AgentLaunch`] carries exactly those
 //! facts and the Herdr desktop adapter turns it into one `terminal.run`
-//! (`shprd-mux-hc`): the labels are `herdr.task`, `herdr.task.space`,
-//! `herdr.agent`, `herdr.role` and, under a coordinator, `herdr.coordinator`
+//! (`shprd-mux-hc`): the labels are `shprd.task`, `shprd.task.space`,
+//! `shprd.agent`, `shprd.role` and, under a coordinator, `shprd.coordinator`
 //! with `parent` set and `outlive_parent` on, so a restarted coordinator does not
 //! take its workers with it. The spike in the SHPR-23 notes confirmed (private
 //! core, no window): a terminal with those labels and no placement labels appears
@@ -77,7 +77,7 @@ pub enum AgentRole {
 }
 
 impl AgentRole {
-    /// The word on the `herdr.role` label and in `/api/state`.
+    /// The word on the `shprd.role` label and in `/api/state`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Worker => "worker",
@@ -86,7 +86,7 @@ impl AgentRole {
         }
     }
 
-    /// The role a `herdr.role` label names; `None` for a word shprd does not use.
+    /// The role a `shprd.role` label names; `None` for a word shprd does not use.
     pub fn parse(word: &str) -> Option<Self> {
         match word {
             "worker" => Some(Self::Worker),
@@ -101,7 +101,7 @@ impl AgentRole {
 #[derive(Debug, Clone, Copy)]
 pub struct AgentLaunch<'a> {
     /// The repository's space: where a host that keeps tabs puts one, and what
-    /// `herdr.task.space` says for a host that does not.
+    /// `shprd.task.space` says for a host that does not.
     pub space: &'a SpaceId,
     /// What a tab is titled when the host has to make one, and the agent's name.
     pub title: &'a str,
@@ -118,7 +118,7 @@ pub struct AgentLaunch<'a> {
     /// The harness id of the program, e.g. `claude`.
     pub program: &'a str,
     /// The terminal that started it, when there is one: the space's
-    /// coordinator, whose tab `herdr.coordinator` names.
+    /// coordinator, whose tab `shprd.coordinator` names.
     pub parent: Option<&'a PaneId>,
 }
 
@@ -134,7 +134,7 @@ pub struct LiveAgent {
     pub role: AgentRole,
     /// The harness id of its program.
     pub program: String,
-    /// The repository space it belongs to (`herdr.task.space`).
+    /// The repository space it belongs to (`shprd.task.space`).
     pub space: SpaceId,
     /// What the host says it is doing.
     pub state: AgentState,
