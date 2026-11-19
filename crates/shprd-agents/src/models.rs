@@ -369,7 +369,7 @@ impl Catalog {
                     model.efforts.clone()
                 },
                 default_effort: model.default_effort.clone(),
-                fast: false,
+                fast: model.fast,
             })
             .collect();
         Catalog {
@@ -632,6 +632,9 @@ pub struct StaticModel {
     /// The level this model starts at when a role names none, if it is known.
     #[serde(default)]
     pub default_effort: Option<String>,
+    /// Whether the program's fast mode applies to this model.
+    #[serde(default)]
+    pub fast: bool,
 }
 
 impl StaticCatalog {

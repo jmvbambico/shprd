@@ -259,8 +259,39 @@ mod tests {
             .iter()
             .map(|model| model.id.as_str())
             .collect();
-        assert_eq!(ids, ["fable", "opus", "sonnet"]);
-        assert_eq!(claude.models[1].name, "Opus");
+        assert_eq!(
+            ids,
+            [
+                "fable",
+                "fable[1m]",
+                "claude-fable-5-1",
+                "opus",
+                "opus[1m]",
+                "sonnet",
+                "sonnet[1m]",
+                "haiku"
+            ],
+            "Haiku and the one-million-token variants are listed, in the ids the CLI takes"
+        );
+        let names: Vec<&str> = claude
+            .models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Fable 5.2",
+                "Fable 5.2 · 1M",
+                "Fable 5.1",
+                "Opus 5.5",
+                "Opus 5.5 · 1M",
+                "Sonnet 5.5",
+                "Sonnet 5.5 · 1M",
+                "Haiku 5.5"
+            ]
+        );
+        assert!(claude.models[3].fast && !claude.models[7].fast, "fast is Opus's");
         assert_eq!(claude.efforts, ["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(claude.default_permission.as_deref(), Some("manual"));
         let modes: Vec<&str> = claude
@@ -285,6 +316,39 @@ mod tests {
         let note = pi.models_note.unwrap_or_default();
         assert!(note.contains("--list-models"), "{note}");
         assert!(note.contains("type a model id"), "{note}");
+    }
+
+    /// Codex's own catalog is read even when it is bigger than a pipe buffer: the
+    /// real `codex debug models` prints about 260 KB, which a probe that does not
+    /// drain its pipe reads as a timeout, so the picker had no Codex models.
+    #[cfg(unix)]
+    #[test]
+    fn codex_models_come_from_codex_even_when_its_catalog_is_large() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("a temp dir");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../shprd-agents/tests/fixtures/codex-models.json");
+        let script = dir.path().join("codex");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncat '{}'\nhead -c 300000 /dev/zero | tr '\\0' ' '\n",
+                fixture.display()
+            ),
+        )
+        .expect("a fake codex");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let path = format!("{}:/usr/bin:/bin", dir.path().display());
+        let roster = read(Some(&shipped()), Some(&path));
+        let codex = program_of(&roster, "codex");
+        assert!(codex.installed);
+        assert!(!codex.models.is_empty(), "{:?}", codex.models_note);
+        assert!(
+            codex.models.iter().all(|model| !model.id.is_empty()),
+            "every listed model has the id codex takes"
+        );
     }
 
     #[test]
