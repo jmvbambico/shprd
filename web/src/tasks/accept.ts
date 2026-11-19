@@ -30,6 +30,7 @@ export const WORDS = {
   noSummary: "The agent wrote no summary.",
   changes: "Changes",
   checks: "Checks",
+  proof: "Proof",
   review: "Review",
   details: "Details",
   noChanges: "Nothing changed on its branch yet.",
@@ -159,6 +160,20 @@ export function checks(task: TaskDto | null): { rows: CheckRow[]; alsoRan: strin
     };
   });
   return { rows, alsoRan: report?.tests ?? [] };
+}
+
+/** One proof the hand-in named: where it was left, and its file name. */
+export interface ProofRow {
+  name: string;
+  path: string;
+}
+
+/** The proof the hand-in named, as rows; empty when it named none. */
+export function proofs(task: TaskDto | null): ProofRow[] {
+  return (attempt(task)?.report?.proofs ?? []).map((path) => ({
+    name: path.split("/").filter((part) => part !== "").pop() ?? path,
+    path,
+  }));
 }
 
 /** One finding row. */

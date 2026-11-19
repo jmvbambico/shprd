@@ -26,6 +26,7 @@ import {
   changeCounts,
   changeRows,
   checks,
+  proofs,
   commitRows,
   findings,
   reviewLine,
@@ -203,6 +204,7 @@ export function AcceptDialog({ client, board, taskId, device, reauthTick, onClos
   const commits = commitRows(changes);
   const listed = changeRows(changes);
   const checked = checks(task);
+  const proved = proofs(task);
   const review = reviewLine(task);
   const found = findings(task);
   const sheet = device === "phone";
@@ -304,6 +306,19 @@ export function AcceptDialog({ client, board, taskId, device, reauthTick, onClos
                   </ul>
                 )}
               </Section>
+
+              {proved.length > 0 ? (
+                <Section label={WORDS.proof}>
+                  <ul className="accept-checks accept-proof">
+                    {proved.map((row, index) => (
+                      <li key={`${row.path}:${index}`}>
+                        <span className="mono accept-check-command">{row.name}</span>
+                        <span className="dim small mono">{row.path}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </Section>
+              ) : null}
 
               <Section label={WORDS.review}>
                 <p className={review.degraded ? "accept-review amber" : "accept-review"}>{review.line}</p>

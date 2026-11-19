@@ -422,6 +422,10 @@ pub struct ReportDto {
     pub commit: Option<String>,
     /// Skills the agent used.
     pub skills_used: Vec<String>,
+    /// Where the attempt left its proof, as the worker named it (paths inside
+    /// its worktree). The accept card lists them.
+    #[serde(default)]
+    pub proofs: Vec<String>,
 }
 
 /// One gate the agent ran for its hand-in.

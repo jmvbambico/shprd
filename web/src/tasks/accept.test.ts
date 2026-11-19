@@ -8,6 +8,7 @@ import {
   changeCounts,
   changeRows,
   checks,
+  proofs,
   findings,
   openUrl,
   reviewLine,
@@ -82,6 +83,13 @@ describe("checks and review", () => {
       attempts: [{ ...attemptWithReport(), reviews: [{ reviewer: "claude", degraded: true }] }],
     });
     expect(reviewLine(degraded).degraded).toBe(true);
+  });
+});
+
+describe("proof", () => {
+  it("lists the proof the hand-in named, by file name and path", () => {
+    expect(proofs(ready)).toEqual([{ name: "T5-usage.txt", path: ".shprd/proof/T5-usage.txt" }]);
+    expect(proofs(task("T", "ready"))).toEqual([]);
   });
 });
 

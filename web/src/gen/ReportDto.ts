@@ -38,4 +38,9 @@ commit?: string,
 /**
  * Skills the agent used.
  */
-skills_used: Array<string>, };
+skills_used: Array<string>, 
+/**
+ * Where the attempt left its proof, as the worker named it (paths inside
+ * its worktree). The accept card lists them.
+ */
+proofs: Array<string>, };

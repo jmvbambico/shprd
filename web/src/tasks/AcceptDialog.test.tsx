@@ -49,6 +49,8 @@ describe("AcceptDialog", () => {
     expect(screen.getByText("Failed")).toBeDefined();
     expect(screen.getByText("codex reviewed it: passed · another vendor")).toBeDefined();
     expect(screen.getByText("Loses a write")).toBeDefined();
+    expect(screen.getByText("Proof")).toBeDefined();
+    expect(screen.getByText("T5-usage.txt")).toBeDefined();
   });
 
   it("is a modal on a desktop and a sheet on a phone", () => {
