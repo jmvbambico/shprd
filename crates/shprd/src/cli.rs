@@ -401,17 +401,17 @@ pub struct InstallArgs {
     /// person's own window.
     #[arg(long = "app-home", value_name = "PATH")]
     pub app_home: Option<PathBuf>,
-    /// The host tree to install from; defaults to `$SHPRD_HOST_DIR`, then a
-    /// `host/herdr-desktop` beside the working directory (a checkout or a
-    /// worktree of shprd), then the copy embedded in this binary.
+    /// The host tree to install from; defaults to `$SHPRD_HOST_DIR`, then `--repo`,
+    /// then the tree this binary was built from (its own checkout in a debug
+    /// build), then the copy embedded in this binary. The working directory is
+    /// never searched.
     ///
     /// A named tree must be one: a `--from` that holds no `layouts/` is refused
     /// rather than quietly falling back to the embedded copy.
     #[arg(long, value_name = "PATH")]
     pub from: Option<PathBuf>,
-    /// The checkout whose `host/herdr-desktop` is installed, when the working
-    /// directory is not the one to search; defaults to the working directory
-    /// and its parent, which is a worktree's shape.
+    /// The checkout whose `host/herdr-desktop` is installed. It wins over the
+    /// binary's own tree, but not over `--from` or `$SHPRD_HOST_DIR`.
     #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
 }

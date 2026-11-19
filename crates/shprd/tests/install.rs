@@ -746,7 +746,7 @@ fn an_install_with_no_host_tree_installs_the_copy_in_the_binary() {
 }
 
 #[test]
-fn a_release_build_and_a_worktree_install_the_same_desktop() {
+fn the_working_directory_is_never_the_source_of_the_layout() {
     // The gate's own complaint: run from a worktree, an install found the
     // canonical checkout (or nothing). A tree named outright, the embedded copy,
     // and a worktree's `../host/herdr-desktop` must all produce the same files.
@@ -766,33 +766,66 @@ fn a_release_build_and_a_worktree_install_the_same_desktop() {
         "the embedded copy is the working tree"
     );
 
-    // The worktree's shape: a directory whose `../host/herdr-desktop` exists is
-    // found without any flag, so a worker in a worktree installs the worktree.
-    let worktree = TempDir::new().expect("a worktree");
-    copy_tree(
-        &host_path(),
-        &worktree.path().join("host").join("herdr-desktop"),
-    );
-    fs::create_dir_all(worktree.path().join("crates")).expect("the crate folder");
-    let from_worktree = Fixture::bare();
-    let output = from_worktree
-        .command(&[])
-        .current_dir(worktree.path().join("crates"))
+    // A working directory holding an OLD checkout (an old layout) is not read:
+    // the binary installs its own tree, and the old layout stays out.
+    let old = TempDir::new().expect("an old checkout");
+    copy_tree(&host_path(), &old.path().join("host").join("herdr-desktop"));
+    fs::write(
+        old.path().join("host/herdr-desktop/layouts/shprd.json"),
+        "{\"id\": \"root\", \"type\": \"row\", \"old\": true}\n",
+    )
+    .expect("old layout");
+    fs::create_dir_all(old.path().join("crates")).expect("the crate folder");
+    for cwd in [old.path().to_path_buf(), old.path().join("crates")] {
+        let from_old_cwd = Fixture::bare();
+        let output = from_old_cwd
+            .command(&[])
+            .current_dir(&cwd)
+            .output()
+            .expect("the binary runs");
+        ok(&output);
+        assert_eq!(
+            from_old_cwd.files(),
+            from_tree.files(),
+            "the working directory's tree is not what gets installed"
+        );
+    }
+    // `--repo` still names a checkout outright and wins over the binary's own.
+    let by_repo = Fixture::bare();
+    let output = by_repo
+        .command(&["--repo", old.path().to_str().unwrap()])
         .output()
         .expect("the binary runs");
     ok(&output);
     assert_eq!(
-        from_worktree.files(),
-        from_tree.files(),
-        "a worktree's host tree is what a worktree installs"
+        fs::read_to_string(by_repo.app_path("layouts/shprd.json")).expect("the layout"),
+        "{\"id\": \"root\", \"type\": \"row\", \"old\": true}\n"
     );
-    // And a dry run says what would happen with nothing named, from here.
-    let said = ok(&from_worktree
-        .command(&["--dry-run"])
-        .current_dir(worktree.path().join("crates"))
+}
+
+#[test]
+fn the_host_dir_variable_wins_over_repo() {
+    let fixture = Fixture::new();
+    let repo = TempDir::new().expect("a repo");
+    copy_tree(
+        &host_path(),
+        &repo.path().join("host").join("herdr-desktop"),
+    );
+    fs::write(
+        fixture.host.path().join("layouts/shprd.json"),
+        "{\"id\": \"root\", \"type\": \"row\", \"env\": true}\n",
+    )
+    .expect("their layout");
+    let output = fixture
+        .command(&["--repo", repo.path().to_str().unwrap()])
+        .env("SHPRD_HOST_DIR", fixture.host.path())
         .output()
-        .expect("the binary runs"));
-    assert!(said.contains("nothing to do"), "{said}");
+        .expect("the binary runs");
+    ok(&output);
+    assert_eq!(
+        fs::read_to_string(fixture.app_path("layouts/shprd.json")).expect("the layout"),
+        "{\"id\": \"root\", \"type\": \"row\", \"env\": true}\n"
+    );
 }
 
 #[test]
