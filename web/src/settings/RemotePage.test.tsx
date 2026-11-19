@@ -26,7 +26,7 @@ describe("RemotePage: states", () => {
       "GET /api/sessions": new Promise<Response>(() => undefined) as unknown as Response,
     });
     expect(screen.getByText("Reading the tunnel…")).toBeDefined();
-    expect(screen.getByText("Reading the sessions…")).toBeDefined();
+    expect(screen.getByText("Reading the devices…")).toBeDefined();
   });
 
   it("degrades to 'not available' on a 404, without an error", async () => {
@@ -43,7 +43,7 @@ describe("RemotePage: states", () => {
       "GET /api/sessions": json(200, { sessions: [] }),
     });
     expect((await screen.findByRole("alert")).textContent).toBe("the tunnel record is unreadable");
-    expect(await screen.findByText("No device is signed in.")).toBeDefined();
+    expect(await screen.findByText(/No devices yet/)).toBeDefined();
   });
 });
 
@@ -61,7 +61,7 @@ describe("RemotePage: the tunnel", () => {
     expect(screen.getByRole("option", { name: /cloudflared \(public internet\)/ })).toBeDefined();
     fireEvent.click(screen.getByRole("option", { name: /cloudflared/ }));
     fireEvent.click(screen.getByRole("button", { name: "Start tunnel" }));
-    expect(await screen.findByText("On")).toBeDefined();
+    expect(await screen.findByText(/^On at/)).toBeDefined();
     expect(calls.find((c) => c.url === "/api/tunnels/start")?.body).toEqual({ provider: "cloudflared" });
   });
 
@@ -131,6 +131,7 @@ describe("RemotePage: sessions and logout", () => {
     expect(phone).toBeDefined();
     expect(screen.getByText("this device")).toBeDefined();
     expect(screen.getByText("remembered")).toBeDefined();
+    expect(screen.getAllByText(/^Last seen/)).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Revoke phone · Safari (aaaaaaaaaaaa)" }));
     await waitFor(() => expect(screen.queryByText("phone · Safari")).toBeNull());
     expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/sessions/aaaaaaaaaaaa")).toBe(true);
