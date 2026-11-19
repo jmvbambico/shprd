@@ -273,6 +273,15 @@ pub struct Task {
     /// cut it answers, so the same one is never acted on twice, and a backup is
     /// a `Backup` record whether or not its process started.
     pub fallbacks: Vec<FallbackRecord>,
+    /// When the task was added, ms since the Unix epoch (the `TaskAdded` event's
+    /// time). A board uses it to show the newest work first and to tell a run's
+    /// old leftovers from tasks added just now.
+    pub added_at_ms: u64,
+    /// When something last happened to the task that a person or the engine
+    /// decided: any event naming it except the engine's own notes (progress lines,
+    /// escalations, nudges, backups), which a pass writes about an abandoned task
+    /// again and again and which must not make it look fresh.
+    pub touched_at_ms: u64,
 }
 
 /// One thing the fallback ladder did, as the ledger recorded it.
@@ -537,6 +546,23 @@ impl RunState {
     pub fn apply(&mut self, event: &Event) -> Result<(), RuleError> {
         rules::replay_as(self, &event.actor, &event.kind, event.at_ms)?;
         self.mutate(event);
+        // The engine's own notes about a task (a progress line, an escalation, a
+        // nudge, a backup) say nothing about the person's work: counting them
+        // would make an abandoned task look fresh every time a pass looked at it.
+        let engine_note = matches!(
+            event.kind,
+            EventKind::TaskStatus { .. }
+                | EventKind::Escalated { .. }
+                | EventKind::Nudged { .. }
+                | EventKind::Backup { .. }
+                | EventKind::ProviderGaveUp { .. }
+        );
+        if !engine_note
+            && let Some(id) = event.kind.task()
+            && let Some(task) = self.tasks.get_mut(id)
+        {
+            task.touched_at_ms = event.at_ms;
+        }
         self.last_seq = event.seq;
         Ok(())
     }
@@ -588,6 +614,8 @@ impl RunState {
                         approved_head: None,
                         nothing_to_merge: None,
                         fallbacks: Vec::new(),
+                        added_at_ms: event.at_ms,
+                        touched_at_ms: event.at_ms,
                     },
                 );
             }
@@ -1132,6 +1160,36 @@ mod tests {
             actor: Actor::Human,
             kind,
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_task_remembers_when_it_was_added_and_last_touched_by_something_real() {
+        let mut events = log("a", "some-rule");
+        // The engine's notes about the task do not count as a touch.
+        events.push(ev(
+            40,
+            EventKind::Escalated {
+                task: Some("a".to_string()),
+                body: "agent gone".to_string(),
+                default_action: "wait".to_string(),
+            },
+        ));
+        events.push(ev(
+            50,
+            EventKind::TaskStatus {
+                task: "a".to_string(),
+                message: "Waiting: src/a is in use".to_string(),
+                progress: None,
+            },
+        ));
+        let state = RunState::fold(&events).expect("folds");
+        let task = &state.tasks["a"];
+        assert_eq!(task.added_at_ms, 2_000);
+        assert_eq!(
+            task.touched_at_ms, 3_000,
+            "the override at seq 3 was the last real event"
+        );
     }
 
     /// A started run, a task `a`, and an override of `rule` on `task`

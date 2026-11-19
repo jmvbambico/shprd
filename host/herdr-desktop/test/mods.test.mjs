@@ -70,6 +70,8 @@ import {
   found,
   lastFailure,
   listView,
+  staleIds,
+  STALE_MS,
   newTask,
   progressOf,
   rowActions,
@@ -1263,9 +1265,12 @@ test("Group by Space gives each space its own heading, tasks in status order", (
   };
   const spaces = [{ id: "s1", name: "shop" }, { id: "s2", name: "docs" }];
   const view = listView(board, { groupBy: "space", spaces });
-  assert.deepEqual(view.groups.map((g) => g.label), ["shop", "docs"]);
+  assert.deepEqual(view.groups.map((g) => g.label), ["shop"], "Done is folded out of the space groups");
   assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["A2", "A1", "C1"], "a task with no space is in the first space");
-  assert.equal(view.groups[1].tasks.length, 1, "Done rows stay in a space group");
+  assert.equal(view.doneLine.label, "1 done");
+  const open = listView(board, { groupBy: "space", spaces, doneOpen: true });
+  assert.equal(open.groups.at(-1).key, "done", "an opened Done is its own group, which folds back");
+  assert.equal(open.doneLine, null);
 });
 
 test("Pinned tasks come out of their group into a Pinned group on top, Done included", () => {
@@ -1303,4 +1308,75 @@ test("a Waiting line from the engine keeps its path and task id on the row", () 
   const line = "Waiting: crates/shprd/tests is in use by install-layout-source";
   assert.equal(secondLine({ title: "t", last_status: { message: line } }), line);
   assert.equal(secondLine({ title: "t", last_status: { message: "x".repeat(60) } }).length, 40);
+});
+
+// ---- SHPR-67: old tasks never block a fresh start ----
+
+const NOW = 1_000_000_000_000;
+const HOURS = 60 * 60 * 1000;
+const aged = (id, word, hours, extra = {}) => ({
+  id,
+  title: `task ${id}`,
+  status: word === "done" ? "integrated" : "queued",
+  derived: { status: word },
+  added_at_ms: NOW - hours * HOURS,
+  touched_at_ms: NOW - hours * HOURS,
+  ...extra,
+});
+
+test("an open task untouched for hours is old; a fresh one, a working one and a done one are not", () => {
+  const board = {
+    tasks: [
+      aged("OLD1", "needs_you", 9),
+      aged("OLD2", "queued", 5),
+      aged("NEW", "needs_you", 0.1),
+      aged("RUN", "working", 9),
+      aged("DONE", "done", 9),
+      { ...aged("NOTIME", "needs_you", 9), touched_at_ms: undefined },
+    ],
+  };
+  assert.deepEqual([...staleIds(board, NOW)].sort(), ["OLD1", "OLD2"]);
+  assert.equal(STALE_MS, 3 * HOURS);
+});
+
+test("a queued task waiting on an old task is old with it, however new", () => {
+  const board = {
+    tasks: [
+      aged("OLD", "needs_you", 9),
+      aged("BEHIND", "to_do", 0.1, { deps: ["OLD"] }),
+      aged("BEHIND2", "to_do", 0.1, { deps: ["BEHIND"] }),
+      aged("FREE", "to_do", 0.1),
+    ],
+  };
+  assert.deepEqual([...staleIds(board, NOW)].sort(), ["BEHIND", "BEHIND2", "OLD"]);
+});
+
+test("old tasks fold into one Older group at the bottom; new ones are on top, newest first", () => {
+  const board = {
+    tasks: [
+      aged("OLD1", "needs_you", 9),
+      aged("OLD2", "to_do", 8),
+      aged("N1", "to_do", 0.5),
+      aged("N2", "to_do", 0.1),
+      aged("D1", "done", 20),
+    ],
+  };
+  const view = listView(board, { now: NOW });
+  assert.deepEqual(view.groups.map((g) => g.key), ["to_do", "older"]);
+  assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["N2", "N1"], "newest first");
+  const older = view.groups[1];
+  assert.equal(older.shut, true, "folded until opened");
+  assert.equal(older.stale, true);
+  assert.deepEqual([...older.ids].sort(), ["OLD1", "OLD2"]);
+  assert.equal(view.doneLine.label, "1 done");
+  assert.equal(listView(board, { now: NOW, olderOpen: true }).groups[1].shut, false);
+  // A search still finds an old task in place.
+  const found = listView(board, { now: NOW, query: "OLD1" });
+  assert.deepEqual(found.groups.flatMap((g) => g.tasks.map((t) => t.id)), ["OLD1"]);
+  assert.equal(found.groups[0].key, "you");
+});
+
+test("an old needs-you task does not light the Needs you badge", () => {
+  const board = { tasks: [aged("OLD", "needs_you", 9), aged("NEW", "needs_you", 0.1)] };
+  assert.equal(counts(board, NOW).needs, 1);
 });

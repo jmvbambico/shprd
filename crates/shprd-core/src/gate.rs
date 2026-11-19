@@ -581,6 +581,8 @@ mod tests {
             last_status: None,
             nothing_to_merge: None,
             fallbacks: Vec::new(),
+            added_at_ms: 0,
+            touched_at_ms: 0,
         }
     }
 

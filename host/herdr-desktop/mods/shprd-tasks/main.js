@@ -49,6 +49,9 @@ import { followChanges } from "./lib/watch.js";
 /** How often the panel reads the board when the change file says nothing. */
 const FLOOR_MS = 4000;
 
+/** The reason "Clear old tasks" records when the person types none. */
+const CLEAR_REASON = "Old tasks from an earlier session";
+
 /** The font shprd's ids and the graph's guide lines are set in. */
 const MONO = "JetBrains Mono";
 
@@ -74,6 +77,12 @@ export default class Tasks extends View {
     this.shut = new Set(this.load("shut", []));
     this.filter = this.load("filter", "all");
     this.doneOpen = this.load("doneopen", false) === true;
+    // "Older": the folded group of stale leftovers, and its one-confirm clear.
+    this.olderOpen = this.load("olderopen", false) === true;
+    this.clearing = null;
+    this.clearBusy = false;
+    this.clearError = null;
+    this.clearReason = null;
     this.allDone = this.load("alldone", false) === true;
     this.searching = false;
     // Group by (For you / Space / Status) and the pinned tasks, remembered; the
@@ -342,6 +351,108 @@ export default class Tasks extends View {
     this.cx.notify();
   }
 
+  /** Opens the "Clear old tasks" confirm for these ids: one reason, one press. */
+  beginClear(ids) {
+    this.clearing = [...ids];
+    this.clearError = null;
+    this.clearBusy = false;
+    this.clearReason = InputState.new({ placeholder: CLEAR_REASON });
+    this.clearReason.on("change", (_e, cx) => cx.notify());
+    this.cx.notify();
+  }
+
+  /** Closes the confirm without dropping anything. */
+  endClear() {
+    this.clearing = null;
+    this.clearError = null;
+    this.clearBusy = false;
+    this.cx.notify();
+  }
+
+  /**
+   * Drops the old tasks together (`task.drop_many`): the typed reason, or the
+   * default one when the box is empty, so the confirm is a single press.
+   */
+  async submitClear() {
+    if (!this.client || this.clearBusy || this.clearing === null) return;
+    const text = String(this.clearReason?.value() ?? "").trim();
+    this.clearBusy = true;
+    this.clearError = null;
+    this.cx.notify();
+    try {
+      await this.client.action({ kind: "task.drop_many", tasks: this.clearing, reason: text || CLEAR_REASON });
+      await this.refresh();
+      this.endClear();
+      return;
+    } catch (err) {
+      this.clearError = reason(err);
+    }
+    this.clearBusy = false;
+    this.cx.notify();
+  }
+
+  /** The confirm: what is about to be dropped, the reason box, Cancel and Drop N. */
+  clearForm(t, colors) {
+    const count = this.clearing.length;
+    return v_flex()
+      .mx(12)
+      .my(4)
+      .p(10)
+      .gap(6)
+      .rounded(RADIUS.card)
+      .border_1()
+      .border_color(t.border)
+      .bg(t.raised)
+      .child(
+        div()
+          .text_size(TEXT.label)
+          .font_medium()
+          .text_color(t.foreground)
+          .child(`Clear ${count} old task${count === 1 ? "" : "s"}?`),
+      )
+      .child(
+        div()
+          .text_size(TEXT.id)
+          .text_color(t.dim)
+          .child("They are dropped together; branches stay. Say why, or leave it blank."),
+      )
+      .child(
+        Input.new(this.clearReason)
+          .h(28)
+          .px(8)
+          .rounded(RADIUS.control)
+          .border_1()
+          .border_color(t.accent)
+          .bg(t.background)
+          .text_size(TEXT.label)
+          .text_color(t.foreground),
+      )
+      .child(
+        h_flex()
+          .h(H.xs)
+          .items_center()
+          .gap(8)
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .text_size(TEXT.id)
+              .text_color(this.clearError !== null ? colors.red : t.dim)
+              .child(this.clearError ?? ""),
+          )
+          .child(this.button(t, "clear-cancel", "Cancel", false, () => this.endClear()))
+          .child(
+            this.button(
+              t,
+              "clear-go",
+              this.clearBusy ? "Dropping…" : `Drop ${count}`,
+              true,
+              () => this.submitClear(),
+            ),
+          ),
+      );
+  }
+
   /** Whether there is more than one space to choose between. */
   hasSpaces() {
     return (this.state?.spaces ?? []).length > 1 || (shared("spaces.picked") ?? null) !== null;
@@ -442,6 +553,7 @@ export default class Tasks extends View {
       filter,
       shut: this.shut,
       doneOpen: this.doneOpen,
+      olderOpen: this.olderOpen,
       allDone: this.allDone,
       groupBy: this.groupBy,
       pinned: this.pinned,
@@ -483,6 +595,7 @@ export default class Tasks extends View {
       .children([
         ...(this.actionError !== null ? [this.wrong(t, this.actionError)] : []),
         ...(this.adding ? [this.form(t, colors)] : []),
+        ...(this.clearing !== null ? [this.clearForm(t, colors)] : []),
         ...(this.failure !== null
           ? [note(t, this.failure), note(t, "Start it from the sidebar's footer, then this fills in.")]
           : this.state === null || (this.state.tasks ?? []).length === 0
@@ -850,7 +963,14 @@ export default class Tasks extends View {
   group(t, colors, group, open) {
     const rows = group.tasks.map((task) => this.taskRow(t, colors, task));
     const isDone = group.key === "done";
+    const isOlder = group.key === "older";
     const onClick = () => {
+      if (isOlder) {
+        this.olderOpen = !this.olderOpen;
+        this.save("olderopen", this.olderOpen);
+        this.cx.notify();
+        return;
+      }
       // An opened Done goes back to its count line; every other heading folds.
       if (isDone) {
         this.doneOpen = false;
@@ -893,7 +1013,29 @@ export default class Tasks extends View {
               .when(!group.top, (el) => el.font_medium().text_color(t.muted))
               .child(group.label),
           )
-          .child(div().flex_none().text_color(t.dim).child(String(group.count))),
+          .child(div().flex_none().text_color(t.dim).child(String(group.count)))
+          .when(isOlder && !open, (el) =>
+            el.child(div().flex_1()).child(
+              h_flex()
+                .id("tasks-clear-old")
+                .h(H.xs)
+                .flex_none()
+                .px(8)
+                .items_center()
+                .rounded(RADIUS.control)
+                .border_1()
+                .border_color(t.input)
+                .text_size(TEXT.label)
+                .text_color(t.foreground)
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover))
+                .on_click((_event, cx) => {
+                  cx.stop_propagation();
+                  this.beginClear(group.ids ?? group.tasks.map((task) => task.id));
+                })
+                .child("Clear old tasks"),
+            ),
+          ),
       )
       .when(!folded, (el) => el.children(rows))
       .when(!folded && isDone && group.more && !open, (el) =>

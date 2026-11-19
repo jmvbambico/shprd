@@ -33,6 +33,8 @@ export function task(
     skills: [],
     deps: [],
     attempts: [],
+    added_at_ms: 0,
+    touched_at_ms: 0,
     last_status: { message: `says ${id}`, seq: 1 },
     ...extra,
   };

@@ -69,6 +69,14 @@ task: string,
 /**
  * Why the person decided against it.
  */
+reason: string, } | { "kind": "task.drop_many", 
+/**
+ * The tasks to drop.
+ */
+tasks: Array<string>, 
+/**
+ * Why the person decided against them, listed under `## Dropped`.
+ */
 reason: string, } | { "kind": "task.accept", 
 /**
  * The task to accept.

@@ -1003,7 +1003,7 @@ fn malformed_action(kind: &str, detail: &str) -> String {
         .and_then(|rest| rest.split_once('`'))
         .map(|(field, _)| field);
     match (kind, missing) {
-        ("task.drop" | "task_drop", Some("reason")) => {
+        ("task.drop" | "task_drop" | "task.drop_many" | "task_drop_many", Some("reason")) => {
             "dropping a task needs a reason: say why it is not wanted".to_string()
         }
         (_, Some(field)) => format!("a {kind:?} action needs a {field:?}"),

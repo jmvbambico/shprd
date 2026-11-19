@@ -42,6 +42,8 @@ describe("Shell: tasks", () => {
         skills: [],
         deps: [],
         attempts: [],
+        added_at_ms: 0,
+        touched_at_ms: 0,
       },
     ],
     agents: [],
