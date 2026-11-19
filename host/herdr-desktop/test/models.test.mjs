@@ -28,8 +28,18 @@ import {
   menusOf,
   modelRows,
   restartNotice,
+  fallbackLabel,
+  fallbackWrite,
+  lineLabel,
+  lineWrites,
+  menuHeight,
+  nextLineProgram,
+  parseLine,
+  encodeLine,
   selectionLabel,
   selectionWrites,
+  withLine,
+  workerLines,
 } from "../mods/lib/settings.js";
 
 const fixture = (name) =>
@@ -114,15 +124,15 @@ test("a click on a role's model button opens the menu popup, and nothing else cl
   const { view, tree } = await drawn("agents");
   const root = tree();
   // the button remembers where it was pressed, as the window's mouse down tells it
-  view.rec("model-worker").at = { x: 600, y: 200, width: 120, height: 28 };
-  const { stopped } = click(root, "model-worker");
+  view.rec("model-coordinator").at = { x: 600, y: 200, width: 120, height: 28 };
+  const { stopped } = click(root, "model-coordinator");
   assert.ok(stopped);
   assert.equal(herdr.OVERLAYS.length, 1);
   const popup = herdr.OVERLAYS[0];
   assert.equal(popup.mod, "shprd-models");
   assert.equal(popup.kind, "popup");
   assert.equal(popup.props.mode, "models");
-  assert.equal(popup.props.key, "role:worker");
+  assert.equal(popup.props.key, "role:coordinator");
   assert.deepEqual(herdr.CLOSED, [], "the click that opened it did not close it");
 });
 
@@ -310,4 +320,209 @@ test("a refused write drops the rest of its choice and closes the popup", async 
   assert.match(view.refusal.text, /share a vendor/);
   assert.deepEqual(herdr.CLOSED, [popup]);
   assert.equal(view.popup, null);
+});
+
+// -- SHPR-44: several worker programs, a reviewer fallback, a program dropdown ----
+
+/** The fixture's settings with these rows set (a row replaces the one of its key). */
+function withRows(rows) {
+  const document = structuredClone(SETTINGS);
+  for (const [key, value, source = "you"] of rows) {
+    const row = document.values.find((entry) => entry.key === key);
+    if (row) Object.assign(row, { value, source });
+    else document.values.push({ key, value, source });
+  }
+  return document;
+}
+
+test("a stored line reads and writes back as the same line", () => {
+  const line = { agent: "codex", model: "gpt-6-luna", effort: "high", fast: true, perm: "auto" };
+  assert.deepEqual(parseLine(encodeLine(line)), line);
+  assert.deepEqual(parseLine("pi/commandcode/z-ai/glm"), { agent: "pi", model: "commandcode/z-ai/glm", effort: null, fast: false, perm: null });
+  assert.deepEqual(parseLine("kilo"), { agent: "kilo", model: null, effort: null, fast: false, perm: null });
+  assert.equal(parseLine("|model"), null);
+  assert.equal(parseLine(""), null);
+});
+
+test("the worker's lines are its own pick, then agents; the old fallback reads as lines too", () => {
+  assert.deepEqual(workerLines(SETTINGS).map((line) => line.agent), ["pi"]);
+  const two = withRows([["roles.worker.agents", ["codex|gpt-6-luna||1|auto", "claude"]]]);
+  const lines = workerLines(two);
+  assert.deepEqual(lines.map((line) => line.agent), ["pi", "codex", "claude"]);
+  assert.equal(lines[1].fast, true);
+  assert.equal(lines[1].perm, "auto");
+  // A file written before lines existed: the fallback programs follow the first.
+  const old = withRows([["roles.worker.fallback", ["codex", "claude"]]]);
+  assert.deepEqual(workerLines(old).map((line) => line.agent), ["pi", "codex", "claude"]);
+  // A program is listed once.
+  const twice = withRows([["roles.worker.agents", ["pi", "codex"]]]);
+  assert.deepEqual(workerLines(twice).map((line) => line.agent), ["pi", "codex"]);
+});
+
+test("a line label leads with the program, then the model and the level", () => {
+  const menus = menusOf(ROSTER);
+  assert.equal(lineLabel(menus, { agent: "claude", model: "haiku", effort: "high" }, ROSTER), "Claude Code · Haiku 5.5 · High");
+  assert.equal(lineLabel(menus, { agent: "codex", model: null, effort: null }, ROSTER), "Codex");
+  assert.equal(lineLabel(menus, { agent: null }, ROSTER), "Choose a program");
+  assert.equal(fallbackLabel(menus, null, ROSTER), "None");
+  assert.equal(fallbackLabel(menus, { agent: "claude", model: "sonnet" }, ROSTER), "Claude Code · Sonnet 5.5");
+});
+
+test("adding a line writes agents with the next free program; removing one writes it back", () => {
+  const next = nextLineProgram(SETTINGS, ROSTER);
+  assert.equal(next, "claude", "pi has a line, claude is the first program that has none");
+  const added = [...workerLines(SETTINGS), { agent: next, model: null, effort: null, fast: false, perm: null }];
+  assert.deepEqual(lineWrites(SETTINGS, "worker", added).map((w) => [w.key, w.value]), [
+    ["roles.worker.agents", ["claude|||"+"|"]],
+  ]);
+  const doc = withRows([["roles.worker.agents", ["claude|||", "codex|||"]]]);
+  const lines = workerLines(doc);
+  const removed = withLine(lines, 1, null);
+  assert.deepEqual(lineWrites(doc, "worker", removed).map((w) => [w.key, w.value]), [
+    ["roles.worker.agents", ["codex||||"]],
+  ]);
+  // Removing the first line promotes the next into the role's own fields.
+  const promoted = lineWrites(doc, "worker", withLine(lines, 0, null)).map((w) => [w.key, w.value]);
+  assert.deepEqual(promoted[0], ["roles.worker.agent", "claude"]);
+  assert.deepEqual(promoted.at(-1), ["roles.worker.agents", ["codex||||"]]);
+  // The old fallback list is emptied by the first edit, so it cannot come back.
+  const old = withRows([["roles.worker.fallback", ["codex"]]]);
+  const writes = lineWrites(old, "worker", withLine(workerLines(old), 1, null));
+  assert.deepEqual(writes.at(-1), { key: "roles.worker.fallback", value: [], prior: ["codex"] });
+  // No program left to add: no "+".
+  const all = withRows([["roles.worker.agents", ["claude", "codex", "kilo", "opencode"]]]);
+  assert.equal(nextLineProgram(all, ROSTER), null);
+});
+
+test("the reviewer's fallback is one program and model; None writes an empty list", () => {
+  const writes = fallbackWrite(SETTINGS, "reviewer", { agent: "codex", model: "gpt-6-luna" });
+  assert.deepEqual(writes.map((w) => [w.key, w.value]), [["roles.reviewer.fallback", ["codex/gpt-6-luna"]]]);
+  const doc = withRows([["roles.reviewer.fallback", ["codex/gpt-6-luna"]]]);
+  assert.deepEqual(fallbackWrite(doc, "reviewer", null).map((w) => w.value), [[]]);
+  assert.deepEqual(fallbackWrite(doc, "reviewer", { agent: "codex", model: "gpt-6-luna" }), [], "no change, no write");
+});
+
+test("the Workers row shows a picker per line, a + while a program is free, and × when there are two", async () => {
+  const one = await drawn("agents");
+  let ids = walk(one.tree()).map((node) => node.idv).filter(Boolean);
+  assert.ok(ids.includes("line-worker-0"));
+  assert.ok(ids.includes("add-line-worker"), "the + is there");
+  assert.ok(!ids.some((id) => id.startsWith("remove-line-worker")), "the last line has no ×");
+  const two = await drawn("agents", { settings: withRows([["roles.worker.agents", ["codex"]]]) });
+  ids = walk(two.tree()).map((node) => node.idv).filter(Boolean);
+  assert.ok(ids.includes("line-worker-1"));
+  assert.ok(ids.includes("remove-line-worker-0") && ids.includes("remove-line-worker-1"));
+  assert.ok(!ids.includes("fallback-worker"), "the worker's separate Fallback control is gone");
+});
+
+test("the + adds a line, the line's menu opens with the program taken, a pick replaces it, × removes it", async () => {
+  const { view, calls, tree } = await drawn("agents");
+  assert.ok(click(tree(), "add-line-worker").stopped);
+  await view.pump();
+  assert.deepEqual(calls.at(-1), { key: "roles.worker.agents", value: ["claude|||"+"|"], forRepo: false });
+
+  view.settings = withRows([["roles.worker.agents", ["claude|||"+"|"]]]);
+  view.rec("line-worker-1").at = { x: 600, y: 300, width: 200, height: 28 };
+  click(view.render(), "line-worker-1");
+  const popup = herdr.OVERLAYS.at(-1);
+  assert.equal(popup.props.key, "line:worker:1");
+  assert.deepEqual(popup.props.taken, ["pi"], "the program the other line runs is not pickable");
+  assert.equal(popup.props.light, false);
+
+  // the menu answers with the new selection; the window writes the list
+  view.handleReply({ key: "line:worker:1", field: "selection", value: { agent: "codex", model: "gpt-6-luna", effort: null, fast: false, perm: null }, at: 1 });
+  await view.pump();
+  assert.deepEqual(calls.at(-1), { key: "roles.worker.agents", value: ["codex|gpt-6-luna|||"], forRepo: false });
+
+  view.settings = withRows([["roles.worker.agents", ["codex|gpt-6-luna|||"]]]);
+  click(view.render(), "remove-line-worker-1");
+  await view.pump();
+  assert.deepEqual(calls.at(-1), { key: "roles.worker.agents", value: [], forRepo: false });
+});
+
+test("the reviewer's Fallback is a second picker with None, the same menu as the main pick", async () => {
+  const { view, calls, tree } = await drawn("agents");
+  const ids = walk(tree()).map((node) => node.idv).filter(Boolean);
+  assert.ok(ids.includes("fallback-reviewer"));
+  view.rec("fallback-reviewer").at = { x: 500, y: 200, width: 160, height: 28 };
+  click(view.render(), "fallback-reviewer");
+  const popup = herdr.OVERLAYS.at(-1);
+  assert.equal(popup.props.key, "fb:reviewer");
+  assert.equal(popup.props.allowNone, true);
+  assert.equal(popup.props.light, true);
+  view.handleReply({ key: "fb:reviewer", field: "selection", value: { agent: "codex", model: null, effort: null, fast: false, perm: null }, at: 2 });
+  await view.pump();
+  assert.deepEqual(calls.at(-1), { key: "roles.reviewer.fallback", value: ["codex"], forRepo: false });
+  view.settings = withRows([["roles.reviewer.fallback", ["codex"]]]);
+  view.handleReply({ key: "fb:reviewer", field: "selection", value: null, at: 3 });
+  await view.pump();
+  assert.deepEqual(calls.at(-1), { key: "roles.reviewer.fallback", value: [], forRepo: false }, "None is an empty list");
+});
+
+test("the program selector is a dropdown listing every detected program, not tabs", () => {
+  herdr.reset();
+  record(true);
+  const roster = structuredClone(ROSTER);
+  // a machine with many CLIs: ten more detected programs
+  for (let i = 0; i < 10; i += 1) roster.programs.push({ ...roster.programs[0], id: `extra${i}`, name: `Extra ${i}`, models: [] });
+  const menus = menusOf(roster);
+  herdr.setProps({
+    mode: "models",
+    key: "line:worker:0",
+    overlay: "ov-7",
+    current: { agent: "claude", model: "haiku", effort: null, fast: false, perm: null },
+    menus,
+    icons: {},
+    width: 460,
+    height: 500,
+    taken: ["codex"],
+  });
+  const menu = new ModelMenu();
+  menu.init({}, context().cx);
+  const ids = () => walk(menu.render()).map((node) => node.idv).filter(Boolean);
+  assert.ok(ids().includes("program-select"));
+  assert.ok(!ids().some((id) => id.startsWith("tab-")), "no row of tabs");
+  assert.ok(!ids().some((id) => id.startsWith("program-claude")), "closed: the list is not drawn");
+  assert.ok(ids().includes("m-claude-haiku"), "Haiku is listed for Claude");
+  assert.ok(click(menu.render(), "program-select").stopped);
+  const open = ids();
+  for (const program of menus.order) assert.ok(open.includes(`program-${program}`), `${program} is in the dropdown`);
+  assert.ok(!open.some((id) => id.startsWith("m-")), "the programs take the models' place while open");
+  // a program another line runs is not pickable
+  click(menu.render(), "program-codex");
+  assert.equal(menu.tab, "claude", "a taken program is refused");
+  assert.ok(click(menu.render(), "program-kilo").stopped);
+  assert.equal(menu.tab, "kilo");
+  assert.ok(ids().some((id) => id.startsWith("m-kilo-")), "kilo's models are listed");
+  // the popup is as tall as the longest list, a program list included
+  assert.ok(menuHeight(menus) >= menuHeight(menusOf(ROSTER)));
+});
+
+test("a light menu (the reviewer's fallback) has None and no Reasoning, Fast or Permissions, and closes on a pick", () => {
+  herdr.reset();
+  record(true);
+  herdr.setProps({
+    mode: "models",
+    key: "fb:reviewer",
+    overlay: "ov-8",
+    current: { agent: null, model: null, effort: null, fast: false, perm: null },
+    menus: menusOf(ROSTER),
+    icons: {},
+    width: 460,
+    height: 400,
+    light: true,
+    allowNone: true,
+  });
+  const menu = new ModelMenu();
+  menu.init({}, context().cx);
+  const ids = walk(menu.render()).map((node) => node.idv).filter(Boolean);
+  assert.ok(ids.includes("none"));
+  assert.ok(!ids.includes("fast") && !ids.includes("perms") && !ids.some((id) => id.startsWith("level-")));
+  assert.ok(menuHeight(menusOf(ROSTER), { light: true, none: true }) < menuHeight(menusOf(ROSTER)));
+  click(menu.render(), "m-claude-haiku");
+  assert.equal(herdr.shared(PICK_KEY).value.model, "haiku");
+  assert.deepEqual(herdr.CLOSED, ["ov-8"], "a pick closes a light menu");
+  herdr.reset();
+  click(menu.render(), "none");
+  assert.equal(herdr.shared(PICK_KEY).value, null);
 });

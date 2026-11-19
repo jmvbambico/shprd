@@ -42,7 +42,6 @@ import {
   maskLink,
   ago,
   sessionRows,
-  toggled,
   tunnelView,
   effortChoices,
   effortLevels,
@@ -182,19 +181,19 @@ test("the program picker offers every program the harness table defines", () => 
 test("a model picker offers the catalog's models after the program's default", () => {
   const claude = programOf(ROSTER, "claude");
   const choices = modelChoices(claude);
-  assert.equal(choices.length, 4);
+  assert.equal(choices.length, 6);
   assert.deepEqual(choices[0], { value: null, label: "The program's default", hint: null });
   assert.deepEqual(
     choices.slice(1).map((choice) => choice.value),
-    ["fable", "opus", "sonnet"],
+    ["fable", "opus", "opus[1m]", "sonnet", "haiku"],
   );
-  assert.equal(choices[2].label, "Opus");
+  assert.equal(choices[2].label, "Opus 5.5");
 
   const model = pick("coordinator", "model");
   assert.equal(model.value, "opus");
   assert.equal(model.display, "opus");
   assert.equal(model.source, "you");
-  assert.equal(model.choices.length, 4);
+  assert.equal(model.choices.length, 6);
 });
 
 test("a program whose catalog named no model still offers the default, and says why", () => {
@@ -1057,11 +1056,9 @@ test("Fast, Permissions and Fallback are offered where the program has them", ()
     [null, "manual", "auto", "acceptEdits", "plan", "bypassPermissions"],
   );
   assert.match(reviewer.perm.display, /Ask/);
-  assert.equal(worker.fallback.key, "roles.worker.fallback");
-  assert.deepEqual(worker.fallback.choices.map((choice) => choice.value), ["claude", "codex", "kilo", "opencode"], "not the role's own program");
-  assert.equal(reviewer.fallback, null, "only the worker has a fallback list");
-  assert.deepEqual(toggled([], "codex"), ["codex"]);
-  assert.deepEqual(toggled(["codex", "claude"], "codex"), ["claude"]);
+  assert.equal(worker.fallback, null, "the worker has lines now, not a fallback list");
+  assert.equal(reviewer.fallback.key, "roles.reviewer.fallback");
+  assert.equal(reviewer.fallback.value, null, "no fallback is None");
 });
 
 test("the Backup agent is a switch: on names another vendor's program, off takes it away", () => {
@@ -1083,11 +1080,11 @@ test("a role's fast, permission and fallback writes go to its own keys", async (
   view.client = client();
   await view.apply("roles.reviewer.fast", true);
   await view.apply("roles.reviewer.perm", "plan");
-  await view.apply("roles.worker.fallback", toggled([], "codex"));
+  await view.apply("roles.reviewer.fallback", ["codex"]);
   assert.deepEqual(view.client.calls, [
     { key: "roles.reviewer.fast", value: true, forRepo: false },
     { key: "roles.reviewer.perm", value: "plan", forRepo: false },
-    { key: "roles.worker.fallback", value: ["codex"], forRepo: false },
+    { key: "roles.reviewer.fallback", value: ["codex"], forRepo: false },
   ]);
 });
 

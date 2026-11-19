@@ -10,7 +10,7 @@
       "models": [
         {
           "id": "fable",
-          "name": "Fable",
+          "name": "Fable 5.2",
           "efforts": [
             "low",
             "medium",
@@ -23,7 +23,33 @@
         },
         {
           "id": "opus",
-          "name": "Opus",
+          "name": "Opus 5.5",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": true
+        },
+        {
+          "id": "opus[1m]",
+          "name": "Opus 5.5 · 1M",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "fast": true
+        },
+        {
+          "id": "sonnet",
+          "name": "Sonnet 5.5",
           "efforts": [
             "low",
             "medium",
@@ -35,8 +61,8 @@
           "fast": false
         },
         {
-          "id": "sonnet",
-          "name": "Sonnet",
+          "id": "haiku",
+          "name": "Haiku 5.5",
           "efforts": [
             "low",
             "medium",
