@@ -28,8 +28,7 @@ import {
   menusOf,
   modelRows,
   restartNotice,
-  fallbackLabel,
-  fallbackWrite,
+  SELECT_HARNESS,
   lineLabel,
   lineWrites,
   menuHeight,
@@ -363,9 +362,8 @@ test("a line label leads with the program, then the model and the level", () => 
   const menus = menusOf(ROSTER);
   assert.equal(lineLabel(menus, { agent: "claude", model: "haiku", effort: "high" }, ROSTER), "Claude Code · Haiku 5.5 · High");
   assert.equal(lineLabel(menus, { agent: "codex", model: null, effort: null }, ROSTER), "Codex");
-  assert.equal(lineLabel(menus, { agent: null }, ROSTER), "Choose a program");
-  assert.equal(fallbackLabel(menus, null, ROSTER), "None");
-  assert.equal(fallbackLabel(menus, { agent: "claude", model: "sonnet" }, ROSTER), "Claude Code · Sonnet 5.5");
+  assert.equal(lineLabel(menus, { agent: null }, ROSTER), "Select Harness");
+  assert.equal(SELECT_HARNESS, "Select Harness");
 });
 
 test("adding a line writes agents with the next free program; removing one writes it back", () => {
@@ -394,25 +392,45 @@ test("adding a line writes agents with the next free program; removing one write
   assert.equal(nextLineProgram(all, ROSTER), null);
 });
 
-test("the reviewer's fallback is one program and model; None writes an empty list", () => {
-  const writes = fallbackWrite(SETTINGS, "reviewer", { agent: "codex", model: "gpt-6-luna" });
-  assert.deepEqual(writes.map((w) => [w.key, w.value]), [["roles.reviewer.fallback", ["codex/gpt-6-luna"]]]);
-  const doc = withRows([["roles.reviewer.fallback", ["codex/gpt-6-luna"]]]);
-  assert.deepEqual(fallbackWrite(doc, "reviewer", null).map((w) => w.value), [[]]);
-  assert.deepEqual(fallbackWrite(doc, "reviewer", { agent: "codex", model: "gpt-6-luna" }), [], "no change, no write");
+test("a reviewer holds lines like a worker: its old fallback reads as line 2 and migrates on a write", () => {
+  const old = withRows([["roles.reviewer.fallback", ["codex/gpt-6-luna"]]]);
+  const lines = workerLines(old, "reviewer");
+  assert.deepEqual(lines.map((line) => [line.agent, line.model]), [["claude", "sonnet"], ["codex", "gpt-6-luna"]]);
+  assert.deepEqual(lineWrites(old, "reviewer", lines).map((w) => [w.key, w.value]), [
+    ["roles.reviewer.agents", ["codex|gpt-6-luna|||"]],
+    ["roles.reviewer.fallback", []],
+  ]);
 });
 
-test("the Workers row shows a picker per line, a + while a program is free, and × when there are two", async () => {
+test("the Worker(s) row shows a picker per line, a + while a program is free, and × when there are two", async () => {
   const one = await drawn("agents");
   let ids = walk(one.tree()).map((node) => node.idv).filter(Boolean);
   assert.ok(ids.includes("line-worker-0"));
   assert.ok(ids.includes("add-line-worker"), "the + is there");
   assert.ok(!ids.some((id) => id.startsWith("remove-line-worker")), "the last line has no ×");
+  assert.ok(!ids.some((id) => id.startsWith("chain-worker-")), "one line: no gutter");
   const two = await drawn("agents", { settings: withRows([["roles.worker.agents", ["codex"]]]) });
   ids = walk(two.tree()).map((node) => node.idv).filter(Boolean);
   assert.ok(ids.includes("line-worker-1"));
   assert.ok(ids.includes("remove-line-worker-0") && ids.includes("remove-line-worker-1"));
   assert.ok(!ids.includes("fallback-worker"), "the worker's separate Fallback control is gone");
+  assert.ok(ids.some((id) => id.startsWith("chain-worker-")), "two lines: a gutter");
+});
+
+test("two or more lines draw a numbered gutter; a worker with three, a reviewer with two", async () => {
+  const three = await drawn("agents", {
+    settings: withRows([
+      ["roles.worker.agents", ["codex", "kilo"]],
+      ["roles.reviewer.agents", ["codex"]],
+    ]),
+  });
+  const ids = walk(three.tree()).map((node) => node.idv).filter(Boolean);
+  for (const at of [0, 1, 2]) assert.ok(ids.includes(`chain-worker-${at}`), `worker line ${at + 1}`);
+  for (const at of [0, 1]) assert.ok(ids.includes(`chain-reviewer-${at}`), `reviewer line ${at + 1}`);
+  assert.ok(!ids.includes("chain-worker-3"));
+  assert.ok(ids.includes("chain-note"), "the one generic note");
+  assert.ok(!ids.some((id) => id.startsWith("instructions-")), "no Edit instructions button");
+  assert.ok(!ids.includes("fallback-reviewer"), "no Fallback picker on the reviewer");
 });
 
 test("the + adds a line, the line's menu opens with the program taken, a pick replaces it, × removes it", async () => {
@@ -440,23 +458,15 @@ test("the + adds a line, the line's menu opens with the program taken, a pick re
   assert.deepEqual(calls.at(-1), { key: "roles.worker.agents", value: [], forRepo: false });
 });
 
-test("the reviewer's Fallback is a second picker with None, the same menu as the main pick", async () => {
+test("a reviewer's line writes roles.reviewer.agents like a worker's", async () => {
   const { view, calls, tree } = await drawn("agents");
-  const ids = walk(tree()).map((node) => node.idv).filter(Boolean);
-  assert.ok(ids.includes("fallback-reviewer"));
-  view.rec("fallback-reviewer").at = { x: 500, y: 200, width: 160, height: 28 };
-  click(view.render(), "fallback-reviewer");
-  const popup = herdr.OVERLAYS.at(-1);
-  assert.equal(popup.props.key, "fb:reviewer");
-  assert.equal(popup.props.allowNone, true);
-  assert.equal(popup.props.light, true);
-  view.handleReply({ key: "fb:reviewer", field: "selection", value: { agent: "codex", model: null, effort: null, fast: false, perm: null }, at: 2 });
+  assert.ok(click(tree(), "add-line-reviewer").stopped);
   await view.pump();
-  assert.deepEqual(calls.at(-1), { key: "roles.reviewer.fallback", value: ["codex"], forRepo: false });
-  view.settings = withRows([["roles.reviewer.fallback", ["codex"]]]);
-  view.handleReply({ key: "fb:reviewer", field: "selection", value: null, at: 3 });
+  assert.equal(calls.at(-1).key, "roles.reviewer.agents");
+  view.settings = withRows([["roles.reviewer.agents", ["codex"]]]);
+  click(view.render(), "remove-line-reviewer-1");
   await view.pump();
-  assert.deepEqual(calls.at(-1), { key: "roles.reviewer.fallback", value: [], forRepo: false }, "None is an empty list");
+  assert.deepEqual(calls.at(-1), { key: "roles.reviewer.agents", value: [], forRepo: false });
 });
 
 test("the program selector is a dropdown listing every detected program, not tabs", () => {

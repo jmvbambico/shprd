@@ -8,7 +8,6 @@ export const ROLE_DEFAULTS: Readonly<Record<string, string>> = {
   coordinator: "Assistant",
   worker: "Worker",
   reviewer: "Reviewer",
-  backup: "Backup agent",
 };
 
 /** The longest name a role may have: the service's own cap. */

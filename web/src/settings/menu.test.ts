@@ -7,8 +7,8 @@ import {
   chooseModel,
   coordinatorRunning,
   encodeLine,
-  fallbackLabel,
-  fallbackWrite,
+  hasLines,
+  SELECT_HARNESS,
   lineLabel,
   lineWrites,
   nextLineProgram,
@@ -54,7 +54,7 @@ describe("the button and the rows", () => {
   it("says the model and its level, or asks for a program", () => {
     expect(selectionLabel(menus, { agent: "claude", model: "opus", effort: null, fast: false, perm: null })).toBe("Opus 5.5 · Medium");
     expect(selectionLabel(menus, { agent: "claude", model: "opus", effort: "low", fast: false, perm: null })).toBe("Opus 5.5 · Low");
-    expect(selectionLabel(menus, { agent: null, model: null, effort: null, fast: false, perm: null })).toBe("Choose a program");
+    expect(selectionLabel(menus, { agent: null, model: null, effort: null, fast: false, perm: null })).toBe("Select Harness");
   });
 
   it("lists the tab's models, searches every program, and offers a typed id", () => {
@@ -159,13 +159,24 @@ describe("a worker's program lines", () => {
     expect(writes.at(-1)).toEqual(["roles.worker.agents", []]);
   });
 
-  it("labels lead with the program; the reviewer's fallback says None when it has none", () => {
+  it("labels lead with the program; an empty one says Select Harness", () => {
     const menus = menusOf(roster);
     expect(lineLabel(menus, { agent: "claude", model: "haiku", effort: "low", fast: false, perm: null }, roster)).toBe("Claude Code · Haiku 5.5 · Low");
-    expect(fallbackLabel(menus, null, roster)).toBe("None");
-    expect(fallbackWrite(doc(), "reviewer", { agent: "codex", model: "gpt-6-luna", effort: null, fast: false, perm: null }).map((w) => w.value)).toEqual([["codex/gpt-6-luna"]]);
-    const set = doc(row("roles.reviewer.fallback", ["codex"], "you"));
-    expect(fallbackWrite(set, "reviewer", null).map((w) => w.value)).toEqual([[]]);
-    expect(fallbackWrite(set, "reviewer", { agent: "codex", model: null, effort: null, fast: false, perm: null })).toEqual([]);
+    expect(lineLabel(menus, { agent: null, model: null, effort: null, fast: false, perm: null }, roster)).toBe(SELECT_HARNESS);
+    expect(SELECT_HARNESS).toBe("Select Harness");
+  });
+
+  it("a reviewer holds lines like a worker; its old fallback reads as the second line and migrates on a write", () => {
+    expect(hasLines("reviewer") && hasLines("worker") && !hasLines("coordinator")).toBe(true);
+    const old = doc(row("roles.reviewer.agent", "codex", "you"), row("roles.reviewer.fallback", ["claude/haiku"], "you"));
+    const lines = workerLines(old, "reviewer");
+    expect(lines.map((line) => [line.agent, line.model])).toEqual([["codex", null], ["claude", "haiku"]]);
+    const writes = lineWrites(old, "reviewer", lines).map((w) => [w.key, w.value]);
+    expect(writes).toEqual([
+      ["roles.reviewer.agents", ["claude|haiku|||"]],
+      ["roles.reviewer.fallback", []],
+    ]);
+    const added = [...lines, { agent: "pi", model: null, effort: null, fast: false, perm: null }];
+    expect(lineWrites(old, "reviewer", added).find((w) => w.key === "roles.reviewer.agents")?.value).toEqual(["claude|haiku|||", "pi||||"]);
   });
 });

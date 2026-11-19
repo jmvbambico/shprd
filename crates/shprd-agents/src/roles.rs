@@ -543,18 +543,18 @@ fn check_review(resolved: &Resolved, review: Review<'_>, table: &Table, problems
             reviewer.id, worker.id, reviewer.id
         ));
     }
-    // The reviewer's fallback reviews when the main one cannot, so it is held to
+    // The reviewer's later lines review when the one before cannot, so it is held to
     // the same rule.
-    for entry in &reviewer.fallback.value {
-        let Some(vendor) = WorkerLine::parse(entry).and_then(|line| line_vendor(&line, table))
-        else {
+    for line in reviewer.lines().into_iter().skip(1) {
+        let entry = line.agent_ref();
+        let Some(vendor) = line_vendor(&line, table) else {
             continue;
         };
         // Refused when it could review no line of the worker's work: every line
         // runs this vendor's models.
         if !line_vendors.is_empty() && line_vendors.iter().all(|kept| *kept == vendor) {
             problems.push(format!(
-                "the reviewer `{}`'s fallback `{entry}` and the worker `{}` are both {vendor}, so the review is not cross-vendor: pick a fallback from another family",
+                "the reviewer `{}`'s later line `{entry}` and the worker `{}` are both {vendor}, so the review is not cross-vendor: pick a program from another family",
                 reviewer.id, worker.id
             ));
         }
@@ -750,12 +750,17 @@ mod tests {
             "[roles.worker]\nagent = \"claude\"\n[roles.reviewer]\nagent = \"codex\"\nfallback = [\"claude\"]\n",
         );
         let message = refused(&settings);
-        assert!(message.contains("fallback `claude`"), "{message}");
+        assert!(message.contains("later line `claude`"), "{message}");
         assert!(message.contains("not cross-vendor"), "{message}");
         let fine = resolved(
             "[roles.worker]\nagent = \"claude\"\n[roles.reviewer]\nagent = \"codex\"\nfallback = [\"codex\"]\n",
         );
         assert!(check(&fine, Review::default(), &table()).is_ok());
+        // The same rule holds for a later line of the new shape.
+        let lines = resolved(
+            "[roles.worker]\nagent = \"claude\"\n[roles.reviewer]\nagent = \"codex\"\nagents = [\"claude||||\"]\n",
+        );
+        assert!(refused(&lines).contains("later line `claude`"));
     }
 
     #[test]

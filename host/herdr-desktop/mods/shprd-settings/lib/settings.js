@@ -44,7 +44,10 @@ export const LAYER = {
 export const UNSET_LAYER = "nothing sets it";
 
 /** The role ids this build ships, in their default order (`BUILTIN_ROLES`). */
-export const BUILTIN = ["coordinator", "worker", "reviewer", "backup"];
+export const BUILTIN = ["coordinator", "worker", "reviewer"];
+
+/** What the Agents page heads a built-in role with, until the person names it: a worker and a reviewer are lists. */
+export const HEADINGS = { worker: "Worker(s)", reviewer: "Reviewer(s)" };
 
 /** The three fields a role's pick is made of, in the order a page draws them. */
 export const PICKS = ["agent", "model", "effort"];
@@ -263,11 +266,14 @@ export function roles(document, roster) {
     const stored = (textOf(titleRow) ?? "").trim();
     // What the person reads: their own name for the role, else its built-in word,
     // else its id (the service's `display_title`).
-    const title = stored || ROLE_DEFAULTS[id] || id;
+    // The service reports the built-in word as a built-in row: that one is headed
+    // "Worker(s)"; a name the person set stands as they wrote it.
+    const named = stored !== "" && titleRow?.source !== "built_in";
+    const title = named ? stored : HEADINGS[id] || ROLE_DEFAULTS[id] || id;
     const name = {
       key: `roles.${id}.title`,
       value: stored,
-      fallback: ROLE_DEFAULTS[id] ?? id,
+      fallback: HEADINGS[id] ?? ROLE_DEFAULTS[id] ?? id,
       source: titleRow?.source ?? null,
       layer: layerOf(titleRow?.source),
     };
@@ -287,19 +293,18 @@ export function roles(document, roster) {
 }
 
 /**
- * The rest of a role's fields as controls: Fast, Permissions and Fallback.
+ * The rest of a role's fields as controls: Fast and Permissions.
  *
  * Each is offered only where it means something, so none is drawn dead:
  * Fast where the role's program has a fast mode, Permissions where its harness
- * table lists access modes, and Fallback on the reviewer role (one program and
- * model; the worker has lines instead, see `workerLines`). `backup` is the Backup
- * agent role's own switch: on while the role names a program.
+ * table lists access modes. A worker's and a reviewer's several programs are
+ * their lines, `workerLines`.
  */
 function extrasOf(role, rows, roster) {
   const agentRow = rows.get(`roles.${role.id}.agent`);
   const agent = textOf(agentRow);
   const program = programOf(roster, agent);
-  const out = { fast: null, perm: null, fallback: null, backup: null };
+  const out = { fast: null, perm: null };
   const fastRow = rows.get(`roles.${role.id}.fast`);
   if (program?.fast === true) {
     out.fast = {
@@ -331,53 +336,16 @@ function extrasOf(role, rows, roster) {
       ],
     };
   }
-  // The reviewer's fallback is one program and model, picked like the main one
-  // (a worker's several programs are its lines, `workerLines`).
-  if (role.id === "reviewer") {
-    const fallbackRow = rows.get("roles.reviewer.fallback");
-    out.fallback = {
-      key: "roles.reviewer.fallback",
-      label: "Fallback",
-      about: "Reviews instead when the main reviewer's CLI is not installed or would share the worker's vendor.",
-      value: reviewerFallback(rows),
-      source: fallbackRow?.source ?? null,
-      layer: layerOf(fallbackRow?.source),
-    };
-  }
-  if (role.id === "backup") {
-    out.backup = {
-      key: "roles.backup.agent",
-      label: "Backup agent",
-      about: "The other program takes a task over, once, when its worker cannot go on.",
-      on: agent !== null,
-      source: agentRow?.source ?? null,
-      layer: layerOf(agentRow?.source),
-    };
-  }
   return out;
 }
 
-/**
- * The program a Backup switch turns on with: another program than the worker's,
- * preferably another vendor and one that is installed, so a takeover is both
- * possible and independent. Null when the roster has nothing to offer.
- */
-export function backupChoice(document, roster) {
-  const worker = textOf(rowsOf(document).get("roles.worker.agent"));
-  const others = (roster?.programs ?? []).filter((program) => program.id !== worker);
-  const vendor = programOf(roster, worker)?.vendor ?? null;
-  const rank = (program) => (program.installed ? 0 : 2) + (program.vendor !== vendor ? 0 : 1);
-  const sorted = [...others].sort((a, b) => rank(a) - rank(b));
-  return sorted[0]?.id ?? null;
-}
-
-// -- worker lines and the reviewer's fallback ---------------------------------
+// -- program lines: the fallback chain of a worker or a reviewer -------------
 //
-// A worker holds an ordered list of program lines. The first is the role's own
-// `agent`/`model`/`effort`/`fast`/`perm`; the rest are `roles.worker.agents`, one
+// A worker or a reviewer holds an ordered list of program lines. The first is the role's own
+// `agent`/`model`/`effort`/`fast`/`perm`; the rest are `roles.<role>.agents`, one
 // `agent|model|effort|fast|perm` string each (the service's `WorkerLine`). A
 // settings file written before lines existed has the other programs in
-// `roles.worker.fallback`; they read as lines with the program's own defaults.
+// `roles.<role>.fallback` (the reviewer's old picker too); they read as lines with the program's own defaults.
 
 /** One stored line (`agent|model|effort|fast|perm`, or `program`, or `program/model`) as a selection, or null. */
 export function parseLine(text) {
@@ -454,30 +422,13 @@ export function withLine(lines, at, line) {
   return line === null ? lines.filter((_, i) => i !== at) : lines.map((kept, i) => (i === at ? line : kept));
 }
 
-/** The reviewer's fallback as a selection `{ agent, model }`, or null for None. */
-function reviewerFallback(rows) {
-  for (const text of listOf(rows.get("roles.reviewer.fallback")) ?? []) {
-    const line = parseLine(text);
-    if (line) return { agent: line.agent, model: line.model, effort: null, fast: false, perm: null };
-  }
-  return null;
-}
-
-/** The write that sets the reviewer's fallback to `sel`, or to None (an empty list) when it is null. */
-export function fallbackWrite(document, roleId, sel) {
-  const key = `roles.${roleId}.fallback`;
-  const had = listOf(rowsOf(document).get(key)) ?? [];
-  const value = sel?.agent ? [sel.model ? `${sel.agent}/${sel.model}` : sel.agent] : [];
-  return JSON.stringify(had) === JSON.stringify(value) ? [] : [{ key, value, prior: had }];
-}
-
 /**
  * What a worker line's button says: "Claude Code · Opus 5.5 · Medium". The program
  * leads, because a worker's lines are programs; a model the line leaves at the
  * program's default is left out.
  */
 export function lineLabel(menus, sel, roster = null) {
-  if (!sel?.agent) return "Choose a program";
+  if (!sel?.agent) return SELECT_HARNESS;
   const program = menus?.programs?.[sel.agent];
   const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
   const model = modelIn(menus, sel);
@@ -487,19 +438,17 @@ export function lineLabel(menus, sel, roster = null) {
     .join(" · ");
 }
 
-/** What the reviewer fallback's button says: "Codex · GPT-6-Luna", or "None". */
-export function fallbackLabel(menus, sel, roster = null) {
-  if (!sel?.agent) return "None";
-  const program = menus?.programs?.[sel.agent];
-  const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
-  const model = modelIn(menus, sel);
-  return sel.model ? `${base} · ${model?.name ?? sel.model}` : base;
+/** Whether a role holds an ordered chain of program lines: workers and reviewers do. */
+export function hasLines(roleId) {
+  return roleId === "worker" || roleId === "reviewer";
 }
 
-/** The one-line description of a worker's lines, the words the Settings dialog shows. */
-export const WORKER_LINES_ABOUT =
-  "The first line is the default worker; `shprd agent spawn --agent <program>` runs a task on any line. " +
-  "If a line's program can't go on, the task moves to the next line.";
+/** The one note, at the bottom of the Agents page, on how a chain is walked. */
+export const CHAIN_NOTE =
+  "For workers and reviewers, the first line is the default. If it can't go on, the next one takes over.";
+
+/** What an empty program button says. */
+export const SELECT_HARNESS = "Select Harness";
 
 /**
  * The order `roles.order` would have after `id` is added, or null when the id
@@ -543,10 +492,16 @@ export function outcomeOf(reply) {
   return { outcome: word, text: OUTCOME[word] ?? "Saved" };
 }
 
+/** What the Prompts page calls a prompt: the built-in ones by their words, any other by its id. */
+export function promptName(id) {
+  return { assistant: "Assistant", worker: "Worker", reviewer: "Reviewer", backup: "Takeover" }[id] ?? id;
+}
+
 /** The templates page's rows: one per prompt this machine has. */
 export function promptRows(list) {
   return (list?.prompts ?? []).map((prompt) => ({
     id: prompt.id,
+    name: promptName(prompt.id),
     about: prompt.about ?? "a prompt of your own",
     path: prompt.path,
     state: prompt.state ?? null,
@@ -556,7 +511,7 @@ export function promptRows(list) {
       ? "Unreadable"
       : prompt.state === "edited"
         ? "Edited"
-        : "Shipped",
+        : "Default",
     edited: prompt.state === "edited",
   }));
 }
@@ -566,7 +521,7 @@ export function promptRows(list) {
  * does to it.
  *
  * `saved` is the answer a save or a reset gave, when one just happened; its
- * words say whether the file is the shipped text now, so a person never has to
+ * words say whether the file is the default text now, so a person never has to
  * guess whether Reset did anything.
  */
 export function promptLine(prompt, saved = null) {
@@ -574,7 +529,7 @@ export function promptLine(prompt, saved = null) {
   if (!at) return "";
   return at.state === "edited"
     ? "Your words: an edit is never replaced by an upgrade."
-    : "The shipped words: saving your own stores them over this file.";
+    : "The default words: saving your own stores them over this file.";
 }
 
 /**
@@ -1180,11 +1135,11 @@ export function fastOffered(menus, sel) {
 
 /**
  * What the role's button says: "Opus 5.5 · Medium", the model alone where there
- * is no level, "Choose a program" while nothing is chosen. The program's name
+ * is no level, "Select Harness" while nothing is chosen. The program's name
  * stands for a model the role leaves at the program's default.
  */
 export function selectionLabel(menus, sel, roster = null) {
-  if (!sel?.agent) return "Choose a program";
+  if (!sel?.agent) return SELECT_HARNESS;
   const program = menus?.programs?.[sel.agent];
   const known = programOf(roster, sel.agent);
   const base = program?.name ?? known?.name ?? sel.agent;

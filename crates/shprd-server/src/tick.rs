@@ -15,7 +15,7 @@
 //! 5. appends one ledger event per step that changed something and publishes it
 //!    on the service's [`Hub`], so the web app and a Herdr mod see it;
 //! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
-//!    a nudge, one backup handover, or a give-up — and records what it did.
+//!    a nudge, a handover to the next line, or a give-up — and records what it did.
 //!
 //! A step that fails is recorded and logged and the pass carries on: one broken
 //! landing must not stop a task from starting, and one bad pass must not stop
@@ -921,7 +921,7 @@ impl Worker {
         Ok(StepReport::ok("nudge", task, detail, Some(seq)))
     }
 
-    /// Starts the backup handover and records it, once per task.
+    /// Starts the backup handover and records it, once per line.
     #[expect(clippy::too_many_arguments, reason = "one handover's whole input")]
     fn start_backup(
         &self,
@@ -966,9 +966,9 @@ impl Worker {
         if started {
             return Ok(StepReport::ok("backup", task, detail, Some(seq)));
         }
-        // A failed handover is still the task's one try, and the person is told
-        // why rather than the next pass trying the same thing again.
-        let body = format!("{task}: backup didn't start: {detail}");
+        // A failed handover is that line's one try: the person is told why, and
+        // the next pass moves on to the next untried line (if there is one).
+        let body = format!("{task}: {to} didn't start: {detail}");
         self.commit(EventKind::Escalated {
             task: Some(task.to_string()),
             body: body.clone(),
@@ -1903,9 +1903,10 @@ fn ladder_state(state: &RunState) -> LadderState {
                         .insert(record.cut.clone());
                 }
                 FallbackAction::Backup => {
-                    entry.backup = Some(BackupDone {
+                    entry.backups.push(BackupDone {
                         from: record.agent.clone(),
                         to: record.to_agent.clone().unwrap_or_default(),
+                        started: record.started.unwrap_or(false),
                     });
                 }
             }

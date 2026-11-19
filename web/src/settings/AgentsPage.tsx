@@ -1,6 +1,8 @@
 // Agents, in Shepherdr's shape: one compact row a role — its name (click it to
-// rename in place) and one line about it, a single "<Model> · <Effort>" button that
-// opens the model menu, and Edit instructions — then the Backup agent switch.
+// rename in place) and one line about it, and a single "<Model> · <Effort>" button
+// that opens the model menu. Workers and reviewers hold a chain of program lines
+// (Add / remove, a gutter that joins them in order); one note at the bottom says
+// how a chain is walked.
 //
 // Mirrors the Herdr desktop's `shprd-settings` Agents page. The roles and their
 // words are the service's answer to `GET /api/settings`; the programs and their
@@ -22,17 +24,14 @@ import {
 import { cleanTitle } from "../roles";
 import { ModelMenu } from "./Dropdown";
 import {
-  WORKER_LINES_ABOUT,
-  backupChoice,
-  fallbackLabel,
-  fallbackWrite,
+  CHAIN_NOTE,
+  hasLines,
   lineLabel,
   lineWrites,
   menusOf,
   nextLineProgram,
   otherCli,
   repoKeysOf,
-  reviewerFallback,
   roleSelection,
   selectionLabel,
   selectionWrites,
@@ -40,18 +39,14 @@ import {
   workerLines,
   type Selection,
 } from "./menu";
-import { Switch } from "./rows";
 
 /** The Agents page. */
 export function AgentsPage({
   state,
   scope,
-  onEditInstructions,
 }: {
   state: SettingsState;
   scope: ScopeId;
-  /** Opens a role's prompt on the Prompts page. */
-  onEditInstructions: (promptId: string) => void;
 }) {
   const list = roles(state.settings, state.roster);
   const [adding, setAdding] = useState<string | null>(null);
@@ -72,21 +67,9 @@ export function AgentsPage({
   return (
     <div className="spage" data-page="agents">
       <h2 className="spage-title">Agents</h2>
-      {list.map((role) =>
-        role.id === "backup" ? (
-          <BackupRow key={role.id} role={role} state={state} scope={scope} busy={busy} />
-        ) : (
-          <RoleRow
-            key={role.id}
-            role={role}
-            state={state}
-            scope={scope}
-            busy={busy}
-            menus={menus}
-            onEditInstructions={onEditInstructions}
-          />
-        ),
-      )}
+      {list.map((role) => (
+        <RoleRow key={role.id} role={role} state={state} scope={scope} busy={busy} menus={menus} />
+      ))}
       {adding === null ? (
         <button type="button" className="link add-role" onClick={() => setAdding("")}>
           Add a role
@@ -115,6 +98,7 @@ export function AgentsPage({
           </button>
         </form>
       )}
+      <p className="snote chain-note">{CHAIN_NOTE}</p>
     </div>
   );
 }
@@ -182,14 +166,12 @@ function RoleRow({
   scope,
   busy,
   menus,
-  onEditInstructions,
 }: {
   role: Role;
   state: SettingsState;
   scope: ScopeId;
   busy: boolean;
   menus: ReturnType<typeof menusOf>;
-  onEditInstructions: (promptId: string) => void;
 }) {
   const repo = forRepo(scope);
   const sel = roleSelection(state.settings, role.id);
@@ -210,10 +192,9 @@ function RoleRow({
   }
   const loading = state.roster === null;
   const none = !loading && menus.order.length === 0;
-  const isWorker = role.id === "worker";
-  const lines = isWorker ? workerLines(state.settings, role.id) : [];
-  const canAdd = isWorker && lines.length > 0 && nextLineProgram(state.settings, state.roster, role.id) !== null;
-  const fallback = role.id === "reviewer" ? reviewerFallback(state.settings, role.id) : null;
+  const chained = hasLines(role.id);
+  const lines = chained ? workerLines(state.settings, role.id) : [];
+  const canAdd = chained && lines.length > 0 && nextLineProgram(state.settings, state.roster, role.id) !== null;
   async function setLines(next: Selection[]) {
     await state.writeAll(lineWrites(state.settings, role.id, next), repo);
   }
@@ -239,7 +220,6 @@ function RoleRow({
             {mine ? <span className="badge">repo</span> : null}
           </div>
           {role.about !== "" ? <div className="srow-about">{role.about}</div> : null}
-          {isWorker ? <div className="srow-about">{WORKER_LINES_ABOUT}</div> : null}
         </div>
         <div className="role-controls">
           {mine && scope === "repo" ? (
@@ -258,10 +238,15 @@ function RoleRow({
               Reset
             </button>
           ) : null}
-          {isWorker ? (
-            <div className="role-lines">
+          {chained ? (
+            <div className="role-lines" data-chain={lines.length > 1 ? "true" : "false"}>
               {(lines.length > 0 ? lines : [sel]).map((line, at) => (
                 <div className="role-line-row" key={at}>
+                  {lines.length > 1 ? (
+                    <span className="chain-gutter" aria-hidden="true" data-step={at + 1}>
+                      <span className="chain-dot">{at + 1}</span>
+                    </span>
+                  ) : null}
                   <ModelMenu
                     label={`${role.title} program ${at + 1}`}
                     shown={loading ? "Loading…" : none ? "No program found" : lineLabel(menus, line, state.roster)}
@@ -285,8 +270,8 @@ function RoleRow({
                 </div>
               ))}
               {canAdd ? (
-                <button type="button" className="link" aria-label="Add a program" disabled={busy} onClick={() => void addLine()}>
-                  + Add a program
+                <button type="button" className="link" aria-label="Add" disabled={busy} onClick={() => void addLine()}>
+                  Add
                 </button>
               ) : null}
             </div>
@@ -300,21 +285,6 @@ function RoleRow({
               onChange={(next) => void choose(next)}
             />
           )}
-          {role.id === "reviewer" ? (
-            <div className="role-fallback">
-              <span className="role-fallback-label">Fallback</span>
-              <ModelMenu
-                label={`${role.title} fallback`}
-                shown={loading ? "Loading…" : fallbackLabel(menus, fallback, state.roster)}
-                menus={menus}
-                sel={fallback ?? { agent: null, model: null, effort: null, fast: false, perm: null }}
-                disabled={loading || none}
-                light
-                onNone={() => void state.writeAll(fallbackWrite(state.settings, role.id, null), repo)}
-                onChange={(next) => void state.writeAll(fallbackWrite(state.settings, role.id, next), repo)}
-              />
-            </div>
-          ) : null}
           {other !== null ? (
             <button
               type="button"
@@ -325,11 +295,6 @@ function RoleRow({
               }
             >
               Use other CLI
-            </button>
-          ) : null}
-          {role.promptId ? (
-            <button type="button" className="btn" onClick={() => onEditInstructions(role.promptId!)}>
-              Edit instructions
             </button>
           ) : null}
           {role.custom ? (
@@ -362,59 +327,6 @@ function RoleRow({
           ) : null}
         </div>
       ) : null}
-    </section>
-  );
-}
-
-function BackupRow({
-  role,
-  state,
-  scope,
-  busy,
-}: {
-  role: Role;
-  state: SettingsState;
-  scope: ScopeId;
-  busy: boolean;
-}) {
-  const menus = menusOf(state.roster);
-  const sel = roleSelection(state.settings, role.id);
-  const on = sel.agent !== null;
-  const repo = forRepo(scope);
-  async function flip() {
-    if (on) {
-      await state.write("roles.backup.agent", null, repo);
-      return;
-    }
-    const program = backupChoice(state.settings, state.roster);
-    if (program === null) {
-      state.refuse("roles.backup.agent", new Error("there is no other program to take a task over"));
-      return;
-    }
-    await state.write("roles.backup.agent", program, repo);
-  }
-  return (
-    <section className="role-row" data-role={role.id} aria-label={role.title}>
-      <div className="role-main">
-        <div className="srow-words">
-          <div className="role-line">
-            <span className="role-title">{role.title}</span>
-          </div>
-          <div className="srow-about">The other CLI takes a task over once when its agent can't go on.</div>
-        </div>
-        <div className="role-controls">
-          {on ? (
-            <ModelMenu
-              label={`${role.title} model`}
-              shown={selectionLabel(menus, sel, state.roster)}
-              menus={menus}
-              sel={sel}
-              onChange={(next) => void state.writeAll(selectionWrites(role.id, sel, next), repo)}
-            />
-          ) : null}
-          <Switch label={role.title} on={on} disabled={busy} onToggle={() => void flip()} />
-        </div>
-      </div>
     </section>
   );
 }

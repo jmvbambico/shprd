@@ -46,8 +46,8 @@ pub enum RuleError {
         /// The task.
         task: TaskId,
     },
-    /// A task already had its one backup handover.
-    #[error("task {task:?} already had its backup handover")]
+    /// A task already had a handover from this program.
+    #[error("task {task:?} already had a handover from that program")]
     TaskAlreadyBackedUp {
         /// The task.
         task: TaskId,
@@ -806,19 +806,22 @@ fn check_with(
         }
         // The fallback ladder acts on an agent that is already running: the
         // task it names must be one the run still holds, and nothing else is
-        // the log's to judge. A backup may only be recorded when the same task
-        // has no backup yet, which is the once-per-task rule read where the
-        // fact is written rather than trusted to the planner.
+        // the log's to judge. A handover may only be recorded when the same task
+        // has no started handover from that program yet, which is the once-per-line rule
+        // read where the fact is written rather than trusted to the planner.
         EventKind::Nudged { task, .. } | EventKind::ProviderGaveUp { task, .. } => {
             check_not_dropped(state, task, provenance)
         }
-        EventKind::Backup { task, .. } => {
+        EventKind::Backup {
+            task, from_agent, ..
+        } => {
             check_not_dropped(state, task, provenance)?;
             if state.tasks.get(task).is_some_and(|entry| {
-                entry
-                    .fallbacks
-                    .iter()
-                    .any(|record| record.action == crate::event::FallbackAction::Backup)
+                entry.fallbacks.iter().any(|record| {
+                    record.action == crate::event::FallbackAction::Backup
+                        && record.agent == *from_agent
+                        && record.started != Some(false)
+                })
             }) {
                 return Err(RuleError::TaskAlreadyBackedUp { task: task.clone() });
             }

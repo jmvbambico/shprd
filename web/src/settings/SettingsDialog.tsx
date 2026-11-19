@@ -46,8 +46,6 @@ export function SettingsDialog({ client, onClose, onSignedOut, page: first }: Se
   // On a phone the page list is the first screen; a page is a second one.
   const [listing, setListing] = useState(first === undefined);
   const [scope, setScope] = useState<ScopeId>("you");
-  // The prompt an Edit instructions button opened the Prompts page on.
-  const [prompt, setPrompt] = useState<string | null>(null);
   const state = useSettings(client);
   const titleId = useId();
   const panel = useRef<HTMLDivElement>(null);
@@ -150,11 +148,6 @@ export function SettingsDialog({ client, onClose, onSignedOut, page: first }: Se
                 page={current.id}
                 scope={scope}
                 state={state}
-                prompt={prompt}
-                onEditInstructions={(id) => {
-                  setPrompt(id);
-                  pick("prompts");
-                }}
                 onSignedOut={onSignedOut}
               />
             </div>
@@ -170,23 +163,19 @@ function PageBody({
   page,
   scope,
   state,
-  prompt,
-  onEditInstructions,
   onSignedOut,
 }: {
   client: ApiClient;
   page: Page["id"];
   scope: ScopeId;
   state: ReturnType<typeof useSettings>;
-  prompt: string | null;
-  onEditInstructions: (promptId: string) => void;
   onSignedOut: () => void;
 }) {
   if (page === "remote") {
     return <RemotePage client={client} onSignedOut={onSignedOut} />;
   }
   if (page === "prompts") {
-    return <PromptsPage client={client} state={state} initial={prompt} />;
+    return <PromptsPage client={client} state={state} />;
   }
   if (state.settings === null) {
     return state.failure === null ? <p className="snote">Reading the settings…</p> : null;
@@ -194,7 +183,7 @@ function PageBody({
   return page === "tasks" ? (
     <TasksPage state={state} scope={scope} />
   ) : (
-    <AgentsPage state={state} scope={scope} onEditInstructions={onEditInstructions} />
+    <AgentsPage state={state} scope={scope} />
   );
 }
 

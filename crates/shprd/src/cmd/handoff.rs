@@ -34,7 +34,7 @@ pub struct HandoffRequest {
     /// The role whose words the newcomer starts with; the worker's when none
     /// is named.
     ///
-    /// A backup handover (a provider cut the worker's turn off) names `backup`,
+    /// A takeover handover (a provider cut the worker's turn off) names `takeover`,
     /// so the newcomer reads what a takeover means and then the task, instead of
     /// the brief written for the program that stopped.
     pub role: Option<String>,
@@ -418,7 +418,10 @@ pub fn handoff(
     let checkpoint = checkpoint(&worktree, &from)?;
     let skills = spawn::select_skills(&env.skills, &env.compat, &task.tags);
     let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
-    let settings_role = env.settings.resolve(None).role(role_id);
+    let settings_role = env
+        .settings
+        .resolve(None)
+        .role(spawn::settings_role_id(role_id));
     let program = spawn::program_of(env.programs.as_slice(), &to.agent)?;
     let chosen = match to_line {
         Some(line) => spawn::applied(&program.spec, line.perm.as_deref(), line.fast),
@@ -936,7 +939,7 @@ project_dirs = []
     }
 
     #[test]
-    fn a_backup_hand_off_uses_the_backup_roles_words() {
+    fn a_takeover_hand_off_uses_the_takeover_words() {
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.env(&ctx, &["sh", "pi"]);
@@ -946,18 +949,18 @@ project_dirs = []
             task: "T1".to_string(),
             reason: "the provider cut sh's turn off".to_string(),
             to: Some("pi".to_string()),
-            role: Some("backup".to_string()),
+            role: Some(spawn::TAKEOVER_ROLE.to_string()),
             same_worker: false,
             opening: Some("<shprd-backup>context</shprd-backup>".to_string()),
         };
         let report = handoff(&mux, &env, &request).unwrap_or_else(|err| panic!("{err}"));
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
-        // The backup role's shipped words and a freshly rendered task, not the
+        // The takeover's shipped words and a freshly rendered task, not the
         // brief the stopped worker was launched with, with the ladder's
         // takeover context before both.
         assert!(
             brief.contains("You are taking over one shprd task"),
-            "the backup role's prompt is in the brief: {brief}"
+            "the takeover prompt is in the brief: {brief}"
         );
         assert!(brief.contains("<shprd-backup>"), "{brief}");
         assert!(brief.contains("# T1 Hand a task over"), "{brief}");

@@ -1424,15 +1424,37 @@ input {
 
 .stepper {
   display: inline-flex;
+  align-items: stretch;
+  height: 26px;
+  border: 1px solid var(--h-border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+
+.stepper .step {
+  min-width: 0;
+  width: 24px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  line-height: 1;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
 }
 
 .step-value {
-  min-width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  padding: 0 4px;
+  border-inline: 1px solid var(--h-border);
   text-align: center;
   color: var(--h-foreground);
   font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
 }
 
 .switch {
@@ -1597,24 +1619,17 @@ textarea.input {
   list-style: none;
 }
 
-.prompt-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 8px;
+.prompt-item {
+  display: flex;
   align-items: center;
-  width: 100%;
-  min-height: 52px;
-  padding: 8px;
-  border: 0;
+  gap: 16px;
+  padding: 12px 0;
   border-bottom: 1px solid var(--h-border);
-  border-radius: var(--radius-card);
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
 }
 
-.prompt-row:hover {
-  background: var(--h-hover);
+.prompt-words {
+  flex: 1;
+  min-width: 0;
 }
 
 .prompt-main {
@@ -1625,33 +1640,44 @@ textarea.input {
 
 .prompt-id {
   color: var(--h-foreground);
-  font-family: var(--font-mono);
-  font-size: var(--text-label);
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 
-.prompt-word {
+.tag {
+  padding: 1px 7px;
+  border: 1px solid var(--h-border);
+  border-radius: 999px;
   color: var(--h-dim);
   font-size: var(--text-id);
+  line-height: 15px;
 }
 
-.prompt-word.tone-amber {
+.tag.tone-amber {
+  border-color: var(--h-amber);
   color: var(--h-amber);
 }
 
-.prompt-word.tone-red {
+.tag.tone-red {
+  border-color: var(--h-red);
   color: var(--h-red);
 }
 
 .prompt-about {
-  grid-column: 1;
+  margin-top: 3px;
   color: var(--h-dim);
-  font-size: var(--text-id);
+  font-size: var(--text-label);
+  line-height: 17px;
 }
 
-.prompt-go {
-  grid-row: 1 / span 2;
-  grid-column: 2;
-  color: var(--h-dim);
+.prompt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.prompt-head .spage-title {
+  margin: 0;
 }
 
 .prompt-bar {
@@ -1668,7 +1694,8 @@ textarea.input {
 }
 
 .prompt-editor {
-  min-height: 320px;
+  min-height: 420px;
+  line-height: 1.5;
   margin: 8px 0;
   font-family: var(--font-mono);
   font-size: var(--text-label);
@@ -3728,15 +3755,78 @@ textarea.input {
   gap: 4px;
 }
 
-.role-fallback {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* a chain: lines start at one edge so the numbered dots line up, and the rail runs unbroken */
+.role-lines[data-chain="true"] {
+  align-items: flex-start;
+  gap: 0;
 }
 
-.role-fallback-label {
+.role-lines[data-chain="true"] .role-line-row {
+  min-height: 36px;
+}
+
+.role-lines[data-chain="true"] .link[aria-label="Add"] {
+  margin-left: 26px;
+}
+
+/* a chain of program lines: a rail joins the numbered dots, in the order they are tried */
+
+.chain-gutter {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  width: 22px;
+}
+
+.chain-gutter::before,
+.chain-gutter::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--h-border);
+}
+
+.chain-gutter::before {
+  top: 0;
+  bottom: 50%;
+}
+
+.chain-gutter::after {
+  top: 50%;
+  bottom: 0;
+}
+
+.role-line-row:first-of-type .chain-gutter::before,
+.role-line-row:last-of-type .chain-gutter::after {
+  display: none;
+}
+
+.chain-dot {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--h-border);
+  border-radius: 50%;
+  background: var(--h-raised);
   color: var(--h-muted);
-  font-size: var(--text-label);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.role-line-row:first-of-type .chain-dot {
+  border-color: var(--h-accent);
+  color: var(--h-foreground);
+}
+
+.chain-note {
+  margin-top: 12px;
 }
 
 .role-controls {

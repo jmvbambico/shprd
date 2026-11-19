@@ -77,12 +77,12 @@ fn the_built_in_workflow_values_are_the_old_config_defaults() {
 }
 
 #[test]
-fn the_four_built_in_roles_are_the_first_rows() {
+fn the_three_built_in_roles_are_the_first_rows() {
     let resolved = resolve(&File::default(), &Request::default());
     assert_eq!(
         resolved.order(),
-        ["coordinator", "worker", "reviewer", "backup"],
-        "the three built-ins and the backup, in their own order"
+        ["coordinator", "worker", "reviewer"],
+        "the three built-ins, in their own order"
     );
     let coordinator = resolved.role("coordinator").expect("the coordinator");
     assert_eq!(coordinator.label(), "Assistant");
@@ -121,7 +121,7 @@ fn a_custom_role_is_any_id_and_defaults_to_a_helper() {
     let resolved = resolve(&file, &Request::default());
     assert_eq!(
         resolved.order(),
-        ["coordinator", "worker", "reviewer", "backup", "docs"],
+        ["coordinator", "worker", "reviewer", "docs"],
         "a custom role follows the built-ins unless the order says otherwise"
     );
     let docs = resolved.role("docs").expect("the docs role");
@@ -161,14 +161,7 @@ fn roles_order_leads_and_every_other_role_follows() {
     let resolved = resolve(&file, &Request::default());
     assert_eq!(
         resolved.order(),
-        [
-            "docs",
-            "coordinator",
-            "worker",
-            "reviewer",
-            "backup",
-            "spare"
-        ],
+        ["docs", "coordinator", "worker", "reviewer", "spare"],
         "the order leads, the built-ins it left out follow, then the rest"
     );
 }
@@ -886,7 +879,7 @@ fn a_roles_order_list_is_reported_as_a_source() {
     assert_eq!(shown(&resolved, "roles.order"), "[\"docs\"]");
     assert_eq!(
         resolved.order(),
-        ["docs", "coordinator", "worker", "reviewer", "backup"]
+        ["docs", "coordinator", "worker", "reviewer"]
     );
 }
 
@@ -1182,4 +1175,72 @@ fn a_line_round_trips_through_its_stored_string() {
         "a line needs its program"
     );
     assert_eq!(WorkerLine::parse(""), None);
+}
+
+#[test]
+fn an_old_backup_role_is_ignored_without_error() {
+    let file = you(r#"
+        version = 1
+
+        [roles]
+        order = ["coordinator", "worker", "reviewer", "backup", "docs"]
+
+        [roles.backup]
+        title = "Backup agent"
+        agent = "codex"
+        model = "gpt-5"
+
+        [roles.docs]
+        kind = "worker"
+        "#);
+    let resolved = resolve(&file, &Request::default());
+    assert_eq!(
+        resolved.order(),
+        ["coordinator", "worker", "reviewer", "docs"],
+        "the retired row is not a custom role"
+    );
+    assert!(resolved.role("backup").is_none());
+    assert!(
+        resolved
+            .roles()
+            .iter()
+            .all(|role| role.id != "backup"
+                && role.agent.as_ref().is_none_or(|a| a.value != "codex"))
+    );
+    let rows = resolved.rows();
+    assert!(
+        rows.iter().all(|row| !row.key.starts_with("roles.backup.")),
+        "{:?}",
+        rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_old_reviewer_with_a_fallback_reads_as_two_lines() {
+    let file = you(r#"
+        version = 1
+
+        [roles.reviewer]
+        agent = "codex"
+        model = "gpt-5"
+        fallback = ["claude/opus"]
+        "#);
+    let resolved = resolve(&file, &Request::default());
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    let refs: Vec<String> = lines.iter().map(|line| line.agent_ref()).collect();
+    assert_eq!(refs, ["codex/gpt-5", "claude/opus"]);
+
+    // The new shape wins over the old key once it holds lines.
+    let file = you(r#"
+        version = 1
+
+        [roles.reviewer]
+        agent = "codex"
+        agents = ["pi|deepseek||||"]
+        fallback = ["claude/opus"]
+        "#);
+    let resolved = resolve(&file, &Request::default());
+    let lines = resolved.role("reviewer").expect("reviewer").lines();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1].agent, "pi");
 }

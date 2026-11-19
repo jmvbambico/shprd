@@ -8,7 +8,7 @@
 //! version = 1
 //!
 //! [roles]
-//! order = ["coordinator", "worker", "reviewer", "backup", "docs"]
+//! order = ["coordinator", "worker", "reviewer", "docs"]
 //!
 //! [roles.coordinator]
 //! title = "Assistant"                     # the word the person sees
@@ -41,8 +41,8 @@
 //! merge = "auto"
 //! ```
 //!
-//! Roles are keyed by id and the four built-ins (`coordinator`, `worker`,
-//! `reviewer`, `backup`) are only the first four rows: any id is a role, with
+//! Roles are keyed by id and the three built-ins (`coordinator`, `worker`,
+//! `reviewer`) are only the first three rows: any id is a role, with
 //! whatever fields it names. `roles.order` is the order a settings UI shows
 //! them in.
 //!
@@ -130,7 +130,13 @@ pub const ROLE_FIELDS: [RoleField; 12] = [
 ];
 
 /// The role ids this build ships, in their default order.
-pub const BUILTIN_ROLES: [&str; 4] = ["coordinator", "worker", "reviewer", "backup"];
+pub const BUILTIN_ROLES: [&str; 3] = ["coordinator", "worker", "reviewer"];
+
+/// Role ids an earlier build shipped and this one does not: a file may still
+/// name them (`roles.backup.agent`), and they are read as nothing — never a
+/// custom row, never an error. The Backup agent went when the worker's program
+/// lines became a fallback chain.
+pub const RETIRED_ROLES: [&str; 1] = ["backup"];
 
 /// The keys a repository's committed `.shprd/settings.toml` may set.
 ///
@@ -1615,16 +1621,6 @@ fn builtin_roles() -> Vec<(String, RoleDefaults)> {
                 readonly: true,
             },
         ),
-        (
-            "backup".to_owned(),
-            RoleDefaults {
-                title: "Backup agent".to_owned(),
-                about: "Takes a task over once, when the worker's CLI cannot go on.".to_owned(),
-                kind: RoleKind::Worker,
-                prompt: "prompt:backup".to_owned(),
-                readonly: false,
-            },
-        ),
     ]
 }
 
@@ -1752,11 +1748,19 @@ pub fn resolve(file: &File, request: &Request<'_>) -> Resolved {
             ids.extend(layer.role_ids());
         }
     }
+    ids.retain(|id| !RETIRED_ROLES.contains(&id.as_str()));
+    values.retain(|name, _| {
+        !RETIRED_ROLES
+            .iter()
+            .any(|id| name.starts_with(&format!("roles.{id}.")))
+    });
     if let Some(Sourced { value, .. }) = values.get("roles.order")
         && let Some(order) = value.list()
     {
         for id in order {
-            ids.insert(id.clone());
+            if !RETIRED_ROLES.contains(&id.as_str()) {
+                ids.insert(id.clone());
+            }
         }
     }
     for id in &ids {
