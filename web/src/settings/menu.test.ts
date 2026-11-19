@@ -66,7 +66,7 @@ describe("a pick", () => {
   it("drops a level or speed the new model does not have, and writes program, model, level in order", () => {
     const before = { agent: "claude", model: "opus", effort: "medium", fast: true, perm: "auto" };
     const after = chooseModel(menus, before, "claude", "haiku");
-    expect(after).toMatchObject({ model: "haiku", fast: false, effort: "medium" });
+    expect(after).toMatchObject({ model: "haiku", fast: false, effort: null });
     const moved = chooseModel(menus, before, "codex", "gpt-6");
     expect(moved.perm).toBeNull();
     expect(selectionWrites("worker", before, moved).map((w) => w.key)).toEqual([
