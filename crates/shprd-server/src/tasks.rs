@@ -180,8 +180,7 @@ pub(crate) fn changes_in(
     let base = run.integration_branch.clone();
     let branch = attempt.branch.clone();
     let git = Git::new(repo);
-    let merge_base = git
-        .run(&["merge-base", &base, &branch])
+    let merge_base = shprd_git::sync::attempt_base(&git, &base, &branch, false)
         .map_err(|err| git_failure(task_id, &base, &branch, &err.to_string()))?
         .lines()
         .next()

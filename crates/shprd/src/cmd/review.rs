@@ -363,10 +363,12 @@ pub fn findings_schema() -> Value {
 ///
 /// The merge base is what makes the packet the task's own change: diffing
 /// against the integration branch's tip would show every other task that landed
-/// since this one forked.
+/// since this one forked. It is taken against the freshest of the local base
+/// and `origin/<base>` (fetched first), so a landing merged on the forge, which
+/// moves only the remote ref, is not read as the task's work.
 fn diff_against_merge_base(repo: &Path, base: &str, branch: &str) -> Result<String, CliError> {
     let git = Git::new(repo);
-    let merge_base = git.run(&["merge-base", base, branch]).map_err(|err| {
+    let merge_base = shprd_git::sync::attempt_base(&git, base, branch, true).map_err(|err| {
         CliError::other(anyhow!(err).context(format!("finding where {branch} forked from {base}")))
     })?;
     git.run(&["diff", &format!("{merge_base}..{branch}")])
@@ -3255,5 +3257,52 @@ project_dirs = []
         assert!(!report.degraded, "the report labels an independent review");
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
+    }
+
+    /// Runs git in `dir`, asserting success, and returns trimmed stdout.
+    fn git_ok(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Commits a file in `dir`.
+    fn commit_file(dir: &Path, file: &str) {
+        std::fs::write(dir.join(file), format!("{file}\n")).unwrap();
+        git_ok(dir, &["add", "--", file]);
+        git_ok(dir, &["commit", "-m", file]);
+    }
+
+    #[test]
+    fn the_packet_diff_holds_only_the_tasks_own_commits_when_origin_is_ahead() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_ok(temp.path(), &["init", "--bare", "origin.git"]);
+        git_ok(&repo, &["init", "-b", "integration/m11"]);
+        git_ok(&repo, &["config", "user.name", "tests"]);
+        git_ok(&repo, &["config", "user.email", "tests@example.invalid"]);
+        git_ok(&repo, &["config", "commit.gpgsign", "false"]);
+        git_ok(&repo, &["remote", "add", "origin", "../origin.git"]);
+        commit_file(&repo, "seed.txt");
+        let seed = git_ok(&repo, &["rev-parse", "HEAD"]);
+        // A pull request landed this on the forge only.
+        commit_file(&repo, "landed.txt");
+        git_ok(&repo, &["push", "-u", "origin", "integration/m11"]);
+        git_ok(&repo, &["checkout", "-b", "task"]);
+        commit_file(&repo, "own.txt");
+        git_ok(&repo, &["branch", "-f", "integration/m11", &seed]);
+
+        let diff = diff_against_merge_base(&repo, "integration/m11", "task").unwrap();
+        assert!(diff.contains("own.txt"), "{diff}");
+        assert!(!diff.contains("landed.txt"), "{diff}");
     }
 }
