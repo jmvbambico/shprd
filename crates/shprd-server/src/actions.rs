@@ -165,7 +165,20 @@ fn ensure_run(ctx: &Context<'_>) -> Result<(), ApiReject> {
         base_branch: base,
         integration_branch: integration.clone(),
     };
-    commit(ctx, started)?;
+    if let Err(refused) = commit(ctx, started) {
+        // Another request started the run between the load and this commit: the
+        // branch made for the lost start is taken back, and the add goes on
+        // against the run that won.
+        if made {
+            let _ = git.run(&["branch", "-D", &integration]);
+        }
+        let (now, _) = ledger::load(ctx.repo).map_err(read_error)?;
+        return if now.run.is_some() {
+            Ok(())
+        } else {
+            Err(refused)
+        };
+    }
     if made {
         let resource = EventKind::Resource {
             action: ResourceAction::Created,
