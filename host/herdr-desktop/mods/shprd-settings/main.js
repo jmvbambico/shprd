@@ -59,6 +59,7 @@ import {
   promptName,
   lineWrites,
   nextLineProgram,
+  newLine,
   withLine,
   workerLines,
   tunnelView,
@@ -94,11 +95,16 @@ import {
   press,
   segmented,
   selectButton,
+  addNew,
   settingsWindowClosed,
   settingsWindowOpened,
   toggleSwitch,
 } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, tone } from "./lib/tokens.js";
+
+/** The width of every program button's row (gutter, button, × slot) and of the × slot: one grid for every line of every role. */
+const LINE_W = 340;
+const X_SLOT = 24;
 
 /** How often the window re-reads the service, so another window's write shows. */
 const FLOOR_MS = 10_000;
@@ -758,9 +764,8 @@ export default class Settings extends View {
 
   /** The "+": one more line, for the first program no line has yet. */
   addLine(roleId) {
-    const agent = nextLineProgram(this.settings, this.roster, roleId);
-    if (agent === null) return;
-    const line = { agent, model: null, effort: null, fast: false, perm: null };
+    const line = newLine(this.settings, this.roster, roleId);
+    if (line === null) return;
     this.setLines(roleId, [...workerLines(this.settings, roleId), line]);
   }
 
@@ -1493,23 +1498,36 @@ export default class Settings extends View {
     ];
   }
 
-  /** The role's button: "Opus 5.5 · Medium ⌄", opening the model menu. */
+  /** The role's button: "Opus 5.5 · Medium ⌄", opening the model menu, in the same frame as a chain's line. */
   modelButton(t, role) {
     const menus = menusOf(this.roster);
     const sel = roleSelection(this.settings, role.id);
     const word = this.roster === null ? "Loading…" : selectionLabel(menus, sel, this.roster);
     const disabled = this.roster === null || menus.order.length === 0;
-    return selectButton(
-      t,
-      `model-${role.id}`,
-      [div().min_w(0).truncate().child(disabled && this.roster !== null ? "No program found" : word)],
-      this.rec(`model-${role.id}`),
-      (at) => this.openModelMenu(at, `role:${role.id}`, roleSelection(this.settings, role.id)),
-      { disabled },
-    );
+    return h_flex()
+      .w(LINE_W)
+      .h(36)
+      .flex_none()
+      .items_center()
+      .child(
+        selectButton(
+          t,
+          `model-${role.id}`,
+          [div().flex_1().min_w(0).truncate().child(disabled && this.roster !== null ? "No program found" : word)],
+          this.rec(`model-${role.id}`),
+          (at) => this.openModelMenu(at, `role:${role.id}`, roleSelection(this.settings, role.id)),
+          { disabled, fill: true },
+        ),
+      )
+      .child(div().w(X_SLOT).flex_none());
   }
 
-  /** One of the worker's lines: "Claude Code · Opus 5.5 · Medium ⌄", and a × while there is another line. */
+  /**
+   * One of a chain's lines: "Claude Code · Opus 5.5 · Medium ⌄" and, in a slot of
+   * its own, a × while there is another line. Every line has the same width and
+   * columns (gutter, the button with its ⌄ at its right edge, the × slot), so a
+   * long label is cut with an ellipsis and never moves a column.
+   */
   lineRow(t, role, lines, at) {
     const menus = menusOf(this.roster);
     const sel = lines[at];
@@ -1517,23 +1535,33 @@ export default class Settings extends View {
     const id = `line-${role.id}-${at}`;
     const taken = lines.filter((_, i) => i !== at).map((line) => line.agent);
     return h_flex()
-      .gap(4)
+      .w(LINE_W)
+      .h(36)
+      .flex_none()
       .items_center()
       .when(lines.length > 1, (el) => el.child(this.chainGutter(t, role.id, at, lines.length)))
       .child(
         selectButton(
           t,
           id,
-          [div().min_w(0).truncate().child(this.roster === null ? "Loading…" : lineLabel(menus, sel, this.roster))],
+          [div().flex_1().min_w(0).truncate().child(this.roster === null ? "Loading…" : lineLabel(menus, sel, this.roster))],
           this.rec(id),
           (point) => this.openModelMenu(point, `line:${role.id}:${at}`, sel, { taken }),
-          { disabled },
+          { disabled, fill: true },
         ),
       )
-      .when(lines.length > 1, (el) =>
-        el.child(
-          link(t, `remove-${id}`, "×", () => this.setLines(role.id, withLine(lines, at, null)), this.writing !== null),
-        ),
+      .child(
+        div()
+          .w(X_SLOT)
+          .flex_none()
+          .flex()
+          .items_center()
+          .justify_center()
+          .when(lines.length > 1, (el) =>
+            el.child(
+              link(t, `remove-${id}`, "×", () => this.setLines(role.id, withLine(lines, at, null)), this.writing !== null),
+            ),
+          ),
       );
   }
 
@@ -1570,23 +1598,26 @@ export default class Settings extends View {
       .child(rail(`chain-down-${roleId}-${at}`, at < count - 1));
   }
 
-  /** The role's lines, one picker each, and the "Add" that adds another. */
+  /** The role's lines, one picker each, and the "Add New +" that adds another. */
   workerLinesControl(t, role) {
     const lines = workerLines(this.settings, role.id);
     const shown = lines.length > 0 ? lines : [{ agent: null, model: null, effort: null, fast: false, perm: null }];
     const more = this.roster !== null && lines.length > 0 && nextLineProgram(this.settings, this.roster, role.id) !== null;
     return v_flex()
       .flex_none()
-      .gap(shown.length > 1 ? 0 : 6)
-      .when(shown.length > 1, (el) => el.items_start())
-      .when(shown.length <= 1, (el) => el.items_end())
+      .w(LINE_W)
+      .items_start()
       .children(shown.map((_, at) => this.lineRow(t, role, shown, at)))
       .when(more, (el) =>
         el.child(
-          div()
+          h_flex()
             .id(`add-line-box-${role.id}`)
-            .when(shown.length > 1, (box) => box.ml(26))
-            .child(link(t, `add-line-${role.id}`, "Add", () => this.addLine(role.id), this.writing !== null)),
+            .w(LINE_W)
+            .h(28)
+            .flex_none()
+            .items_center()
+            .justify_end()
+            .child(addNew(t, `add-line-${role.id}`, () => this.addLine(role.id), this.writing !== null, X_SLOT)),
         ),
       );
   }

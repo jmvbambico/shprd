@@ -44,7 +44,7 @@ describe("role names", () => {
     expect(coordinator.title).toBe("Orchestrator");
     expect(coordinator.name).toMatchObject({ key: "roles.coordinator.title", value: "Orchestrator", fallback: "Assistant" });
     expect(worker.title).toBe("Dev");
-    expect(reviewer.title).toBe("Reviewer(s)");
+    expect(reviewer.title).toBe("Reviewer (s)");
     expect(reviewer.name.value).toBe("Reviewer");
   });
 });
@@ -60,10 +60,10 @@ describe("the inline name", () => {
 
   it("a click on the name opens a field; Enter writes the trimmed name", async () => {
     const kit = await dialog();
-    const worker = await screen.findByRole("region", { name: "Worker(s)" });
-    expect(within(worker).queryByLabelText("Worker(s) name")).toBeNull();
-    fireEvent.click(within(worker).getByRole("button", { name: "Rename Worker(s)" }));
-    const box = within(worker).getByLabelText("Worker(s) name");
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    expect(within(worker).queryByLabelText("Worker (s) name")).toBeNull();
+    fireEvent.click(within(worker).getByRole("button", { name: "Rename Worker (s)" }));
+    const box = within(worker).getByLabelText("Worker (s) name");
     fireEvent.change(box, { target: { value: "  Dev " } });
     fireEvent.keyDown(box, { key: "Enter" });
     fireEvent.blur(box);
@@ -77,12 +77,12 @@ describe("the inline name", () => {
 
   it("Esc leaves the field, writes nothing and does not close the window", async () => {
     const kit = await dialog();
-    const worker = await screen.findByRole("region", { name: "Worker(s)" });
-    fireEvent.click(within(worker).getByRole("button", { name: "Rename Worker(s)" }));
-    const box = within(worker).getByLabelText("Worker(s) name");
+    const worker = await screen.findByRole("region", { name: "Worker (s)" });
+    fireEvent.click(within(worker).getByRole("button", { name: "Rename Worker (s)" }));
+    const box = within(worker).getByLabelText("Worker (s) name");
     fireEvent.change(box, { target: { value: "Nope" } });
     fireEvent.keyDown(box, { key: "Escape" });
-    expect(within(worker).queryByLabelText("Worker(s) name")).toBeNull();
+    expect(within(worker).queryByLabelText("Worker (s) name")).toBeNull();
     expect(kit.calls.some((call) => call.method === "PUT")).toBe(false);
   });
 

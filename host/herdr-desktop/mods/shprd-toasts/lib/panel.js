@@ -219,14 +219,15 @@ export function press(fn) {
  * placed at the button. The press remembers the button's bounds (`rec.at`) so the
  * popup lands under it, as Shepherdr's model button does.
  */
-export function selectButton(t, id, content, rec, onOpen, { bordered = false, disabled = false } = {}) {
+export function selectButton(t, id, content, rec, onOpen, { bordered = false, disabled = false, fill = false } = {}) {
   const el = h_flex()
     .id(id)
     .h(bordered ? 28 : 28)
     .pl(8)
     .pr(5)
     .gap(4)
-    .flex_none()
+    .when(fill, (e) => e.flex_1().w_full())
+    .when(!fill, (e) => e.flex_none())
     .min_w(0)
     .items_center()
     .rounded(RADIUS.control)
@@ -285,6 +286,20 @@ export function link(t, id, word, onClick, busy = false) {
     ? base
     : base.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(press(onClick));
   return live.child(word);
+}
+
+/**
+ * The "Add New +" of a chain: the words, then a "+" in a slot as wide as the
+ * × slot of the lines above it, so the two glyphs share one column.
+ */
+export function addNew(t, id, onClick, busy = false, slot = 24) {
+  const base = h_flex().id(id).flex_none().items_center().text_size(TEXT.label).text_color(busy ? t.dim : t.muted);
+  const live = busy
+    ? base
+    : base.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(press(onClick));
+  return live
+    .child(div().whitespace_nowrap().child("Add New"))
+    .child(div().w(slot).flex_none().flex().items_center().justify_center().child("+"));
 }
 
 /**

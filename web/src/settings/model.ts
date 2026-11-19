@@ -47,7 +47,7 @@ export const UNSET_LAYER = "nothing sets it";
 export const BUILTIN = ["coordinator", "worker", "reviewer"];
 
 /** What the Agents page heads a built-in role with, until the person names it: a worker and a reviewer are lists. */
-export const HEADINGS: Readonly<Record<string, string>> = { worker: "Worker(s)", reviewer: "Reviewer(s)" };
+export const HEADINGS: Readonly<Record<string, string>> = { worker: "Worker (s)", reviewer: "Reviewer (s)" };
 
 /** The three fields a role's pick is made of, in the order a page draws them. */
 export const PICKS = ["agent", "model", "effort"] as const;
@@ -317,7 +317,7 @@ export function roles(document: SettingsDto | null, roster: RosterDto | null): R
     const titleRow = rows.get(`roles.${id}.title`);
     const stored = (textOf(titleRow) ?? "").trim();
     // The service reports the built-in word as a built-in row: that one is
-    // headed "Worker(s)"; a name the person set stands as they wrote it.
+    // headed "Worker (s)"; a name the person set stands as they wrote it.
     const named = stored !== "" && titleRow?.source !== "built_in";
     return {
     id,

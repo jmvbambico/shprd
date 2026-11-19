@@ -37,6 +37,8 @@ import {
   encodeLine,
   selectionLabel,
   selectionWrites,
+  newLine,
+  defaultModel,
   withLine,
   workerLines,
 } from "../mods/lib/settings.js";
@@ -381,7 +383,7 @@ test("adding a line writes agents with the next free program; removing one write
   ]);
   // Removing the first line promotes the next into the role's own fields.
   const promoted = lineWrites(doc, "worker", withLine(lines, 0, null)).map((w) => [w.key, w.value]);
-  assert.deepEqual(promoted[0], ["roles.worker.agent", "claude"]);
+  assert.ok(promoted.some(([key, value]) => key === "roles.worker.agent" && value === "claude"));
   assert.deepEqual(promoted.at(-1), ["roles.worker.agents", ["codex||||"]]);
   // The old fallback list is emptied by the first edit, so it cannot come back.
   const old = withRows([["roles.worker.fallback", ["codex"]]]);
@@ -402,7 +404,7 @@ test("a reviewer holds lines like a worker: its old fallback reads as line 2 and
   ]);
 });
 
-test("the Worker(s) row shows a picker per line, a + while a program is free, and × when there are two", async () => {
+test("the Worker (s) row shows a picker per line, a + while a program is free, and × when there are two", async () => {
   const one = await drawn("agents");
   let ids = walk(one.tree()).map((node) => node.idv).filter(Boolean);
   assert.ok(ids.includes("line-worker-0"));
@@ -535,4 +537,37 @@ test("a light menu (the reviewer's fallback) has None and no Reasoning, Fast or 
   herdr.reset();
   click(menu.render(), "none");
   assert.equal(herdr.shared(PICK_KEY).value, null);
+});
+
+test("changing a program writes the old model, level and mode out before the new program in", () => {
+  const writes = selectionWrites(
+    "worker",
+    { agent: "claude", model: "opus", effort: "high", fast: false, perm: "plan" },
+    { agent: "pi", model: "Command Code/z-ai/glm-5.3-flash", effort: null, fast: false, perm: null },
+  );
+  assert.deepEqual(
+    writes.map((w) => `${w.key.split(".")[2]}=${w.value}`),
+    ["model=null", "effort=null", "perm=null", "agent=pi", "model=Command Code/z-ai/glm-5.3-flash"],
+  );
+});
+
+test("a program that needs a provider is added with a model of a vendor the other role does not run", () => {
+  const roster = {
+    programs: [
+      { id: "claude", name: "Claude Code", installed: true, vendor: "anthropic", multi_model: false, needs_provider: false, models: [], efforts: [], permissions: [] },
+      {
+        id: "pi", name: "Pi", installed: true, vendor: "pi", multi_model: true, needs_provider: true, efforts: [], permissions: [],
+        models: [
+          { id: "Command Code/deepseek/deepseek-v4.1-flash", name: "DeepSeek", efforts: [], fast: false, vendor: "deepseek" },
+          { id: "Command Code/z-ai/glm-5.3-flash", name: "GLM", efforts: [], fast: false, vendor: "zhipu" },
+        ],
+      },
+    ],
+  };
+  assert.equal(defaultModel(roster, "claude"), null);
+  assert.equal(defaultModel(roster, "pi", []), "Command Code/deepseek/deepseek-v4.1-flash");
+  assert.equal(defaultModel(roster, "pi", ["deepseek"]), "Command Code/z-ai/glm-5.3-flash");
+  const doc = withRows([["roles.worker.agent", "claude"], ["roles.worker.model", null]]);
+  assert.equal(newLine(doc, roster, "reviewer").agent, "pi");
+  assert.equal(newLine(doc, roster, "reviewer").model, "Command Code/deepseek/deepseek-v4.1-flash");
 });

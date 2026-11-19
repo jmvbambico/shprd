@@ -145,6 +145,10 @@ async fn a_static_catalog_supplies_the_models_and_their_levels() {
         "{ids:?}"
     );
     let opus = &models[3];
+    assert_eq!(
+        opus["vendor"], "anthropic",
+        "a model names its vendor: {opus}"
+    );
     assert_eq!(opus["id"], "opus");
     assert_eq!(opus["name"], "Opus 5.5");
     assert_eq!(

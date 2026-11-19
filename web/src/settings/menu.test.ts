@@ -84,12 +84,14 @@ describe("a pick", () => {
     expect(after).toMatchObject({ model: "haiku", fast: false, effort: null });
     const moved = chooseModel(menus, before, "codex", "gpt-6");
     expect(moved.perm).toBeNull();
+    // the old program's model, level, speed and mode go out first, then the new program, then its model
     expect(selectionWrites("worker", before, moved).map((w) => w.key)).toEqual([
-      "roles.worker.agent",
       "roles.worker.model",
       "roles.worker.effort",
       "roles.worker.fast",
       "roles.worker.perm",
+      "roles.worker.agent",
+      "roles.worker.model",
     ]);
     expect(selectionWrites("worker", before, before)).toEqual([]);
   });
@@ -155,7 +157,10 @@ describe("a worker's program lines", () => {
   it("removing the first line promotes the next into the role's own fields", () => {
     const two = doc(row("roles.worker.agents", ["codex|gpt-6-luna|||"], "you"));
     const writes = lineWrites(two, "worker", withLine(workerLines(two), 0, null)).map((w) => [w.key, w.value]);
-    expect(writes[0]).toEqual(["roles.worker.agent", "codex"]);
+    expect(writes).toContainEqual(["roles.worker.agent", "codex"]);
+    expect(writes.indexOf(writes.find((w) => w[0] === "roles.worker.agent")!)).toBeGreaterThan(
+      writes.findIndex((w) => w[0] === "roles.worker.model" && w[1] === null),
+    );
     expect(writes.at(-1)).toEqual(["roles.worker.agents", []]);
   });
 
