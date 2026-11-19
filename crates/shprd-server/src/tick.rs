@@ -15,7 +15,7 @@
 //! 5. appends one ledger event per step that changed something and publishes it
 //!    on the service's [`Hub`], so the web app and a Herdr mod see it;
 //! 6. when a [`FallbackSource`] is wired, plans and runs the provider ladder —
-//!    a nudge, one backup handover, or a give-up — and records what it did.
+//!    a nudge, a handover to the next line, or a give-up — and records what it did.
 //!
 //! A step that fails is recorded and logged and the pass carries on: one broken
 //! landing must not stop a task from starting, and one bad pass must not stop
@@ -921,7 +921,7 @@ impl Worker {
         Ok(StepReport::ok("nudge", task, detail, Some(seq)))
     }
 
-    /// Starts the backup handover and records it, once per task.
+    /// Starts the backup handover and records it, once per line.
     #[expect(clippy::too_many_arguments, reason = "one handover's whole input")]
     fn start_backup(
         &self,
@@ -1903,7 +1903,7 @@ fn ladder_state(state: &RunState) -> LadderState {
                         .insert(record.cut.clone());
                 }
                 FallbackAction::Backup => {
-                    entry.backup = Some(BackupDone {
+                    entry.backups.push(BackupDone {
                         from: record.agent.clone(),
                         to: record.to_agent.clone().unwrap_or_default(),
                     });

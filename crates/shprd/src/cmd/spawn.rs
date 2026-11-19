@@ -1818,6 +1818,21 @@ pub(crate) struct BriefContext {
 /// The role a worker's brief is written for.
 pub(crate) const BRIEF_ROLE: &str = "worker";
 
+/// The name of the takeover words a handover brief opens with. It is not a role:
+/// the newcomer runs on the worker's settings and reads this prompt (the
+/// shipped prompt `backup`, kept under its old id so an edit stays).
+pub(crate) const TAKEOVER_ROLE: &str = "takeover";
+
+/// The role whose settings a launch under `role_id` runs on: the worker's for a
+/// takeover, else the role itself.
+pub(crate) fn settings_role_id(role_id: &str) -> &str {
+    if role_id == TAKEOVER_ROLE {
+        BRIEF_ROLE
+    } else {
+        role_id
+    }
+}
+
 /// Reads the role's prompt and resolves the settings for one attempt.
 ///
 /// A prompt that cannot be read is refused before the worktree, the tab and the
@@ -1829,6 +1844,12 @@ pub(crate) fn brief_context(
     effort: Option<&str>,
     applied: &Applied,
 ) -> Result<BriefContext, CliError> {
+    let prompt_id = if role_id == TAKEOVER_ROLE {
+        "backup"
+    } else {
+        role_id
+    };
+    let role_id = settings_role_id(role_id);
     let base = env.settings.resolve(None);
     let mut task = Layer::new();
     if let Some(role) = base.role(role_id) {
@@ -1868,7 +1889,15 @@ pub(crate) fn brief_context(
             role.fast = Sourced::new(applied.fast, Source::BuiltIn);
         }
     }
-    let prompt = role_prompt(env, role_id)?;
+    let prompt = if prompt_id == role_id {
+        role_prompt(env, role_id)?
+    } else {
+        // The takeover words: the installed prompt, not a role's `prompt` field.
+        PromptRef::parse(&format!("{}{prompt_id}", PromptRef::PREFIX))
+            .map_err(invalid)?
+            .read(&env.prompts_dir, &env.home)
+            .map_err(invalid)?
+    };
     let proof = settings.tasks().proof;
     Ok(BriefContext {
         prompt,

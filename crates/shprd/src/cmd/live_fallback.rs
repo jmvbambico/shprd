@@ -286,7 +286,7 @@ impl shprd_server::FallbackSource for LiveFallback {
             task: task.to_string(),
             reason: format!("the provider cut {from}'s turn off"),
             to: Some(to.to_string()),
-            role: Some("backup".to_string()),
+            role: Some(spawn::TAKEOVER_ROLE.to_string()),
             same_worker: false,
             opening: Some(brief.to_string()),
         };

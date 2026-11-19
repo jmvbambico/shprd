@@ -5,7 +5,7 @@
 //! Each built-in role has a prompt the build carries (`data/templates/`): the
 //! coordinator's (`assistant.md`, the name Shepherdr uses for it and the one
 //! M9.3's `prompt:assistant` default names), the worker's, the reviewer's and
-//! the backup's. A role's `prompt` field is either `prompt:<id>`, which names a
+//! the takeover's (the opening of a handover brief; it is not a role). A role's `prompt` field is either `prompt:<id>`, which names a
 //! file in the person's prompts directory, or a path.
 //!
 //! # Where the files live
@@ -205,9 +205,12 @@ pub const SHIPPED: [ShippedPrompt; 4] = [
         old: REVIEWER_OLD,
     },
     ShippedPrompt {
+        // Not a role: the opening a takeover brief carries, when the worker's
+        // program cannot go on and the next line of the worker chain takes over.
+        // The id stays `backup` so an installed (or edited) file keeps its name.
         id: "backup",
-        role: "backup",
-        about: "Takes a task over once, when the worker's CLI cannot go on.",
+        role: "takeover",
+        about: "Opens the brief of a program that takes a task over.",
         text: include_str!("../../../data/templates/backup.md"),
         old: BACKUP_OLD,
     },

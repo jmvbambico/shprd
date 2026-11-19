@@ -27,10 +27,12 @@
 //! - nothing is sent while the agent is working, and nothing is sent twice for
 //!   the same cut;
 //! - a cut older than [`STALE_CUT_MS`] when first seen is left to the person;
-//! - when the ladder is over, one backup handover is allowed per task, never to
-//!   the program the task already runs, and only to a program installed and
-//!   signed in on this machine. A task whose backup already ran (or failed to
-//!   start) is a human's again.
+//! - when the ladder is over, the task is handed to the next untried program
+//!   line (the worker's chain): one handover per line, never to a program the
+//!   task already ran on, and only to a program installed and signed in on this
+//!   machine. When the program that took over is cut off too, the next untried
+//!   line takes over; when every line was tried (or none can start), the task is
+//!   a human's again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -126,7 +128,7 @@ pub struct AgentState {
     pub gave_up: BTreeSet<String>,
 }
 
-/// A backup handover the ledger already recorded, successful or not.
+/// A handover the ledger already recorded, successful or not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupDone {
     /// The program the task was running.
@@ -140,8 +142,8 @@ pub struct BackupDone {
 pub struct TaskState {
     /// The ladder's memory per agent, keyed by program id.
     pub agents: BTreeMap<String, AgentState>,
-    /// The one backup handover this task may have.
-    pub backup: Option<BackupDone>,
+    /// The handovers this task already had, oldest first: one per program line.
+    pub backups: Vec<BackupDone>,
 }
 
 /// Everything the ledger already recorded, keyed by task.
@@ -333,10 +335,10 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
         }
         let task = state.tasks.get(&fact.task);
         let agent = task.and_then(|task| task.agents.get(&fact.agent));
-        let backup = task.and_then(|task| task.backup.as_ref());
-        // The agent its backup already replaced is on its way out, and its cut
+        let backups: &[BackupDone] = task.map_or(&[], |task| task.backups.as_slice());
+        // The agent a handover already replaced is on its way out, and its cut
         // is the old program's problem, not the task's.
-        if backup.is_some_and(|backup| backup.from == fact.agent) {
+        if backups.iter().any(|backup| backup.from == fact.agent) {
             continue;
         }
         if agent.is_some_and(|agent| agent.gave_up.contains(&cut.id)) {
@@ -352,18 +354,14 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
             continue;
         }
         if outcome.over {
-            if let Some(backup) = backup {
-                // One handover per task: the backup agent's own cut is the
-                // person's, whatever the reason.
-                actions.push(give_up(
-                    fact,
-                    cut,
-                    outcome.reason,
-                    &format!("backup ran: {} took over from {}", backup.to, backup.from),
-                    config,
-                ));
-            } else if takes_over(cut) {
-                match choose_backup(config, fact.role, &fact.agent) {
+            if takes_over(cut) {
+                // Every program the task already ran on, or was handed to
+                // (even when the handover failed to start), is tried.
+                let tried: BTreeSet<&str> = backups
+                    .iter()
+                    .flat_map(|backup| [backup.from.as_str(), backup.to.as_str()])
+                    .collect();
+                match choose_backup(config, fact.role, &fact.agent, &tried) {
                     Some(to) => actions.push(Action::Backup {
                         task: fact.task.clone(),
                         attempt: fact.attempt,
@@ -374,13 +372,18 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
                         reason: outcome.reason,
                         handover: fact.handover.clone(),
                     }),
-                    None => actions.push(give_up(
-                        fact,
-                        cut,
-                        outcome.reason,
-                        &no_backup_why(config, fact.role, &fact.agent),
-                        config,
-                    )),
+                    None => {
+                        let why = match backups.last() {
+                            Some(last) if !has_untried(config, fact.role, &fact.agent, &tried) => {
+                                format!(
+                                    "every line was tried: {} took over from {}",
+                                    last.to, last.from
+                                )
+                            }
+                            _ => no_backup_why(config, fact.role, &fact.agent, &tried),
+                        };
+                        actions.push(give_up(fact, cut, outcome.reason, &why, config));
+                    }
                 }
             } else {
                 actions.push(give_up(fact, cut, outcome.reason, "", config));
@@ -416,10 +419,15 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
 ///
 /// The role's list is the worker's program lines, in order. A task that was
 /// running line N moves to line N+1, and when no later line can take it, to an
-/// earlier one; the program the task already runs is skipped (a backup is a
-/// different program, not a fresh process), and only a program signed in on this
-/// machine is chosen.
-pub fn choose_backup(config: &Config, role: Role, from: &str) -> Option<String> {
+/// earlier one. A program in `tried` (the lines the task already ran on or was
+/// handed to) and the program the task runs are skipped, so the chain walks to
+/// each line once; only a program signed in on this machine is chosen.
+pub fn choose_backup(
+    config: &Config,
+    role: Role,
+    from: &str,
+    tried: &BTreeSet<&str>,
+) -> Option<String> {
     let list = config.fallbacks_for(role);
     let lines = role
         .key()
@@ -434,6 +442,7 @@ pub fn choose_backup(config: &Config, role: Role, from: &str) -> Option<String> 
     for raw in list[start..].iter().chain(&list[..start]) {
         let program = program_of(raw);
         if program != from
+            && !tried.contains(program)
             && config.installed.contains(program)
             && config.signed_in.contains(program)
         {
@@ -441,6 +450,15 @@ pub fn choose_backup(config: &Config, role: Role, from: &str) -> Option<String> 
         }
     }
     None
+}
+
+/// Whether any line is left that was not tried (installed or not).
+fn has_untried(config: &Config, role: Role, from: &str, tried: &BTreeSet<&str>) -> bool {
+    config
+        .fallbacks_for(role)
+        .iter()
+        .map(|raw| program_of(raw))
+        .any(|program| program != from && !tried.contains(program))
 }
 
 /// Whether a cut is one only another program gets past.
@@ -452,11 +470,11 @@ pub fn takes_over(cut: &Cut) -> bool {
 }
 
 /// Why no backup could be chosen, in Shepherdr's few words.
-fn no_backup_why(config: &Config, role: Role, from: &str) -> String {
+fn no_backup_why(config: &Config, role: Role, from: &str, tried: &BTreeSet<&str>) -> String {
     let mut why = String::from("no backup");
     for raw in config.fallbacks_for(role) {
         let program = program_of(raw);
-        if program == from {
+        if program == from || tried.contains(program) {
             continue;
         }
         why = if !config.installed.contains(program) {
@@ -734,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn one_backup_per_task_and_never_the_same_program() {
+    fn never_the_same_program_and_a_replaced_agents_cut_is_left_alone() {
         let cfg = config();
         // The task runs codex: the fallback list's first entry is the same
         // program and is skipped for claude.
@@ -742,29 +760,97 @@ mod tests {
         let actions = plan(&State::default(), std::slice::from_ref(&fact), NOW, &cfg);
         assert!(matches!(&actions[0], Action::Backup { to, .. } if to == "claude"));
 
-        // Once a backup ran, the backup agent's own cut is a person's.
+        // The old program's cut is not acted on once a handover replaced it.
         let mut state = State::default();
         state.tasks.insert(
             String::from("T1"),
             TaskState {
                 agents: BTreeMap::new(),
-                backup: Some(BackupDone {
+                backups: vec![BackupDone {
                     from: String::from("codex"),
                     to: String::from("claude"),
-                }),
+                }],
             },
         );
-        let backup_fact = facts("claude", Some(cut(ErrorKind::Quota, NOW, 1)));
-        let actions = plan(&state, &[backup_fact], NOW, &cfg);
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].name(), "give_up");
-        if let Action::GiveUp { reason, .. } = &actions[0] {
-            assert!(reason.contains("backup ran"), "{reason}");
-        }
-
-        // And the old program's cut is not acted on at all.
         let actions = plan(&state, &[fact], NOW, &cfg);
         assert!(actions.is_empty());
+    }
+
+    fn chain_of_three() -> Config {
+        let mut cfg = config();
+        cfg.fallbacks = BTreeMap::from([(
+            String::from("worker"),
+            ["claude", "codex", "pi"].map(String::from).to_vec(),
+        )]);
+        cfg.installed = ["claude", "codex", "pi"].map(String::from).into();
+        cfg.signed_in = cfg.installed.clone();
+        cfg
+    }
+
+    fn done(from: &str, to: &str) -> BackupDone {
+        BackupDone {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
+    }
+
+    fn state_with(backups: Vec<BackupDone>) -> State {
+        let mut state = State::default();
+        state.tasks.insert(
+            String::from("T1"),
+            TaskState {
+                agents: BTreeMap::new(),
+                backups,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn the_chain_walks_one_handover_per_line_then_stops() {
+        let cfg = chain_of_three();
+        // Line 1 is cut: line 2 takes over.
+        let first = facts("claude", Some(cut(ErrorKind::Quota, NOW, 1)));
+        let actions = plan(&State::default(), &[first], NOW, &cfg);
+        assert!(matches!(&actions[0], Action::Backup { to, .. } if to == "codex"));
+
+        // Line 2 (which took over) is cut as well: line 3 takes over, never
+        // back to line 1.
+        let state = state_with(vec![done("claude", "codex")]);
+        let second = facts("codex", Some(cut(ErrorKind::Quota, NOW, 1)));
+        let actions = plan(&state, &[second], NOW, &cfg);
+        assert!(
+            matches!(&actions[0], Action::Backup { to, from, .. } if to == "pi" && from == "codex")
+        );
+
+        // Line 3 is cut too: every line was tried, so the person decides.
+        let state = state_with(vec![done("claude", "codex"), done("codex", "pi")]);
+        let third = facts("pi", Some(cut(ErrorKind::Quota, NOW, 1)));
+        let actions = plan(&state, &[third], NOW, &cfg);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::GiveUp { reason, .. } => {
+                assert!(reason.contains("every line was tried"), "{reason}")
+            }
+            other => panic!("expected a give-up, got {other:?}"),
+        }
+
+        // The agents already replaced stay quiet.
+        let old = facts("claude", Some(cut(ErrorKind::Quota, NOW, 1)));
+        assert!(plan(&state, &[old], NOW, &cfg).is_empty());
+    }
+
+    #[test]
+    fn a_line_that_failed_to_start_still_counts_as_tried() {
+        let cfg = chain_of_three();
+        // claude was handed to codex (which failed to start) and the task is
+        // back on claude's pane: codex is not tried again, pi is.
+        let state = state_with(vec![done("claude", "codex")]);
+        let again = facts("pi", Some(cut(ErrorKind::Auth, NOW, 1)));
+        let actions = plan(&state, &[again], NOW, &cfg);
+        assert!(matches!(&actions[0], Action::GiveUp { .. }));
+        let tried: BTreeSet<&str> = BTreeSet::from(["claude", "codex"]);
+        assert_eq!(choose_backup(&cfg, Role::Worker, "pi", &tried), None);
     }
 
     #[test]
@@ -781,23 +867,23 @@ mod tests {
             .into();
         cfg.signed_in = cfg.installed.clone();
         assert_eq!(
-            choose_backup(&cfg, Role::Worker, "codex").as_deref(),
+            choose_backup(&cfg, Role::Worker, "codex", &BTreeSet::new()).as_deref(),
             Some("pi"),
             "line 2 moves to line 3"
         );
         assert_eq!(
-            choose_backup(&cfg, Role::Worker, "claude").as_deref(),
+            choose_backup(&cfg, Role::Worker, "claude", &BTreeSet::new()).as_deref(),
             Some("codex")
         );
         // The next line is signed out: the one after it takes over.
         cfg.signed_in.remove("pi");
         assert_eq!(
-            choose_backup(&cfg, Role::Worker, "codex").as_deref(),
+            choose_backup(&cfg, Role::Worker, "codex", &BTreeSet::new()).as_deref(),
             Some("opencode")
         );
         // The last line has nothing after it: an earlier line takes over.
         assert_eq!(
-            choose_backup(&cfg, Role::Worker, "opencode").as_deref(),
+            choose_backup(&cfg, Role::Worker, "opencode", &BTreeSet::new()).as_deref(),
             Some("claude")
         );
     }

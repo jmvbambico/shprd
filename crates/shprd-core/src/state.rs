@@ -1220,14 +1220,14 @@ mod tests {
     }
 
     #[test]
-    fn a_task_gets_only_one_backup_handover() {
-        let backup = |seq: u64, to: &str| {
+    fn a_task_gets_one_handover_per_line() {
+        let backup = |seq: u64, from: &str, to: &str| {
             ev(
                 seq,
                 EventKind::Backup {
                     task: "a".to_string(),
                     attempt: 1,
-                    from_agent: "claude".to_string(),
+                    from_agent: from.to_string(),
                     to_agent: to.to_string(),
                     cut: "cut-2".to_string(),
                     class: ProviderClass::Quota,
@@ -1238,7 +1238,13 @@ mod tests {
                 },
             )
         };
-        let folded = fold_extra(vec![backup(3, "codex"), backup(4, "pi")]);
+        // The next line's handover is allowed.
+        assert!(fold_extra(vec![backup(3, "claude", "codex"), backup(4, "codex", "pi")]).is_ok());
+        // A second one from the same line is not.
+        let folded = fold_extra(vec![
+            backup(3, "claude", "codex"),
+            backup(4, "claude", "pi"),
+        ]);
         assert!(matches!(
             folded,
             Err(RuleError::TaskAlreadyBackedUp { ref task }) if task == "a"
