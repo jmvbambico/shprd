@@ -1631,3 +1631,55 @@ async fn review_again_on_a_stuck_review_needs_a_host_and_consumes_nothing_withou
         "the card is still open"
     );
 }
+
+/// Runs `git` in `dir`, panicking on failure (tests only).
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn the_first_task_in_a_fresh_repo_starts_a_run() {
+    // Major 12 of SHPR-54's QA: `+` in a repo with no run was refused with
+    // "no run has started". The add now starts one on the checked-out branch.
+    let repo = tempfile::tempdir().expect("repo dir");
+    git_in(repo.path(), &["init", "-b", "trunk"]);
+    git_in(repo.path(), &["commit", "--allow-empty", "-m", "seed"]);
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state dir"));
+    let reply = fixture.add_task("T1").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+
+    let state = fixture
+        .send(Call::get("/api/state").with_token(&fixture.token))
+        .await;
+    let snapshot = state.json();
+    assert!(snapshot["run"].is_object(), "a run started: {snapshot}");
+    assert_eq!(snapshot["run"]["base_branch"], json!("trunk"), "{snapshot}");
+    let integration = snapshot["run"]["integration_branch"]
+        .as_str()
+        .expect("an integration branch")
+        .to_string();
+    let branches = git_in(fixture.repo.path(), &["branch", "--list", &integration]);
+    assert!(!branches.is_empty(), "the integration branch was made");
+
+    // A second task adds to the same run.
+    let again = fixture.add_task("T2").await;
+    assert_eq!(again.status, StatusCode::OK, "{:?}", again.body);
+}
+
+#[tokio::test]
+async fn a_task_in_a_repo_with_no_commit_is_refused_with_the_way_out() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    git_in(repo.path(), &["init", "-b", "trunk"]);
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state dir"));
+    let reply = fixture.add_task("T1").await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    let message = reply.json()["message"].as_str().unwrap_or("").to_string();
+    assert!(message.contains("shprd run start"), "{message}");
+}

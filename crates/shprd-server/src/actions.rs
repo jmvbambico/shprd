@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use shprd_core::config::MergePolicy;
-use shprd_core::event::{Actor, EventKind, status_line};
+use shprd_core::event::{Actor, EventKind, ResourceAction, ResourceKind, status_line};
 use shprd_core::log::{Clock, SystemClock};
 use shprd_core::state::Task;
 use shprd_git::git::Git;
@@ -70,6 +70,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
             skills,
             deps,
         } => {
+            ensure_run(ctx)?;
             let kind = EventKind::TaskAdded {
                 task,
                 title,
@@ -115,6 +116,79 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         Action::TaskAccept { task } => accept(ctx, &task),
         Action::TaskResendBrief { task } => resend_brief(ctx, &task),
     }
+}
+
+/// Starts a run when the log has none, so the first task in a fresh repository
+/// can be added without a CLI step.
+///
+/// The defaults are the ones a person would type: the base is the branch the
+/// repository has checked out, the integration branch is `integration/<run id>`
+/// and is cut from the base when it does not exist, and the run id is the start
+/// time. A directory that is not a git repository gets a log-only run (the same
+/// as `shprd run start` there). A detached HEAD or a repository with no commit
+/// has no base to name, so it is refused with the way out.
+fn ensure_run(ctx: &Context<'_>) -> Result<(), ApiReject> {
+    let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    if folded.run.is_some() {
+        return Ok(());
+    }
+    let git = Git::new(ctx.repo);
+    let in_repo = git.run(&["rev-parse", "--git-dir"]).is_ok();
+    let base = if in_repo {
+        match git.current_branch() {
+            Ok(Some(branch)) if git.rev_parse(&branch).is_ok() => branch,
+            _ => {
+                return Err(ApiReject::refused(
+                    "no run has started, and none can start on its own: the repository has no \
+                     checked-out branch with a commit to base it on; check one out, or run \
+                     `shprd run start --run-id … --base … --integration …`",
+                ));
+            }
+        }
+    } else {
+        "main".to_string()
+    };
+    let run_id = format!("r{}", SystemClock.now_ms() / 1000);
+    let integration = format!("integration/{run_id}");
+    let mut made = false;
+    if in_repo && !git.branch_exists(&integration).unwrap_or(false) {
+        git.run(&["branch", &integration, &base]).map_err(|err| {
+            ApiReject::refused(format!(
+                "could not create the integration branch {integration:?} from {base:?}: {err}"
+            ))
+        })?;
+        made = true;
+    }
+    let started = EventKind::RunStarted {
+        run_id,
+        repo: ctx.repo.to_string_lossy().to_string(),
+        base_branch: base,
+        integration_branch: integration.clone(),
+    };
+    if let Err(refused) = commit(ctx, started) {
+        // Another request started the run between the load and this commit: the
+        // branch made for the lost start is taken back, and the add goes on
+        // against the run that won.
+        if made {
+            let _ = git.run(&["branch", "-D", &integration]);
+        }
+        let (now, _) = ledger::load(ctx.repo).map_err(read_error)?;
+        return if now.run.is_some() {
+            Ok(())
+        } else {
+            Err(refused)
+        };
+    }
+    if made {
+        let resource = EventKind::Resource {
+            action: ResourceAction::Created,
+            kind: ResourceKind::Branch,
+            name: integration,
+            task: None,
+        };
+        commit(ctx, resource)?;
+    }
+    Ok(())
 }
 
 /// Delivers a task's latest brief to its agent again and records that it went.
