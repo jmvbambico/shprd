@@ -96,6 +96,18 @@ describe("AcceptDialog", () => {
     expect(calls.find((c) => c.method === "POST")?.body).toEqual({ kind: "task.accept", task: "T1" });
   });
 
+  it("a refused Accept says why in the dialog and stays open", async () => {
+    const why = "T1 is not ready to land";
+    const { api } = scripted(routes({ "POST /api/action": refusal(409, "refused", why) }));
+    const onClose = vi.fn();
+    render(
+      <AcceptDialog client={api} board={board(snapshot([ready]))} taskId="T1" device="desktop" reauthTick={0} onClose={onClose} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(screen.getByText(why)).toBeDefined());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("hides Accept where tasks.merge lands work without one, and says so", async () => {
     const { api } = scripted(
       routes({ "GET /api/settings": json(200, { values: [{ key: "tasks.merge", value: "auto", source: "you" }], problems: [] }) }),

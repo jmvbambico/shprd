@@ -75,6 +75,7 @@ import {
   runLabel,
   runShort,
   runState,
+  secondLine,
   since,
   statusCounts,
   taskById,
@@ -1238,4 +1239,10 @@ test("the Tasks popups list their rows and mark the one in force", () => {
   assert.equal(group[2].hint, "✓");
   const more = tasksMenu({ menu: "more", items: [{ key: "done", word: "Done", count: 4 }], current: "all" });
   assert.deepEqual(more.map((r) => [r.label, r.hint]), [["Done", "4"]]);
+});
+
+test("a Waiting line from the engine keeps its path and task id on the row", () => {
+  const line = "Waiting: crates/shprd/tests is in use by install-layout-source";
+  assert.equal(secondLine({ title: "t", last_status: { message: line } }), line);
+  assert.equal(secondLine({ title: "t", last_status: { message: "x".repeat(60) } }).length, 40);
 });

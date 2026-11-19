@@ -22,6 +22,11 @@ describe("secondLine", () => {
     expect(secondLine(mixed.tasks[2])).toBe("wiring the route");
     expect(secondLine(mixed.tasks[3])).toBe("Title of T4");
   });
+
+  it("keeps the engine's whole Waiting line, with the path and the task in it", () => {
+    const line = "Waiting: crates/shprd/tests is in use by install-layout-source";
+    expect(secondLine(task("W", "to_do", { last_status: { message: line, seq: 1 } }))).toBe(line);
+  });
 });
 
 describe("listView", () => {

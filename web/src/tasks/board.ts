@@ -69,6 +69,9 @@ export function look(task: TaskDto | null | undefined): { word: string; tone: To
 /** How many characters a row's second line may hold. */
 export const LINE_MAX = 40;
 
+/** How many characters the engine's "Waiting: …" line may hold. */
+export const WAITING_MAX = 120;
+
 /** Cuts `text` to `max` characters, ending in an ellipsis when it was cut. */
 export function cut(text: unknown, max = LINE_MAX): string {
   const value = String(text ?? "").trim();
@@ -85,8 +88,10 @@ export function secondLine(task: TaskDto | null | undefined): string {
   if (said) {
     return cut(said);
   }
-  if (task?.last_status?.message) {
-    return cut(task.last_status.message);
+  const line = task?.last_status?.message;
+  if (line) {
+    // The engine's own "Waiting: <why>" line keeps the room it was written with.
+    return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   }
   return cut(task?.title ?? "");
 }

@@ -608,7 +608,24 @@ fn approval_matches(task: &Task, pr: Option<&PrFacts>) -> bool {
             .and_then(|attempt| attempt.report.as_ref())
             .and_then(|report| report.commit.as_deref())
     });
-    head == Some(approved)
+    head.is_some_and(|head| same_commit(head, approved))
+}
+
+/// Whether two commit ids name the same commit: equal, or one is a prefix of
+/// the other of at least 7 hex characters (a worker's report may carry the
+/// short form of the full SHA an approval records). Case-insensitive; an
+/// empty string never matches, and a prefix match needs hex.
+pub fn same_commit(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if !a.is_empty() && a == b {
+        return true;
+    }
+    let hex = |s: &str| s.len() >= 7 && s.bytes().all(|c| c.is_ascii_hexdigit());
+    if !hex(a) || !hex(b) {
+        return false;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long[..short.len()].eq_ignore_ascii_case(short)
 }
 
 /// Whether this task's `ask` was already recorded, so a pass says it once.
@@ -1229,6 +1246,72 @@ mod tests {
                 policy: MergePolicy::Ask,
             }]
         );
+    }
+
+    fn short_report_commit_log(approved: &str) -> Vec<Event> {
+        let mut log = ready_log("A");
+        for event in &mut log {
+            if let EventKind::Reported { commit, .. } = &mut event.kind {
+                *commit = Some("c1dc924".to_string());
+            }
+        }
+        log.push(ev(
+            7,
+            EventKind::TaskPrOpened {
+                task: "A".to_string(),
+                number: 7,
+                url: "https://example.invalid/pull/7".to_string(),
+                head: "shprd/r1/A".to_string(),
+            },
+        ));
+        log.push(Event {
+            seq: 8,
+            at_ms: 8_000,
+            actor: Actor::Human,
+            kind: EventKind::TaskApproved {
+                task: "A".to_string(),
+                number: 7,
+                head_sha: approved.to_string(),
+            },
+        });
+        log
+    }
+
+    #[test]
+    fn a_short_report_commit_matches_the_full_approved_sha() {
+        let log = short_report_commit_log("c1dc9247e7eea8e38d5f0505722f1472384d5688");
+        let steps = plan_for(
+            &folded(&log),
+            &Facts::default(),
+            &config(MergePolicy::Ask, 4),
+        );
+        assert_eq!(
+            steps,
+            vec![Step::Land {
+                task: "A".to_string(),
+                policy: MergePolicy::Ask,
+            }]
+        );
+        // Same first 6 characters, a different commit: no landing.
+        let log = short_report_commit_log("c1dc92ffffffffffffffffffffffffffffffffff");
+        let steps = plan_for(
+            &folded(&log),
+            &Facts::default(),
+            &config(MergePolicy::Ask, 4),
+        );
+        assert!(!steps.iter().any(|s| matches!(s, Step::Land { .. })));
+    }
+
+    #[test]
+    fn same_commit_rules() {
+        let full = "c1dc9247e7eea8e38d5f0505722f1472384d5688";
+        assert!(same_commit("c1dc924", full));
+        assert!(same_commit("C1DC924", full));
+        assert!(same_commit(full, "c1dc924"));
+        assert!(!same_commit("c1dc92", full));
+        assert!(!same_commit("", full));
+        assert!(!same_commit("", ""));
+        assert!(!same_commit("c1dc925", full));
     }
 
     #[test]
