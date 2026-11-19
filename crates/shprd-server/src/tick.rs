@@ -82,6 +82,17 @@ pub trait FactsSource: Send + Sync {
 
     /// The tasks that have an agent running right now.
     fn live(&self, state: &RunState) -> BTreeSet<String>;
+
+    /// The live tasks whose agent is idle, each with when it was first seen
+    /// idle (ms since the epoch).
+    ///
+    /// An agent that ended its turn without handing in is alive but not at
+    /// work; the pass reads it as quiet, so the task stops holding a slot and
+    /// reads "Needs you" once the grace has passed. The default says no agent
+    /// is idle, which is the old behaviour.
+    fn idle_since(&self, _state: &RunState, _now_ms: u64) -> BTreeMap<String, u64> {
+        BTreeMap::new()
+    }
 }
 
 /// A forge a pass may read and write from its own thread.
@@ -94,12 +105,38 @@ pub type SharedForge = Arc<dyn Forge + Send + Sync>;
 /// Which tasks have an agent running, as the host reports it.
 pub type LiveFn = Arc<dyn Fn(&RunState) -> BTreeSet<String> + Send + Sync>;
 
+/// Which live tasks have an agent that is idle, as the host reports it.
+pub type IdleFn = Arc<dyn Fn(&RunState) -> BTreeSet<String> + Send + Sync>;
+
 /// The production facts: the forge the binary drives, and the host's agents.
 pub struct LiveFacts {
     /// The forge a landing would use, and the one its facts come from.
     pub forge: SharedForge,
     /// Whether a task has a live agent, as the host and the watchdog see it.
     pub live: LiveFn,
+    /// Which live tasks have an idle agent; `None` reads every live agent as
+    /// at work.
+    pub idle: Option<IdleFn>,
+    /// When each task was first seen idle, kept across passes.
+    seen_idle: std::sync::Mutex<BTreeMap<String, u64>>,
+}
+
+impl LiveFacts {
+    /// Facts from a forge and the host's live set, with no idle reading.
+    pub fn new(forge: SharedForge, live: LiveFn) -> Self {
+        Self {
+            forge,
+            live,
+            idle: None,
+            seen_idle: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The same facts with the host's idle reading.
+    pub fn with_idle(mut self, idle: IdleFn) -> Self {
+        self.idle = Some(idle);
+        self
+    }
 }
 
 impl FactsSource for LiveFacts {
@@ -146,6 +183,22 @@ impl FactsSource for LiveFacts {
 
     fn live(&self, state: &RunState) -> BTreeSet<String> {
         (self.live)(state)
+    }
+
+    fn idle_since(&self, state: &RunState, now_ms: u64) -> BTreeMap<String, u64> {
+        let Some(idle) = &self.idle else {
+            return BTreeMap::new();
+        };
+        let now_idle = idle(state);
+        let Ok(mut seen) = self.seen_idle.lock() else {
+            return BTreeMap::new();
+        };
+        // A task that is no longer idle starts its grace over next time.
+        seen.retain(|task, _| now_idle.contains(task));
+        for task in now_idle {
+            seen.entry(task).or_insert(now_ms);
+        }
+        seen.clone()
     }
 }
 
@@ -442,6 +495,14 @@ impl Worker {
         // failure is still recorded: what goes quiet is the terminal.
         let quiet = self.quiet_failures(&state);
         for step in steps {
+            // A wait is the task's status line and nothing more: it is reported
+            // only on the pass that wrote it, so an idle queue stays quiet.
+            if let Step::Wait { task, path, other } = &step {
+                if let Some(done) = self.hold(&state, task, path, other) {
+                    report.steps.push(done);
+                }
+                continue;
+            }
             let result = self.run_step(&config, &state, &step, &quiet);
             report.steps.push(result);
         }
@@ -732,9 +793,11 @@ impl Worker {
         };
         let now_ms = desk.clock.now_ms();
         let live = self.facts.live(&state);
+        let idle = self.facts.idle_since(&state, now_ms);
         let rows = self.rows(
             &state,
             &live,
+            &idle,
             retries,
             Some(&news::started_at(&events)),
             now_ms,
@@ -829,7 +892,9 @@ impl Worker {
         facts: &Facts,
         retries: &BTreeMap<String, derived::ProviderCut>,
     ) -> BTreeMap<String, Phase> {
-        self.rows(state, &facts.live, retries, None, SystemClock.now_ms())
+        let now_ms = SystemClock.now_ms();
+        let idle = self.facts.idle_since(state, now_ms);
+        self.rows(state, &facts.live, &idle, retries, None, now_ms)
             .into_iter()
             .map(|(id, (row, _))| (id, phase_of(row.status)))
             .collect()
@@ -857,6 +922,7 @@ impl Worker {
         &self,
         state: &RunState,
         live: &BTreeSet<String>,
+        idle: &BTreeMap<String, u64>,
         retries: &BTreeMap<String, derived::ProviderCut>,
         started: Option<&BTreeMap<String, u64>>,
         now_ms: u64,
@@ -869,9 +935,18 @@ impl Worker {
                 signal.provider_cut = retries.get(id).cloned();
                 signal.started_ms = started.and_then(|at| at.get(id).copied());
                 let agents = if live.contains(id) {
+                    // An agent seen idle is quiet since it was first seen so: the
+                    // status rules give it their grace and then read the task as
+                    // waiting for a person, which frees its slot.
+                    let quiet = idle.get(id).copied();
                     LiveAgents::new(vec![LiveAgent {
                         address: id.clone(),
-                        activity: Some(Activity::Working),
+                        activity: Some(if quiet.is_some() {
+                            Activity::Idle
+                        } else {
+                            Activity::Working
+                        }),
+                        since_ms: quiet,
                         ..LiveAgent::default()
                     }])
                 } else {
@@ -1056,6 +1131,8 @@ impl Worker {
     ) -> StepReport {
         let result = match step {
             Step::Start { task } => self.start_task(task),
+            // Never reached: `tick` turns a wait into `hold` before it gets here.
+            Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
             Step::Land { task, policy } => self.land_task(state, task, *policy),
@@ -1091,6 +1168,40 @@ impl Worker {
                     tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
                 }
                 StepReport::failed(step, reason)
+            }
+        }
+    }
+
+    /// Says on a queued task's card that it waits for another task's scope.
+    ///
+    /// The line reads "Waiting: <path> is in use by <task>" and is written once
+    /// while it stays true. Returns a report only when it wrote the line: the
+    /// task is Queued, nothing failed, and nobody needs to be told.
+    fn hold(&self, state: &RunState, task: &str, path: &str, other: &str) -> Option<StepReport> {
+        let message = waiting_message(&format!(
+            "task {task:?} path {path:?} overlaps task {other:?}"
+        ));
+        let found = state.tasks.get(task)?;
+        if found
+            .last_status
+            .as_ref()
+            .is_some_and(|status| status.message == message)
+        {
+            return None;
+        }
+        let progress = found
+            .last_status
+            .as_ref()
+            .and_then(|status| status.progress);
+        match self.commit(EventKind::TaskStatus {
+            task: task.to_string(),
+            message: message.clone(),
+            progress,
+        }) {
+            Ok(seq) => Some(StepReport::ok("wait", task, message, Some(seq))),
+            Err(err) => {
+                tracing::warn!(%task, %err, "could not write why the task waits");
+                None
             }
         }
     }

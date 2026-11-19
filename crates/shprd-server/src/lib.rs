@@ -104,6 +104,6 @@ pub use shprd_remote::AllowedHosts;
 pub use snapshot::NO_RUN_HINT;
 pub use terminal::{TermKey, TerminalHost, TerminalPort};
 pub use tick::{
-    FactsSource, FallbackSource, FallbackSourceArc, LiveFacts, LiveFn, ReviewCloser, Reviewer,
-    SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,
+    FactsSource, FallbackSource, FallbackSourceArc, IdleFn, LiveFacts, LiveFn, ReviewCloser,
+    Reviewer, SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,
 };

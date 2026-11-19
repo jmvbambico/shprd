@@ -377,10 +377,10 @@ fn a_forge_that_cannot_be_asked_yields_no_action_that_depends_on_it() {
     log.extend(ready(2, "abc123"));
     let fixture = Fixture::new(log);
     let forge: SharedForge = Arc::new(NoForge);
-    let facts: Arc<dyn FactsSource> = Arc::new(shprd_server::LiveFacts {
-        forge: Arc::clone(&forge),
-        live: Arc::new(|_state| BTreeSet::new()),
-    });
+    let facts: Arc<dyn FactsSource> = Arc::new(shprd_server::LiveFacts::new(
+        Arc::clone(&forge),
+        Arc::new(|_state| BTreeSet::new()),
+    ));
     let worker = fixture.worker(
         facts,
         forge,
@@ -527,11 +527,8 @@ fn a_step_that_fails_the_same_way_three_passes_asks_a_person_once() {
     // 99 identical lines went to a terminal nobody read. The third identical
     // failure is a card, recorded once, naming the step and its error.
     let fixture = Fixture::new(vec![started(), added(2, "C2")]);
-    let start: shprd_server::Starter = Arc::new(|_repo: &Path, _task: &str| {
-        Err(String::from(
-            "task \"C2\" path \"calc.py\" overlaps task \"C1\"",
-        ))
-    });
+    let start: shprd_server::Starter =
+        Arc::new(|_repo: &Path, _task: &str| Err(String::from("no agent CLI is installed for C2")));
     let worker = fixture.worker(
         Arc::new(Scripted::default()),
         Arc::new(NoForge),
@@ -568,7 +565,7 @@ fn a_step_that_fails_the_same_way_three_passes_asks_a_person_once() {
         card.body
     );
     assert!(
-        card.body.contains("overlaps task"),
+        card.body.contains("no agent CLI is installed"),
         "the card names the error: {}",
         card.body
     );
@@ -2691,4 +2688,110 @@ fn a_review_out_too_long_becomes_one_card_with_a_review_again_choice() {
     );
     worker.watch_reviews(later + shprd_core::review::STUCK_AFTER_MS + 1);
     assert_eq!(fixture.state().asks.len(), 2);
+}
+
+/// A task added with an explicit scope.
+fn added_scoped(seq: u64, id: &str, scope: &str) -> Event {
+    ev(
+        seq,
+        EventKind::TaskAdded {
+            task: id.to_string(),
+            title: format!("task {id}"),
+            scope: vec![scope.to_string()],
+            acceptance: vec![String::from("it works")],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    )
+}
+
+/// `id` spawned at attempt 1, so it is Working.
+fn spawned_ev(seq: u64, id: &str) -> Event {
+    ev(
+        seq,
+        EventKind::Spawned {
+            task: id.to_string(),
+            attempt: 1,
+            agent: String::from("claude"),
+            model: None,
+            worktree: format!("/wt/{id}"),
+            branch: format!("shprd/r1/{id}"),
+        },
+    )
+}
+
+#[test]
+fn a_task_waiting_for_a_running_tasks_scope_is_queued_never_failing() {
+    // Bug 7 of SHPR-54's QA: T4 shares a path with the running T1. Its start was
+    // planned, refused by the spawn rule, and on the third pass became a card.
+    // It waits instead: no start is tried, no step fails, no card is written,
+    // and its status line says what it waits for.
+    let fixture = Fixture::new(vec![
+        started(),
+        added_scoped(2, "T1", "calc/ops.py"),
+        spawned_ev(3, "T1"),
+        added_scoped(4, "T4", "calc/ops.py"),
+    ]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::clone(&calls)),
+    );
+    for pass in 1..=5 {
+        let report = worker.tick().expect("the pass ran");
+        assert!(
+            report.ok(),
+            "pass {pass} must not fail a step: {:?}",
+            report.steps
+        );
+    }
+    assert!(
+        calls.lock().expect("calls").is_empty(),
+        "T4 is never started"
+    );
+    let state = fixture.state();
+    assert!(state.escalations.is_empty(), "{:?}", state.escalations);
+    let status = state.tasks["T4"]
+        .last_status
+        .as_ref()
+        .expect("a status line");
+    assert_eq!(status.message, "Waiting: calc/ops.py is in use by T1");
+    assert_eq!(
+        state.tasks["T4"].status,
+        shprd_core::state::TaskStatus::Queued
+    );
+}
+
+#[test]
+fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
+    // Bug 8: T4 waits on T1's scope; T5 and T6 are disjoint and start in the
+    // same pass, T4 first in the queue notwithstanding. T7 shares a path with
+    // T5, which this very pass starts, so it waits rather than failing.
+    let fixture = Fixture::new(vec![
+        started(),
+        added_scoped(2, "T1", "calc/ops.py"),
+        spawned_ev(3, "T1"),
+        added_scoped(4, "T4", "calc/ops.py"),
+        added_scoped(5, "T5", "README.md"),
+        added_scoped(6, "T6", "docs"),
+        added_scoped(7, "T7", "README.md"),
+    ]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut cfg = config(shprd_core::config::MergePolicy::Auto);
+    cfg.tick.max_running = 4;
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        Arc::new(NoForge),
+        cfg,
+        recording_start(Arc::clone(&calls)),
+    );
+    let report = worker.tick().expect("the pass ran");
+    assert!(report.ok(), "{:?}", report.steps);
+    assert_eq!(
+        *calls.lock().expect("calls"),
+        vec![String::from("T5"), String::from("T6")]
+    );
 }

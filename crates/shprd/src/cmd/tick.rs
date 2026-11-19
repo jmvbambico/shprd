@@ -110,11 +110,17 @@ pub(crate) fn worker_with_hub(
         }
         crate::cmd::spawn::live_tasks(&*live_host, &live_home, state)
     });
+    let idle_repo = repo.display().to_string();
+    let idle_home = home.to_path_buf();
+    let idle_host = std::sync::Arc::clone(&host);
+    let idle: shprd_server::IdleFn = std::sync::Arc::new(move |state| {
+        if record_only() || Path::new(&idle_repo).file_name().is_none() {
+            return Default::default();
+        }
+        crate::cmd::spawn::idle_tasks(&*idle_host, &idle_home, state)
+    });
     let facts: std::sync::Arc<dyn shprd_server::FactsSource> =
-        std::sync::Arc::new(shprd_server::LiveFacts {
-            forge: forge.clone(),
-            live,
-        });
+        std::sync::Arc::new(shprd_server::LiveFacts::new(forge.clone(), live).with_idle(idle));
     let spawn_home = home.to_path_buf();
     let spawn_actor = actor.clone();
     let start: Starter = std::sync::Arc::new(move |repo: &Path, task: &str| {
