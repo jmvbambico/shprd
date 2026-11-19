@@ -438,7 +438,7 @@ fn host_space(host: &dyn Host, notice: &SpaceNotice) -> Option<shprd_server::Hos
     let (SpaceNotice::Created(label, _) | SpaceNotice::Reused(label, _)) = notice else {
         return None;
     };
-    let found = host.find_space(label).ok().flatten()?;
+    let found = shprd_mux::find_marked_space(host, label).ok().flatten()?;
     Some(shprd_server::HostSpace {
         id: found.id.as_str().to_string(),
         name: found.name,

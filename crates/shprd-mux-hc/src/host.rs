@@ -776,6 +776,30 @@ impl HcHost {
         Ok(self.refresh_layout()?.spaces)
     }
 
+    /// Write `body` as the core document `document`, compare-and-set, retrying
+    /// when somebody else wrote in between.
+    fn write_document(&self, document: &str, body: &str) -> Result<()> {
+        for _ in 0..DOC_RETRIES {
+            let current = self
+                .core("doc.get", json!({"name": document}))
+                .map_err(|error| core_error("doc.get", error))?;
+            let version = current.get("version").and_then(Value::as_u64).unwrap_or(0);
+            let write = self.core(
+                "doc.set",
+                json!({"name": document, "value": body, "version": version}),
+            );
+            match write {
+                Ok(_) => return Ok(()),
+                Err(error) if error.refusal_kind() == Some("conflict") => continue,
+                Err(error) => return Err(core_error("doc.set", error)),
+            }
+        }
+        Err(MuxError::command(
+            "writing a document",
+            format!("herdr-core kept refusing {document} as changed"),
+        ))
+    }
+
     /// The space with `id`, from a fresh read.
     fn space_with(&self, id: &str, what: &'static str) -> Result<placement::Space> {
         let spaces = self.spaces()?;
@@ -925,6 +949,26 @@ impl Host for HcHost {
     fn find_space(&self, name: &str) -> Result<Option<Space>> {
         let spaces = self.spaces()?;
         Ok(match_space(&spaces, name).map(space_of))
+    }
+
+    /// The space shprd marked `mark`, found through the core document that
+    /// names its id. The document belongs to the host, not to a terminal, so a
+    /// space with no terminals keeps its mark and a rename never loses it.
+    fn marked_space(&self, mark: &str) -> Result<Option<Space>> {
+        let current = self
+            .core("doc.get", json!({"name": mark_document(mark)}))
+            .map_err(|error| core_error("doc.get", error))?;
+        let Some(id) = current.get("value").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let spaces = self.spaces()?;
+        Ok(placement::find_space(&spaces, id).map(space_of))
+    }
+
+    fn mark_space(&self, space: &SpaceId, mark: &str) -> Result<()> {
+        // Refuse loudly for a space the layout does not hold.
+        let found = self.space_with(space.as_str(), "space")?;
+        self.write_document(&mark_document(mark), &found.id)
     }
 
     fn list_spaces(&self) -> Result<Vec<Space>> {
@@ -1486,25 +1530,8 @@ impl Host for HcHost {
     /// and the write is re-read and retried.
     fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {
         let document = format!("shprd.{}.{name}", model::bare(space.as_str()));
-        for _ in 0..DOC_RETRIES {
-            let current = self
-                .core("doc.get", json!({"name": document}))
-                .map_err(|error| core_error("doc.get", error))?;
-            let version = current.get("version").and_then(Value::as_u64).unwrap_or(0);
-            let write = self.core(
-                "doc.set",
-                json!({"name": document, "value": body, "version": version}),
-            );
-            match write {
-                Ok(_) => return Ok(document),
-                Err(error) if error.refusal_kind() == Some("conflict") => continue,
-                Err(error) => return Err(core_error("doc.set", error)),
-            }
-        }
-        Err(MuxError::command(
-            "writing a document",
-            format!("herdr-core kept refusing {document} as changed"),
-        ))
+        self.write_document(&document, body)?;
+        Ok(document)
     }
 
     /// Run `argv` once with `machine.exec` and answer its exit code and output.
@@ -1693,6 +1720,12 @@ fn tab_title(tab: &placement::Tab) -> String {
     } else {
         tab.name.clone()
     }
+}
+
+/// The core document that holds shprd's mark `mark`: its value is the id of the
+/// space that carries it.
+fn mark_document(mark: &str) -> String {
+    format!("shprd.space-mark.{}", tab_label(mark))
 }
 
 /// The space `name` matches: by id (a label-made space's id is its label), then
@@ -1904,6 +1937,18 @@ mod tests {
     use super::{match_space, tab_label, terminal_of_pane};
     use crate::placement::spaces_from_document;
     use serde_json::json;
+
+    #[test]
+    fn a_mark_lives_in_a_core_document_not_on_a_terminal() {
+        use super::mark_document;
+        // A document keyed by the mark holds the space id, so a space with no
+        // terminals keeps it and a rename never loses it.
+        assert_eq!(
+            mark_document("shprd · repo"),
+            "shprd.space-mark.shprd · repo"
+        );
+        assert_ne!(mark_document("shprd · a"), mark_document("shprd · b"));
+    }
 
     #[test]
     fn a_tab_label_is_the_title_a_person_reads() {

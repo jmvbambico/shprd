@@ -131,7 +131,7 @@ impl HostLive {
         else {
             return false;
         };
-        match self.host.find_space(&name) {
+        match shprd_mux::find_marked_space(self.host.as_ref(), &name) {
             Err(_) => true,
             Ok(None) => false,
             Ok(Some(space)) => self.host.list_tabs(&space.id).is_err(),
@@ -143,7 +143,7 @@ impl HostLive {
         let name = crate::cmd::spawn::repo_name(&self.repo)
             .map(|name| crate::cmd::spawn::repo_space_name(&name))
             .ok()?;
-        let space = self.host.find_space(&name).ok()??;
+        let space = shprd_mux::find_marked_space(self.host.as_ref(), &name).ok()??;
         let record = crate::cmd::spawn::coordinator_record(
             &self.home,
             &self.repo,

@@ -106,6 +106,8 @@ enum TabClosePolicy {
 #[derive(Debug)]
 struct Inner {
     calls: Vec<Call>,
+    /// shprd's marks on spaces: mark -> space id.
+    marks: HashMap<String, WorkspaceId>,
     spaces: Vec<Workspace>,
     /// Tabs with the space that owns each, so listing stays scoped.
     tabs: Vec<(WorkspaceId, Tab)>,
@@ -156,6 +158,7 @@ impl Inner {
     fn fresh() -> Self {
         Self {
             calls: Vec::new(),
+            marks: HashMap::new(),
             spaces: Vec::new(),
             tabs: Vec::new(),
             agents: Vec::new(),
@@ -572,6 +575,16 @@ impl FakeMux {
         }
     }
 
+    /// Rename a space the way a person does in the window: the id and the mark
+    /// stay, the display name changes.
+    pub fn rename_space(&self, space: &WorkspaceId, name: &str) {
+        if let Ok(mut inner) = self.lock()
+            && let Some(found) = inner.spaces.iter_mut().find(|found| &found.id == space)
+        {
+            found.name = name.to_string();
+        }
+    }
+
     /// Queue an event for the next `subscribe` call.
     pub fn push_event(&self, event: MuxEvent) {
         if let Ok(mut inner) = self.lock() {
@@ -603,6 +616,24 @@ impl Host for FakeMux {
             .iter()
             .find(|space| space.name == name)
             .cloned())
+    }
+
+    fn marked_space(&self, mark: &str) -> Result<Option<Workspace>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .marks
+            .get(mark)
+            .and_then(|id| inner.spaces.iter().find(|space| &space.id == id))
+            .cloned())
+    }
+
+    fn mark_space(&self, space: &WorkspaceId, mark: &str) -> Result<()> {
+        let mut inner = self.lock()?;
+        if inner.space(space).is_none() {
+            return Err(MuxError::not_found("space", space));
+        }
+        inner.marks.insert(mark.to_string(), space.clone());
+        Ok(())
     }
 
     fn list_spaces(&self) -> Result<Vec<Workspace>> {
@@ -1391,6 +1422,61 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_renamed_space_is_found_by_its_mark_and_not_made_twice() {
+        let mux = FakeMux::default();
+        let (first, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/tmp"),
+        ));
+        assert!(created);
+        mux.rename_space(&first.id, "my favourite place");
+        let (again, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/tmp"),
+        ));
+        assert!(!created);
+        assert_eq!(again.id, first.id);
+        assert_eq!(ok(mux.list_spaces()).len(), 1, "no second space was made");
+        let found = ok(crate::find_marked_space(&mux, "shprd · repo"));
+        assert_eq!(found.map(|space| space.id), Some(first.id));
+    }
+
+    #[test]
+    fn an_unmarked_space_is_found_by_its_old_name_once_and_then_marked() {
+        let mux = FakeMux::default();
+        let old = ok(mux.create_space("shprd · repo", Path::new("/tmp")));
+        assert!(ok(mux.marked_space("shprd · repo")).is_none());
+        let (found, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/tmp"),
+        ));
+        assert!(!created);
+        assert_eq!(found.id, old.id);
+        // Marked now: a rename no longer loses it.
+        mux.rename_space(&old.id, "renamed");
+        let marked = ok(mux.marked_space("shprd · repo"));
+        assert_eq!(marked.map(|space| space.id), Some(old.id));
+    }
+
+    #[test]
+    fn a_space_with_no_terminals_keeps_its_mark() {
+        // `without_starter_tab` is the default: the space holds nothing.
+        let mux = FakeMux::default();
+        let (space, _) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · empty",
+            Path::new("/tmp"),
+        ));
+        assert!(ok(mux.list_tabs(&space.id)).is_empty());
+        mux.rename_space(&space.id, "renamed");
+        let marked = ok(mux.marked_space("shprd · empty"));
+        assert_eq!(marked.map(|found| found.id), Some(space.id));
     }
 
     // ---- capability degradation, one test per missing verb ----

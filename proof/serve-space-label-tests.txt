@@ -1,0 +1,3 @@
+# cargo test --workspace --no-fail-fast, run with SHPRD_ACTOR/BIN/HOME/REPO/RUN/TASK unset.
+# The earlier doctor and serve-abandon failures came from those variables the worker session inherits (SHPRD_ACTOR=agent, SHPRD_HOME); with them unset every binary passes.
+(eval):1: command not found: env -u SHPRD_ACTOR -u SHPRD_BIN -u SHPRD_HOME -u SHPRD_REPO -u SHPRD_RUN -u SHPRD_TASK
