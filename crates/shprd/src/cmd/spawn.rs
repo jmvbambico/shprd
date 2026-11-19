@@ -1328,7 +1328,13 @@ fn replace_previous(
     }
     let path = env.layout.path(&env.repo_name, &env.run, &task.id);
     let branch = env.layout.branch_name(&env.run, &task.id);
-    let branch_exists = branch_exists(env, &branch)?;
+    let branch_exists = branch_exists(env, &branch).map_err(|err| {
+        plain_failure(
+            &task.id,
+            "the old attempt's branch could not be looked up",
+            &err,
+        )
+    })?;
     if !branch_exists && !path.exists() {
         return Ok(None);
     }
@@ -1345,7 +1351,9 @@ fn replace_previous(
     // What the new attempt starts from: the branch's last commit, when the
     // attempt made commits of its own that have not landed.
     let carried = if branch_exists && task.status != TaskStatus::Integrated {
-        carried_head(env, &branch)
+        carried_head(env, &branch).map_err(|err| {
+            plain_failure(&task.id, "the old attempt's work could not be read", &err)
+        })?
     } else {
         None
     };
@@ -1430,7 +1438,13 @@ fn replace_previous(
     // spelled differently from the layout's now (`/tmp` against `/private/tmp`,
     // a symlinked home), so what holds the branch is asked of git rather than
     // assumed from the layout's string.
-    let held = worktrees_holding(env, &branch);
+    let held = worktrees_holding(env, &branch).map_err(|err| {
+        plain_failure(
+            &task.id,
+            "the old attempt's workspace could not be found",
+            &err,
+        )
+    })?;
     if worktree_event.is_some() || path.exists() || !held.is_empty() {
         for place in held.iter().chain(std::iter::once(&path)) {
             if place.exists() {
@@ -1475,21 +1489,28 @@ fn replace_previous(
 /// committed something the base does not already have. An attempt that made no
 /// commits (or whose commits the base holds) gives `None`, so the retry starts
 /// from the current base instead of an older point.
-fn carried_head(env: &SpawnEnv<'_>, branch: &str) -> Option<String> {
+fn carried_head(
+    env: &SpawnEnv<'_>,
+    branch: &str,
+) -> Result<Option<String>, shprd_git::git::GitError> {
     let git = Git::new(&env.ctx.root);
-    let head = git.rev_parse(branch).ok()?;
+    let head = git.rev_parse(branch)?;
     let base = base_for_new_work(env);
-    let own = git
-        .run(&["merge-base", "--is-ancestor", &head, &base])
-        .is_err();
-    own.then_some(head)
+    // Exit 1 is git's answer "not an ancestor", which is the attempt having
+    // commits of its own; any other failure is a failure, not an answer.
+    match git.run(&["merge-base", "--is-ancestor", &head, &base]) {
+        Ok(_) => Ok(None),
+        Err(shprd_git::git::GitError::Failed { code: Some(1), .. }) => Ok(Some(head)),
+        Err(err) => Err(err),
+    }
 }
 
 /// Every place git has `branch` checked out, as git spells the path.
-fn worktrees_holding(env: &SpawnEnv<'_>, branch: &str) -> Vec<PathBuf> {
-    let Ok(listing) = Git::new(&env.ctx.root).run(&["worktree", "list", "--porcelain"]) else {
-        return Vec::new();
-    };
+fn worktrees_holding(
+    env: &SpawnEnv<'_>,
+    branch: &str,
+) -> Result<Vec<PathBuf>, shprd_git::git::GitError> {
+    let listing = Git::new(&env.ctx.root).run(&["worktree", "list", "--porcelain"])?;
     let wanted = format!("refs/heads/{branch}");
     let mut found = Vec::new();
     let mut current: Option<PathBuf> = None;
@@ -1502,7 +1523,7 @@ fn worktrees_holding(env: &SpawnEnv<'_>, branch: &str) -> Vec<PathBuf> {
             found.push(path);
         }
     }
-    found
+    Ok(found)
 }
 
 /// A failure to start a new attempt, as a sentence a person can read.
