@@ -18,7 +18,9 @@ import {
   type Role,
   type ScopeId,
 } from "./model";
+import { cleanTitle } from "../roles";
 import { Row } from "./rows";
+import { TextBox } from "./TasksPage";
 
 /** The Agents page. */
 export function AgentsPage({ state, scope }: { state: SettingsState; scope: ScopeId }) {
@@ -66,6 +68,8 @@ export function AgentsPage({ state, scope }: { state: SettingsState; scope: Scop
           }}
           onApply={(key, value) => void apply(key, value)}
           onTyped={setTyped}
+          onName={(text) => void apply(role.name.key, cleanTitle(text) === "" ? null : cleanTitle(text))}
+          restart={state.restartCoordinator}
           onRemove={() => void apply("roles.order", withoutRole(state.settings, role.id))}
         />
       ))}
@@ -111,6 +115,8 @@ function RoleBlock({
   onToggle,
   onApply,
   onTyped,
+  onName,
+  restart,
   onRemove,
 }: {
   role: Role;
@@ -122,8 +128,18 @@ function RoleBlock({
   onToggle: (key: string) => void;
   onApply: (key: string, value: string | null) => void;
   onTyped: (typed: { key: string; text: string } | null) => void;
+  /** The name box was left or Enter pressed: write it. */
+  onName: (text: string) => void;
+  /** Restarts the coordinator; the coordinator's block offers it. */
+  restart: () => Promise<string | null>;
   onRemove: () => void;
 }) {
+  const [restarting, setRestarting] = useState<"working" | "done" | string | null>(null);
+  async function restartNow() {
+    setRestarting("working");
+    const failed = await restart();
+    setRestarting(failed === null ? "done" : `failed:${failed}`);
+  }
   return (
     <section className="role" data-role={role.id} aria-label={role.title}>
       <header className="role-head">
@@ -139,6 +155,16 @@ function RoleBlock({
         ) : null}
       </header>
       {role.about !== "" ? <p className="role-about">{role.about}</p> : null}
+      <Row
+        id={role.name.key}
+        title="Name"
+        about={`What the app calls this role. Empty goes back to “${role.name.fallback}”.`}
+        scopeId={scope}
+        scope={{ key: role.name.key, layer: role.name.layer, mine: role.name.source === "repo_entry" }}
+        onReset={() => onApply(role.name.key, null)}
+        busy={busy}
+        below={<TextBox label={`${role.title} name`} value={role.name.value} rows={1} debounce={false} onCommit={onName} />}
+      />
       {role.picks.map((pick) => {
         const key = `${role.id}.${pick.field}`;
         return (
@@ -156,6 +182,27 @@ function RoleBlock({
           />
         );
       })}
+      {role.kind === "coordinator" ? (
+        <Row
+          id="restart-coordinator"
+          scopeId={scope}
+          title="Restart the coordinator"
+          about="A new program or model reaches the coordinator when it next starts."
+          value={restarting === "working" ? "Restarting…" : restarting === "done" ? "Restarted" : undefined}
+          control={
+            <button type="button" className="link" disabled={restarting === "working"} onClick={() => void restartNow()}>
+              Restart the coordinator now
+            </button>
+          }
+          below={
+            restarting?.startsWith("failed:") ? (
+              <div className="refusal" role="alert">
+                {restarting.slice(7)}
+              </div>
+            ) : null
+          }
+        />
+      ) : null}
     </section>
   );
 }

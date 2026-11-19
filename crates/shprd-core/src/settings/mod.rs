@@ -822,6 +822,21 @@ impl Key {
         Ok(())
     }
 
+    /// The value as it is stored: a role's name is trimmed and cut to
+    /// [`TITLE_MAX`] characters, and a name with nothing in it is no value at all
+    /// (the role goes back to its built-in title). Every other value is kept.
+    pub fn normalized(&self, value: Option<Value>) -> Option<Value> {
+        let Self::Role {
+            field: RoleField::Title,
+            ..
+        } = self
+        else {
+            return value;
+        };
+        let text = normalize_title(value?.text()?);
+        (!text.is_empty()).then_some(Value::Text(text))
+    }
+
     /// The numeric range of a `tasks.*` key, when it has one.
     fn task_range(&self) -> Option<(i64, i64)> {
         match self {
@@ -1833,6 +1848,45 @@ impl ResolvedRole {
     pub fn label(&self) -> &str {
         &self.title.value
     }
+
+    /// The name the person sees for this role: its title, trimmed and cut to
+    /// [`TITLE_MAX`] characters, or the role's built-in title when the stored one
+    /// is empty. See [`display_title`].
+    pub fn display_title(&self) -> String {
+        display_title(&self.title.value, &self.id)
+    }
+}
+
+/// The longest name a role may have, in characters.
+///
+/// A tab, a toast and a sidebar line all carry it, so it has to fit them.
+pub const TITLE_MAX: usize = 24;
+
+/// The name a role is shown under: `raw` trimmed and cut to [`TITLE_MAX`]
+/// characters, or — when nothing is left — the built-in title of the role `id`
+/// (a shipped role's own word, else the id itself).
+pub fn display_title(raw: &str, id: &str) -> String {
+    let named = normalize_title(raw);
+    if !named.is_empty() {
+        return named;
+    }
+    builtin_roles()
+        .into_iter()
+        .find(|(known, _)| known == id)
+        .map_or_else(|| id.to_owned(), |(_, defaults)| defaults.title)
+}
+
+/// A typed role name as it is stored: trimmed, whitespace runs inside it kept
+/// as one space, and cut to [`TITLE_MAX`] characters. Empty means "no name".
+pub fn normalize_title(raw: &str) -> String {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    words
+        .join(" ")
+        .chars()
+        .take(TITLE_MAX)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
 }
 
 /// The resolved workflow values, typed.
@@ -1896,6 +1950,18 @@ impl Resolved {
     /// The role ids, in the order a settings UI shows them.
     pub fn order(&self) -> &[String] {
         &self.roles
+    }
+
+    /// What each role is called, by role id, in the order a settings UI shows
+    /// them: every name is [`ResolvedRole::display_title`].
+    pub fn role_titles(&self) -> Vec<(String, String)> {
+        self.roles()
+            .into_iter()
+            .map(|role| {
+                let title = role.display_title();
+                (role.id, title)
+            })
+            .collect()
     }
 
     /// Every role, in the order a settings UI shows them.

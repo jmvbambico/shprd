@@ -725,6 +725,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/tasks", post(add_task))
         .route("/api/tasks/{id}/changes", get(task_changes))
         .route("/api/settings", get(settings).put(put_settings))
+        .route("/api/coordinator/restart", post(restart_coordinator))
         .route("/api/roster", get(roster))
         .route("/api/agents", post(open_agent))
         .route("/api/agents/{id}/output", get(agent_output))
@@ -817,6 +818,8 @@ async fn snapshot_handler(State(state): State<AppState>) -> Result<Json<Snapshot
     })
     .await?;
     crate::live::decorate(&mut snapshot, &state.repo, rows, host_space, branch);
+    let titles_state = state.clone();
+    snapshot.role_titles = blocking(move || settings_api::role_titles(&titles_state)).await?;
     Ok(Json(snapshot))
 }
 
@@ -1084,6 +1087,15 @@ async fn put_settings(
 ) -> Result<Json<SettingsWriteDto>, ApiReject> {
     let answer = blocking(move || settings_api::write(&state, &body)).await?;
     answer.map(Json)
+}
+
+/// `POST /api/coordinator/restart`: end the coordinator and start it again from
+/// its role, in the same tab. It is how a new program or model reaches a
+/// coordinator that is already running.
+async fn restart_coordinator(State(state): State<AppState>) -> Result<StatusCode, ApiReject> {
+    let agents = state.agents.clone();
+    blocking(move || agents.restart_coordinator()).await??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /api/agents`: start a program in a new tab, in the run's space.

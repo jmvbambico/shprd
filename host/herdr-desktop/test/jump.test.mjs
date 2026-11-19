@@ -22,7 +22,7 @@ test("with nothing typed the coordinator and the spaces come first, then every t
   const spaces = rows.filter((r) => r.kind === "space");
   // Only the coordinator's: a task's space is reached through its task.
   assert.equal(spaces.length, 1);
-  assert.match(spaces[0].sub, /^Coordinator/);
+  assert.match(spaces[0].sub, /^Assistant/);
   assert.equal(rows.filter((r) => r.kind === "task").length, STATE.tasks.length);
 });
 

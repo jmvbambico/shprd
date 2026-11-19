@@ -83,6 +83,7 @@ export function snapshot(tasks: TaskDto[], extra: Partial<SnapshotDto> = {}): Sn
     finished: false,
     spaces: [],
     live_agents: [],
+    role_titles: {},
     ...extra,
   };
 }

@@ -1035,3 +1035,63 @@ fn a_web_key_is_written_into_the_web_table() {
         "{text}"
     );
 }
+
+#[test]
+fn a_role_is_shown_under_its_own_name_or_its_built_in_one() {
+    // The built-in names: the coordinator keeps Shepherdr's word.
+    let resolved = resolve(&File::default(), &Request::default());
+    let names: std::collections::BTreeMap<_, _> = resolved.role_titles().into_iter().collect();
+    assert_eq!(names["coordinator"], "Assistant");
+    assert_eq!(names["worker"], "Worker");
+    assert_eq!(names["reviewer"], "Reviewer");
+
+    // The person's own names.
+    let named = resolve(
+        &you(
+            "[roles.coordinator]\ntitle = \"Orchestrator\"\n[roles.worker]\ntitle = \"Dev\"\n\
+             [roles.reviewer]\ntitle = \"QA\"\n",
+        ),
+        &Request::default(),
+    );
+    let names: std::collections::BTreeMap<_, _> = named.role_titles().into_iter().collect();
+    assert_eq!(names["coordinator"], "Orchestrator");
+    assert_eq!(names["worker"], "Dev");
+    assert_eq!(names["reviewer"], "QA");
+    // The key never changes.
+    assert!(named.role("worker").is_some());
+}
+
+#[test]
+fn an_empty_or_blank_name_falls_back_to_the_built_in_title() {
+    assert_eq!(display_title("", "worker"), "Worker");
+    assert_eq!(display_title("   \t ", "reviewer"), "Reviewer");
+    assert_eq!(display_title("", "coordinator"), "Assistant");
+    // A custom role falls back to its id.
+    assert_eq!(display_title("  ", "docs"), "docs");
+}
+
+#[test]
+fn a_name_is_trimmed_and_cut_to_the_cap() {
+    assert_eq!(display_title("  Dev  team ", "worker"), "Dev team");
+    let long = "x".repeat(TITLE_MAX + 10);
+    assert_eq!(display_title(&long, "worker").chars().count(), TITLE_MAX);
+    // Cutting never leaves a trailing space.
+    let spaced = format!("{} tail", "a".repeat(TITLE_MAX - 1));
+    assert_eq!(display_title(&spaced, "worker"), "a".repeat(TITLE_MAX - 1));
+}
+
+#[test]
+fn storing_a_name_trims_it_and_an_empty_one_is_no_value() {
+    let key = Key::parse("roles.worker.title").expect("key");
+    assert_eq!(
+        key.normalized(Some(Value::Text("  Dev ".to_owned()))),
+        Some(Value::Text("Dev".to_owned()))
+    );
+    assert_eq!(key.normalized(Some(Value::Text("   ".to_owned()))), None);
+    // Another key is stored as given.
+    let other = Key::parse("tasks.base").expect("key");
+    assert_eq!(
+        other.normalized(Some(Value::Text("  x ".to_owned()))),
+        Some(Value::Text("  x ".to_owned()))
+    );
+}

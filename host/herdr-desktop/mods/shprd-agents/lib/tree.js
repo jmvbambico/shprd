@@ -19,6 +19,7 @@
 // source, never a copy.
 
 import { isLive, look } from "./board.js";
+import { roleRename, roleTitle } from "./tokens.js";
 
 
 /** How long a finished agent stays in the Agents pane: 30 minutes. A coordinator stays as long as its space. */
@@ -128,12 +129,16 @@ export function taskLine(state, task, now = Date.now()) {
   } else if (status === "ready") {
     return "ready to approve";
   } else if (reviewer) {
-    parts.push(reviewer.program, "reviewing");
+    // The person's own name for the reviewer, when they gave one: `codex · QA reviewing`.
+    const qa = roleRename(state, "reviewer");
+    parts.push(reviewer.program, qa ? `${qa} reviewing` : "reviewing");
   } else if (status === "merging") {
     return "merging";
   } else {
     if (worker?.program) parts.push(worker.program);
-    parts.push(status === "working" || worker?.state === "working" ? "working" : String(status ?? "").replace("_", " "));
+    const dev = worker ? roleRename(state, "worker") : null;
+    const word = status === "working" || worker?.state === "working" ? "working" : String(status ?? "").replace("_", " ");
+    parts.push(dev ? `${dev} ${word}` : word);
   }
   if (rounds > 0) parts.push(`R#${rounds}`);
   const since = age(worker?.since_ms ?? reviewer?.since_ms, now);
@@ -246,7 +251,7 @@ export function agentRows(state, { grouped = false, now = Date.now() } = {}) {
       kind: "agent",
       id: agent.id,
       name: task ? `${task.id} ${task.title}` : (spaces.get(agent.space)?.name ?? agent.space ?? ""),
-      role: ROLE_WORDS[agent.role] ?? String(agent.role ?? ""),
+      role: roleTitle(state, agent.role),
       program: String(agent.program ?? ""),
       line: agentLine(agent, now),
       glyph: shape.glyph,

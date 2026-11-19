@@ -596,6 +596,15 @@ export class Client {
     return this.call("POST", "/api/agents", { body });
   }
 
+  /**
+   * `POST /api/coordinator/restart`: end the space's coordinator and start it
+   * again from its role, in the same tab. A new program or model reaches a
+   * coordinator that is running only this way.
+   */
+  restartCoordinator() {
+    return this.call("POST", "/api/coordinator/restart", { body: {} });
+  }
+
   /** `GET /api/prompts`: every template this machine has, without its words. */
   prompts() {
     return this.call("GET", "/api/prompts");

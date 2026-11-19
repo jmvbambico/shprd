@@ -12,7 +12,7 @@
 //! prompt next to the task it describes. No model writes any of it.
 
 use shprd_core::event::{Event, Finding, Severity};
-use shprd_core::settings::{Key, Resolved, ResolvedRole, Sourced, TaskKey, Value};
+use shprd_core::settings::{Key, Resolved, ResolvedRole, Source, Sourced, TaskKey, Value};
 use shprd_core::state::{GateResult, OverrideRecord, RunState, Task, TaskStatus};
 
 use crate::clock;
@@ -571,6 +571,15 @@ pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> Strin
         "Each line ends with the layer that set it: `this task`, `this repo`, `you`, \
          `the repo's file` or `built in`. Where this brief says otherwise, the brief wins.\n\n",
     );
+    // The person's own name for the role, where it reads naturally: the agent is
+    // told what the person will call it. The role's key never changes.
+    if let Some(role) = role.filter(|role| role.title.source != Source::BuiltIn) {
+        out.push_str(&format!(
+            "You are the {} (the `{}` role) on this task.\n\n",
+            role.display_title(),
+            role.id
+        ));
+    }
     let role_line = |name: &str, field: Option<&Sourced<String>>, absent: &str| match field {
         Some(sourced) if !sourced.value.trim().is_empty() => {
             format!("- {name}: {} ({})\n", sourced.value, sourced.source.label())
@@ -1312,5 +1321,30 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             text.lines().count() <= 40,
             "the advertised cap must hold: {lines}"
         );
+    }
+
+    /// A role the person named is told its name in the brief; one nobody named is not.
+    #[test]
+    fn the_settings_block_says_the_name_the_person_gave_the_role() {
+        use shprd_core::settings::{File, Key, Request, RoleField, Value, resolve};
+        let mut file = File::default();
+        file.you.set(
+            Key::Role {
+                id: "worker".to_owned(),
+                field: RoleField::Title,
+            },
+            Value::Text("Dev".to_owned()),
+        );
+        let resolved = resolve(&file, &Request::default());
+        let Some(role) = resolved.role("worker") else {
+            panic!("the worker role resolves");
+        };
+        let text = settings_block(&resolved, Some(&role));
+        assert!(
+            text.contains("You are the Dev (the `worker` role)"),
+            "{text}"
+        );
+        let (plain, plain_role) = settings_fixture();
+        assert!(!settings_block(&plain, Some(&plain_role)).contains("You are the"));
     }
 }

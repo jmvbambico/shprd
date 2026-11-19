@@ -63,4 +63,10 @@ spaces: Array<SpaceDto>,
 /**
  * The agents the host has, headless: no tab and no space of their own.
  */
-live_agents: Array<LiveAgentDto>, };
+live_agents: Array<LiveAgentDto>, 
+/**
+ * What each role is called, by role id (`coordinator`, `worker`, …): the
+ * person's own name for it, or its built-in title. Every screen that shows a
+ * role shows this word.
+ */
+role_titles: { [key in string]: string }, };

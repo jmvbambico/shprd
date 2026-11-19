@@ -39,6 +39,8 @@ import {
   CHANGED_HERE,
   backupChoice,
   boxProblem,
+  cleanTitle,
+  needsCoordinatorRestart,
   sessionRows,
   toggled,
   tunnelView,
@@ -109,6 +111,7 @@ export default class Settings extends View {
     this.scope = scopeOf(p.scope).id;
     this.settings = null;
     this.roster = null;
+    this.restarting = null;
     this.prompts = null;
     this.failure = null;
     this.client = null;
@@ -460,7 +463,15 @@ export default class Settings extends View {
     // compare a box with, so no box is rewritten.
     if (this.settings === null) return;
     const queued = new Set(this.queue.map((write) => write.key));
-    for (const row of workflowRows(this.settings)) {
+    // The role names are boxes too: a name the person is typing is never rewritten
+    // from under them, and one that was stored empty shows nothing (the fallback
+    // is its placeholder).
+    const names = roles(this.settings, this.roster).map((role) => ({
+      key: role.name.key,
+      kind: "text",
+      value: role.name.value,
+    }));
+    for (const row of [...workflowRows(this.settings), ...names]) {
       if (row.kind !== "text" && row.kind !== "notes") continue;
       const box = this.boxOf(row.key, row.value, { rows: row.kind === "notes" ? 3 : 1 });
       const text = typeof row.value === "string" ? row.value : "";
@@ -499,7 +510,10 @@ export default class Settings extends View {
   async writeBox(key, cx = this.cx) {
     const box = this.boxes.get(key);
     if (!box) return;
-    const text = box.state.value?.() ?? "";
+    const typed = box.state.value?.() ?? "";
+    // A role's name is written trimmed and cut, as the service stores it; the box
+    // takes the stored form back when the write lands.
+    const text = key.startsWith("roles.") && key.endsWith(".title") ? cleanTitle(typed) : typed;
     if (text === box.saved) return;
     // A branch name git would refuse is refused here, in a sentence, before it is stored.
     const problem = boxProblem(key, text);
@@ -1292,6 +1306,9 @@ export default class Settings extends View {
     // so its pickers would be rows about nothing.
     const off = role.backup !== null && !role.backup.on;
     const rows = off ? [this.backupRow(t, role)] : [...(role.backup ? [this.backupRow(t, role)] : []), ...this.roleRows(t, colors, role)];
+    // The role's name leads its rows: it is what every screen calls the role.
+    rows.unshift(this.nameRow(t, role));
+    if (role.kind === "coordinator") rows.push(this.restartRow(t, colors));
     return v_flex()
       .w_full()
       .gap(2)
@@ -1301,6 +1318,69 @@ export default class Settings extends View {
         el.child(div().pb(4).text_size(TEXT.label).text_color(t.dim).child(role.about)),
       )
       .children(rows);
+  }
+
+  /**
+   * A role's name: the word the whole app uses for it (the tab, the chat, the
+   * Agents pane, the thread). Written when the person leaves the box; empty goes
+   * back to the built-in word, which the box shows as its placeholder.
+   */
+  nameRow(t, role) {
+    const key = role.name.key;
+    const box = this.boxOf(key, role.name.value);
+    const justSaved = Date.now() - box.savedAt < SAVED_MS;
+    return this.row(t, {
+      title: "Name",
+      about: `What the app calls this role. Empty goes back to “${role.name.fallback}”.`,
+      value: justSaved ? "Saved" : null,
+      control: null,
+      scope: { key, layer: role.name.layer, mine: role.name.source === "repo_entry" },
+      below: v_flex()
+        .w_full()
+        .rounded(RADIUS.control)
+        .border_1()
+        .border_color(this.focusKey === key ? t.accent : t.border)
+        .bg(t.raised)
+        .overflow_hidden()
+        .child(Input.new(box.state).w_full().px(10).py(6)),
+    });
+  }
+
+  /**
+   * The coordinator's program and model apply when it next starts: it keeps
+   * running the one it has. The link restarts it now, in the same tab and chat.
+   */
+  restartRow(t, colors) {
+    const state = this.restarting;
+    return this.row(t, {
+      title: "Restart the coordinator",
+      about: "A new program or model reaches the coordinator when it next starts.",
+      value: state === "working" ? "Restarting…" : state === "done" ? "Restarted" : null,
+      control: link(t, "restart-coordinator", "Restart the coordinator now", () => this.restartCoordinator(), state === "working"),
+      scope: null,
+      below:
+        typeof state === "string" && state.startsWith("failed:")
+          ? div().text_size(TEXT.id).text_color(colors.red ?? t.foreground).child(state.slice(7))
+          : null,
+    });
+  }
+
+  /** Restarts the coordinator through the service, and says how it went. */
+  async restartCoordinator() {
+    if (!this.client || this.restarting === "working") return;
+    this.restarting = "working";
+    this.cx.notify();
+    try {
+      await this.client.restartCoordinator();
+      this.restarting = "done";
+    } catch (err) {
+      this.restarting = `failed:${reason(err)}`;
+    }
+    this.cx.notify();
+    this.cx.timer.after(SAVED_MS * 2, (next) => {
+      if (this.restarting === "done") this.restarting = null;
+      next.notify();
+    });
   }
 
   /** A role's pickers, then Fast, Permissions and Fallback where the program has them. */

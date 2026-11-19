@@ -58,6 +58,7 @@ describe("requests", () => {
         finished: false,
         spaces: [],
         live_agents: [],
+        role_titles: {},
       }),
     ]);
     const client = new ApiClient({ fetch });

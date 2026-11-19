@@ -23,7 +23,7 @@
 
 import { matches, secondLine } from "./board.js";
 import { KIND, coordinatorRow, spaceIndex, splitSpaceName } from "./spaces.js";
-import { STATUS, STATUS_ORDER } from "./tokens.js";
+import { STATUS, STATUS_ORDER, roleTitle } from "./tokens.js";
 
 /** The popup's measurements, Shepherdr's: 620 × 480 at the top, offset 56. */
 export const JUMP = { width: 620, height: 480, offset: 56, row: 48, head: 30, more: 32, shown: 8 };
@@ -62,13 +62,13 @@ export function jumpItems(state, list = [], query = "") {
   const coordinator = index.coordinator ? coordinatorRow(state, index.coordinator) : null;
   if (coordinator) {
     const space = index.coordinator;
-    if (matches(q, coordinator.label, "Coordinator", space.name, space.folder, coordinator.sub)) {
+    if (matches(q, coordinator.label, roleTitle(state, "coordinator"), "Coordinator", space.name, space.folder, coordinator.sub)) {
       out.push({
         kind: "space",
         key: `s:${space.id}`,
         id: space.id,
         label: coordinator.label,
-        sub: `Coordinator · ${coordinator.sub}`,
+        sub: `${roleTitle(state, "coordinator")} · ${coordinator.sub}`,
         mark: "#",
         active: Boolean(space.active),
       });

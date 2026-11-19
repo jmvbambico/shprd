@@ -59,6 +59,8 @@ export interface SettingsState {
   write: (key: string, value: SettingValue, forRepo: boolean) => Promise<boolean>;
   /** Clears the refusal and the saved word. */
   clearNotices: () => void;
+  /** Restarts the coordinator; the service's sentence when it cannot, else null. */
+  restartCoordinator: () => Promise<string | null>;
   /** Reads the prompt list again. */
   reloadPrompts: () => Promise<void>;
   /** Sets the prompt list directly (after an edit or a reset). */
@@ -219,6 +221,14 @@ export function useSettings(client: ApiClient): SettingsState {
     reloadPrompts,
     setPrompts,
     refuse: (key, error) => setRefusal({ key, text: reason(error) }),
+    restartCoordinator: async () => {
+      try {
+        await client.restartCoordinator();
+        return null;
+      } catch (error) {
+        return reason(error);
+      }
+    },
     say,
     clearNotices: () => {
       setRefusal(null);

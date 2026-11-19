@@ -23,6 +23,7 @@
 // every mod folder as `lib/settings.js`. Edit the source, never a copy.
 
 import { reason } from "./client.js";
+import { ROLE_DEFAULTS } from "./tokens.js";
 
 /**
  * The layer words the service's `source` names, verbatim.
@@ -258,11 +259,22 @@ function pickOf(role, field, rows, roster) {
 export function roles(document, roster) {
   const rows = rowsOf(document);
   return roleIds(document).map((id) => {
-    const title = textOf(rows.get(`roles.${id}.title`)) ?? id;
+    const titleRow = rows.get(`roles.${id}.title`);
+    const stored = (textOf(titleRow) ?? "").trim();
+    // What the person reads: their own name for the role, else its built-in word,
+    // else its id (the service's `display_title`).
+    const title = stored || ROLE_DEFAULTS[id] || id;
+    const name = {
+      key: `roles.${id}.title`,
+      value: stored,
+      fallback: ROLE_DEFAULTS[id] ?? id,
+      source: titleRow?.source ?? null,
+      layer: layerOf(titleRow?.source),
+    };
     const about = textOf(rows.get(`roles.${id}.about`)) ?? "";
     const kind = textOf(rows.get(`roles.${id}.kind`)) ?? "helper";
     const readonly = rows.get(`roles.${id}.readonly`)?.value === true;
-    const base = { id, title, about, kind, readonly, custom: !BUILTIN.includes(id) };
+    const base = { id, title, name, about, kind, readonly, custom: !BUILTIN.includes(id) };
     return {
       ...base,
       picks: PICKS.map((field) => pickOf(base, field, rows, roster)),
@@ -893,4 +905,29 @@ export function sessionRows(list, now = Date.now() / 1000) {
     remembered: session.remember === true,
     seen: `last seen ${ago(session.last_seen, now)}`,
   }));
+}
+
+/** The longest name a role may have: the service's own cap (`TITLE_MAX` in `shprd-core`). */
+export const TITLE_MAX = 24;
+
+/**
+ * A typed role name as it is written: trimmed, runs of space as one, cut to
+ * [`TITLE_MAX`]. Empty means "no name", which the service takes as "back to the
+ * built-in one".
+ */
+export function cleanTitle(text) {
+  return String(text ?? "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, TITLE_MAX)
+    .trimEnd();
+}
+
+/**
+ * Whether a change to this key reaches a coordinator that is already running only
+ * when it starts again: its program and everything that shapes how it starts.
+ */
+export function needsCoordinatorRestart(key) {
+  return /^roles\.coordinator\.(agent|model|effort|fast|perm)$/.test(String(key ?? ""));
 }
