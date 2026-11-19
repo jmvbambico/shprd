@@ -232,10 +232,24 @@ pub fn run_with_timeout(
         program: program.to_owned(),
         source,
     })?;
+    // The pipes are drained while the probe runs: a listing larger than the
+    // pipe's buffer (codex's model catalog is a quarter of a megabyte) would
+    // otherwise block the child on its own write and read as a timeout.
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let out = drain(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let err = drain(child.stderr.take().map(|pipe| Box::new(pipe) as _));
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(source) => {
                 kill(&mut child);
@@ -253,13 +267,12 @@ pub fn run_with_timeout(
             });
         }
         thread::sleep(POLL_INTERVAL);
-    }
-    child
-        .wait_with_output()
-        .map_err(|source| DetectError::Wait {
-            program: program.to_owned(),
-            source,
-        })
+    };
+    Ok(Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 /// Kills a probe that timed out or failed, and every process it started, then
@@ -491,6 +504,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Codex's catalog is a quarter of a megabyte: a probe that does not drain its
+    /// pipes blocks the child on its write and reads as a timeout.
+    #[test]
+    fn a_listing_larger_than_the_pipe_buffer_is_read_whole() {
+        let out = run_with_timeout(
+            Path::new("/bin/sh"),
+            &[
+                "-c".to_owned(),
+                "head -c 300000 /dev/zero | tr '\\0' x; echo done >&2".to_owned(),
+            ],
+            &[],
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|error| panic!("the listing is read: {error}"));
+        assert_eq!(out.stdout.len(), 300_000);
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "done");
+    }
 
     #[test]
     fn a_busy_spawn_is_retried_until_it_succeeds() {

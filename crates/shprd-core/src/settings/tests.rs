@@ -1095,3 +1095,91 @@ fn storing_a_name_trims_it_and_an_empty_one_is_no_value() {
         Some(Value::Text("  x ".to_owned()))
     );
 }
+
+#[test]
+fn a_worker_holds_an_ordered_list_of_program_lines() {
+    let file = you(r#"
+        version = 1
+
+        [roles.worker]
+        agent = "claude"
+        model = "claude-haiku-5-5"
+        effort = "low"
+        fast = true
+        perm = "auto"
+        agents = ["codex|gpt-5||1|auto", "pi", "claude"]
+        "#);
+    let worker = resolve(&file, &Request::default())
+        .role("worker")
+        .expect("the worker role");
+    let lines = worker.lines();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.agent.as_str())
+            .collect::<Vec<_>>(),
+        ["claude", "codex", "pi"],
+        "the role's own pick is the first line; a program is listed once"
+    );
+    assert_eq!(lines[0].model.as_deref(), Some("claude-haiku-5-5"));
+    assert!(lines[0].fast);
+    assert_eq!(lines[1].model.as_deref(), Some("gpt-5"));
+    assert!(lines[1].fast);
+    assert_eq!(lines[1].perm.as_deref(), Some("auto"));
+    assert_eq!(lines[2].model, None);
+}
+
+#[test]
+fn an_old_worker_fallback_list_becomes_the_lines_after_the_first() {
+    let file = you(r#"
+        version = 1
+
+        [roles.worker]
+        agent = "claude"
+        model = "claude-opus-5-5"
+        fallback = ["codex", "pi/some-model"]
+        "#);
+    let worker = resolve(&file, &Request::default())
+        .role("worker")
+        .expect("the worker role");
+    let lines = worker.lines();
+    assert_eq!(lines.len(), 3, "the old key still reads");
+    assert_eq!(lines[0].agent_ref(), "claude/claude-opus-5-5");
+    assert_eq!(lines[1].agent_ref(), "codex");
+    assert_eq!(lines[2].agent_ref(), "pi/some-model");
+}
+
+#[test]
+fn agents_wins_over_the_old_fallback_once_it_names_lines() {
+    let file = you(r#"
+        version = 1
+
+        [roles.worker]
+        agent = "claude"
+        fallback = ["codex"]
+        agents = ["pi"]
+        "#);
+    let worker = resolve(&file, &Request::default())
+        .role("worker")
+        .expect("the worker role");
+    let programs: Vec<String> = worker.lines().into_iter().map(|line| line.agent).collect();
+    assert_eq!(programs, ["claude", "pi"]);
+}
+
+#[test]
+fn a_line_round_trips_through_its_stored_string() {
+    let line = WorkerLine {
+        agent: "opencode".to_owned(),
+        model: Some("anthropic/claude-sonnet-5-5".to_owned()),
+        effort: Some("high".to_owned()),
+        fast: true,
+        perm: None,
+    };
+    assert_eq!(WorkerLine::parse(&line.encode()), Some(line));
+    assert_eq!(
+        WorkerLine::parse("|model"),
+        None,
+        "a line needs its program"
+    );
+    assert_eq!(WorkerLine::parse(""), None);
+}

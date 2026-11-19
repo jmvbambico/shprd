@@ -54,7 +54,14 @@ import {
   cleanTitle,
   needsCoordinatorRestart,
   sessionRows,
-  toggled,
+  WORKER_LINES_ABOUT,
+  fallbackLabel,
+  fallbackWrite,
+  lineLabel,
+  lineWrites,
+  nextLineProgram,
+  withLine,
+  workerLines,
   tunnelView,
   maskLink,
   LEVEL,
@@ -659,11 +666,16 @@ export default class Settings extends View {
     });
   }
 
-  /** Opens the model menu for a role, under its button. */
-  openModelMenu(at, role) {
+  /**
+   * Opens the model menu under a button. `key` is what the answer comes back on
+   * (`role:<id>`, `line:<id>:<n>` or `fb:<id>`), `current` the choice it starts
+   * from, and `opts` the menu's `light`, `allowNone` and `taken` (see
+   * `shprd-models`).
+   */
+  openModelMenu(at, key, current, opts = {}) {
     this.closePopup();
     const menus = menusOf(this.roster);
-    const MENU_H = menuHeight(menus);
+    const MENU_H = menuHeight(menus, { light: opts.light === true, none: opts.allowNone === true });
     const place = popupAt(at, MENU_W, MENU_H);
     const below = place !== "pointer" && at !== null && place.y > at.y;
     this.popup = openOverlay({
@@ -675,13 +687,16 @@ export default class Settings extends View {
       at: place,
       props: {
         mode: "models",
-        key: `role:${role.id}`,
-        current: roleSelection(this.settings, role.id),
+        key,
+        current,
         menus,
         icons: this.icons,
         width: MENU_W,
         height: MENU_H,
         below,
+        light: opts.light === true,
+        allowNone: opts.allowNone === true,
+        taken: opts.taken ?? [],
       },
     });
   }
@@ -726,7 +741,33 @@ export default class Settings extends View {
       const before = roleSelection(this.settings, id);
       const writes = selectionWrites(id, before, reply.value ?? before);
       if (writes.length > 0) this.applyBatch(writes);
+      return;
     }
+    // One of the worker's program lines was chosen: the whole list is written.
+    if (kind === "line" && reply.field === "selection" && reply.value) {
+      const [roleId, at] = id.split(":");
+      this.setLines(roleId, withLine(workerLines(this.settings, roleId), Number(at), reply.value));
+      return;
+    }
+    // The reviewer's fallback was chosen, or None.
+    if (kind === "fb" && reply.field === "selection") {
+      const writes = fallbackWrite(this.settings, id, reply.value ?? null);
+      if (writes.length > 0) this.applyBatch(writes);
+    }
+  }
+
+  /** Writes the worker's lines as one choice. */
+  setLines(roleId, lines) {
+    const writes = lineWrites(this.settings, roleId, lines);
+    if (writes.length > 0) this.applyBatch(writes);
+  }
+
+  /** The "+": one more line, for the first program no line has yet. */
+  addLine(roleId) {
+    const agent = nextLineProgram(this.settings, this.roster, roleId);
+    if (agent === null) return;
+    const line = { agent, model: null, effort: null, fast: false, perm: null };
+    this.setLines(roleId, [...workerLines(this.settings, roleId), line]);
   }
 
   /** Starts editing a role's name in place: the field takes the keyboard. */
@@ -1477,9 +1518,77 @@ export default class Settings extends View {
       `model-${role.id}`,
       [div().min_w(0).truncate().child(disabled && this.roster !== null ? "No program found" : word)],
       this.rec(`model-${role.id}`),
-      (at) => this.openModelMenu(at, role),
+      (at) => this.openModelMenu(at, `role:${role.id}`, roleSelection(this.settings, role.id)),
       { disabled },
     );
+  }
+
+  /** One of the worker's lines: "Claude Code · Opus 5.5 · Medium ⌄", and a × while there is another line. */
+  lineRow(t, role, lines, at) {
+    const menus = menusOf(this.roster);
+    const sel = lines[at];
+    const disabled = this.roster === null || menus.order.length === 0;
+    const id = `line-${role.id}-${at}`;
+    const taken = lines.filter((_, i) => i !== at).map((line) => line.agent);
+    return h_flex()
+      .gap(4)
+      .items_center()
+      .child(
+        selectButton(
+          t,
+          id,
+          [div().min_w(0).truncate().child(this.roster === null ? "Loading…" : lineLabel(menus, sel, this.roster))],
+          this.rec(id),
+          (point) => this.openModelMenu(point, `line:${role.id}:${at}`, sel, { taken }),
+          { disabled },
+        ),
+      )
+      .when(lines.length > 1, (el) =>
+        el.child(
+          link(t, `remove-${id}`, "×", () => this.setLines(role.id, withLine(lines, at, null)), this.writing !== null),
+        ),
+      );
+  }
+
+  /** The worker's lines, one picker each, and the "+" that adds another. */
+  workerLinesControl(t, role) {
+    const lines = workerLines(this.settings, role.id);
+    const shown = lines.length > 0 ? lines : [{ agent: null, model: null, effort: null, fast: false, perm: null }];
+    const more = this.roster !== null && lines.length > 0 && nextLineProgram(this.settings, this.roster, role.id) !== null;
+    return v_flex()
+      .flex_none()
+      .gap(6)
+      .items_end()
+      .children(shown.map((_, at) => this.lineRow(t, role, shown, at)))
+      .when(more, (el) =>
+        el.child(link(t, `add-line-${role.id}`, "+ Add a program", () => this.addLine(role.id), this.writing !== null)),
+      );
+  }
+
+  /** The reviewer's fallback: "Fallback: Codex · GPT-6-Luna ⌄", the same menu as the main pick, with None. */
+  fallbackPicker(t, role) {
+    const menus = menusOf(this.roster);
+    const sel = role.fallback.value;
+    const id = `fallback-${role.id}`;
+    const disabled = this.roster === null || menus.order.length === 0;
+    return h_flex()
+      .gap(6)
+      .items_center()
+      .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child("Fallback"))
+      .child(
+        selectButton(
+          t,
+          id,
+          [div().min_w(0).truncate().child(this.roster === null ? "Loading…" : fallbackLabel(menus, sel, this.roster))],
+          this.rec(id),
+          (at) =>
+            this.openModelMenu(at, `fb:${role.id}`, sel ?? { agent: null, model: null, effort: null, fast: false, perm: null }, {
+              light: true,
+              allowNone: true,
+            }),
+          { disabled },
+        ),
+      );
   }
 
   /** The role's name: the title (click it, or the pencil, to rename) or, while renaming, its field. */
@@ -1551,6 +1660,9 @@ export default class Settings extends View {
               )
               .when(role.about !== "", (el) =>
                 el.child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(role.about)),
+              )
+              .when(role.id === "worker", (el) =>
+                el.child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(WORKER_LINES_ABOUT)),
               ),
           )
           .child(
@@ -1561,7 +1673,8 @@ export default class Settings extends View {
               .when(mine && this.scope === "repo", (el) =>
                 el.child(link(t, `reset-${role.id}`, RESET, () => this.resetRole(role), this.writing !== null)),
               )
-              .child(this.modelButton(t, role))
+              .child(role.id === "worker" ? this.workerLinesControl(t, role) : this.modelButton(t, role))
+              .when(role.id === "reviewer" && role.fallback !== null, (el) => el.child(this.fallbackPicker(t, role)))
               .when(other !== null, (el) =>
                 el.child(button(t, `other-${role.id}`, "Use other CLI", { kind: "plain", onClick: () => this.useOtherCli(role, other) })),
               )
@@ -1573,8 +1686,7 @@ export default class Settings extends View {
               ),
           ),
       )
-      .when(notice, (el) => el.child(this.restartLine(t, colors, state)))
-      .when(role.fallback !== null, (el) => el.child(this.fallbackLine(t, role.fallback)));
+      .when(notice, (el) => el.child(this.restartLine(t, colors, state)));
   }
 
   /**
@@ -1656,41 +1768,6 @@ export default class Settings extends View {
         .when(field.on, (el) => el.child(this.modelButton(t, role)))
         .child(toggleSwitch(t, field.key, field.on, flip)),
     });
-  }
-
-  /** The worker's fallback: every other program as a chip, tried in the order picked. */
-  fallbackLine(t, field) {
-    const chip = (choice) => {
-      const at = field.value.indexOf(choice.value);
-      const on = at >= 0;
-      return h_flex()
-        .id(`fallback-${choice.value}`)
-        .h(H.sm)
-        .px(8)
-        .gap(4)
-        .flex_none()
-        .items_center()
-        .rounded(RADIUS.control)
-        .border_1()
-        .border_color(on ? t.accent : t.border)
-        .text_size(TEXT.label)
-        .text_color(on ? t.foreground : t.muted)
-        .cursor_pointer()
-        .hover((style) => style.bg(t.hover))
-        .on_click(press(() => this.apply(field.key, toggled(field.value, choice.value))))
-        .child(on ? `${at + 1}  ${choice.label}` : choice.label)
-        .when(choice.hint === "not installed", (el) =>
-          el.child(div().text_size(TEXT.id).text_color(t.dim).child("not installed")),
-        );
-    };
-    return h_flex()
-      .w_full()
-      .gap(8)
-      .items_center()
-      .flex_wrap()
-      .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child("Fallback"))
-      .children(field.choices.map(chip))
-      .when(field.choices.length === 0, (el) => el.child(div().text_size(TEXT.label).text_color(t.dim).child("no other program")));
   }
 
   /** The one row that makes a new role. */

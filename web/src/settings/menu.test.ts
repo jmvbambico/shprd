@@ -6,6 +6,15 @@ import { describe, expect, it } from "vitest";
 import {
   chooseModel,
   coordinatorRunning,
+  encodeLine,
+  fallbackLabel,
+  fallbackWrite,
+  lineLabel,
+  lineWrites,
+  nextLineProgram,
+  parseLine,
+  withLine,
+  workerLines,
   detectedPrograms,
   levelsFor,
   menusOf,
@@ -109,5 +118,54 @@ describe("the restart notice", () => {
     expect(coordinatorRunning({ live_agents: [{ ...agent, role: "worker" }] })).toBe(false);
     expect(coordinatorRunning({ live_agents: [{ ...agent, role: "coordinator" }] })).toBe(true);
     expect(coordinatorRunning({ live_agents: [{ ...agent, role: "coordinator", ended_ms: 5 }] })).toBe(false);
+  });
+});
+
+describe("a worker's program lines", () => {
+  const doc = (...rows: Array<ReturnType<typeof row>>) => settings(rows);
+
+  it("a stored line reads and writes back as the same line", () => {
+    const line = { agent: "codex", model: "gpt-6-luna", effort: "high", fast: true, perm: "auto" };
+    expect(parseLine(encodeLine(line))).toEqual(line);
+    expect(parseLine("pi/commandcode/z-ai/glm")).toEqual({ agent: "pi", model: "commandcode/z-ai/glm", effort: null, fast: false, perm: null });
+    expect(parseLine("|model")).toBeNull();
+  });
+
+  it("are the role's own pick, then agents; the old fallback reads as lines too; a program once", () => {
+    expect(workerLines(doc()).map((line) => line.agent)).toEqual(["claude"]);
+    const two = doc(row("roles.worker.agents", ["codex|gpt-6-luna||1|auto", "claude"], "you"));
+    const lines = workerLines(two);
+    expect(lines.map((line) => line.agent)).toEqual(["claude", "codex"]);
+    expect(lines[1]).toMatchObject({ model: "gpt-6-luna", fast: true, perm: "auto" });
+    const old = doc(row("roles.worker.fallback", ["codex"], "you"));
+    expect(workerLines(old).map((line) => line.agent)).toEqual(["claude", "codex"]);
+  });
+
+  it("adding writes agents with the next free program, and the old fallback is emptied", () => {
+    expect(nextLineProgram(doc(), roster)).toBe("codex");
+    const added = [...workerLines(doc()), { agent: "codex", model: null, effort: null, fast: false, perm: null }];
+    expect(lineWrites(doc(), "worker", added).map((w) => [w.key, w.value])).toEqual([["roles.worker.agents", ["codex||||"]]]);
+    const old = doc(row("roles.worker.fallback", ["codex"], "you"));
+    const writes = lineWrites(old, "worker", withLine(workerLines(old), 1, null));
+    expect(writes.at(-1)).toEqual({ key: "roles.worker.fallback", value: [], prior: ["codex"] });
+    const all = doc(row("roles.worker.agents", ["codex"], "you"));
+    expect(nextLineProgram(all, roster)).toBeNull();
+  });
+
+  it("removing the first line promotes the next into the role's own fields", () => {
+    const two = doc(row("roles.worker.agents", ["codex|gpt-6-luna|||"], "you"));
+    const writes = lineWrites(two, "worker", withLine(workerLines(two), 0, null)).map((w) => [w.key, w.value]);
+    expect(writes[0]).toEqual(["roles.worker.agent", "codex"]);
+    expect(writes.at(-1)).toEqual(["roles.worker.agents", []]);
+  });
+
+  it("labels lead with the program; the reviewer's fallback says None when it has none", () => {
+    const menus = menusOf(roster);
+    expect(lineLabel(menus, { agent: "claude", model: "haiku", effort: "low", fast: false, perm: null }, roster)).toBe("Claude Code · Haiku 5.5 · Low");
+    expect(fallbackLabel(menus, null, roster)).toBe("None");
+    expect(fallbackWrite(doc(), "reviewer", { agent: "codex", model: "gpt-6-luna", effort: null, fast: false, perm: null }).map((w) => w.value)).toEqual([["codex/gpt-6-luna"]]);
+    const set = doc(row("roles.reviewer.fallback", ["codex"], "you"));
+    expect(fallbackWrite(set, "reviewer", null).map((w) => w.value)).toEqual([[]]);
+    expect(fallbackWrite(set, "reviewer", { agent: "codex", model: null, effort: null, fast: false, perm: null })).toEqual([]);
   });
 });

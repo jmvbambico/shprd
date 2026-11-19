@@ -244,17 +244,28 @@ pub fn spawn(
     // still wins over both.
     let candidates = role_candidates(role.as_ref(), &env.workers);
     let mut pick = choose_agent(req.agent.as_deref(), &candidates, &env.programs)?;
-    if req.agent.is_none()
-        && let Some(model) = role
-            .as_ref()
-            .and_then(|role| role.model.as_ref())
-            .filter(|model| !model.value.trim().is_empty())
-    {
-        pick.model = Some(model.value.clone());
+    // The worker holds an ordered list of program lines; the task runs the one
+    // whose program was picked, with that line's model, effort, fast mode and
+    // access mode.
+    let lines = role.as_ref().map(ResolvedRole::lines).unwrap_or_default();
+    let line = lines.iter().find(|line| line.agent == pick.agent);
+    if pick.model.is_none() {
+        if let Some(line) = line {
+            pick.model = line.model.clone();
+        } else if req.agent.is_none()
+            && lines.is_empty()
+            && let Some(model) = role
+                .as_ref()
+                .and_then(|role| role.model.as_ref())
+                .filter(|model| !model.value.trim().is_empty())
+        {
+            pick.model = Some(model.value.clone());
+        }
     }
     let effort = req
         .effort
         .clone()
+        .or_else(|| line.and_then(|line| line.effort.clone()))
         .or_else(|| {
             role.as_ref()
                 .and_then(|role| role.effort.as_ref())
@@ -262,6 +273,7 @@ pub fn spawn(
                 .filter(|effort| !effort.trim().is_empty())
         })
         .filter(|effort| !effort.trim().is_empty());
+    let program_line = program_line_note(&lines, &pick.agent, req.agent.is_some());
     // What the catalog says about the level decides whether the flag is passed;
     // the setting itself stays as it was written, so the brief can say both what
     // was asked for and why it does nothing.
@@ -289,11 +301,14 @@ pub fn spawn(
     // What the launch applies is decided before the brief is written, because
     // the Settings block names it.
     let program = program_of(env.programs.as_slice(), &pick.agent)?;
-    let chosen = applied(
-        &program.spec,
-        named(role.as_ref().and_then(|role| role.perm.as_ref())),
-        role.as_ref().is_some_and(|role| role.fast.value),
-    );
+    let chosen = match line {
+        Some(line) => applied(&program.spec, line.perm.as_deref(), line.fast),
+        None => applied(
+            &program.spec,
+            named(role.as_ref().and_then(|role| role.perm.as_ref())),
+            role.as_ref().is_some_and(|role| role.fast.value),
+        ),
+    };
     // How this program raises a needs-you card is the harness's fact alone
     // (`[asks] supported`), so the brief never has to know a program's name.
     let ask = AskRoute::of_harness(program.spec.asks.supported);
@@ -336,6 +351,7 @@ pub fn spawn(
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &warnings,
+        program_line: program_line.as_deref(),
     });
     write_brief(&brief_path, &brief)?;
     // The repository's one space comes first: shprd's to make rather than a
@@ -1585,27 +1601,57 @@ pub(crate) fn program_of<'a>(
         })
 }
 
-/// The agent strings a spawn tries, in order: the worker role's program and
-/// model when it names a program, then the configured workers.
+/// One sentence for the brief's Settings block: which of the worker's program
+/// lines a task got, why, and where the task goes if that program can't go on.
+///
+/// [`None`] for a worker with one line or none, whose brief reads as it always
+/// did.
+fn program_line_note(
+    lines: &[shprd_core::settings::WorkerLine],
+    picked: &str,
+    asked: bool,
+) -> Option<String> {
+    if lines.len() < 2 {
+        return None;
+    }
+    let order: Vec<&str> = lines.iter().map(|line| line.agent.as_str()).collect();
+    let Some(index) = order.iter().position(|agent| *agent == picked) else {
+        return Some(format!(
+            "none of the worker's lines ({}): `{picked}` was picked with --agent or from the              configured workers",
+            order.join(", ")
+        ));
+    };
+    let why = if asked {
+        "asked for with --agent"
+    } else if index == 0 {
+        "the default: the first line"
+    } else {
+        "the lines before it have no CLI installed here"
+    };
+    let next = match order.get(index + 1) {
+        Some(next) => format!(
+            "if `{picked}` can't go on (provider error or out of quota) the task moves to `{next}`"
+        ),
+        None => format!("`{picked}` is the last line, so there is no further program to move to"),
+    };
+    Some(format!(
+        "{} of {} (`{picked}`), {why}; lines in order: {}; {next}",
+        index + 1,
+        lines.len(),
+        order.join(", ")
+    ))
+}
+
+/// The agent strings a spawn tries, in order: every program line of the worker
+/// role, then the configured workers.
 ///
 /// A role's program that is not installed falls through to the configured
 /// workers, exactly as an uninstalled worker does, so a machine without it
 /// still starts the task.
 fn role_candidates(role: Option<&ResolvedRole>, workers: &[String]) -> Vec<String> {
-    let mut candidates = Vec::new();
-    if let Some(role) = role
-        && let Some(agent) = &role.agent
-    {
-        let model = role
-            .model
-            .as_ref()
-            .map(|model| model.value.as_str())
-            .filter(|model| !model.is_empty());
-        candidates.push(match model {
-            Some(model) => format!("{}/{model}", agent.value),
-            None => agent.value.clone(),
-        });
-    }
+    let mut candidates: Vec<String> = role
+        .map(|role| role.lines().iter().map(|line| line.agent_ref()).collect())
+        .unwrap_or_default();
     candidates.extend(workers.iter().cloned());
     candidates
 }
@@ -3423,6 +3469,59 @@ project_dirs = []
         assert!(brief.contains("- Program: pi (you)"), "{brief}");
         assert!(brief.contains("- Model: sonnet (you)"), "{brief}");
         assert!(brief.contains("- Effort: high (you)"), "{brief}");
+    }
+
+    /// A worker with several program lines: the default is the first, and a task
+    /// asked for another line gets that line's own model and effort, and the
+    /// brief says which line it got and where it goes next.
+    #[test]
+    fn a_task_picks_a_worker_line_and_gets_its_settings() {
+        let settings = "[roles.worker]\nagent = \"pi\"\nmodel = \"sonnet\"\neffort = \"high\"\n\
+                        agents = [\"kilo|kilo-model|low||\", \"opencode\"]\n";
+        let run = |asked: Option<&str>| {
+            let scratch = Scratch::new();
+            let ctx = scratch.ctx();
+            let mut env = scratch.spawn_env_with(&ctx, settings);
+            for id in ["pi", "kilo", "opencode"] {
+                env.programs.push(Program {
+                    spec: fake_spec(id),
+                    installed: true,
+                });
+            }
+            let mux = FakeMux::default().with_ready_agent();
+            mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+                .unwrap_or_else(|err| panic!("{err}"));
+            let mut req = request();
+            req.agent = asked.map(str::to_string);
+            let report = spawn(&mux, &env, &req).unwrap_or_else(|err| panic!("{err}"));
+            let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
+            (report, brief)
+        };
+
+        // Nothing asked: the first line.
+        let (first, brief) = run(None);
+        assert_eq!(first.agent, "pi");
+        assert_eq!(first.model.as_deref(), Some("sonnet"));
+        assert!(
+            brief.contains("1 of 3 (`pi`), the default: the first line"),
+            "{brief}"
+        );
+        assert!(brief.contains("moves to `kilo`"), "{brief}");
+
+        // Asked for the second line by its program: its model and effort.
+        let (second, brief) = run(Some("kilo"));
+        assert_eq!(second.agent, "kilo");
+        assert_eq!(second.model.as_deref(), Some("kilo-model"));
+        assert!(
+            brief.contains("2 of 3 (`kilo`), asked for with --agent"),
+            "{brief}"
+        );
+        assert!(brief.contains("- Model: kilo-model (this task)"), "{brief}");
+        assert!(brief.contains("- Effort: low (this task)"), "{brief}");
+        assert!(
+            !brief.contains("- Fallback:"),
+            "the lines replace the fallback line: {brief}"
+        );
     }
 
     /// A model its catalog says cannot think is not passed an effort flag, and
@@ -5851,6 +5950,7 @@ off = ["--no-fast"]
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         for needle in [
             "# M4.4 Make spawn real",
@@ -5903,6 +6003,7 @@ off = ["--no-fast"]
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         for needle in [
             "## Why the previous attempt was sent back",
@@ -5941,6 +6042,7 @@ off = ["--no-fast"]
                 settings: None,
                 role: None,
                 warnings: &[],
+                program_line: None,
             })
         };
         assert!(!brief_for(1).contains("sent back"));

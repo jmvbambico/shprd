@@ -291,8 +291,8 @@ export function roles(document, roster) {
  *
  * Each is offered only where it means something, so none is drawn dead:
  * Fast where the role's program has a fast mode, Permissions where its harness
- * table lists access modes, and Fallback on the worker role (the tick
- * reads the worker's list, `roles.worker.fallback`). `backup` is the Backup
+ * table lists access modes, and Fallback on the reviewer role (one program and
+ * model; the worker has lines instead, see `workerLines`). `backup` is the Backup
  * agent role's own switch: on while the role names a program.
  */
 function extrasOf(role, rows, roster) {
@@ -331,20 +331,17 @@ function extrasOf(role, rows, roster) {
       ],
     };
   }
-  const fallbackRow = rows.get(`roles.${role.id}.fallback`);
-  if (role.id === "worker") {
-    const value = listOf(fallbackRow) ?? [];
+  // The reviewer's fallback is one program and model, picked like the main one
+  // (a worker's several programs are its lines, `workerLines`).
+  if (role.id === "reviewer") {
+    const fallbackRow = rows.get("roles.reviewer.fallback");
     out.fallback = {
-      key: `roles.${role.id}.fallback`,
+      key: "roles.reviewer.fallback",
       label: "Fallback",
-      about: "Programs tried in this order when the first cannot go on.",
-      value,
-      display: value.length === 0 ? "None" : value.map((id) => programOf(roster, id)?.name ?? id).join(" → "),
+      about: "Reviews instead when the main reviewer's CLI is not installed or would share the worker's vendor.",
+      value: reviewerFallback(rows),
       source: fallbackRow?.source ?? null,
       layer: layerOf(fallbackRow?.source),
-      choices: (roster?.programs ?? [])
-        .filter((entry) => entry.id !== agent)
-        .map((entry) => ({ value: entry.id, label: entry.name, hint: entry.installed ? entry.vendor : "not installed" })),
     };
   }
   if (role.id === "backup") {
@@ -374,11 +371,135 @@ export function backupChoice(document, roster) {
   return sorted[0]?.id ?? null;
 }
 
-/** The list a Fallback pick would write after `id` is toggled in `list`. */
-export function toggled(list, id) {
-  const have = Array.isArray(list) ? list : [];
-  return have.includes(id) ? have.filter((entry) => entry !== id) : [...have, id];
+// -- worker lines and the reviewer's fallback ---------------------------------
+//
+// A worker holds an ordered list of program lines. The first is the role's own
+// `agent`/`model`/`effort`/`fast`/`perm`; the rest are `roles.worker.agents`, one
+// `agent|model|effort|fast|perm` string each (the service's `WorkerLine`). A
+// settings file written before lines existed has the other programs in
+// `roles.worker.fallback`; they read as lines with the program's own defaults.
+
+/** One stored line (`agent|model|effort|fast|perm`, or `program`, or `program/model`) as a selection, or null. */
+export function parseLine(text) {
+  const raw = String(text ?? "");
+  const parts = raw.split("|");
+  const head = parts.shift().trim();
+  const some = (part) => (part === undefined || part.trim() === "" ? null : part.trim());
+  if (parts.length === 0) {
+    const at = head.indexOf("/");
+    const agent = at < 0 ? head : head.slice(0, at).trim();
+    const model = at < 0 ? null : some(head.slice(at + 1));
+    return agent === "" ? null : { agent, model, effort: null, fast: false, perm: null };
+  }
+  if (head === "") return null;
+  return {
+    agent: head,
+    model: some(parts[0]),
+    effort: some(parts[1]),
+    fast: ["1", "true"].includes((parts[2] ?? "").trim()),
+    perm: some(parts[3]),
+  };
 }
+
+/** The string a line is stored as. */
+export function encodeLine(line) {
+  return [line.agent, line.model ?? "", line.effort ?? "", line.fast ? "1" : "", line.perm ?? ""].join("|");
+}
+
+/**
+ * The worker's program lines, first (the default) first: `[{ agent, model, effort,
+ * fast, perm }]`. Empty while the worker names no program. A program is listed once.
+ */
+export function workerLines(document, roleId = "worker") {
+  const rows = rowsOf(document);
+  const first = roleSelection(document, roleId);
+  const lines = first.agent ? [first] : [];
+  const stored = listOf(rows.get(`roles.${roleId}.agents`)) ?? [];
+  const more = stored.length > 0 ? stored : (listOf(rows.get(`roles.${roleId}.fallback`)) ?? []);
+  for (const text of more) {
+    const line = parseLine(text);
+    if (line && !lines.some((kept) => kept.agent === line.agent)) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * The writes that make a role's lines `lines`: the first line into the role's own
+ * fields, the rest into `agents`. The old `fallback` list is emptied when it held
+ * anything, because `agents` replaces it. A write that changes nothing is left out.
+ */
+export function lineWrites(document, roleId, lines) {
+  const before = roleSelection(document, roleId);
+  const [first, ...rest] = lines;
+  const writes = first ? selectionWrites(roleId, before, first) : [];
+  const rows = rowsOf(document);
+  const had = listOf(rows.get(`roles.${roleId}.agents`)) ?? [];
+  const next = rest.map(encodeLine);
+  if (JSON.stringify(had) !== JSON.stringify(next)) {
+    writes.push({ key: `roles.${roleId}.agents`, value: next, prior: had.length > 0 ? had : null });
+  }
+  const old = listOf(rows.get(`roles.${roleId}.fallback`)) ?? [];
+  if (old.length > 0) writes.push({ key: `roles.${roleId}.fallback`, value: [], prior: old });
+  return writes;
+}
+
+/** The program a "+" adds a line for: the first detected program no line has, or null. */
+export function nextLineProgram(document, roster, roleId = "worker") {
+  const used = new Set(workerLines(document, roleId).map((line) => line.agent));
+  return detectedPrograms(roster).find((program) => !used.has(program.id))?.id ?? null;
+}
+
+/** The lines after line `at` (0-based) is replaced by `line`, or taken out when `line` is null. */
+export function withLine(lines, at, line) {
+  return line === null ? lines.filter((_, i) => i !== at) : lines.map((kept, i) => (i === at ? line : kept));
+}
+
+/** The reviewer's fallback as a selection `{ agent, model }`, or null for None. */
+function reviewerFallback(rows) {
+  for (const text of listOf(rows.get("roles.reviewer.fallback")) ?? []) {
+    const line = parseLine(text);
+    if (line) return { agent: line.agent, model: line.model, effort: null, fast: false, perm: null };
+  }
+  return null;
+}
+
+/** The write that sets the reviewer's fallback to `sel`, or to None (an empty list) when it is null. */
+export function fallbackWrite(document, roleId, sel) {
+  const key = `roles.${roleId}.fallback`;
+  const had = listOf(rowsOf(document).get(key)) ?? [];
+  const value = sel?.agent ? [sel.model ? `${sel.agent}/${sel.model}` : sel.agent] : [];
+  return JSON.stringify(had) === JSON.stringify(value) ? [] : [{ key, value, prior: had }];
+}
+
+/**
+ * What a worker line's button says: "Claude Code · Opus 5.5 · Medium". The program
+ * leads, because a worker's lines are programs; a model the line leaves at the
+ * program's default is left out.
+ */
+export function lineLabel(menus, sel, roster = null) {
+  if (!sel?.agent) return "Choose a program";
+  const program = menus?.programs?.[sel.agent];
+  const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
+  const model = modelIn(menus, sel);
+  const level = program ? levelOf(menus, sel) : sel.effort;
+  return [base, sel.model ? (model?.name ?? sel.model) : null, level ? levelWord(level) : null]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** What the reviewer fallback's button says: "Codex · GPT-6-Luna", or "None". */
+export function fallbackLabel(menus, sel, roster = null) {
+  if (!sel?.agent) return "None";
+  const program = menus?.programs?.[sel.agent];
+  const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
+  const model = modelIn(menus, sel);
+  return sel.model ? `${base} · ${model?.name ?? sel.model}` : base;
+}
+
+/** The one-line description of a worker's lines, the words the Settings dialog shows. */
+export const WORKER_LINES_ABOUT =
+  "The first line is the default worker; `shprd agent spawn --agent <program>` runs a task on any line. " +
+  "If a line's program can't go on, the task moves to the next line.";
 
 /**
  * The order `roles.order` would have after `id` is added, or null when the id
@@ -1184,7 +1305,7 @@ export function repoKeysOf(document, roleId) {
 /** The shared key a popup answers on, read by the Settings window: `{ key, field, value, at }`. */
 export const PICK_KEY = "shprd.settings.pick";
 
-/** The model menu's width, and its height at its tallest: border and padding, tabs, search, heading, 8 rows, rule, Reasoning, Fast, Permissions, a note. */
+/** The model menu's width, and its height at its tallest: border and padding, the program dropdown, search, heading, 8 rows, rule, Reasoning, Fast, Permissions, a note. */
 export const MENU_W = 460;
 export const MENU_H = 2 + 10 + 34 + 36 + 26 + 8 * 31 + 20 + 9 + 26 + 34 + 31 + 31;
 
@@ -1194,7 +1315,11 @@ export const MENU_H = 2 + 10 + 34 + 36 + 26 + 8 * 31 + 20 + 9 + 26 + 34 + 31 + 3
  * popup is not much taller than what it shows and a click beside the menu
  * reaches the page.
  */
-export function menuHeight(menus) {
-  const longest = Math.max(1, ...menus.order.map((id) => menus.programs[id].models.length));
-  return MENU_H - (8 - Math.min(8, longest)) * 31;
+export function menuHeight(menus, { light = false, none = false } = {}) {
+  // The program list takes the models' place while it is open, so it counts too.
+  const longest = Math.max(1, menus.order.length, ...menus.order.map((id) => menus.programs[id].models.length));
+  const full = MENU_H - (8 - Math.min(8, longest)) * 31;
+  // A light menu has no rule, Reasoning, Fast or Permissions.
+  const lighter = light ? full - (9 + 26 + 34 + 31 + 31) : full;
+  return lighter + (none ? 31 : 0);
 }

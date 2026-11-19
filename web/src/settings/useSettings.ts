@@ -240,7 +240,7 @@ export function useSettings(client: ApiClient): SettingsState {
 
   const writeAll = useCallback(
     async (writes: Write[], forRepo: boolean): Promise<boolean> => {
-      const done: Array<{ key: string; prior: string | boolean | null }> = [];
+      const done: Array<{ key: string; prior: string | boolean | string[] | null }> = [];
       let current = settingsRef.current;
       for (const next of writes) {
         const prior = priorInScope(current, next.key, forRepo);

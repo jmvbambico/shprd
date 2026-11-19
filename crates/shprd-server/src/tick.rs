@@ -640,31 +640,41 @@ impl Worker {
             .collect()
     }
 
-    /// The programs a cut worker is handed to, in order: the worker role's own
-    /// fallback list, then the configured workers.
+    /// The programs a cut worker is handed to, in order: the worker role's program
+    /// lines, then the configured workers.
     ///
     /// The role's list is what the brief's Settings block prints, so the ladder
     /// and the block agree. A settings file that cannot be read (or a role that
     /// names nobody) leaves the configured workers, which is the order a run had
     /// before the role settings existed. A `program/model` entry counts as its
     /// program, because a backup is chosen by program.
-    fn worker_fallbacks(&self) -> Vec<String> {
+    fn worker_fallbacks(&self) -> (Vec<String>, usize) {
         let mut programs: Vec<String> =
             match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
                 Ok(loaded) => loaded
                     .resolve(None)
                     .role("worker")
-                    .map(|role| role.fallback.value)
+                    .map(|role| {
+                        // The worker's program lines, in order: the ladder
+                        // moves a cut task to the next one. The first line is
+                        // listed too, so a task on a later line can wrap round.
+                        role.lines().iter().map(|line| line.agent_ref()).collect()
+                    })
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
+        let lines = programs.len();
         for worker in &self.config.roster.workers {
             let program = worker.split('/').next().unwrap_or(worker).trim();
-            if !program.is_empty() && !programs.iter().any(|kept| kept == program) {
+            if !program.is_empty()
+                && !programs
+                    .iter()
+                    .any(|kept| kept.split('/').next() == Some(program))
+            {
                 programs.push(program.to_owned());
             }
         }
-        programs
+        (programs, lines)
     }
 
     /// Tells the coordinator what changed, when a news desk is wired.
@@ -705,8 +715,8 @@ impl Worker {
 
     /// Reads the ladder's facts and plans its actions.
     ///
-    /// The fallback list is the worker role's own (`roles.worker.fallback`),
-    /// which is the list the brief's Settings block prints, then the configured
+    /// The list is the worker role's program lines (`roles.worker.agents`, with
+    /// the old `fallback` read as lines too), which the brief's Settings block prints, then the configured
     /// workers, so a setting nobody made keeps the roster's order.
     fn ladder_plan(&self, state: &RunState) -> LadderPass {
         let Some(source) = &self.fallback else {
@@ -719,9 +729,11 @@ impl Worker {
         if !agents.iter().any(|agent| agent.cut.is_some()) {
             return LadderPass::default();
         }
+        let (worker_list, worker_lines) = self.worker_fallbacks();
         let config = LadderConfig {
             waits_ms: Vec::new(),
-            fallbacks: BTreeMap::from([(String::from("worker"), self.worker_fallbacks())]),
+            fallbacks: BTreeMap::from([(String::from("worker"), worker_list.clone())]),
+            lines: BTreeMap::from([(String::from("worker"), worker_lines)]),
             installed: source.installed(),
             signed_in: source.signed_in(),
         };

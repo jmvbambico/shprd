@@ -87,6 +87,11 @@ pub struct Config {
     /// `coordinator`). Entries may be `program/model` strings; only the
     /// program is read here.
     pub fallbacks: BTreeMap<String, Vec<String>>,
+    /// How many leading entries of a role's list are its own program lines (the
+    /// rest are the configured workers, appended). A task moves to the line after
+    /// the one it runs on only when it runs on one of those lines; a role missing
+    /// here counts every entry as a line.
+    pub lines: BTreeMap<String, usize>,
     /// Every program the machine has a harness for and a binary for.
     pub installed: BTreeSet<String>,
     /// Every program that answered its own sign-in probe.
@@ -409,11 +414,24 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
 
 /// The program that takes over from `from`, if one may.
 ///
-/// The role's fallback list is walked in order; the program the task already
-/// runs is skipped (a backup is a different program, not a fresh process), and
-/// only a program signed in on this machine is chosen.
+/// The role's list is the worker's program lines, in order. A task that was
+/// running line N moves to line N+1, and when no later line can take it, to an
+/// earlier one; the program the task already runs is skipped (a backup is a
+/// different program, not a fresh process), and only a program signed in on this
+/// machine is chosen.
 pub fn choose_backup(config: &Config, role: Role, from: &str) -> Option<String> {
-    for raw in config.fallbacks_for(role) {
+    let list = config.fallbacks_for(role);
+    let lines = role
+        .key()
+        .and_then(|key| config.lines.get(key))
+        .copied()
+        .unwrap_or(list.len())
+        .min(list.len());
+    let start = list[..lines]
+        .iter()
+        .position(|raw| program_of(raw) == from)
+        .map_or(0, |at| at + 1);
+    for raw in list[start..].iter().chain(&list[..start]) {
         let program = program_of(raw);
         if program != from
             && config.installed.contains(program)
@@ -599,6 +617,7 @@ mod tests {
                 String::from("worker"),
                 vec![String::from("claude"), String::from("codex")],
             )]),
+            lines: BTreeMap::new(),
             installed: BTreeSet::from([String::from("claude"), String::from("codex")]),
             signed_in: BTreeSet::from([String::from("claude"), String::from("codex")]),
         }
@@ -746,6 +765,41 @@ mod tests {
         // And the old program's cut is not acted on at all.
         let actions = plan(&state, &[fact], NOW, &cfg);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn a_cut_task_moves_to_the_next_line_then_wraps_to_an_earlier_one() {
+        let mut cfg = config();
+        cfg.fallbacks = BTreeMap::from([(
+            String::from("worker"),
+            ["claude", "codex", "pi", "opencode"]
+                .map(String::from)
+                .to_vec(),
+        )]);
+        cfg.installed = ["claude", "codex", "pi", "opencode"]
+            .map(String::from)
+            .into();
+        cfg.signed_in = cfg.installed.clone();
+        assert_eq!(
+            choose_backup(&cfg, Role::Worker, "codex").as_deref(),
+            Some("pi"),
+            "line 2 moves to line 3"
+        );
+        assert_eq!(
+            choose_backup(&cfg, Role::Worker, "claude").as_deref(),
+            Some("codex")
+        );
+        // The next line is signed out: the one after it takes over.
+        cfg.signed_in.remove("pi");
+        assert_eq!(
+            choose_backup(&cfg, Role::Worker, "codex").as_deref(),
+            Some("opencode")
+        );
+        // The last line has nothing after it: an earlier line takes over.
+        assert_eq!(
+            choose_backup(&cfg, Role::Worker, "opencode").as_deref(),
+            Some("claude")
+        );
     }
 
     #[test]

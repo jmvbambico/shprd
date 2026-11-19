@@ -15,10 +15,15 @@
 // Two modes, by props:
 //
 // - `{ mode: "models", key, current: { agent, model, effort, fast, perm }, menus,
-//   icons, overlay }` — the model menu. `menus` is `menusOf(roster)`: one tab per
-//   program the roster says is installed, never a fixed pair. Every change goes
-//   back at once as shared `shprd.settings.pick` = `{ key, field: "selection",
-//   value, at }`, which the window applies as writes.
+//   icons, overlay, light?, allowNone?, taken? }` — the model menu. `menus` is
+//   `menusOf(roster)`: every program the roster says is installed, listed in a
+//   dropdown at the top (a row of tabs does not scale to many CLIs). Every change
+//   goes back at once as shared `shprd.settings.pick` = `{ key, field:
+//   "selection", value, at }`, which the window applies as writes. `light` is a
+//   program-and-model choice only (the reviewer's fallback): no Reasoning, Fast or
+//   Permissions, and the menu closes on a pick; `allowNone` adds a "None" row, which
+//   answers `value: null`; `taken` is the programs another line of the same role
+//   already runs, shown but not pickable.
 // - `{ mode: "pick", key, field, options: [{ id, label, hint? }], current, overlay }`
 //   — a plain list with a check on the current one; the choice goes back as
 //   `{ key, field, value, at }`.
@@ -44,7 +49,7 @@ const ROW = 31;
 const HEAD = 26;
 const SEP = 9;
 const SEG = 34;
-const TABS = 34;
+const PROGRAM = 34;
 const SEARCH = 36;
 const LIST_ROWS = 8;
 
@@ -60,6 +65,7 @@ export default class ModelMenu extends View {
     this.sel = { ...(p.current ?? {}) };
     this.tab = p.menus?.programs?.[this.sel.agent] ? this.sel.agent : (p.menus?.order ?? [])[0] ?? null;
     this.permOpen = false;
+    this.progOpen = false;
     this.cursor = 0;
     this.input = InputState.new({ placeholder: "Search every agent’s models" });
     this.input.on("change", (_e, cx2) => {
@@ -105,6 +111,22 @@ export default class ModelMenu extends View {
     this.input.set_value("");
     this.cursor = 0;
     this.tell();
+    if (this.p.light === true) closeOverlay(this.p.overlay);
+  }
+
+  /** The program dropdown's choice: that program's models are listed. */
+  pickProgram(agent) {
+    if ((this.p.taken ?? []).includes(agent)) return;
+    this.tab = agent;
+    this.progOpen = false;
+    this.input.set_value("");
+    this.cursor = 0;
+  }
+
+  /** "None" (the reviewer's fallback): nothing, and the menu closes. */
+  pickNone() {
+    setShared(PICK, { key: this.p.key, field: "selection", value: null, at: Date.now() });
+    closeOverlay(this.p.overlay);
   }
 
   icon(agent, t) {
@@ -144,6 +166,7 @@ export default class ModelMenu extends View {
     const program = menus.programs[sel.agent] ?? null;
     const rows = this.rows();
     this.cursor = Math.max(0, Math.min(this.cursor, rows.length - 1));
+    const light = this.p.light === true;
     const levels = levelsFor(menus, sel);
     const level = levelOf(menus, sel);
     const fast = fastOffered(menus, sel);
@@ -152,50 +175,60 @@ export default class ModelMenu extends View {
     const listH = Math.min(LIST_ROWS, Math.max(rows.length, 1)) * ROW;
     const note = this.tab ? (menus.programs[this.tab]?.note ?? null) : null;
 
-    const tabs = h_flex()
-      .h(TABS)
+    // The program is a dropdown, not a row of tabs: it holds as many CLIs as the
+    // machine has. Opened, its list takes the models' place below the search.
+    const taken = this.p.taken ?? [];
+    const programSelect = h_flex()
+      .h(PROGRAM)
       .flex_none()
       .px(4)
       .pb(4)
       .items_center()
       .child(
         h_flex()
+          .id("program-select")
           .w_full()
-          .h(28)
-          .p(2)
-          .gap(2)
-          .rounded(14)
+          .h(30)
+          .px(10)
+          .gap(8)
+          .rounded(7)
           .bg(t.raised)
-          .children(
-            menus.order.map((a) =>
-              h_flex()
-                .id(`tab-${a}`)
-                .flex_auto()
-                .h_full()
-                .px(8)
-                .gap(6)
-                .justify_center()
-                .items_center()
-                .rounded(12)
-                .text_size(12)
-                .when(this.tab === a, (el) => el.bg(t.background).text_color(t.foreground).font_medium())
-                .when(this.tab !== a, (el) =>
-                  el
-                    .text_color(t.muted)
-                    .cursor_pointer()
-                    .hover((s) => s.text_color(t.foreground))
-                    .on_click(
-                      press(() => {
-                        this.tab = a;
-                        this.input.set_value("");
-                        this.cursor = 0;
-                      }),
-                    ),
-                )
-                .child(this.icon(a, t))
-                .child(div().whitespace_nowrap().child(menus.programs[a].name)),
-            ),
-          ),
+          .items_center()
+          .cursor_pointer()
+          .hover((s2) => s2.bg(t.selected ?? t.hover))
+          .when(this.progOpen, (el) => el.bg(t.selected ?? t.hover))
+          .on_click(
+            press(() => {
+              this.progOpen = !this.progOpen;
+            }),
+          )
+          .child(this.tab ? this.icon(this.tab, t) : div().size(14).flex_none())
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .font_medium()
+              .child(this.tab ? (menus.programs[this.tab]?.name ?? this.tab) : "Select program"),
+          )
+          .child(svg(iconFile("chevron-down")).size(12).flex_none().text_color(t.dim)),
+      );
+    const programList = v_flex()
+      .id("program-list")
+      .flex_none()
+      .h(Math.min(LIST_ROWS, Math.max(menus.order.length, 1)) * ROW)
+      .overflow_y_scrollbar()
+      .children(
+        menus.order.map((a) =>
+          this.row(t, `program-${a}`, () => this.pickProgram(a))
+            .when(taken.includes(a), (el) => el.opacity(0.5))
+            .child(this.icon(a, t))
+            .child(div().flex_1().min_w(0).truncate().child(menus.programs[a].name))
+            .when(taken.includes(a), (el) =>
+              el.child(div().flex_none().text_size(11).text_color(t.dim).child("another line has it")),
+            )
+            .child(this.check(t, a === this.tab)),
+        ),
       );
 
     const search = h_flex()
@@ -217,6 +250,12 @@ export default class ModelMenu extends View {
           .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)),
       );
 
+    const noneRow = this.p.allowNone
+      ? this.row(t, "none", () => this.pickNone())
+          .child(div().size(14).flex_none())
+          .child(div().flex_1().child("None"))
+          .child(this.check(t, !sel.agent))
+      : null;
     const list =
       rows.length === 0
         ? div().min_h(ROW).flex_none().px(9).py(6).text_size(11.5).text_color(t.dim).child("No models.")
@@ -304,16 +343,19 @@ export default class ModelMenu extends View {
       .shadow_md()
       .text_size(12.8)
       .text_color(t.foreground)
-      .when(menus.order.length > 0, (el) => el.child(tabs))
+      .when(menus.order.length > 0, (el) => el.child(programSelect))
       .child(search)
-      .child(this.head(t, "Models"))
-      .child(list)
-      .when(Boolean(note), (el) =>
+      .when(noneRow !== null && !this.progOpen, (el) => el.child(noneRow))
+      .child(this.head(t, this.progOpen ? "Programs" : "Models"))
+      .child(this.progOpen ? programList : list)
+      .when(Boolean(note) && !this.progOpen, (el) =>
         el.child(div().px(9).py(3).text_size(11).text_color(t.dim).child(note)),
       )
-      .child(div().h(SEP).flex_none().py(4).px(4).child(div().h(1).w_full().bg(t.border)))
-      .when(reasoning !== null, (el) => el.child(reasoning))
-      .when(fast, (el) =>
+      .when(!light, (el) =>
+        el.child(div().h(SEP).flex_none().py(4).px(4).child(div().h(1).w_full().bg(t.border))),
+      )
+      .when(!light && reasoning !== null, (el) => el.child(reasoning))
+      .when(!light && fast, (el) =>
         el.child(
           this.row(t, "fast", () => {
             this.sel = { ...this.sel, fast: !this.sel.fast };
@@ -342,7 +384,7 @@ export default class ModelMenu extends View {
             ),
         ),
       )
-      .when(perms.length > 0, (el) =>
+      .when(!light && perms.length > 0, (el) =>
         el.child(
           this.row(t, "perms", () => {
             this.permOpen = !this.permOpen;
@@ -355,7 +397,7 @@ export default class ModelMenu extends View {
             .child(svg(iconFile("chevron-right")).size(12).flex_none().text_color(t.dim)),
         ),
       )
-      .when(this.permOpen, (el) => el.child(this.permMenu(t, perms)));
+      .when(!light && this.permOpen, (el) => el.child(this.permMenu(t, perms)));
 
     const col = v_flex()
       .id("model-menu-area")
@@ -366,8 +408,9 @@ export default class ModelMenu extends View {
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
           cx.stop_propagation();
-          if (this.permOpen) {
+          if (this.permOpen || this.progOpen) {
             this.permOpen = false;
+            this.progOpen = false;
             cx.notify();
           } else closeOverlay(this.p.overlay);
           return;
@@ -375,6 +418,7 @@ export default class ModelMenu extends View {
         if (e.key === "down") this.cursor = Math.min(rows.length - 1, this.cursor + 1);
         else if (e.key === "up") this.cursor = Math.max(0, this.cursor - 1);
         else if (e.key === "tab" && menus.order.length > 1) {
+          // Tab steps to the next program, as it stepped along the tabs.
           const at = menus.order.indexOf(this.tab);
           this.tab = menus.order[(at + (e.modifiers?.shift ? menus.order.length - 1 : 1)) % menus.order.length];
           this.input.set_value("");

@@ -3553,32 +3553,38 @@ textarea.input {
   width: min(460px, calc(100vw - 32px));
 }
 
-.mm-tabs {
+.mm-program {
   display: flex;
-  gap: 2px;
-  padding: 2px;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
   margin: 0 4px 6px;
-  overflow-x: auto;
-  border-radius: 14px;
-  background: var(--h-raised);
-}
-
-.mm-tab {
-  flex: auto;
-  padding: 4px 10px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--h-muted);
-  font-size: var(--text-label);
-  white-space: nowrap;
+  border-radius: 7px;
+  background: var(--h-raised);
+  color: var(--h-foreground);
+  font: inherit;
+  font-weight: 500;
   cursor: pointer;
 }
 
-.mm-tab[aria-selected="true"] {
-  background: var(--h-background);
-  color: var(--h-foreground);
-  font-weight: 500;
+.mm-program[aria-expanded="true"] {
+  background: var(--h-hover);
+}
+
+.mm-program-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pop-row:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .mm-search {
@@ -3706,6 +3712,31 @@ textarea.input {
 .role-kind {
   color: var(--h-dim);
   font-size: var(--text-id);
+}
+
+.role-lines {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.role-line-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.role-fallback {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.role-fallback-label {
+  color: var(--h-muted);
+  font-size: var(--text-label);
 }
 
 .role-controls {

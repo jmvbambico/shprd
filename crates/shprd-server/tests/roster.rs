@@ -135,14 +135,23 @@ async fn a_static_catalog_supplies_the_models_and_their_levels() {
     assert_eq!(claude["vendor"], "anthropic");
     assert_eq!(claude["models_source"], "static");
     let models = claude["models"].as_array().expect("models");
-    assert_eq!(models.len(), 3, "{claude}");
-    assert_eq!(models[1]["id"], "opus");
-    assert_eq!(models[1]["name"], "Opus");
+    assert_eq!(models.len(), 8, "{claude}");
+    let ids: Vec<&str> = models
+        .iter()
+        .map(|model| model["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"haiku") && ids.contains(&"opus[1m]"),
+        "{ids:?}"
+    );
+    let opus = &models[3];
+    assert_eq!(opus["id"], "opus");
+    assert_eq!(opus["name"], "Opus 5.5");
     assert_eq!(
-        models[1]["efforts"],
+        opus["efforts"],
         serde_json::json!(["low", "medium", "high", "xhigh", "max"])
     );
-    assert_eq!(models[1]["default_effort"], "medium");
+    assert_eq!(opus["default_effort"], "medium");
     assert_eq!(claude["default_permission"], "manual");
     assert_eq!(claude["fast"], true);
     assert!(
