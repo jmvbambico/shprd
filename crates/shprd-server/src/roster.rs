@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use shprd_agents::data::DataDir;
 use shprd_agents::detect::{find_binary, vendor_name};
+use shprd_agents::families::Families;
 use shprd_agents::models::{self, Catalog};
 use shprd_agents::spec::{CatalogSource, HarnessSpec};
 
@@ -73,11 +74,12 @@ pub(crate) fn read(data: Option<&DataDir>, path_env: Option<&str>) -> RosterDto 
     // and read in the table's order, so the answer takes the slowest listing's
     // time rather than their sum.
     let catalogs = listings(&specs, data, path_env);
+    let families = data.families().unwrap_or_default();
     RosterDto {
         programs: specs
             .iter()
             .zip(catalogs)
-            .map(|(spec, catalog)| program(spec, catalog, installed(spec, path_env)))
+            .map(|(spec, catalog)| program(spec, catalog, installed(spec, path_env), &families))
             .collect(),
         note: None,
     }
@@ -121,9 +123,17 @@ fn listings(specs: &[HarnessSpec], data: &DataDir, path_env: Option<&str>) -> Ve
 }
 
 /// One program's entry: its identity and everything a picker offers for it.
-fn program(spec: &HarnessSpec, catalog: Option<Catalog>, installed: bool) -> ProgramDto {
+fn program(
+    spec: &HarnessSpec,
+    catalog: Option<Catalog>,
+    installed: bool,
+    families: &Families,
+) -> ProgramDto {
     let source = spec.models.catalog_source();
-    let model_choices = catalog.as_ref().map(models_of).unwrap_or_default();
+    let model_choices = catalog
+        .as_ref()
+        .map(|catalog| models_of(catalog, spec, families))
+        .unwrap_or_default();
     let efforts = catalog
         .as_ref()
         .map(|catalog| catalog.efforts.clone())
@@ -162,11 +172,20 @@ fn program(spec: &HarnessSpec, catalog: Option<Catalog>, installed: bool) -> Pro
 }
 
 /// A catalog's models, as the picker draws them.
-fn models_of(catalog: &Catalog) -> Vec<ModelChoiceDto> {
+fn models_of(catalog: &Catalog, spec: &HarnessSpec, families: &Families) -> Vec<ModelChoiceDto> {
     catalog
         .models
         .iter()
         .map(|model| ModelChoiceDto {
+            vendor: if spec.multi_model {
+                let body = match (spec.models.provider_qualified, model.id.split_once('/')) {
+                    (true, Some((_, rest))) => rest,
+                    _ => model.id.as_str(),
+                };
+                families.family_of(body).map(str::to_owned)
+            } else {
+                Some(vendor_name(spec.vendor).to_owned())
+            },
             id: model.id.clone(),
             name: model.name.clone(),
             efforts: model.efforts.clone(),

@@ -1504,6 +1504,13 @@ pub struct ModelChoiceDto {
     pub default_effort: Option<String>,
     /// Whether the model has a speed tier of its own.
     pub fast: bool,
+    /// Whose model it is: the family of the model for a program that runs
+    /// several vendors' models (`pi`), else the program's own vendor. Absent
+    /// when no family claims it. The cross-vendor rule reads this, so a
+    /// picker can choose a default that does not break it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub vendor: Option<String>,
 }
 
 /// One access mode a program offers.

@@ -47,7 +47,7 @@ export const UNSET_LAYER = "nothing sets it";
 export const BUILTIN = ["coordinator", "worker", "reviewer"];
 
 /** What the Agents page heads a built-in role with, until the person names it: a worker and a reviewer are lists. */
-export const HEADINGS = { worker: "Worker(s)", reviewer: "Reviewer(s)" };
+export const HEADINGS = { worker: "Worker (s)", reviewer: "Reviewer (s)" };
 
 /** The three fields a role's pick is made of, in the order a page draws them. */
 export const PICKS = ["agent", "model", "effort"];
@@ -267,7 +267,7 @@ export function roles(document, roster) {
     // What the person reads: their own name for the role, else its built-in word,
     // else its id (the service's `display_title`).
     // The service reports the built-in word as a built-in row: that one is headed
-    // "Worker(s)"; a name the person set stands as they wrote it.
+    // "Worker (s)"; a name the person set stands as they wrote it.
     const named = stored !== "" && titleRow?.source !== "built_in";
     const title = named ? stored : HEADINGS[id] || ROLE_DEFAULTS[id] || id;
     const name = {
@@ -415,6 +415,41 @@ export function lineWrites(document, roleId, lines) {
 export function nextLineProgram(document, roster, roleId = "worker") {
   const used = new Set(workerLines(document, roleId).map((line) => line.agent));
   return detectedPrograms(roster).find((program) => !used.has(program.id))?.id ?? null;
+}
+
+/**
+ * The vendor whose model a line runs: the model's own for a program that runs
+ * several vendors' models (`pi`), else the program's. Null when it is not known.
+ */
+export function lineVendor(roster, line) {
+  const program = programOf(roster, line?.agent);
+  if (!program) return null;
+  if (!program.multi_model) return program.vendor ?? null;
+  return program.models.find((model) => model.id === line.model)?.vendor ?? null;
+}
+
+/**
+ * The model a program is given when it is picked without one: none for a program
+ * with a default of its own, but a program that needs a provider (`pi`) has none,
+ * so it gets the first listed model, preferring one of a vendor not in `avoid` (the
+ * other role's vendors) so the cross-vendor rule is not broken by the pick.
+ */
+export function defaultModel(roster, programId, avoid = []) {
+  const program = programOf(roster, programId);
+  if (!program || !program.needs_provider || program.models.length === 0) return null;
+  const free = program.models.find((model) => !model.vendor || !avoid.includes(model.vendor));
+  return (free ?? program.models[0]).id;
+}
+
+/** The line a "+" adds to a role: the next free program with a valid default model. */
+export function newLine(document, roster, roleId = "worker") {
+  const agent = nextLineProgram(document, roster, roleId);
+  if (agent === null) return null;
+  const other = roleId === "reviewer" ? "worker" : "reviewer";
+  const avoid = workerLines(document, other)
+    .map((line) => lineVendor(roster, line))
+    .filter(Boolean);
+  return { agent, model: defaultModel(roster, agent, avoid), effort: null, fast: false, perm: null };
 }
 
 /** The lines after line `at` (0-based) is replaced by `line`, or taken out when `line` is null. */
@@ -1195,11 +1230,27 @@ export function chooseModel(menus, sel, agent, id) {
 export function selectionWrites(roleId, before, after) {
   const writes = [];
   const put = (field, value, prior) => writes.push({ key: `roles.${roleId}.${field}`, value, prior });
-  if (after.agent !== before.agent) put("agent", after.agent ?? null, before.agent ?? null);
-  if (after.model !== before.model) put("model", after.model ?? null, before.model ?? null);
-  if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null, before.effort ?? null);
-  if (Boolean(after.fast) !== Boolean(before.fast)) put("fast", Boolean(after.fast), Boolean(before.fast));
-  if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null, before.perm ?? null);
+  const same = (field) =>
+    field === "fast" ? Boolean(after.fast) === Boolean(before.fast) : (after[field] ?? null) === (before[field] ?? null);
+  if ((after.agent ?? null) !== (before.agent ?? null)) {
+    // A new program is never asked to take the old one's model, level or access
+    // mode (`pi` refuses `pi/opus`, and `ultra` is not a level it lists), so what
+    // the old program had is taken out first and the new values go in after it.
+    if (before.model) put("model", null, before.model);
+    if (before.effort) put("effort", null, before.effort);
+    if (before.fast) put("fast", false, true);
+    if (before.perm) put("perm", null, before.perm);
+    put("agent", after.agent ?? null, before.agent ?? null);
+    if (after.model) put("model", after.model, null);
+    if (after.effort) put("effort", after.effort, null);
+    if (after.fast) put("fast", true, false);
+    if (after.perm) put("perm", after.perm, null);
+    return writes;
+  }
+  if (!same("model")) put("model", after.model ?? null, before.model ?? null);
+  if (!same("effort")) put("effort", after.effort ?? null, before.effort ?? null);
+  if (!same("fast")) put("fast", Boolean(after.fast), Boolean(before.fast));
+  if (!same("perm")) put("perm", after.perm ?? null, before.perm ?? null);
   return writes;
 }
 

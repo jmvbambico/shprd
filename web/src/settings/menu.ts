@@ -234,8 +234,22 @@ export function selectionWrites(roleId: string, before: Selection, after: Select
   const writes: Write[] = [];
   const put = (field: string, value: string | boolean | null, prior: string | boolean | null) =>
     writes.push({ key: `roles.${roleId}.${field}`, value, prior });
-  if (after.agent !== before.agent) put("agent", after.agent ?? null, before.agent ?? null);
-  if (after.model !== before.model) put("model", after.model ?? null, before.model ?? null);
+  if ((after.agent ?? null) !== (before.agent ?? null)) {
+    // A new program is never asked to take the old one's model, level or access
+    // mode (`pi` refuses `pi/opus`, and `ultra` is not a level it lists), so what
+    // the old program had is taken out first and the new values go in after it.
+    if (before.model) put("model", null, before.model);
+    if (before.effort) put("effort", null, before.effort);
+    if (before.fast) put("fast", false, true);
+    if (before.perm) put("perm", null, before.perm);
+    put("agent", after.agent ?? null, before.agent ?? null);
+    if (after.model) put("model", after.model, null);
+    if (after.effort) put("effort", after.effort, null);
+    if (after.fast) put("fast", true, false);
+    if (after.perm) put("perm", after.perm, null);
+    return writes;
+  }
+  if ((after.model ?? null) !== (before.model ?? null)) put("model", after.model ?? null, before.model ?? null);
   if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null, before.effort ?? null);
   if (after.fast !== before.fast) put("fast", after.fast, before.fast);
   if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null, before.perm ?? null);
@@ -382,6 +396,49 @@ export function lineWrites(document: SettingsDto | null, roleId: string, lines: 
 export function nextLineProgram(document: SettingsDto | null, roster: RosterDto | null, roleId = "worker"): string | null {
   const used = new Set(workerLines(document, roleId).map((line) => line.agent));
   return detectedPrograms(roster).find((program) => !used.has(program.id))?.id ?? null;
+}
+
+/**
+ * The vendor whose model a line runs: the model's own for a program that runs
+ * several vendors' models (`pi`), else the program's. Null when it is not known.
+ */
+export function lineVendor(roster: RosterDto | null, line: Selection): string | null {
+  const program = programOf(roster, line.agent);
+  if (!program) {
+    return null;
+  }
+  if (!program.multi_model) {
+    return program.vendor ?? null;
+  }
+  return program.models.find((model) => model.id === line.model)?.vendor ?? null;
+}
+
+/**
+ * The model a program is given when it is picked without one: none for a program
+ * with a default of its own, but a program that needs a provider (`pi`) has none,
+ * so it gets the first listed model, preferring one of a vendor not in `avoid` (the
+ * other role's vendors) so the cross-vendor rule is not broken by the pick.
+ */
+export function defaultModel(roster: RosterDto | null, programId: string, avoid: string[] = []): string | null {
+  const program = programOf(roster, programId);
+  if (!program || !program.needs_provider || program.models.length === 0) {
+    return null;
+  }
+  const free = program.models.find((model) => !model.vendor || !avoid.includes(model.vendor));
+  return (free ?? program.models[0]!).id;
+}
+
+/** The line a "+" adds to a role: the next free program with a valid default model. */
+export function newLine(document: SettingsDto | null, roster: RosterDto | null, roleId = "worker"): Selection | null {
+  const agent = nextLineProgram(document, roster, roleId);
+  if (agent === null) {
+    return null;
+  }
+  const other = roleId === "reviewer" ? "worker" : "reviewer";
+  const avoid = workerLines(document, other)
+    .map((line) => lineVendor(roster, line))
+    .filter((vendor): vendor is string => vendor !== null);
+  return { agent, model: defaultModel(roster, agent, avoid), effort: null, fast: false, perm: null };
 }
 
 /** The lines after line `at` is replaced by `line`, or taken out when `line` is null. */

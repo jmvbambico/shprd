@@ -29,6 +29,7 @@ import {
   lineLabel,
   lineWrites,
   menusOf,
+  newLine,
   nextLineProgram,
   otherCli,
   repoKeysOf,
@@ -199,9 +200,9 @@ function RoleRow({
     await state.writeAll(lineWrites(state.settings, role.id, next), repo);
   }
   async function addLine() {
-    const agent = nextLineProgram(state.settings, state.roster, role.id);
-    if (agent !== null) {
-      await setLines([...lines, { agent, model: null, effort: null, fast: false, perm: null }]);
+    const line = newLine(state.settings, state.roster, role.id);
+    if (line !== null) {
+      await setLines([...lines, line]);
     }
   }
   const showNotice = role.kind === "coordinator" && (state.restartNotice || restarting !== null);
@@ -256,34 +257,46 @@ function RoleRow({
                     taken={lines.filter((_, i) => i !== at).map((other) => other.agent ?? "")}
                     onChange={(next) => void setLines(withLine(lines.length > 0 ? lines : [sel], at, next))}
                   />
-                  {lines.length > 1 ? (
-                    <button
-                      type="button"
-                      className="link"
-                      aria-label={`Remove program ${at + 1}`}
-                      disabled={busy}
-                      onClick={() => void setLines(withLine(lines, at, null))}
-                    >
-                      ×
-                    </button>
-                  ) : null}
+                  <span className="x-slot">
+                    {lines.length > 1 ? (
+                      <button
+                        type="button"
+                        className="link"
+                        aria-label={`Remove program ${at + 1}`}
+                        disabled={busy}
+                        onClick={() => void setLines(withLine(lines, at, null))}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </span>
                 </div>
               ))}
               {canAdd ? (
-                <button type="button" className="link" aria-label="Add" disabled={busy} onClick={() => void addLine()}>
-                  Add
-                </button>
+                <div className="role-add">
+                  <button type="button" className="link" aria-label="Add New +" disabled={busy} onClick={() => void addLine()}>
+                    <span>Add New</span>
+                    <span className="x-slot" aria-hidden="true">
+                      +
+                    </span>
+                  </button>
+                </div>
               ) : null}
             </div>
           ) : (
-            <ModelMenu
-              label={`${role.title} model`}
-              shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
-              menus={menus}
-              sel={sel}
-              disabled={loading || none}
-              onChange={(next) => void choose(next)}
-            />
+            <div className="role-lines">
+              <div className="role-line-row">
+                <ModelMenu
+                  label={`${role.title} model`}
+                  shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
+                  menus={menus}
+                  sel={sel}
+                  disabled={loading || none}
+                  onChange={(next) => void choose(next)}
+                />
+                <span className="x-slot" />
+              </div>
+            </div>
           )}
           {other !== null ? (
             <button

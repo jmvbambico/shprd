@@ -3741,32 +3741,62 @@ textarea.input {
   font-size: var(--text-id);
 }
 
+/* one grid for every line of every role: [gutter] [button, ⌄ at its right edge] [× slot] */
 .role-lines {
   display: flex;
   flex: none;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
+  align-items: flex-start;
+  width: 340px;
+  max-width: 100%;
 }
 
 .role-line-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-}
-
-/* a chain: lines start at one edge so the numbered dots line up, and the rail runs unbroken */
-.role-lines[data-chain="true"] {
-  align-items: flex-start;
-  gap: 0;
-}
-
-.role-lines[data-chain="true"] .role-line-row {
+  width: 340px;
+  max-width: 100%;
   min-height: 36px;
 }
 
-.role-lines[data-chain="true"] .link[aria-label="Add"] {
-  margin-left: 26px;
+.role-line-row > .pop {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.role-line-row > .pop > .pop-button {
+  flex: 1;
+  min-width: 0;
+  justify-content: space-between;
+}
+
+.role-line-row > .pop > .pop-button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.x-slot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+}
+
+.role-add {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 340px;
+  max-width: 100%;
+  height: 28px;
+}
+
+.role-add .link {
+  display: inline-flex;
+  align-items: center;
 }
 
 /* a chain of program lines: a rail joins the numbered dots, in the order they are tried */
