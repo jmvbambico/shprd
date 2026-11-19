@@ -23,6 +23,9 @@ import { NEED, STATUS, STATUS_ORDER, status as statusOf } from "./tokens.js";
 /** How many characters a row's second line may hold (Shepherdr `LINE_MAX`). */
 export const LINE_MAX = 40;
 
+/** How many characters the engine's "Waiting: …" line may hold. */
+export const WAITING_MAX = 120;
+
 /** Cuts `text` to `max` characters, ending in an ellipsis when it was cut. */
 export function cut(text, max = LINE_MAX) {
   const value = String(text ?? "").trim();
@@ -41,7 +44,10 @@ export function secondLine(task) {
   const derived = task?.derived ?? {};
   const said = derived.reason ?? (derived.need ? NEED[derived.need] : null);
   if (said) return cut(said);
-  if (task?.last_status?.message) return cut(task.last_status.message);
+  const line = task?.last_status?.message;
+  // The engine's own "Waiting: <why>" line says why a step is refused: it keeps
+  // the room it was written with (120) so the path and task id are not cut.
+  if (line) return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   return cut(task?.title ?? "");
 }
 

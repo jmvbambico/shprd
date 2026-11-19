@@ -112,6 +112,18 @@ describe("TasksScreen with data", () => {
 });
 
 describe("TasksScreen verbs", () => {
+  it.each([
+    ["Retry", "task.retry", { status: "failed" }],
+    ["Stop", "task.stop", {}],
+  ] as const)("a refused %s says why, on the screen", async (label, kind, extra) => {
+    const why = "path crates/shprd/tests overlaps task install-layout-source";
+    const { api, calls } = scripted({ "POST /api/action": json(409, { code: "refused", message: why }) });
+    render(<TasksScreen client={api} board={board(snapshot([task("T4", kind === "task.stop" ? "working" : "needs_you", { ...extra })]))} onOpen={vi.fn()} onReview={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: `${label} T4` }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(why));
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ kind, task: "T4" });
+  });
+
   it("Start posts the engine's verb and reads the board again", async () => {
     const { api, calls } = scripted({ "POST /api/action": json(200, { ok: true, seq: 5 }) });
     const reload = vi.fn(async () => undefined);
