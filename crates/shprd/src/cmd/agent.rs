@@ -330,8 +330,100 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
         skills_used: args.skills_used.clone(),
         proofs,
     };
-    let event = ctx.commit(kind)?;
+    let event = match ctx.commit(kind) {
+        Ok(event) => event,
+        Err(CliError::Refused(refused)) => {
+            // A refused hand-in records nothing, so the board would read
+            // `Working` for ever with the worker idle. A card says why instead.
+            raise_refused_hand_in(ctx, args, &refused);
+            return Err(CliError::Refused(refused));
+        }
+        Err(other) => return Err(other),
+    };
     emit(ctx, &event)
+}
+
+/// Puts a card in front of the person for a hand-in the engine refused.
+///
+/// Only the refusals a person can settle get one: a path outside the scope
+/// (they may widen it) and a hand-in without passing checks (they may send the
+/// task back). It is best effort: the worker still gets the refusal as its exit
+/// status, and a card that could not be written must not hide it.
+fn raise_refused_hand_in(ctx: &Ctx, args: &ReportArgs, refused: &shprd_core::rules::RuleError) {
+    use shprd_core::rules::RuleError;
+    if !matches!(
+        refused,
+        RuleError::PathOutOfScope { .. }
+            | RuleError::HandInWithoutChecks { .. }
+            | RuleError::EmptyCheck { .. }
+            | RuleError::HandInCheckFailed { .. }
+    ) {
+        return;
+    }
+    let Ok(state) = ctx.state() else { return };
+    let Some(task) = state.tasks.get(&args.task) else {
+        return;
+    };
+    let prefix = format!(
+        "{}{}-",
+        shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX,
+        args.attempt
+    );
+    let earlier = state
+        .asks
+        .values()
+        .filter(|ask| ask.task == args.task && ask.id.starts_with(&prefix))
+        .count();
+    // One open card per attempt: a worker that retries the same hand-in does
+    // not stack them.
+    if state
+        .asks
+        .values()
+        .any(|ask| ask.task == args.task && ask.id.starts_with(&prefix) && ask.answer.is_none())
+    {
+        return;
+    }
+    let outside: Vec<String> = args
+        .changed
+        .iter()
+        .filter_map(|path| shprd_core::scope::normalize(path).ok())
+        .filter(|path| !shprd_core::scope::within(path, &task.scope))
+        .collect();
+    let id = shprd_core::gate::hand_in_refused_ask(args.attempt, earlier + 1);
+    let text =
+        shprd_core::gate::hand_in_refused_body(&args.task, args.attempt, &refused.to_string());
+    let options = shprd_core::gate::hand_in_refused_options(&outside);
+    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
+    let ask = shprd_core::ask::Ask::new(
+        id.clone(),
+        args.task.clone(),
+        shprd_core::ask::AskKind::Question,
+        text.clone(),
+        now_ms,
+    )
+    .with_options(options.clone());
+    let queue = shprd_core::ask::AskQueue::for_repo(&ctx.root);
+    if queue.raise(&ask).is_err() {
+        return;
+    }
+    let raised = ctx.commit(EventKind::AskRaised {
+        task: args.task.clone(),
+        ask: id.clone(),
+        ask_kind: shprd_core::ask::AskKind::Question,
+        text,
+        options,
+        created_at_ms: now_ms,
+        expires_at_ms: None,
+    });
+    if raised.is_err() {
+        let _ = queue.remove(&args.task, &id);
+        return;
+    }
+    let _ = ctx.commit(EventKind::TaskStatus {
+        task: args.task.clone(),
+        message: status_line("hand-in refused: waiting for a decision"),
+        progress: None,
+    });
 }
 
 /// The proofs a hand-in records, refused when one is outside the worktree.

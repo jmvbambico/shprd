@@ -141,6 +141,18 @@ pub enum RuleError {
         /// Who tried.
         actor: Actor,
     },
+    /// Something other than a person tried to widen a task's scope.
+    #[error("{actor:?} cannot widen a scope: only a person can")]
+    ScopeNotWidenedByHuman {
+        /// Who tried.
+        actor: Actor,
+    },
+    /// A scope widening named no path.
+    #[error("widening task {task:?}'s scope needs at least one path")]
+    EmptyScopeWidening {
+        /// The task.
+        task: TaskId,
+    },
     /// The task's scope clashes with another task's.
     #[error("task {task:?} path {path:?} overlaps task {other:?}")]
     ScopeConflict {
@@ -799,6 +811,9 @@ fn check_with(
         EventKind::TaskStopped { task, attempt } => {
             check_task_stopped(state, task, *attempt, provenance)
         }
+        EventKind::ScopeWidened { task, paths } => {
+            check_scope_widened(state, actor, task, paths, provenance)
+        }
         EventKind::Dry { .. } => Ok(()),
         EventKind::Available { agent, .. } => check_available(state, actor, agent, provenance),
         EventKind::HandedOff { task, to_agent, .. } => {
@@ -1252,6 +1267,61 @@ fn check_spawned(
             continue;
         }
         if let Some(path) = first_overlap(&found.scope, &other.scope) {
+            return Err(RuleError::ScopeConflict {
+                task: task.to_string(),
+                other: other_id.clone(),
+                path,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rules for widening a task's scope: only a person does it, to paths that
+/// are usable and that no other task in flight holds.
+///
+/// A scope a worker could widen for itself would bound nothing, which is why
+/// the actor is checked on the name, as an override is. History is not
+/// re-judged.
+fn check_scope_widened(
+    state: &RunState,
+    actor: &Actor,
+    task: &str,
+    paths: &[String],
+    provenance: Provenance,
+) -> Result<(), RuleError> {
+    check_not_dropped(state, task, provenance)?;
+    let found = task_in(state, task)?;
+    if provenance == Provenance::Historical {
+        return Ok(());
+    }
+    if !matches!(actor, Actor::Human) {
+        return Err(RuleError::ScopeNotWidenedByHuman {
+            actor: actor.clone(),
+        });
+    }
+    if paths.is_empty() {
+        return Err(RuleError::EmptyScopeWidening {
+            task: task.to_string(),
+        });
+    }
+    let mut added = Vec::new();
+    for path in paths {
+        let normalized = scope::normalize(path).map_err(|_| RuleError::PathOutOfScope {
+            task: task.to_string(),
+            path: path.clone(),
+        })?;
+        added.push(normalized);
+    }
+    for (other_id, other) in &state.tasks {
+        let busy = matches!(
+            other.status,
+            TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+        );
+        if other_id == &found.id || !busy {
+            continue;
+        }
+        if let Some(path) = first_overlap(&added, &other.scope) {
             return Err(RuleError::ScopeConflict {
                 task: task.to_string(),
                 other: other_id.clone(),
@@ -3150,6 +3220,39 @@ mod tests {
             }
         }
         assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
+    }
+
+    #[test]
+    fn only_a_human_widens_a_scope() {
+        let state = passed_task();
+        let kind = EventKind::ScopeWidened {
+            task: "a".to_string(),
+            paths: vec!["tests/x.py".to_string()],
+        };
+        for actor in [
+            Actor::Engine,
+            Actor::Orchestrator,
+            Actor::Agent {
+                id: "w1".to_string(),
+            },
+        ] {
+            assert!(
+                matches!(
+                    check_as(&state, &actor, &kind, 6_000),
+                    Err(RuleError::ScopeNotWidenedByHuman { .. })
+                ),
+                "{actor:?}"
+            );
+        }
+        assert!(check_as(&state, &Actor::Human, &kind, 6_000).is_ok());
+        let empty = EventKind::ScopeWidened {
+            task: "a".to_string(),
+            paths: Vec::new(),
+        };
+        assert!(matches!(
+            check_as(&state, &Actor::Human, &empty, 6_000),
+            Err(RuleError::EmptyScopeWidening { .. })
+        ));
     }
 
     #[test]

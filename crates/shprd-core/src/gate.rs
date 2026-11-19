@@ -246,6 +246,69 @@ pub fn answered_rounds_body(task: &Task, attempt: u32, rounds: u32, answer: &str
     )
 }
 
+/// What every ask id that offers a refused hand-in's choices begins with.
+pub const HAND_IN_REFUSED_ASK_PREFIX: &str = "hand-in-refused-";
+
+/// The words every choice that widens the scope begins with; the paths follow.
+pub const WIDEN_CHOICE: &str = "widen the scope to ";
+
+/// The choice that stops the attempt and starts another.
+pub const SEND_BACK_CHOICE: &str = "send it back to a new attempt";
+
+/// The id of the card for the `n`th hand-in `attempt` had refused.
+///
+/// A worker that hands in again after a widening and is refused for another
+/// reason is a new card, so the count is part of the id.
+pub fn hand_in_refused_ask(attempt: u32, n: usize) -> String {
+    format!("{HAND_IN_REFUSED_ASK_PREFIX}{attempt}-{n}")
+}
+
+/// The choices a refused hand-in's card offers: widen the scope to the paths
+/// that fell outside it (when some did), or send the task back.
+pub fn hand_in_refused_options(out_of_scope: &[String]) -> Vec<String> {
+    let mut options = Vec::new();
+    if !out_of_scope.is_empty() {
+        options.push(format!("{WIDEN_CHOICE}{}", out_of_scope.join(", ")));
+    }
+    options.push(SEND_BACK_CHOICE.to_string());
+    options
+}
+
+/// What a card for a refused hand-in says: the task, and the reason the engine
+/// gave.
+pub fn hand_in_refused_body(task: &str, attempt: u32, reason: &str) -> String {
+    format!(
+        "{task}: the engine refused attempt {attempt}'s hand-in, so nothing was recorded: \
+         {reason}"
+    )
+}
+
+/// What a person's answer to a refused hand-in's card chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandInChoice {
+    /// Add these paths to the task's scope and have the worker hand in again.
+    Widen(Vec<String>),
+    /// Stop the attempt and start another.
+    SendBack,
+}
+
+/// The choice `answer` makes on `ask`, when `ask` is a refused hand-in's card.
+pub fn hand_in_refused_choice(ask: &str, answer: &str) -> Option<HandInChoice> {
+    if !ask.starts_with(HAND_IN_REFUSED_ASK_PREFIX) {
+        return None;
+    }
+    let choice = answer.trim();
+    if let Some(paths) = choice.strip_prefix(WIDEN_CHOICE) {
+        let paths: Vec<String> = paths
+            .split(',')
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect();
+        return (!paths.is_empty()).then_some(HandInChoice::Widen(paths));
+    }
+    (choice == SEND_BACK_CHOICE).then_some(HandInChoice::SendBack)
+}
+
 /// The event a person's answer to a spent review's card carries out, if it has one.
 ///
 /// The card's answer is the person's own decision, so no second confirmation is
@@ -449,8 +512,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        ESCALATION_ACTION, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, after_failure,
-        answer_leaves_a_verb, answered_rounds_body, card_attempt, decide, failed_review_rounds,
+        ESCALATION_ACTION, HandInChoice, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, SEND_BACK_CHOICE,
+        after_failure, answer_leaves_a_verb, answered_rounds_body, card_attempt, decide,
+        failed_review_rounds, hand_in_refused_choice, hand_in_refused_options,
         latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
         rounds_spent_followup, rounds_spent_prefix, rounds_spent_verb_ran,
         send_back_failure_prefix, verdict,
@@ -871,6 +935,34 @@ mod tests {
         // A retry is the engine's own work; another ask is not this card.
         assert!(rounds_spent_followup(&found, &ask, "retry with another round").is_none());
         assert!(rounds_spent_followup(&found, "plan-1", "take it as it is").is_none());
+    }
+
+    #[test]
+    fn a_refused_hand_in_card_offers_the_widening_and_reads_the_choice_back() {
+        let paths = vec![
+            String::from("tests/test_ops.py"),
+            String::from("tests/x.py"),
+        ];
+        let options = hand_in_refused_options(&paths);
+        assert_eq!(options.len(), 2, "{options:?}");
+        assert_eq!(
+            hand_in_refused_choice("hand-in-refused-1-1", &options[0]),
+            Some(HandInChoice::Widen(paths))
+        );
+        assert_eq!(
+            hand_in_refused_choice("hand-in-refused-1-1", &options[1]),
+            Some(HandInChoice::SendBack)
+        );
+        // No path outside the scope: only the send-back is offered.
+        assert_eq!(
+            hand_in_refused_options(&[]),
+            vec![SEND_BACK_CHOICE.to_string()]
+        );
+        assert_eq!(
+            hand_in_refused_choice("review-out-1", SEND_BACK_CHOICE),
+            None
+        );
+        assert_eq!(hand_in_refused_choice("hand-in-refused-1-1", "later"), None);
     }
 
     #[test]

@@ -330,6 +330,30 @@ pub(crate) fn answer_ask(
             .check_as(ctx.actor, kind, SystemClock.now_ms())
             .map_err(|err| ApiReject::refused(err.to_string()))?;
     }
+    // A refused hand-in's card widens the scope or sends the task back. Both
+    // are checked before the answer is consumed, for the same reason.
+    let hand_in = shprd_core::gate::hand_in_refused_choice(ask, answer);
+    let widening = match &hand_in {
+        Some(shprd_core::gate::HandInChoice::Widen(paths)) => {
+            let kind = EventKind::ScopeWidened {
+                task: task.to_string(),
+                paths: paths.clone(),
+            };
+            before
+                .check_as(ctx.actor, &kind, SystemClock.now_ms())
+                .map_err(|err| ApiReject::refused(err.to_string()))?;
+            Some(kind)
+        }
+        Some(shprd_core::gate::HandInChoice::SendBack) => {
+            if ctx.engine.is_none() {
+                return Err(ApiReject::refused(
+                    "this service was started without a host, so it cannot start another attempt",
+                ));
+            }
+            None
+        }
+        None => None,
+    };
     let queue = shprd_core::ask::AskQueue::for_repo(ctx.repo);
     let now_ms = SystemClock.now_ms();
     let answered: shprd_core::ask::Ask =
@@ -356,6 +380,27 @@ pub(crate) fn answer_ask(
     if let Some(kind) = followup {
         let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
         ctx.hub.publish(acted.seq);
+    }
+    if let Some(kind) = widening {
+        // The scope is wider now; the worker is told to hand in again, which
+        // is the brief it was given with the new scope. A host that cannot
+        // deliver it leaves the line below to say what is waiting.
+        let widened = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+        ctx.hub.publish(widened.seq);
+        let note = EventKind::TaskStatus {
+            task: task.to_string(),
+            message: status_line("scope widened: hand in again"),
+            progress: None,
+        };
+        commit(ctx, note)?;
+        if let Some(engine) = ctx.engine {
+            let _ = engine.resend(ctx.repo, task);
+        }
+    }
+    if matches!(hand_in, Some(shprd_core::gate::HandInChoice::SendBack)) {
+        // The same two verbs the Stop and Retry buttons run.
+        stop(ctx, task)?;
+        spawn(ctx, task, "retry")?;
     }
     if let Some(step) = ctx.after_write {
         step.call(ctx.repo);

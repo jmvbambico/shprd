@@ -1458,3 +1458,109 @@ async fn retrying_a_spent_review_records_no_override() {
     assert!(task.overrides.is_empty());
     assert_ne!(task.status, shprd_core::state::TaskStatus::Dropped);
 }
+
+/// A repository whose `T1` (scope `tcalc/ops.py`) had a hand-in refused for
+/// `tests/test_ops.py`: the card `hand-in-refused-1-1` is open.
+fn refused_hand_in_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["tcalc/ops.py".into()],
+            acceptance: vec!["add a test in tests/".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::Spawned {
+            task: "T1".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            model: None,
+            worktree: "/wt/T1".into(),
+            branch: "shprd/r1/T1".into(),
+        },
+    );
+    let ask = shprd_core::gate::hand_in_refused_ask(1, 1);
+    let body = shprd_core::gate::hand_in_refused_body("T1", 1, "path outside scope");
+    let options = shprd_core::gate::hand_in_refused_options(&["tests/test_ops.py".to_string()]);
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+async fn answer_refused_card(answer: &str) -> (Fixture, Reply) {
+    let fixture = Fixture::prepared(refused_hand_in_repo(), tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "hand-in-refused-1-1", "answer": answer}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    (fixture, reply)
+}
+
+#[tokio::test]
+async fn widening_the_scope_from_a_refused_hand_in_card_widens_it() {
+    let (fixture, reply) = answer_refused_card("widen the scope to tests/test_ops.py").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    let task = state.tasks.get("T1").expect("T1");
+    assert!(
+        task.scope.iter().any(|path| path == "tests/test_ops.py"),
+        "{:?}",
+        task.scope
+    );
+    assert!(task.scope.iter().any(|path| path == "tcalc/ops.py"));
+}
+
+#[tokio::test]
+async fn sending_a_refused_hand_in_back_needs_a_host_and_consumes_nothing_without_one() {
+    let (fixture, reply) = answer_refused_card("send it back to a new attempt").await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "the card is still open"
+    );
+}

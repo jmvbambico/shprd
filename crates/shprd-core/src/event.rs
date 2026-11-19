@@ -520,6 +520,18 @@ pub enum EventKind {
         /// request lists, so a reader sees what was left out and why.
         reason: String,
     },
+    /// A person widened a task's scope.
+    ///
+    /// The scope is what a hand-in may change, so widening it is the person's
+    /// own call (a worker that could widen its own scope would have none). It
+    /// is what a refused hand-in's card offers: the paths named are added to the
+    /// task's scope, and the worker hands in again.
+    ScopeWidened {
+        /// The task.
+        task: TaskId,
+        /// The paths added, as the person gave them.
+        paths: Vec<String>,
+    },
     /// The agent working on a task was stopped, so the attempt has no agent.
     ///
     /// It is the person's own verb (`task.stop` on the API), and the fact it
@@ -865,6 +877,7 @@ impl EventKind {
             | Self::GateFailed { task, .. }
             | Self::Integrated { task, .. }
             | Self::TaskDropped { task, .. }
+            | Self::ScopeWidened { task, .. }
             | Self::TaskStopped { task, .. }
             | Self::ReviewRequested { task, .. }
             | Self::HandedOff { task, .. }
@@ -987,6 +1000,10 @@ mod tests {
                 task: "M1.2".to_string(),
                 reason: "not needed after all".to_string(),
             },
+            EventKind::ScopeWidened {
+                task: "M1.3".to_string(),
+                paths: vec!["tests".to_string()],
+            },
             EventKind::TaskStopped {
                 task: "M1.3".to_string(),
                 attempt: 1,
@@ -1105,7 +1122,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 27, "one case per EventKind variant");
+        assert_eq!(kinds.len(), 28, "one case per EventKind variant");
 
         for (index, kind) in kinds.into_iter().enumerate() {
             let event = Event {

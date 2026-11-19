@@ -625,6 +625,22 @@ impl RunState {
                 proofs,
                 ..
             } => {
+                // A hand-in the engine took answers the cards its refused
+                // attempts left open.
+                let seq = event.seq;
+                for record in self.asks.values_mut() {
+                    if record.task == *task
+                        && record.answer.is_none()
+                        && record
+                            .id
+                            .starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
+                    {
+                        record.answer = Some(AskAnswerRecord {
+                            text: String::from("handed in"),
+                            seq,
+                        });
+                    }
+                }
                 // Only a completed report moves the task on to gating; a
                 // blocked or failed one leaves it retryable, so the task goes
                 // Failed even though the report itself is recorded below.
@@ -752,6 +768,16 @@ impl RunState {
             EventKind::Integrated { task, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
+                }
+            }
+            EventKind::ScopeWidened { task, paths } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    for path in paths {
+                        let path = scope::normalize(path).unwrap_or_else(|_| path.clone());
+                        if !entry.scope.contains(&path) {
+                            entry.scope.push(path);
+                        }
+                    }
                 }
             }
             EventKind::TaskStopped { task, attempt } => {
