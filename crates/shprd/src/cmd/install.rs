@@ -114,6 +114,17 @@ const PREVIOUS_LAYOUTS: &[&str] = &[
 /// Runs `shprd install`, whichever mode the command line asked for.
 pub fn run(args: &InstallArgs, home: Option<&Path>, json: bool) -> Result<(), CliError> {
     let app_home = resolve_app_home(args, home)?;
+    let env: Vec<(String, String)> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let real_home = env_home(&env).map(|home| home.join(".config").join("herdr-app"));
+    refuse_agent_on_real_home(&env, &app_home, real_home.as_deref(), args.allow_agent)
+        .map_err(|message| CliError::other(anyhow!(message)))?;
     if args.uninstall {
         return uninstall(&app_home, args.dry_run, json);
     }
@@ -138,6 +149,70 @@ fn resolve_app_home(args: &InstallArgs, home: Option<&Path>) -> Result<PathBuf, 
     Ok(crate::ctx::resolve_home(home)?
         .join(".config")
         .join("herdr-app"))
+}
+
+/// The person's own home (`$HOME`, never `$SHPRD_HOME`), from an environment
+/// snapshot.
+fn env_home(env: &[(String, String)]) -> Option<PathBuf> {
+    env.iter()
+        .find(|(key, value)| key == "HOME" && !value.is_empty())
+        .map(|(_, value)| PathBuf::from(value))
+}
+
+/// Names what marks this process as started by an agent, if anything does.
+///
+/// A pure function over the environment as `(name, value)` pairs: an `HC_*` or
+/// `HERDR_*` variable with a value (a Herdr child's markers; `HERDR_APP_HOME` is
+/// configuration, not a marker, so it does not count), or `SHPRD_ACTOR` naming an
+/// `agent:` actor.
+fn agent_marker(env: &[(String, String)]) -> Option<String> {
+    env.iter().find_map(|(key, value)| {
+        if value.is_empty() {
+            return None;
+        }
+        let child =
+            (key.starts_with("HC_") || key.starts_with("HERDR_")) && key != "HERDR_APP_HOME";
+        let actor = key == "SHPRD_ACTOR" && value.starts_with("agent:");
+        (child || actor).then(|| key.clone())
+    })
+}
+
+/// Drops `.` parts and trailing separators so two spellings of one path compare
+/// equal. Purely lexical, so the decision stays free of I/O.
+fn normalized(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|part| !matches!(part, std::path::Component::CurDir))
+        .collect()
+}
+
+/// Refuses an agent-started install into the person's real Herdr app home.
+///
+/// `env` is the environment as data, `app_home` the folder about to be written,
+/// `real_app_home` the person's own (`$HOME/.config/herdr-app`, `None` when there
+/// is no `$HOME`). Pure: no I/O and no environment read, so a test passes any
+/// environment it likes. `allow_agent` (`--allow-agent`) lets it through. An
+/// `app_home` other than the real one is never refused.
+fn refuse_agent_on_real_home(
+    env: &[(String, String)],
+    app_home: &Path,
+    real_app_home: Option<&Path>,
+    allow_agent: bool,
+) -> Result<(), String> {
+    let Some(real) = real_app_home else {
+        return Ok(());
+    };
+    if allow_agent || normalized(app_home) != normalized(real) {
+        return Ok(());
+    }
+    match agent_marker(env) {
+        None => Ok(()),
+        Some(marker) => Err(format!(
+            "refusing to write into {}: this install was started by an agent ({marker} is set). \
+             Point --app-home or $HERDR_APP_HOME at a private folder, or pass --allow-agent \
+             if the person asked for their own Herdr to be changed",
+            real.display()
+        )),
+    }
 }
 
 /// Where the files to install come from.
@@ -1252,7 +1327,64 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{Manifest, parents, parse_keys, sha256};
+    use super::{Manifest, parents, parse_keys, refuse_agent_on_real_home, sha256};
+    use std::path::Path;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const REAL: &str = "/h/.config/herdr-app";
+
+    fn gate(pairs: &[(&str, &str)], app: &str, allow: bool) -> Result<(), String> {
+        refuse_agent_on_real_home(&env(pairs), Path::new(app), Some(Path::new(REAL)), allow)
+    }
+
+    #[test]
+    fn an_hc_or_herdr_child_variable_refuses_the_real_home() {
+        for key in ["HC_SESSION", "HERDR_PANE_ID", "HERDR_SOCKET_PATH"] {
+            let err = gate(&[(key, "x")], REAL, false).expect_err("refused");
+            assert!(err.contains(key) && err.contains("--allow-agent"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_agent_actor_refuses_the_real_home() {
+        assert!(gate(&[("SHPRD_ACTOR", "agent:w1")], REAL, false).is_err());
+        assert!(gate(&[("SHPRD_ACTOR", "human")], REAL, false).is_ok());
+    }
+
+    #[test]
+    fn the_flag_lets_an_agent_through() {
+        assert!(gate(&[("HC_SESSION", "x")], REAL, true).is_ok());
+    }
+
+    #[test]
+    fn a_private_app_home_is_never_refused() {
+        let vars = [("HC_SESSION", "x"), ("SHPRD_ACTOR", "agent:w1")];
+        assert!(gate(&vars, "/tmp/private", false).is_ok());
+    }
+
+    #[test]
+    fn no_marker_and_empty_markers_pass() {
+        assert!(gate(&[("PATH", "/bin")], REAL, false).is_ok());
+        assert!(gate(&[("HC_SESSION", "")], REAL, false).is_ok());
+        assert!(gate(&[("HERDR_APP_HOME", REAL)], REAL, false).is_ok());
+    }
+
+    #[test]
+    fn another_spelling_of_the_real_home_is_still_refused() {
+        assert!(gate(&[("HC_SESSION", "x")], "/h/./.config/herdr-app/", false).is_err());
+    }
+
+    #[test]
+    fn no_known_real_home_refuses_nothing() {
+        let vars = env(&[("HC_SESSION", "x")]);
+        assert!(refuse_agent_on_real_home(&vars, Path::new(REAL), None, false).is_ok());
+    }
 
     #[test]
     fn a_hash_is_lowercase_hex_of_the_content() {

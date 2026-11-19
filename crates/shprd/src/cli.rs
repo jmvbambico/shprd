@@ -414,6 +414,13 @@ pub struct InstallArgs {
     /// binary's own tree, but not over `--from` or `$SHPRD_HOST_DIR`.
     #[arg(long, value_name = "PATH")]
     pub repo: Option<PathBuf>,
+    /// Let an agent write into the person's real `~/.config/herdr-app`.
+    ///
+    /// Without it, an install started by an agent (an `HC_*` or `HERDR_*` child
+    /// variable, or `SHPRD_ACTOR=agent:*`) refuses to write there. A private
+    /// `--app-home` or `$HERDR_APP_HOME` is never refused.
+    #[arg(long)]
+    pub allow_agent: bool,
 }
 
 /// The hosts `shprd install` can set up.
