@@ -1535,7 +1535,10 @@ impl Worker {
         let worktree = PathBuf::from(&attempt.worktree);
         let git = Git::new(&worktree);
         let head = git.head_sha().map_err(|err| err.to_string())?;
-        let approved = found.approved_head.as_deref() == Some(head.as_str());
+        let approved = found
+            .approved_head
+            .as_deref()
+            .is_some_and(|a| shprd_core::tick::same_commit(a, &head));
         let has_work = attempt
             .report
             .as_ref()
