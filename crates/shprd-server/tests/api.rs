@@ -1282,3 +1282,352 @@ where
     let text = message.into_text().expect("a text frame");
     serde_json::from_str(text.as_str()).expect("the frame is JSON")
 }
+
+/// A repository whose task `T7` failed its review twice: the rounds are spent
+/// and the card (`review-out-2`) is open.
+fn spent_review_repo() -> TempDir {
+    use shprd_core::event::{CheckReport, Finding, ReportStatus, ReviewSource, Severity};
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T7".into(),
+            title: "t7".into(),
+            scope: vec!["tcalc".into()],
+            acceptance: vec!["it works".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    for attempt in 1..=2u32 {
+        put(
+            &mut log,
+            Actor::Engine,
+            EventKind::Spawned {
+                task: "T7".into(),
+                attempt,
+                agent: "claude".into(),
+                model: None,
+                worktree: "/wt/T7".into(),
+                branch: "shprd/r1/T7".into(),
+            },
+        );
+        put(
+            &mut log,
+            Actor::Agent {
+                id: "claude".into(),
+            },
+            EventKind::Reported {
+                task: "T7".into(),
+                attempt,
+                status: ReportStatus::Completed,
+                summary: "done".into(),
+                tests: Vec::new(),
+                checks: vec![CheckReport {
+                    gate: "tests".into(),
+                    command: "cargo test".into(),
+                    exit_code: Some(0),
+                    output_tail: String::new(),
+                }],
+                changed_paths: Vec::new(),
+                commit: Some("abc123".into()),
+                skills_used: Vec::new(),
+                proofs: Vec::new(),
+            },
+        );
+        let request_seq = put_review_requested(&mut log, attempt);
+        put(
+            &mut log,
+            Actor::Engine,
+            EventKind::GateFailed {
+                task: "T7".into(),
+                attempt,
+                gate: "review".into(),
+                findings: vec![Finding {
+                    severity: Severity::Major,
+                    title: "outside scope".into(),
+                    location: None,
+                    detail: String::new(),
+                }],
+                source: Some(ReviewSource {
+                    reviewer: "codex".into(),
+                    findings_sha256:
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+                    request_seq,
+                }),
+            },
+        );
+    }
+    let ask = shprd_core::gate::rounds_spent_ask(2);
+    let body = "T7: its review of attempt 2 failed 2 time(s) and no round is left".to_string();
+    log.append(
+        Actor::Engine,
+        EventKind::AskRaised {
+            task: "T7".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                .iter()
+                .map(|choice| (*choice).to_string())
+                .collect(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+        &SystemClock,
+    )
+    .expect("raise");
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T7", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(
+                    shprd_core::gate::ROUNDS_SPENT_OPTIONS
+                        .iter()
+                        .map(|choice| (*choice).to_string())
+                        .collect(),
+                ),
+        )
+        .expect("the ask file");
+    repo
+}
+
+/// Appends one event to `log`.
+fn put(log: &mut EventLog, actor: Actor, kind: EventKind) {
+    log.append(actor, kind, &SystemClock).expect("append");
+}
+
+/// Records a review request for `attempt` and returns its seq.
+fn put_review_requested(log: &mut EventLog, attempt: u32) -> u64 {
+    log.append(
+        Actor::Engine,
+        EventKind::ReviewRequested {
+            task: "T7".into(),
+            attempt,
+            reviewer: "codex".into(),
+            degraded: false,
+        },
+        &SystemClock,
+    )
+    .expect("request")
+    .seq
+}
+
+/// Answers the spent-review card and returns the folded run.
+async fn answer_spent_card(answer: &str) -> (Fixture, shprd_core::state::RunState) {
+    let fixture = Fixture::prepared(spent_review_repo(), tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T7", "ask": "review-out-2", "answer": answer}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    (fixture, state)
+}
+
+#[tokio::test]
+async fn taking_a_spent_review_as_it_is_records_the_override_that_lets_it_land() {
+    let (_fixture, state) = answer_spent_card("take it as it is").await;
+    let task = state.tasks.get("T7").expect("T7");
+    assert!(
+        task.overrides
+            .iter()
+            .any(|record| record.rule == shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE),
+        "the answer is the override: {:?}",
+        task.overrides
+    );
+    assert!(
+        shprd_core::rules::ready_to_land(task).is_ok(),
+        "the task can now land: {:?}",
+        shprd_core::rules::ready_to_land(task)
+    );
+}
+
+#[tokio::test]
+async fn dropping_a_spent_review_drops_the_task() {
+    let (_fixture, state) = answer_spent_card("drop it").await;
+    assert_eq!(
+        state.tasks.get("T7").expect("T7").status,
+        shprd_core::state::TaskStatus::Dropped
+    );
+}
+
+#[tokio::test]
+async fn retrying_a_spent_review_records_no_override() {
+    let (_fixture, state) = answer_spent_card("retry with another round").await;
+    let task = state.tasks.get("T7").expect("T7");
+    assert!(task.overrides.is_empty());
+    assert_ne!(task.status, shprd_core::state::TaskStatus::Dropped);
+}
+
+/// A repository whose `T1` (scope `tcalc/ops.py`) had a hand-in refused for
+/// `tests/test_ops.py`: the card `hand-in-refused-1-1` is open.
+fn refused_hand_in_repo() -> TempDir {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("the log opens");
+    put(
+        &mut log,
+        Actor::Human,
+        EventKind::TaskAdded {
+            task: "T1".into(),
+            title: "t1".into(),
+            scope: vec!["tcalc/ops.py".into()],
+            acceptance: vec!["add a test in tests/".into()],
+            tags: Vec::new(),
+            skills: Vec::new(),
+            deps: Vec::new(),
+        },
+    );
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::Spawned {
+            task: "T1".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            model: None,
+            worktree: "/wt/T1".into(),
+            branch: "shprd/r1/T1".into(),
+        },
+    );
+    let ask = shprd_core::gate::hand_in_refused_ask(1, 1);
+    let body = shprd_core::gate::hand_in_refused_body("T1", 1, "path outside scope");
+    let options = shprd_core::gate::hand_in_refused_options(&["tests/test_ops.py".to_string()]);
+    put(
+        &mut log,
+        Actor::Agent {
+            id: "claude".into(),
+        },
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: body.clone(),
+            options: options.clone(),
+            created_at_ms: 1,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(ask, "T1", shprd_core::ask::AskKind::Question, body, 1)
+                .with_options(options),
+        )
+        .expect("the ask file");
+    repo
+}
+
+async fn answer_refused_card(answer: &str) -> (Fixture, Reply) {
+    let fixture = Fixture::prepared(refused_hand_in_repo(), tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": "hand-in-refused-1-1", "answer": answer}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    (fixture, reply)
+}
+
+#[tokio::test]
+async fn widening_the_scope_from_a_refused_hand_in_card_widens_it() {
+    let (fixture, reply) = answer_refused_card("widen the scope to tests/test_ops.py").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    let state = shprd_core::state::RunState::fold(&events).expect("folds");
+    let task = state.tasks.get("T1").expect("T1");
+    assert!(
+        task.scope.iter().any(|path| path == "tests/test_ops.py"),
+        "{:?}",
+        task.scope
+    );
+    assert!(task.scope.iter().any(|path| path == "tcalc/ops.py"));
+}
+
+#[tokio::test]
+async fn sending_a_refused_hand_in_back_needs_a_host_and_consumes_nothing_without_one() {
+    let (fixture, reply) = answer_refused_card("send it back to a new attempt").await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&fixture.repo.path().join(".shprd").join("events.jsonl"))
+        .expect("read the log")
+        .events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "the card is still open"
+    );
+}
+
+#[tokio::test]
+async fn review_again_on_a_stuck_review_needs_a_host_and_consumes_nothing_without_one() {
+    let repo = refused_hand_in_repo();
+    let ask = shprd_core::review::stuck_ask(1, 1);
+    let options = shprd_core::review::stuck_options();
+    let path = repo.path().join(".shprd").join("events.jsonl");
+    let mut log = EventLog::open(&path).expect("open");
+    put(
+        &mut log,
+        Actor::Engine,
+        EventKind::AskRaised {
+            task: "T1".into(),
+            ask: ask.clone(),
+            ask_kind: shprd_core::ask::AskKind::Question,
+            text: "stuck".into(),
+            options: options.clone(),
+            created_at_ms: 2,
+            expires_at_ms: None,
+        },
+    );
+    shprd_core::ask::AskQueue::for_repo(repo.path())
+        .raise(
+            &shprd_core::ask::Ask::new(
+                ask.clone(),
+                "T1",
+                shprd_core::ask::AskKind::Question,
+                "stuck",
+                2,
+            )
+            .with_options(options),
+        )
+        .expect("the ask file");
+    let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state"));
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/asks/answer",
+                json!({"task": "T1", "ask": ask, "answer": "review again"}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let events = EventLog::read_all(&path).expect("read").events;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
+        "the card is still open"
+    );
+}

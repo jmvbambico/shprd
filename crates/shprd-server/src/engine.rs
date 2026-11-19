@@ -35,6 +35,9 @@ pub struct Engine {
     stop: Option<WorkerCloser>,
     /// Delivers a task's brief to its agent again, when the caller has a host.
     resend: Option<Resender>,
+    /// Closes a task's reviewer and starts a new review, when the caller has
+    /// a host.
+    review_again: Option<Resender>,
 }
 
 impl Engine {
@@ -47,6 +50,7 @@ impl Engine {
             start,
             stop: None,
             resend: None,
+            review_again: None,
         }
     }
 
@@ -60,6 +64,26 @@ impl Engine {
     pub fn with_resend(mut self, resend: Resender) -> Self {
         self.resend = Some(resend);
         self
+    }
+
+    /// The same engine, also able to start a review again.
+    pub fn with_review_again(mut self, review_again: Resender) -> Self {
+        self.review_again = Some(review_again);
+        self
+    }
+
+    /// Whether this engine can start a review again.
+    pub fn can_review_again(&self) -> bool {
+        self.review_again.is_some()
+    }
+
+    /// Closes `task`'s reviewer and starts a new review of the same attempt, as
+    /// `shprd agent review --again` does.
+    pub fn review_again(&self, repo: &Path, task: &str) -> Result<String, String> {
+        let again = self.review_again.as_ref().ok_or_else(|| {
+            "this service was started without a host, so it cannot start a review".to_string()
+        })?;
+        again(repo, task)
     }
 
     /// Delivers `task`'s latest brief to its agent again.
@@ -97,6 +121,7 @@ impl std::fmt::Debug for Engine {
         f.debug_struct("Engine")
             .field("stop", &self.stop.is_some())
             .field("resend", &self.resend.is_some())
+            .field("review_again", &self.review_again.is_some())
             .finish_non_exhaustive()
     }
 }

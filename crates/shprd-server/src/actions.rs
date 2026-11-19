@@ -282,6 +282,12 @@ pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiRejec
         .asks
         .values()
         .filter(|ask| ask.is_open_at(now_ms))
+        .filter(|ask| {
+            state
+                .tasks
+                .get(&ask.task)
+                .is_none_or(|task| !ask.is_retired_by_newer_attempt(task))
+        })
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms
@@ -311,6 +317,53 @@ pub(crate) fn answer_ask(
             "an answer needs at least one character",
         ));
     }
+    // A spent review's card acts on its answer, and the rules are asked before
+    // anything is written: an answer whose consequence they would refuse (a
+    // task already dropped, say) must not be consumed and then do nothing.
+    let (before, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    let followup = before
+        .tasks
+        .get(task)
+        .and_then(|found| shprd_core::gate::rounds_spent_followup(found, ask, answer));
+    if let Some(kind) = &followup {
+        before
+            .check_as(ctx.actor, kind, SystemClock.now_ms())
+            .map_err(|err| ApiReject::refused(err.to_string()))?;
+    }
+    // A refused hand-in's card widens the scope or sends the task back. Both
+    // are checked before the answer is consumed, for the same reason.
+    let hand_in = shprd_core::gate::hand_in_refused_choice(ask, answer);
+    let widening = match &hand_in {
+        Some(shprd_core::gate::HandInChoice::Widen(paths)) => {
+            let kind = EventKind::ScopeWidened {
+                task: task.to_string(),
+                paths: paths.clone(),
+            };
+            before
+                .check_as(ctx.actor, &kind, SystemClock.now_ms())
+                .map_err(|err| ApiReject::refused(err.to_string()))?;
+            Some(kind)
+        }
+        Some(shprd_core::gate::HandInChoice::SendBack) => {
+            if ctx.engine.is_none() {
+                return Err(ApiReject::refused(
+                    "this service was started without a host, so it cannot start another attempt",
+                ));
+            }
+            None
+        }
+        None => None,
+    };
+    // A stuck review's `review again` needs a host to start the reviewer on.
+    let review_again = ask.starts_with(shprd_core::review::STUCK_ASK_PREFIX)
+        && answer
+            .trim()
+            .eq_ignore_ascii_case(shprd_core::review::REVIEW_AGAIN_CHOICE);
+    if review_again && !ctx.engine.is_some_and(Engine::can_review_again) {
+        return Err(ApiReject::refused(
+            "this service was started without a host, so it cannot start a review",
+        ));
+    }
     let queue = shprd_core::ask::AskQueue::for_repo(ctx.repo);
     let now_ms = SystemClock.now_ms();
     let answered: shprd_core::ask::Ask =
@@ -331,6 +384,41 @@ pub(crate) fn answer_ask(
         }
     };
     ctx.hub.publish(event.seq);
+    // The card's answer is the person's confirmation, so what it chose is
+    // recorded as theirs: the override `take it as it is` means (the tick lands
+    // the task on its own policy afterwards) or the drop.
+    if let Some(kind) = followup {
+        let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+        ctx.hub.publish(acted.seq);
+    }
+    if let Some(kind) = widening {
+        // The scope is wider now; the worker is told to hand in again, which
+        // is the brief it was given with the new scope. A host that cannot
+        // deliver it leaves the line below to say what is waiting.
+        let widened = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+        ctx.hub.publish(widened.seq);
+        let note = EventKind::TaskStatus {
+            task: task.to_string(),
+            message: status_line("scope widened: hand in again"),
+            progress: None,
+        };
+        commit(ctx, note)?;
+        if let Some(engine) = ctx.engine {
+            let _ = engine.resend(ctx.repo, task);
+        }
+    }
+    if review_again && let Some(engine) = ctx.engine {
+        // The answer is the person's word that the old reviewer is gone, so
+        // the new one replaces it; a refusal is the review's own words.
+        engine
+            .review_again(ctx.repo, task)
+            .map_err(ApiReject::refused)?;
+    }
+    if matches!(hand_in, Some(shprd_core::gate::HandInChoice::SendBack)) {
+        // The same two verbs the Stop and Retry buttons run.
+        stop(ctx, task)?;
+        spawn(ctx, task, "retry")?;
+    }
     if let Some(step) = ctx.after_write {
         step.call(ctx.repo);
     }

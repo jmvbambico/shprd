@@ -175,6 +175,30 @@ impl AskRecord {
     pub fn is_open_at(&self, now_ms: u64) -> bool {
         self.answer.is_none() && self.expires_at_ms.is_none_or(|until| until > now_ms)
     }
+
+    /// Whether a newer attempt of `task` started after this ask was raised.
+    ///
+    /// An ask belongs to the attempt that was newest when it was raised, and a
+    /// new attempt retires what the old one left open: its agent is gone, so
+    /// nobody waits on the answer, and a task that read `Needs you` for it
+    /// would keep saying so while the new attempt works. An ask raised before
+    /// any attempt started belongs to the first one.
+    pub fn is_retired_by_newer_attempt(&self, task: &Task) -> bool {
+        let spawns = |seq: Option<u64>| seq.is_some();
+        let all = task
+            .attempts
+            .iter()
+            .filter(|attempt| spawns(attempt.spawn_seq))
+            .count();
+        let before = task
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.spawn_seq.is_some_and(|seq| seq < self.raised_seq))
+            .count();
+        // The ask's own attempt is the newest one at its raising, or the first
+        // when it was raised before any attempt started.
+        all > before.max(1)
+    }
 }
 
 /// One ask's answer as the log records it.
@@ -608,6 +632,22 @@ impl RunState {
                 proofs,
                 ..
             } => {
+                // A hand-in the engine took answers the cards its refused
+                // attempts left open.
+                let seq = event.seq;
+                for record in self.asks.values_mut() {
+                    if record.task == *task
+                        && record.answer.is_none()
+                        && record
+                            .id
+                            .starts_with(crate::gate::HAND_IN_REFUSED_ASK_PREFIX)
+                    {
+                        record.answer = Some(AskAnswerRecord {
+                            text: String::from("handed in"),
+                            seq,
+                        });
+                    }
+                }
                 // Only a completed report moves the task on to gating; a
                 // blocked or failed one leaves it retryable, so the task goes
                 // Failed even though the report itself is recorded below.
@@ -697,6 +737,21 @@ impl RunState {
                 ..
             } => {
                 let passed = matches!(event.kind, EventKind::GatePassed { .. });
+                if gate == crate::gate::REVIEW_GATE {
+                    // A verdict answers the card a review that ran long put up.
+                    let seq = event.seq;
+                    for record in self.asks.values_mut() {
+                        if record.task == *task
+                            && record.answer.is_none()
+                            && record.id.starts_with(crate::review::STUCK_ASK_PREFIX)
+                        {
+                            record.answer = Some(AskAnswerRecord {
+                                text: String::from("reviewed"),
+                                seq,
+                            });
+                        }
+                    }
+                }
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = if passed {
                         TaskStatus::Passed
@@ -735,6 +790,16 @@ impl RunState {
             EventKind::Integrated { task, .. } => {
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = TaskStatus::Integrated;
+                }
+            }
+            EventKind::ScopeWidened { task, paths } => {
+                if let Some(entry) = self.tasks.get_mut(task) {
+                    for path in paths {
+                        let path = scope::normalize(path).unwrap_or_else(|_| path.clone());
+                        if !entry.scope.contains(&path) {
+                            entry.scope.push(path);
+                        }
+                    }
                 }
             }
             EventKind::TaskStopped { task, attempt } => {
@@ -1103,6 +1168,94 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    fn spawned(seq: u64, attempt: u32) -> Event {
+        ev(
+            seq,
+            EventKind::Spawned {
+                task: "a".to_string(),
+                attempt,
+                agent: "w1".to_string(),
+                model: None,
+                worktree: "/wt/a".to_string(),
+                branch: "shprd/r1/a".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_ask_raised_before_any_attempt_belongs_to_the_first_one() {
+        let mut events = log("", "no_main_push");
+        events.truncate(2);
+        events.push(ev(
+            3,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "plan-1".to_string(),
+                ask_kind: AskKind::Plan,
+                text: "Plan to approve".to_string(),
+                options: Vec::new(),
+                created_at_ms: 3000,
+                expires_at_ms: None,
+            },
+        ));
+        events.push(spawned(4, 1));
+        let state = RunState::fold(&events).expect("folds");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(!ask.is_retired_by_newer_attempt(state.tasks.get("a").expect("a")));
+        events.push(ev(
+            5,
+            EventKind::TaskStopped {
+                task: "a".to_string(),
+                attempt: 1,
+            },
+        ));
+        events.push(spawned(6, 2));
+        let state = RunState::fold(&events).expect("folds");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(ask.is_retired_by_newer_attempt(state.tasks.get("a").expect("a")));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_new_attempt_retires_the_asks_the_old_one_left_open() {
+        let raised = ev(
+            4,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "plan-1".to_string(),
+                ask_kind: AskKind::Plan,
+                text: "Plan to approve".to_string(),
+                options: Vec::new(),
+                created_at_ms: 4000,
+                expires_at_ms: None,
+            },
+        );
+        let mut events = log("", "no_main_push");
+        events.truncate(2);
+        events.push(spawned(3, 1));
+        events.push(raised);
+        let state = RunState::fold(&events).expect("folds");
+        let task = state.tasks.get("a").expect("a");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(
+            !ask.is_retired_by_newer_attempt(task),
+            "the attempt that raised it is still the newest"
+        );
+        events.push(ev(
+            5,
+            EventKind::TaskStopped {
+                task: "a".to_string(),
+                attempt: 1,
+            },
+        ));
+        events.push(spawned(6, 2));
+        let state = RunState::fold(&events).expect("folds");
+        let task = state.tasks.get("a").expect("a");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(ask.is_retired_by_newer_attempt(task));
     }
 
     #[test]

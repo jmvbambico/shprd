@@ -1471,12 +1471,24 @@ pub fn review_verb(ctx: &Ctx, args: &ReviewArgs, home: Option<&Path>) -> Result<
 /// the code a person's `shprd agent review` runs. It returns one line for the
 /// pass's report: which reviewer was started, and where.
 pub fn review_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, String> {
+    start_review(ctx, home, task, false)
+}
+
+/// Closes the task's reviewer and starts a new review, as `--again` does.
+///
+/// It is what a stuck review's card runs when the person answers `review again`.
+pub fn review_again_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<String, String> {
+    start_review(ctx, home, task, true)
+}
+
+/// One review start for the service: [`review`] with the verb's own arguments.
+fn start_review(ctx: &Ctx, home: &Path, task: &str, again: bool) -> Result<String, String> {
     let mux = spawn::real_mux();
     let env = ReviewEnv::build(ctx, Some(home)).map_err(|err| err.to_string())?;
     let request = ReviewRequest {
         task: task.to_string(),
         degraded: false,
-        again: false,
+        again,
     };
     let report = review(&mux, &env, &request).map_err(|err| err.to_string())?;
     Ok(format!(

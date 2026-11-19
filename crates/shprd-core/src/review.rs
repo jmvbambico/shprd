@@ -12,7 +12,8 @@ use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
-use crate::event::Finding;
+use crate::event::{Event, Finding};
+use crate::state::RunState;
 
 /// How long a findings file must sit untouched before a reader trusts it.
 ///
@@ -20,6 +21,113 @@ use crate::event::Finding;
 /// and the last byte: reading a file younger than this would decide a review
 /// from half of it.
 pub const FINDINGS_SETTLE: Duration = Duration::from_secs(2);
+
+/// How long a review may be out without a verdict before a person is asked.
+///
+/// A reviewer that died, hung (a provider retrying for hours) or keeps failing
+/// writes nothing, and nothing else says so: the task would read `In review`
+/// for ever. Thirty minutes is longer than any review the engine has seen take
+/// and short enough that nobody finds the board stale at the end of the day.
+pub const STUCK_AFTER_MS: u64 = 30 * 60 * 1000;
+
+/// What every ask id of a stuck review's card begins with.
+pub const STUCK_ASK_PREFIX: &str = "review-stuck-";
+
+/// The choice that closes the reviewer and starts a new review.
+pub const REVIEW_AGAIN_CHOICE: &str = "review again";
+
+/// The choice that drops the task.
+pub const STUCK_DROP_CHOICE: &str = "drop it";
+
+/// The id of the `n`th card a review of `attempt` has put in front of a person.
+pub fn stuck_ask(attempt: u32, n: usize) -> String {
+    format!("{STUCK_ASK_PREFIX}{attempt}-{n}")
+}
+
+/// The choices a stuck review's card offers.
+pub fn stuck_options() -> Vec<String> {
+    vec![
+        REVIEW_AGAIN_CHOICE.to_string(),
+        STUCK_DROP_CHOICE.to_string(),
+    ]
+}
+
+/// What a stuck review's card says.
+pub fn stuck_body(task: &str, attempt: u32, reviewer: &str, minutes: u64) -> String {
+    format!(
+        "{task}: the review of attempt {attempt} by {reviewer} has not finished after {minutes} \
+         minutes; the reviewer may have died, hung or be failing"
+    )
+}
+
+/// A review that has been out too long.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StuckReview {
+    /// The task under review.
+    pub task: String,
+    /// The attempt being reviewed.
+    pub attempt: u32,
+    /// The reviewer the request named.
+    pub reviewer: String,
+    /// The id of the card to raise for it.
+    pub ask: String,
+    /// How long the request has been out, in whole minutes.
+    pub minutes: u64,
+}
+
+/// The reviews that were requested more than `after_ms` before `now_ms` and
+/// have neither a verdict nor a card since that request.
+///
+/// A card raised after the request is the decision to wait for, so the same
+/// request is never put in front of a person twice; a new request (`review
+/// again`) starts the clock over.
+pub fn stuck_reviews(
+    state: &RunState,
+    events: &[Event],
+    now_ms: u64,
+    after_ms: u64,
+) -> Vec<StuckReview> {
+    let mut stuck = Vec::new();
+    for task in state.tasks.values() {
+        let Some(attempt) = crate::tick::awaiting_verdict(task) else {
+            continue;
+        };
+        let Some(request) = task
+            .latest_attempt()
+            .and_then(|current| current.reviews.last())
+        else {
+            continue;
+        };
+        let Some(asked_at) = events
+            .iter()
+            .find(|event| event.seq == request.seq)
+            .map(|event| event.at_ms)
+        else {
+            continue;
+        };
+        let age = now_ms.saturating_sub(asked_at);
+        if age < after_ms {
+            continue;
+        }
+        let prefix = format!("{STUCK_ASK_PREFIX}{attempt}-");
+        let own: Vec<_> = state
+            .asks
+            .values()
+            .filter(|ask| ask.task == task.id && ask.id.starts_with(&prefix))
+            .collect();
+        if own.iter().any(|ask| ask.raised_seq > request.seq) {
+            continue;
+        }
+        stuck.push(StuckReview {
+            task: task.id.clone(),
+            attempt,
+            reviewer: request.reviewer.clone(),
+            ask: stuck_ask(attempt, own.len() + 1),
+            minutes: age / 60_000,
+        });
+    }
+    stuck
+}
 
 /// Where a review packet lives: `<reviews>/<run>/<task>-a<attempt>/`.
 pub fn packet_dir(reviews: &Path, run: &str, task: &str, attempt: u32) -> PathBuf {

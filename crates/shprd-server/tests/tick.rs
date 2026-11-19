@@ -2620,3 +2620,75 @@ fn a_pass_excludes_shprds_state_in_a_worktree_made_before_the_change() {
         "the repaired worktree still reports shprd's state"
     );
 }
+
+/// A task that handed in and whose reviewer was asked, with no verdict since.
+fn reviewer_out() -> Fixture {
+    let mut log = vec![started(), added(2, "A")];
+    log.extend(handed_in(3));
+    log.push(ev(
+        5,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 1,
+            reviewer: String::from("opencode"),
+            degraded: false,
+        },
+    ));
+    Fixture::new(log)
+}
+
+#[test]
+fn a_review_out_too_long_becomes_one_card_with_a_review_again_choice() {
+    let fixture = reviewer_out();
+    let worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+    let now = SystemClock.now_ms();
+
+    // Not yet: the reviewer was asked a moment ago.
+    worker.watch_reviews(now);
+    assert!(fixture.state().asks.is_empty());
+
+    // Half an hour on, with no verdict, a person is asked — once.
+    let later = now + shprd_core::review::STUCK_AFTER_MS + 1;
+    worker.watch_reviews(later);
+    worker.watch_reviews(later);
+    let state = fixture.state();
+    assert_eq!(state.asks.len(), 1, "{:?}", state.asks);
+    let ask = state.asks.values().next().expect("the card");
+    assert_eq!(ask.id, shprd_core::review::stuck_ask(1, 1));
+    assert!(ask.text.contains("opencode"), "{}", ask.text);
+    assert!(
+        ask.options
+            .iter()
+            .any(|choice| choice == shprd_core::review::REVIEW_AGAIN_CHOICE),
+        "{:?}",
+        ask.options
+    );
+    let snapshot = shprd_server::dto::SnapshotDto::from_state(&state, later);
+    assert_eq!(snapshot.asks.len(), 1, "the board shows the card");
+
+    // `review again` records a new request; a second silence is a new card.
+    append(
+        &fixture,
+        Actor::Engine,
+        EventKind::AskAnswered {
+            task: String::from("A"),
+            ask: shprd_core::review::stuck_ask(1, 1),
+            answer: String::from(shprd_core::review::REVIEW_AGAIN_CHOICE),
+        },
+    );
+    append(
+        &fixture,
+        Actor::Engine,
+        EventKind::ReviewRequested {
+            task: String::from("A"),
+            attempt: 1,
+            reviewer: String::from("opencode"),
+            degraded: false,
+        },
+    );
+    worker.watch_reviews(later + shprd_core::review::STUCK_AFTER_MS + 1);
+    assert_eq!(fixture.state().asks.len(), 2);
+}

@@ -95,6 +95,13 @@ fn open_asks(state: &RunState, now_ms: u64) -> Vec<AskDto> {
         .asks
         .values()
         .filter(|ask| ask.is_open_at(now_ms))
+        // A new attempt retires what the old one left open.
+        .filter(|ask| {
+            state
+                .tasks
+                .get(&ask.task)
+                .is_none_or(|task| !ask.is_retired_by_newer_attempt(task))
+        })
         // A card about a failed review is answered by a newer attempt, exactly
         // as its escalation is: one decision, one card on either list.
         .filter(|ask| {
@@ -617,11 +624,7 @@ mod tests {
             "{}",
             card.body
         );
-        assert!(
-            card.body.contains("`shprd drop T1 --reason …`"),
-            "{}",
-            card.body
-        );
+        assert!(!card.body.contains("shprd "), "{}", card.body);
         assert!(
             answered.asks.is_empty(),
             "the ask was consumed by the answer: {:?}",

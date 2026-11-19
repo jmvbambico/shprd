@@ -480,6 +480,7 @@ impl TaskSignal {
                 .asks
                 .values()
                 .filter(|ask| ask.task == id && ask.answer.is_none())
+                .filter(|ask| !ask.is_retired_by_newer_attempt(task))
                 .map(|ask| AskFacts {
                     kind: ask.kind,
                     text: ask.text.clone(),

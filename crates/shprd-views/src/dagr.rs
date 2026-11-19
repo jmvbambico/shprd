@@ -503,6 +503,7 @@ fn event_label(kind: &EventKind) -> &'static str {
         EventKind::GateFailed { .. } => "gate_failed",
         EventKind::Integrated { .. } => "integrated",
         EventKind::TaskDropped { .. } => "task_dropped",
+        EventKind::ScopeWidened { .. } => "scope_widened",
         EventKind::TaskStopped { .. } => "task_stopped",
         EventKind::ReviewRequested { .. } => "review_requested",
         EventKind::Dry { .. } => "dry",
@@ -538,6 +539,7 @@ fn event_task(kind: &EventKind) -> Option<&str> {
         | EventKind::TaskStatus { task, .. }
         | EventKind::AskRaised { task, .. }
         | EventKind::AskAnswered { task, .. }
+        | EventKind::ScopeWidened { task, .. }
         | EventKind::GatePassed { task, .. }
         | EventKind::GateFailed { task, .. }
         | EventKind::Integrated { task, .. }
