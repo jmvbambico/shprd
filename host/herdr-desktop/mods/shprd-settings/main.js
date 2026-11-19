@@ -1943,25 +1943,44 @@ export default class Settings extends View {
 
   // -- drawing: Remote -------------------------------------------------------
 
-  /** Remote: the tunnel, the devices signed in, and Log out. */
+  /** Remote: the tunnel, the devices signed in, and a note on the link. */
   remotePage(t, colors) {
-    return [this.title(t, "Remote"), this.tunnelSection(t, colors), this.sessionsSection(t, colors)];
+    return [
+      this.title(t, "Remote"),
+      this.tunnelSection(t, colors),
+      this.sessionsSection(t, colors),
+      div()
+        .id("remote-note")
+        .pt(12)
+        .text_size(TEXT.label)
+        .line_height("17px")
+        .text_color(t.dim)
+        .child("Anyone with the link can reach shprd, so the link stays hidden until you choose to show it."),
+    ];
   }
 
   /** A section's heading inside Remote. */
   heading(t, text) {
-    return div().pt(14).pb(4).text_size(TEXT.body).font_medium().text_color(t.foreground).child(text);
+    return div().pt(14).pb(2).text_size(TEXT.body).font_semibold().text_color(t.foreground).child(text);
   }
 
-  /** What a section says while it has no data: reading, not available, or the failure. */
+  /** What a section says while it has no data: reading, not available, or the failure (in the red box Agents uses). */
   remoteNote(t, colors, read, what) {
     if (read === null) return note(t, `Reading ${what}…`);
     if (read.unavailable) return note(t, `${what[0].toUpperCase()}${what.slice(1)} are not available on this service.`);
-    if (read.error) return div().px(12).py(6).text_size(TEXT.label).text_color(colors.red).child(read.error);
+    if (read.error) {
+      return v_flex()
+        .mb(10)
+        .p(8)
+        .rounded(RADIUS.card)
+        .border_1()
+        .border_color(colors.red)
+        .child(div().text_size(TEXT.label).text_color(colors.red).child(read.error));
+    }
     return null;
   }
 
-  /** The tunnel: its state, its link (masked until asked for), and Start or Stop. */
+  /** The tunnel: one status row (Off / Starting… / On at <hidden link>) with Start or Stop, then the provider. */
   tunnelSection(t, colors) {
     const read = this.tunnelRead;
     const missing = this.remoteNote(t, colors, read, "the tunnel");
@@ -1969,49 +1988,51 @@ export default class Settings extends View {
     if (missing) return v_flex().w_full().children([...blocks, missing]);
     const view = tunnelView(read.data, this.provider);
     const starting = view.starting || this.remoteBusy === "start";
-    blocks.push(
-      h_flex()
-        .gap(8)
+    const dot = div().w(7).h(7).flex_none().rounded(4).bg(view.on ? colors.green : t.dim);
+    let about = starting && !view.on ? "Starting…" : view.word;
+    if (view.on && view.link) {
+      about = h_flex()
+        .gap(6)
         .items_center()
-        .py(6)
-        .child(div().w(6).h(6).flex_none().rounded(3).bg(view.on ? colors.green : t.dim))
-        .child(div().text_size(TEXT.body).text_color(t.foreground).child(starting && !view.on ? "Starting…" : view.word))
-        .when(view.live !== null, (el) => el.child(div().text_size(TEXT.label).text_color(t.muted).child(view.live)))
-        .when(view.version !== null, (el) => el.child(div().text_size(TEXT.id).text_color(t.dim).child(view.version))),
+        .child("On at")
+        .child(
+          div()
+            .min_w(0)
+            .truncate()
+            .font_family("JetBrains Mono")
+            .text_size(TEXT.id)
+            .text_color(t.muted)
+            .child(this.revealed ? view.link : maskLink(view.link)),
+        )
+        .child(
+          link(t, "tunnel-reveal", this.revealed ? "Hide" : "Reveal", () => {
+            this.revealed = !this.revealed;
+            this.cx.notify();
+          }),
+        );
+    }
+    const action = view.on
+      ? button(t, "tunnel-stop", this.remoteBusy === "stop" ? "Stopping…" : "Stop tunnel", {
+          disabled: this.remoteBusy !== null,
+          onClick: () => this.tunnelCall("stop"),
+        })
+      : button(t, "tunnel-start", starting ? "Starting…" : "Start tunnel", {
+          disabled: starting || this.remoteBusy !== null,
+          onClick: () => this.tunnelCall("start"),
+        });
+    blocks.push(
+      this.row(t, {
+        title: h_flex().gap(8).items_center().child(dot).child("Status"),
+        about,
+        control: action,
+      }),
     );
+    if (view.on && view.live) {
+      blocks.push(note(t, `Carried by ${view.live}${view.version ? ` ${view.version}` : ""}.`));
+    }
     if (view.why) blocks.push(note(t, view.why));
     if (view.tailnetUser) blocks.push(note(t, `Signed in through Tailscale as ${view.tailnetUser}.`));
-    if (view.on && view.link) {
-      blocks.push(
-        h_flex()
-          .gap(10)
-          .items_center()
-          .py(6)
-          .child(
-            div()
-              .flex_1()
-              .min_w(0)
-              .truncate()
-              .font_family("JetBrains Mono")
-              .text_size(TEXT.id)
-              .text_color(t.muted)
-              .child(this.revealed ? view.link : maskLink(view.link)),
-          )
-          .child(
-            link(t, "tunnel-reveal", this.revealed ? "Hide" : "Reveal", () => {
-              this.revealed = !this.revealed;
-              this.cx.notify();
-            }),
-          ),
-      );
-    }
-    if (view.on) {
-      blocks.push(
-        h_flex()
-          .py(6)
-          .child(button(t, "tunnel-stop", this.remoteBusy === "stop" ? "Stopping…" : "Stop tunnel", { disabled: this.remoteBusy !== null, onClick: () => this.tunnelCall("stop") })),
-      );
-    } else {
+    if (!view.on) {
       const options = view.providers.map((entry) => ({ id: entry.id, label: entry.word }));
       const shown = view.providers.find((entry) => entry.id === view.provider)?.word ?? "Choose";
       blocks.push(
@@ -2029,71 +2050,47 @@ export default class Settings extends View {
         }),
       );
       if (view.note) blocks.push(note(t, view.note));
-      blocks.push(
-        h_flex()
-          .py(6)
-          .child(button(t, "tunnel-start", starting ? "Starting…" : "Start tunnel", { disabled: starting || this.remoteBusy !== null, onClick: () => this.tunnelCall("start") })),
-      );
     }
     return v_flex().w_full().children(blocks);
   }
 
-  /** The devices signed in, each with Revoke, and Log out all. */
+  /** The devices signed in: a row each with Sign out, an empty state, and Log out all. */
   sessionsSection(t, colors) {
     const read = this.sessionRead;
     const missing = this.remoteNote(t, colors, read, "the signed-in devices");
-    const blocks = [this.heading(t, "Signed in")];
+    const blocks = [this.heading(t, "Signed-in devices")];
     if (missing) return v_flex().w_full().children([...blocks, missing]);
     const rows = sessionRows(read.data);
-    if (rows.length === 0) blocks.push(note(t, "No device is signed in."));
+    if (rows.length === 0) {
+      blocks.push(note(t, "No devices yet. A phone or computer shows up here once it has logged in."));
+    }
     for (const entry of rows) {
       blocks.push(
-        h_flex()
-          .w_full()
-          .gap(10)
-          .py(8)
-          .items_center()
-          .border_b(1)
-          .border_color(t.border)
-          .child(
-            v_flex()
-              .flex_1()
-              .min_w(0)
-              .gap(2)
-              .child(
-                h_flex()
-                  .gap(6)
-                  .items_center()
-                  .child(div().text_size(TEXT.body).text_color(t.foreground).child(entry.label))
-                  .when(entry.here, (el) => el.child(badge(t, "this device", t.raised, t.muted)))
-                  .when(entry.remembered, (el) => el.child(div().text_size(TEXT.id).text_color(t.dim).child("remembered"))),
-              )
-              .child(div().text_size(TEXT.id).text_color(t.dim).child(entry.seen)),
-          )
-          .child(
-            link(
-              t,
-              `revoke-${entry.id}`,
-              this.remoteBusy === entry.id ? "Revoking…" : "Revoke",
-              () => this.revokeSession(entry.id),
-              this.remoteBusy !== null,
-            ),
-          ),
+        this.row(t, {
+          title: h_flex()
+            .gap(6)
+            .items_center()
+            .child(entry.label)
+            .when(entry.here, (el) => el.child(badge(t, "this device", t.raised, t.muted)))
+            .when(entry.remembered, (el) => el.child(badge(t, "remembered", t.raised, t.muted))),
+          about: `${entry.seen[0].toUpperCase()}${entry.seen.slice(1)}`,
+          control: button(t, `revoke-${entry.id}`, this.remoteBusy === entry.id ? "Signing out…" : entry.here ? "Sign out" : "Sign out device", {
+            disabled: this.remoteBusy !== null,
+            onClick: () => this.revokeSession(entry.id),
+          }),
+        }),
       );
     }
     if (rows.length > 0) {
       blocks.push(
-        h_flex()
-          .py(10)
-          .child(
-            link(
-              t,
-              "logout-all",
-              this.remoteBusy === "logout" ? "Logging out…" : "Log out all",
-              () => this.logoutAll(),
-              this.remoteBusy !== null,
-            ),
-          ),
+        this.row(t, {
+          title: "Log out all",
+          about: "Sign every device out, this one included.",
+          control: button(t, "logout-all", this.remoteBusy === "logout" ? "Logging out…" : "Log out all", {
+            disabled: this.remoteBusy !== null,
+            onClick: () => this.logoutAll(),
+          }),
+        }),
       );
     }
     return v_flex().w_full().children(blocks);

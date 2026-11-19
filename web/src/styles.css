@@ -1707,70 +1707,38 @@ textarea.input {
 .rsection {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 0;
-  border-bottom: 1px solid var(--h-border);
+  gap: 4px;
+  padding: 14px 0 0;
 }
 
 .rsection-title {
   margin: 0;
-  color: var(--h-muted);
-  font-size: var(--text-label);
+  color: var(--h-foreground);
+  font-size: var(--text-body);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
-.tunnel,
-.tunnel-start,
-.tunnel-link {
+.tunnel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-}
-
-.tunnel .button,
-.tunnel-start .button {
-  align-self: flex-start;
-  padding: 0 16px;
-}
-
-.tunnel-state {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
   border-radius: 50%;
   background: var(--h-dim);
+  vertical-align: middle;
 }
 
 .dot.tone-green {
   background: var(--h-green);
 }
 
-.tunnel-word {
-  color: var(--h-foreground);
-  font-weight: 600;
-}
-
-.tunnel-provider,
-.tunnel-version {
-  color: var(--h-dim);
-  font-size: var(--text-id);
-}
-
-.link-line {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 .link-text {
-  min-width: 0;
   overflow-wrap: anywhere;
   color: var(--h-foreground);
   font-family: var(--font-mono);
@@ -1785,40 +1753,8 @@ textarea.input {
   padding: 8px;
 }
 
-.session-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.session {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 12px;
-  align-items: center;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--h-border);
-}
-
-.session-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.session-label {
-  color: var(--h-foreground);
-}
-
-.session-kind,
-.session-sub {
-  color: var(--h-dim);
-  font-size: var(--text-id);
-}
-
-.session .link {
-  grid-row: 1 / span 2;
-  grid-column: 2;
+.srow .badge {
+  margin-left: 8px;
 }
 
 /* phone: the sheet fills the screen; the list is its first page */

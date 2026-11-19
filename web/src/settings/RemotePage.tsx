@@ -100,7 +100,28 @@ export function RemotePage({
       <TunnelSection client={client} />
       <SessionsSection client={client} onSignedOut={onSignedOut} />
       <LogoutSection client={client} onSignedOut={onSignedOut} />
+      <p className="snote chain-note">
+        Anyone with the link can reach shprd, so the link stays hidden until you choose to show it.
+      </p>
     </div>
+  );
+}
+
+/** An error in the Agents page's style: a red box with the service's own sentence. */
+function Refusal({ text }: { text: string }) {
+  return (
+    <div className="refusal" role="alert">
+      <div className="refusal-text">{text}</div>
+    </div>
+  );
+}
+
+/** A section heading with its first lines. */
+function Heading({ id, title }: { id: string; title: string }) {
+  return (
+    <h3 id={id} className="rsection-title">
+      {title}
+    </h3>
   );
 }
 
@@ -130,18 +151,12 @@ function TunnelSection({ client }: { client: ApiClient }) {
 
   return (
     <section className="rsection" aria-labelledby="remote-tunnel">
-      <h3 id="remote-tunnel" className="rsection-title">
-        Tunnel
-      </h3>
+      <Heading id="remote-tunnel" title="Tunnel" />
       {load.state === "loading" ? <p className="snote">Reading the tunnel…</p> : null}
       {load.state === "unavailable" ? (
         <p className="snote">Tunnels are not available on this service.</p>
       ) : null}
-      {load.state === "error" ? (
-        <p className="refusal-text" role="alert">
-          {load.message}
-        </p>
-      ) : null}
+      {load.state === "error" ? <Refusal text={load.message} /> : null}
       {load.state === "data" ? (
         <TunnelBody
           status={load.data}
@@ -183,75 +198,97 @@ function TunnelBody({
   const starting = status.starting || busy === "start";
   const chosen = status.providers.find((entry) => entry.id === provider);
   const needsPassword = chosen?.public_internet === true && !status.password_set;
-  const word = status.on ? "On" : starting ? "Starting…" : "Off";
+  const showLink = status.on && Boolean(status.link);
   return (
     <div className="tunnel" data-tunnel={status.on ? "on" : "off"}>
-      <div className="tunnel-state">
-        <span className={status.on ? "dot tone-green" : "dot"} aria-hidden="true" />
-        <span className="tunnel-word">{word}</span>
-        {status.on && status.provider ? <span className="tunnel-provider">{status.provider}</span> : null}
-        {status.version ? <span className="tunnel-version">{status.version}</span> : null}
+      <div className="srow" data-row="tunnel">
+        <div className="srow-main">
+          <div className="srow-words">
+            <div className="srow-title">
+              <span className={status.on ? "dot tone-green" : "dot"} aria-hidden="true" />
+              Status
+            </div>
+            <div className="srow-about" data-status={status.on ? "on" : starting ? "starting" : "off"}>
+              {status.on ? (
+                showLink ? (
+                  <>
+                    On at{" "}
+                    <code className="link-text" data-revealed={revealed}>
+                      {revealed ? status.link : maskLink(status.link ?? "")}
+                    </code>{" "}
+                    <button type="button" className="link" aria-pressed={revealed} onClick={onReveal}>
+                      {revealed ? "Hide" : "Reveal"}
+                    </button>
+                  </>
+                ) : (
+                  "On"
+                )
+              ) : starting ? (
+                "Starting…"
+              ) : (
+                "Off"
+              )}
+            </div>
+          </div>
+          <div className="srow-control">
+            {status.on ? (
+              <button type="button" className="btn" disabled={busy !== null} onClick={onStop}>
+                {busy === "stop" ? "Stopping…" : "Stop tunnel"}
+              </button>
+            ) : (
+              <button type="button" className="btn" disabled={starting} onClick={onStart}>
+                {starting ? "Starting…" : "Start tunnel"}
+              </button>
+            )}
+          </div>
+        </div>
+        {status.on && status.qr_svg && revealed ? (
+          <img
+            className="qr"
+            alt="QR code for the link"
+            src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(status.qr_svg)}`}
+          />
+        ) : null}
       </div>
+      {status.on && status.provider ? (
+        <p className="snote">
+          Carried by {status.provider}
+          {status.version ? ` ${status.version}` : ""}.
+        </p>
+      ) : null}
       {!status.on && status.why ? <p className="snote">{status.why}</p> : null}
       {status.tailnet_user ? (
         <p className="snote">Signed in through Tailscale as {status.tailnet_user}.</p>
       ) : null}
 
-      {status.on && status.link ? (
-        <div className="tunnel-link">
-          <div className="link-line">
-            <code className="link-text" data-revealed={revealed}>
-              {revealed ? status.link : maskLink(status.link)}
-            </code>
-            <button type="button" className="link" aria-pressed={revealed} onClick={onReveal}>
-              {revealed ? "Hide" : "Reveal"}
-            </button>
+      {!status.on ? (
+        <div className="srow" data-row="provider">
+          <div className="srow-main">
+            <div className="srow-words">
+              <div className="srow-title">Provider</div>
+              <div className="srow-about">What carries the tunnel.</div>
+            </div>
+            <div className="srow-control">
+              <Dropdown
+                label="Provider"
+                value={provider}
+                disabled={starting}
+                options={status.providers.map((entry) => ({
+                  id: entry.id,
+                  label: entry.public_internet ? `${entry.id} (public internet)` : entry.id,
+                }))}
+                onPick={onProvider}
+              />
+            </div>
           </div>
-          {status.qr_svg && revealed ? (
-            <img
-              className="qr"
-              alt="QR code for the link"
-              src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(status.qr_svg)}`}
-            />
-          ) : null}
         </div>
       ) : null}
-
-      {status.on ? (
-        <button type="button" className="button" disabled={busy !== null} onClick={onStop}>
-          {busy === "stop" ? "Stopping…" : "Stop tunnel"}
-        </button>
-      ) : (
-        <div className="tunnel-start">
-          <div className="field">
-            <span className="field-label">Provider</span>
-            <Dropdown
-              label="Provider"
-              value={provider}
-              disabled={starting}
-              options={status.providers.map((entry) => ({
-                id: entry.id,
-                label: entry.public_internet ? `${entry.id} (public internet)` : entry.id,
-              }))}
-              onPick={onProvider}
-            />
-          </div>
-          {needsPassword ? (
-            <p className="snote">
-              A public tunnel needs a login password first: run `shprd web password set`.
-            </p>
-          ) : null}
-          <button type="button" className="button" disabled={starting} onClick={onStart}>
-            {starting ? "Starting…" : "Start tunnel"}
-          </button>
-        </div>
-      )}
-      {refusal !== null ? (
-        <div className="refusal" role="alert">
-          <div className="refusal-key">tunnel</div>
-          <div className="refusal-text">{refusal}</div>
-        </div>
+      {!status.on && needsPassword ? (
+        <p className="snote">
+          A public tunnel needs a login password first: run `shprd web password set`.
+        </p>
       ) : null}
+      {refusal !== null ? <Refusal text={refusal} /> : null}
     </div>
   );
 }
@@ -288,53 +325,48 @@ function SessionsSection({
 
   return (
     <section className="rsection" aria-labelledby="remote-sessions">
-      <h3 id="remote-sessions" className="rsection-title">
-        Signed in
-      </h3>
-      {load.state === "loading" ? <p className="snote">Reading the sessions…</p> : null}
+      <Heading id="remote-sessions" title="Signed-in devices" />
+      {load.state === "loading" ? <p className="snote">Reading the devices…</p> : null}
       {load.state === "unavailable" ? (
         <p className="snote">The list of signed-in devices is not available on this service.</p>
       ) : null}
-      {load.state === "error" ? (
-        <p className="refusal-text" role="alert">
-          {load.message}
+      {load.state === "error" ? <Refusal text={load.message} /> : null}
+      {load.state === "data" && load.data.sessions.length === 0 ? (
+        <p className="snote">
+          No devices yet. A phone or computer shows up here once it has logged in.
         </p>
       ) : null}
-      {load.state === "data" && load.data.sessions.length === 0 ? (
-        <p className="snote">No device is signed in.</p>
-      ) : null}
-      {load.state === "data" && load.data.sessions.length > 0 ? (
-        <ul className="session-list">
-          {load.data.sessions.map((session) => {
+      {load.state === "data" && load.data.sessions.length > 0
+        ? load.data.sessions.map((session) => {
             const here = session.id === load.data.current;
             return (
-              <li key={session.id} className="session" data-session={session.id}>
-                <div className="session-main">
-                  <span className="session-label">{session.label}</span>
-                  {here ? <span className="badge">this device</span> : null}
-                  {session.remember ? <span className="session-kind">remembered</span> : null}
+              <div key={session.id} className="srow" data-session={session.id}>
+                <div className="srow-main">
+                  <div className="srow-words">
+                    <div className="srow-title">
+                      {session.label}
+                      {here ? <span className="badge">this device</span> : null}
+                      {session.remember ? <span className="badge">remembered</span> : null}
+                    </div>
+                    <div className="srow-about">Last seen {ago(session.last_seen)}</div>
+                  </div>
+                  <div className="srow-control">
+                    <button
+                      type="button"
+                      className="btn"
+                      aria-label={`Revoke ${session.label} (${session.id})`}
+                      disabled={revoking !== null}
+                      onClick={() => void revoke(session.id, here)}
+                    >
+                      {revoking === session.id ? "Signing out…" : here ? "Sign out" : "Sign out device"}
+                    </button>
+                  </div>
                 </div>
-                <div className="session-sub">last seen {ago(session.last_seen)}</div>
-                <button
-                  type="button"
-                  className="link"
-                  aria-label={`Revoke ${session.label} (${session.id})`}
-                  disabled={revoking !== null}
-                  onClick={() => void revoke(session.id, here)}
-                >
-                  {revoking === session.id ? "Revoking…" : here ? "Sign out" : "Revoke"}
-                </button>
-              </li>
+              </div>
             );
-          })}
-        </ul>
-      ) : null}
-      {refusal !== null ? (
-        <div className="refusal" role="alert">
-          <div className="refusal-key">sessions</div>
-          <div className="refusal-text">{refusal}</div>
-        </div>
-      ) : null}
+          })
+        : null}
+      {refusal !== null ? <Refusal text={refusal} /> : null}
     </section>
   );
 }
@@ -359,12 +391,20 @@ function LogoutSection({
   }
   return (
     <section className="rsection" aria-labelledby="remote-logout">
-      <h3 id="remote-logout" className="rsection-title">
-        This device
-      </h3>
-      <button type="button" className="button" disabled={busy} onClick={() => void logout()}>
-        Log out
-      </button>
+      <Heading id="remote-logout" title="This device" />
+      <div className="srow" data-row="logout">
+        <div className="srow-main">
+          <div className="srow-words">
+            <div className="srow-title">Log out</div>
+            <div className="srow-about">Sign out of shprd on this device.</div>
+          </div>
+          <div className="srow-control">
+            <button type="button" className="btn" disabled={busy} onClick={() => void logout()}>
+              Log out
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
