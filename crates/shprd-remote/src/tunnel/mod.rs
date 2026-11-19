@@ -36,7 +36,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
-pub use edge::{Edge, trusted_login};
+pub use edge::{ClientHeader, Edge, client_address, over_tunnel, trusted_login};
 pub use manager::{StartRequest, TunnelManager};
 pub use parse::{authority_of, mask_url, name_of, redact, strip_ansi};
 pub use providers::{Options, SystemTunnels, TunnelFactory};

@@ -6,22 +6,37 @@
 //! | Limit | Value | On breach |
 //! |---|---|---|
 //! | login attempts per IP | 5 / 15 min, then 15 min → 1 h → 6 h | `429` + `Retry-After` |
-//! | login attempts globally | 30 / hour | `429` |
-//! | wrong passwords for the account | 10 / hour, then locked for 1 h | `429` |
+//! | login attempts globally | 60 / hour | `429` |
+//! | wrong passwords for the account | 30 / hour, then locked for 15 min | `429` |
 //! | session creation | 5 / hour per IP | `429` ("too many devices") |
 //! | `/api/*` writes | 60 / min per session | `429` |
 //! | unauthenticated requests | 120 / min per IP | `429` |
 //!
-//! The keys are the **peer address** — `X-Forwarded-For` is ignored until the
-//! tunnel task decides when it may be trusted (M7d §4.3 rule 5), because a
-//! header a client writes is not an address. The account is a single one, so its
-//! key is the table itself.
+//! The keys are the **client address** the gate worked out
+//! (`tunnel::client_address`): the socket's peer for a direct request, and over
+//! the active tunnel the address the provider's edge wrote in its own header,
+//! because every tunnelled request's peer is the local agent and would put every
+//! visitor in one bucket. The account is a single one, so its key is the table
+//! itself.
 //!
-//! The per-address and global rows count *attempts*; the account row counts
-//! **wrong passwords**, which is what "someone is guessing" means. Counting
-//! attempts against the account would lock the person out after ten successful
-//! logins from their own devices in an hour, which is exactly what the other two
-//! rows are there to prevent.
+//! The per-address and global rows count *failed* logins: an attempt is counted
+//! when it arrives (so a burst of parallel guesses cannot all slip in before
+//! the first is judged) and handed back by [`RateLimiter::login_succeeded`] when
+//! the password was right. A right password never counts against anyone. The account row counts **wrong
+//! passwords**, which is what "someone is guessing" means.
+//!
+//! **The trade-off.** Any limit shared by every visitor is a lever an attacker
+//! can pull to lock the owner out, and a limit that is not shared is one a
+//! spoofed address walks around. The per-address row is where one guesser is
+//! stopped, so it is the tight one (5 per 15 minutes), and on a tunnel whose
+//! edge reports addresses it is keyed on the visitor, not the owner. The two
+//! shared rows are the ceiling for a *spread* guess and are loose on purpose:
+//! one address cannot reach either (it is blocked after 5, and at most about 10
+//! an hour once its blocks escalate, against 30 for the account), so it takes
+//! a crowd to lock the owner out, and the lock lasts 15 minutes, not an hour.
+//! A tunnel whose edge reports nothing we believe (`tunnl`) leaves every
+//! visitor in one bucket: there, one guesser does lock the owner out until the
+//! block ends, and the local CLI is the way back in.
 //!
 //! A blocked IP is a *failing closed* state that only time ends; the account
 //! lock is what stops a distributed guess, and the local CLI is untouched by
@@ -55,14 +70,14 @@ pub const BACKOFF: [Duration; 3] = [
 ];
 
 /// Every address together may try the password this often in an hour.
-pub const LOGIN_GLOBAL: u32 = 30;
+pub const LOGIN_GLOBAL: u32 = 60;
 
 /// The account may be given this many wrong passwords in an hour before it
 /// locks.
-pub const LOGIN_ACCOUNT: u32 = 10;
+pub const LOGIN_ACCOUNT: u32 = 30;
 
 /// How long the account stays locked.
-pub const ACCOUNT_LOCK: Duration = Duration::from_secs(60 * 60);
+pub const ACCOUNT_LOCK: Duration = Duration::from_secs(15 * 60);
 
 /// How many sessions one address may mint in an hour.
 pub const SESSION_CREATION: u32 = 5;
@@ -113,6 +128,9 @@ struct Buckets {
     login_all: Vec<u64>,
     /// Wrong passwords for the one account, in the last hour.
     failures: Vec<u64>,
+    /// The last login stamp handed out: stamps are strictly increasing, so a
+    /// [`LoginTicket`] names exactly one attempt even within one millisecond.
+    last_stamp: u64,
     /// Until when the account is locked.
     account_locked_until: u64,
     /// Session creations per address.
@@ -149,6 +167,11 @@ impl StormSignal {
         self.0.load(Ordering::SeqCst)
     }
 }
+
+/// The attempt a [`RateLimiter::login`] counted, handed back to
+/// [`RateLimiter::login_succeeded`] when the password turns out to be right.
+#[derive(Debug, Clone, Copy)]
+pub struct LoginTicket(u64);
 
 /// The limiter: one instance per service, shared by every route.
 #[derive(Clone)]
@@ -187,12 +210,16 @@ impl RateLimiter {
 
     /// Counts one login attempt from `ip`, or refuses it.
     ///
-    /// Every attempt counts, right or wrong: the table bounds attempts, so a
-    /// request that arrives at all is one, whatever it turns out to be. A wrong
-    /// password is counted a second time by [`RateLimiter::failure`].
-    pub fn login(&self, ip: IpAddr) -> Result<(), Retry> {
+    /// The attempt is counted up front so parallel guesses are bounded, and
+    /// [`RateLimiter::login_succeeded`] takes it back when the password was
+    /// right. A wrong password is counted a second time, against the account,
+    /// by [`RateLimiter::failure`].
+    pub fn login(&self, ip: IpAddr) -> Result<LoginTicket, Retry> {
         let now = self.now();
         let mut buckets = self.lock();
+        // The attempt's own stamp: the time, nudged forward when another attempt
+        // already took this millisecond (a window's edge moves by less than that).
+        let stamp = now.max(buckets.last_stamp + 1);
 
         // An address in a block is refused until the block ends. The block is
         // not extended by attempts inside it, or a client that retries would
@@ -229,7 +256,10 @@ impl RateLimiter {
                 after_ms: length.as_millis() as u64,
             });
         }
-        buckets.login_ip.entry(ip).or_default().push(now);
+        buckets.login_ip.entry(ip).or_default().push(stamp);
+        // Only an attempt that is counted takes its stamp, so refused requests
+        // cannot push stamps ahead of the clock.
+        buckets.last_stamp = stamp;
 
         // Everywhere, in the last hour.
         let hour = HOUR.as_millis() as u64;
@@ -237,6 +267,13 @@ impl RateLimiter {
             .login_all
             .retain(|at| now.saturating_sub(*at) < hour);
         if buckets.login_all.len() as u32 >= LOGIN_GLOBAL {
+            // A refused attempt is not one this address made against the
+            // per-address limit.
+            if let Some(recent) = buckets.login_ip.get_mut(&ip)
+                && let Some(at) = recent.iter().rposition(|at| *at == stamp)
+            {
+                recent.remove(at);
+            }
             self.storm.trip();
             let after = buckets
                 .login_all
@@ -245,10 +282,33 @@ impl RateLimiter {
                 .unwrap_or(hour);
             return Err(Retry { after_ms: after });
         }
-        buckets.login_all.push(now);
+        buckets.login_all.push(stamp);
 
         self.sweep(&mut buckets, now);
-        Ok(())
+        Ok(LoginTicket(stamp))
+    }
+
+    /// Takes back the attempt [`RateLimiter::login`] counted for `ip` (the one
+    /// `ticket` names), because the password was right. Only this attempt's own entry leaves each count, so a
+    /// right password racing a wrong one never hands the wrong one back.
+    pub fn login_succeeded(&self, ip: IpAddr, ticket: LoginTicket) {
+        let mut buckets = self.lock();
+        // A success hands its stamp back too when nothing was stamped after it,
+        // so a burst of right logins cannot leave the stamp clock ahead of time.
+        if buckets.last_stamp == ticket.0 {
+            buckets.last_stamp = ticket.0 - 1;
+        }
+        // Only this attempt's own entries leave, not the address's other
+        // in-flight attempts: a right password racing wrong ones must not wipe
+        // them. (Earlier failures therefore age out with the window.)
+        if let Some(recent) = buckets.login_ip.get_mut(&ip)
+            && let Some(at) = recent.iter().rposition(|at| *at == ticket.0)
+        {
+            recent.remove(at);
+        }
+        if let Some(at) = buckets.login_all.iter().rposition(|at| *at == ticket.0) {
+            buckets.login_all.remove(at);
+        }
     }
 
     /// Counts one wrong password, and locks the account when there are too many.
@@ -482,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn every_address_together_may_only_try_thirty_times_an_hour() {
+    fn every_address_together_may_only_fail_sixty_times_an_hour() {
         let (clock, limits) = limiter();
         for n in 0..LOGIN_GLOBAL {
             // A fresh address for each, so no per-address block can be what
@@ -491,14 +551,16 @@ mod tests {
                 .login(ip(u8::try_from(n).expect("small")))
                 .expect("inside");
         }
-        let refused = limits.login(ip(200)).expect_err("the thirty-first");
+        let refused = limits
+            .login(ip(200))
+            .expect_err("one more than the ceiling");
         assert!(refused.after_secs() > 0);
         clock.advance(Duration::from_secs(60 * 60 + 1));
         limits.login(ip(200)).expect("the hour is over");
     }
 
     #[test]
-    fn ten_wrong_passwords_lock_the_account_for_an_hour_even_from_many_addresses() {
+    fn thirty_wrong_passwords_lock_the_account_for_a_quarter_hour_even_from_many_addresses() {
         let (clock, limits) = limiter();
         for n in 0..(LOGIN_ACCOUNT - 1) {
             limits
@@ -506,14 +568,14 @@ mod tests {
                 .expect("inside");
             limits.failure().expect("a wrong password");
         }
-        let locking = limits.failure().expect_err("the tenth locks the account");
-        assert_eq!(locking.after_secs(), 60 * 60);
+        let locking = limits.failure().expect_err("the last locks the account");
+        assert_eq!(locking.after_secs(), 15 * 60);
         // A brand-new address is refused, because the account is what is locked.
         let refused = limits.login(ip(99)).expect_err("the account is locked");
-        assert_eq!(refused.after_secs(), 60 * 60);
-        clock.advance(Duration::from_secs(30 * 60));
+        assert_eq!(refused.after_secs(), 15 * 60);
+        clock.advance(Duration::from_secs(10 * 60));
         assert!(limits.login(ip(99)).is_err(), "still locked");
-        clock.advance(Duration::from_secs(31 * 60));
+        clock.advance(Duration::from_secs(6 * 60));
         limits.login(ip(99)).expect("the lock ended");
     }
 
@@ -615,7 +677,9 @@ mod tests {
                 .expect("inside");
         }
         assert_eq!(storm.count(), 0);
-        limits.login(ip(250)).expect_err("the thirty-first");
+        limits
+            .login(ip(250))
+            .expect_err("one more than the ceiling");
         assert_eq!(storm.count(), 1, "the global limit tripped it");
 
         clock.advance(Duration::from_secs(60 * 60 * 7));
@@ -623,7 +687,7 @@ mod tests {
             limits.failure().expect("a wrong password");
         }
         assert_eq!(storm.count(), 1);
-        limits.failure().expect_err("the tenth locks the account");
+        limits.failure().expect_err("the last locks the account");
         assert_eq!(storm.count(), 2, "the account lock tripped it");
     }
 
@@ -635,5 +699,63 @@ mod tests {
             let _ = limits.failure();
         }
         assert_eq!(signal.count(), 1);
+    }
+
+    #[test]
+    fn a_right_password_is_not_counted_against_anyone() {
+        let (_, limits) = limiter();
+        // Far more right logins than any limit, from one address: never refused.
+        for _ in 0..(LOGIN_GLOBAL * 2) {
+            let ticket = limits.login(ip(1)).expect("a right login is never refused");
+            limits.login_succeeded(ip(1), ticket);
+        }
+        // Four wrong passwords, then the owner gets in: the success took back
+        // only its own attempt, so exactly one more is allowed.
+        for _ in 0..(LOGIN_PER_IP - 1) {
+            limits.login(ip(2)).expect("inside");
+        }
+        let ticket = limits.login(ip(2)).expect("the fifth is allowed");
+        limits.login_succeeded(ip(2), ticket);
+        limits.login(ip(2)).expect("the success was not counted");
+        limits.login(ip(2)).expect_err("but the four failures were");
+    }
+
+    #[test]
+    fn a_success_hands_back_only_its_own_attempt_from_the_global_count() {
+        let (clock, limits) = limiter();
+        let mine = limits.login(ip(1)).expect("inside");
+        clock.advance(Duration::from_secs(1));
+        limits.login(ip(2)).expect("another guess, still in flight");
+        limits.login_succeeded(ip(1), mine);
+        assert_eq!(limits.lock().login_all.len(), 1, "the other attempt stays");
+    }
+
+    #[test]
+    fn two_attempts_in_one_millisecond_have_their_own_tickets() {
+        let (_, limits) = limiter();
+        let first = limits.login(ip(1)).expect("inside");
+        limits.login(ip(1)).expect("the same millisecond");
+        limits.login_succeeded(ip(1), first);
+        assert_eq!(limits.lock().login_all.len(), 1);
+        assert_eq!(limits.lock().login_ip[&ip(1)].len(), 1);
+    }
+
+    #[test]
+    fn one_address_cannot_lock_the_account_or_use_up_the_global_ceiling() {
+        let (clock, limits) = limiter();
+        // Wrong passwords from one address, as fast as it is allowed, for a day.
+        for _ in 0..96 {
+            for _ in 0..(LOGIN_PER_IP * 2) {
+                if limits.login(ip(1)).is_ok() {
+                    let _ = limits.failure();
+                }
+            }
+            clock.advance(Duration::from_secs(15 * 60));
+        }
+        let locked_until = limits.lock().account_locked_until;
+        assert_eq!(locked_until, 0, "one address never locked the account");
+        limits
+            .login(ip(2))
+            .expect("the owner's own address is fine");
     }
 }
