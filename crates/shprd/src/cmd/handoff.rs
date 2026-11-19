@@ -208,7 +208,12 @@ fn checkpoint(worktree: &Path, from: &str) -> Result<String, CliError> {
 /// What the attempt changed against the run's integration branch, as git
 /// summarizes it. A branch git cannot compare is reported, never fatal.
 fn diffstat(worktree: &Path, base: &str) -> String {
-    match Git::new(worktree).run(&["diff", "--stat", &format!("{base}..HEAD")]) {
+    let git = Git::new(worktree);
+    // From where the attempt started, not the base's tip: `base..HEAD` as a tree
+    // diff would also show whatever landed on the base since.
+    let from = shprd_git::sync::attempt_base(&git, base, "HEAD", false)
+        .unwrap_or_else(|_| base.to_string());
+    match git.run(&["diff", "--stat", &format!("{from}..HEAD")]) {
         Ok(text) if text.trim().is_empty() => "(no changes yet)".to_string(),
         Ok(text) => text,
         Err(err) => format!("(not available: {err})"),
