@@ -1025,14 +1025,31 @@ fn locate_store(root: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Transc
                 .and_then(|time| time.get("updated"))
                 .and_then(number_ms)
                 .unwrap_or(0);
-            if since_ms.is_some_and(|since| updated < i64::try_from(since).unwrap_or(i64::MAX)) {
+            // An agent's own session began after it started: it is judged by
+            // when it was created, never by when it was last touched.
+            let created = value
+                .get("time")
+                .and_then(|time| time.get("created"))
+                .and_then(number_ms)
+                .unwrap_or(updated);
+            if since_ms.is_some_and(|since| created < i64::try_from(since).unwrap_or(i64::MAX)) {
                 continue;
             }
-            candidates.push((updated, id.to_owned(), path));
+            candidates.push((
+                if since_ms.is_some() { created } else { updated },
+                id.to_owned(),
+                path,
+            ));
         }
     }
     candidates.sort_by_key(|candidate| candidate.0);
-    let (_, session, _) = candidates.pop()?;
+    // The newest session, or (for an agent that knows when it started) the
+    // first one begun since.
+    let (_, session, _) = if since_ms.is_some() {
+        candidates.into_iter().next()?
+    } else {
+        candidates.pop()?
+    };
     Some(Transcript {
         format: TranscriptFormat::OpencodeStorage,
         source: Source::Store {
@@ -1205,30 +1222,21 @@ fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
 /// be the reason a live CLI's store is locked or migrated.
 fn locate_database(db: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Transcript> {
     let connection = open_ro(db)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, directory, time_updated FROM session \
-             ORDER BY time_updated DESC, id DESC",
-        )
-        .ok()?;
-    let rows = statement
-        .query_map((), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        })
-        .ok()?;
+    let mut rows = session_rows(&connection, true).or_else(|| session_rows(&connection, false))?;
     let floor = since_ms.and_then(|since| i64::try_from(since).ok());
+    // An agent's own session is the first one *created* since it started, not
+    // whichever was touched last; with no start to go by it is the newest.
+    if floor.is_some() {
+        rows.sort_by_key(|(id, _, _, created)| (*created, id.clone()));
+    }
     // The first row is the newest session that belongs here: the query is
     // newest-first, so the search stops at its answer.
     let session = rows
-        .flatten()
-        .filter(|(_, _, updated)| {
-            floor.is_none_or(|floor| updated.is_some_and(|updated| updated >= floor))
+        .into_iter()
+        .filter(|(_, _, _, created)| {
+            floor.is_none_or(|floor| created.is_some_and(|created| created >= floor))
         })
-        .find(|(_, directory, _)| {
+        .find(|(_, directory, _, _)| {
             // A session that records no directory at all is not refused: an older
             // OpenCode wrote the folder only into the message parts, and a row
             // with an empty `directory` records nothing either.
@@ -1236,7 +1244,7 @@ fn locate_database(db: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Trans
                 .as_deref()
                 .is_none_or(|directory| directory.is_empty() || same_dir(Path::new(directory), cwd))
         })
-        .map(|(id, _, _)| id)?;
+        .map(|(id, _, _, _)| id)?;
     Some(Transcript {
         format: TranscriptFormat::OpencodeSqlite,
         source: Source::Database {
@@ -1245,6 +1253,34 @@ fn locate_database(db: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Trans
         },
         session,
     })
+}
+
+/// One `session` row: its id, directory, last update and (where the schema has
+/// it) creation time.
+type SessionRow = (String, Option<String>, Option<i64>, Option<i64>);
+
+/// The `session` rows, newest-updated first. A schema with no `time_created`
+/// column (an older OpenCode) is read with the creation time unknown.
+fn session_rows(connection: &rusqlite::Connection, with_created: bool) -> Option<Vec<SessionRow>> {
+    let sql = if with_created {
+        "SELECT id, directory, time_updated, time_created FROM session \
+         ORDER BY time_updated DESC, id DESC"
+    } else {
+        "SELECT id, directory, time_updated, NULL FROM session \
+         ORDER BY time_updated DESC, id DESC"
+    };
+    let mut statement = connection.prepare(sql).ok()?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .ok()?;
+    Some(rows.flatten().collect())
 }
 
 /// One message row of OpenCode's database, with its parts, oldest first.

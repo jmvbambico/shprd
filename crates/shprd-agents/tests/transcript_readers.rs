@@ -556,6 +556,36 @@ fn an_agent_reads_the_session_begun_after_it_started_not_an_older_one_in_the_fol
     );
 }
 
+/// OpenCode (both stores): an agent's session is one *created* after it started.
+/// A session that began earlier and was merely touched since is somebody else's.
+#[test]
+fn opencode_pins_a_session_by_its_creation_not_its_last_update() {
+    // The fixture session was created at 1768956000000 and updated at 1768956700000.
+    for program in ["opencode", "opencode-store"] {
+        let (_dir, home) = recorded(program);
+        let roots = shprd_agents::transcript::Roots::at(&home);
+        let spec = if program == "opencode" {
+            harness("opencode").transcript().clone()
+        } else {
+            shprd_agents::spec::TranscriptSpec {
+                format: Some(TranscriptFormat::OpencodeStorage),
+                location: Some("{data_home}/opencode/storage".to_string()),
+            }
+        };
+        let spec = &spec;
+        let after_creation = Some(1_768_956_100_000);
+        assert!(
+            Transcript::locate_since(spec, &roots, Path::new(CWD), after_creation).is_none(),
+            "{program}: begun before the agent started, only updated since"
+        );
+        let before_creation = Some(1_768_955_000_000);
+        assert!(
+            Transcript::locate_since(spec, &roots, Path::new(CWD), before_creation).is_some(),
+            "{program}: begun after the agent started"
+        );
+    }
+}
+
 #[test]
 fn a_program_with_no_transcript_section_has_nothing_to_read() {
     let kilo = harness("kilo");
