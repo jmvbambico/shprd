@@ -3502,17 +3502,26 @@ project_dirs = []
         let (first, brief) = run(None);
         assert_eq!(first.agent, "pi");
         assert_eq!(first.model.as_deref(), Some("sonnet"));
-        assert!(brief.contains("1 of 3 (`pi`), the default: the first line"), "{brief}");
+        assert!(
+            brief.contains("1 of 3 (`pi`), the default: the first line"),
+            "{brief}"
+        );
         assert!(brief.contains("moves to `kilo`"), "{brief}");
 
         // Asked for the second line by its program: its model and effort.
         let (second, brief) = run(Some("kilo"));
         assert_eq!(second.agent, "kilo");
         assert_eq!(second.model.as_deref(), Some("kilo-model"));
-        assert!(brief.contains("2 of 3 (`kilo`), asked for with --agent"), "{brief}");
+        assert!(
+            brief.contains("2 of 3 (`kilo`), asked for with --agent"),
+            "{brief}"
+        );
         assert!(brief.contains("- Model: kilo-model (this task)"), "{brief}");
         assert!(brief.contains("- Effort: low (this task)"), "{brief}");
-        assert!(!brief.contains("- Fallback:"), "the lines replace the fallback line: {brief}");
+        assert!(
+            !brief.contains("- Fallback:"),
+            "the lines replace the fallback line: {brief}"
+        );
     }
 
     /// A model its catalog says cannot think is not passed an effort flag, and

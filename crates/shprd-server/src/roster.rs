@@ -291,7 +291,10 @@ mod tests {
                 "Haiku 5.5"
             ]
         );
-        assert!(claude.models[3].fast && !claude.models[7].fast, "fast is Opus's");
+        assert!(
+            claude.models[3].fast && !claude.models[7].fast,
+            "fast is Opus's"
+        );
         assert_eq!(claude.efforts, ["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(claude.default_permission.as_deref(), Some("manual"));
         let modes: Vec<&str> = claude

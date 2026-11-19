@@ -594,6 +594,10 @@ pub struct ReviewerRole {
     /// author's own vendor, or of an unknown one, is then no reason to refuse or
     /// to label the review degraded. False (the default) holds the rule.
     pub same_vendor_ok: bool,
+    /// The fallback reviewer, as `program` or `program/model`: used when the
+    /// main reviewer's CLI is not installed here or cannot review this change
+    /// (it shares the author's vendor).
+    pub fallback: Option<String>,
 }
 
 impl ReviewerRole {
@@ -607,6 +611,12 @@ impl ReviewerRole {
             readonly: role.readonly.value,
             may_review: role.may_review(),
             same_vendor_ok: false,
+            fallback: role
+                .fallback
+                .value
+                .iter()
+                .map(|entry| entry.trim().to_owned())
+                .find(|entry| !entry.is_empty()),
         }
     }
 
@@ -637,6 +647,7 @@ impl ReviewerRole {
             readonly: true,
             may_review: true,
             same_vendor_ok: false,
+            fallback: None,
         }
     }
 
@@ -735,6 +746,48 @@ impl Reviewer {
 /// legacy layer. The cross-vendor check is made against this resolved reviewer,
 /// never against a separate config value.
 pub fn choose_reviewer(
+    role: &ReviewerRole,
+    author: &str,
+    author_model: Option<&str>,
+    programs: &[Program],
+    degraded: bool,
+) -> Result<Reviewer, CliError> {
+    let main = choose_main_reviewer(role, author, author_model, programs, degraded);
+    let Some(fallback) = role.fallback.as_deref() else {
+        return main;
+    };
+    // The main reviewer stands when it can start here: the fallback is for a
+    // program that is not installed, or one that cannot review this change.
+    let why = match &main {
+        Ok(chosen) if installed(programs, &chosen.agent) => return main,
+        Ok(chosen) => format!("`{}` is not installed here", chosen.agent),
+        Err(error) => error.to_string(),
+    };
+    let mut second = ReviewerRole::written(fallback, role.effort());
+    second.readonly = role.readonly;
+    second.may_review = role.may_review;
+    second.same_vendor_ok = role.same_vendor_ok;
+    match choose_main_reviewer(&second, author, author_model, programs, degraded) {
+        Ok(mut chosen) if installed(programs, &chosen.agent) => {
+            chosen.note = Some(format!(
+                "note: the fallback reviewer `{fallback}` reviews, because {why}"
+            ));
+            Ok(chosen)
+        }
+        // A fallback that cannot do better leaves the main reviewer's own answer.
+        _ => main,
+    }
+}
+
+/// Whether the program is installed on this machine.
+fn installed(programs: &[Program], id: &str) -> bool {
+    programs
+        .iter()
+        .any(|program| program.spec.id == id && program.installed)
+}
+
+/// Picks the one reviewer a [`ReviewerRole`] names, with no fallback.
+fn choose_main_reviewer(
     role: &ReviewerRole,
     author: &str,
     author_model: Option<&str>,
@@ -3107,6 +3160,52 @@ project_dirs = []
             !open.contains(&worker.id.to_string()),
             "a worker tab outlived the run: {open:?}"
         );
+    }
+
+    #[test]
+    fn the_reviewer_fallback_reviews_when_the_main_reviewer_cannot() {
+        let mut role = settings_reviewer(
+            "[roles.reviewer]\nagent = \"claude\"\nfallback = [\"codex/gpt-5\"]\n",
+        );
+        assert_eq!(role.fallback.as_deref(), Some("codex/gpt-5"));
+        // Claude Code wrote it: the Claude reviewer cannot, so the fallback does.
+        let programs = family_programs();
+        let chosen = choose_reviewer(&role, "claude", None, &programs, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "codex");
+        assert_eq!(chosen.model.as_deref(), Some("gpt-5"));
+        let note = chosen.note.unwrap_or_default();
+        assert!(note.contains("fallback reviewer `codex/gpt-5`"), "{note}");
+
+        // A different author: the main reviewer stands, the fallback is unused.
+        let chosen = choose_reviewer(&role, "codex", None, &programs, false)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "claude");
+        assert!(chosen.note.is_none());
+
+        // A main reviewer that is not installed here gives way too.
+        let mut missing = family_programs();
+        for program in &mut missing {
+            if program.spec.id == "claude" {
+                program.installed = false;
+            }
+        }
+        let chosen = choose_reviewer(
+            &role,
+            "pi",
+            Some("deepseek/deepseek-v4.1-flash"),
+            &missing,
+            false,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            chosen.agent, "codex",
+            "the main reviewer's CLI is not installed"
+        );
+
+        // No fallback: the refusal is the main reviewer's own.
+        role.fallback = None;
+        assert!(choose_reviewer(&role, "claude", None, &programs, false).is_err());
     }
 
     #[test]
