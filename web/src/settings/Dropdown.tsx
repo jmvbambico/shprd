@@ -318,6 +318,9 @@ export function ModelMenu({
                 onClick={() => pickModel(row)}
               >
                 <span className="pop-row-label">{row.name}</span>
+                {why(row.agent, row.id) !== null ? (
+                  <span className="pop-row-hint">{why(row.agent, row.id)}</span>
+                ) : null}
                 {row.typed ? (
                   <span className="pop-row-hint">{menus.programs[row.agent]?.name} id</span>
                 ) : null}

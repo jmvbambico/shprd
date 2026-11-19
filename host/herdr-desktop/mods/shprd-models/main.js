@@ -278,6 +278,9 @@ export default class ModelMenu extends View {
                   .when(i === this.cursor && (this.input?.value?.() ?? "") !== "", (el) => el.bg(t.selected ?? t.hover))
                   .child(this.icon(x.agent, t))
                   .child(div().flex_1().min_w(0).truncate().child(x.name))
+                  .when(this.blockedWhy(x.agent, x.id) !== null, (el) =>
+                    el.child(div().flex_none().text_size(11).text_color(t.dim).child(this.blockedWhy(x.agent, x.id))),
+                  )
                   .when(x.typed, (el) =>
                     el.child(
                       div().flex_none().text_size(11).text_color(t.dim).child(`${menus.programs[x.agent]?.name ?? x.agent} id`),
