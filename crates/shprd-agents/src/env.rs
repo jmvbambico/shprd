@@ -70,6 +70,12 @@ const FOREIGN_VARS: &[&str] = &[
     "OPENCODE_CONFIG_CONTENT",
 ];
 
+/// Variables of the terminal holder that another product's hooks key off.
+///
+/// Removed for every role, so a hook installed globally for another product
+/// (Shepherdr's SessionStart note) finds nothing to act on in a shprd agent.
+const NOT_OURS_VARS: &[&str] = &["HC_TERMINAL_ID"];
+
 /// Prefixes reserved by other orchestrators; anything under them is removed.
 const FOREIGN_PREFIXES: &[&str] = &["OMNIGENT_", "OG_"];
 
@@ -234,6 +240,13 @@ pub fn launch_env(base: &BTreeMap<String, String>, role: Role, ctx: &EnvContext)
         if is_parent_claude_marker(name) {
             remove.insert(name.clone());
         }
+    }
+    // Another product's SessionStart hook (Shepherdr's `session-note.sh`, in the
+    // person's global Claude Code and Codex settings) acts only when
+    // `HC_TERMINAL_ID` is set, and then tells the agent it is that product's
+    // Assistant. shprd's agents need no terminal id of their own.
+    for name in NOT_OURS_VARS {
+        remove.insert((*name).to_string());
     }
     remove.retain(|name| !is_protected(name));
 
@@ -512,6 +525,27 @@ mod tests {
                     "{role:?} dropped the person's own {name}"
                 );
             }
+        }
+    }
+
+    /// SHPR-66: Shepherdr's global SessionStart hook acts only when
+    /// `HC_TERMINAL_ID` is set; no shprd role carries it into its CLI.
+    #[test]
+    fn another_products_terminal_id_is_dropped_for_every_role() {
+        let mut base = base_env();
+        base.insert("HC_TERMINAL_ID".to_string(), "t8m".to_string());
+        for role in [
+            Role::Engine,
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+        ] {
+            let env = launch_env(&base, role, &ctx());
+            assert!(
+                env.removed_names().contains(&"HC_TERMINAL_ID".to_string()),
+                "{role:?}"
+            );
+            assert!(!env.apply_to(&base).contains_key("HC_TERMINAL_ID"));
         }
     }
 

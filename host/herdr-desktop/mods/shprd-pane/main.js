@@ -7,7 +7,7 @@
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
 // In shprd a pane *is* a task's agent terminal, so the header names the task the
-// pane belongs to (`herdr.task` label) and the agent's own state, which is what a
+// pane belongs to (`shprd.task` label) and the agent's own state, which is what a
 // person checks before they click into it. Herdr hands each copy `props().pane`
 // and `props().terminal`; everything else comes from `panes()`.
 //

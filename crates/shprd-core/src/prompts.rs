@@ -119,6 +119,17 @@ const WORKER_M10_PROOF: &str = include_str!("../../../data/templates/history/wor
 const WORKER_M10_PROOF_DIGEST: &str =
     "39c27a0d0d261505d9cf2663e11c4f724c9a33f52ce826a6bbf4d9b65895eb50";
 
+/// The worker wording before it opened with an identity line. With another
+/// product's session note in the same CLI (Shepherdr's), an agent could answer
+/// as that product, so today's words say first who it is.
+#[cfg(test)]
+const WORKER_PRE_IDENTITY: &str =
+    include_str!("../../../data/templates/history/worker-pre-identity.md");
+
+/// The SHA-256 of [`WORKER_PRE_IDENTITY`].
+const WORKER_PRE_IDENTITY_DIGEST: &str =
+    "4349b51d144d5377b3036cbf48c7af6a9e3af29db67e27a090641fde320116ba";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -126,6 +137,7 @@ const WORKER_OLD: &[&str] = &[
     WORKER_M9_ASKS_DIGEST,
     WORKER_M9_PROOF_DIGEST,
     WORKER_M10_PROOF_DIGEST,
+    WORKER_PRE_IDENTITY_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
@@ -165,8 +177,23 @@ const ASSISTANT_ASKS_RAISE: &str =
 const ASSISTANT_ASKS_RAISE_DIGEST: &str =
     "5759b6e936356e985db7ef39f21037b9e68a2d0a955714be3bd65c1d327af027";
 
+/// The assistant wording before it opened with an identity line. With another
+/// product's session note in the same CLI (Shepherdr's), an agent could answer
+/// as that product, so today's words say first who it is.
+#[cfg(test)]
+const ASSISTANT_PRE_IDENTITY: &str =
+    include_str!("../../../data/templates/history/assistant-pre-identity.md");
+
+/// The SHA-256 of [`ASSISTANT_PRE_IDENTITY`].
+const ASSISTANT_PRE_IDENTITY_DIGEST: &str =
+    "41298d28d3c74f5dfb9844e5ae33254dfc940a61e3b327b1411e83498b46e185";
+
 /// The coordinator's retired defaults.
-const ASSISTANT_OLD: &[&str] = &[ASSISTANT_M9_ASKS_DIGEST, ASSISTANT_ASKS_RAISE_DIGEST];
+const ASSISTANT_OLD: &[&str] = &[
+    ASSISTANT_M9_ASKS_DIGEST,
+    ASSISTANT_ASKS_RAISE_DIGEST,
+    ASSISTANT_PRE_IDENTITY_DIGEST,
+];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet
 /// now carries. A criterion about asking is only checkable from those, so
@@ -178,8 +205,19 @@ const REVIEWER_M9_ASKS: &str = include_str!("../../../data/templates/history/rev
 const REVIEWER_M9_ASKS_DIGEST: &str =
     "3d9ee44b1a18395e0463945ab0d34baed819d8ec7ad8fa3896491ec0120a517c";
 
+/// The reviewer wording before it opened with an identity line. With another
+/// product's session note in the same CLI (Shepherdr's), an agent could answer
+/// as that product, so today's words say first who it is.
+#[cfg(test)]
+const REVIEWER_PRE_IDENTITY: &str =
+    include_str!("../../../data/templates/history/reviewer-pre-identity.md");
+
+/// The SHA-256 of [`REVIEWER_PRE_IDENTITY`].
+const REVIEWER_PRE_IDENTITY_DIGEST: &str =
+    "2c28ab6907cffc0e9d2173d49042a0918f4f7c744ad8be2183cfd752d51c291e";
+
 /// The reviewer's retired defaults.
-const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST];
+const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST, REVIEWER_PRE_IDENTITY_DIGEST];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [
