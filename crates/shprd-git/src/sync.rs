@@ -197,6 +197,7 @@ pub fn attempt_base(git: &Git, base: &str, branch: &str, fetch: bool) -> Result<
             Err(err) => first_err = first_err.or(Some(err)),
         }
     }
+    let merged_somewhere = found.iter().any(|(_, tip)| *tip);
     let open: Vec<&(String, bool)> = found.iter().filter(|(_, tip)| !tip).collect();
     let pool: Vec<&(String, bool)> = if open.is_empty() {
         found.iter().collect()
@@ -210,12 +211,45 @@ pub fn attempt_base(git: &Git, base: &str, branch: &str, fetch: bool) -> Result<
             _ => Some(mb.as_str()),
         };
     }
+    if merged_somewhere
+        && let Some(cut) = creation_point(git, branch)
+        && is_ancestor(git, &cut, branch)?
+        && match best {
+            Some(cur) => is_ancestor(git, cur, &cut)?,
+            None => true,
+        }
+    {
+        // A candidate holds the whole branch, so its merge base is the tip and
+        // the others may be stale: the branch's own reflog still names the
+        // commit it was cut from.
+        return Ok(cut);
+    }
     match best {
         Some(mb) => Ok(mb.to_string()),
         None => match first_err {
             Some(err) => Err(err),
             None => git.run(&["merge-base", base, branch]),
         },
+    }
+}
+
+/// The commit `branch` was created at, from its reflog's oldest entry.
+///
+/// Best effort: a branch whose reflog is gone or was recreated answers `None`.
+fn creation_point(git: &Git, branch: &str) -> Option<String> {
+    let log = git
+        .run(&[
+            "reflog",
+            "show",
+            "--format=%H",
+            &format!("refs/heads/{branch}"),
+        ])
+        .ok()?;
+    let oldest = log.lines().last()?.trim().to_string();
+    if oldest.is_empty() {
+        None
+    } else {
+        Some(oldest)
     }
 }
 
@@ -434,9 +468,8 @@ mod attempt_base_tests {
             Ok(from) => from,
             Err(err) => panic!("must resolve: {err}"),
         };
-        assert_ne!(from, own, "an empty change would hide the work");
+        assert_eq!(from, landed, "neither empty nor carrying landed work");
         let diff = run(&repo, &["diff", "--name-only", &format!("{from}..task")]);
-        assert!(diff.contains("own.txt"), "{diff}");
-        let _ = landed;
+        assert_eq!(diff, "own.txt");
     }
 }
