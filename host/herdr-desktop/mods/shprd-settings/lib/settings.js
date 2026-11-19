@@ -1172,5 +1172,5 @@ export function repoKeysOf(document, roleId) {
 export const PICK_KEY = "shprd.settings.pick";
 
 /** The model menu's width, and its height at its tallest: border and padding, tabs, search, heading, 8 rows, rule, Reasoning, Fast, Permissions, a note. */
-export const MENU_W = 340;
+export const MENU_W = 460;
 export const MENU_H = 2 + 10 + 34 + 36 + 26 + 8 * 31 + 20 + 9 + 26 + 34 + 31 + 31;

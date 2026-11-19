@@ -1256,16 +1256,9 @@ export default class Settings extends View {
         .gap(6)
         .children(blocks);
     }
+    // No "Saved" line: it pushed the page down on every write. A write shows in
+    // the control that made it, and a refusal is the one thing that gets a block.
     if (this.refusal !== null) blocks.push(this.refusalBlock(t, colors));
-    else if (this.saved !== null) {
-      blocks.push(
-        div()
-          .pb(6)
-          .text_size(TEXT.label)
-          .text_color(colors.green)
-          .child(this.saved.text),
-      );
-    }
     const state = health(this.settings);
     for (const problem of state.problems) {
       blocks.push(div().pb(4).text_size(TEXT.label).text_color(colors.red).child(problem));

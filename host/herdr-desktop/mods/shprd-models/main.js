@@ -170,8 +170,7 @@ export default class ModelMenu extends View {
             menus.order.map((a) =>
               h_flex()
                 .id(`tab-${a}`)
-                .flex_1()
-                .min_w(0)
+                .flex_auto()
                 .h_full()
                 .px(8)
                 .gap(6)
@@ -194,7 +193,7 @@ export default class ModelMenu extends View {
                     ),
                 )
                 .child(this.icon(a, t))
-                .child(div().truncate().child(menus.programs[a].name)),
+                .child(div().whitespace_nowrap().child(menus.programs[a].name)),
             ),
           ),
       );
