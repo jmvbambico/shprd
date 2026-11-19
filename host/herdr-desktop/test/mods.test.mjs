@@ -1269,7 +1269,8 @@ test("Group by Space gives each space its own heading, tasks in status order", (
   assert.deepEqual(view.groups[0].tasks.map((t) => t.id), ["A2", "A1", "C1"], "a task with no space is in the first space");
   assert.equal(view.doneLine.label, "1 done");
   const open = listView(board, { groupBy: "space", spaces, doneOpen: true });
-  assert.equal(open.groups[1].tasks.length, 1, "an opened Done puts its rows back in their space");
+  assert.equal(open.groups.at(-1).key, "done", "an opened Done is its own group, which folds back");
+  assert.equal(open.doneLine, null);
 });
 
 test("Pinned tasks come out of their group into a Pinned group on top, Done included", () => {

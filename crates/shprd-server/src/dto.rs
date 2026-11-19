@@ -1165,10 +1165,10 @@ pub struct ActionReply {
     #[ts(optional)]
     pub task: Option<TaskDto>,
     /// The tasks a `task.drop_many` dropped, in the order asked.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub dropped: Vec<String>,
     /// The tasks a `task.drop_many` left alone, each with the rule's reason.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub skipped: Vec<String>,
 }
 
