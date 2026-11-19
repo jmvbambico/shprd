@@ -36,9 +36,6 @@ import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
 import { button, iconFile, segmented } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
 
-/** When a switch last swapped a pane: one swap per 3 s, whichever copy asked. */
-let lastSwap = 0;
-
 /**
  * Runs an app command and answers what it returned (`herdr-app do`): `run` gives
  * nothing back and a swap needs the new pane's id.
@@ -109,9 +106,8 @@ export default class Pane extends View {
    * this pane and this header.
    */
   toChat(self, view, cx) {
-    if (this.busy || Date.now() - lastSwap < 3000) return;
+    if (this.busy) return;
     this.busy = true;
-    lastSwap = Date.now();
     const terminal = self.terminal;
     cx.spawn(async (cx) => {
       try {
@@ -147,9 +143,8 @@ export default class Pane extends View {
       if (own) run("pane.focus", { pane: own.pane });
       return;
     }
-    if (this.busy || Date.now() - lastSwap < 3000) return;
+    if (this.busy) return;
     this.busy = true;
-    lastSwap = Date.now();
     cx.spawn(async (cx) => {
       try {
         await app("pane.focus", { pane: chat });
@@ -166,9 +161,8 @@ export default class Pane extends View {
   }
 
   /** Shows or hides the end-agent question in the header. */
-  ask(on, cx) {
+  ask(on) {
     this.ending = on;
-    cx?.notify?.();
   }
 
   /**
@@ -272,7 +266,7 @@ export default class Pane extends View {
           .child(
             button(t, `pane-end-no-${id}`, endAgent(name).cancel, {
               kind: "plain",
-              onClick: () => this.ask(false, cx),
+              onClick: () => this.ask(false),
             }),
           )
           .child(
@@ -291,7 +285,7 @@ export default class Pane extends View {
           .child(this.action(t, `zoom-${id}`, self?.zoomed ? "unzoom" : "zoom", () => run("pane.zoom", { pane: id })))
           .child(
             this.action(t, `close-${id}`, "x", () =>
-              isAgent ? this.ask(true, cx) : run("pane.close", { pane: id }),
+              isAgent ? this.ask(true) : run("pane.close", { pane: id }),
             ),
           ),
       )
@@ -305,7 +299,7 @@ export default class Pane extends View {
               ["terminal", "Terminal"],
             ],
             view.chatMode ? "chat" : "terminal",
-            (choice) => (choice === "chat" ? this.toChat(self, view, cx) : this.toTerminal(id, view, cx)),
+            (choice, _event, click) => (choice === "chat" ? this.toChat(self, view, click) : this.toTerminal(id, view, click)),
           ),
         ),
       );

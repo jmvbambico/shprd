@@ -345,7 +345,7 @@ export function segmented(t, id, options, value, onPick, { disabled = false } = 
             ? styled
             : off
               ? styled.text_color(t.dim)
-            : styled.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(press(() => onPick(choice)));
+            : styled.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(press((event, cx) => onPick(choice, event, cx)));
         return live.child(String(word));
       }),
     );

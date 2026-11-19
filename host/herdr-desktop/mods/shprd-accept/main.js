@@ -28,7 +28,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { closeOverlay, layout, nextCommand, props, run, setShared, shared, terminals, theme } from "herdr";
+import { closeOverlay, focused, layout, nextCommand, props, run, setShared, shared, terminals, theme } from "herdr";
 
 import { attach, reason, singleFlight } from "./lib/client.js";
 import {
@@ -324,7 +324,9 @@ export default class Accept extends View {
   focusAgent(task, force = true) {
     const agent = task ? threadAgent(this.state, task.id) : null;
     if (!agent?.terminal) return;
-    if (!force && this.focusedTerminal === agent.terminal) return;
+    // The agent block shows the agent Herdr last focused, which the person may have
+    // changed since this head last asked: ask Herdr, not a cache of this head's own.
+    if (!force && focused()?.agent === agent.terminal) return;
     this.focusedTerminal = agent.terminal;
     run("agent.focus", { terminal: agent.terminal });
   }
