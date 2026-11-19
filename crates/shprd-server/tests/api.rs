@@ -923,6 +923,20 @@ async fn a_malformed_action_is_a_typed_refusal() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(reply.code(), "bad_request", "{body}");
     }
+    // A drop with no reason says what is missing, not serde's own text.
+    let drop = fixture
+        .send(
+            Call::post("/api/action", json!({"kind": "task.drop", "task": "T1"}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    let message = drop.json()["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(message.contains("needs a reason"), "{message}");
+    assert!(!message.contains("missing field"), "{message}");
 }
 
 #[tokio::test]
