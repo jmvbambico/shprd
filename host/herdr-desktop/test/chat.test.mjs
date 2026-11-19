@@ -118,6 +118,12 @@ test("a new session starts the panel over rather than gluing two conversations",
   assert.equal(second.session, "s2");
 });
 
+test("what the service told the agent stays news, and is not the person's side", () => {
+  const chat = fold(empty(), page({ messages: [{ role: "news", text: "T7 needs you: pick one", tools: [] }] }));
+  assert.equal(chat.messages[0].role, "news");
+  assert.equal(mine(chat.messages[0]), false);
+});
+
 test("a message keeps its shape even when the service left a field out", () => {
   const chat = fold(empty(), page({ messages: [{ role: "assistant", text: "hi" }] }));
   assert.deepEqual(chat.messages[0], {

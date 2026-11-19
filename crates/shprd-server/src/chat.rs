@@ -61,6 +61,14 @@ pub trait ChatWriter: Send + Sync {
     /// open; the caller tells the person and nothing is retried, because
     /// retyping a message the agent may have read already is worse than not.
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String>;
+
+    /// When the agent `send` types into for `space` started, in epoch
+    /// milliseconds, when the host says. The chat shows the conversation that
+    /// agent began, not the newest one in its folder (a person's own, or an
+    /// earlier coordinator's, can be newer). `None` is not knowing.
+    fn started_ms(&self, _space: Option<&str>) -> Option<u64> {
+        None
+    }
 }
 
 /// The writer a service holds, with a `Debug` that never prints a host.
@@ -141,6 +149,9 @@ struct Place {
     cwd: PathBuf,
     /// What to say when there is nothing to read, if anything is already known.
     note: Option<String>,
+    /// When the agent started, when known: only a conversation begun then or
+    /// later is its own.
+    since_ms: Option<u64>,
 }
 
 /// `GET /api/chat`: the messages a space's agent record gained since `since`.
@@ -180,7 +191,15 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
              transcript: start `shprd serve` from a build that passes $HOME in",
         )
     })?;
-    let Some(transcript) = Transcript::locate_in(&spec.transcript, roots, &place.cwd) else {
+    let Some(transcript) =
+        Transcript::locate_since(&spec.transcript, roots, &place.cwd, place.since_ms)
+    else {
+        if place.since_ms.is_some() {
+            answer.note = Some(format!(
+                "the coordinator ({program}) has not said anything yet: its conversation starts with its first turn"
+            ));
+            return Ok(answer);
+        }
         answer.note = Some(match spec.transcript.format {
             // OpenCode's store and database are session stores rather than one
             // file a session; a missing one is a program that has not run here.
@@ -270,6 +289,8 @@ fn coordinator_place(state: &AppState) -> Result<Place, ApiReject> {
         program: None,
         cwd: state.repo.clone(),
         note: None,
+        // The conversation shown is the one of the agent a chat line reaches.
+        since_ms: state.chat.get().and_then(|writer| writer.started_ms(None)),
     };
     let Some(home) = state.home.as_deref() else {
         place.note = Some(String::from(
@@ -330,12 +351,14 @@ fn task_place(state: &AppState, task: &str) -> Result<Place, ApiReject> {
             note: Some(format!(
                 "{task} has not started: there is no attempt to read a conversation from"
             )),
+            since_ms: None,
         });
     };
     Ok(Place {
         program: Some(attempt.agent.clone()),
         cwd: PathBuf::from(&attempt.worktree),
         note: None,
+        since_ms: None,
     })
 }
 

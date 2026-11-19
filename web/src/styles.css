@@ -2231,6 +2231,14 @@ textarea.input {
   border: 1px solid color-mix(in srgb, var(--h-accent) 30%, transparent);
 }
 
+/* What the service told the agent: a plain news line, not a bubble. */
+.chat-row[data-from="news"] .chat-bubble {
+  background: transparent;
+  border: 1px dashed var(--h-border);
+  color: var(--h-muted);
+  font-size: var(--text-label);
+}
+
 .md > :first-child {
   margin-top: 0;
 }

@@ -175,7 +175,7 @@ function Bubble({ message, open, onToggle }: { message: ChatMessageDto; open: bo
   const html = useMemo(() => renderMarkdown(shown.text, mine(message)), [shown.text, message]);
   const time = when(message.at_ms);
   return (
-    <article className="chat-row" data-from={mine(message) ? "you" : "agent"}>
+    <article className="chat-row" data-from={message.role === "news" ? "news" : mine(message) ? "you" : "agent"}>
       {message.text.trim() !== "" ? (
         <div className="chat-bubble">
           {/* The markup is DOMPurify's output: a short tag list, http(s) links only. */}

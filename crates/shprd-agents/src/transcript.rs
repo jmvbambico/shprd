@@ -92,6 +92,9 @@ pub enum Role {
     User,
     /// The agent.
     Assistant,
+    /// What shprd's service told the agent: a task's news, typed into the
+    /// conversation as `<shprd-news>` lines and shown as plain news lines.
+    News,
 }
 
 impl Role {
@@ -100,6 +103,7 @@ impl Role {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::News => "news",
         }
     }
 }
@@ -225,14 +229,32 @@ impl Transcript {
     /// that CLI had — the real `HOME` it inherits and its XDG data home — never
     /// under the engine's home, which no CLI writes a session into.
     pub fn locate_in(spec: &TranscriptSpec, roots: &Roots, cwd: &Path) -> Option<Transcript> {
+        Self::locate_since(spec, roots, cwd, None)
+    }
+
+    /// [`Transcript::locate_in`] for an agent that started at `since_ms` (epoch
+    /// milliseconds): only a session that began then or later is its own.
+    ///
+    /// A directory holds every conversation anyone had there, a person's own
+    /// and an earlier agent's included, so "the newest in this directory" can be
+    /// somebody else's. An agent knows when it started, and its session is the
+    /// first one begun after that. `None` is the old rule: the newest session.
+    pub fn locate_since(
+        spec: &TranscriptSpec,
+        roots: &Roots,
+        cwd: &Path,
+        since_ms: Option<u64>,
+    ) -> Option<Transcript> {
         let format = spec.format?;
         let location = spec.location.as_deref()?;
         match format {
-            TranscriptFormat::OpencodeStorage => locate_store(&expand_path(location, roots)?, cwd),
-            TranscriptFormat::OpencodeSqlite => {
-                locate_database(&expand_path(location, roots)?, cwd)
+            TranscriptFormat::OpencodeStorage => {
+                locate_store(&expand_path(location, roots)?, cwd, since_ms)
             }
-            _ => locate_file(format, location, roots, cwd),
+            TranscriptFormat::OpencodeSqlite => {
+                locate_database(&expand_path(location, roots)?, cwd, since_ms)
+            }
+            _ => locate_file(format, location, roots, cwd, since_ms),
         }
     }
 
@@ -398,12 +420,65 @@ fn parse_line(format: TranscriptFormat, line: &[u8]) -> Option<Message> {
         return None;
     }
     let value: Value = serde_json::from_slice(line).ok()?;
-    match format {
+    let message = match format {
         TranscriptFormat::ClaudeJsonl => claude_message(&value),
         TranscriptFormat::CodexJsonl => codex_message(&value),
         TranscriptFormat::PiJsonl => pi_message(&value),
         // OpenCode's two shapes are read from files of their own, not lines.
         TranscriptFormat::OpencodeStorage | TranscriptFormat::OpencodeSqlite => None,
+    }?;
+    Some(news_of(message))
+}
+
+/// A user turn that is shprd's news, as news lines.
+///
+/// The service types `<shprd-news task="T7" event="needs-you">…</shprd-news>`
+/// into the coordinator, and the program records it as something the person
+/// said. It is not: the words inside the tags are shown, as a news message, and
+/// the tags, and the wrapper a paste adds around them, are not.
+fn news_of(message: Message) -> Message {
+    if message.role != Role::User || !message.text.contains("<shprd-news") {
+        return message;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut rest = String::new();
+    let mut remaining = message.text.as_str();
+    while let Some(at) = remaining.find("<shprd-news") {
+        rest.push_str(&remaining[..at]);
+        let after = &remaining[at..];
+        let Some(open_end) = after.find('>') else {
+            rest.push_str(after);
+            remaining = "";
+            break;
+        };
+        let body = &after[open_end + 1..];
+        let (inside, tail) = match body.find("</shprd-news>") {
+            Some(end) => (&body[..end], &body[end + "</shprd-news>".len()..]),
+            None => (body, ""),
+        };
+        for line in inside.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                lines.push(line.to_owned());
+            }
+        }
+        remaining = tail;
+    }
+    rest.push_str(remaining);
+    // What is left is a paste's wrapper tags and whitespace, or words the
+    // person typed beside the news.
+    let rest = unwrap_tag(&rest, "pasted_content");
+    let rest = rest.trim();
+    if !rest.is_empty() {
+        lines.push(rest.to_owned());
+    }
+    if lines.is_empty() {
+        return message;
+    }
+    Message {
+        role: Role::News,
+        text: lines.join("\n"),
+        ..message
     }
 }
 
@@ -511,7 +586,9 @@ fn codex_message(value: &Value) -> Option<Message> {
                         !codex_injected(text)
                     })
                 }
-                Role::Assistant => texts(content, &["input_text", "output_text", "text"]),
+                Role::Assistant | Role::News => {
+                    texts(content, &["input_text", "output_text", "text"])
+                }
             };
             let message = Message {
                 role,
@@ -689,6 +766,23 @@ fn unwrap_tag(text: &str, name: &str) -> String {
             rest = after;
             continue;
         }
+        // A closing tag that carries attributes (`</pasted_content id="56ab">`)
+        // or has its slash escaped (`<\/pasted_content …>`) is the same wrapper
+        // as the pasted block shows it.
+        let closing = format!("</{name}");
+        let escaped = format!("<\\/{name}");
+        if let Some(after) = rest
+            .strip_prefix(closing.as_str())
+            .or_else(|| rest.strip_prefix(escaped.as_str()))
+        {
+            match after.find('>') {
+                Some(gt) => {
+                    rest = &after[gt + 1..];
+                    continue;
+                }
+                None => break,
+            }
+        }
         if let Some(after) = rest.strip_prefix(open.as_str()) {
             match after.find('>') {
                 Some(gt) => {
@@ -845,18 +939,40 @@ fn locate_file(
     location: &str,
     roots: &Roots,
     cwd: &Path,
+    since_ms: Option<u64>,
 ) -> Option<Transcript> {
     let (root, components) = pattern_parts(location, roots, cwd, format)?;
     let mut found: Option<(SystemTime, PathBuf)> = None;
+    // A second of slack: a clock the host and the file system read apart.
+    let since = since_ms.map(|ms| {
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms.saturating_sub(1_000))
+    });
     walk(&root, &components, 0, &mut |path| {
         if format == TranscriptFormat::CodexJsonl && !codex_belongs(path, cwd) {
             return;
         }
-        let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        let Ok(meta) = std::fs::metadata(path) else {
             return;
         };
-        if found.as_ref().is_none_or(|(kept, _)| modified >= *kept) {
-            found = Some((modified, path.to_path_buf()));
+        let Ok(modified) = meta.modified() else {
+            return;
+        };
+        match since {
+            // The first session begun since the agent started is its own.
+            Some(since) => {
+                let began = meta.created().unwrap_or(modified);
+                if began < since {
+                    return;
+                }
+                if found.as_ref().is_none_or(|(kept, _)| began < *kept) {
+                    found = Some((began, path.to_path_buf()));
+                }
+            }
+            None => {
+                if found.as_ref().is_none_or(|(kept, _)| modified >= *kept) {
+                    found = Some((modified, path.to_path_buf()));
+                }
+            }
         }
     });
     let (_, path) = found?;
@@ -874,7 +990,7 @@ fn locate_file(
 /// that belongs to a directory is the one that says so, not the newest one on
 /// the machine. The comparison follows symlinks: a session recorded from the
 /// resolved path belongs to the directory a person names by its symlinked one.
-fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
+fn locate_store(root: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Transcript> {
     let sessions = root.join("session");
     let mut candidates: Vec<(i64, String, PathBuf)> = Vec::new();
     for project in std::fs::read_dir(&sessions).ok()?.flatten() {
@@ -909,11 +1025,31 @@ fn locate_store(root: &Path, cwd: &Path) -> Option<Transcript> {
                 .and_then(|time| time.get("updated"))
                 .and_then(number_ms)
                 .unwrap_or(0);
-            candidates.push((updated, id.to_owned(), path));
+            // An agent's own session began after it started: it is judged by
+            // when it was created, never by when it was last touched.
+            let created = value
+                .get("time")
+                .and_then(|time| time.get("created"))
+                .and_then(number_ms)
+                .unwrap_or(updated);
+            if since_ms.is_some_and(|since| created < i64::try_from(since).unwrap_or(i64::MAX)) {
+                continue;
+            }
+            candidates.push((
+                if since_ms.is_some() { created } else { updated },
+                id.to_owned(),
+                path,
+            ));
         }
     }
     candidates.sort_by_key(|candidate| candidate.0);
-    let (_, session, _) = candidates.pop()?;
+    // The newest session, or (for an agent that knows when it started) the
+    // first one begun since.
+    let (_, session, _) = if since_ms.is_some() {
+        candidates.into_iter().next()?
+    } else {
+        candidates.pop()?
+    };
     Some(Transcript {
         format: TranscriptFormat::OpencodeStorage,
         source: Source::Store {
@@ -1084,24 +1220,23 @@ fn store_message(root: &Path, id: &str, path: &Path) -> Option<Message> {
 /// the directory the session belongs to. The database is opened read-only
 /// through a `mode=ro` URI, exactly as the watchdog reads it: a chat must never
 /// be the reason a live CLI's store is locked or migrated.
-fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
+fn locate_database(db: &Path, cwd: &Path, since_ms: Option<u64>) -> Option<Transcript> {
     let connection = open_ro(db)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, directory FROM session \
-             ORDER BY time_updated DESC, id DESC",
-        )
-        .ok()?;
-    let rows = statement
-        .query_map((), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .ok()?;
+    let mut rows = session_rows(&connection, true).or_else(|| session_rows(&connection, false))?;
+    let floor = since_ms.and_then(|since| i64::try_from(since).ok());
+    // An agent's own session is the first one *created* since it started, not
+    // whichever was touched last; with no start to go by it is the newest.
+    if floor.is_some() {
+        rows.sort_by_key(|(id, _, _, created)| (*created, id.clone()));
+    }
     // The first row is the newest session that belongs here: the query is
     // newest-first, so the search stops at its answer.
     let session = rows
-        .flatten()
-        .find(|(_, directory)| {
+        .into_iter()
+        .filter(|(_, _, _, created)| {
+            floor.is_none_or(|floor| created.is_some_and(|created| created >= floor))
+        })
+        .find(|(_, directory, _, _)| {
             // A session that records no directory at all is not refused: an older
             // OpenCode wrote the folder only into the message parts, and a row
             // with an empty `directory` records nothing either.
@@ -1109,7 +1244,7 @@ fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
                 .as_deref()
                 .is_none_or(|directory| directory.is_empty() || same_dir(Path::new(directory), cwd))
         })
-        .map(|(id, _)| id)?;
+        .map(|(id, _, _, _)| id)?;
     Some(Transcript {
         format: TranscriptFormat::OpencodeSqlite,
         source: Source::Database {
@@ -1118,6 +1253,34 @@ fn locate_database(db: &Path, cwd: &Path) -> Option<Transcript> {
         },
         session,
     })
+}
+
+/// One `session` row: its id, directory, last update and (where the schema has
+/// it) creation time.
+type SessionRow = (String, Option<String>, Option<i64>, Option<i64>);
+
+/// The `session` rows, newest-updated first. A schema with no `time_created`
+/// column (an older OpenCode) is read with the creation time unknown.
+fn session_rows(connection: &rusqlite::Connection, with_created: bool) -> Option<Vec<SessionRow>> {
+    let sql = if with_created {
+        "SELECT id, directory, time_updated, time_created FROM session \
+         ORDER BY time_updated DESC, id DESC"
+    } else {
+        "SELECT id, directory, time_updated, NULL FROM session \
+         ORDER BY time_updated DESC, id DESC"
+    };
+    let mut statement = connection.prepare(sql).ok()?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .ok()?;
+    Some(rows.flatten().collect())
 }
 
 /// One message row of OpenCode's database, with its parts, oldest first.
@@ -1678,6 +1841,46 @@ mod tests {
         assert_eq!(message.tools.len(), 1);
         assert_eq!(message.tools[0].name, "Bash");
         assert_eq!(message.tools[0].summary, "ls");
+    }
+
+    #[test]
+    fn shprd_news_is_a_news_message_not_raw_tags() {
+        // SHPR-65 bug 5: the service types its news into the coordinator, and a
+        // paste's wrapper tags (one with an attribute, one with its slash
+        // escaped) came out around it as text.
+        let pasted = "<pasted_content id=\"56ab\">\n\
+            <shprd-news task=\"T7\" event=\"needs-you\">T7 needs you: Should pow handle negative exponents? (Add pow)</shprd-news>\n\
+            <shprd-news task=\"T10\" event=\"landed\">T10 is done (Create docs/b.md)</shprd-news>\n\
+            <\\/pasted_content id=\"56ab\">";
+        let value = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": pasted}
+        });
+        let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+        assert_eq!(message.role, Role::News);
+        assert_eq!(
+            message.text,
+            "T7 needs you: Should pow handle negative exponents? (Add pow)\nT10 is done (Create docs/b.md)"
+        );
+        assert!(!message.text.contains('<'), "{}", message.text);
+        // A person's own words are still theirs.
+        let said = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "start T3 please"}
+        });
+        let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&said)).unwrap();
+        assert_eq!(message.role, Role::User);
+    }
+
+    #[test]
+    fn a_pastes_closing_tag_with_an_attribute_or_an_escaped_slash_is_removed() {
+        for close in ["</pasted_content id=\"9\">", "<\\/pasted_content id=\"9\">"] {
+            let text = format!("<pasted_content id=\"9\">hello{close}");
+            let value =
+                serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
+            let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&value)).unwrap();
+            assert_eq!(message.text, "hello", "{close}");
+        }
     }
 
     #[test]

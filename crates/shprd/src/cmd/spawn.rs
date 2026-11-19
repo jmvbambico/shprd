@@ -2464,7 +2464,86 @@ pub(crate) fn coordinator_pane_of(
     recorded_coordinator_pane(home, repo, mux, space)
 }
 
-/// The coordinator agent shprd started, when it is still running in `space`.
+/// A coordinator shprd can type into, as it was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FoundCoordinator {
+    /// The host's pane id.
+    pub(crate) pane: PaneId,
+    /// The program it runs, when known.
+    pub(crate) program: String,
+    /// When its terminal started, in epoch milliseconds, when the host says.
+    pub(crate) started_ms: Option<u64>,
+}
+
+/// The ids a repository's agents carry as their space: the space shprd keeps
+/// for it and any other the host has open on the same folder (an older shprd's,
+/// or one a person opened), because one repository is one space and an agent
+/// started for either belongs to it. An agent whose space is in none of these is
+/// not this repository's.
+pub(crate) fn repo_space_ids(mux: &dyn Host, repo: &Path, space: &shprd_mux::Space) -> Vec<String> {
+    let mut ids = vec![bare_id(space.id.as_str())];
+    for other in mux.spaces_in_folder(repo).unwrap_or_default() {
+        let id = bare_id(other.id.as_str());
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// A host id without a machine prefix.
+fn bare_id(id: &str) -> String {
+    id.rsplit('/').next().unwrap_or(id).to_string()
+}
+
+/// The coordinators of this repository that are running, newest last.
+fn running_coordinators(
+    mux: &dyn Host,
+    repo: &Path,
+    space: &shprd_mux::Space,
+) -> Vec<shprd_mux::LiveAgent> {
+    let ids = repo_space_ids(mux, repo, space);
+    let mut found: Vec<shprd_mux::LiveAgent> = mux
+        .list_coordinators()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| {
+            agent.role == shprd_mux::AgentRole::Coordinator
+                && agent.live
+                && ids.contains(&bare_id(agent.space.as_str()))
+        })
+        .collect();
+    found.sort_by_key(|agent| agent.started_ms);
+    found
+}
+
+/// Ends every running coordinator of this repository except `keep`, and lets go
+/// of the finished ones the host still keeps, so the space holds one.
+///
+/// Only coordinators started for this repository's space are touched, and only
+/// the host's own stop is used; a failure is a warning, because a leftover is
+/// better than a service that will not start.
+pub(crate) fn end_other_coordinators(
+    mux: &dyn Host,
+    repo: &Path,
+    space: &shprd_mux::Space,
+    keep: Option<&PaneId>,
+) {
+    let ids = repo_space_ids(mux, repo, space);
+    for agent in mux.list_coordinators().unwrap_or_default() {
+        if agent.role != shprd_mux::AgentRole::Coordinator
+            || !ids.contains(&bare_id(agent.space.as_str()))
+            || keep.is_some_and(|keep| *keep == agent.tab.root_pane)
+        {
+            continue;
+        }
+        if let Err(err) = mux.kill(&agent.tab.root_pane) {
+            tracing::warn!(pane = %agent.tab.root_pane.as_str(), %err, "an old coordinator could not be ended");
+        }
+    }
+}
+
+/// The coordinator agent shprd can type into, when one is running in `space`.
 ///
 /// News and chat lines are typed into this pane and no other, so it is trusted
 /// only while all three hold: the record carries the `agent` mark (shprd
@@ -2472,12 +2551,51 @@ pub(crate) fn coordinator_pane_of(
 /// tabs, and the host does not say its program has ended. A person who closed
 /// the tab, or whose coordinator exited, gets a refusal and not a line typed
 /// into whatever is left.
+///
+/// When the record names no such pane (the service was restarted for a space
+/// that was found by another route, or the record belongs to an earlier
+/// space), the host's own list of running coordinators for this repository is
+/// asked, and the newest one is taken and recorded: a coordinator that is
+/// running is found, whatever wrote it down.
+pub(crate) fn find_coordinator(
+    home: &Path,
+    repo: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Option<FoundCoordinator> {
+    if let Some(found) = recorded_coordinator(home, repo, mux, space) {
+        return Some(found);
+    }
+    let adopted = running_coordinators(mux, repo, space).pop()?;
+    let pane = adopted.tab.root_pane.clone();
+    if let Err(err) = record_coordinator_pane(home, repo, &space.id, &pane, &adopted.program) {
+        tracing::warn!(%err, "a running coordinator could not be recorded");
+    }
+    Some(FoundCoordinator {
+        pane,
+        program: adopted.program,
+        started_ms: adopted.started_ms,
+    })
+}
+
+/// [`find_coordinator`]'s pane.
 pub(crate) fn recorded_coordinator_pane(
     home: &Path,
     repo: &Path,
     mux: &dyn Host,
     space: &shprd_mux::Space,
 ) -> Option<PaneId> {
+    find_coordinator(home, repo, mux, space).map(|found| found.pane)
+}
+
+/// The coordinator the record names, when it is still a running tab of the
+/// space.
+fn recorded_coordinator(
+    home: &Path,
+    repo: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Option<FoundCoordinator> {
     let record = coordinator_record(home, repo, mux, space)?;
     if !record.agent {
         return None;
@@ -2489,9 +2607,20 @@ pub(crate) fn recorded_coordinator_pane(
         .map(|tab| tab.root_pane)
         .find(|pane| *pane == record.pane)?;
     match mux.agent_state(&pane) {
-        Ok(AgentState::Done) | Err(_) => None,
-        Ok(_) => Some(pane),
+        Ok(AgentState::Done) | Err(_) => return None,
+        Ok(_) => {}
     }
+    let started_ms = mux
+        .list_coordinators()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|agent| agent.tab.root_pane == pane)
+        .and_then(|agent| agent.started_ms);
+    Some(FoundCoordinator {
+        pane,
+        program: record.program.unwrap_or_default(),
+        started_ms,
+    })
 }
 
 /// How `shprd serve` found the coordinator in the repository's space.
@@ -2532,9 +2661,14 @@ pub(crate) fn ensure_coordinator(
     // What older shprd left behind goes first: a coordinator in a bare terminal
     // tab is replaced by the chat tab, never kept beside it.
     tidy_old_coordinator_tabs(mux, space);
-    if let Some(pane) = recorded_coordinator_pane(&env.home, &env.ctx.root, mux, space) {
-        return Ok(CoordinatorStart::Running(pane));
+    // A coordinator that is running is reused and every other one this
+    // repository's earlier starts left behind is ended: a restart never adds
+    // one, and the Agents list does not fill up with them.
+    if let Some(found) = find_coordinator(&env.home, &env.ctx.root, mux, space) {
+        end_other_coordinators(mux, &env.ctx.root, space, Some(&found.pane));
+        return Ok(CoordinatorStart::Running(found.pane));
     }
+    end_other_coordinators(mux, &env.ctx.root, space, None);
     // No coordinator is running, so a tab of ours that still holds a finished
     // one is cleared: the new agent takes the tab's place, not a second pane.
     close_own_tabs(mux, space, &[COORDINATOR_TAB]);
@@ -2708,11 +2842,32 @@ pub(crate) fn restart_coordinator(
     home: &Path,
     defer: impl FnOnce(PendingPrompt),
 ) -> Result<(), CliError> {
-    let prepared = ensure_repo_space(mux, &ctx.root)?;
-    close_own_tabs(mux, &prepared.space, &[COORDINATOR_TAB]);
     let data = crate::cmd::roster::resolve_data_dir();
     let env = build_repo_env(ctx, Some(home), &data)?;
-    ensure_coordinator(mux, &env, &prepared, defer).map(|_| ())
+    restart_coordinator_with(mux, ctx, &env, defer)
+}
+
+/// [`restart_coordinator`] with the environment it starts from already built.
+fn restart_coordinator_with(
+    mux: &dyn Host,
+    ctx: &Ctx,
+    env: &SpawnEnv<'_>,
+    defer: impl FnOnce(PendingPrompt),
+) -> Result<(), CliError> {
+    let prepared = ensure_repo_space(mux, &ctx.root)?;
+    // Every running coordinator of the repository ends first, so the one the
+    // restart starts is the only one and is not mistaken for the old one.
+    end_other_coordinators(mux, &ctx.root, &prepared.space, None);
+    close_own_tabs(mux, &prepared.space, &[COORDINATOR_TAB]);
+    // The host reports a stop a moment later: wait for it, or the old
+    // coordinator is found running and kept.
+    for _ in 0..30 {
+        if running_coordinators(mux, &ctx.root, &prepared.space).is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ensure_coordinator(mux, env, &prepared, defer).map(|_| ())
 }
 
 /// What the person calls the coordinator: its role's name, which is the
@@ -4142,6 +4297,132 @@ project_dirs = []
             matches!(replaced, CoordinatorStart::Started(_)),
             "{replaced:?}"
         );
+    }
+
+    /// A coordinator an earlier start left behind: running, with no record that
+    /// names it.
+    fn stray_coordinator(mux: &FakeMux, space: &shprd_mux::Space, repo: &Path) -> PaneId {
+        mux.spawn_agent(&shprd_mux::AgentLaunch {
+            space: &space.id,
+            title: "Assistant",
+            argv: &["claude".to_string()],
+            env: &[],
+            cwd: repo,
+            role: shprd_mux::AgentRole::Coordinator,
+            task: None,
+            program: "claude",
+            parent: None,
+        })
+        .unwrap_or_else(|err| panic!("{err}"))
+        .root_pane
+    }
+
+    fn running(mux: &FakeMux) -> Vec<PaneId> {
+        mux.list_coordinators()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|agent| agent.live)
+            .map(|agent| agent.tab.root_pane)
+            .collect()
+    }
+
+    /// The service starts after earlier starts left coordinators running: it
+    /// keeps one, ends the rest, and a later start adds none (SHPR-65 bug 3).
+    #[test]
+    fn old_coordinators_are_ended_and_a_restart_never_adds_one() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let old: Vec<PaneId> = (0..3)
+            .map(|_| stray_coordinator(&mux, &prepared.space, scratch.root()))
+            .collect();
+        assert_eq!(running(&mux).len(), 3);
+
+        let first = ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        // The newest running one is kept and recorded; no fourth is started.
+        assert_eq!(first, CoordinatorStart::Running(old[2].clone()));
+        assert_eq!(running(&mux), vec![old[2].clone()], "one is left running");
+
+        for _ in 0..3 {
+            let again = ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+                .unwrap_or_else(|err| panic!("{err}"));
+            assert_eq!(again, CoordinatorStart::Running(old[2].clone()));
+        }
+        assert_eq!(running(&mux).len(), 1, "restarts add none");
+    }
+
+    /// A running coordinator is found and typed into even when its record is
+    /// missing or belongs to another space (SHPR-65 bug 2).
+    #[test]
+    fn a_running_coordinator_is_found_without_a_record_and_send_reaches_it() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mux = FakeMux::default().with_ready_agent();
+        let space = repo_space(&mux, &scratch);
+        let pane = stray_coordinator(&mux, &space, scratch.root());
+        let _ = mux.take_calls();
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            writes(&mux),
+            vec![(pane.as_str().to_string(), "hello".to_string())]
+        );
+        // And it was recorded, so the next lookup is the fast one.
+        let record = coordinator_record(scratch.home.path(), scratch.root(), &mux, &space);
+        assert_eq!(record.map(|record| record.pane), Some(pane));
+    }
+
+    /// A coordinator that belongs to another repository's space is not this
+    /// repository's, and is neither typed into nor ended.
+    #[test]
+    fn another_repositorys_coordinator_is_neither_found_nor_ended() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let other = mux
+            .create_space("shprd · elsewhere", Path::new("/work/elsewhere"))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let theirs = stray_coordinator(&mux, &other, Path::new("/work/elsewhere"));
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let started = ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            matches!(started, CoordinatorStart::Started(_)),
+            "{started:?}"
+        );
+        assert!(
+            running(&mux).contains(&theirs),
+            "the other repository's is untouched"
+        );
+        let _ = mux.take_calls();
+        prompt_coordinator(&mux, scratch.home.path(), &ctx, "hi")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_ne!(writes(&mux)[0].0, theirs.as_str());
+    }
+
+    /// A restart ends the running coordinator before it starts the new one, so
+    /// the new one is the only one.
+    #[test]
+    fn a_coordinator_restart_leaves_exactly_one() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let first = ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        restart_coordinator_with(&mux, &ctx, &env, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let now = running(&mux);
+        assert_eq!(now.len(), 1, "{now:?}");
+        assert_ne!(now[0], *first.pane(), "a new one, not the old");
     }
 
     /// Renaming the coordinator renames shprd's own tab and nothing else: a tab the

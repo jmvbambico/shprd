@@ -38,8 +38,9 @@ pub(crate) struct HostLive {
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Every agent seen so far, by id.
     seen: Mutex<BTreeMap<String, Seen>>,
-    /// The host's space this service made or reused for the repository.
-    space: Option<HostSpace>,
+    /// Whether the service has a space of its own for the repository: when it
+    /// does not (a host it could not reach), no name is reported for one.
+    has_space: bool,
 }
 
 impl HostLive {
@@ -62,13 +63,16 @@ impl HostLive {
             host,
             now,
             seen: Mutex::new(BTreeMap::new()),
-            space: None,
+            has_space: false,
         }
     }
 
-    /// Names the host's own space for the repository, which `spaces` reports.
-    pub(crate) fn with_space(mut self, space: Option<HostSpace>) -> Self {
-        self.space = space;
+    /// Says the service made or reused the host's own space for the repository,
+    /// which `spaces` reports by the name the host shows *now*: the window draws
+    /// a space's name a moment after it makes it, so a name read once at start
+    /// would be the raw id for ever.
+    pub(crate) fn with_space(mut self, has_space: bool) -> Self {
+        self.has_space = has_space;
         self
     }
 
@@ -81,15 +85,46 @@ impl HostLive {
             .map(|row| row.terminal)
     }
 
+    /// The label of the repository's space.
+    fn label(&self) -> Option<String> {
+        crate::cmd::spawn::repo_name(&self.repo)
+            .map(|name| crate::cmd::spawn::repo_space_name(&name))
+            .ok()
+    }
+
+    /// The host's space for the repository, found the way the service finds it
+    /// everywhere: by its mark, then its label.
+    fn repo_space(&self) -> Result<Option<shprd_mux::Space>, shprd_mux::MuxError> {
+        let Some(label) = self.label() else {
+            return Ok(None);
+        };
+        shprd_mux::find_marked_space(self.host.as_ref(), &label)
+    }
+
     /// What the host lists right now, as rows without a clock; `None` when the
     /// host could not be asked, which is not the same as an empty list.
+    ///
+    /// Only this repository's agents are listed: a worker or reviewer belongs to
+    /// the space of the repository its task is in, and one whose space the host
+    /// cannot tie to this repository is not shown here. The coordinator is the
+    /// one running now, however many an earlier start left behind.
     fn current(&self) -> Option<(Vec<LiveAgentRow>, bool)> {
         let now = (self.now)();
+        let space = self.repo_space().ok()?;
+        let ids = space
+            .as_ref()
+            .map(|space| crate::cmd::spawn::repo_space_ids(self.host.as_ref(), &self.repo, space))
+            .unwrap_or_default();
         let mut rows: Vec<LiveAgentRow> = self
             .host
             .list_agents()
             .ok()?
             .into_iter()
+            .filter(|agent| agent.role != AgentRole::Coordinator)
+            .filter(|agent| {
+                let id = agent.space.as_str().rsplit('/').next().unwrap_or_default();
+                ids.iter().any(|known| known == id)
+            })
             // The core keeps a finished terminal's record; the pane lists it for
             // as long as the rest do, then lets it go.
             .filter(|agent| {
@@ -117,60 +152,31 @@ impl HostLive {
                 }
             })
             .collect();
-        let coordinator = self.coordinator();
-        let unknown = coordinator.is_none() && self.coordinator_unreadable();
+        let coordinator = space.as_ref().and_then(|space| self.coordinator(space));
+        let unknown = coordinator.is_none()
+            && space
+                .as_ref()
+                .is_some_and(|space| self.host.list_tabs(&space.id).is_err());
         rows.extend(coordinator);
         Some((rows, unknown))
     }
 
-    /// Whether the host could not say where the coordinator is (a failed lookup),
-    /// as against it not being there: the last row is kept for the first.
-    fn coordinator_unreadable(&self) -> bool {
-        let Ok(name) = crate::cmd::spawn::repo_name(&self.repo)
-            .map(|name| crate::cmd::spawn::repo_space_name(&name))
-        else {
-            return false;
-        };
-        match self.host.find_space(&name) {
-            Err(_) => true,
-            Ok(None) => false,
-            Ok(Some(space)) => self.host.list_tabs(&space.id).is_err(),
-        }
-    }
-
-    /// The coordinator shprd started in the repository's space, when it is there.
-    fn coordinator(&self) -> Option<LiveAgentRow> {
-        let name = crate::cmd::spawn::repo_name(&self.repo)
-            .map(|name| crate::cmd::spawn::repo_space_name(&name))
-            .ok()?;
-        let space = self.host.find_space(&name).ok()??;
-        let record = crate::cmd::spawn::coordinator_record(
-            &self.home,
-            &self.repo,
-            self.host.as_ref(),
-            &space,
-        )?;
-        let pane = record.pane;
-        // Only a pane that is still a tab of the space is the coordinator: a
-        // closed tab is no longer its record's.
-        let tab = self
-            .host
-            .list_tabs(&space.id)
-            .ok()?
-            .into_iter()
-            .find(|tab| tab.root_pane == pane)?;
-        let state = match self.host.agent_state(&tab.root_pane) {
+    /// The coordinator running in the repository's space, when there is one.
+    fn coordinator(&self, space: &shprd_mux::Space) -> Option<LiveAgentRow> {
+        let found =
+            crate::cmd::spawn::find_coordinator(&self.home, &self.repo, self.host.as_ref(), space)?;
+        let state = match self.host.agent_state(&found.pane) {
             Ok(state) => state_word(state),
             Err(_) => "done",
         };
         Some(LiveAgentRow {
-            id: pane.as_str().to_string(),
-            terminal: pane.as_str().to_string(),
+            id: found.pane.as_str().to_string(),
+            terminal: found.pane.as_str().to_string(),
             task: None,
             role: AgentRole::Coordinator.as_str().to_string(),
-            program: record.program.unwrap_or_default(),
+            program: found.program,
             state: state.to_string(),
-            started_ms: None,
+            started_ms: found.started_ms,
             ended_ms: None,
             since_ms: None,
         })
@@ -189,7 +195,22 @@ fn state_word(state: AgentState) -> &'static str {
 
 impl LiveSource for HostLive {
     fn space(&self) -> Option<HostSpace> {
-        self.space.clone()
+        if !self.has_space {
+            return None;
+        }
+        let label = self.label()?;
+        let space = self.repo_space().ok()??;
+        // A name the host has not drawn yet is the id: the label shprd gave the
+        // space is what a person is to read.
+        let name = match space.name.trim() {
+            "" => label,
+            shown if shown == space.id.as_str() => label,
+            shown => shown.to_string(),
+        };
+        Some(HostSpace {
+            id: space.id.as_str().to_string(),
+            name,
+        })
     }
 
     fn agents(&self) -> Vec<LiveAgentRow> {
@@ -341,6 +362,62 @@ mod tests {
         // Thirty minutes later they are gone.
         clock.store(5_000 + FINISHED_FOR_MS, Ordering::SeqCst);
         assert!(live.agents().is_empty());
+    }
+
+    #[test]
+    fn another_repositorys_agents_are_not_listed_here() {
+        // SHPR-65 bug 4: the shprd repo's workers showed in the scratchpad's space.
+        let (live, mux, _clock, _home) = source();
+        start(&mux, AgentRole::Worker, Some("mine"));
+        let other = mux
+            .ensure_space("shprd · other", std::path::Path::new("/work/other"))
+            .expect("space");
+        mux.spawn_agent(&AgentLaunch {
+            space: &other.id,
+            title: "agent",
+            argv: &[],
+            env: &[],
+            cwd: std::path::Path::new("/work/other"),
+            role: AgentRole::Worker,
+            task: Some("theirs"),
+            program: "claude",
+            parent: None,
+        })
+        .expect("agent");
+        // And one whose space the host cannot tie to any repository.
+        mux.spawn_agent(&AgentLaunch {
+            space: &shprd_mux::SpaceId::new("sp-unknown"),
+            title: "agent",
+            argv: &[],
+            env: &[],
+            cwd: std::path::Path::new("/work/other"),
+            role: AgentRole::Worker,
+            task: Some("nobodys"),
+            program: "claude",
+            parent: None,
+        })
+        .expect("agent");
+        let tasks: Vec<_> = live.agents().into_iter().map(|row| row.task).collect();
+        assert_eq!(tasks, vec![Some("mine".to_string())], "{tasks:?}");
+    }
+
+    #[test]
+    fn only_the_running_coordinator_is_listed_however_many_earlier_starts_left() {
+        // SHPR-65 bug 3: twelve coordinators filled the Agents pane.
+        let (live, mux, _clock, home) = source();
+        let space = mux
+            .ensure_space("shprd · repo", std::path::Path::new("/work/repo"))
+            .expect("space");
+        for _ in 0..4 {
+            start(&mux, AgentRole::Coordinator, None);
+        }
+        let rows = live.agents();
+        let coordinators: Vec<_> = rows
+            .iter()
+            .filter(|row| row.role == "coordinator")
+            .collect();
+        assert_eq!(coordinators.len(), 1, "{rows:?}");
+        let _ = (space, home);
     }
 
     #[test]

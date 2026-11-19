@@ -38,6 +38,8 @@ const PORT: u16 = 18_082;
 struct Recorder {
     lines: Mutex<Vec<(Option<String>, String)>>,
     refuse: bool,
+    /// When the coordinator this writer types into started, if it says.
+    started_ms: Option<u64>,
 }
 
 impl Recorder {
@@ -48,6 +50,10 @@ impl Recorder {
 }
 
 impl ChatWriter for Recorder {
+    fn started_ms(&self, space: Option<&str>) -> Option<u64> {
+        space.is_none().then_some(self.started_ms).flatten()
+    }
+
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
         if self.refuse {
             return Err("no open pane for the coordinator".to_string());
@@ -1000,4 +1006,61 @@ async fn a_task_space_reads_an_opencode_database_session_from_its_worktree() {
     assert_eq!(reply.body["session"], "ses_task");
     assert_eq!(reply.messages().len(), 1, "{}", reply.body);
     assert_eq!(reply.messages()[0]["text"], "T3 is done.");
+}
+
+/// SHPR-65 bug 5: the chat shows the agent Send reaches. An older conversation in
+/// the same folder (the person's own, or the last coordinator's) is not it.
+#[tokio::test]
+async fn the_coordinators_chat_is_the_conversation_it_began_not_an_older_one_in_the_folder() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    // An older Claude Code conversation in the repository's folder.
+    let first = Fixture::prepared(repo, home);
+    first.write_session(first.repo.path(), "older.jsonl", &[(true, "an old chat")]);
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let Fixture { repo, home, .. } = first;
+    let fixture = Fixture::prepared_with(
+        repo,
+        home,
+        Arc::new(Recorder {
+            started_ms: Some(started),
+            ..Recorder::default()
+        }),
+    );
+
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        reply.messages().is_empty(),
+        "the old chat is not shown: {}",
+        reply.body
+    );
+    assert!(
+        reply.note().contains("has not said anything yet"),
+        "{}",
+        reply.note()
+    );
+
+    // Its own first turn begins a session, and that is what the chat shows.
+    fixture.write_session(
+        fixture.repo.path(),
+        "mine.jsonl",
+        &[(true, "<shprd-news task=\"T7\" event=\"needs-you\">T7 needs you: pick one (Add pow)</shprd-news>"), (false, "Noted.")],
+    );
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.body["session"], "mine", "{}", reply.body);
+    assert_eq!(reply.messages().len(), 2);
+    // The news line the service typed is news, not raw tags.
+    assert_eq!(reply.messages()[0]["role"], "news");
+    assert_eq!(
+        reply.messages()[0]["text"],
+        "T7 needs you: pick one (Add pow)"
+    );
+    assert_eq!(reply.messages()[1]["role"], "assistant");
 }

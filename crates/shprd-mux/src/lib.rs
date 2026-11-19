@@ -102,6 +102,30 @@ pub trait Host: Send + Sync {
         Err(MuxError::Unsupported("marking a space"))
     }
 
+    /// Give `space` the display name `name`.
+    ///
+    /// The id and the mark stay. A host that cannot rename answers
+    /// [`MuxError::Unsupported`], and the caller leaves the name as it is.
+    fn rename_space(&self, _space: &SpaceId, _name: &str) -> Result<()> {
+        Err(MuxError::Unsupported("renaming a space"))
+    }
+
+    /// The spaces whose folder is `folder`, in the host's display order.
+    ///
+    /// A host that does not record a space's folder answers none: the caller
+    /// then falls back to names.
+    fn spaces_in_folder(&self, _folder: &Path) -> Result<Vec<Space>> {
+        Ok(Vec::new())
+    }
+
+    /// Every coordinator agent the host has, running or ended, whichever space
+    /// it was started for. [`Host::list_agents`] lists the headless agents only
+    /// (a coordinator keeps a tab), so this is the one place a coordinator
+    /// shprd started earlier can be found again.
+    fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+        Ok(Vec::new())
+    }
+
     /// Every space the host has, in the host's display order.
     ///
     /// Only where a name cannot be guessed: a refusal is worth reading when it
@@ -521,6 +545,18 @@ macro_rules! forward_a_wrapper {
                     (**self).mark_space(space, mark)
                 }
 
+                fn rename_space(&self, space: &SpaceId, name: &str) -> Result<()> {
+                    (**self).rename_space(space, name)
+                }
+
+                fn spaces_in_folder(&self, folder: &Path) -> Result<Vec<Space>> {
+                    (**self).spaces_in_folder(folder)
+                }
+
+                fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+                    (**self).list_coordinators()
+                }
+
                 fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {
                     (**self).doc(space, name, body)
                 }
@@ -589,14 +625,23 @@ pub fn repo_space_name(repo_name: &str) -> String {
 ///
 /// A person may rename the space, so the display name is not the identity: the
 /// mark is. Order: the space carrying the mark; else (back-compat, a space made
-/// before marks existed) the space with that exact name, which then gets the
-/// mark; else a new space made in `cwd` and marked. Returns the space and
-/// whether this call made it. A host that cannot keep marks still works by name.
+/// before marks existed) the space with that exact name; else a space already
+/// open on `cwd` (one repository is one space, so a space an older shprd or a
+/// person made for the same folder is adopted, never shown beside a second);
+/// else a new space made in `cwd`. The space found or made is marked, and
+/// given `name` when the host shows it by its raw id, by no name at all or by
+/// its folder's name, because a person reads the label on the sidebar. A name
+/// a person chose is left alone. Returns the space and whether this call made
+/// it. A host that cannot keep marks or rename still works by name.
 pub fn ensure_marked_space(host: &dyn Host, name: &str, cwd: &Path) -> Result<(Space, bool)> {
-    if let Some(space) = host.marked_space(name)? {
-        return Ok((space, false));
-    }
-    let (space, created) = match host.find_space(name)? {
+    let known = match host.marked_space(name)? {
+        Some(space) => Some(space),
+        None => match host.find_space(name)? {
+            Some(space) => Some(space),
+            None => same_folder_space(host, name, cwd),
+        },
+    };
+    let (mut space, created) = match known {
         Some(space) => (space, false),
         None => match host.create_space(name, cwd) {
             Ok(space) => (space, true),
@@ -607,11 +652,42 @@ pub fn ensure_marked_space(host: &dyn Host, name: &str, cwd: &Path) -> Result<(S
             },
         },
     };
+    if shows_as_auto(&space, name, cwd) && host.rename_space(&space.id, name).is_ok() {
+        space.name = name.to_string();
+    }
     match host.mark_space(&space.id, name) {
         Ok(()) | Err(MuxError::Unsupported(_)) => {}
         Err(err) => return Err(err),
     }
     Ok((space, created))
+}
+
+/// The space already open on `cwd` that is not another repository's label: the
+/// one a repository adopts instead of making a second.
+fn same_folder_space(host: &dyn Host, label: &str, cwd: &Path) -> Option<Space> {
+    let spaces = host.spaces_in_folder(cwd).ok()?;
+    spaces
+        .into_iter()
+        .find(|space| space.name == label || !space.name.starts_with(SPACE_PREFIX))
+}
+
+/// What every label starts with.
+const SPACE_PREFIX: &str = "shprd · ";
+
+/// Whether a host shows `space` by something the window made up rather than by
+/// a name a person chose: its raw id, nothing, or its folder's name.
+fn shows_as_auto(space: &Space, label: &str, cwd: &Path) -> bool {
+    if space.name == label {
+        return false;
+    }
+    let name = space.name.trim();
+    let folder = cwd
+        .file_name()
+        .map(|folder| folder.to_string_lossy().to_string())
+        .unwrap_or_default();
+    name.is_empty()
+        || name == space.id.as_str()
+        || (!folder.is_empty() && name.eq_ignore_ascii_case(&folder))
 }
 
 /// The space shprd keeps under `name` if the host has it: by mark first, then

@@ -82,7 +82,7 @@ export function fold(chat, answer) {
 /** One message of an answer, with the fields a row draws always present. */
 export function normalize(message) {
   return {
-    role: message?.role === "assistant" ? "assistant" : "user",
+    role: message?.role === "assistant" || message?.role === "news" ? message.role : "user",
     text: String(message?.text ?? ""),
     tools: Array.isArray(message?.tools)
       ? message.tools.map((tool) => ({

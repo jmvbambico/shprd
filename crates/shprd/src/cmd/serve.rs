@@ -147,13 +147,23 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         repo: ctx.root.clone(),
         home: home.clone(),
         host: host.clone(),
+        start_failure: match &workspace {
+            SpaceNotice::Created(_, None, why) | SpaceNotice::Reused(_, None, why) => why.clone(),
+            SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) => {
+                Some(format!("the space was not ready: {reason}"))
+            }
+            _ => None,
+        },
     }));
     // The agents the host lists, headless: `live_agents` on the state answer, the
     // output and attach routes, and the terminal socket's `agent:<id>` space all
     // read this one list, so a client can only reach an agent that was listed.
     let live = Arc::new(
         crate::cmd::live_agents::HostLive::new(ctx.root.clone(), home.clone(), host.clone())
-            .with_space(host_space(host.as_ref(), &workspace)),
+            .with_space(matches!(
+                workspace,
+                SpaceNotice::Created(..) | SpaceNotice::Reused(..)
+            )),
     );
     config.live = shprd_server::LiveAgents::with(live.clone());
     config.terminal = shprd_server::TerminalPort::with(Arc::new(HostTerminal {
@@ -274,9 +284,28 @@ struct HostChat {
     /// The host this service drives — the same adapter the tick spawns and
     /// closes with, so a chat line and a prompt can never go to two hosts.
     host: Arc<dyn Host>,
+    /// Why the coordinator could not be started when the service started, so a
+    /// chat that finds none says why and not only that there is none.
+    start_failure: Option<String>,
 }
 
 impl shprd_server::ChatWriter for HostChat {
+    fn started_ms(&self, space: Option<&str>) -> Option<u64> {
+        // Only the coordinator is pinned: a task's conversation is in its own
+        // worktree, where nobody else's lives.
+        if space.is_some() {
+            return None;
+        }
+        let name = crate::cmd::spawn::repo_name(&self.repo)
+            .map(|name| crate::cmd::spawn::repo_space_name(&name))
+            .ok()?;
+        let space = shprd_mux::find_marked_space(self.host.as_ref(), &name)
+            .ok()
+            .flatten()?;
+        crate::cmd::spawn::find_coordinator(&self.home, &self.repo, self.host.as_ref(), &space)?
+            .started_ms
+    }
+
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
         // Reading the log needs the root; the actor is the person, because the
         // line is theirs — the API never writes to the ledger for a chat turn,
@@ -290,7 +319,12 @@ impl shprd_server::ChatWriter for HostChat {
                 crate::cmd::spawn::prompt_in(self.host.as_ref(), &self.home, &ctx, task, text)
             }
         }
-        .map_err(|err| err.to_string())
+        .map_err(|err| match (&self.start_failure, space) {
+            (Some(why), None) if matches!(err, CliError::Invalid(_)) => {
+                format!("{err} (it could not be started when the service started: {why})")
+            }
+            _ => err.to_string(),
+        })
     }
 }
 
@@ -436,19 +470,6 @@ impl shprd_server::AgentOpener for HostAgents {
     }
 }
 
-/// The host's real space for the repository, by the label the service
-/// created or reused, so the state can name Herdr's own id.
-fn host_space(host: &dyn Host, notice: &SpaceNotice) -> Option<shprd_server::HostSpace> {
-    let (SpaceNotice::Created(label, _) | SpaceNotice::Reused(label, _)) = notice else {
-        return None;
-    };
-    let found = shprd_mux::find_marked_space(host, label).ok().flatten()?;
-    Some(shprd_server::HostSpace {
-        id: found.id.as_str().to_string(),
-        name: found.name,
-    })
-}
-
 /// What the service did about the repository's own space when it started.
 ///
 /// The label is derived ([`crate::cmd::spawn::repo_space_name`]) and a host
@@ -459,11 +480,12 @@ fn host_space(host: &dyn Host, notice: &SpaceNotice) -> Option<shprd_server::Hos
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SpaceNotice {
     /// The space was already there and is reused, with the pane recorded for the
-    /// coordinator's chat when the space has a tab.
-    Reused(String, Option<String>),
+    /// coordinator's chat when the space has a tab, and the reason the
+    /// coordinator could not be started when it could not.
+    Reused(String, Option<String>, Option<String>),
     /// The space was missing and is created at the repository root, with that
     /// pane.
-    Created(String, Option<String>),
+    Created(String, Option<String>, Option<String>),
     /// It could not be found or made; the reason names the label it wanted.
     Unavailable(String),
     /// The host was not touched at all: the checkout and the socket name two
@@ -494,16 +516,16 @@ fn prepare_space(
     // coordinator that cannot start (no CLI installed, a prompt that cannot be
     // read) is a warning and not a refusal to serve: the board is still what a
     // person reads, and the chat then says why it has nowhere to type.
-    let pane = match start(&prepared) {
-        Ok(start) => Some(start.pane().as_str().to_string()),
+    let (pane, why) = match start(&prepared) {
+        Ok(start) => (Some(start.pane().as_str().to_string()), None),
         Err(err) => {
             tracing::warn!(%err, "the coordinator could not be started");
-            None
+            (None, Some(err.to_string()))
         }
     };
     match prepared.created {
-        true => SpaceNotice::Created(prepared.space.name, pane),
-        false => SpaceNotice::Reused(prepared.space.name, pane),
+        true => SpaceNotice::Created(prepared.space.name, pane, why),
+        false => SpaceNotice::Reused(prepared.space.name, pane, why),
     }
 }
 
@@ -719,18 +741,22 @@ fn announce(
 /// banner a person can read, and the failure to prepare the space is in the
 /// place the rest of the setup is.
 fn space_line(notice: &SpaceNotice, root: &Path) -> String {
-    let coordinator = |pane: &Option<String>| match pane {
-        Some(pane) => format!(", the coordinator's pane {pane}"),
-        None => String::from(", no tab for the coordinator yet"),
+    let coordinator = |pane: &Option<String>, why: &Option<String>| match (pane, why) {
+        (Some(pane), _) => format!(", the coordinator's pane {pane}"),
+        (None, Some(why)) => format!(", the coordinator could not be started: {why}"),
+        (None, None) => String::from(", no tab for the coordinator yet"),
     };
     match notice {
-        SpaceNotice::Created(label, pane) => format!(
+        SpaceNotice::Created(label, pane, why) => format!(
             "created {label:?} at the repository root {}{}",
             root.display(),
-            coordinator(pane)
+            coordinator(pane, why)
         ),
-        SpaceNotice::Reused(label, pane) => {
-            format!("{label:?} (already there, reused){}", coordinator(pane))
+        SpaceNotice::Reused(label, pane, why) => {
+            format!(
+                "{label:?} (already there, reused){}",
+                coordinator(pane, why)
+            )
         }
         SpaceNotice::Unavailable(reason) => format!("not ready: {reason}"),
         // A withheld space has no label to report: nothing was looked up, and
@@ -746,11 +772,11 @@ fn space_line(notice: &SpaceNotice, root: &Path) -> String {
 /// the only thing that says which label was wanted.
 fn space_json(notice: &SpaceNotice) -> Value {
     match notice {
-        SpaceNotice::Created(label, pane) => {
-            serde_json::json!({ "label": label, "state": "created", "pane": pane })
+        SpaceNotice::Created(label, pane, why) => {
+            serde_json::json!({ "label": label, "state": "created", "pane": pane, "coordinator_error": why })
         }
-        SpaceNotice::Reused(label, pane) => {
-            serde_json::json!({ "label": label, "state": "reused", "pane": pane })
+        SpaceNotice::Reused(label, pane, why) => {
+            serde_json::json!({ "label": label, "state": "reused", "pane": pane, "coordinator_error": why })
         }
         SpaceNotice::Unavailable(reason) => {
             serde_json::json!({ "label": Value::Null, "state": "unavailable", "reason": reason })
@@ -822,7 +848,7 @@ mod tests {
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
 
-        let SpaceNotice::Created(reported, pane) = &notice else {
+        let SpaceNotice::Created(reported, pane, _) = &notice else {
             panic!("the space is created, not {notice:?}");
         };
         assert_eq!(reported, &label);
@@ -862,6 +888,51 @@ mod tests {
     }
 
     #[test]
+    fn a_space_an_earlier_run_left_for_the_folder_is_reused_and_given_the_label() {
+        // SHPR-65 bug 1: the person's repo already had a space (made before the
+        // mark existed, named after its folder). The banner said "created" and the
+        // sidebar showed a second, raw-id entry beside it.
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default().with_starter_tab();
+        let label = label_of(repo.path());
+        let folder = repo
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let old = mux.add_space(&folder, repo.path());
+
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
+
+        let SpaceNotice::Reused(reported, _, _) = &notice else {
+            panic!("the older space is reused, not {notice:?}");
+        };
+        assert_eq!(reported, &label);
+        assert!(space_line(&notice, repo.path()).contains("reused"));
+        let spaces = mux.list_spaces().unwrap_or_default();
+        assert_eq!(spaces.len(), 1, "one repository, one space: {spaces:?}");
+        assert_eq!(spaces[0].id, old);
+        assert_eq!(spaces[0].name, label, "labelled, not the raw id");
+    }
+
+    #[test]
+    fn a_coordinator_that_cannot_start_says_why_in_the_banner() {
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default();
+        let notice = prepare_space(&mux, repo.path(), |_| {
+            Err(CliError::Invalid(anyhow!("no installed worker CLI")))
+        });
+        let line = space_line(&notice, repo.path());
+        assert!(line.contains("could not be started"), "{line}");
+        assert!(line.contains("no installed worker CLI"), "{line}");
+        assert_eq!(
+            space_json(&notice)["coordinator_error"],
+            "invalid: no installed worker CLI"
+        );
+    }
+
+    #[test]
     fn a_service_reuses_the_space_that_is_already_there() {
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default().with_starter_tab();
@@ -874,7 +945,7 @@ mod tests {
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
 
-        let SpaceNotice::Reused(reported, pane) = &notice else {
+        let SpaceNotice::Reused(reported, pane, _) = &notice else {
             panic!("the space is reused, not {notice:?}");
         };
         assert_eq!(reported, &label);

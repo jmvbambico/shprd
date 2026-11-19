@@ -433,7 +433,9 @@ export default class Chat extends View {
           .text_color(t.foreground)
           // The agent's words sit in a raised bubble; the person's are an accent
           // tint, which is how a long column of one voice stays readable.
-          .when(!mine(message), (el) => el.bg(t.raised))
+          .when(!mine(message) && message.role !== "news", (el) => el.bg(t.raised))
+          // What the service told the agent is a quiet news line, not a bubble.
+          .when(message.role === "news", (el) => el.text_color(t.muted).text_size(TEXT.label).border_1().border_color(t.dim + "66"))
           .when(mine(message), (el) => el.bg(t.accent + "33").border_1().border_color(t.accent + "4d"))
           .child(
             TextView.markdown(`chat-md-${row.key}${open ? "" : shown.folded ? "-f" : ""}`, markdownOf(message, shown.text) || " ")

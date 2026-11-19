@@ -200,6 +200,24 @@ fn a_space_the_window_makes_is_named_where_the_person_sees_it() {
 }
 
 #[test]
+fn a_space_is_renamed_by_the_windows_own_verb_and_only_when_the_layout_holds_it() {
+    let (_fake, window, host) = host_with_window("normal");
+    host.rename_space(&SpaceId::new(SPACE), "shprd · repo")
+        .expect("the window renames the space");
+    let calls = window.calls();
+    assert!(
+        calls.iter().any(|call| call.starts_with("do space.rename")
+            && call.contains(&format!("--id {SPACE}"))
+            && call.contains("--name shprd · repo")),
+        "the window was asked to rename it: {calls:?}"
+    );
+    assert!(matches!(
+        host.rename_space(&SpaceId::new("spgone"), "x"),
+        Err(MuxError::NotFound { .. })
+    ));
+}
+
+#[test]
 fn a_space_the_layout_does_not_hold_is_not_found() {
     let (_fake, _window, host) = host_with_window("normal");
     assert!(matches!(
