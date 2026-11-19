@@ -159,8 +159,8 @@ export function when(atMs) {
 }
 
 /** One line for the panel's header: which program and session the page is from. */
-export function header(chat) {
-  if (!chat?.program) return "Coordinator";
+export function header(chat, title = "Coordinator") {
+  if (!chat?.program) return title;
   if (!chat?.session) return `${chat.program} · no session yet`;
   return `${chat.program} · ${cut(chat.session, 24)}`;
 }

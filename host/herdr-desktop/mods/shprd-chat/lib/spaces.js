@@ -28,7 +28,7 @@
 // Shared: the source is `mods/lib/spaces.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { NEED, STATUS_ORDER, status as statusOf } from "./tokens.js";
+import { NEED, STATUS_ORDER, roleTitle, status as statusOf } from "./tokens.js";
 import { counts, isLive, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
@@ -201,7 +201,7 @@ export function coordinatorRow(state, space = null) {
     kind: KIND.coordinator,
     id: COORDINATOR_ID,
     label: String(run?.repo ?? "").split("/").filter(Boolean).pop() || "This repository",
-    title: "Coordinator",
+    title: roleTitle(state, "coordinator"),
     sub: run ? `run ${run.id} · ${run.integration_branch}` : (state?.hint ?? "No run yet"),
     status: run ? (state?.finished ? "done" : "working") : "to_do",
     word: run ? (state?.finished ? "Finished" : "Running") : "No run",

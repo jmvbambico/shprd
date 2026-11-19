@@ -33,7 +33,7 @@
 // Shared: the source is `mods/lib/tabstrip.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { status as statusOf } from "./tokens.js";
+import { roleTitle, status as statusOf } from "./tokens.js";
 
 /** The separator shprd's tab titles are built from (`worker_title`). */
 export const SEP = "·";
@@ -183,7 +183,7 @@ export function tabRows(space, panes, state) {
       named: Boolean(tab.named),
       agent: named.agent,
       role: named.role,
-      roleWord: named.role ? ROLE[named.role] : null,
+      roleWord: named.role ? roleTitle(state, named.role) : null,
       task: named.task,
       title: String(task?.title ?? ""),
       active: Boolean(tab.active),

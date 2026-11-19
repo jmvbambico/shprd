@@ -27,6 +27,8 @@
 // Shared: the source is `mods/lib/toasts.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
+import { roleRename } from "./tokens.js";
+
 /** How many toasts are on screen at once (`core/toasts.js:11`). */
 export const SHOWN = 3;
 /** How wide the float is, px (`core/toasts.js:12`). */
@@ -177,7 +179,10 @@ export function newsItems(changes, state) {
     // which one and what it found; without the snapshot's join it says the
     // least it truthfully can.
     const failed = failedGate(state, task);
-    const what = failed?.gate === "review" || !failed ? "Review failed" : `${failed.gate} failed`;
+    // The reviewer's own name, when the person gave it one: "QA failed it".
+    const qa = roleRename(state, "reviewer");
+    const review = qa ? `${qa} failed it` : "Review failed";
+    const what = failed?.gate === "review" || !failed ? review : `${failed.gate} failed`;
     items.push({
       id: eventId(change.seq),
       level,

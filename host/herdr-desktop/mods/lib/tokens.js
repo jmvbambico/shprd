@@ -21,6 +21,37 @@
 /** Button heights: 20 only inside a row's second line, 24 in panels, 32 in dialogs. */
 export const H = { xs: 20, sm: 24, lg: 32 };
 
+/**
+ * The names the shipped roles are called by until the person renames them: the
+ * service's own (`builtin_roles` in `shprd-core`), used when a state carries no
+ * `role_titles` (an older service, a fixture).
+ */
+export const ROLE_DEFAULTS = {
+  coordinator: "Assistant",
+  worker: "Worker",
+  reviewer: "Reviewer",
+  backup: "Backup agent",
+};
+
+/**
+ * What a role is called on screen: the person's name for it, as `GET /api/state`
+ * carries it in `role_titles`, else the built-in title, else the role's key.
+ * The key (`worker`) is what settings, labels and routes use and never changes;
+ * this is only the word a person reads. An empty name falls back, like the
+ * service's own.
+ */
+export function roleTitle(state, role) {
+  const named = state?.role_titles?.[role];
+  const text = typeof named === "string" ? named.trim() : "";
+  return text || ROLE_DEFAULTS[role] || String(role ?? "");
+}
+
+/** The person's own name for a role, or null while it still has its built-in one. */
+export function roleRename(state, role) {
+  const title = roleTitle(state, role);
+  return title === (ROLE_DEFAULTS[role] ?? String(role ?? "")) ? null : title;
+}
+
 /** Text sizes: 11 ids and times, 12 second lines and labels, 13 body and titles, 15 page titles. */
 export const TEXT = { id: 11, label: 12, body: 13, title: 15 };
 
