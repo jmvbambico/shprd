@@ -1439,6 +1439,9 @@ input {
   border: 0;
   border-radius: 0;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .step-value {
@@ -3752,6 +3755,20 @@ textarea.input {
   gap: 4px;
 }
 
+/* a chain: lines start at one edge so the numbered dots line up, and the rail runs unbroken */
+.role-lines[data-chain="true"] {
+  align-items: flex-start;
+  gap: 0;
+}
+
+.role-lines[data-chain="true"] .role-line-row {
+  min-height: 36px;
+}
+
+.role-lines[data-chain="true"] .link[aria-label="Add"] {
+  margin-left: 26px;
+}
+
 /* a chain of program lines: a rail joins the numbered dots, in the order they are tried */
 
 .chain-gutter {
@@ -3775,13 +3792,13 @@ textarea.input {
 }
 
 .chain-gutter::before {
-  top: -4px;
+  top: 0;
   bottom: 50%;
 }
 
 .chain-gutter::after {
   top: 50%;
-  bottom: -4px;
+  bottom: 0;
 }
 
 .role-line-row:first-of-type .chain-gutter::before,

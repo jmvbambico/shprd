@@ -1578,10 +1578,16 @@ export default class Settings extends View {
     return v_flex()
       .flex_none()
       .gap(shown.length > 1 ? 0 : 6)
-      .items_end()
+      .when(shown.length > 1, (el) => el.items_start())
+      .when(shown.length <= 1, (el) => el.items_end())
       .children(shown.map((_, at) => this.lineRow(t, role, shown, at)))
       .when(more, (el) =>
-        el.child(link(t, `add-line-${role.id}`, "Add", () => this.addLine(role.id), this.writing !== null)),
+        el.child(
+          div()
+            .id(`add-line-box-${role.id}`)
+            .when(shown.length > 1, (box) => box.ml(26))
+            .child(link(t, `add-line-${role.id}`, "Add", () => this.addLine(role.id), this.writing !== null)),
+        ),
       );
   }
 
