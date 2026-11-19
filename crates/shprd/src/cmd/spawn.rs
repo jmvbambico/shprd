@@ -365,7 +365,11 @@ pub fn spawn(
     // The ask hook goes in before the program starts, because a program reads
     // its hooks once at launch. A worktree that cannot take it is a spawn that
     // would promise cards it can never raise, so it fails and undoes itself.
-    if let Err(err) = install_ask_hook(env, &pick.agent, &created.path) {
+    // With `tasks.worktrees` off the "worktree" is the person's own checkout,
+    // which is not ours to write into.
+    if !uses_worktrees(env) {
+        // nothing to install into
+    } else if let Err(err) = install_ask_hook(env, &pick.agent, &created.path) {
         discard_worktree(env, &created);
         return Err(err);
     }
@@ -3714,6 +3718,29 @@ project_dirs = []
         assert!(report.worktree.join(".shprd/ask-hook.sh").is_file());
         // The person's own settings stay theirs.
         assert!(!scratch.home.path().join(".claude").exists());
+    }
+
+    /// With `tasks.worktrees` off the worker runs in the person's own checkout,
+    /// and the spawn writes no hook config there.
+    #[test]
+    fn a_spawn_without_worktrees_leaves_the_persons_checkout_alone() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.worker]\nagent = \"claude\"\n[tasks]\nworktrees = false\n",
+        );
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!scratch.root().join(".claude").exists());
     }
 
     /// A program with no ask hook spawns without one and writes no config.
