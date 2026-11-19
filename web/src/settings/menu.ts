@@ -49,7 +49,7 @@ export interface MenuModel {
   fast: boolean;
 }
 
-/** One program's tab: its models, levels and access modes. */
+/** One program in the menu's dropdown: its models, levels and access modes. */
 export interface MenuProgram {
   id: string;
   name: string;
@@ -63,7 +63,7 @@ export interface MenuProgram {
   models: MenuModel[];
 }
 
-/** The menu's data: `order` is the tab order. */
+/** The menu's data: `order` is the order the program dropdown lists them in. */
 export interface Menus {
   order: string[];
   programs: Record<string, MenuProgram>;
@@ -229,9 +229,9 @@ export function chooseModel(menus: Menus, sel: Selection, agent: string, id: str
 /** One key to write; `null` takes it out of the scope's layer. */
 export interface Write {
   key: string;
-  value: string | boolean | null;
+  value: string | boolean | string[] | null;
   /** What the key held before, to put back if a later write of the same choice is refused. */
-  prior?: string | boolean | null;
+  prior?: string | boolean | string[] | null;
 }
 
 /** The writes that take a role from one selection to another: program, model, effort, speed, access. */
@@ -252,11 +252,17 @@ export function selectionWrites(roleId: string, before: Selection, after: Select
  * that layer itself held, or `null` (take the key out) when it came from another
  * layer or nothing set it.
  */
-export function priorInScope(document: SettingsDto | null, key: string, forRepo: boolean): string | boolean | null {
+export function priorInScope(
+  document: SettingsDto | null,
+  key: string,
+  forRepo: boolean,
+): string | boolean | string[] | null {
   const row = document?.values.find((entry) => entry.key === key);
   const value = row?.value;
   const mine = forRepo ? "repo_entry" : "you";
-  return row?.source === mine && (typeof value === "string" || typeof value === "boolean") ? value : null;
+  return row?.source === mine && (typeof value === "string" || typeof value === "boolean" || Array.isArray(value))
+    ? (value as string | boolean | string[])
+    : null;
 }
 
 /** The program "Use other CLI" switches the reviewer to, or null (already another vendor, or none). */
@@ -312,3 +318,140 @@ export function backupChoice(document: SettingsDto | null, roster: RosterDto | n
     (program.installed ? 0 : 2) + (program.vendor !== vendor ? 0 : 1);
   return [...others].sort((a, b) => rank(a) - rank(b))[0]?.id ?? null;
 }
+
+// -- worker lines and the reviewer's fallback ---------------------------------
+//
+// A worker holds an ordered list of program lines. The first is the role's own
+// `agent`/`model`/`effort`/`fast`/`perm`; the rest are `roles.worker.agents`, one
+// `agent|model|effort|fast|perm` string each (the service's `WorkerLine`). A
+// settings file written before lines existed has the other programs in
+// `roles.worker.fallback`; they read as lines with the program's own defaults.
+// The same rules as the Herdr desktop's `mods/lib/settings.js`.
+
+function listOfKey(document: SettingsDto | null, key: string): string[] {
+  const value = document?.values.find((row) => row.key === key)?.value;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/** One stored line (`agent|model|effort|fast|perm`, `program` or `program/model`) as a selection, or null. */
+export function parseLine(raw: string): Selection | null {
+  const parts = raw.split("|");
+  const head = (parts.shift() ?? "").trim();
+  const some = (part: string | undefined) => (part === undefined || part.trim() === "" ? null : part.trim());
+  if (parts.length === 0) {
+    const at = head.indexOf("/");
+    const agent = at < 0 ? head : head.slice(0, at).trim();
+    const model = at < 0 ? null : some(head.slice(at + 1));
+    return agent === "" ? null : { agent, model, effort: null, fast: false, perm: null };
+  }
+  if (head === "") {
+    return null;
+  }
+  return {
+    agent: head,
+    model: some(parts[0]),
+    effort: some(parts[1]),
+    fast: ["1", "true"].includes((parts[2] ?? "").trim()),
+    perm: some(parts[3]),
+  };
+}
+
+/** The string a line is stored as. */
+export function encodeLine(line: Selection): string {
+  return [line.agent ?? "", line.model ?? "", line.effort ?? "", line.fast ? "1" : "", line.perm ?? ""].join("|");
+}
+
+/** The worker's program lines, the default first. Empty while no program is named. */
+export function workerLines(document: SettingsDto | null, roleId = "worker"): Selection[] {
+  const first = roleSelection(document, roleId);
+  const lines: Selection[] = first.agent ? [first] : [];
+  const stored = listOfKey(document, `roles.${roleId}.agents`);
+  const more = stored.length > 0 ? stored : listOfKey(document, `roles.${roleId}.fallback`);
+  for (const raw of more) {
+    const line = parseLine(raw);
+    if (line && !lines.some((kept) => kept.agent === line.agent)) {
+      lines.push(line);
+    }
+  }
+  return lines;
+}
+
+/**
+ * The writes that make a role's lines `lines`: the first into the role's own
+ * fields, the rest into `agents`; the old `fallback` list is emptied when it held
+ * anything, because `agents` replaces it.
+ */
+export function lineWrites(document: SettingsDto | null, roleId: string, lines: Selection[]): Write[] {
+  const [first, ...rest] = lines;
+  const writes = first ? selectionWrites(roleId, roleSelection(document, roleId), first) : [];
+  const had = listOfKey(document, `roles.${roleId}.agents`);
+  const next = rest.map(encodeLine);
+  if (JSON.stringify(had) !== JSON.stringify(next)) {
+    writes.push({ key: `roles.${roleId}.agents`, value: next, prior: had.length > 0 ? had : null });
+  }
+  const old = listOfKey(document, `roles.${roleId}.fallback`);
+  if (old.length > 0) {
+    writes.push({ key: `roles.${roleId}.fallback`, value: [], prior: old });
+  }
+  return writes;
+}
+
+/** The program a "+" adds a line for: the first detected program no line has, or null. */
+export function nextLineProgram(document: SettingsDto | null, roster: RosterDto | null, roleId = "worker"): string | null {
+  const used = new Set(workerLines(document, roleId).map((line) => line.agent));
+  return detectedPrograms(roster).find((program) => !used.has(program.id))?.id ?? null;
+}
+
+/** The lines after line `at` is replaced by `line`, or taken out when `line` is null. */
+export function withLine(lines: Selection[], at: number, line: Selection | null): Selection[] {
+  return line === null ? lines.filter((_, i) => i !== at) : lines.map((kept, i) => (i === at ? line : kept));
+}
+
+/** The reviewer's fallback as a selection, or null for None. */
+export function reviewerFallback(document: SettingsDto | null, roleId = "reviewer"): Selection | null {
+  for (const raw of listOfKey(document, `roles.${roleId}.fallback`)) {
+    const line = parseLine(raw);
+    if (line) {
+      return { agent: line.agent, model: line.model, effort: null, fast: false, perm: null };
+    }
+  }
+  return null;
+}
+
+/** The write that sets the reviewer's fallback to `sel`, or to None (an empty list) when it is null. */
+export function fallbackWrite(document: SettingsDto | null, roleId: string, sel: Selection | null): Write[] {
+  const key = `roles.${roleId}.fallback`;
+  const had = listOfKey(document, key);
+  const value = sel?.agent ? [sel.model ? `${sel.agent}/${sel.model}` : sel.agent] : [];
+  return JSON.stringify(had) === JSON.stringify(value) ? [] : [{ key, value, prior: had }];
+}
+
+/** What a worker line's button says: "Claude Code · Opus 5.5 · Medium". */
+export function lineLabel(menus: Menus, sel: Selection, roster: RosterDto | null = null): string {
+  if (!sel.agent) {
+    return "Choose a program";
+  }
+  const program = menus.programs[sel.agent];
+  const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
+  const model = modelIn(menus, sel);
+  const level = program ? levelOf(menus, sel) : sel.effort;
+  return [base, sel.model ? (model?.name ?? sel.model) : null, level ? levelWord(level) : null]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** What the reviewer fallback's button says: "Codex · GPT-6-Luna", or "None". */
+export function fallbackLabel(menus: Menus, sel: Selection | null, roster: RosterDto | null = null): string {
+  if (!sel?.agent) {
+    return "None";
+  }
+  const program = menus.programs[sel.agent];
+  const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
+  const model = modelIn(menus, sel);
+  return sel.model ? `${base} · ${model?.name ?? sel.model}` : base;
+}
+
+/** The one-line description of a worker's lines. */
+export const WORKER_LINES_ABOUT =
+  "The first line is the default worker; pick any line for a task in the New task form. " +
+  "When a line's program can't go on, the task moves to the next line.";

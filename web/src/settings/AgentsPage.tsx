@@ -22,13 +22,22 @@ import {
 import { cleanTitle } from "../roles";
 import { ModelMenu } from "./Dropdown";
 import {
+  WORKER_LINES_ABOUT,
   backupChoice,
+  fallbackLabel,
+  fallbackWrite,
+  lineLabel,
+  lineWrites,
   menusOf,
+  nextLineProgram,
   otherCli,
   repoKeysOf,
+  reviewerFallback,
   roleSelection,
   selectionLabel,
   selectionWrites,
+  withLine,
+  workerLines,
   type Selection,
 } from "./menu";
 import { Switch } from "./rows";
@@ -201,6 +210,19 @@ function RoleRow({
   }
   const loading = state.roster === null;
   const none = !loading && menus.order.length === 0;
+  const isWorker = role.id === "worker";
+  const lines = isWorker ? workerLines(state.settings, role.id) : [];
+  const canAdd = isWorker && lines.length > 0 && nextLineProgram(state.settings, state.roster, role.id) !== null;
+  const fallback = role.id === "reviewer" ? reviewerFallback(state.settings, role.id) : null;
+  async function setLines(next: Selection[]) {
+    await state.writeAll(lineWrites(state.settings, role.id, next), repo);
+  }
+  async function addLine() {
+    const agent = nextLineProgram(state.settings, state.roster, role.id);
+    if (agent !== null) {
+      await setLines([...lines, { agent, model: null, effort: null, fast: false, perm: null }]);
+    }
+  }
   const showNotice = role.kind === "coordinator" && (state.restartNotice || restarting !== null);
 
   return (
@@ -217,6 +239,7 @@ function RoleRow({
             {mine ? <span className="badge">repo</span> : null}
           </div>
           {role.about !== "" ? <div className="srow-about">{role.about}</div> : null}
+          {isWorker ? <div className="srow-about">{WORKER_LINES_ABOUT}</div> : null}
         </div>
         <div className="role-controls">
           {mine && scope === "repo" ? (
@@ -235,14 +258,63 @@ function RoleRow({
               Reset
             </button>
           ) : null}
-          <ModelMenu
-            label={`${role.title} model`}
-            shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
-            menus={menus}
-            sel={sel}
-            disabled={loading || none}
-            onChange={(next) => void choose(next)}
-          />
+          {role.id === "reviewer" ? (
+            <div className="role-fallback">
+              <span className="role-fallback-label">Fallback</span>
+              <ModelMenu
+                label={`${role.title} fallback`}
+                shown={loading ? "Loading…" : fallbackLabel(menus, fallback, state.roster)}
+                menus={menus}
+                sel={fallback ?? { agent: null, model: null, effort: null, fast: false, perm: null }}
+                disabled={loading || none}
+                light
+                onNone={() => void state.writeAll(fallbackWrite(state.settings, role.id, null), repo)}
+                onChange={(next) => void state.writeAll(fallbackWrite(state.settings, role.id, next), repo)}
+              />
+            </div>
+          ) : null}
+          {isWorker ? (
+            <div className="role-lines">
+              {(lines.length > 0 ? lines : [sel]).map((line, at) => (
+                <div className="role-line-row" key={at}>
+                  <ModelMenu
+                    label={`${role.title} program ${at + 1}`}
+                    shown={loading ? "Loading…" : none ? "No program found" : lineLabel(menus, line, state.roster)}
+                    menus={menus}
+                    sel={line}
+                    disabled={loading || none}
+                    taken={lines.filter((_, i) => i !== at).map((other) => other.agent ?? "")}
+                    onChange={(next) => void setLines(withLine(lines.length > 0 ? lines : [sel], at, next))}
+                  />
+                  {lines.length > 1 ? (
+                    <button
+                      type="button"
+                      className="link"
+                      aria-label={`Remove program ${at + 1}`}
+                      disabled={busy}
+                      onClick={() => void setLines(withLine(lines, at, null))}
+                    >
+                      ×
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+              {canAdd ? (
+                <button type="button" className="link" aria-label="Add a program" disabled={busy} onClick={() => void addLine()}>
+                  + Add a program
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <ModelMenu
+              label={`${role.title} model`}
+              shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
+              menus={menus}
+              sel={sel}
+              disabled={loading || none}
+              onChange={(next) => void choose(next)}
+            />
+          )}
           {other !== null ? (
             <button
               type="button"

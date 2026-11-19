@@ -126,9 +126,15 @@ export function Dropdown({
 }
 
 /**
- * The model menu: program tabs (the detected programs), a search over every
- * program's models, the models with a check on the current one, Reasoning,
- * Fast and Permissions. Every change goes back at once through `onChange`.
+ * The model menu: a program dropdown (every detected program: a row of tabs does
+ * not scale to many CLIs), a search over every program's models, the models with a
+ * check on the current one, Reasoning, Fast and Permissions. Every change goes back
+ * at once through `onChange`.
+ *
+ * `light` is a program-and-model choice only (the reviewer's fallback): no
+ * Reasoning, Fast or Permissions, and the menu closes on a pick. `onNone` adds a
+ * "None" row. `taken` lists programs another line of the same role runs: shown,
+ * not pickable.
  */
 export function ModelMenu({
   label,
@@ -137,6 +143,9 @@ export function ModelMenu({
   sel,
   onChange,
   disabled = false,
+  light = false,
+  onNone,
+  taken = [],
 }: {
   label: string;
   shown: string;
@@ -144,11 +153,15 @@ export function ModelMenu({
   sel: Selection;
   onChange: (next: Selection) => void;
   disabled?: boolean;
+  light?: boolean;
+  onNone?: () => void;
+  taken?: string[];
 }) {
   const { open, setOpen, root } = usePopover();
   const [tab, setTab] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [permOpen, setPermOpen] = useState(false);
+  const [progOpen, setProgOpen] = useState(false);
   const active = tab ?? (menus.programs[sel.agent ?? ""] ? sel.agent! : (menus.order[0] ?? null));
   const rows = active ? modelRows(menus, active, query) : [];
   const levels = levelsFor(menus, sel);
@@ -163,6 +176,7 @@ export function ModelMenu({
     setTab(null);
     setQuery("");
     setPermOpen(false);
+    setProgOpen(false);
     setOpen(!open);
   }
 
@@ -173,6 +187,9 @@ export function ModelMenu({
     setTab(row.agent);
     setQuery("");
     onChange(chooseModel(menus, sel, row.agent, row.id, unlisted));
+    if (light) {
+      setOpen(false);
+    }
   }
 
   return (
@@ -194,23 +211,21 @@ export function ModelMenu({
       {open ? (
         <div className="pop-panel model-menu" role="dialog" aria-label={`${label}: model menu`}>
           {menus.order.length > 0 ? (
-            <div className="mm-tabs" role="tablist" aria-label="Programs">
-              {menus.order.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  role="tab"
-                  aria-selected={id === active}
-                  className="mm-tab"
-                  onClick={() => {
-                    setTab(id);
-                    setQuery("");
-                  }}
-                >
-                  {menus.programs[id]!.name}
-                </button>
-              ))}
-            </div>
+            <button
+              type="button"
+              className="mm-program"
+              aria-haspopup="listbox"
+              aria-expanded={progOpen}
+              aria-label="Program"
+              onClick={() => setProgOpen(!progOpen)}
+            >
+              <span className="mm-program-name">
+                {active ? menus.programs[active]!.name : "Select program"}
+              </span>
+              <span className="pop-chevron" aria-hidden="true">
+                ⌄
+              </span>
+            </button>
           ) : null}
           <input
             className="mm-search"
@@ -220,6 +235,56 @@ export function ModelMenu({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
+          {onNone && !progOpen ? (
+            <button
+              type="button"
+              role="option"
+              aria-selected={!sel.agent}
+              className="pop-row"
+              onClick={() => {
+                onNone();
+                setOpen(false);
+              }}
+            >
+              <span className="pop-row-label">None</span>
+              <span className="pop-check" aria-hidden="true">
+                {!sel.agent ? "✓" : ""}
+              </span>
+            </button>
+          ) : null}
+          {progOpen ? (
+            <>
+              <div className="mm-head">Programs</div>
+              <div className="mm-list" role="listbox" aria-label="Programs">
+                {menus.order.map((id) => {
+                  const blocked = taken.includes(id);
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="option"
+                      aria-selected={id === active}
+                      aria-disabled={blocked}
+                      disabled={blocked}
+                      className="pop-row"
+                      onClick={() => {
+                        setTab(id);
+                        setQuery("");
+                        setProgOpen(false);
+                      }}
+                    >
+                      <span className="pop-row-label">{menus.programs[id]!.name}</span>
+                      {blocked ? <span className="pop-row-hint">another line has it</span> : null}
+                      <span className="pop-check" aria-hidden="true">
+                        {id === active ? "✓" : ""}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <>
           <div className="mm-head">Models</div>
           <div className="mm-list" role="listbox" aria-label="Models">
             {rows.length === 0 ? <div className="mm-note">No models.</div> : null}
@@ -242,10 +307,12 @@ export function ModelMenu({
               </button>
             ))}
           </div>
-          {active && menus.programs[active]?.note ? (
+            </>
+          )}
+          {!progOpen && active && menus.programs[active]?.note ? (
             <div className="mm-note">{menus.programs[active]!.note}</div>
           ) : null}
-          {levels.length > 0 ? (
+          {!light && levels.length > 0 ? (
             <>
               <div className="mm-head">Reasoning</div>
               <div className="mm-levels" role="radiogroup" aria-label="Reasoning">
@@ -264,7 +331,7 @@ export function ModelMenu({
               </div>
             </>
           ) : null}
-          {fastOffered(menus, sel) ? (
+          {!light && fastOffered(menus, sel) ? (
             <button
               type="button"
               role="switch"
@@ -278,7 +345,7 @@ export function ModelMenu({
               </span>
             </button>
           ) : null}
-          {program && program.perms.length > 0 ? (
+          {!light && program && program.perms.length > 0 ? (
             <div className="mm-perms">
               <button
                 type="button"
