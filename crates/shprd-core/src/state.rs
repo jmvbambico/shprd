@@ -184,13 +184,20 @@ impl AskRecord {
     /// would keep saying so while the new attempt works. An ask raised before
     /// any attempt started belongs to the first one.
     pub fn is_retired_by_newer_attempt(&self, task: &Task) -> bool {
-        let spawned_after =
-            |attempt: &Attempt| attempt.spawn_seq.is_some_and(|seq| seq > self.raised_seq);
-        let spawned_before = task
+        let spawns = |seq: Option<u64>| seq.is_some();
+        let all = task
             .attempts
             .iter()
-            .any(|attempt| attempt.spawn_seq.is_some_and(|seq| seq < self.raised_seq));
-        spawned_before && task.attempts.iter().any(spawned_after)
+            .filter(|attempt| spawns(attempt.spawn_seq))
+            .count();
+        let before = task
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.spawn_seq.is_some_and(|seq| seq < self.raised_seq))
+            .count();
+        // The ask's own attempt is the newest one at its raising, or the first
+        // when it was raised before any attempt started.
+        all > before.max(1)
     }
 }
 
@@ -1175,6 +1182,40 @@ mod tests {
                 branch: "shprd/r1/a".to_string(),
             },
         )
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn an_ask_raised_before_any_attempt_belongs_to_the_first_one() {
+        let mut events = log("", "no_main_push");
+        events.truncate(2);
+        events.push(ev(
+            3,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "plan-1".to_string(),
+                ask_kind: AskKind::Plan,
+                text: "Plan to approve".to_string(),
+                options: Vec::new(),
+                created_at_ms: 3000,
+                expires_at_ms: None,
+            },
+        ));
+        events.push(spawned(4, 1));
+        let state = RunState::fold(&events).expect("folds");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(!ask.is_retired_by_newer_attempt(state.tasks.get("a").expect("a")));
+        events.push(ev(
+            5,
+            EventKind::TaskStopped {
+                task: "a".to_string(),
+                attempt: 1,
+            },
+        ));
+        events.push(spawned(6, 2));
+        let state = RunState::fold(&events).expect("folds");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(ask.is_retired_by_newer_attempt(state.tasks.get("a").expect("a")));
     }
 
     #[test]
