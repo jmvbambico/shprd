@@ -807,7 +807,7 @@ fn check_with(
         // The fallback ladder acts on an agent that is already running: the
         // task it names must be one the run still holds, and nothing else is
         // the log's to judge. A handover may only be recorded when the same task
-        // has no handover from that program yet, which is the once-per-line rule
+        // has no started handover from that program yet, which is the once-per-line rule
         // read where the fact is written rather than trusted to the planner.
         EventKind::Nudged { task, .. } | EventKind::ProviderGaveUp { task, .. } => {
             check_not_dropped(state, task, provenance)
@@ -820,6 +820,7 @@ fn check_with(
                 entry.fallbacks.iter().any(|record| {
                     record.action == crate::event::FallbackAction::Backup
                         && record.agent == *from_agent
+                        && record.started != Some(false)
                 })
             }) {
                 return Err(RuleError::TaskAlreadyBackedUp { task: task.clone() });

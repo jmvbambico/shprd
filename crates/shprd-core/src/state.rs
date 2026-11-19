@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn a_task_gets_one_handover_per_line() {
-        let backup = |seq: u64, from: &str, to: &str| {
+        let backup_with = |seq: u64, from: &str, to: &str, started: bool| {
             ev(
                 seq,
                 EventKind::Backup {
@@ -1234,10 +1234,20 @@ mod tests {
                     reason: "Out of allowance".to_string(),
                     worktree: "/tmp/wt".to_string(),
                     branch: "feature/a".to_string(),
-                    started: true,
+                    started,
                 },
             )
         };
+        let backup = |seq: u64, from: &str, to: &str| backup_with(seq, from, to, true);
+        // A handover that never started leaves the line free: the next one from
+        // the same program is allowed.
+        assert!(
+            fold_extra(vec![
+                backup_with(3, "claude", "codex", false),
+                backup(4, "claude", "pi")
+            ])
+            .is_ok()
+        );
         // The next line's handover is allowed.
         assert!(fold_extra(vec![backup(3, "claude", "codex"), backup(4, "codex", "pi")]).is_ok());
         // A second one from the same line is not.

@@ -135,6 +135,10 @@ pub struct BackupDone {
     pub from: String,
     /// The program chosen to take over.
     pub to: String,
+    /// Whether the newcomer actually started. A handover that failed to start
+    /// leaves the task on the program that was cut off, so the chain moves on to
+    /// the next untried line instead of waiting for a cut that will not come.
+    pub started: bool,
 }
 
 /// What the ledger already recorded about one task.
@@ -336,9 +340,12 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
         let task = state.tasks.get(&fact.task);
         let agent = task.and_then(|task| task.agents.get(&fact.agent));
         let backups: &[BackupDone] = task.map_or(&[], |task| task.backups.as_slice());
-        // The agent a handover already replaced is on its way out, and its cut
+        // The agent a started handover replaced is on its way out, and its cut
         // is the old program's problem, not the task's.
-        if backups.iter().any(|backup| backup.from == fact.agent) {
+        if backups
+            .iter()
+            .any(|backup| backup.started && backup.from == fact.agent)
+        {
             continue;
         }
         if agent.is_some_and(|agent| agent.gave_up.contains(&cut.id)) {
@@ -356,7 +363,8 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
         if outcome.over {
             if takes_over(cut) {
                 // Every program the task already ran on, or was handed to
-                // (even when the handover failed to start), is tried.
+                // (even when the handover failed to start), is tried: a line
+                // that could not start is skipped, and the next one is chosen.
                 let tried: BTreeSet<&str> = backups
                     .iter()
                     .flat_map(|backup| [backup.from.as_str(), backup.to.as_str()])
@@ -769,6 +777,7 @@ mod tests {
                 backups: vec![BackupDone {
                     from: String::from("codex"),
                     to: String::from("claude"),
+                    started: true,
                 }],
             },
         );
@@ -791,6 +800,7 @@ mod tests {
         BackupDone {
             from: from.to_string(),
             to: to.to_string(),
+            started: true,
         }
     }
 
@@ -841,16 +851,30 @@ mod tests {
     }
 
     #[test]
-    fn a_line_that_failed_to_start_still_counts_as_tried() {
+    fn a_line_that_failed_to_start_is_skipped_and_the_next_one_is_tried() {
         let cfg = chain_of_three();
-        // claude was handed to codex (which failed to start) and the task is
-        // back on claude's pane: codex is not tried again, pi is.
-        let state = state_with(vec![done("claude", "codex")]);
-        let again = facts("pi", Some(cut(ErrorKind::Auth, NOW, 1)));
-        let actions = plan(&state, &[again], NOW, &cfg);
-        assert!(matches!(&actions[0], Action::GiveUp { .. }));
-        let tried: BTreeSet<&str> = BTreeSet::from(["claude", "codex"]);
-        assert_eq!(choose_backup(&cfg, Role::Worker, "pi", &tried), None);
+        // claude was cut, the handover to codex failed to start: the task is
+        // still on claude, whose cut is acted on again, and pi is chosen.
+        let mut failed = done("claude", "codex");
+        failed.started = false;
+        let state = state_with(vec![failed]);
+        let still = facts("claude", Some(cut(ErrorKind::Quota, NOW, 1)));
+        let actions = plan(&state, &[still], NOW, &cfg);
+        assert!(
+            matches!(&actions[0], Action::Backup { to, from, .. } if to == "pi" && from == "claude"),
+            "{actions:?}"
+        );
+        // Both other lines failed to start: every line was tried.
+        let mut second = done("claude", "pi");
+        second.started = false;
+        let mut first = done("claude", "codex");
+        first.started = false;
+        let state = state_with(vec![first, second]);
+        let still = facts("claude", Some(cut(ErrorKind::Quota, NOW, 1)));
+        let actions = plan(&state, &[still], NOW, &cfg);
+        assert!(
+            matches!(&actions[0], Action::GiveUp { reason, .. } if reason.contains("every line was tried"))
+        );
     }
 
     #[test]

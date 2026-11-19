@@ -966,9 +966,9 @@ impl Worker {
         if started {
             return Ok(StepReport::ok("backup", task, detail, Some(seq)));
         }
-        // A failed handover is still the task's one try, and the person is told
-        // why rather than the next pass trying the same thing again.
-        let body = format!("{task}: backup didn't start: {detail}");
+        // A failed handover is that line's one try: the person is told why, and
+        // the next pass moves on to the next untried line (if there is one).
+        let body = format!("{task}: {to} didn't start: {detail}");
         self.commit(EventKind::Escalated {
             task: Some(task.to_string()),
             body: body.clone(),
@@ -1906,6 +1906,7 @@ fn ladder_state(state: &RunState) -> LadderState {
                     entry.backups.push(BackupDone {
                         from: record.agent.clone(),
                         to: record.to_agent.clone().unwrap_or_default(),
+                        started: record.started.unwrap_or(false),
                     });
                 }
             }
