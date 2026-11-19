@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 import type { ApiClient } from "../api/client";
 import type { TaskChangesDto } from "../gen";
 import { PR_WORDS, canReview, openUrl, prSize, reportLine, taskPr, threadViews, type ThreadView } from "./accept";
-import { look, ref, taskById } from "./board";
+import { look, progressOf, ref, taskById } from "./board";
 import { ChatView } from "../agent/ChatView";
 import { cards, forTask } from "./asks";
 import { Glyph } from "./Glyph";
@@ -72,7 +72,7 @@ export function TaskThread({ client, board, taskId, onBack, onReview }: TaskThre
         </div>
         <div className="thread-what">
           <span className="thread-glyph">
-            <Glyph shape={shape.glyph} tone={shape.tone} progress={task?.last_status?.progress} label={shape.word} />
+            <Glyph shape={shape.glyph} tone={shape.tone} progress={progressOf(task)} label={shape.word} />
           </span>
           <div className="thread-text">
             <p className="thread-title">

@@ -3,7 +3,17 @@
 
 import { describe, expect, it } from "vitest";
 
-import { counts, filterChips, found, listView, newTask, rowActions, secondLine, taskById } from "./board";
+import {
+  counts,
+  filterChips,
+  found,
+  listView,
+  newTask,
+  progressOf,
+  rowActions,
+  secondLine,
+  taskById,
+} from "./board";
 import { snapshot, task } from "./fixtures";
 
 const mixed = snapshot([
@@ -117,5 +127,49 @@ describe("taskById", () => {
     expect(taskById(mixed, "T1")?.id).toBe("T1");
     expect(taskById(mixed, "gone")).toBeNull();
     expect(taskById(mixed, null)).toBeNull();
+  });
+});
+
+describe("a task that handed in", () => {
+  const reviewing = task("R", "working", {
+    status: "reported",
+    last_status: { message: "mul done; test-file scope question", progress: 70, seq: 3 },
+    attempts: [{ gates: [], reviews: [{ reviewer: "codex", degraded: false }] } as never],
+  });
+
+  it("says it is in review, not its worker's last progress line, and draws no old percent", () => {
+    expect(secondLine(reviewing)).toBe("In review");
+    expect(progressOf(reviewing)).toBeUndefined();
+  });
+
+  it("keeps the progress line while it is still being worked on", () => {
+    const working = { ...reviewing, status: "working" as const, attempts: [] };
+    expect(secondLine(working)).toBe("mul done; test-file scope question");
+    expect(progressOf(working)).toBe(70);
+  });
+});
+
+describe("Drop", () => {
+  it("is offered on a failed or stuck row, beside Retry, and never on a dropped one", () => {
+    expect(rowActions(task("F", "needs_you", { status: "failed" })).map((a) => a.id)).toEqual(["retry", "drop"]);
+    expect(rowActions(task("S", "needs_you")).map((a) => a.id)).toEqual(["drop"]);
+    expect(rowActions(task("D", "done", { status: "dropped" }))).toEqual([]);
+  });
+
+  it("does not list a dropped task as done", () => {
+    const view = listView(snapshot([task("D", "done", { status: "dropped" }), task("L", "done")]));
+    expect(view.doneLine).toEqual({ count: 1, label: "1 done" });
+    expect(counts(snapshot([task("D", "done", { status: "dropped" })])).total).toBe(0);
+  });
+});
+
+describe("newTask After", () => {
+  it("reads task ids and names one the board does not hold", () => {
+    const ok = newTask({ title: "a", scope: "x", acceptance: "y", deps: "T1, T2 T1" }, ["T1", "T2"]);
+    expect(ok.deps).toEqual(["T1", "T2"]);
+    expect(ok.ready).toBe(true);
+    const bad = newTask({ title: "a", scope: "x", acceptance: "y", deps: "nope" }, ["T1"]);
+    expect(bad.ready).toBe(false);
+    expect(bad.why).toBe("No task named nope to wait for");
   });
 });

@@ -51,6 +51,16 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
   // The task whose thread is open, and the one whose Accept card is.
   const [thread, setThread] = useState<string | null>(null);
   const [accepting, setAccepting] = useState<string | null>(null);
+  // Whether the card opens on its Drop step: a row's Drop goes straight there.
+  const [dropFirst, setDropFirst] = useState(false);
+  const review = (id: string) => {
+    setDropFirst(false);
+    setAccepting(id);
+  };
+  const dropTask = (id: string) => {
+    setDropFirst(true);
+    setAccepting(id);
+  };
   // Counts up each time the password was entered again, so a refused verb is sent again.
   const [reauthTick, setReauthTick] = useState(0);
 
@@ -128,10 +138,10 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
               board={board}
               taskId={thread}
               onBack={() => setThread(null)}
-              onReview={setAccepting}
+              onReview={review}
             />
           ) : (
-            <TasksScreen client={client} board={board} onOpen={openThread} onReview={setAccepting} />
+            <TasksScreen client={client} board={board} onOpen={openThread} onReview={review} onDrop={dropTask} />
           )
         ) : null}
       </main>
@@ -171,7 +181,7 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
             board={board}
             taskId={thread}
             onBack={() => setThread(null)}
-            onReview={setAccepting}
+            onReview={review}
           />
         </div>
       ) : null}
@@ -181,6 +191,7 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
           client={client}
           board={board}
           taskId={accepting}
+          startDropping={dropFirst}
           device={layout}
           reauthTick={reauthTick}
           onClose={() => setAccepting(null)}

@@ -71,6 +71,7 @@ import {
   lastFailure,
   listView,
   newTask,
+  progressOf,
   rowActions,
   runLabel,
   runShort,
@@ -677,6 +678,40 @@ test("a time in the bar is words, not a date", () => {
   assert.equal(since(undefined, now), "just now");
 });
 
+test("a stuck task can be dropped from its row, and a dropped one is not listed", () => {
+  const stopped = { id: "S", status: "working", derived: { status: "needs_you", need: "stopped" } };
+  assert.deepEqual(rowActions(stopped), [{ id: "drop", label: "Drop", action: null }]);
+  const dropped = { id: "D", status: "dropped", derived: { status: "done", reason: "Dropped · no" } };
+  assert.deepEqual(rowActions(dropped), []);
+  const view = listView({ tasks: [dropped, { id: "L", status: "integrated", derived: { status: "done" } }] }, {});
+  assert.equal(view.doneLine.count, 1, "a dropped task is not counted as done");
+});
+
+test("a task in review says so, not its worker's last progress line", () => {
+  const reviewing = {
+    id: "R",
+    title: "t",
+    status: "reported",
+    derived: { status: "working" },
+    last_status: { message: "mul done; test-file scope question", progress: 70 },
+    attempts: [{ gates: [], reviews: [{ reviewer: "codex", degraded: false }] }],
+  };
+  assert.equal(secondLine(reviewing), "In review");
+  assert.equal(progressOf(reviewing), null, "a worker's old 70% is not drawn");
+  const working = { ...reviewing, status: "working", attempts: [] };
+  assert.equal(secondLine(working), "mul done; test-file scope question");
+  assert.equal(progressOf(working), 70);
+});
+
+test("the add form takes an After list and names an id the board does not hold", () => {
+  const ok = newTask({ title: "a", scope: "x", acceptance: "y", deps: "T1, T2" }, ["T1", "T2"]);
+  assert.deepEqual(ok.deps, ["T1", "T2"]);
+  assert.equal(ok.ready, true);
+  const bad = newTask({ title: "a", scope: "x", acceptance: "y", deps: "nope" }, ["T1"]);
+  assert.equal(bad.ready, false);
+  assert.match(bad.why, /No task named nope/);
+});
+
 // -- the tasks panel's reading of a row's act ------------------------------
 
 /** One task of the M10.5 board, by id. */
@@ -688,7 +723,11 @@ test("a row offers the one verb the engine has for its state", () => {
   // T2 is passed, so its act opens the Accept card rather than posting a verb.
   assert.deepEqual(rowActions(boardTask("T2")), [{ id: "review", label: "Review", action: null }]);
   // T3 failed its review: the send-back is a spawn, which is what a retry is.
-  assert.deepEqual(rowActions(boardTask("T3")), [{ id: "retry", label: "Retry", action: "task.retry" }]);
+  // A failed task can also be given up: Drop opens the card on its Drop step.
+  assert.deepEqual(rowActions(boardTask("T3")), [
+    { id: "retry", label: "Retry", action: "task.retry" },
+    { id: "drop", label: "Drop", action: null },
+  ]);
   // T5 is working, so the one act is a stop.
   assert.deepEqual(rowActions(boardTask("T5")), [{ id: "stop", label: "Stop", action: "task.stop" }]);
   // A done task is history, and a queued one waits for its deps: neither has an

@@ -521,7 +521,7 @@ export function openAccept(p) {
     modal: true,
     width: 640,
     height: 640,
-    props: { task: p.task, title: p.title ?? "" },
+    props: { task: p.task, title: p.title ?? "", ...(p.drop ? { drop: true } : {}) },
   });
 }
 

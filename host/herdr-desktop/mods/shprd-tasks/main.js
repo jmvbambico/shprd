@@ -364,7 +364,7 @@ export default class Tasks extends View {
     this.addError = null;
     this.sending = false;
     this.titleField = InputState.new({ placeholder: "What needs doing" });
-    this.scopeField = InputState.new({ placeholder: "host/herdr-desktop, crates/shprd-server" });
+    this.scopeField = InputState.new({ placeholder: "src/parser, docs/usage.md" });
     this.acceptanceField = InputState.new({ placeholder: "The board adds a task; a test says so" });
     this.depsField = InputState.new({ placeholder: "After (optional): task ids it waits for, e.g. T1, T2" });
     for (const field of [this.titleField, this.scopeField, this.acceptanceField, this.depsField]) {
@@ -998,7 +998,9 @@ export default class Tasks extends View {
       .child(this.pin(t, task))
       .when(acts.length > 0, (el) =>
         el.child(this.act(t, task, acts[0])),
-      );
+      )
+      // A second act (Drop beside Retry) is a pill of its own.
+      .when(acts.length > 1, (el) => el.child(this.act(t, task, acts[1])));
   }
 
   /** The pin toggle at a row's end: ★ when pinned, ☆ when not; a press stops at it. */
@@ -1048,7 +1050,7 @@ export default class Tasks extends View {
     return el.on_click((_event, cx) => {
       cx.stop_propagation();
       // Review is the card, as a dialog: the panel underneath stays as it was.
-      if (act.action === null) openAccept({ task: task.id, title: task.title });
+      if (act.action === null) openAccept({ task: task.id, title: task.title, drop: act.id === "drop" });
       else this.verb(task, act.action);
     });
   }
