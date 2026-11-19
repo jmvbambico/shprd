@@ -648,7 +648,7 @@ impl Worker {
     /// names nobody) leaves the configured workers, which is the order a run had
     /// before the role settings existed. A `program/model` entry counts as its
     /// program, because a backup is chosen by program.
-    fn worker_fallbacks(&self) -> Vec<String> {
+    fn worker_fallbacks(&self) -> (Vec<String>, usize) {
         let mut programs: Vec<String> =
             match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
                 Ok(loaded) => loaded
@@ -663,13 +663,18 @@ impl Worker {
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
+        let lines = programs.len();
         for worker in &self.config.roster.workers {
             let program = worker.split('/').next().unwrap_or(worker).trim();
-            if !program.is_empty() && !programs.iter().any(|kept| kept == program) {
+            if !program.is_empty()
+                && !programs
+                    .iter()
+                    .any(|kept| kept.split('/').next() == Some(program))
+            {
                 programs.push(program.to_owned());
             }
         }
-        programs
+        (programs, lines)
     }
 
     /// Tells the coordinator what changed, when a news desk is wired.
@@ -724,9 +729,11 @@ impl Worker {
         if !agents.iter().any(|agent| agent.cut.is_some()) {
             return LadderPass::default();
         }
+        let (worker_list, worker_lines) = self.worker_fallbacks();
         let config = LadderConfig {
             waits_ms: Vec::new(),
-            fallbacks: BTreeMap::from([(String::from("worker"), self.worker_fallbacks())]),
+            fallbacks: BTreeMap::from([(String::from("worker"), worker_list.clone())]),
+            lines: BTreeMap::from([(String::from("worker"), worker_lines)]),
             installed: source.installed(),
             signed_in: source.signed_in(),
         };

@@ -1653,6 +1653,44 @@ fn the_worker_roles_fallback_list_is_the_ladder_it_walks() {
 }
 
 #[test]
+fn a_cut_worker_moves_to_the_next_program_line() {
+    let all = || {
+        BTreeSet::from([
+            String::from("claude"),
+            String::from("codex"),
+            String::from("pi"),
+        ])
+    };
+    let source = ScriptedFallback {
+        agents: vec![cut_facts(ErrorKind::Quota, 1, 0, Role::Worker)],
+        installed: all(),
+        signed_in: all(),
+        ..ScriptedFallback::default()
+    };
+    let backups = Arc::clone(&source.backups);
+    let (fixture, worker, _) = ladder_pass(source);
+    // The worker's lines, in order: claude, then pi, then codex. The task runs
+    // claude, so it moves to the next line (pi), not to the first installed one.
+    let dir = fixture.home.join(".config").join("shprd");
+    std::fs::create_dir_all(&dir).expect("the settings directory");
+    std::fs::write(
+        dir.join("settings.toml"),
+        "[roles.worker]\nagent = \"claude\"\nagents = [\"pi\", \"codex\"]\n",
+    )
+    .expect("the settings file");
+    let report = worker.tick().expect("the pass ran");
+    assert!(
+        report.steps.iter().any(|step| step.action == "backup"),
+        "{report:?}"
+    );
+    assert!(
+        backups.lock().unwrap()[0].contains("claude->pi"),
+        "the next line takes over: {:?}",
+        backups.lock().unwrap()
+    );
+}
+
+#[test]
 fn a_task_is_backed_up_once_and_never_to_its_own_program() {
     let source = ScriptedFallback {
         agents: vec![cut_facts(ErrorKind::Quota, 1, 0, Role::Worker)],

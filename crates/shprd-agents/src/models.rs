@@ -1199,8 +1199,36 @@ parser = "codex_catalog""#,
             Some(model) => model,
             None => panic!("the catalog should name opus"),
         };
-        assert_eq!(opus.name.as_deref(), Some("Opus"));
+        assert_eq!(opus.name.as_deref(), Some("Opus 5.5"));
         assert!(opus.efforts.contains(&"xhigh".to_owned()));
+        assert!(opus.fast, "fast mode is offered on Opus");
+        // Haiku and the one-million-token variants are listed, in the ids the CLI takes.
+        for id in [
+            "haiku",
+            "opus[1m]",
+            "sonnet[1m]",
+            "fable[1m]",
+            "fable",
+            "sonnet",
+        ] {
+            assert!(
+                catalog.names().contains(&id),
+                "{id} is missing: {:?}",
+                catalog.names()
+            );
+        }
+        assert_eq!(
+            catalog
+                .model("haiku")
+                .and_then(|model| model.name.as_deref()),
+            Some("Haiku 5.5")
+        );
+        assert_eq!(
+            catalog
+                .model("opus[1m]")
+                .and_then(|model| model.name.as_deref()),
+            Some("Opus 5.5 · 1M")
+        );
     }
 
     #[test]
@@ -1234,7 +1262,8 @@ parser = "codex_catalog""#,
         assert!(catalog.names().contains(&"opus"), "{:?}", catalog.names());
         assert_eq!(catalog.efforts, ["low", "medium", "high", "xhigh", "max"]);
         let opus = named(&catalog, "opus");
-        assert_eq!(opus.name, "Opus");
+        assert_eq!(opus.name, "Opus 5.5");
+        assert!(opus.fast);
         assert_eq!(opus.efforts, ["low", "medium", "high", "xhigh", "max"]);
     }
 

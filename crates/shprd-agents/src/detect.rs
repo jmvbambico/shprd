@@ -518,7 +518,7 @@ mod tests {
             &[],
             Duration::from_secs(10),
         )
-        .expect("the listing is read");
+        .unwrap_or_else(|error| panic!("the listing is read: {error}"));
         assert_eq!(out.stdout.len(), 300_000);
         assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "done");
     }

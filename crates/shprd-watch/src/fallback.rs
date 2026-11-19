@@ -87,6 +87,11 @@ pub struct Config {
     /// `coordinator`). Entries may be `program/model` strings; only the
     /// program is read here.
     pub fallbacks: BTreeMap<String, Vec<String>>,
+    /// How many leading entries of a role's list are its own program lines (the
+    /// rest are the configured workers, appended). A task moves to the line after
+    /// the one it runs on only when it runs on one of those lines; a role missing
+    /// here counts every entry as a line.
+    pub lines: BTreeMap<String, usize>,
     /// Every program the machine has a harness for and a binary for.
     pub installed: BTreeSet<String>,
     /// Every program that answered its own sign-in probe.
@@ -416,7 +421,13 @@ pub fn plan(state: &State, facts: &[AgentFacts], now_ms: u64, config: &Config) -
 /// machine is chosen.
 pub fn choose_backup(config: &Config, role: Role, from: &str) -> Option<String> {
     let list = config.fallbacks_for(role);
-    let start = list
+    let lines = role
+        .key()
+        .and_then(|key| config.lines.get(key))
+        .copied()
+        .unwrap_or(list.len())
+        .min(list.len());
+    let start = list[..lines]
         .iter()
         .position(|raw| program_of(raw) == from)
         .map_or(0, |at| at + 1);
