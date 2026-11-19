@@ -327,13 +327,13 @@ export function rowActions(task: TaskDto | null | undefined): RowAct[] {
   }
   const word = task.derived.status;
   const status = task.status;
-  if (word === "ready" || status === "passed" || status === "reported") {
-    return [{ id: "review", label: "Review", action: null }];
-  }
   // A task that is stuck (stopped, failed, waiting on the person) can be given
   // up from its row. Drop needs a reason, so it opens the card's Drop step.
   const drop: RowAct[] =
     status === "failed" || word === "needs_you" ? [{ id: "drop", label: "Drop", action: null }] : [];
+  if (word === "ready" || status === "passed" || status === "reported") {
+    return [{ id: "review", label: "Review", action: null }, ...(word === "needs_you" ? drop : [])];
+  }
   if (status === "queued" && (word === "to_do" || word === "scheduled")) {
     return [{ id: "start", label: "Start", action: "task.start" }];
   }

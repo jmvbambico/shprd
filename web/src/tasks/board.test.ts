@@ -154,6 +154,9 @@ describe("Drop", () => {
     expect(rowActions(task("F", "needs_you", { status: "failed" })).map((a) => a.id)).toEqual(["retry", "drop"]);
     expect(rowActions(task("S", "needs_you")).map((a) => a.id)).toEqual(["drop"]);
     expect(rowActions(task("D", "done", { status: "dropped" }))).toEqual([]);
+    // A handed-in task that needs you keeps Review and can still be dropped.
+    expect(rowActions(task("P", "needs_you", { status: "reported" })).map((a) => a.id)).toEqual(["review", "drop"]);
+    expect(rowActions(task("Y", "ready")).map((a) => a.id)).toEqual(["review"]);
   });
 
   it("does not list a dropped task as done", () => {

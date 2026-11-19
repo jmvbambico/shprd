@@ -681,6 +681,12 @@ test("a time in the bar is words, not a date", () => {
 test("a stuck task can be dropped from its row, and a dropped one is not listed", () => {
   const stopped = { id: "S", status: "working", derived: { status: "needs_you", need: "stopped" } };
   assert.deepEqual(rowActions(stopped), [{ id: "drop", label: "Drop", action: null }]);
+  const handedIn = { id: "P", status: "reported", derived: { status: "needs_you", need: "asks" } };
+  assert.deepEqual(
+    rowActions(handedIn).map((act) => act.id),
+    ["review", "drop"],
+    "a handed-in task that needs you keeps Review and can be dropped",
+  );
   const dropped = { id: "D", status: "dropped", derived: { status: "done", reason: "Dropped · no" } };
   assert.deepEqual(rowActions(dropped), []);
   const view = listView({ tasks: [dropped, { id: "L", status: "integrated", derived: { status: "done" } }] }, {});
@@ -721,7 +727,11 @@ function boardTask(id) {
 
 test("a row offers the one verb the engine has for its state", () => {
   // T2 is passed, so its act opens the Accept card rather than posting a verb.
-  assert.deepEqual(rowActions(boardTask("T2")), [{ id: "review", label: "Review", action: null }]);
+  // It needs the person too, so it can also be dropped from its row.
+  assert.deepEqual(rowActions(boardTask("T2")), [
+    { id: "review", label: "Review", action: null },
+    { id: "drop", label: "Drop", action: null },
+  ]);
   // T3 failed its review: the send-back is a spawn, which is what a retry is.
   // A failed task can also be given up: Drop opens the card on its Drop step.
   assert.deepEqual(rowActions(boardTask("T3")), [
