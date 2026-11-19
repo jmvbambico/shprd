@@ -444,6 +444,29 @@ Agents pane below; the coordinator is the space's Assistant chat tab.
 **Gate:** the M10 flow runs from a desktop browser and from a phone over each
 tunnel, and every request without a session is refused.
 
+**Gate result (2026-11-19): passed with gaps.** The live gate over ngrok came back
+*pass with gaps*. Fixes A–E landed from it: A (#110) the login limit per client,
+reauth on accept and the health id; B (#107) the web app at 390 px, the QR following
+the mask and dropped tasks in the graph; C (#108) typing in the web terminal on
+Herdr desktop; D (#109) agents run the service's own `shprd`; E (#111) the
+coordinator record per repo and space. Settings rounds 1–7 (#112–#118) then
+reworked Settings to match Shepherdr: program tabs from the detected harnesses,
+renamable roles, and a redesigned Remote page. Tail fixes landed after the gate:
+`serve` finds its Herdr space by shprd's own label (#119), `install` takes the
+binary's own layout (#120), Accept works with a short SHA and a refused action says
+why on the card (#121), review diffs from the attempt's own base (#122), and
+`install` refuses the real herdr-app when an agent starts it (#123). #107, #109
+and #110 merged without a passing cross-vendor review.
+
+Parked gaps:
+
+- G1: a forged `X-Forwarded-For` header gets past the per-client login limit over
+  ngrok (the account limit of 30/h and the global limit of 60/h still hold).
+- G2: an idle coordinator web terminal returns 409.
+- G3: the desktop graph omits dropped tasks.
+- G4: a landed task's accept card says no changes.
+- G5: the coordinator can stay stuck at "blocked (permission)".
+
 ---
 
 ## M12 · herdr TUI and tuios
