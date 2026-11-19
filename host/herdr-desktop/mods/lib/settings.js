@@ -1174,3 +1174,14 @@ export const PICK_KEY = "shprd.settings.pick";
 /** The model menu's width, and its height at its tallest: border and padding, tabs, search, heading, 8 rows, rule, Reasoning, Fast, Permissions, a note. */
 export const MENU_W = 460;
 export const MENU_H = 2 + 10 + 34 + 36 + 26 + 8 * 31 + 20 + 9 + 26 + 34 + 31 + 31;
+
+/**
+ * The popup's height for these menus: as tall as the menu gets for the longest
+ * model list a tab has (at most 8 rows, then it scrolls), so the transparent
+ * popup is not much taller than what it shows and a click beside the menu
+ * reaches the page.
+ */
+export function menuHeight(menus) {
+  const longest = Math.max(1, ...menus.order.map((id) => menus.programs[id].models.length));
+  return MENU_H - (8 - Math.min(8, longest)) * 31;
+}

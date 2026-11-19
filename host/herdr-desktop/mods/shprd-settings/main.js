@@ -37,8 +37,8 @@ import { closeOverlay, knownAgents, openOverlay, props, shared, theme } from "he
 import { attach, reason, ServiceError, singleFlight } from "./lib/client.js";
 import {
   CHANGED_HERE,
-  MENU_H,
   MENU_W,
+  menuHeight,
   PICK_KEY,
   backupChoice,
   boxProblem,
@@ -635,6 +635,7 @@ export default class Settings extends View {
   openModelMenu(at, role) {
     this.closePopup();
     const menus = menusOf(this.roster);
+    const MENU_H = menuHeight(menus);
     const place = popupAt(at, MENU_W, MENU_H);
     const below = place !== "pointer" && at !== null && place.y > at.y;
     this.popup = openOverlay({
@@ -1166,8 +1167,10 @@ export default class Settings extends View {
       .on_click((_event, cx) => {
         // A click inside the panel stays inside: only one beside it closes the
         // window (Shepherdr's own rule for its self-drawn frame). Each control
-        // stops its own click first (`press()`), so this is only what no control took.
+        // stops its own click first (`press()`), so this is only what no control took:
+        // a click on the panel's own blank puts an open dropdown away.
         cx.stop_propagation();
+        this.closePopup();
       })
       .on_key_down((event, cx) => {
         if (event?.key !== "escape") return;
@@ -1486,8 +1489,11 @@ export default class Settings extends View {
   roleRow(t, colors, role) {
     const other = role.id === "reviewer" ? otherCli(this.settings, this.roster) : null;
     const mine = repoKeysOf(this.settings, role.id).length > 0;
-    const notice = role.kind === "coordinator" && restartNotice({ changed: this.coordChanged, running: this.coordRunning });
     const state = this.restarting;
+    // Only the coordinator's row, and only once its choice changed (or while a restart it asked for shows its answer).
+    const notice =
+      role.kind === "coordinator" &&
+      (restartNotice({ changed: this.coordChanged, running: this.coordRunning }) || typeof state === "string");
     return v_flex()
       .w_full()
       .gap(6)
@@ -1539,7 +1545,7 @@ export default class Settings extends View {
               ),
           ),
       )
-      .when(notice || typeof state === "string", (el) => el.child(this.restartLine(t, colors, state)))
+      .when(notice, (el) => el.child(this.restartLine(t, colors, state)))
       .when(role.fallback !== null, (el) => el.child(this.fallbackLine(t, role.fallback)));
   }
 

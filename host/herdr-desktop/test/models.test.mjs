@@ -222,9 +222,13 @@ test("the restart notice shows only after the coordinator's own choice changed, 
   // the coordinator's does
   await view.apply("roles.coordinator.model", "opus");
   assert.equal(has(), true);
-  // restarting puts it away
-  await view.restartCoordinator();
+  // restarting puts it away, and its answer shows on the coordinator's row alone
+  const notices = () => walk(tree()).filter((node) => node.idv === "restart-notice").length;
+  assert.equal(notices(), 1);
+  const pending = view.restartCoordinator();
+  await pending;
   assert.equal(has(), false);
+  assert.equal(notices(), 1, "Restarted shows on the coordinator only");
 
   // no coordinator running: a change never raises it
   const idle = await drawn("agents", { coordRunning: false });
