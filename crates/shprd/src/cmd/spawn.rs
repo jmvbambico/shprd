@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use shprd_agents::asks::{AskHookInstaller, AskHookPaths, HarnessAskHook};
 use shprd_agents::data::DataDir;
 use shprd_agents::env::{EnvContext, LaunchEnv, Role as EnvRole, launch_env};
 use shprd_agents::models::{AgentRef, Catalog};
@@ -361,6 +362,13 @@ pub fn spawn(
     // the worktree exists.
     let space = agent_space(mux, env)?;
     let created = create_worktree(env, &task.id)?;
+    // The ask hook goes in before the program starts, because a program reads
+    // its hooks once at launch. A worktree that cannot take it is a spawn that
+    // would promise cards it can never raise, so it fails and undoes itself.
+    if let Err(err) = install_ask_hook(env, &pick.agent, &created.path) {
+        discard_worktree(env, &created);
+        return Err(err);
+    }
     // From here on every failure undoes everything: the tab first, then the
     // worktree, and never an event.
     let opened = open_agent(
@@ -1225,6 +1233,35 @@ fn create_worktree(env: &SpawnEnv<'_>, task: &str) -> Result<Worktree, CliError>
         &base_for_new_work(env),
     )
     .map_err(|err| CliError::other(anyhow!(err).context(format!("creating a worktree for {task}"))))
+}
+
+/// Puts `program`'s ask hook into the worktree it is about to work in.
+///
+/// It is what `shprd ask install` does, run at spawn so a worker's
+/// `AskUserQuestion` and permission prompts become Needs-you cards without a
+/// person installing anything. The config written is the program's own
+/// worktree-local one (`.claude/settings.local.json`, `.codex/hooks.json`);
+/// the installer refuses any target outside the worktree, so a person's own
+/// settings are never touched. A program with no hook is left alone.
+fn install_ask_hook(env: &SpawnEnv<'_>, program: &str, worktree: &Path) -> Result<(), CliError> {
+    let spec = &program_of(env.programs.as_slice(), program)?.spec;
+    let installer = HarnessAskHook::for_spec(&spec.asks, &spec.id);
+    if !installer.available() {
+        return Ok(());
+    }
+    let binary = shprd_agents::env::service_bin().ok_or_else(|| {
+        CliError::other(anyhow!("cannot resolve the shprd binary for the ask hook"))
+    })?;
+    let hook = worktree.join(".shprd").join("ask-hook.sh");
+    installer
+        .install(&AskHookPaths::new(&hook, worktree, &binary))
+        .map(|_| ())
+        .map_err(|err| {
+            CliError::other(anyhow!(err).context(format!(
+                "installing the {program} ask hook in {}",
+                worktree.display()
+            )))
+        })
 }
 
 /// Removes a worktree this spawn created, ignoring the failure: the caller is
@@ -3649,6 +3686,50 @@ project_dirs = []
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_default();
         assert!(brief.contains("- Permissions: plan (you)"), "{brief}");
         assert!(brief.contains("- Fast mode: on (you)"), "{brief}");
+    }
+
+    /// A spawned worker's worktree gets the program's ask hook, so its question
+    /// and permission prompts become cards (SHPR-57), and nothing outside the
+    /// worktree is written.
+    #[test]
+    fn a_spawn_installs_the_ask_hook_in_the_workers_worktree() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(&ctx, "[roles.worker]\nagent = \"claude\"\n");
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let config = report.worktree.join(".claude/settings.local.json");
+        let text = std::fs::read_to_string(&config)
+            .unwrap_or_else(|err| panic!("no ask hook config at {}: {err}", config.display()));
+        assert!(text.contains("ask-hook.sh"), "{text}");
+        assert!(text.contains("PermissionRequest"), "{text}");
+        assert!(report.worktree.join(".shprd/ask-hook.sh").is_file());
+        // The person's own settings stay theirs.
+        assert!(!scratch.home.path().join(".claude").exists());
+    }
+
+    /// A program with no ask hook spawns without one and writes no config.
+    #[test]
+    fn a_spawn_of_a_program_with_no_ask_hook_writes_none() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(!report.worktree.join(".claude").exists());
+        assert!(!report.worktree.join(".shprd/ask-hook.sh").exists());
     }
 
     /// A mode the program does not declare is not claimed: the launch falls back
