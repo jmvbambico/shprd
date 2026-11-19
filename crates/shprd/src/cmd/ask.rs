@@ -140,7 +140,7 @@ fn words(payload: &Payload) -> Option<Words> {
             Some(Words {
                 kind: AskKind::Plan,
                 text: plan,
-                options: vec!["Approve".to_string(), "Deny".to_string()],
+                options: vec!["Approve".to_string(), "Reject".to_string()],
                 question: None,
             })
         }
@@ -163,6 +163,20 @@ fn words(payload: &Payload) -> Option<Words> {
             })
         }
     }
+}
+
+/// The choices a raised card offers: the caller's own, else a yes or a no.
+///
+/// A permission or a plan is a yes or a no, and a card with no choices would
+/// make the person type one. A plan is approved or rejected, a permission
+/// allowed or denied.
+fn raise_options(kind: AskKind, given: &[String]) -> Vec<String> {
+    let words: [&str; 2] = match kind {
+        _ if kind == AskKind::Question || !given.is_empty() => return given.to_vec(),
+        AskKind::Plan => ["Approve", "Reject"],
+        _ => ["Allow", "Deny"],
+    };
+    words.iter().map(|word| word.to_string()).collect()
 }
 
 /// A choice label without the "(Recommended)" tag Claude puts on one.
@@ -266,13 +280,7 @@ pub fn raise(args: &AskRaiseArgs, ctx: &Ctx) -> Result<(), CliError> {
         )));
     }
     let kind = ask_kind(args.kind);
-    let options = match (kind, args.options.is_empty()) {
-        (AskKind::Question, _) => args.options.clone(),
-        // A permission or a plan is a yes or a no, and a card with no choices
-        // would make the person type one.
-        (_, true) => vec!["Allow".to_string(), "Deny".to_string()],
-        (_, false) => args.options.clone(),
-    };
+    let options = raise_options(kind, &args.options);
     let made = Words {
         kind,
         question: (kind == AskKind::Question).then(|| text.clone()),
@@ -552,7 +560,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Payload, decision, is_denial, strip_recommended, words};
+    use super::{Payload, decision, is_denial, raise_options, strip_recommended, words};
     use shprd_core::ask::AskKind;
 
     #[test]
@@ -565,6 +573,19 @@ mod tests {
         assert_eq!(made.kind, AskKind::Permission);
         assert_eq!(made.text, "Run the tests");
         assert_eq!(made.options, vec!["Allow", "Deny"]);
+    }
+
+    #[test]
+    fn a_raised_plan_offers_approve_and_reject() {
+        assert_eq!(raise_options(AskKind::Plan, &[]), vec!["Approve", "Reject"]);
+        assert_eq!(
+            raise_options(AskKind::Permission, &[]),
+            vec!["Allow", "Deny"]
+        );
+        assert_eq!(
+            raise_options(AskKind::Plan, &["Go".to_string()]),
+            vec!["Go"]
+        );
     }
 
     #[test]
