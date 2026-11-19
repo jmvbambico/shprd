@@ -68,6 +68,10 @@ pub enum ReportStatus {
 /// agent message out of the log.
 pub const TASK_STATUS_MAX_CHARS: usize = 40;
 
+/// The longest status line the engine itself writes: it says why a step is
+/// waiting, which needs room for a path and a task id.
+pub const ENGINE_STATUS_MAX_CHARS: usize = 120;
+
 /// A one-line task status, trimmed and capped for the log.
 ///
 /// Whitespace runs collapse to one space, so a pasted block of text becomes a

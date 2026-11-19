@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use crate::event::{
-    Actor, AgentId, CheckReport, EventKind, ReportStatus, ResourceAction, ResourceKind,
-    ReviewSource, TASK_STATUS_MAX_CHARS, TaskId,
+    Actor, AgentId, CheckReport, ENGINE_STATUS_MAX_CHARS, EventKind, ReportStatus, ResourceAction,
+    ResourceKind, ReviewSource, TASK_STATUS_MAX_CHARS, TaskId,
 };
 use crate::gate::REVIEW_GATE;
 use crate::scope::{self, ScopeError};
@@ -782,7 +782,7 @@ fn check_with(
             task,
             message,
             progress,
-        } => check_task_status(state, task, message, *progress, provenance),
+        } => check_task_status(state, actor, task, message, *progress, provenance),
         EventKind::AskRaised {
             task,
             ask,
@@ -1360,6 +1360,7 @@ fn check_reported(
 /// takes no status: the worker posting it was left behind by the drop.
 fn check_task_status(
     state: &RunState,
+    actor: &Actor,
     task: &str,
     message: &str,
     progress: Option<u8>,
@@ -1373,12 +1374,19 @@ fn check_task_status(
             task: task.to_string(),
         });
     }
+    // The engine's own status says why a step waits, which a worker's
+    // 40-character progress line has no room for.
+    let max = if matches!(actor, Actor::Agent { .. }) {
+        TASK_STATUS_MAX_CHARS
+    } else {
+        ENGINE_STATUS_MAX_CHARS
+    };
     let found = trimmed.chars().count();
-    if found > TASK_STATUS_MAX_CHARS {
+    if found > max {
         return Err(RuleError::StatusMessageTooLong {
             task: task.to_string(),
             found,
-            max: TASK_STATUS_MAX_CHARS,
+            max,
         });
     }
     if let Some(progress) = progress
@@ -2856,7 +2864,10 @@ mod tests {
                 "progress",
             ),
         ] {
-            let error = match before.check(&kind, 5_000) {
+            let worker = Actor::Agent {
+                id: "w".to_string(),
+            };
+            let error = match before.check_as(&worker, &kind, 5_000) {
                 Ok(()) => panic!("a bad status line ({expected}) was accepted"),
                 Err(err) => err,
             };
@@ -2870,6 +2881,19 @@ mod tests {
                 (label, other) => panic!("{label} was refused with {other:?}"),
             }
         }
+    }
+
+    /// The engine may write a longer status line than a worker, to say why a
+    /// step waits.
+    #[test]
+    fn the_engine_may_write_a_longer_status_line() {
+        let state = folded(&reported_run());
+        let kind = EventKind::TaskStatus {
+            task: "a".to_string(),
+            message: "x".repeat(TASK_STATUS_MAX_CHARS + 20),
+            progress: None,
+        };
+        assert!(state.check_as(&Actor::Engine, &kind, 5_000).is_ok());
     }
 
     /// A status line for a task a human dropped is refused: the worker posting

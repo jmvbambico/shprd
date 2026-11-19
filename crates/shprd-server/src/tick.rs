@@ -1037,8 +1037,12 @@ impl Worker {
             } => self.escalate_review(state, task, body, default_action),
         };
         match result {
-            Ok(report) => report,
+            Ok(report) => {
+                self.clear_waiting(state, step.task());
+                report
+            }
             Err(reason) => {
+                self.note_waiting(state, step.task(), &reason);
                 // Logged, not raised: a failing step is news about one task, and
                 // the pass must reach the others. A failure a person has already
                 // been given a card for is logged quietly: the card is the
@@ -1052,6 +1056,52 @@ impl Worker {
                 StepReport::failed(step, reason)
             }
         }
+    }
+
+    /// Puts why a step is stuck on the task's card, once.
+    ///
+    /// The status line reads "Waiting: <reason>"; an identical line already on
+    /// the card is not written again, so a step that fails every pass says it
+    /// once. Best effort: a failed write is not worth failing the pass for.
+    fn note_waiting(&self, state: &RunState, task: &str, reason: &str) {
+        let message = waiting_message(reason);
+        let current = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.last_status.as_ref())
+            .map(|status| status.message.as_str());
+        if current == Some(message.as_str()) {
+            return;
+        }
+        let progress = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.last_status.as_ref())
+            .and_then(|status| status.progress);
+        let _ = self.commit(EventKind::TaskStatus {
+            task: task.to_string(),
+            message,
+            progress,
+        });
+    }
+
+    /// Clears a "Waiting:" line once a step for the task has succeeded.
+    fn clear_waiting(&self, state: &RunState, task: &str) {
+        let Some(status) = state
+            .tasks
+            .get(task)
+            .and_then(|found| found.last_status.as_ref())
+        else {
+            return;
+        };
+        if !status.message.starts_with(WAITING_PREFIX) {
+            return;
+        }
+        let _ = self.commit(EventKind::TaskStatus {
+            task: task.to_string(),
+            message: String::from("No longer waiting"),
+            progress: status.progress,
+        });
     }
 
     /// Starts an agent on a queued task through the caller's spawn path.
@@ -2226,5 +2276,51 @@ pub async fn run(
             _ = tokio::time::sleep(wait) => {}
             _ = &mut shutdown => return,
         }
+    }
+}
+
+/// What a card's status line begins with while a step is refused.
+const WAITING_PREFIX: &str = "Waiting: ";
+
+/// The status line for a step that failed with `reason`: a scope overlap reads
+/// "Waiting: <path> is in use by <task>", anything else carries the reason.
+fn waiting_message(reason: &str) -> String {
+    let quoted: Vec<&str> = reason.split('"').skip(1).step_by(2).collect();
+    let text = match (reason.contains(" overlaps task "), quoted.as_slice()) {
+        (true, [_, path, other, ..]) => format!("{path} is in use by {other}"),
+        _ => reason.to_string(),
+    };
+    let line = format!(
+        "{WAITING_PREFIX}{}",
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    if line.chars().count() <= shprd_core::event::ENGINE_STATUS_MAX_CHARS {
+        return line;
+    }
+    let mut capped: String = line
+        .chars()
+        .take(shprd_core::event::ENGINE_STATUS_MAX_CHARS - 1)
+        .collect();
+    capped.push('\u{2026}');
+    capped
+}
+
+#[cfg(test)]
+mod waiting_tests {
+    use super::waiting_message;
+
+    #[test]
+    fn an_overlap_reads_as_a_path_in_use() {
+        let reason = r#"task "serve-space-label" path "crates/shprd/tests" overlaps task "install-layout-source""#;
+        assert_eq!(
+            waiting_message(reason),
+            "Waiting: crates/shprd/tests is in use by install-layout-source"
+        );
+    }
+
+    #[test]
+    fn another_refusal_carries_its_reason_capped() {
+        assert_eq!(waiting_message("no host"), "Waiting: no host");
+        assert!(waiting_message(&"x".repeat(500)).chars().count() <= 120);
     }
 }
