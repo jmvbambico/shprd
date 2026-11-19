@@ -249,3 +249,15 @@ export function setKnown(next) {
 export async function knownAgents() {
   return KNOWN;
 }
+
+/** What `focused()` answers (`{ agent }` is the agent the Terminal block shows); a test sets it. */
+export let FOCUSED = null;
+
+/** Sets what `focused()` answers. */
+export function setFocused(next) {
+  FOCUSED = next;
+}
+
+export function focused() {
+  return FOCUSED;
+}

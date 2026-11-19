@@ -19,6 +19,7 @@ design. Read [docs/plan.md](docs/plan.md) for what's being built now.
 | web app | `cd web && npm ci && npx tsc --noEmit && npm run build && npm test` | yes, when the task touches `web/` or a DTO | yes | yes (the `web` job) |
 | generated types | `cargo run -p shprd-server --example export-ts`, then `git diff --exit-code web/src/gen` | yes, when a DTO in `shprd-server` or `shprd-remote` changed | yes | yes (the `web` job) |
 
+- `cargo test --workspace` stops at the first failing crate: use `--no-fail-fast`; `shprd-mux-hc` host tests can flake under load, rerun them alone.
 - Workers run the first three gates in their own worktree before reporting
   done, and say which ones they ran.
 - The integration tests run only on the integration branch, once per batch,
