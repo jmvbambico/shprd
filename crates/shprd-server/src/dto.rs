@@ -638,6 +638,11 @@ pub struct SnapshotDto {
     /// The agents the host has, headless: no tab and no space of their own.
     #[serde(default)]
     pub live_agents: Vec<LiveAgentDto>,
+    /// What each role is called, by role id (`coordinator`, `worker`, …): the
+    /// person's own name for it, or its built-in title. Every screen that shows a
+    /// role shows this word.
+    #[serde(default)]
+    pub role_titles: std::collections::BTreeMap<String, String>,
 }
 
 /// One space of the sidebar's tree: a repository.

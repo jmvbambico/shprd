@@ -2331,8 +2331,8 @@ pub(crate) fn ensure_coordinator(
     // No coordinator is running, so a tab of ours that still holds a finished
     // one is cleared: the new agent takes the tab's place, not a second pane.
     close_own_tabs(mux, space, &[COORDINATOR_TAB]);
-    let title = assistant_title(mux, space);
     let role = env.settings.resolve(None).role(COORDINATOR_ROLE);
+    let title = assistant_title(mux, space, &coordinator_name(role.as_ref()));
     let candidates = role_candidates(role.as_ref(), &env.workers);
     let mut pick = choose_agent(None, &candidates, &env.programs)?;
     if let Some(model) = role
@@ -2489,24 +2489,86 @@ const OLD_COORDINATOR_TAB: &str = "coordinator";
 
 use shprd_mux_hc::host::COORDINATOR_TAB;
 
-/// The name for the coordinator's tab: "Assistant", unless a tab of that name
-/// that is not shprd's own is already in the space (Shepherdr adds one to every
-/// space), in which case "shprd". Another product's tab is never renamed.
-fn assistant_title(mux: &dyn Host, space: &shprd_mux::Space) -> String {
+/// Ends the repository's coordinator and starts it again from its role.
+///
+/// The tab is shprd's own ([`COORDINATOR_TAB`]) and is made again under the same
+/// id and the role's current name, so the chat that follows it carries on; the
+/// program, model and effort are read now, which is the point: a role changed in
+/// the settings reaches a coordinator that was already running only this way.
+pub(crate) fn restart_coordinator(
+    mux: &dyn Host,
+    ctx: &Ctx,
+    home: &Path,
+    defer: impl FnOnce(PendingPrompt),
+) -> Result<(), CliError> {
+    let prepared = ensure_repo_space(mux, &ctx.root)?;
+    close_own_tabs(mux, &prepared.space, &[COORDINATOR_TAB]);
+    let data = crate::cmd::roster::resolve_data_dir();
+    let env = build_repo_env(ctx, Some(home), &data)?;
+    ensure_coordinator(mux, &env, &prepared, defer).map(|_| ())
+}
+
+/// What the person calls the coordinator: its role's name, which is the
+/// built-in "Assistant" until they rename it.
+pub(crate) fn coordinator_name(role: Option<&shprd_core::settings::ResolvedRole>) -> String {
+    role.map_or_else(
+        || ASSISTANT_TITLE.to_owned(),
+        shprd_core::settings::ResolvedRole::display_title,
+    )
+}
+
+/// The name for the coordinator's tab: `wanted` (the role's name), unless a tab
+/// of that name that is not shprd's own is already in the space (Shepherdr adds
+/// an "Assistant" to every space), in which case "shprd". Another product's tab
+/// is never renamed.
+fn assistant_title(mux: &dyn Host, space: &shprd_mux::Space, wanted: &str) -> String {
     let taken = mux
         .tab_names(&space.id)
         .unwrap_or_default()
         .into_iter()
         .any(|(id, name)| {
             let own = matches!(id.as_str(), COORDINATOR_TAB | OLD_COORDINATOR_TAB);
-            !own && name.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
+            !own && name.trim().eq_ignore_ascii_case(wanted)
         });
     if taken {
-        ASSISTANT_FALLBACK_TITLE
+        ASSISTANT_FALLBACK_TITLE.to_owned()
     } else {
-        ASSISTANT_TITLE
+        wanted.to_owned()
     }
-    .to_string()
+}
+
+/// Renames the coordinator's tab to the role's name, live.
+///
+/// Only the tab shprd made (its id is [`COORDINATOR_TAB`]) is ever renamed: a tab
+/// the person or another product made keeps its name, whatever it is called.
+/// `Ok(false)` is "nothing to rename": no space, or no coordinator tab yet.
+pub(crate) fn rename_coordinator_tab(
+    mux: &dyn Host,
+    repo: &Path,
+    wanted: &str,
+) -> Result<bool, CliError> {
+    let name = repo_space_name(&repo_name(repo)?);
+    let Some(space) = mux.find_space(&name).map_err(|err| {
+        CliError::other(anyhow!(err).context(format!("looking for the space {name:?}")))
+    })?
+    else {
+        return Ok(false);
+    };
+    let title = assistant_title(mux, &space, wanted);
+    let current = mux
+        .list_tabs(&space.id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|tab| tab.id.as_str() == COORDINATOR_TAB);
+    let Some(tab) = current else {
+        return Ok(false);
+    };
+    if tab.title == title {
+        return Ok(true);
+    }
+    mux.rename_tab(&tab.id, &title)
+        .map_err(|err| CliError::other(anyhow!(err).context("renaming the coordinator's tab")))?;
+    Ok(true)
 }
 
 /// Closes the space's tabs whose id is exactly one of `ids`: tabs shprd made
@@ -3692,6 +3754,71 @@ project_dirs = []
         assert!(
             matches!(replaced, CoordinatorStart::Started(_)),
             "{replaced:?}"
+        );
+    }
+
+    /// Renaming the coordinator renames shprd's own tab and nothing else: a tab the
+    /// person or another product made keeps its name, even one called the same.
+    #[test]
+    fn the_coordinators_tab_follows_its_name_and_no_other_tab_is_renamed() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        let theirs = mux.with_tab_id(&prepared.space.id, "tb42", "Notes");
+        mux.with_tab_id(&prepared.space.id, COORDINATOR_TAB, ASSISTANT_TITLE);
+        let titles = |mux: &FakeMux| {
+            mux.list_tabs(&prepared.space.id)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .into_iter()
+                .map(|tab| (tab.id.as_str().to_owned(), tab.title))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(titles(&mux)[COORDINATOR_TAB], ASSISTANT_TITLE);
+
+        let renamed = rename_coordinator_tab(&mux, scratch.root(), "Orchestrator")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(renamed);
+        let after = titles(&mux);
+        assert_eq!(after[COORDINATOR_TAB], "Orchestrator");
+        assert_eq!(after[theirs.id.as_str()], "Notes", "their tab is untouched");
+
+        // A tab that is not ours and has the wanted name is not displaced: ours
+        // takes shprd's own fallback word.
+        mux.with_tab_id(&prepared.space.id, "tb43", "QA");
+        rename_coordinator_tab(&mux, scratch.root(), "QA").unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(titles(&mux)[COORDINATOR_TAB], "shprd");
+        assert_eq!(titles(&mux)["tb43"], "QA");
+    }
+
+    /// With no coordinator tab of ours there is nothing to rename.
+    #[test]
+    fn there_is_no_tab_to_rename_before_the_coordinator_starts() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default();
+        ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !rename_coordinator_tab(&mux, scratch.root(), "Orchestrator")
+                .unwrap_or_else(|err| panic!("{err}"))
+        );
+    }
+
+    /// The coordinator's name is its role's: the built-in word until it is renamed.
+    #[test]
+    fn the_coordinators_name_comes_from_its_role() {
+        use shprd_core::settings::{File, Request, resolve};
+        assert_eq!(coordinator_name(None), "Assistant");
+        let named = File::parse("[roles.coordinator]\ntitle = \"Orchestrator\"\n")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let resolved = resolve(&named, &Request::default());
+        assert_eq!(
+            coordinator_name(resolved.role("coordinator").as_ref()),
+            "Orchestrator"
+        );
+        let plain = resolve(&File::default(), &Request::default());
+        assert_eq!(
+            coordinator_name(plain.role("coordinator").as_ref()),
+            "Assistant"
         );
     }
 

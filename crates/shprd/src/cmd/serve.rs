@@ -188,6 +188,8 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         repo: ctx.root.clone(),
         data,
         host: agent_host.clone(),
+        ctx: ctx.clone(),
+        home: home.clone(),
     }));
     config.tick = Some(tick);
 
@@ -387,9 +389,32 @@ struct HostAgents {
     data: shprd_agents::data::DataDir,
     /// The host this service drives.
     host: Arc<dyn Host>,
+    /// The context a coordinator is started with.
+    ctx: Ctx,
+    /// The person's home, where the settings the coordinator starts from live.
+    home: std::path::PathBuf,
 }
 
 impl shprd_server::AgentOpener for HostAgents {
+    fn name_coordinator(&self, title: &str) -> Result<(), String> {
+        crate::cmd::spawn::rename_coordinator_tab(self.host.as_ref(), &self.repo, title)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    fn restart_coordinator(&self) -> Result<(), String> {
+        let delivering = self.host.clone();
+        crate::cmd::spawn::restart_coordinator(
+            self.host.as_ref(),
+            &self.ctx,
+            &self.home,
+            move |pending| {
+                std::thread::spawn(move || pending.deliver(delivering.as_ref()));
+            },
+        )
+        .map_err(|err| err.to_string())
+    }
+
     fn open(&self, program: &str, space: Option<&str>) -> Result<shprd_server::OpenedTab, String> {
         let opened = crate::cmd::spawn::open_program(
             self.host.as_ref(),

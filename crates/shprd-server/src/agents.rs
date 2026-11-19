@@ -55,6 +55,22 @@ pub trait AgentOpener: Send + Sync {
     /// `space` is the host's id of the space the window is showing; `None` opens
     /// the tab in the repository's own space.
     fn open(&self, program: &str, space: Option<&str>) -> Result<OpenedTab, String>;
+
+    /// Names the coordinator's tab `title`, live. Only the tab shprd made is
+    /// ever renamed; no tab, or a host with no window, is `Ok`: the name is
+    /// read again when the coordinator next starts.
+    fn name_coordinator(&self, _title: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Ends the coordinator and starts it again from its role, in the same tab.
+    /// It is how a new program or model reaches a coordinator that is running.
+    fn restart_coordinator(&self) -> Result<(), String> {
+        Err(
+            "this service was started without a host, so it cannot restart the coordinator"
+                .to_owned(),
+        )
+    }
 }
 
 /// The opener a service holds, with a `Debug` that never prints a host.
@@ -108,6 +124,26 @@ impl Agents {
             .map(str::trim)
             .filter(|space| !space.is_empty());
         opener.open(program, space).map_err(ApiReject::refused)
+    }
+}
+
+impl Agents {
+    /// Names the coordinator's tab; a service without an opener has no tab.
+    pub fn name_coordinator(&self, title: &str) -> Result<(), String> {
+        match &self.0 {
+            Some(opener) => opener.name_coordinator(title),
+            None => Ok(()),
+        }
+    }
+
+    /// Restarts the coordinator, or says why it cannot be.
+    pub fn restart_coordinator(&self) -> Result<(), ApiReject> {
+        let opener = self.0.as_ref().ok_or_else(|| {
+            ApiReject::refused(
+                "this service was started without a host, so it cannot restart the coordinator",
+            )
+        })?;
+        opener.restart_coordinator().map_err(ApiReject::refused)
     }
 }
 

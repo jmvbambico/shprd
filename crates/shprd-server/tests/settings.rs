@@ -429,3 +429,91 @@ async fn a_broken_pair_someone_left_does_not_block_other_keys() {
         "{reply}"
     );
 }
+
+/// An opener that keeps the names the coordinator's tab was given and the
+/// restarts it was asked for.
+#[derive(Debug, Default)]
+struct Tabs {
+    named: std::sync::Mutex<Vec<String>>,
+    restarts: std::sync::Mutex<u32>,
+}
+
+impl shprd_server::AgentOpener for Tabs {
+    fn open(&self, _: &str, _: Option<&str>) -> Result<shprd_server::OpenedTab, String> {
+        Err("not used".to_owned())
+    }
+
+    fn name_coordinator(&self, title: &str) -> Result<(), String> {
+        self.named.lock().expect("lock").push(title.to_owned());
+        Ok(())
+    }
+
+    fn restart_coordinator(&self) -> Result<(), String> {
+        *self.restarts.lock().expect("lock") += 1;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn naming_the_coordinator_renames_its_tab_and_the_state_carries_the_names() {
+    let tabs = std::sync::Arc::new(Tabs::default());
+    let mut fixture = Fixture::new();
+    fixture.app = fixture.app.with_agent_opener(tabs.clone());
+    // A name is trimmed, and shows in the state for every client.
+    let (status, reply) = fixture
+        .put(json!({"key": "roles.coordinator.title", "value": "  Orchestrator "}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(
+        row(&reply["settings"], "roles.coordinator.title")["value"],
+        "Orchestrator"
+    );
+    assert_eq!(*tabs.named.lock().expect("lock"), ["Orchestrator"]);
+    fixture
+        .put(json!({"key": "roles.worker.title", "value": "Dev"}))
+        .await;
+    let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(state["role_titles"]["coordinator"], "Orchestrator");
+    assert_eq!(state["role_titles"]["worker"], "Dev");
+    assert_eq!(state["role_titles"]["reviewer"], "Reviewer");
+    // A worker's name does not touch the coordinator's tab.
+    assert_eq!(tabs.named.lock().expect("lock").len(), 1);
+    // A blank name is no name: the built-in title comes back, and the tab follows.
+    let (status, _) = fixture
+        .put(json!({"key": "roles.coordinator.title", "value": "   "}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tabs.named.lock().expect("lock").last().map(String::as_str),
+        Some("Assistant")
+    );
+    let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(state["role_titles"]["coordinator"], "Assistant");
+    // A name is cut to its cap.
+    fixture
+        .put(json!({"key": "roles.reviewer.title", "value": "x".repeat(60)}))
+        .await;
+    let (_, state) = fixture.send(Method::GET, "/api/state", None).await;
+    assert_eq!(state["role_titles"]["reviewer"].as_str().unwrap().len(), 24);
+}
+
+#[tokio::test]
+async fn restarting_the_coordinator_asks_the_host_once() {
+    let tabs = std::sync::Arc::new(Tabs::default());
+    let mut fixture = Fixture::new();
+    fixture.app = fixture.app.with_agent_opener(tabs.clone());
+    let (status, _) = fixture
+        .send(Method::POST, "/api/coordinator/restart", None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(*tabs.restarts.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn a_service_with_no_host_refuses_to_restart_the_coordinator() {
+    let fixture = Fixture::new();
+    let (status, _) = fixture
+        .send(Method::POST, "/api/coordinator/restart", None)
+        .await;
+    assert_ne!(status, StatusCode::NO_CONTENT);
+}

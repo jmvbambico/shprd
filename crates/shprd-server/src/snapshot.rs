@@ -67,6 +67,7 @@ pub fn snapshot(state: &RunState, now_ms: u64) -> SnapshotDto {
         finished: state.finished,
         spaces: Vec::new(),
         live_agents: Vec::new(),
+        role_titles: Default::default(),
     }
 }
 
