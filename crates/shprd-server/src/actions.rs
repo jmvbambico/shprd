@@ -354,6 +354,16 @@ pub(crate) fn answer_ask(
         }
         None => None,
     };
+    // A stuck review's `review again` needs a host to start the reviewer on.
+    let review_again = ask.starts_with(shprd_core::review::STUCK_ASK_PREFIX)
+        && answer
+            .trim()
+            .eq_ignore_ascii_case(shprd_core::review::REVIEW_AGAIN_CHOICE);
+    if review_again && !ctx.engine.is_some_and(Engine::can_review_again) {
+        return Err(ApiReject::refused(
+            "this service was started without a host, so it cannot start a review",
+        ));
+    }
     let queue = shprd_core::ask::AskQueue::for_repo(ctx.repo);
     let now_ms = SystemClock.now_ms();
     let answered: shprd_core::ask::Ask =
@@ -396,6 +406,13 @@ pub(crate) fn answer_ask(
         if let Some(engine) = ctx.engine {
             let _ = engine.resend(ctx.repo, task);
         }
+    }
+    if review_again && let Some(engine) = ctx.engine {
+        // The answer is the person's word that the old reviewer is gone, so
+        // the new one replaces it; a refusal is the review's own words.
+        engine
+            .review_again(ctx.repo, task)
+            .map_err(ApiReject::refused)?;
     }
     if matches!(hand_in, Some(shprd_core::gate::HandInChoice::SendBack)) {
         // The same two verbs the Stop and Retry buttons run.

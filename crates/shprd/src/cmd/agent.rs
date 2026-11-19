@@ -345,19 +345,13 @@ fn report(ctx: &Ctx, args: &ReportArgs) -> Result<(), CliError> {
 
 /// Puts a card in front of the person for a hand-in the engine refused.
 ///
-/// Only the refusals a person can settle get one: a path outside the scope
-/// (they may widen it) and a hand-in without passing checks (they may send the
-/// task back). It is best effort: the worker still gets the refusal as its exit
+/// Only a path outside the scope gets one, because only a person can settle it
+/// (by widening the scope); a hand-in without passing checks is the worker's to
+/// fix and records nothing. It is best effort: the worker still gets the refusal as its exit
 /// status, and a card that could not be written must not hide it.
 fn raise_refused_hand_in(ctx: &Ctx, args: &ReportArgs, refused: &shprd_core::rules::RuleError) {
     use shprd_core::rules::RuleError;
-    if !matches!(
-        refused,
-        RuleError::PathOutOfScope { .. }
-            | RuleError::HandInWithoutChecks { .. }
-            | RuleError::EmptyCheck { .. }
-            | RuleError::HandInCheckFailed { .. }
-    ) {
+    if !matches!(refused, RuleError::PathOutOfScope { .. }) {
         return;
     }
     let Ok(state) = ctx.state() else { return };

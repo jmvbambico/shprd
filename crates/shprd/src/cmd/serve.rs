@@ -180,7 +180,11 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // The person's start, retry and stop actions are the same two closures the
     // tick's steps run: one spawn path, one way of closing a task's space, so a
     // board's Start and the engine's own start cannot drift apart.
-    config.engine = Some(engine_of(&tick.worker).with_resend(resender(resend_host, &home)));
+    config.engine = Some(
+        engine_of(&tick.worker)
+            .with_resend(resender(resend_host, &home))
+            .with_review_again(review_again(&home, tick.worker.actor.clone())),
+    );
     // The tab bar's "+" menu's *Start an agent* is the same host and the same
     // harness table: a program is a tab with its plain launch line in it, never
     // a task's attempt, so it goes through the service and not through the mod.
@@ -584,6 +588,15 @@ fn resender(host: Arc<dyn Host>, home: &Path) -> shprd_server::Resender {
     Arc::new(move |repo: &Path, task: &str| {
         let ctx = crate::ctx::Ctx::new(repo.to_path_buf(), Actor::Human, false, true);
         crate::cmd::spawn::resend_brief(&*host, &home, &ctx, task).map_err(|err| err.to_string())
+    })
+}
+
+/// The board's `review again` on a stuck review: the verb's own `--again`.
+fn review_again(home: &Path, actor: Actor) -> shprd_server::Resender {
+    let home = home.to_path_buf();
+    Arc::new(move |repo: &Path, task: &str| {
+        let ctx = crate::ctx::Ctx::new(repo.to_path_buf(), actor.clone(), false, true);
+        crate::cmd::review::review_again_for_tick(&ctx, &home, task)
     })
 }
 

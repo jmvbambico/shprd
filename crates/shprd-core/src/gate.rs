@@ -318,12 +318,13 @@ pub fn hand_in_refused_choice(ask: &str, answer: &str) -> Option<HandInChoice> {
 /// of the person's: the engine spends the round it grants. `None` for any other
 /// ask, any other answer, or a task the run no longer holds open.
 pub fn rounds_spent_followup(task: &Task, ask: &str, answer: &str) -> Option<EventKind> {
-    if !ask.starts_with(ROUNDS_SPENT_ASK_PREFIX) {
+    let stuck = ask.starts_with(crate::review::STUCK_ASK_PREFIX);
+    if !ask.starts_with(ROUNDS_SPENT_ASK_PREFIX) && !stuck {
         return None;
     }
     let choice = answer.trim();
     let lower = choice.to_ascii_lowercase();
-    if lower.starts_with("take") {
+    if lower.starts_with("take") && !stuck {
         return Some(EventKind::Override {
             task: task.id.clone(),
             rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),

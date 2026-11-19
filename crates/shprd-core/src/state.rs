@@ -730,6 +730,21 @@ impl RunState {
                 ..
             } => {
                 let passed = matches!(event.kind, EventKind::GatePassed { .. });
+                if gate == crate::gate::REVIEW_GATE {
+                    // A verdict answers the card a review that ran long put up.
+                    let seq = event.seq;
+                    for record in self.asks.values_mut() {
+                        if record.task == *task
+                            && record.answer.is_none()
+                            && record.id.starts_with(crate::review::STUCK_ASK_PREFIX)
+                        {
+                            record.answer = Some(AskAnswerRecord {
+                                text: String::from("reviewed"),
+                                seq,
+                            });
+                        }
+                    }
+                }
                 if let Some(entry) = self.tasks.get_mut(task) {
                     entry.status = if passed {
                         TaskStatus::Passed
@@ -1163,6 +1178,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_new_attempt_retires_the_asks_the_old_one_left_open() {
         let raised = ev(
             4,

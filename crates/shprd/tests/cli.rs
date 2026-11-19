@@ -455,6 +455,14 @@ fn changed_path_outside_scope_is_refused() {
     assert_eq!(status_of(&state(root), "T1"), "working");
 }
 
+/// The run log's text.
+fn read_log(root: &Path) -> String {
+    match std::fs::read_to_string(log_path(root)) {
+        Ok(text) => text,
+        Err(err) => panic!("reading the log failed: {err}"),
+    }
+}
+
 #[test]
 fn a_refused_hand_in_leaves_a_card_naming_the_reason() {
     let dir = repo();
@@ -479,7 +487,7 @@ fn a_refused_hand_in_leaves_a_card_naming_the_reason() {
         "tests/test_ops.py",
     ];
     refused(root, &report);
-    let log = std::fs::read_to_string(log_path(root)).expect("the log");
+    let log = read_log(root);
     let raised: Vec<&str> = log
         .lines()
         .filter(|line| line.contains("\"ask_raised\""))
@@ -499,7 +507,7 @@ fn a_refused_hand_in_leaves_a_card_naming_the_reason() {
     assert!(raised[0].contains("send it back"), "{}", raised[0]);
     // The worker retries the same hand-in: still one open card.
     refused(root, &report);
-    let log = std::fs::read_to_string(log_path(root)).expect("the log");
+    let log = read_log(root);
     assert_eq!(log.matches("\"ask_raised\"").count(), 1, "{log}");
 }
 

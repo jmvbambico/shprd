@@ -450,6 +450,10 @@ impl Worker {
         for action in &ladder.actions {
             report.steps.push(self.run_ladder(&state, action));
         }
+        // A review that has been out too long is a card, whatever its reviewer
+        // is doing: the pass cannot see into the reviewer, only how long ago it
+        // was asked.
+        self.watch_reviews(SystemClock.now_ms());
         // And the news last, from the log as the steps left it, so a task this
         // pass started is news on this pass rather than the next one.
         report.news = self.news_pass(&ladder.retries);
@@ -460,6 +464,39 @@ impl Worker {
             SystemClock.now_ms(),
         ));
         Ok(report)
+    }
+
+    /// Puts a card in front of a person for every review that has been out for
+    /// [`shprd_core::review::STUCK_AFTER_MS`] without a verdict.
+    ///
+    /// The card is an answerable ask, like the one a spent review raises: its
+    /// `review again` closes the reviewer and starts a new one. A request that
+    /// already has a card since it was made is not raised again.
+    pub fn watch_reviews(&self, now_ms: u64) {
+        let Ok((state, events)) = ledger::load(&self.repo) else {
+            return;
+        };
+        for stuck in shprd_core::review::stuck_reviews(
+            &state,
+            &events,
+            now_ms,
+            shprd_core::review::STUCK_AFTER_MS,
+        ) {
+            let text = shprd_core::review::stuck_body(
+                &stuck.task,
+                stuck.attempt,
+                &stuck.reviewer,
+                stuck.minutes,
+            );
+            if let Err(err) = self.raise_card(
+                &stuck.task,
+                &stuck.ask,
+                &text,
+                shprd_core::review::stuck_options(),
+            ) {
+                tracing::warn!(task = %stuck.task, %err, "the card for a stuck review could not be recorded");
+            }
+        }
     }
 
     /// Counts this pass's failures against the last one's, and asks a person
@@ -1214,11 +1251,22 @@ impl Worker {
     /// expires, because the decision is the person's to make when they get to
     /// it, and its id names the failed attempt so one failure has one card.
     fn raise_rounds_card(&self, task: &str, id: &str, text: &str) -> Result<Option<u64>, String> {
-        let now_ms = SystemClock.now_ms();
         let options: Vec<String> = shprd_core::gate::ROUNDS_SPENT_OPTIONS
             .iter()
             .map(|choice| (*choice).to_string())
             .collect();
+        self.raise_card(task, id, text, options)
+    }
+
+    /// Writes an answerable card with `options`: the queue file and the event.
+    fn raise_card(
+        &self,
+        task: &str,
+        id: &str,
+        text: &str,
+        options: Vec<String>,
+    ) -> Result<Option<u64>, String> {
+        let now_ms = SystemClock.now_ms();
         let ask = shprd_core::ask::Ask::new(
             id.to_string(),
             task.to_string(),
