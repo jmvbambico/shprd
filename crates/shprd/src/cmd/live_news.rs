@@ -52,8 +52,13 @@ impl Coordinator for LiveNews {
             }
         };
         let space = crate::cmd::spawn::repo_space_name(&repo_name);
-        match crate::cmd::spawn::coordinator_pane_for(self.mux.as_ref(), &self.home, state, &space)
-        {
+        match crate::cmd::spawn::coordinator_pane_for(
+            self.mux.as_ref(),
+            &self.home,
+            &self.repo,
+            state,
+            &space,
+        ) {
             Ok(pane) => pane.map(|pane| pane.as_str().to_string()),
             Err(err) => {
                 tracing::warn!(%err, "the coordinator's pane could not be found");
@@ -95,8 +100,14 @@ mod tests {
             .first()
             .map(|tab| tab.root_pane.clone())
             .expect("the space's first tab");
-        crate::cmd::spawn::record_coordinator_pane(home.path(), &recorded, "sh")
-            .expect("recording the pane");
+        crate::cmd::spawn::record_coordinator_pane(
+            home.path(),
+            repo.path(),
+            &space.id,
+            &recorded,
+            "sh",
+        )
+        .expect("recording the pane");
 
         let news = LiveNews::new(Box::new(mux), home.path(), repo.path());
         assert_eq!(

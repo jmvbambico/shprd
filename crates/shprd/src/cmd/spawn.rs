@@ -725,7 +725,7 @@ pub(crate) fn open_agent(
     // The coordinator that is running in the repository's space is the agent's
     // parent, so the host can keep it under a restarted coordinator; none
     // running leaves it parentless, which is a worker all the same.
-    let parent = coordinator_pane_of(&env.home, mux, space);
+    let parent = coordinator_pane_of(&env.home, &env.ctx.root, mux, space);
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
@@ -2090,56 +2090,161 @@ pub(crate) fn all_handles(mux: &dyn Host) -> Vec<shprd_mux::Tab> {
     handles
 }
 
+/// The directory the coordinator records live under: `<home>/.shprd/coordinators`.
+const COORDINATORS_DIR: &str = "coordinators";
+
+/// The older, machine-wide record: `<home>/.shprd/coordinator.pane`.
+///
+/// One file per machine meant a second `shprd serve` (another repository, a
+/// test run) overwrote the first service's record. It is read only to migrate
+/// ([`coordinator_record`]) and is never written or deleted.
+fn legacy_coordinator_path(home: &Path) -> PathBuf {
+    home.join(".shprd").join("coordinator.pane")
+}
+
+/// A name that is safe as one path component: ASCII letters, digits, `-` and
+/// `_` stay, anything else becomes `_`.
+fn path_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Where the pane of the coordinator shprd started is written.
 ///
-/// It is `<home>/.shprd/coordinator.pane`, beside the tab records. Two lines:
-/// the host's own pane id, then the word `agent`, which says shprd started an
-/// agent there. A record without the second line names a pane shprd did not
-/// start (an older build recorded the space's starter shell), and is never typed
-/// into.
-pub(crate) fn coordinator_pane_path(home: &Path) -> PathBuf {
-    home.join(".shprd").join("coordinator.pane")
+/// It is `<home>/.shprd/coordinators/<repo-key>/<space-id>`, beside the tab
+/// records. The repo key is the repository's folder name and a short digest of
+/// its canonical path, so two repositories with the same folder name still get
+/// their own directory; the file is named by the host's id of the repository's
+/// space, so a second space on the same repository does not share it either.
+/// This follows how the rest of shprd scopes by repository (one space per
+/// repository, labelled from its folder) while keeping the record under the one
+/// `--home` a service is given, where its other records already live. Three
+/// lines: the host's own pane id, then the word `agent`, which says shprd
+/// started an agent there, then the program. A record without the second line
+/// names a pane shprd did not start (an older build recorded the space's
+/// starter shell), and is never typed into.
+pub(crate) fn coordinator_pane_path(
+    home: &Path,
+    repo: &Path,
+    space: &shprd_mux::SpaceId,
+) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let short: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    let name = canonical
+        .file_name()
+        .map(|name| path_safe(&name.to_string_lossy()))
+        .unwrap_or_default();
+    home.join(".shprd")
+        .join(COORDINATORS_DIR)
+        .join(format!("{name}-{short}"))
+        .join(path_safe(space.as_str()))
 }
 
 /// The line that marks a recorded pane as an agent shprd started.
 const COORDINATOR_AGENT_MARK: &str = "agent";
 
-/// Records the pane of the coordinator agent shprd started.
+/// Records the pane of the coordinator agent shprd started, for the
+/// repository's `space`. No other repository's or space's record is touched.
 pub(crate) fn record_coordinator_pane(
     home: &Path,
+    repo: &Path,
+    space: &shprd_mux::SpaceId,
     pane: &PaneId,
     program: &str,
 ) -> Result<(), CliError> {
-    let path = coordinator_pane_path(home);
+    let path = coordinator_pane_path(home, repo, space);
+    write_record(
+        &path,
+        &format!("{}\n{COORDINATOR_AGENT_MARK}\n{program}\n", pane.as_str()),
+    )
+}
+
+fn write_record(path: &Path, text: &str) -> Result<(), CliError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|err| {
             CliError::other(anyhow!(err).context(format!("making {}", dir.display())))
         })?;
     }
-    std::fs::write(
-        &path,
-        format!("{}\n{COORDINATOR_AGENT_MARK}\n{program}\n", pane.as_str()),
-    )
-    .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
+    std::fs::write(path, text)
+        .map_err(|err| CliError::other(anyhow!(err).context(format!("writing {}", path.display()))))
+}
+
+/// What a coordinator record says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoordinatorRecord {
+    /// The host's pane id.
+    pub pane: PaneId,
+    /// Whether the record carries the `agent` mark.
+    pub agent: bool,
+    /// The program the coordinator runs, when recorded.
+    pub program: Option<String>,
+}
+
+fn parse_record(text: &str) -> Option<CoordinatorRecord> {
+    let mut lines = text.lines().map(str::trim);
+    let pane = lines.next().filter(|pane| !pane.is_empty())?;
+    let agent = lines.next() == Some(COORDINATOR_AGENT_MARK);
+    let program = lines
+        .next()
+        .filter(|program| !program.is_empty())
+        .map(str::to_string);
+    Some(CoordinatorRecord {
+        pane: PaneId::new(pane),
+        agent,
+        program,
+    })
+}
+
+/// The record of the coordinator for this repository's `space`.
+///
+/// The repository's own record wins. When there is none, the old machine-wide
+/// file is read once for migration, and only if its pane is a tab of this
+/// service's own space: then it is copied into the repository's record. A pane
+/// the space does not have belongs to another service (or is stale) and is
+/// ignored. The old file is never deleted: it may be another service's.
+pub(crate) fn coordinator_record(
+    home: &Path,
+    repo: &Path,
+    mux: &dyn Host,
+    space: &shprd_mux::Space,
+) -> Option<CoordinatorRecord> {
+    let path = coordinator_pane_path(home, repo, &space.id);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        return parse_record(&text);
+    }
+    let text = std::fs::read_to_string(legacy_coordinator_path(home)).ok()?;
+    let record = parse_record(&text)?;
+    let alive_here = mux
+        .list_tabs(&space.id)
+        .ok()?
+        .into_iter()
+        .any(|tab| tab.root_pane == record.pane);
+    if !alive_here {
+        return None;
+    }
+    if let Err(err) = write_record(&path, &text) {
+        tracing::warn!(%err, "the old coordinator record could not be migrated");
+    }
+    Some(record)
 }
 
 /// The coordinator running in `space`, for an agent to name as its parent.
 pub(crate) fn coordinator_pane_of(
     home: &Path,
+    repo: &Path,
     mux: &dyn Host,
     space: &shprd_mux::Space,
 ) -> Option<PaneId> {
-    recorded_coordinator_pane(home, mux, space)
-}
-
-/// The program the recorded coordinator runs, from its record's third line.
-pub(crate) fn recorded_coordinator_program(home: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(coordinator_pane_path(home)).ok()?;
-    text.lines()
-        .nth(2)
-        .map(str::trim)
-        .filter(|program| !program.is_empty())
-        .map(str::to_string)
+    recorded_coordinator_pane(home, repo, mux, space)
 }
 
 /// The coordinator agent shprd started, when it is still running in `space`.
@@ -2152,13 +2257,12 @@ pub(crate) fn recorded_coordinator_program(home: &Path) -> Option<String> {
 /// into whatever is left.
 pub(crate) fn recorded_coordinator_pane(
     home: &Path,
+    repo: &Path,
     mux: &dyn Host,
     space: &shprd_mux::Space,
 ) -> Option<PaneId> {
-    let text = std::fs::read_to_string(coordinator_pane_path(home)).ok()?;
-    let mut lines = text.lines().map(str::trim);
-    let wanted = lines.next().filter(|pane| !pane.is_empty())?;
-    if lines.next() != Some(COORDINATOR_AGENT_MARK) {
+    let record = coordinator_record(home, repo, mux, space)?;
+    if !record.agent {
         return None;
     }
     let pane = mux
@@ -2166,7 +2270,7 @@ pub(crate) fn recorded_coordinator_pane(
         .ok()?
         .into_iter()
         .map(|tab| tab.root_pane)
-        .find(|pane| pane.as_str() == wanted)?;
+        .find(|pane| *pane == record.pane)?;
     match mux.agent_state(&pane) {
         Ok(AgentState::Done) | Err(_) => None,
         Ok(_) => Some(pane),
@@ -2211,7 +2315,7 @@ pub(crate) fn ensure_coordinator(
     // What older shprd left behind goes first: a coordinator in a bare terminal
     // tab is replaced by the chat tab, never kept beside it.
     tidy_old_coordinator_tabs(mux, space);
-    if let Some(pane) = recorded_coordinator_pane(&env.home, mux, space) {
+    if let Some(pane) = recorded_coordinator_pane(&env.home, &env.ctx.root, mux, space) {
         return Ok(CoordinatorStart::Running(pane));
     }
     // No coordinator is running, so a tab of ours that still holds a finished
@@ -2288,7 +2392,13 @@ pub(crate) fn ensure_coordinator(
         .map_err(|err| CliError::other(anyhow!(err).context("starting the coordinator")))?;
     // A coordinator nobody can find again is one a restart would start a second
     // of, so a record that cannot be written stops the one just started.
-    if let Err(err) = record_coordinator_pane(&env.home, &tab.root_pane, &pick.agent) {
+    if let Err(err) = record_coordinator_pane(
+        &env.home,
+        &env.ctx.root,
+        &space.id,
+        &tab.root_pane,
+        &pick.agent,
+    ) {
         close_tab(mux, &tab.id);
         return Err(err);
     }
@@ -2425,6 +2535,7 @@ fn tidy_old_coordinator_tabs(mux: &dyn Host, space: &shprd_mux::Space) {
 pub(crate) fn coordinator_pane_for(
     mux: &dyn Host,
     home: &Path,
+    repo: &Path,
     state: &RunState,
     space_name: &str,
 ) -> Result<Option<PaneId>, CliError> {
@@ -2437,7 +2548,7 @@ pub(crate) fn coordinator_pane_for(
     let Some(space) = space else {
         return Ok(None);
     };
-    Ok(recorded_coordinator_pane(home, mux, &space))
+    Ok(recorded_coordinator_pane(home, repo, mux, &space))
 }
 
 /// Sends one turn of input to the run's coordinator, as the person.
@@ -2463,7 +2574,7 @@ pub(crate) fn prompt_coordinator(
 pub(crate) fn coordinator_pane(mux: &dyn Host, home: &Path, ctx: &Ctx) -> Result<PaneId, CliError> {
     let state = ctx.state()?;
     let name = repo_space_name(&repo_name(&ctx.root)?);
-    coordinator_pane_for(mux, home, &state, &name)?.ok_or_else(|| no_coordinator(&name))
+    coordinator_pane_for(mux, home, &ctx.root, &state, &name)?.ok_or_else(|| no_coordinator(&name))
 }
 
 /// The refusal a coordinator with no recorded pane earns.
@@ -3413,14 +3524,20 @@ project_dirs = []
     }
 
     /// Records the space's first tab as the coordinator agent's pane.
-    fn record_first_tab(home: &Path, mux: &FakeMux, space: &shprd_mux::Space) -> PaneId {
+    fn record_first_tab(
+        home: &Path,
+        repo: &Path,
+        mux: &FakeMux,
+        space: &shprd_mux::Space,
+    ) -> PaneId {
         let pane = mux
             .list_tabs(&space.id)
             .unwrap_or_else(|err| panic!("{err}"))
             .first()
             .map(|tab| tab.root_pane.clone())
             .unwrap_or_else(|| panic!("the space has a pane to record"));
-        record_coordinator_pane(home, &pane, "sh").unwrap_or_else(|err| panic!("{err}"));
+        record_coordinator_pane(home, repo, &space.id, &pane, "sh")
+            .unwrap_or_else(|err| panic!("{err}"));
         pane
     }
 
@@ -3433,7 +3550,7 @@ project_dirs = []
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_starter_tab();
         let space = repo_space(&mux, &scratch);
-        let pane = record_first_tab(scratch.home.path(), &mux, &space);
+        let pane = record_first_tab(scratch.home.path(), scratch.root(), &mux, &space);
         let _ = mux.take_calls();
 
         prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello coordinator")
@@ -3474,7 +3591,7 @@ project_dirs = []
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_starter_tab();
         let space = repo_space(&mux, &scratch);
-        let path = coordinator_pane_path(scratch.home.path());
+        let path = coordinator_pane_path(scratch.home.path(), scratch.root(), &space.id);
         let dir = path.parent().unwrap_or_else(|| panic!("a parent"));
         std::fs::create_dir_all(dir).unwrap_or_else(|err| panic!("{err}"));
         std::fs::write(&path, "p-closed\n").unwrap_or_else(|err| panic!("{err}"));
@@ -3485,7 +3602,7 @@ project_dirs = []
         assert!(writes(&mux).is_empty(), "nothing was typed");
 
         // And the space's own tab is still fine once it is the one recorded.
-        let pane = record_first_tab(scratch.home.path(), &mux, &space);
+        let pane = record_first_tab(scratch.home.path(), scratch.root(), &mux, &space);
         let _ = mux.take_calls();
         prompt_coordinator(&mux, scratch.home.path(), &ctx, "hello")
             .unwrap_or_else(|err| panic!("{err}"));
@@ -3627,7 +3744,7 @@ project_dirs = []
             .first()
             .map(|tab| tab.root_pane.clone())
             .unwrap_or_else(|| panic!("a pane"));
-        let path = coordinator_pane_path(scratch.home.path());
+        let path = coordinator_pane_path(scratch.home.path(), scratch.root(), &space.id);
         std::fs::create_dir_all(path.parent().unwrap_or(scratch.home.path()))
             .unwrap_or_else(|err| panic!("{err}"));
         std::fs::write(&path, format!("{}\n", pane.as_str())).unwrap_or_else(|err| panic!("{err}"));
@@ -3635,7 +3752,7 @@ project_dirs = []
             prompt_coordinator(&mux, scratch.home.path(), &ctx, "hi").is_err(),
             "a bare record is a shell"
         );
-        record_coordinator_pane(scratch.home.path(), &pane, "sh")
+        record_coordinator_pane(scratch.home.path(), scratch.root(), &space.id, &pane, "sh")
             .unwrap_or_else(|err| panic!("{err}"));
         mux.set_state(&pane, AgentState::Done);
         assert!(
@@ -3643,6 +3760,95 @@ project_dirs = []
             "an ended coordinator is not typed into"
         );
         assert!(writes(&mux).is_empty(), "nothing was typed");
+    }
+
+    /// Two repositories on one machine keep their own records: a second
+    /// service recording its coordinator never rewrites the first's, and each
+    /// reader finds its own.
+    #[test]
+    fn two_repositories_keep_their_own_coordinator_records() {
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let (repo_a, repo_b) = (
+            TempDir::new().unwrap_or_else(|err| panic!("{err}")),
+            TempDir::new().unwrap_or_else(|err| panic!("{err}")),
+        );
+        let mux_a = FakeMux::default().with_starter_tab();
+        let mux_b = FakeMux::default().with_starter_tab();
+        let space_a = mux_a
+            .create_space("a", repo_a.path())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let space_b = mux_b
+            .create_space("b", repo_b.path())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let first = |mux: &FakeMux, space: &shprd_mux::Space| {
+            mux.list_tabs(&space.id)
+                .unwrap_or_else(|err| panic!("{err}"))
+                .first()
+                .map(|tab| tab.root_pane.clone())
+                .unwrap_or_else(|| panic!("a pane"))
+        };
+        let (pane_a, pane_b) = (first(&mux_a, &space_a), first(&mux_b, &space_b));
+        record_coordinator_pane(home.path(), repo_a.path(), &space_a.id, &pane_a, "claude")
+            .unwrap_or_else(|err| panic!("{err}"));
+        record_coordinator_pane(home.path(), repo_b.path(), &space_b.id, &pane_b, "codex")
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        assert_ne!(
+            coordinator_pane_path(home.path(), repo_a.path(), &space_a.id),
+            coordinator_pane_path(home.path(), repo_b.path(), &space_b.id)
+        );
+        assert_eq!(
+            recorded_coordinator_pane(home.path(), repo_a.path(), &mux_a, &space_a),
+            Some(pane_a.clone())
+        );
+        assert_eq!(
+            recorded_coordinator_pane(home.path(), repo_b.path(), &mux_b, &space_b),
+            Some(pane_b)
+        );
+        let record = coordinator_record(home.path(), repo_a.path(), &mux_a, &space_a);
+        assert_eq!(
+            record.and_then(|r| r.program).as_deref(),
+            Some("claude"),
+            "the program is the repository's own"
+        );
+    }
+
+    /// The old machine-wide file is migrated only when it names a pane alive in
+    /// this space, and is never deleted.
+    #[test]
+    fn the_old_record_is_migrated_only_for_a_live_pane_of_this_space() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default().with_starter_tab();
+        let space = repo_space(&mux, &scratch);
+        let pane = mux
+            .list_tabs(&space.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .first()
+            .map(|tab| tab.root_pane.clone())
+            .unwrap_or_else(|| panic!("a pane"));
+        let legacy = scratch.home.path().join(".shprd").join("coordinator.pane");
+        std::fs::create_dir_all(legacy.parent().unwrap_or(scratch.home.path()))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let new_path = coordinator_pane_path(scratch.home.path(), scratch.root(), &space.id);
+
+        // Another service's pane: ignored, nothing written.
+        std::fs::write(&legacy, "p-elsewhere\nagent\nclaude\n")
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            recorded_coordinator_pane(scratch.home.path(), scratch.root(), &mux, &space),
+            None
+        );
+        assert!(!new_path.exists(), "a foreign record is not migrated");
+
+        // This space's live pane: migrated, the old file stays.
+        std::fs::write(&legacy, format!("{}\nagent\nclaude\n", pane.as_str()))
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            recorded_coordinator_pane(scratch.home.path(), scratch.root(), &mux, &space),
+            Some(pane)
+        );
+        assert!(new_path.exists(), "the record is migrated");
+        assert!(legacy.exists(), "the old file is left alone");
     }
 
     /// A run that recorded its own coordinator pane wins over the service's
@@ -3653,7 +3859,7 @@ project_dirs = []
         let ctx = scratch.ctx();
         let mux = FakeMux::default().with_starter_tab();
         let space = repo_space(&mux, &scratch);
-        let _ = record_first_tab(scratch.home.path(), &mux, &space);
+        let _ = record_first_tab(scratch.home.path(), scratch.root(), &mux, &space);
         let launched = mux
             .spawn(
                 &space.id,

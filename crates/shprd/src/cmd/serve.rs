@@ -753,7 +753,13 @@ mod tests {
                     parent: None,
                 })
                 .map_err(|err| CliError::other(anyhow!(err)))?;
-            crate::cmd::spawn::record_coordinator_pane(home, &tab.root_pane, "sh")?;
+            crate::cmd::spawn::record_coordinator_pane(
+                home,
+                repo,
+                &prepared.space.id,
+                &tab.root_pane,
+                "sh",
+            )?;
             Ok(crate::cmd::spawn::CoordinatorStart::Started(tab.root_pane))
         }
     }
@@ -784,9 +790,17 @@ mod tests {
         assert_eq!(reported, &label);
         // The space's own first tab is the pane the chat may reach, and it is
         // recorded once, here.
-        let recorded =
-            std::fs::read_to_string(crate::cmd::spawn::coordinator_pane_path(home.path()))
-                .unwrap_or_else(|err| panic!("the pane is recorded: {err}"));
+        let space = mux
+            .find_space(&label)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("the space exists"));
+        let recorded = std::fs::read_to_string(crate::cmd::spawn::coordinator_pane_path(
+            home.path(),
+            repo.path(),
+            &space.id,
+        ))
+        .unwrap_or_else(|err| panic!("the pane is recorded: {err}"));
         assert_eq!(
             recorded.lines().next().unwrap_or_default(),
             pane.clone().unwrap_or_default()

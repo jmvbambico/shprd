@@ -1003,7 +1003,7 @@ fn open_reviewer(
             data: env.spawn.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
-    let parent = spawn::coordinator_pane_of(&env.spawn.home, mux, &space);
+    let parent = spawn::coordinator_pane_of(&env.spawn.home, &env.spawn.ctx.root, mux, &space);
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
