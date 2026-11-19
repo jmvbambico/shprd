@@ -2103,9 +2103,13 @@ fn legacy_coordinator_path(home: &Path) -> PathBuf {
 }
 
 /// A name that is safe as one path component: ASCII letters, digits, `-` and
-/// `_` stay, anything else becomes `_`.
+/// `_` stay, anything else becomes `_`. A name that had to change also gets a
+/// short digest of the original, so two different names never share a path
+/// (`a/b` and `a_b` stay apart).
 fn path_safe(text: &str) -> String {
-    text.chars()
+    use sha2::{Digest, Sha256};
+    let safe: String = text
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -2113,7 +2117,13 @@ fn path_safe(text: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if safe == text {
+        return safe;
+    }
+    let digest = Sha256::digest(text.as_bytes());
+    let short: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    format!("{safe}-{short}")
 }
 
 /// Where the pane of the coordinator shprd started is written.
@@ -3811,6 +3821,17 @@ project_dirs = []
             Some("claude"),
             "the program is the repository's own"
         );
+    }
+
+    /// Space ids that differ only in characters a path cannot hold still get
+    /// their own record paths.
+    #[test]
+    fn distinct_space_ids_never_share_a_record_path() {
+        let home = Path::new("/h");
+        let repo = Path::new("/r/x");
+        let a = coordinator_pane_path(home, repo, &shprd_mux::SpaceId::new("space/a"));
+        let b = coordinator_pane_path(home, repo, &shprd_mux::SpaceId::new("space_a"));
+        assert_ne!(a, b);
     }
 
     /// The old machine-wide file is migrated only when it names a pane alive in
