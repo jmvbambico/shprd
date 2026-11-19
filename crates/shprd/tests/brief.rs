@@ -95,6 +95,7 @@ fn brief_for(program: &str) -> String {
         settings: None,
         role: None,
         warnings: &[],
+        program_line: None,
     })
 }
 

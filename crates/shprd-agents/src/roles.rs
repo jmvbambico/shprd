@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 
-use shprd_core::settings::{Resolved, ResolvedRole};
+use shprd_core::settings::{Resolved, ResolvedRole, Sourced, WorkerLine};
 use thiserror::Error;
 
 use crate::data::DataDir;
@@ -324,7 +324,40 @@ fn check_role(role: &ResolvedRole, table: &Table, problems: &mut Problems) {
     check_model(role, spec, table, problems);
     check_perm(role, spec, problems);
     check_effort(role, spec, problems);
+    // The lines after the first are checked as the role would be were each its
+    // own pick.
+    // (The old `fallback` spelling is checked below, by its own words.)
+    let extras = if role.agents.value.is_empty() {
+        Vec::new()
+    } else {
+        role.lines().into_iter().skip(1).collect()
+    };
+    for line in extras {
+        let Some(spec) = table.specs.iter().find(|spec| spec.id == line.agent) else {
+            problems.push(format!(
+                "role `{}` has a line for the program `{}`, which no harness defines: known programs are {known}",
+                role.id, line.agent
+            ));
+            continue;
+        };
+        let mut as_line = role.clone();
+        let sourced = |text: &Option<String>| {
+            text.as_ref()
+                .map(|text| Sourced::new(text.clone(), role.agents.source))
+        };
+        as_line.agent = Some(Sourced::new(line.agent.clone(), role.agents.source));
+        as_line.model = sourced(&line.model);
+        as_line.effort = sourced(&line.effort);
+        as_line.perm = sourced(&line.perm);
+        as_line.fast = Sourced::new(line.fast, role.agents.source);
+        check_model(&as_line, spec, table, problems);
+        check_perm(&as_line, spec, problems);
+        check_effort(&as_line, spec, problems);
+    }
+    // A reviewer's fallback is one program (or `program/model`) as a picker
+    // names it; a worker's old list is read as lines above.
     for fallback in &role.fallback.value {
+        let fallback = fallback.split('/').next().unwrap_or(fallback);
         if !table.specs.iter().any(|spec| spec.id == *fallback) {
             problems.push(format!(
                 "role `{}` falls back to `{fallback}`, which no harness defines: known programs are {known}",
@@ -477,19 +510,54 @@ fn check_review(resolved: &Resolved, review: Review<'_>, table: &Table, problems
         ));
         return;
     };
-    let reviewer_vendor = vendor_of(&reviewer, table);
-    let worker_vendor = vendor_of(&worker, table);
     // A role that names no program has no vendor yet: the person has not
     // chosen, and the check cannot be made rather than failed.
-    let (Some(reviewer_vendor), Some(worker_vendor)) = (reviewer_vendor, worker_vendor) else {
-        return;
+    // Only lines the person listed count; the old `fallback` spelling of a worker
+    // keeps meaning "after the first", as it always did.
+    let counted = if worker.agents.value.is_empty() {
+        1
+    } else {
+        usize::MAX
     };
-    if reviewer_vendor == worker_vendor {
+    let worker_vendors: Vec<String> = worker
+        .lines()
+        .iter()
+        .take(counted)
+        .filter_map(|line| line_vendor(line, table))
+        .collect();
+    let main = reviewer
+        .lines()
+        .into_iter()
+        .next()
+        .and_then(|line| line_vendor(&line, table));
+    if let Some(reviewer_vendor) = main
+        && worker_vendors.contains(&reviewer_vendor)
+    {
         problems.push(format!(
             "the reviewer `{}` and the worker `{}` are both {reviewer_vendor}, so the review is not cross-vendor: set roles.{}.agent to a program from another family",
             reviewer.id, worker.id, reviewer.id
         ));
     }
+    // The reviewer's fallback reviews when the main one cannot, so it is held to
+    // the same rule.
+    for entry in &reviewer.fallback.value {
+        let Some(vendor) = WorkerLine::parse(entry).and_then(|line| line_vendor(&line, table))
+        else {
+            continue;
+        };
+        if worker_vendors.contains(&vendor) {
+            problems.push(format!(
+                "the reviewer `{}`'s fallback `{entry}` and the worker `{}` are both {vendor}, so the review is not cross-vendor: pick a fallback from another family",
+                reviewer.id, worker.id
+            ));
+        }
+    }
+}
+
+/// The vendor one program line would run.
+fn line_vendor(line: &WorkerLine, table: &Table) -> Option<String> {
+    let agent = AgentRef::parse(&line.agent_ref(), &table.specs).ok()?;
+    agent_vendor(&agent, &table.specs, &table.families)
 }
 
 /// The model family a role would run, when both its program and its model name
@@ -653,6 +721,43 @@ mod tests {
         let settings = resolved("[roles.worker]\nagent = \"claude\"\nfallback = [\"nope\"]\n");
         let message = refused(&settings);
         assert!(message.contains("falls back to `nope`"), "{message}");
+    }
+
+    #[test]
+    fn a_worker_line_is_checked_like_the_first() {
+        let settings = resolved("[roles.worker]\nagent = \"claude\"\nagents = [\"nope\"]\n");
+        let message = refused(&settings);
+        assert!(
+            message.contains("a line for the program `nope`"),
+            "{message}"
+        );
+        let twice = resolved("[roles.worker]\nagent = \"claude\"\nagents = [\"claude\"]\n");
+        // The program is listed once by `lines()`, so a repeat never reaches the
+        // check: it is simply ignored.
+        assert!(check(&twice, Review::default(), &table()).is_ok());
+    }
+
+    #[test]
+    fn a_reviewer_fallback_of_the_workers_vendor_is_refused() {
+        let settings = resolved(
+            "[roles.worker]\nagent = \"claude\"\n[roles.reviewer]\nagent = \"codex\"\nfallback = [\"claude\"]\n",
+        );
+        let message = refused(&settings);
+        assert!(message.contains("fallback `claude`"), "{message}");
+        assert!(message.contains("not cross-vendor"), "{message}");
+        let fine = resolved(
+            "[roles.worker]\nagent = \"claude\"\n[roles.reviewer]\nagent = \"codex\"\nfallback = [\"codex\"]\n",
+        );
+        assert!(check(&fine, Review::default(), &table()).is_ok());
+    }
+
+    #[test]
+    fn any_worker_line_of_the_reviewers_vendor_is_refused() {
+        let settings = resolved(
+            "[roles.worker]\nagent = \"claude\"\nagents = [\"codex\"]\n[roles.reviewer]\nagent = \"codex\"\n",
+        );
+        let message = refused(&settings);
+        assert!(message.contains("not cross-vendor"), "{message}");
     }
 
     #[test]

@@ -330,6 +330,9 @@ pub struct BriefInput<'a> {
     /// What the launch already knows the agent should be told: an effort level
     /// its model cannot use, for one. Empty for most briefs.
     pub warnings: &'a [String],
+    /// Which of the worker's program lines this task got and why, as one
+    /// sentence, for the Settings block.
+    pub program_line: Option<&'a str>,
 }
 
 /// The longest detail the brief keeps from a previous attempt's finding, so one
@@ -374,7 +377,7 @@ pub fn task_brief(input: &BriefInput<'_>) -> String {
     }
     if let Some(resolved) = input.settings {
         out.push('\n');
-        out.push_str(&settings_block(resolved, input.role));
+        out.push_str(&settings_block(resolved, input.role, input.program_line));
     }
     if !input.warnings.is_empty() {
         out.push_str("\n## Warnings\n\n");
@@ -565,7 +568,11 @@ fn proof_rule(proof: bool) -> String {
 /// role inherited and a value the person set for this repository must not read
 /// alike. A value nothing sets is named as shprd's own behaviour, with `built in`
 /// as its layer.
-pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> String {
+pub fn settings_block(
+    resolved: &Resolved,
+    role: Option<&ResolvedRole>,
+    program_line: Option<&str>,
+) -> String {
     let mut out = String::from("## Your settings\n\n");
     out.push_str(
         "Each line ends with the layer that set it: `this task`, `this repo`, `you`, \
@@ -579,6 +586,9 @@ pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> Strin
             role.display_title(),
             role.id
         ));
+    }
+    if let Some(note) = program_line {
+        out.push_str(&format!("- Program line: {note}\n"));
     }
     let role_line = |name: &str, field: Option<&Sourced<String>>, absent: &str| match field {
         Some(sourced) if !sourced.value.trim().is_empty() => {
@@ -625,7 +635,11 @@ pub fn settings_block(resolved: &Resolved, role: Option<&ResolvedRole>) -> Strin
             )
         })
         .unwrap_or_else(|| "none: the configured workers (built in)".to_owned());
-    out.push_str(&format!("- Fallback: {fallback}\n"));
+    // A task that got a program line says which and what comes next, which is
+    // the whole of the old fallback list's job.
+    if program_line.is_none() {
+        out.push_str(&format!("- Fallback: {fallback}\n"));
+    }
     for (name, key, absent) in [
         ("Merge", TaskKey::Merge, "ask"),
         ("Review rounds", TaskKey::ReviewRounds, "0 (off)"),
@@ -905,6 +919,7 @@ mod tests {
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         match text.split_once("## Rules\n\n") {
             Some((_, rules)) => rules.to_string(),
@@ -968,7 +983,7 @@ mod tests {
     #[test]
     fn settings_block_lists_every_value_with_the_layer_that_set_it() {
         let (resolved, role) = settings_fixture();
-        let block = settings_block(&resolved, Some(&role));
+        let block = settings_block(&resolved, Some(&role), None);
         let expected = "## Your settings
 
 Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the repo's file` or `built in`. Where this brief says otherwise, the brief wins.
@@ -996,7 +1011,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
     #[test]
     fn a_settings_block_without_a_role_says_the_program_decides() {
         let (resolved, _) = settings_fixture();
-        let block = settings_block(&resolved, None);
+        let block = settings_block(&resolved, None, None);
         assert!(
             block.contains("- Program: the program's own default (built in)"),
             "{block}"
@@ -1030,6 +1045,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: Some(&resolved),
             role: Some(&role),
             warnings: &[],
+            program_line: None,
         });
         let expected = "You work on one shprd task.
 Stay within scope.
@@ -1110,6 +1126,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         assert!(
             text.starts_with("# M9.4 role templates and a brief\n"),
@@ -1142,6 +1159,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &warnings,
+            program_line: None,
         });
         assert!(
             text.contains(
@@ -1171,6 +1189,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         assert!(!text.contains("## Warnings"), "{text}");
     }
@@ -1195,6 +1214,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         })
     }
 
@@ -1292,6 +1312,7 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             settings: None,
             role: None,
             warnings: &[],
+            program_line: None,
         });
         assert!(!text.contains("leave one real proof"), "{text}");
         assert!(
@@ -1339,12 +1360,12 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
         let Some(role) = resolved.role("worker") else {
             panic!("the worker role resolves");
         };
-        let text = settings_block(&resolved, Some(&role));
+        let text = settings_block(&resolved, Some(&role), None);
         assert!(
             text.contains("You are the Dev (the `worker` role)"),
             "{text}"
         );
         let (plain, plain_role) = settings_fixture();
-        assert!(!settings_block(&plain, Some(&plain_role)).contains("You are the"));
+        assert!(!settings_block(&plain, Some(&plain_role), None).contains("You are the"));
     }
 }

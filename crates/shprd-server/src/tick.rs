@@ -640,8 +640,8 @@ impl Worker {
             .collect()
     }
 
-    /// The programs a cut worker is handed to, in order: the worker role's own
-    /// fallback list, then the configured workers.
+    /// The programs a cut worker is handed to, in order: the worker role's program
+    /// lines, then the configured workers.
     ///
     /// The role's list is what the brief's Settings block prints, so the ladder
     /// and the block agree. A settings file that cannot be read (or a role that
@@ -654,7 +654,12 @@ impl Worker {
                 Ok(loaded) => loaded
                     .resolve(None)
                     .role("worker")
-                    .map(|role| role.fallback.value)
+                    .map(|role| {
+                        // The worker's program lines, in order: the ladder
+                        // moves a cut task to the next one. The first line is
+                        // listed too, so a task on a later line can wrap round.
+                        role.lines().iter().map(|line| line.agent_ref()).collect()
+                    })
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
@@ -705,8 +710,8 @@ impl Worker {
 
     /// Reads the ladder's facts and plans its actions.
     ///
-    /// The fallback list is the worker role's own (`roles.worker.fallback`),
-    /// which is the list the brief's Settings block prints, then the configured
+    /// The list is the worker role's program lines (`roles.worker.agents`, with
+    /// the old `fallback` read as lines too), which the brief's Settings block prints, then the configured
     /// workers, so a setting nobody made keeps the roster's order.
     fn ladder_plan(&self, state: &RunState) -> LadderPass {
         let Some(source) = &self.fallback else {

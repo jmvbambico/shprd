@@ -1115,6 +1115,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
         settings: None,
         role: None,
         warnings: &[],
+        program_line: None,
     });
     assert!(
         brief.contains("## Why the previous attempt was sent back"),

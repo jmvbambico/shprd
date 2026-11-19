@@ -114,7 +114,7 @@ pub const VERSION: u32 = 1;
 /// The role fields, in the order a settings UI and `settings show` list them.
 ///
 /// Order matters only for display: every field resolves on its own.
-pub const ROLE_FIELDS: [RoleField; 11] = [
+pub const ROLE_FIELDS: [RoleField; 12] = [
     RoleField::Title,
     RoleField::About,
     RoleField::Kind,
@@ -124,6 +124,7 @@ pub const ROLE_FIELDS: [RoleField; 11] = [
     RoleField::Effort,
     RoleField::Fast,
     RoleField::Perm,
+    RoleField::Agents,
     RoleField::Fallback,
     RoleField::Readonly,
 ];
@@ -412,7 +413,13 @@ pub enum RoleField {
     Fast,
     /// The access mode, as one of the program's `[permissions]` ids.
     Perm,
-    /// The programs to fall back through, in order.
+    /// The worker lines after the first, in order: one `agent|model|effort|fast|perm`
+    /// string each (see [`WorkerLine`]).
+    Agents,
+    /// The programs to fall back through, in order. For a worker this is the
+    /// pre-SHPR-44 spelling of "more lines": it still reads, as lines with the
+    /// program's own defaults, when `agents` names none. A reviewer's fallback
+    /// is one `program` or `program/model` entry.
     Fallback,
     /// Whether the role only reads.
     Readonly,
@@ -431,6 +438,7 @@ impl RoleField {
             Self::Effort => "effort",
             Self::Fast => "fast",
             Self::Perm => "perm",
+            Self::Agents => "agents",
             Self::Fallback => "fallback",
             Self::Readonly => "readonly",
         }
@@ -728,7 +736,7 @@ impl Key {
             Self::RolesOrder => Kind::List,
             Self::Role { field, .. } => match field {
                 RoleField::Fast | RoleField::Readonly => Kind::Switch,
-                RoleField::Fallback => Kind::List,
+                RoleField::Fallback | RoleField::Agents => Kind::List,
                 RoleField::Kind => Kind::OneOf(&ROLE_KINDS),
                 _ => Kind::Text,
             },
@@ -1643,7 +1651,7 @@ impl RoleDefaults {
             RoleField::Kind => Some(Value::Text(self.kind.name().to_owned())),
             RoleField::Readonly => Some(Value::Switch(self.readonly)),
             RoleField::Fast => Some(Value::Switch(false)),
-            RoleField::Fallback => Some(Value::List(Vec::new())),
+            RoleField::Fallback | RoleField::Agents => Some(Value::List(Vec::new())),
             RoleField::Prompt => Some(Value::Text(self.prompt.clone())),
             _ => None,
         }
@@ -1832,13 +1840,146 @@ pub struct ResolvedRole {
     pub fast: Sourced<bool>,
     /// The access mode, as one of the program's ids.
     pub perm: Option<Sourced<String>>,
+    /// The worker lines after the first, as stored (see [`WorkerLine`]).
+    pub agents: Sourced<Vec<String>>,
     /// The programs to fall back through, in order.
     pub fallback: Sourced<Vec<String>>,
     /// Whether the role only reads.
     pub readonly: Sourced<bool>,
 }
 
+/// One program line of a role that may run several: a worker's.
+///
+/// The first line is the role's own `agent`, `model`, `effort`, `fast` and `perm`;
+/// the rest are stored in `agents` as `agent|model|effort|fast|perm` strings (an
+/// empty part is unset, `fast` is `1` when on). A model id may hold any character
+/// but `|`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerLine {
+    /// The program, as a harness id.
+    pub agent: String,
+    /// The model, in the program's own words.
+    pub model: Option<String>,
+    /// The effort level.
+    pub effort: Option<String>,
+    /// Whether the program's fast mode is on.
+    pub fast: bool,
+    /// The access mode.
+    pub perm: Option<String>,
+}
+
+impl WorkerLine {
+    /// A line that names only its program.
+    pub fn program(agent: &str) -> WorkerLine {
+        WorkerLine {
+            agent: agent.to_owned(),
+            model: None,
+            effort: None,
+            fast: false,
+            perm: None,
+        }
+    }
+
+    /// The line a stored string names, or [`None`] when it names no program.
+    ///
+    /// A bare `program` and `program/model` (the old fallback spelling) read too.
+    pub fn parse(text: &str) -> Option<WorkerLine> {
+        let mut parts = text.split('|');
+        let head = parts.next()?.trim();
+        let rest: Vec<&str> = parts.collect();
+        let some = |part: Option<&&str>| {
+            part.map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+        };
+        if rest.is_empty() {
+            let (agent, model) = match head.split_once('/') {
+                Some((agent, model)) => (agent.trim(), Some(model.trim().to_owned())),
+                None => (head, None),
+            };
+            if agent.is_empty() {
+                return None;
+            }
+            return Some(WorkerLine {
+                model: model.filter(|model| !model.is_empty()),
+                ..WorkerLine::program(agent)
+            });
+        }
+        if head.is_empty() {
+            return None;
+        }
+        Some(WorkerLine {
+            agent: head.to_owned(),
+            model: some(rest.first()),
+            effort: some(rest.get(1)),
+            fast: rest
+                .get(2)
+                .is_some_and(|part| matches!(part.trim(), "1" | "true")),
+            perm: some(rest.get(3)),
+        })
+    }
+
+    /// The string this line is stored as.
+    pub fn encode(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.agent,
+            self.model.as_deref().unwrap_or(""),
+            self.effort.as_deref().unwrap_or(""),
+            if self.fast { "1" } else { "" },
+            self.perm.as_deref().unwrap_or("")
+        )
+    }
+
+    /// The `program` or `program/model` string a worker list names this line by.
+    pub fn agent_ref(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{}/{model}", self.agent),
+            None => self.agent.clone(),
+        }
+    }
+}
+
 impl ResolvedRole {
+    /// The role's program lines, first (the default) first.
+    ///
+    /// The first line is the role's own `agent` (none when no program is named);
+    /// the rest are `agents`, or — for a settings file written before a role could
+    /// hold several — the `fallback` programs, each as a line with the program's
+    /// own defaults. A program is listed once: a later line naming it again is
+    /// ignored, because a task picks a line by its program.
+    pub fn lines(&self) -> Vec<WorkerLine> {
+        let mut lines: Vec<WorkerLine> = Vec::new();
+        if let Some(agent) = &self.agent {
+            let some = |field: &Option<Sourced<String>>| {
+                field
+                    .as_ref()
+                    .map(|sourced| sourced.value.trim().to_owned())
+                    .filter(|text| !text.is_empty())
+            };
+            lines.push(WorkerLine {
+                agent: agent.value.clone(),
+                model: some(&self.model),
+                effort: some(&self.effort),
+                fast: self.fast.value,
+                perm: some(&self.perm),
+            });
+        }
+        let more = if self.agents.value.is_empty() {
+            &self.fallback.value
+        } else {
+            &self.agents.value
+        };
+        for text in more {
+            if let Some(line) = WorkerLine::parse(text)
+                && !lines.iter().any(|kept| kept.agent == line.agent)
+            {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
     /// Whether this role may review: it is a reviewer, or it only reads.
     pub fn may_review(&self) -> bool {
         self.kind.value == RoleKind::Reviewer || self.readonly.value
@@ -2015,6 +2156,7 @@ impl Resolved {
             effort: optional(RoleField::Effort),
             fast: self.switch_of(id, RoleField::Fast),
             perm: optional(RoleField::Perm),
+            agents: self.list_of(id, RoleField::Agents),
             fallback: self.list_of(id, RoleField::Fallback),
             readonly: self.switch_of(id, RoleField::Readonly),
         })

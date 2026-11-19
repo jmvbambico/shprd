@@ -370,7 +370,7 @@ pub fn handoff(
     let task = spawn::task_of(&state, &req.task)?;
     let attempt = working_attempt(task)?;
     let from = attempt.agent.clone();
-    let Some(to) = pick_to(
+    let Some(mut to) = pick_to(
         &state,
         &env.programs,
         &env.workers,
@@ -390,6 +390,20 @@ pub fn handoff(
             task.id
         )));
     };
+    // The task moves along the worker's program lines: the program it moves to
+    // keeps that line's model, fast mode and access mode.
+    let worker_lines = env
+        .settings
+        .resolve(None)
+        .role(spawn::BRIEF_ROLE)
+        .map(|role| role.lines())
+        .unwrap_or_default();
+    let to_line = worker_lines.iter().find(|line| line.agent == to.agent);
+    if to.model.is_none()
+        && let Some(line) = to_line
+    {
+        to.model = line.model.clone();
+    }
     // Refuse before any effect: a refused hand-off must leave nothing behind.
     env.ctx.check(&EventKind::HandedOff {
         task: task.id.clone(),
@@ -406,14 +420,17 @@ pub fn handoff(
     let role_id = req.role.as_deref().unwrap_or(spawn::BRIEF_ROLE);
     let settings_role = env.settings.resolve(None).role(role_id);
     let program = spawn::program_of(env.programs.as_slice(), &to.agent)?;
-    let chosen = spawn::applied(
-        &program.spec,
-        settings_role
-            .as_ref()
-            .and_then(|role| role.perm.as_ref())
-            .map(|perm| perm.value.as_str()),
-        settings_role.as_ref().is_some_and(|role| role.fast.value),
-    );
+    let chosen = match to_line {
+        Some(line) => spawn::applied(&program.spec, line.perm.as_deref(), line.fast),
+        None => spawn::applied(
+            &program.spec,
+            settings_role
+                .as_ref()
+                .and_then(|role| role.perm.as_ref())
+                .map(|perm| perm.value.as_str()),
+            settings_role.as_ref().is_some_and(|role| role.fast.value),
+        ),
+    };
     // The newcomer's program decides how it raises a needs-you card.
     let ask = spawn::AskRoute::of_harness(program.spec.asks.supported);
     // The newcomer's words are read before the space and the pane are touched:
@@ -451,6 +468,7 @@ pub fn handoff(
         settings: Some(&context.settings),
         role: context.role.as_ref(),
         warnings: &[],
+        program_line: None,
     };
     // A worker continuing an attempt reads the brief it was launched with; a
     // different role reads its own words, because that brief was written for
