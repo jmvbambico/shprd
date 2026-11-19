@@ -274,7 +274,10 @@ export function roles(document, roster) {
     const about = textOf(rows.get(`roles.${id}.about`)) ?? "";
     const kind = textOf(rows.get(`roles.${id}.kind`)) ?? "helper";
     const readonly = rows.get(`roles.${id}.readonly`)?.value === true;
-    const base = { id, title, name, about, kind, readonly, custom: !BUILTIN.includes(id) };
+    const prompt = textOf(rows.get(`roles.${id}.prompt`)) ?? "";
+    // The prompt a role starts with, when it is one of the templates (`prompt:<id>`).
+    const promptId = prompt.startsWith("prompt:") ? prompt.slice("prompt:".length) : null;
+    const base = { id, title, name, about, kind, readonly, promptId, custom: !BUILTIN.includes(id) };
     return {
       ...base,
       picks: PICKS.map((field) => pickOf(base, field, rows, roster)),
@@ -931,3 +934,243 @@ export function cleanTitle(text) {
 export function needsCoordinatorRestart(key) {
   return /^roles\.coordinator\.(agent|model|effort|fast|perm)$/.test(String(key ?? ""));
 }
+
+// -- the model menu ----------------------------------------------------------
+//
+// The Agents page is one compact row per role with a single "<Model> · <Effort>"
+// button, and the button opens a popover: program tabs, a search over every
+// program's models, the models with a check on the current one, Reasoning, Fast
+// and Permissions. This is Shepherdr's model menu (`mods/chat-models/main.js`,
+// `core/settings.js` `modelLabel`), with one difference the person asked for:
+// Shepherdr's tabs are a fixed Claude/Codex pair, and these are the programs the
+// service's roster says are installed on this machine (`ProgramDto.installed`,
+// from `GET /api/roster`). A program that is not installed has no tab, so a
+// choice that cannot start is never offered. The pure rules are here so the
+// popover, the page and the tests are one thing; none of it touches `herdr`.
+//
+// - Source: <https://github.com/eliasstravik/shepherdr>
+// - Paths: `mods/chat-models/main.js` (the menu), `core/settings.js`
+//   (`modelLabel`, `chooseModel`)
+// - Commit: `a3f327a` (tag `v3.1.34`)
+// - License: MIT — Copyright (c) 2026 Elias Stravik
+
+/** The words for an effort level, as Shepherdr's menu spells them. */
+export const LEVEL_WORDS = {
+  off: "Off",
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+  ultra: "Ultra",
+};
+
+/** One effort level in words. */
+export function levelWord(level) {
+  return LEVEL_WORDS[level] ?? String(level ?? "");
+}
+
+/**
+ * The programs the menu has tabs for: the roster's programs that are installed,
+ * in the roster's order. Undetected programs are hidden, never shown disabled.
+ */
+export function detectedPrograms(roster) {
+  return (roster?.programs ?? []).filter((program) => program.installed === true);
+}
+
+/**
+ * The menu's data from the roster: `{ order, programs }`, one entry per
+ * detected program with its models, levels, access modes and whether it has a
+ * fast mode. `order` is the tab order.
+ */
+export function menusOf(roster) {
+  const programs = {};
+  const order = [];
+  for (const program of detectedPrograms(roster)) {
+    order.push(program.id);
+    programs[program.id] = {
+      id: program.id,
+      name: program.name,
+      vendor: program.vendor,
+      needsProvider: program.needs_provider === true,
+      note: program.models_note ?? null,
+      efforts: program.efforts ?? [],
+      fast: program.fast === true,
+      perms: (program.permissions ?? []).map((entry) => ({ id: entry.id, label: entry.label ?? entry.id })),
+      defaultPerm: program.default_permission ?? null,
+      models: (program.models ?? []).map((model) => ({
+        id: model.id,
+        name: model.name || model.id,
+        efforts: model.efforts ?? [],
+        defaultEffort: model.default_effort ?? null,
+        fast: model.fast === true,
+      })),
+    };
+  }
+  return { order, programs };
+}
+
+/**
+ * A role's current choice, as the service resolved it:
+ * `{ agent, model, effort, fast, perm }` (a missing value is `null`).
+ */
+export function roleSelection(document, roleId) {
+  const rows = rowsOf(document);
+  const text = (field) => textOf(rows.get(`roles.${roleId}.${field}`));
+  return {
+    agent: text("agent"),
+    model: text("model"),
+    effort: text("effort"),
+    fast: rows.get(`roles.${roleId}.fast`)?.value === true,
+    perm: text("perm"),
+  };
+}
+
+/** The model of a selection in a menu, or null (an id the catalog does not list). */
+export function modelIn(menus, sel) {
+  return menus?.programs?.[sel?.agent]?.models?.find((model) => model.id === sel.model) ?? null;
+}
+
+/**
+ * The levels the Reasoning row offers for a selection: the model's own, else the
+ * program's. `[]` hides the row.
+ */
+export function levelsFor(menus, sel) {
+  const program = menus?.programs?.[sel?.agent];
+  if (!program) return [];
+  const model = modelIn(menus, sel);
+  return model?.efforts?.length ? model.efforts : program.efforts;
+}
+
+/** The level that applies: the chosen one, else the model's default. */
+export function levelOf(menus, sel) {
+  return sel?.effort ?? modelIn(menus, sel)?.defaultEffort ?? null;
+}
+
+/** Whether the Fast switch is offered: where the model, or an unlisted model's program, has it. */
+export function fastOffered(menus, sel) {
+  const program = menus?.programs?.[sel?.agent];
+  if (!program) return false;
+  const model = modelIn(menus, sel);
+  return model ? model.fast : program.fast;
+}
+
+/**
+ * What the role's button says: "Opus 5.5 · Medium", the model alone where there
+ * is no level, "Choose a program" while nothing is chosen. The program's name
+ * stands for a model the role leaves at the program's default.
+ */
+export function selectionLabel(menus, sel, roster = null) {
+  if (!sel?.agent) return "Choose a program";
+  const program = menus?.programs?.[sel.agent];
+  const known = programOf(roster, sel.agent);
+  const base = program?.name ?? known?.name ?? sel.agent;
+  const model = modelIn(menus, sel);
+  const name = sel.model ? (model?.name ?? sel.model) : base;
+  const level = program ? levelOf(menus, sel) : sel.effort;
+  return level ? `${name} · ${levelWord(level)}` : name;
+}
+
+/**
+ * The rows of the model list: the models of the tab's program, or — when the
+ * person has typed — every detected program's models that match, then, for a
+ * word no model has as its id, one "Use <id>" row for the tab's program (the way
+ * to pick a model of a program that lists none, like `pi`).
+ */
+export function modelRows(menus, tab, query) {
+  const word = String(query ?? "").trim();
+  const lower = word.toLowerCase();
+  const rows = [];
+  const from = lower === "" ? [tab] : menus.order;
+  for (const agent of from) {
+    for (const model of menus.programs[agent]?.models ?? []) {
+      if (lower === "" || model.name.toLowerCase().includes(lower) || model.id.toLowerCase().includes(lower)) {
+        rows.push({ agent, id: model.id, name: model.name, typed: false });
+      }
+    }
+  }
+  const exact = rows.some((row) => row.id.toLowerCase() === lower);
+  if (word !== "" && !exact && menus.programs[tab]) rows.push({ agent: tab, id: word, name: `Use ${word}`, typed: true });
+  return rows;
+}
+
+/** The selection after a model is picked: effort and speed stay where the model has them. */
+export function chooseModel(menus, sel, agent, id) {
+  const next = { ...sel, agent, model: id };
+  const model = modelIn(menus, next);
+  const levels = levelsFor(menus, next);
+  if (next.effort && !levels.includes(next.effort)) next.effort = null;
+  if (!fastOffered(menus, next)) next.fast = false;
+  // Another program has its own access modes: the old one is kept only if it has it.
+  if (agent !== sel.agent && !(menus.programs[agent]?.perms ?? []).some((entry) => entry.id === next.perm)) next.perm = null;
+  if (agent !== sel.agent && model === null) next.fast = false;
+  return next;
+}
+
+/**
+ * The writes that take a role from one selection to another, in the order the
+ * service should hear them: program, model, effort, speed, access. A value that
+ * did not change is not written; `null` takes the key out of the scope's layer
+ * (it inherits again).
+ */
+export function selectionWrites(roleId, before, after) {
+  const writes = [];
+  const put = (field, value) => writes.push({ key: `roles.${roleId}.${field}`, value });
+  if (after.agent !== before.agent) put("agent", after.agent ?? null);
+  if (after.model !== before.model) put("model", after.model ?? null);
+  if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null);
+  if (Boolean(after.fast) !== Boolean(before.fast)) put("fast", Boolean(after.fast));
+  if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null);
+  return writes;
+}
+
+/**
+ * The program a Reviewer's "Use other CLI" switches to: an installed program of
+ * another vendor than the worker's, the first the roster lists; null when the
+ * reviewer already is one or there is none (the button is then not drawn).
+ */
+export function otherCli(document, roster) {
+  const worker = textOf(rowsOf(document).get("roles.worker.agent"));
+  const reviewer = textOf(rowsOf(document).get("roles.reviewer.agent"));
+  const vendor = programOf(roster, worker)?.vendor ?? null;
+  if (vendor === null) return null;
+  if (reviewer !== null && programOf(roster, reviewer)?.vendor !== vendor) return null;
+  return detectedPrograms(roster).find((program) => program.vendor !== vendor)?.id ?? null;
+}
+
+/**
+ * Whether a coordinator is running now, from `GET /api/state`'s `live_agents`.
+ * A state that does not say (an older service) counts as running, so the notice
+ * errs towards offering the restart.
+ */
+export function coordinatorRunning(state) {
+  if (!Array.isArray(state?.live_agents)) return true;
+  return state.live_agents.some(
+    (agent) => agent.role === "coordinator" && !agent.ended_ms && agent.state !== "done",
+  );
+}
+
+/**
+ * Whether the inline "restart the coordinator" notice shows: the coordinator's
+ * program, model, effort, speed or access was changed here since it started, and
+ * one is running. Nothing else shows it.
+ */
+export function restartNotice({ changed, running }) {
+  return Boolean(changed) && Boolean(running);
+}
+
+/** The keys of a role a repository sets for itself (what "Reset" would put back). */
+export function repoKeysOf(document, roleId) {
+  return (document?.values ?? [])
+    .filter((row) => row.source === "repo_entry" && String(row.key).startsWith(`roles.${roleId}.`))
+    .map((row) => row.key);
+}
+
+/** The shared key a popup answers on, read by the Settings window: `{ key, field, value, at }`. */
+export const PICK_KEY = "shprd.settings.pick";
+
+/** The model menu's width, and its height at its tallest: border and padding, tabs, search, heading, 8 rows, rule, Reasoning, Fast, Permissions, a note. */
+export const MENU_W = 340;
+export const MENU_H = 2 + 10 + 34 + 36 + 26 + 8 * 31 + 20 + 9 + 26 + 34 + 31 + 31;

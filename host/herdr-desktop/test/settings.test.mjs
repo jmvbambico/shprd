@@ -603,9 +603,9 @@ test("the window opens on the page it was asked for, and keeps to the ones it ha
 
 test("Esc closes what is open inside the window before it closes the window", async () => {
   const { view } = window_();
-  view.open = "worker.agent";
+  view.renaming = "worker";
   await view.escape();
-  assert.equal(view.open, null, "the first Esc closes the open picker");
+  assert.equal(view.renaming, null, "the first Esc leaves the name field");
   assert.deepEqual(herdr.CLOSED, [], "and leaves the window up");
 
   await view.escape();

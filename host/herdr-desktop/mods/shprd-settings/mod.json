@@ -2,7 +2,9 @@
   "place": "none",
   "title": "Settings",
   "overlay": {
-    "width": 820,
-    "height": 620
+    "kind": "dialog",
+    "frame": "none",
+    "width": 860,
+    "height": 0.92
   }
 }

@@ -51,6 +51,7 @@ export function reset() {
   HC_CALLS.length = 0;
   SPACES = [];
   RUNS.length = 0;
+  KNOWN = [];
   OVERLAYS.length = 0;
   CLOSED.length = 0;
   SHARED.clear();
@@ -238,4 +239,13 @@ export function theme() {
     solid: "#eeeeee",
     solid_foreground: "#111111",
   };
+}
+
+/** The agents Herdr knows, as `knownAgents()` answers: a test sets them. */
+export let KNOWN = [];
+export function setKnown(next) {
+  KNOWN = next;
+}
+export async function knownAgents() {
+  return KNOWN;
 }

@@ -194,6 +194,79 @@ export function keycap(t, text) {
 }
 
 /**
+ * A click handler that takes the click for itself.
+ *
+ * **Why every control wraps its handler in this.** A click bubbles from the
+ * element pressed up through every ancestor's handler, and the Settings panel has
+ * one of its own (it closes what is open, and keeps the window from closing).
+ * The old picker button only toggled its list; the panel's handler then ran in
+ * the same click and put the list away again, so the list opened and closed in
+ * one click and no dropdown could be seen to open (SHPR-43). Shepherdr's
+ * controls all stop the click and repaint (`lib/ui.js`: `cx.stop_propagation();
+ * onClick(e, cx); cx.notify()`), and so does this.
+ */
+export function press(fn) {
+  return (event, cx) => {
+    cx?.stop_propagation?.();
+    fn(event, cx);
+    cx?.notify?.();
+  };
+}
+
+/**
+ * A dropdown's button, the one every pick in the window opens: its words, a small
+ * chevron, and — on press — a popup of its own over the window (`openOverlay`),
+ * placed at the button. The press remembers the button's bounds (`rec.at`) so the
+ * popup lands under it, as Shepherdr's model button does.
+ */
+export function selectButton(t, id, content, rec, onOpen, { bordered = false, disabled = false } = {}) {
+  const el = h_flex()
+    .id(id)
+    .h(bordered ? 28 : 28)
+    .pl(8)
+    .pr(5)
+    .gap(4)
+    .flex_none()
+    .min_w(0)
+    .items_center()
+    .rounded(RADIUS.control)
+    .text_size(TEXT.label)
+    .font_medium()
+    .text_color(disabled ? t.dim : bordered ? t.foreground : t.muted)
+    .when(bordered, (e) => e.border_1().border_color(t.input ?? t.border).bg(t.background).pr(8))
+    .when(disabled, (e) => e.opacity(0.6))
+    .when(!disabled, (e) =>
+      e
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", (event) => {
+          rec.at =
+            event?.bounds ??
+            (event?.position
+              ? { x: event.position.x - 40, y: event.position.y - 14, width: 80, height: 28 }
+              : null);
+        })
+        .on_click(press(() => onOpen(rec.at ?? null))),
+    );
+  return el
+    .children(Array.isArray(content) ? content : [content])
+    .child(svg(iconFile("chevron-down")).size(12).flex_none());
+}
+
+/**
+ * Where a popup of width `w` and height `h` opens for a button's bounds: right
+ * edges lined up, above the button when there is room (8 px from the window's
+ * top), else below it. With no bounds the pointer's place is Herdr's own default.
+ */
+export function popupAt(bounds, w, h) {
+  if (!bounds) return "pointer";
+  return {
+    x: Math.max(8, bounds.x + bounds.width - w),
+    y: bounds.y - h - 6 >= 8 ? bounds.y - h - 6 : bounds.y + bounds.height + 6,
+  };
+}
+
+/**
  * A quiet text link: muted, foreground on hover, sized to its words.
  *
  * Shepherdr's `link()` (`lib/ui.js`): the words a row puts beside a value
@@ -210,7 +283,7 @@ export function link(t, id, word, onClick, busy = false) {
     .text_color(busy ? t.dim : t.muted);
   const live = busy
     ? base
-    : base.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(() => onClick());
+    : base.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(press(onClick));
   return live.child(word);
 }
 
@@ -256,7 +329,7 @@ export function segmented(t, id, options, value, onPick, { disabled = false } = 
             ? styled
             : off
               ? styled.text_color(t.dim)
-            : styled.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(() => onPick(choice));
+            : styled.cursor_pointer().hover((style) => style.text_color(t.foreground)).on_click(press(() => onPick(choice)));
         return live.child(String(word));
       }),
     );
@@ -280,7 +353,7 @@ export function toggleSwitch(t, id, on, onToggle) {
     .bg(on ? t.accent : t.hover)
     .when(on, (el) => el.justify_end())
     .cursor_pointer()
-    .on_click(() => onToggle(!on))
+    .on_click(press(() => onToggle(!on)))
     .child(div().w(16).h(16).rounded(8).bg(on ? t.background : t.muted));
 }
 
