@@ -44,7 +44,10 @@ export const LAYER: Record<SettingsSourceDto, string> = {
 export const UNSET_LAYER = "nothing sets it";
 
 /** The role ids this build ships, in their default order. */
-export const BUILTIN = ["coordinator", "worker", "reviewer", "backup"];
+export const BUILTIN = ["coordinator", "worker", "reviewer"];
+
+/** What the Agents page heads a built-in role with, until the person names it: a worker and a reviewer are lists. */
+export const HEADINGS: Readonly<Record<string, string>> = { worker: "Worker(s)", reviewer: "Reviewer(s)" };
 
 /** The three fields a role's pick is made of, in the order a page draws them. */
 export const PICKS = ["agent", "model", "effort"] as const;
@@ -313,13 +316,16 @@ export function roles(document: SettingsDto | null, roster: RosterDto | null): R
   return roleIds(document).map((id) => {
     const titleRow = rows.get(`roles.${id}.title`);
     const stored = (textOf(titleRow) ?? "").trim();
+    // The service reports the built-in word as a built-in row: that one is
+    // headed "Worker(s)"; a name the person set stands as they wrote it.
+    const named = stored !== "" && titleRow?.source !== "built_in";
     return {
     id,
-    title: stored || roleTitle(null, id),
+    title: named ? stored : HEADINGS[id] || roleTitle(null, id),
     name: {
       key: `roles.${id}.title`,
       value: stored,
-      fallback: roleTitle(null, id),
+      fallback: HEADINGS[id] ?? roleTitle(null, id),
       layer: layerOf(titleRow?.source),
       source: titleRow?.source ?? null,
     },
@@ -359,16 +365,23 @@ export function outcomeOf(outcome: SettingsOutcomeDto | undefined): string {
   return OUTCOME[outcome ?? "stored"] ?? "Saved";
 }
 
+/** What the Prompts page calls a prompt: the built-in ones by their words, any other by its id. */
+export function promptName(id: string): string {
+  return { assistant: "Assistant", worker: "Worker", reviewer: "Reviewer", backup: "Takeover" }[id] ?? id;
+}
+
 /** One row of the Prompts list. */
 export interface PromptRow {
   /** The id. */
   id: string;
+  /** The name the page shows. */
+  name: string;
   /** What it is for. */
   about: string;
   /** The file. */
   path: string;
   /** The word beside the id. */
-  word: "Unreadable" | "Edited" | "Shipped";
+  word: "Unreadable" | "Edited" | "Default";
   /** Why the file cannot be used, when it cannot. */
   problem: string | null;
   /** Whether the words are the person's own. */
@@ -379,10 +392,11 @@ export interface PromptRow {
 export function promptRows(list: PromptListDto | null): PromptRow[] {
   return (list?.prompts ?? []).map((prompt) => ({
     id: prompt.id,
+    name: promptName(prompt.id),
     about: prompt.about ?? "a prompt of your own",
     path: prompt.path,
     problem: prompt.problem ?? null,
-    word: prompt.problem ? "Unreadable" : prompt.state === "edited" ? "Edited" : "Shipped",
+    word: prompt.problem ? "Unreadable" : prompt.state === "edited" ? "Edited" : "Default",
     edited: prompt.state === "edited",
   }));
 }
@@ -391,7 +405,7 @@ export function promptRows(list: PromptListDto | null): PromptRow[] {
 export function promptLine(state: "default" | "edited"): string {
   return state === "edited"
     ? "Your words: an edit is never replaced by an upgrade."
-    : "The shipped words: saving your own stores them over this file.";
+    : "The default words: saving your own stores them over this file.";
 }
 
 /** What the roles say about the settings as a whole. */

@@ -20,6 +20,7 @@ import {
   levelWord,
   levelsFor,
   modelRows,
+  SELECT_HARNESS,
   type Menus,
   type Selection,
 } from "./menu";
@@ -220,7 +221,7 @@ export function ModelMenu({
               onClick={() => setProgOpen(!progOpen)}
             >
               <span className="mm-program-name">
-                {active ? menus.programs[active]!.name : "Select program"}
+                {active ? menus.programs[active]!.name : SELECT_HARNESS}
               </span>
               <span className="pop-chevron" aria-hidden="true">
                 ⌄

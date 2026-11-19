@@ -19,8 +19,8 @@ import {
 import { PROMPTS, ROSTER, row, settings } from "./testkit";
 
 describe("roles", () => {
-  it("lists the four built-in roles, even from an empty document", () => {
-    expect(roleIds(null)).toEqual(["coordinator", "worker", "reviewer", "backup"]);
+  it("lists the three built-in roles, even from an empty document", () => {
+    expect(roleIds(null)).toEqual(["coordinator", "worker", "reviewer"]);
   });
 
   it("appends a role whose keys are there but whose id is not in the order", () => {
@@ -52,11 +52,11 @@ describe("roles", () => {
 
   it("refuses a role id the core would refuse", () => {
     const document = settings();
-    expect(withRole(document, "docs")).toEqual(["coordinator", "worker", "reviewer", "backup", "docs"]);
+    expect(withRole(document, "docs")).toEqual(["coordinator", "worker", "reviewer", "docs"]);
     expect(withRole(document, "worker")).toBeNull();
     expect(withRole(document, "order")).toBeNull();
     expect(withRole(document, "no spaces")).toBeNull();
-    expect(withoutRole(document, "backup")).toEqual(["coordinator", "worker", "reviewer"]);
+    expect(withoutRole(document, "reviewer")).toEqual(["coordinator", "worker"]);
   });
 });
 
@@ -93,7 +93,7 @@ describe("the rest", () => {
     const rows = promptRows({
       prompts: [...PROMPTS.prompts, { id: "mine", path: "/p/mine.md", shipped: false, problem: "not UTF-8" }],
     });
-    expect(rows.map((entry) => entry.word)).toEqual(["Shipped", "Edited", "Unreadable"]);
+    expect(rows.map((entry) => entry.word)).toEqual(["Default", "Edited", "Unreadable"]);
     expect(rows[2]?.about).toBe("a prompt of your own");
   });
 

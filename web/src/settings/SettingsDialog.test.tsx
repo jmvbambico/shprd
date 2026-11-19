@@ -39,7 +39,7 @@ describe("SettingsDialog: frame", () => {
       "Prompts",
       "Remote",
     ]);
-    await screen.findByText("Worker");
+    await screen.findByText("Worker(s)");
     expect(screen.queryByRole("button", { name: /save/i })).toBeNull();
     expect(screen.getByRole("dialog", { name: "Settings" }).getAttribute("data-view")).toBe("both");
   });
@@ -62,7 +62,7 @@ describe("SettingsDialog: frame", () => {
 
   it("closes on Escape and on the close button", async () => {
     const { onClose } = open(reads());
-    await screen.findByText("Worker");
+    await screen.findByText("Worker(s)");
     fireEvent.keyDown(document, { key: "Escape" });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(onClose).toHaveBeenCalledTimes(2);
@@ -72,10 +72,10 @@ describe("SettingsDialog: frame", () => {
 describe("SettingsDialog: Agents", () => {
   it("shows one compact row a role: its name, one line, and one model button", async () => {
     open(reads());
-    const worker = await screen.findByRole("region", { name: "Worker" });
-    const button = within(worker).getByRole("button", { name: "Worker program 1" });
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    const button = within(worker).getByRole("button", { name: "Worker(s) program 1" });
     expect(button.textContent).toContain("Sonnet");
-    expect(within(worker).getByRole("button", { name: "Edit instructions" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Edit instructions/ })).toBeNull();
     // No stacked Program / Model / Effort rows, and no "nothing sets it" captions.
     expect(screen.queryByText("nothing sets it")).toBeNull();
     expect(screen.queryByText("Program")).toBeNull();
@@ -90,8 +90,8 @@ describe("SettingsDialog: Agents", () => {
       ],
     };
     open(reads({ "GET /api/roster": json(200, roster) }));
-    const worker = await screen.findByRole("region", { name: "Worker" });
-    fireEvent.click(await within(worker).findByRole("button", { name: "Worker program 1" }));
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker(s) program 1" }));
     expect(screen.queryByRole("tablist")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Program" }));
     const programs = within(screen.getByRole("listbox", { name: "Programs" })).getAllByRole("option");
@@ -111,15 +111,15 @@ describe("SettingsDialog: Agents", () => {
         }),
       }),
     );
-    const worker = await screen.findByRole("region", { name: "Worker" });
-    fireEvent.click(await within(worker).findByRole("button", { name: "Worker program 1" }));
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker(s) program 1" }));
     fireEvent.click(await screen.findByRole("option", { name: /opus/ }));
     await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
     const put = calls.find((call) => call.method === "PUT");
     // the level the model does not take is dropped, the model is written
     expect(put?.body).toEqual({ key: "roles.worker.model", value: "opus" });
     await waitFor(() =>
-      expect(within(worker).getByRole("button", { name: "Worker program 1" }).textContent).toContain("opus"),
+      expect(within(worker).getByRole("button", { name: "Worker(s) program 1" }).textContent).toContain("opus"),
     );
   });
 
@@ -133,7 +133,7 @@ describe("SettingsDialog: Agents", () => {
         "PUT /api/settings": json(200, { outcome: "removed", settings: settings() }),
       }),
     );
-    const worker = await screen.findByRole("region", { name: "Worker" });
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
     expect(within(worker).getByText("repo")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Reset worker" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Applies to" }));
@@ -152,8 +152,8 @@ describe("SettingsDialog: Agents", () => {
         "PUT /api/settings": refusal(409, "refused", words),
       }),
     );
-    const worker = await screen.findByRole("region", { name: "Worker" });
-    fireEvent.click(await within(worker).findByRole("button", { name: "Worker program 1" }));
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker(s) program 1" }));
     fireEvent.click(screen.getByRole("button", { name: "Program" }));
     fireEvent.click(screen.getByRole("option", { name: /Codex/ }));
     fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "gpt-6" } });
@@ -182,8 +182,8 @@ describe("SettingsDialog: Agents", () => {
         },
       }),
     );
-    const worker = await screen.findByRole("region", { name: "Worker" });
-    fireEvent.click(await within(worker).findByRole("button", { name: "Worker program 1" }));
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker(s) program 1" }));
     fireEvent.click(screen.getByRole("button", { name: "Program" }));
     fireEvent.click(screen.getByRole("option", { name: /Codex/ }));
     fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
@@ -212,8 +212,8 @@ describe("SettingsDialog: Agents", () => {
         },
       }),
     );
-    const worker = await screen.findByRole("region", { name: "Worker" });
-    fireEvent.click(await within(worker).findByRole("button", { name: "Worker program 1" }));
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker(s) program 1" }));
     fireEvent.click(screen.getByRole("button", { name: "Program" }));
     fireEvent.click(screen.getByRole("option", { name: /Codex/ }));
     fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
@@ -228,18 +228,18 @@ describe("SettingsDialog: Agents", () => {
         "PUT /api/settings": json(200, { outcome: "stored", settings: settings([row("roles.worker.agents", ["codex||||"], "you")]) }),
       }),
     );
-    const worker = await screen.findByRole("region", { name: "Worker" });
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
     expect(within(worker).queryByRole("button", { name: /Remove program/ })).toBeNull();
-    expect(within(worker).getByText(/The first line is the default worker/)).toBeDefined();
+    expect(within(worker).queryByText(/The first line is the default worker/)).toBeNull();
     expect(within(worker).queryByText("Fallback")).toBeNull();
-    fireEvent.click(within(worker).getByRole("button", { name: "Add a program" }));
+    fireEvent.click(within(worker).getByRole("button", { name: "Add" }));
     await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
     expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
       key: "roles.worker.agents",
       value: ["codex||||"],
     });
     // the second line shows, with a × on each line, and its menu has the first line's program taken
-    fireEvent.click(await within(worker).findByRole("button", { name: "Worker program 2" }));
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker(s) program 2" }));
     fireEvent.click(screen.getByRole("button", { name: "Program" }));
     const claude = screen.getByRole("option", { name: /Claude Code/ }) as HTMLButtonElement;
     expect(claude.disabled).toBe(true);
@@ -248,26 +248,45 @@ describe("SettingsDialog: Agents", () => {
     expect(within(worker).getAllByRole("button", { name: /Remove program/ })).toHaveLength(2);
   });
 
-  it("the reviewer's fallback is a second picker with None, not pills", async () => {
+  it("a reviewer holds lines like a worker: Add, a gutter, no separate Fallback picker; an old fallback reads as line 2", async () => {
     const { calls } = open(
       reads({
-        "PUT /api/settings": json(200, { outcome: "stored", settings: settings([row("roles.reviewer.fallback", ["codex"], "you")]) }),
+        "GET /api/settings": json(
+          200,
+          settings([row("roles.reviewer.agent", "claude", "you"), row("roles.reviewer.fallback", ["codex"], "you")]),
+        ),
+        "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }),
       }),
     );
-    const reviewer = await screen.findByRole("region", { name: "Reviewer" });
-    const picker = within(reviewer).getByRole("button", { name: "Reviewer fallback" });
-    expect(picker.textContent).toContain("None");
-    fireEvent.click(picker);
-    expect(screen.getByRole("option", { name: "None" })).toBeDefined();
-    expect(screen.queryByRole("radiogroup", { name: "Reasoning" })).toBeNull();
-    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+    const reviewer = await screen.findByRole("region", { name: "Reviewer(s)" });
+    expect(within(reviewer).queryByText("Fallback")).toBeNull();
+    expect(within(reviewer).queryByRole("button", { name: /fallback/i })).toBeNull();
+    const second = within(reviewer).getByRole("button", { name: "Reviewer(s) program 2" });
+    expect(second.textContent).toContain("Codex");
+    // two lines: a gutter with the order, and a remove on each
+    expect(reviewer.querySelectorAll(".chain-gutter")).toHaveLength(2);
+    expect(Array.from(reviewer.querySelectorAll(".chain-dot")).map((dot) => dot.textContent)).toEqual(["1", "2"]);
+    fireEvent.click(within(reviewer).getByRole("button", { name: "Remove program 2" }));
     await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
-    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
-      key: "roles.reviewer.fallback",
-      value: ["claude/sonnet"],
-    });
-    // the menu closes on a pick
-    expect(screen.queryByRole("dialog", { name: /fallback: model menu/ })).toBeNull();
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({ key: "roles.reviewer.fallback", value: [] });
+  });
+
+  it("a worker with three lines shows a numbered gutter; one line has none; no Backup row; one generic note", async () => {
+    open(
+      reads({
+        "GET /api/settings": json(
+          200,
+          settings([row("roles.worker.agents", ["codex||||", "pi||||"], "you")]),
+        ),
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker(s)" });
+    expect(Array.from(worker.querySelectorAll(".chain-dot")).map((dot) => dot.textContent)).toEqual(["1", "2", "3"]);
+    const reviewer = screen.getByRole("region", { name: "Reviewer(s)" });
+    expect(reviewer.querySelectorAll(".chain-gutter")).toHaveLength(0);
+    expect(screen.queryByText("Backup agent")).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getAllByText(/the first line is the default/)).toHaveLength(1);
   });
 
   it("types an id for a program that lists no models", async () => {
@@ -276,8 +295,8 @@ describe("SettingsDialog: Agents", () => {
         "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }),
       }),
     );
-    const reviewer = await screen.findByRole("region", { name: "Reviewer" });
-    fireEvent.click(await within(reviewer).findByRole("button", { name: "Reviewer model" }));
+    const reviewer = await screen.findByRole("region", { name: "Reviewer(s)" });
+    fireEvent.click(await within(reviewer).findByRole("button", { name: "Reviewer(s) program 1" }));
     fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "gpt-6-luna" } });
     fireEvent.click(await screen.findByRole("option", { name: /Use gpt-6-luna/ }));
     await waitFor(() =>
@@ -292,18 +311,19 @@ describe("SettingsDialog: Agents", () => {
     const { calls } = open(
       reads({ "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }) }),
     );
-    await screen.findByText("Worker");
+    await screen.findByText("Worker(s)");
     fireEvent.click(screen.getByRole("button", { name: "Add a role" }));
     fireEvent.change(screen.getByLabelText("Role id"), { target: { value: "worker" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    const addForm = within(screen.getByLabelText("Role id").closest("form")!);
+    fireEvent.click(addForm.getByRole("button", { name: "Add" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/letters, digits/);
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
     fireEvent.change(screen.getByLabelText("Role id"), { target: { value: "docs" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.click(addForm.getByRole("button", { name: "Add" }));
     await waitFor(() =>
       expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
         key: "roles.order",
-        value: ["coordinator", "worker", "reviewer", "backup", "docs"],
+        value: ["coordinator", "worker", "reviewer", "docs"],
       }),
     );
   });
@@ -389,7 +409,7 @@ describe("SettingsDialog: Prompts", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
     expect(await screen.findByText("Edited")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: /worker/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Worker" }));
     const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
     expect(box.value).toBe("Be careful.");
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -401,8 +421,8 @@ describe("SettingsDialog: Prompts", () => {
     await waitFor(() =>
       expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ text: "Be very careful." }),
     );
-    expect(await screen.findByText("edited")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Reset to the shipped words" }));
+    expect(await screen.findByText("Edited")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
     await waitFor(() => expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("Be careful."));
     expect(calls.some((c) => c.method === "DELETE")).toBe(true);
   });
@@ -428,16 +448,16 @@ describe("SettingsDialog: Prompts", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
-    fireEvent.click(await screen.findByRole("button", { name: /worker/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Worker" }));
     const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "typed" } });
     fireEvent.blur(box);
     await waitFor(() => expect(order).toEqual(["put"]));
-    fireEvent.click(screen.getByRole("button", { name: "Reset to the shipped words" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
     // The reset button is disabled while the save is in flight, so nothing queues.
     release?.();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Reset to the shipped words" })).toHaveProperty("disabled", false));
-    fireEvent.click(screen.getByRole("button", { name: "Reset to the shipped words" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reset to default" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
     await waitFor(() => expect(order).toEqual(["put", "delete"]));
     await waitFor(() => expect((screen.getByLabelText("Prompt worker") as HTMLTextAreaElement).value).toBe("shipped"));
     expect(order).toEqual(["put", "delete"]);
@@ -451,7 +471,7 @@ describe("SettingsDialog: Prompts", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
-    fireEvent.click(await screen.findByRole("button", { name: /worker/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Worker" }));
     const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "" } });
     // Back saves first; a refusal keeps the words in the box and stays.
@@ -482,7 +502,7 @@ describe("SettingsDialog: Prompts", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
-    fireEvent.click(await screen.findByRole("button", { name: /worker/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Worker" }));
     const box = (await screen.findByLabelText("Prompt worker")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "draft A" } });
     fireEvent.blur(box);
@@ -511,7 +531,7 @@ describe("SettingsDialog: on a phone", () => {
     expect(screen.queryByText("Worker")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Agents/ }));
     expect(dialog.getAttribute("data-view")).toBe("page");
-    expect(await screen.findByText("Worker")).toBeDefined();
+    expect(await screen.findByText("Worker(s)")).toBeDefined();
     expect(screen.queryByRole("navigation", { name: "Settings pages" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /‹ Settings/ }));
     expect(dialog.getAttribute("data-view")).toBe("list");

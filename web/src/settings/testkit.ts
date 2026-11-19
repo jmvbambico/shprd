@@ -69,10 +69,10 @@ export function row(
   return { key, value, source };
 }
 
-/** The settings a fresh install resolves: four roles and the workflow keys. */
+/** The settings a fresh install resolves: three roles and the workflow keys. */
 export function settings(overrides: SettingsValueDto[] = [], extra: Partial<SettingsDto> = {}): SettingsDto {
   const base: SettingsValueDto[] = [
-    row("roles.order", ["coordinator", "worker", "reviewer", "backup"]),
+    row("roles.order", ["coordinator", "worker", "reviewer"]),
     row("roles.worker.title", "Worker"),
     row("roles.worker.about", "Does the task."),
     row("roles.worker.kind", "worker"),

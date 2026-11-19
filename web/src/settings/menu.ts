@@ -17,11 +17,6 @@
 import type { RosterDto, SettingsDto, SnapshotDto } from "../gen";
 import { programOf } from "./model";
 
-function textOfKey(document: SettingsDto | null, key: string): string | null {
-  const value = document?.values.find((row) => row.key === key)?.value;
-  return typeof value === "string" ? value : null;
-}
-
 /** The words for an effort level, as Shepherdr's menu spells them. */
 export const LEVEL_WORDS: Record<string, string> = {
   off: "Off",
@@ -156,10 +151,10 @@ export function fastOffered(menus: Menus, sel: Selection): boolean {
   return model ? model.fast : program.fast;
 }
 
-/** What the role's button says: "Opus 5.5 · Medium", or "Choose a program" while nothing is chosen. */
+/** What the role's button says: "Opus 5.5 · Medium", or "Select Harness" while nothing is chosen. */
 export function selectionLabel(menus: Menus, sel: Selection, roster: RosterDto | null = null): string {
   if (!sel.agent) {
-    return "Choose a program";
+    return SELECT_HARNESS;
   }
   const program = menus.programs[sel.agent];
   const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
@@ -306,26 +301,13 @@ export function repoKeysOf(document: SettingsDto | null, roleId: string): string
     .map((row) => row.key);
 }
 
-/**
- * The program a Backup switch turns on with: another program than the worker's,
- * preferably another vendor and one that is installed. Null when there is none.
- */
-export function backupChoice(document: SettingsDto | null, roster: RosterDto | null): string | null {
-  const worker = textOfKey(document, "roles.worker.agent");
-  const vendor = programOf(roster, worker)?.vendor ?? null;
-  const others = (roster?.programs ?? []).filter((program) => program.id !== worker);
-  const rank = (program: { installed: boolean; vendor: string }) =>
-    (program.installed ? 0 : 2) + (program.vendor !== vendor ? 0 : 1);
-  return [...others].sort((a, b) => rank(a) - rank(b))[0]?.id ?? null;
-}
-
-// -- worker lines and the reviewer's fallback ---------------------------------
+// -- program lines: the fallback chain of a worker or a reviewer -------------
 //
-// A worker holds an ordered list of program lines. The first is the role's own
-// `agent`/`model`/`effort`/`fast`/`perm`; the rest are `roles.worker.agents`, one
+// A worker or a reviewer holds an ordered list of program lines. The first is the role's own
+// `agent`/`model`/`effort`/`fast`/`perm`; the rest are `roles.<role>.agents`, one
 // `agent|model|effort|fast|perm` string each (the service's `WorkerLine`). A
 // settings file written before lines existed has the other programs in
-// `roles.worker.fallback`; they read as lines with the program's own defaults.
+// `roles.<role>.fallback` (the reviewer's old picker too); they read as lines with the program's own defaults.
 // The same rules as the Herdr desktop's `mods/lib/settings.js`.
 
 function listOfKey(document: SettingsDto | null, key: string): string[] {
@@ -407,29 +389,10 @@ export function withLine(lines: Selection[], at: number, line: Selection | null)
   return line === null ? lines.filter((_, i) => i !== at) : lines.map((kept, i) => (i === at ? line : kept));
 }
 
-/** The reviewer's fallback as a selection, or null for None. */
-export function reviewerFallback(document: SettingsDto | null, roleId = "reviewer"): Selection | null {
-  for (const raw of listOfKey(document, `roles.${roleId}.fallback`)) {
-    const line = parseLine(raw);
-    if (line) {
-      return { agent: line.agent, model: line.model, effort: null, fast: false, perm: null };
-    }
-  }
-  return null;
-}
-
-/** The write that sets the reviewer's fallback to `sel`, or to None (an empty list) when it is null. */
-export function fallbackWrite(document: SettingsDto | null, roleId: string, sel: Selection | null): Write[] {
-  const key = `roles.${roleId}.fallback`;
-  const had = listOfKey(document, key);
-  const value = sel?.agent ? [sel.model ? `${sel.agent}/${sel.model}` : sel.agent] : [];
-  return JSON.stringify(had) === JSON.stringify(value) ? [] : [{ key, value, prior: had }];
-}
-
 /** What a worker line's button says: "Claude Code · Opus 5.5 · Medium". */
 export function lineLabel(menus: Menus, sel: Selection, roster: RosterDto | null = null): string {
   if (!sel.agent) {
-    return "Choose a program";
+    return SELECT_HARNESS;
   }
   const program = menus.programs[sel.agent];
   const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
@@ -440,18 +403,14 @@ export function lineLabel(menus: Menus, sel: Selection, roster: RosterDto | null
     .join(" · ");
 }
 
-/** What the reviewer fallback's button says: "Codex · GPT-6-Luna", or "None". */
-export function fallbackLabel(menus: Menus, sel: Selection | null, roster: RosterDto | null = null): string {
-  if (!sel?.agent) {
-    return "None";
-  }
-  const program = menus.programs[sel.agent];
-  const base = program?.name ?? programOf(roster, sel.agent)?.name ?? sel.agent;
-  const model = modelIn(menus, sel);
-  return sel.model ? `${base} · ${model?.name ?? sel.model}` : base;
+/** Whether a role holds an ordered chain of program lines: workers and reviewers do. */
+export function hasLines(roleId: string): boolean {
+  return roleId === "worker" || roleId === "reviewer";
 }
 
-/** The one-line description of a worker's lines. */
-export const WORKER_LINES_ABOUT =
-  "The first line is the default worker; `shprd agent spawn --agent <program>` runs a task on any line. " +
-  "If a line's program can't go on, the task moves to the next line.";
+/** The one note, at the bottom of the Agents page, on how a chain is walked. */
+export const CHAIN_NOTE =
+  "For workers and reviewers, the first line is the default. If it can't go on, the next one takes over.";
+
+/** What an empty program button says. */
+export const SELECT_HARNESS = "Select Harness";

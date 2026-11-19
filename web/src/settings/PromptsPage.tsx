@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "../api/client";
 import type { PromptDto } from "../gen";
-import { promptLine, promptRows } from "./model";
+import { promptLine, promptName, promptRows } from "./model";
 import { SAVED_MS, type SettingsState } from "./useSettings";
 
 /** How long an edited prompt waits before it saves itself. */
@@ -18,15 +18,11 @@ export const PROMPT_MS = 700;
 export function PromptsPage({
   client,
   state,
-  initial = null,
 }: {
   client: ApiClient;
   state: SettingsState;
-  /** A prompt to open on at once (a role's Edit instructions). */
-  initial?: string | null;
 }) {
   const [open, setOpen] = useState<PromptDto | null>(null);
-  const opened = useRef<string | null>(null);
   const rows = promptRows(state.prompts);
 
   async function openPrompt(id: string) {
@@ -37,15 +33,6 @@ export function PromptsPage({
       state.refuse(`prompts.${id}`, error);
     }
   }
-
-  useEffect(() => {
-    if (initial !== null && opened.current !== initial) {
-      opened.current = initial;
-      void openPrompt(initial);
-    }
-    // openPrompt only reads `client` and `state`'s notices.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initial]);
 
   if (open !== null) {
     return (
@@ -73,31 +60,36 @@ export function PromptsPage({
       <div className="spage" data-page="prompts">
         <h2 className="spage-title">Prompts</h2>
         <p className="snote">No prompts yet.</p>
-        <p className="snote">The service writes the shipped ones on first read.</p>
       </div>
     );
   }
   return (
     <div className="spage" data-page="prompts">
       <h2 className="spage-title">Prompts</h2>
+      <p className="snote">What each agent is told before it starts. Edit any of them: an edit is kept.</p>
       <ul className="prompt-list">
         {rows.map((row) => (
-          <li key={row.id}>
-            <button type="button" className="prompt-row" onClick={() => void openPrompt(row.id)}>
-              <span className="prompt-main">
-                <span className="prompt-id">{row.id}</span>
+          <li key={row.id} className="prompt-item" data-prompt={row.id}>
+            <div className="prompt-words">
+              <div className="prompt-main">
+                <span className="prompt-id">{row.name}</span>
                 <span
                   className={
-                    row.problem !== null ? "prompt-word tone-red" : row.edited ? "prompt-word tone-amber" : "prompt-word"
+                    row.problem !== null ? "tag tone-red" : row.edited ? "tag tone-amber" : "tag"
                   }
                 >
                   {row.word}
                 </span>
-              </span>
-              <span className="prompt-about">{row.problem ?? row.about}</span>
-              <span className="prompt-go" aria-hidden="true">
-                ›
-              </span>
+              </div>
+              <div className="prompt-about">{row.problem ?? row.about}</div>
+            </div>
+            <button
+              type="button"
+              className="btn"
+              aria-label={`Edit ${row.name}`}
+              onClick={() => void openPrompt(row.id)}
+            >
+              Edit
             </button>
           </li>
         ))}
@@ -227,7 +219,7 @@ function PromptEditor({
       setText(reply.text);
       setShown(reply);
       setFailed(false);
-      state.say("Reset: the shipped words are back");
+      state.say("Reset: the default words are back");
     } catch (error) {
       state.refuse(`prompts.${prompt.id}`, error);
     } finally {
@@ -238,18 +230,11 @@ function PromptEditor({
 
   return (
     <div className="spage" data-page="prompts">
-      <h2 className="spage-title">{prompt.id}</h2>
       <div className="prompt-bar">
-        <span className={shown.state === "edited" ? "badge tone-amber" : "badge"}>
-          {shown.state === "edited" ? "edited" : "shipped"}
-        </span>
-        <span className="grow" />
-        {writing || justSaved ? (
-          <span className={writing ? "saving" : "saved"}>{writing ? "saving…" : "Saved"}</span>
-        ) : null}
         <button
           type="button"
-          className="link"
+          className="link prompt-back"
+          aria-label={failed && text !== stored.current ? undefined : "Back"}
           onClick={() => {
             // Words the service refused stay in the box: the first Back keeps
             // them and shows why, and only a second one (now "Discard…") leaves.
@@ -264,11 +249,21 @@ function PromptEditor({
             });
           }}
         >
-          {failed && text !== stored.current ? "Discard and go back" : "Back"}
+          {failed && text !== stored.current ? "Discard and go back" : "‹ Prompts"}
         </button>
+        <span className="grow" />
+        {writing || justSaved ? (
+          <span className={writing ? "saving" : "saved"}>{writing ? "saving…" : "Saved"}</span>
+        ) : null}
       </div>
-      <div className="prompt-path">{shown.path}</div>
+      <div className="prompt-head">
+        <h2 className="spage-title">{promptName(prompt.id)}</h2>
+        <span className={shown.state === "edited" ? "tag tone-amber" : "tag"}>
+          {shown.state === "edited" ? "Edited" : "Default"}
+        </span>
+      </div>
       <div className="snote">{promptLine(shown.state)}</div>
+      <div className="prompt-path">{shown.path}</div>
       <textarea
         className="input prompt-editor"
         aria-label={`Prompt ${prompt.id}`}
@@ -286,8 +281,8 @@ function PromptEditor({
         onBlur={() => void save()}
       />
       <div>
-        <button type="button" className="link" disabled={writing || resetting} onClick={() => void reset()}>
-          Reset to the shipped words
+        <button type="button" className="btn" disabled={writing || resetting} onClick={() => void reset()}>
+          Reset to default
         </button>
       </div>
     </div>
