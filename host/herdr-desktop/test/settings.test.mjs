@@ -59,6 +59,7 @@ import {
   programOf,
   promptLine,
   promptRows,
+  nextLineProgram,
   plainRefusal,
   refused,
   reviewBlocks,
@@ -301,6 +302,8 @@ test("a reviewer's list rules out the worker's vendor, so the refusal cannot be 
   // Pi runs several vendors' models, so it is never ruled out; other roles are not held to the rule.
   assert.equal(reviewBlocks(document, ROSTER, "reviewer", 0).pi, undefined);
   assert.deepEqual(reviewBlocks(document, ROSTER, "worker", 0), {});
+  // Add New never picks a program the rule rules out: the reviewer's second line is not claude.
+  assert.equal(nextLineProgram(document, ROSTER, "reviewer"), "codex");
   // No worker program, no rule.
   row.value = null;
   assert.deepEqual(reviewBlocks(document, ROSTER, "reviewer", 0), {});

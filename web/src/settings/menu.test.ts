@@ -207,6 +207,11 @@ describe("a reviewer's list and a refusal in plain words", () => {
     expect(reviewBlocks(two, roster, "reviewer", 1)).toEqual({});
   });
 
+  it("never adds a reviewer line a same-vendor rule would refuse", () => {
+    expect(nextLineProgram(doc, roster, "reviewer")).not.toBe("claude");
+    expect(nextLineProgram(doc, roster, "worker")).toBe("codex");
+  });
+
   it("says a same-vendor refusal in a sentence, with no key path or backticks", () => {
     const later =
       "`roles.reviewer.agents` would be refused: the reviewer `reviewer`'s later line `claude` and the worker `worker` are both anthropic, so the review is not cross-vendor: pick a program from another family";

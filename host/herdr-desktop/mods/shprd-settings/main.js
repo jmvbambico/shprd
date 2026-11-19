@@ -109,7 +109,7 @@ import { H, RADIUS, SPACE, TEXT, tone } from "./lib/tokens.js";
  * for "Select Harness ⌄" (a longer label is cut with an ellipsis), and the × slot.
  * Every dropdown in the window is as wide as the button.
  */
-const BTN_W = 132;
+const BTN_W = 124;
 const GUTTER_W = 22;
 const X_SLOT = 24;
 /** The button's right padding (5) and its 12 px ⌄: a "+" centred in this lines up with the caret. */
@@ -1719,13 +1719,14 @@ export default class Settings extends View {
               .when(mine && this.scope === "repo", (el) =>
                 el.child(link(t, `reset-${role.id}`, RESET, () => this.resetRole(role), this.writing !== null)),
               )
-              .child(hasLines(role.id) ? this.workerLinesControl(t, role) : this.modelButton(t, role))
               .when(other !== null, (el) =>
                 el.child(button(t, `other-${role.id}`, "Use other CLI", { kind: "plain", onClick: () => this.useOtherCli(role, other) })),
               )
               .when(role.custom, (el) =>
                 el.child(button(t, `remove-${role.id}`, "Remove", { kind: "plain", disabled: this.writing !== null, onClick: () => this.removeRole(role) })),
-              ),
+              )
+              // The lines come last: a button beside them sits to their left, so the ⌄ column never moves.
+              .child(hasLines(role.id) ? this.workerLinesControl(t, role) : this.modelButton(t, role)),
           ),
       )
       .when(notice, (el) => el.child(this.restartLine(t, colors, state)));

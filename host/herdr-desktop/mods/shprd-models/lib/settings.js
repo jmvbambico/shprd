@@ -413,8 +413,11 @@ export function lineWrites(document, roleId, lines) {
 
 /** The program a "+" adds a line for: the first detected program no line has, or null. */
 export function nextLineProgram(document, roster, roleId = "worker") {
-  const used = new Set(workerLines(document, roleId).map((line) => line.agent));
-  return detectedPrograms(roster).find((program) => !used.has(program.id))?.id ?? null;
+  const lines = workerLines(document, roleId);
+  const used = new Set(lines.map((line) => line.agent));
+  // A reviewer's new line is never a program its own rule would refuse.
+  const blocked = reviewBlocks(document, roster, roleId, lines.length);
+  return detectedPrograms(roster).find((program) => !used.has(program.id) && !(program.id in blocked))?.id ?? null;
 }
 
 /**

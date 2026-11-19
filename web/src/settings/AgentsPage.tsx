@@ -240,6 +240,29 @@ function RoleRow({
               Reset
             </button>
           ) : null}
+          {/* buttons beside the lines sit to their left, so the ⌄ column never moves */}
+          {other !== null ? (
+            <button
+              type="button"
+              className="btn plain"
+              disabled={busy}
+              onClick={() =>
+                void choose({ agent: other, model: null, effort: null, fast: false, perm: null })
+              }
+            >
+              Use other CLI
+            </button>
+          ) : null}
+          {role.custom ? (
+            <button
+              type="button"
+              className="btn plain"
+              disabled={busy}
+              onClick={() => void state.write("roles.order", withoutRole(state.settings, role.id), repo)}
+            >
+              Remove
+            </button>
+          ) : null}
           {chained ? (
             <div className="role-lines" data-chain={lines.length > 1 ? "true" : "false"}>
               {(lines.length > 0 ? lines : [sel]).map((line, at) => (
@@ -300,28 +323,6 @@ function RoleRow({
               </div>
             </div>
           )}
-          {other !== null ? (
-            <button
-              type="button"
-              className="btn plain"
-              disabled={busy}
-              onClick={() =>
-                void choose({ agent: other, model: null, effort: null, fast: false, perm: null })
-              }
-            >
-              Use other CLI
-            </button>
-          ) : null}
-          {role.custom ? (
-            <button
-              type="button"
-              className="btn plain"
-              disabled={busy}
-              onClick={() => void state.write("roles.order", withoutRole(state.settings, role.id), repo)}
-            >
-              Remove
-            </button>
-          ) : null}
         </div>
       </div>
       {showNotice ? (
