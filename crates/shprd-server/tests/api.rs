@@ -1630,7 +1630,8 @@ async fn review_again_on_a_stuck_review_needs_a_host_and_consumes_nothing_withou
             .any(|event| matches!(event.kind, EventKind::AskAnswered { .. })),
         "the card is still open"
     );
-=======
+}
+
 /// Runs `git` in `dir`, panicking on failure (tests only).
 fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
@@ -1681,5 +1682,4 @@ async fn a_task_in_a_repo_with_no_commit_is_refused_with_the_way_out() {
     assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
     let message = reply.json()["message"].as_str().unwrap_or("").to_string();
     assert!(message.contains("shprd run start"), "{message}");
->>>>>>> 784ad35 (feat(server): adding the first task in a fresh repo starts a run)
 }
