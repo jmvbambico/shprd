@@ -32,13 +32,25 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, Textarea, TextareaState, h_flex, v_flex } from "gpui-base";
-import { closeOverlay, props, theme } from "herdr";
+import { closeOverlay, knownAgents, openOverlay, props, shared, theme } from "herdr";
 
 import { attach, reason, ServiceError, singleFlight } from "./lib/client.js";
 import {
   CHANGED_HERE,
+  MENU_W,
+  menuHeight,
+  PICK_KEY,
   backupChoice,
   boxProblem,
+  coordinatorRunning,
+  menusOf,
+  otherCli,
+  priorInScope,
+  repoKeysOf,
+  restartNotice,
+  roleSelection,
+  selectionLabel,
+  selectionWrites,
   cleanTitle,
   needsCoordinatorRestart,
   sessionRows,
@@ -67,10 +79,15 @@ import {
 } from "./lib/settings.js";
 import {
   badge,
+  button,
   icon,
+  iconFile,
   link,
   note,
+  popupAt,
+  press,
   segmented,
+  selectButton,
   settingsWindowClosed,
   settingsWindowOpened,
   toggleSwitch,
@@ -115,11 +132,22 @@ export default class Settings extends View {
     this.prompts = null;
     this.failure = null;
     this.client = null;
-    /** The picker showing its choices, as `<role>.<field>`, or null. */
-    this.open = null;
-    /** The picker whose "use an id typed" box is showing. */
-    this.typedKey = null;
-    this.typed = null;
+    /** The role whose name is being edited inline, or null. */
+    this.renaming = null;
+    /** Whether the coordinator's program, model, effort, speed or access changed here, and one is running. */
+    this.coordChanged = false;
+    this.coordRunning = false;
+    /** The popup a dropdown opened (an overlay id), and the last answer it gave. */
+    this.popup = null;
+    this.lastReply = shared(PICK_KEY)?.at ?? null;
+    /** Each dropdown button's bounds, by id, for placing its popup. */
+    this.recs = new Map();
+    /** Program icons by harness id: `{ icon, tint }`, from Herdr's known agents. */
+    this.icons = {};
+    /** Counts the batches of writes, so a refusal can drop the rest of its own. */
+    this.batchId = 0;
+    /** What each batch has written so far, by batch id: what an undo puts back. */
+    this.batchDone = {};
     /** The key a write is in flight for. */
     this.writing = null;
     /**
@@ -240,6 +268,9 @@ export default class Settings extends View {
       // drawn, never the whole window blank.
       const roster = await this.client.roster().catch(() => null);
       if (roster) this.roster = roster;
+      const live = await this.client.state().catch(() => null);
+      this.coordRunning = coordinatorRunning(live);
+      await this.readIcons();
       const prompts = await this.client.prompts().catch(() => null);
       if (prompts) this.prompts = prompts;
       if (this.page === "remote") await this.readRemote();
@@ -257,6 +288,21 @@ export default class Settings extends View {
     cx.notify();
   }
 
+  /** The harnesses' icons, from Herdr's own list of agents (once; a failure leaves none). */
+  async readIcons() {
+    if (this.iconsRead) return;
+    this.iconsRead = true;
+    try {
+      const known = await knownAgents();
+      for (const entry of known ?? []) {
+        const id = entry.key ?? (entry.run ?? [])[0];
+        if (id && entry.icon) this.icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
+      }
+    } catch {
+      // No icons: the tabs and rows are words only.
+    }
+  }
+
   /**
    * Drops what the window read from the service that went away: its settings, its
    * programs and its templates are that run's, and a new service has its own.
@@ -265,7 +311,6 @@ export default class Settings extends View {
     this.settings = null;
     this.roster = null;
     this.prompts = null;
-    this.open = null;
     this.refusal = null;
     // A prompt's words are the person's until they are stored. A restarted service is
     // a new run's settings, but a prompt is a file in the config directory and the
@@ -303,8 +348,6 @@ export default class Settings extends View {
 
   /** Puts the keyboard back on the panel, as Shepherdr's every page change does. */
   keepKeyboard() {
-    this.open = null;
-    this.typedKey = null;
     this.handle?.focus?.();
     this.cx.notify();
   }
@@ -319,10 +362,27 @@ export default class Settings extends View {
    * `shprd_core::settings` stores nothing when a value equals the inherited one).
    */
   apply(key, value) {
-    // No client is not the same as "nothing to write": the words are held in the
-    // queue and written when a read finds the service again (see `pump()`), so a
-    // transient timeout never costs a person a note.
-    this.queue.push({ key, value, for_repo: forRepo(this.scope) });
+    return this.applyBatch([{ key, value }]);
+  }
+
+  /**
+   * Writes several keys as one choice (a program, then its model, then its level).
+   *
+   * No client is not the same as "nothing to write": the words are held in the
+   * queue and written when a read finds the service again (see `pump()`), so a
+   * transient timeout never costs a person a note. If the service refuses one
+   * write of a batch the rest of that batch is dropped, so a role is never left
+   * half switched and shown as saved.
+   */
+  applyBatch(writes) {
+    this.batchId += 1;
+    const batch = this.batchId;
+    const repo = forRepo(this.scope);
+    for (const write of writes) {
+      // What this scope's layer held before, so a refused later write can undo the earlier ones.
+      const prior = priorInScope(this.settings, write.key, repo);
+      this.queue.push({ key: write.key, value: write.value, for_repo: repo, batch, prior });
+    }
     return this.pump();
   }
 
@@ -347,7 +407,8 @@ export default class Settings extends View {
     while (this.queue.length > 0) {
       const next = this.queue.shift();
       this.writing = next.key;
-      this.refusal = null;
+      // An undo runs behind the refusal that caused it and must not wipe it.
+      if (!next.undo) this.refusal = null;
       this.saved = null;
       this.cx.notify();
       if (!this.client) {
@@ -363,18 +424,42 @@ export default class Settings extends View {
         if (reply?.settings) this.settings = reply.settings;
         this.saved = outcomeOf(reply);
         this.savedAt = Date.now();
-        this.open = null;
-        this.typedKey = null;
+        if (needsCoordinatorRestart(next.key) && this.coordRunning) this.coordChanged = true;
         this.cx.notify();
         this.cx.timer.after(SAVED_MS, (next_timer) => next_timer.notify());
         // A box or the editor whose words this write carried is "saved" now, so a
         // later blur or debounce sees nothing left to do.
         this.markSaved(next.key, next.value);
+        if (!next.undo) (this.batchDone[next.batch] ??= []).push(next);
       } catch (err) {
         // A refusal is the service's sentence, shown as it was sent: the person has
         // to read *why* ("they are both anthropic"), not a summary of it. The words
         // stay in the box, unsaved, and the person can try again.
-        this.refusal = refused(next.key, err);
+        if (!next.undo) {
+          this.refusal = refused(next.key, err);
+        } else {
+          // Putting a write back was refused too: say so, so the person knows the role
+          // is still half switched and which key to look at.
+          const base = this.refusal ?? { key: next.key, text: "" };
+          this.refusal = {
+            key: base.key,
+            text: `${base.text} (and putting ${next.key} back was refused too: ${reason(err)}; it still holds the new value)`.trim(),
+          };
+        }
+        // The rest of this choice is not written, and the popup that made it goes.
+        this.queue = this.queue.filter((write) => write.batch !== next.batch);
+        // ...and what the choice had already written is put back, newest first, so the
+        // role is not left half switched (a program changed under its old model).
+        if (!next.undo) {
+          const done = this.batchDone[next.batch] ?? [];
+          for (const write of done) {
+            this.queue.unshift({ key: write.key, value: write.prior ?? null, for_repo: write.for_repo, batch: next.batch, undo: true });
+          }
+        }
+        delete this.batchDone[next.batch];
+        this.saved = null;
+        this.closePopup();
+        this.refresh();
       }
     }
     this.writing = null;
@@ -419,11 +504,11 @@ export default class Settings extends View {
    * stops — and a value that came from the service is never written back over a
    * box the person is in.
    */
-  boxOf(key, value, { rows = 1 } = {}) {
+  boxOf(key, value, { rows = 1, placeholder = "" } = {}) {
     const found = this.boxes.get(key);
     if (found) return found;
     const text = typeof value === "string" ? value : "";
-    const state = rows > 1 ? TextareaState.new({ rows }) : InputState.new({ value: "", placeholder: "" });
+    const state = rows > 1 ? TextareaState.new({ rows }) : InputState.new({ value: "", placeholder });
     state.set_value?.(text);
     const box = { state, saved: text, gen: 0, savedAt: 0, rows };
     state.on?.("change", (_event, cx) => {
@@ -435,7 +520,10 @@ export default class Settings extends View {
         });
       }
     });
-    state.on?.("submit", (_event, _cx) => this.writeBox(key));
+    state.on?.("submit", (_event, _cx) => {
+      this.writeBox(key);
+      this.endRename(key);
+    });
     state.on?.("focus", (_event, cx) => {
       this.focusKey = key;
       cx.notify();
@@ -443,6 +531,7 @@ export default class Settings extends View {
     state.on?.("blur", (_event, _cx) => {
       if (this.focusKey === key) this.focusKey = null;
       this.writeBox(key);
+      this.endRename(key);
     });
     this.boxes.set(key, box);
     return box;
@@ -530,30 +619,158 @@ export default class Settings extends View {
     cx.timer.after(SAVED_MS, (next) => next.notify());
   }
 
-  // -- the pickers -----------------------------------------------------------
+  // -- the dropdowns ---------------------------------------------------------
+  //
+  // Every dropdown is a popup of its own (`mods/shprd-models`), opened over the
+  // window the way Shepherdr's are, and it answers through the shared
+  // `shprd.settings.pick`. Nothing is drawn inside this panel, so no click here can
+  // put a list away that the same click opened.
 
-  /** Shows one picker's choices, or closes it. */
-  toggle(key) {
-    this.open = this.open === key ? null : key;
-    this.typedKey = null;
-    this.refusal = null;
-    this.cx.notify();
+  /** The record a dropdown button keeps its bounds in. */
+  rec(id) {
+    if (!this.recs.has(id)) this.recs.set(id, { at: null });
+    return this.recs.get(id);
   }
 
-  /** Shows the box a picker's typed value goes in, making it on first use. */
-  typePick(key) {
-    this.typedKey = key;
-    if (!this.typed) {
-      this.typed = InputState.new({ placeholder: "Type an id", value: "" });
+  /** Puts the open popup away, if there is one. */
+  closePopup() {
+    if (this.popup === null) return;
+    try {
+      closeOverlay(this.popup);
+    } catch {
+      // Already gone: a click beside it closed it.
     }
+    this.popup = null;
+  }
+
+  /** Opens a plain pick list under a button: `options` is `[{ id, label, hint?, icon? }]`. */
+  openPick(at, key, field, options, current) {
+    this.closePopup();
+    const W = 260;
+    const H = 14 + 31 * Math.min(options.length, 8);
+    this.popup = openOverlay({
+      mod: "shprd-models",
+      kind: "popup",
+      frame: "none",
+      width: W,
+      height: H,
+      at: popupAt(at, W, H),
+      props: { mode: "pick", key, field, options, current, width: W, height: H },
+    });
+  }
+
+  /** Opens the model menu for a role, under its button. */
+  openModelMenu(at, role) {
+    this.closePopup();
+    const menus = menusOf(this.roster);
+    const MENU_H = menuHeight(menus);
+    const place = popupAt(at, MENU_W, MENU_H);
+    const below = place !== "pointer" && at !== null && place.y > at.y;
+    this.popup = openOverlay({
+      mod: "shprd-models",
+      kind: "popup",
+      frame: "none",
+      width: MENU_W,
+      height: MENU_H,
+      at: place,
+      props: {
+        mode: "models",
+        key: `role:${role.id}`,
+        current: roleSelection(this.settings, role.id),
+        menus,
+        icons: this.icons,
+        width: MENU_W,
+        height: MENU_H,
+        below,
+      },
+    });
+  }
+
+  /**
+   * Takes what a popup answered, once: `{ key, field, value, at }` in the shared
+   * `shprd.settings.pick`. The answer is applied after this render, as a write.
+   */
+  takeReply() {
+    const reply = shared(PICK_KEY);
+    if (!reply || reply.at === this.lastReply || typeof reply.key !== "string") return;
+    this.lastReply = reply.at;
+    this.cx.timer.after(0, (cx) => {
+      this.handleReply(reply);
+      cx.notify();
+    });
+  }
+
+  /** What each kind of answer does. */
+  handleReply(reply) {
+    const [kind, ...rest] = reply.key.split(":");
+    const id = rest.join(":");
+    if (kind === "scope") {
+      this.scope = scopeOf(reply.value).id;
+      this.refusal = null;
+      this.saved = null;
+      this.resetBoxes();
+      return;
+    }
+    if (kind === "provider") {
+      this.provider = reply.value;
+      return;
+    }
+    if (kind === "wf") {
+      const row = workflowRows(this.settings).find((entry) => entry.key === id);
+      const chosen = (row?.choices ?? []).find(([value]) => String(value) === String(reply.value));
+      if (chosen) this.apply(id, chosen[0]);
+      this.closePopup();
+      return;
+    }
+    if (kind === "role" && reply.field === "selection") {
+      const before = roleSelection(this.settings, id);
+      const writes = selectionWrites(id, before, reply.value ?? before);
+      if (writes.length > 0) this.applyBatch(writes);
+    }
+  }
+
+  /** Starts editing a role's name in place: the field takes the keyboard. */
+  startRename(role) {
+    const box = this.boxOf(role.name.key, role.name.value, { placeholder: role.name.fallback });
+    box.state.set_value?.(role.title);
+    box.saved = role.title;
+    this.renaming = role.id;
+    this.cx.notify();
+    this.cx.timer.after(0, () => box.state.focus?.());
+  }
+
+  /** Leaves the name field once its words were written (`Enter` or the keyboard going elsewhere). */
+  endRename(key) {
+    if (this.renaming !== null && key === `roles.${this.renaming}.title`) {
+      this.renaming = null;
+      this.cx.notify();
+    }
+  }
+
+  /** `Esc` in the name field: the old name comes back and nothing is written. */
+  cancelRename() {
+    const id = this.renaming;
+    if (id === null) return;
+    const box = this.boxes.get(`roles.${id}.title`);
+    box?.state?.set_value?.(box.saved ?? "");
+    this.renaming = null;
     this.cx.notify();
   }
 
-  /** Writes the value typed into an open picker. */
-  applyTyped(key) {
-    const value = (this.typed?.value?.() ?? "").trim();
-    if (value === "") return;
-    return this.apply(key, value);
+  /** Opens a role's instructions: the Prompts page, on that template. */
+  editInstructions(role) {
+    if (!role.promptId) return;
+    this.closePopup();
+    this.page = "prompts";
+    this.refusal = null;
+    this.saved = null;
+    this.openPrompt({ id: role.promptId });
+  }
+
+  /** Puts back what a repository overrode for a role (the keys its own layer holds). */
+  resetRole(role) {
+    const writes = repoKeysOf(this.settings, role.id).map((key) => ({ key, value: null }));
+    if (writes.length > 0) this.applyBatch(writes);
   }
 
   /** Adds a role by putting its id in `roles.order`. */
@@ -844,10 +1061,8 @@ export default class Settings extends View {
    * Shepherdr's dialog does with the key.
    */
   escape() {
-    if (this.open !== null || this.typedKey !== null) {
-      this.open = null;
-      this.typedKey = null;
-      this.cx.notify();
+    if (this.renaming !== null) {
+      this.cancelRename();
       return Promise.resolve();
     }
     if (this.page === "prompts" && this.prompt !== null) {
@@ -872,6 +1087,7 @@ export default class Settings extends View {
    * saves at, and this is that moment.
    */
   async dismiss() {
+    this.closePopup();
     await this.flush();
     settingsWindowClosed(this.window_);
     closeOverlay(props()?.overlay);
@@ -960,6 +1176,7 @@ export default class Settings extends View {
    */
   render() {
     this.revalidate();
+    this.takeReply();
     const t = theme();
     const colors = tone(t);
     const card = h_flex()
@@ -977,13 +1194,11 @@ export default class Settings extends View {
       .overflow_hidden()
       .on_click((_event, cx) => {
         // A click inside the panel stays inside: only one beside it closes the
-        // window (Shepherdr's own rule for its self-drawn frame).
+        // window (Shepherdr's own rule for its self-drawn frame). Each control
+        // stops its own click first (`press()`), so this is only what no control took:
+        // a click on the panel's own blank puts an open dropdown away.
         cx.stop_propagation();
-        if (this.open !== null || this.typedKey !== null) {
-          this.open = null;
-          this.typedKey = null;
-          this.cx.notify();
-        }
+        this.closePopup();
       })
       .on_key_down((event, cx) => {
         if (event?.key !== "escape") return;
@@ -1021,13 +1236,16 @@ export default class Settings extends View {
           el
             .cursor_pointer()
             .hover((style) => style.bg(t.hover))
-            .on_click(() => {
-              this.page = page.id;
-              this.refusal = null;
-              this.saved = null;
-              this.keepKeyboard();
-              if (page.id === "remote") this.readRemote();
-            }),
+            .on_click(
+              press(() => {
+                this.closePopup();
+                this.page = page.id;
+                this.refusal = null;
+                this.saved = null;
+                this.keepKeyboard();
+                if (page.id === "remote") this.readRemote();
+              }),
+            ),
         )
         .child(icon(page.icon, 14, on ? t.foreground : t.muted))
         .child(div().flex_1().min_w(0).truncate().child(page.title));
@@ -1069,16 +1287,9 @@ export default class Settings extends View {
         .gap(6)
         .children(blocks);
     }
+    // No "Saved" line: it pushed the page down on every write. A write shows in
+    // the control that made it, and a refusal is the one thing that gets a block.
     if (this.refusal !== null) blocks.push(this.refusalBlock(t, colors));
-    else if (this.saved !== null) {
-      blocks.push(
-        div()
-          .pb(6)
-          .text_size(TEXT.label)
-          .text_color(colors.green)
-          .child(this.saved.text),
-      );
-    }
     const state = health(this.settings);
     for (const problem of state.problems) {
       blocks.push(div().pb(4).text_size(TEXT.label).text_color(colors.red).child(problem));
@@ -1111,9 +1322,9 @@ export default class Settings extends View {
   }
 
   /**
-   * The level switch, at the top of each page a repository can own: `Applies to`
-   * and the two words a person picks between, and under them what the level
-   * means. A page that is one for every repository says so instead.
+   * The level switch, at the top of each page a repository can own: Shepherdr's
+   * `Applies to` and a dropdown (Everywhere, This repo), and under it what the
+   * level means. A page that is one for every repository says so instead.
    */
   levelBar(t, colors) {
     const page = PAGES.find((entry) => entry.id === this.page);
@@ -1126,6 +1337,12 @@ export default class Settings extends View {
         .child(LEVEL.one);
     }
     const repository = this.settings?.repo ?? null;
+    const word = this.scope === "repo" ? "This repo" : "Everywhere";
+    const options = [
+      { id: "you", label: "Everywhere", icon: "globe" },
+      { id: "repo", label: "This repo", hint: repository ?? undefined, icon: "branch" },
+    ];
+    const rec = this.rec("scope");
     return v_flex()
       .w_full()
       .mb(18)
@@ -1140,34 +1357,18 @@ export default class Settings extends View {
           .items_center()
           .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child(LEVEL.label))
           .child(
-            segmented(
+            selectButton(
               t,
               "level",
-              SCOPES.map((scope) => [scope.id, scope.word]),
-              this.scope,
-              (id) => {
-                this.scope = id;
-                this.refusal = null;
-                this.saved = null;
-                this.resetBoxes();
-                this.keepKeyboard();
-              },
+              [icon(this.scope === "repo" ? "branch" : "globe", 14, t.muted), div().child(word)],
+              rec,
+              (at) => this.openPick(at, "scope", "pick", options, this.scope),
+              { bordered: true },
             ),
           )
           .child(div().flex_1())
-          .when(repository !== null, (el) =>
-            el
-              .child(
-                div()
-                  .flex_none()
-                  .font_family("JetBrains Mono")
-                  .text_size(TEXT.id)
-                  .text_color(t.dim)
-                  .child(repository),
-              )
-              .when(this.writing !== null, (el) =>
-                el.child(div().flex_none().pl(8).text_size(TEXT.id).text_color(colors.amber).child("saving…")),
-              ),
+          .when(this.writing !== null, (el) =>
+            el.child(div().flex_none().text_size(TEXT.id).text_color(colors.amber).child("saving…")),
           ),
       )
       .child(
@@ -1180,11 +1381,14 @@ export default class Settings extends View {
   }
 
   /**
-   * Shepherdr's row: the title and one line about it on the left, the value and
-   * the scope line at the right, the control beside them, and `below` — a box or
-   * a list of choices — under all of it.
+   * Shepherdr's row: the title and one line about it on the left, the control at
+   * the right, and `below` (a box, say) under both. Where the layer matters it is
+   * a small `repo` badge (this repository overrides the value), and in `This repo`
+   * a plain Reset beside it; a value nothing in the repo sets shows nothing.
+   * `status` is the few words that follow a write ("Saved").
    */
-  row(t, { title, about, value = null, control = null, scope = null, below = null }) {
+  row(t, { title, about, status = null, control = null, scope = null, below = null }) {
+    const mine = scope?.mine === true;
     return v_flex()
       .w_full()
       .gap(8)
@@ -1194,58 +1398,33 @@ export default class Settings extends View {
       .child(
         h_flex()
           .w_full()
-          .gap(16)
+          .gap(12)
           .items_center()
           .child(
             v_flex()
               .flex_1()
               .min_w(0)
               .gap(3)
-              .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(title))
+              .child(
+                h_flex()
+                  .gap(6)
+                  .items_center()
+                  .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(title))
+                  .when(mine, (el) => el.child(badge(t, "repo", t.raised, t.muted))),
+              )
               .when(Boolean(about), (el) =>
                 el.child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(about)),
               ),
           )
-          .when(value !== null || scope !== null, (el) =>
-            el.child(
-              v_flex()
-                .flex_none()
-                .items_end()
-                .gap(2)
-                .when(value !== null, (el) =>
-                  el.child(div().text_size(TEXT.label).text_color(t.foreground).child(String(value))),
-                )
-                .when(scope !== null, (el) => el.child(this.scopeLine(t, scope))),
-            ),
+          .when(status !== null, (el) =>
+            el.child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child(String(status))),
           )
-          .when(control !== null, (el) => el.child(div().flex_none().child(control))),
+          .when(mine && this.scope === "repo" && scope?.key, (el) =>
+            el.child(link(t, `reset-${scope.key}`, RESET, () => this.apply(scope.key, null), this.writing !== null)),
+          )
+          .when(control !== null, (el) => el.child(h_flex().flex_none().gap(8).items_center().child(control))),
       )
       .when(below !== null, (el) => el.child(below));
-  }
-
-  /**
-   * Where a row's value comes from.
-   *
-   * In `This repo` the row says whether the repository set its own (`Set for
-   * this repository · Reset`) or which layer it inherits from, and Reset is the
-   * one write that takes the repository's value away. In `You` it names the layer
-   * that answered, in the service's own words — including `this repo`, when the
-   * repository's entry is what a person would actually run with.
-   */
-  scopeLine(t, scope) {
-    if (this.scope !== "repo") {
-      return div().text_size(TEXT.id).text_color(t.dim).child(scope.layer);
-    }
-    if (scope.mine) {
-      return h_flex()
-        .gap(6)
-        .items_center()
-        .text_size(TEXT.id)
-        .child(div().text_color(t.muted).child(CHANGED_HERE))
-        .child(div().text_color(t.dim).child("·"))
-        .child(link(t, `reset-${scope.key}`, RESET, () => this.apply(scope.key, null), this.writing !== null));
-    }
-    return div().text_size(TEXT.id).text_color(t.dim).child(`inherited from ${scope.layer}`);
   }
 
   /** A refusal: the service's own sentence, unedited, in the tone it deserves. */
@@ -1269,100 +1448,159 @@ export default class Settings extends View {
   // -- drawing: Agents -------------------------------------------------------
 
   /**
-   * Agents: one block a role — its name, what it does, and the program, model and
-   * effort it runs — then the one row that makes another.
+   * Agents, in Shepherdr's shape: one compact row a role — its name and one line
+   * about it, then a single "<Model> · <Effort>" button that opens the model menu
+   * and an Edit instructions button — and the toggles shprd has (Backup agent).
    *
    * The roles, their order and their words are the service's answer to
    * `GET /api/settings`; the programs and their models are `GET /api/roster`'s.
-   * A refusal in the middle of a write is the service's own sentence, because a
-   * cross-vendor review is refused in words that name both roles and both
-   * vendors, and a person needs exactly those words.
+   * A refusal is the service's own sentence: a cross-vendor review is refused in
+   * words that name both roles and both vendors, and a person needs exactly those.
    */
   agentsPage(t, colors) {
     const list = roles(this.settings, this.roster);
     return [
       this.title(t, "Agents"),
-      ...list.map((role) => this.roleBlock(t, colors, role)),
+      ...list.map((role) => (role.id === "backup" ? this.backupRow(t, role) : this.roleRow(t, colors, role))),
       this.addRoleRow(t),
     ];
   }
 
-  /** One role: its header line, then its three picks. */
-  roleBlock(t, colors, role) {
-    const header = h_flex()
-      .w_full()
-      .gap(6)
-      .items_center()
-      .py(4)
-      .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(role.title))
-      .child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child(role.kind))
-      .when(role.custom, (el) => el.child(badge(t, "custom", t.raised, t.muted)))
-      .when(role.readonly, (el) => el.child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child("reads only")))
-      .child(div().flex_1())
-      .when(role.custom, (el) =>
-        el.child(link(t, `remove-${role.id}`, "Remove", () => this.removeRole(role), this.writing !== null)),
-      );
-    // The Backup agent is a switch first: with it off the role has no program,
-    // so its pickers would be rows about nothing.
-    const off = role.backup !== null && !role.backup.on;
-    const rows = off ? [this.backupRow(t, role)] : [...(role.backup ? [this.backupRow(t, role)] : []), ...this.roleRows(t, colors, role)];
-    // The role's name leads its rows: it is what every screen calls the role.
-    rows.unshift(this.nameRow(t, role));
-    if (role.kind === "coordinator") rows.push(this.restartRow(t, colors));
-    return v_flex()
-      .w_full()
-      .gap(2)
-      .pb(10)
-      .child(header)
-      .when(role.about !== "", (el) =>
-        el.child(div().pb(4).text_size(TEXT.label).text_color(t.dim).child(role.about)),
-      )
-      .children(rows);
+  /** The role's button: "Opus 5.5 · Medium ⌄", opening the model menu. */
+  modelButton(t, role) {
+    const menus = menusOf(this.roster);
+    const sel = roleSelection(this.settings, role.id);
+    const word = this.roster === null ? "Loading…" : selectionLabel(menus, sel, this.roster);
+    const disabled = this.roster === null || menus.order.length === 0;
+    return selectButton(
+      t,
+      `model-${role.id}`,
+      [div().min_w(0).truncate().child(disabled && this.roster !== null ? "No program found" : word)],
+      this.rec(`model-${role.id}`),
+      (at) => this.openModelMenu(at, role),
+      { disabled },
+    );
   }
 
-  /**
-   * A role's name: the word the whole app uses for it (the tab, the chat, the
-   * Agents pane, the thread). Written when the person leaves the box; empty goes
-   * back to the built-in word, which the box shows as its placeholder.
-   */
-  nameRow(t, role) {
-    const key = role.name.key;
-    const box = this.boxOf(key, role.name.value);
-    const justSaved = Date.now() - box.savedAt < SAVED_MS;
-    return this.row(t, {
-      title: "Name",
-      about: `What the app calls this role. Empty goes back to “${role.name.fallback}”.`,
-      value: justSaved ? "Saved" : null,
-      control: null,
-      scope: { key, layer: role.name.layer, mine: role.name.source === "repo_entry" },
-      below: v_flex()
-        .w_full()
+  /** The role's name: the title (click it, or the pencil, to rename) or, while renaming, its field. */
+  roleName(t, role) {
+    if (this.renaming === role.id) {
+      const box = this.boxOf(role.name.key, role.name.value, { placeholder: role.name.fallback });
+      return div()
+        .w(190)
+        .h(26)
+        .flex_none()
         .rounded(RADIUS.control)
         .border_1()
-        .border_color(this.focusKey === key ? t.accent : t.border)
+        .border_color(t.accent)
         .bg(t.raised)
         .overflow_hidden()
-        .child(Input.new(box.state).w_full().px(10).py(6)),
-    });
+        .child(Input.new(box.state).w_full().px(8).py(2).text_size(TEXT.body));
+    }
+    return h_flex()
+      .id(`rename-${role.id}`)
+      .gap(6)
+      .items_center()
+      .rounded(RADIUS.control)
+      .cursor_pointer()
+      .hover((style) => style.bg(t.hover))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.startRename(role);
+        cx.notify();
+      })
+      .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(role.title))
+      .child(icon("square-pen", 12, t.dim));
+  }
+
+  /** One role. */
+  roleRow(t, colors, role) {
+    const other = role.id === "reviewer" ? otherCli(this.settings, this.roster) : null;
+    const mine = repoKeysOf(this.settings, role.id).length > 0;
+    const state = this.restarting;
+    // Only the coordinator's row, and only once its choice changed (or while a restart it asked for shows its answer).
+    const notice =
+      role.kind === "coordinator" &&
+      (restartNotice({ changed: this.coordChanged, running: this.coordRunning }) || typeof state === "string");
+    return v_flex()
+      .w_full()
+      .gap(6)
+      .py(12)
+      .border_b(1)
+      .border_color(t.border)
+      .child(
+        h_flex()
+          .w_full()
+          .gap(12)
+          .items_center()
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(3)
+              .child(
+                h_flex()
+                  .gap(6)
+                  .items_center()
+                  .child(this.roleName(t, role))
+                  .when(role.readonly, (el) =>
+                    el.child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child("reads only")),
+                  )
+                  .when(role.custom, (el) => el.child(badge(t, "custom", t.raised, t.muted)))
+                  .when(mine, (el) => el.child(badge(t, "repo", t.raised, t.muted))),
+              )
+              .when(role.about !== "", (el) =>
+                el.child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(role.about)),
+              ),
+          )
+          .child(
+            h_flex()
+              .flex_none()
+              .gap(8)
+              .items_center()
+              .when(mine && this.scope === "repo", (el) =>
+                el.child(link(t, `reset-${role.id}`, RESET, () => this.resetRole(role), this.writing !== null)),
+              )
+              .child(this.modelButton(t, role))
+              .when(other !== null, (el) =>
+                el.child(button(t, `other-${role.id}`, "Use other CLI", { kind: "plain", onClick: () => this.useOtherCli(role, other) })),
+              )
+              .when(Boolean(role.promptId), (el) =>
+                el.child(button(t, `instructions-${role.id}`, "Edit instructions", { onClick: () => this.editInstructions(role) })),
+              )
+              .when(role.custom, (el) =>
+                el.child(button(t, `remove-${role.id}`, "Remove", { kind: "plain", disabled: this.writing !== null, onClick: () => this.removeRole(role) })),
+              ),
+          ),
+      )
+      .when(notice, (el) => el.child(this.restartLine(t, colors, state)))
+      .when(role.fallback !== null, (el) => el.child(this.fallbackLine(t, role.fallback)));
   }
 
   /**
-   * The coordinator's program and model apply when it next starts: it keeps
-   * running the one it has. The link restarts it now, in the same tab and chat.
+   * The coordinator keeps running the program it started with: this one line shows
+   * only after its program, model, effort, speed or access changed here, and says
+   * so with the one button that restarts it in the same tab and chat.
    */
-  restartRow(t, colors) {
-    const state = this.restarting;
-    return this.row(t, {
-      title: "Restart the coordinator",
-      about: "A new program or model reaches the coordinator when it next starts.",
-      value: state === "working" ? "Restarting…" : state === "done" ? "Restarted" : null,
-      control: link(t, "restart-coordinator", "Restart the coordinator now", () => this.restartCoordinator(), state === "working"),
-      scope: null,
-      below:
-        typeof state === "string" && state.startsWith("failed:")
-          ? div().text_size(TEXT.id).text_color(colors.red ?? t.foreground).child(state.slice(7))
-          : null,
-    });
+  restartLine(t, colors, state) {
+    const word =
+      state === "working"
+        ? "Restarting…"
+        : state === "done"
+          ? "Restarted"
+          : typeof state === "string" && state.startsWith("failed:")
+            ? state.slice(7)
+            : "Applies when the coordinator next starts.";
+    const failed = typeof state === "string" && state.startsWith("failed:");
+    return h_flex()
+      .id("restart-notice")
+      .w_full()
+      .gap(8)
+      .items_center()
+      .child(div().text_size(TEXT.label).text_color(failed ? colors.red : t.dim).child(word))
+      .when(state !== "working" && state !== "done", (el) =>
+        el.child(link(t, "restart-coordinator", "Restart the coordinator now", () => this.restartCoordinator())),
+      );
   }
 
   /** Restarts the coordinator through the service, and says how it went. */
@@ -1373,6 +1611,7 @@ export default class Settings extends View {
     try {
       await this.client.restartCoordinator();
       this.restarting = "done";
+      this.coordChanged = false;
     } catch (err) {
       this.restarting = `failed:${reason(err)}`;
     }
@@ -1383,37 +1622,17 @@ export default class Settings extends View {
     });
   }
 
-  /** A role's pickers, then Fast, Permissions and Fallback where the program has them. */
-  roleRows(t, colors, role) {
-    const rows = role.picks.map((pick) => this.pickRow(t, colors, role, pick));
-    if (role.fast) rows.push(this.switchRow(t, role.fast));
-    if (role.perm) {
-      rows.push(
-        this.pickRow(t, colors, role, {
-          ...role.perm,
-          field: "perm",
-          note: null,
-        }),
-      );
-    }
-    if (role.fallback) rows.push(this.fallbackRow(t, role.fallback));
-    return rows;
-  }
-
-  /** A role's yes-or-no field (Fast mode) as a switch, written where it is flipped. */
-  switchRow(t, field) {
-    return this.row(t, {
-      title: field.label,
-      about: field.about,
-      value: field.display,
-      control: toggleSwitch(t, field.key, field.value, (on) => this.apply(field.key, on)),
-      scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
-    });
+  /** "Use other CLI": the reviewer runs the program of another vendor than the worker's. */
+  useOtherCli(role, program) {
+    const before = roleSelection(this.settings, role.id);
+    const after = { agent: program, model: null, effort: null, fast: false, perm: null };
+    this.applyBatch(selectionWrites(role.id, before, after));
   }
 
   /**
-   * The Backup agent's switch. On names the other program (another vendor, one
-   * that is installed, when there is one); off takes the program away again.
+   * The Backup agent, a switch in Shepherdr's row. On names the other program
+   * (another vendor, one that is installed, when there is one) and shows its
+   * button beside the switch; off takes the program away again.
    */
   backupRow(t, role) {
     const field = role.backup;
@@ -1428,16 +1647,19 @@ export default class Settings extends View {
       return this.apply(field.key, program);
     };
     return this.row(t, {
-      title: field.label,
-      about: field.about,
-      value: field.on ? "On" : "Off",
-      control: toggleSwitch(t, field.key, field.on, flip),
+      title: role.title,
+      about: "The other CLI takes a task over once when its agent can't go on.",
       scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
+      control: h_flex()
+        .gap(8)
+        .items_center()
+        .when(field.on, (el) => el.child(this.modelButton(t, role)))
+        .child(toggleSwitch(t, field.key, field.on, flip)),
     });
   }
 
-  /** Fallback: every other program as a chip; the ones picked are tried in the order they were picked. */
-  fallbackRow(t, field) {
+  /** The worker's fallback: every other program as a chip, tried in the order picked. */
+  fallbackLine(t, field) {
     const chip = (choice) => {
       const at = field.value.indexOf(choice.value);
       const on = at >= 0;
@@ -1455,128 +1677,20 @@ export default class Settings extends View {
         .text_color(on ? t.foreground : t.muted)
         .cursor_pointer()
         .hover((style) => style.bg(t.hover))
-        .on_click(() => this.apply(field.key, toggled(field.value, choice.value)))
+        .on_click(press(() => this.apply(field.key, toggled(field.value, choice.value))))
         .child(on ? `${at + 1}  ${choice.label}` : choice.label)
         .when(choice.hint === "not installed", (el) =>
           el.child(div().text_size(TEXT.id).text_color(t.dim).child("not installed")),
         );
     };
-    return this.row(t, {
-      title: field.label,
-      about: field.about,
-      value: field.display,
-      scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
-      below: h_flex().w_full().flex_wrap().gap(6).children(field.choices.map(chip)),
-    });
-  }
-
-  /** One pick: its words, its value and layer, and its choices underneath. */
-  pickRow(t, colors, role, pick) {
-    const key = `${role.id}.${pick.field}`;
-    const isOpen = this.open === key;
-    const writing = this.writing === pick.key;
-    const scope = {
-      key: pick.key,
-      layer: pick.layer,
-      mine: pick.source === "repo_entry",
-    };
-    return this.row(t, {
-      title: pick.label,
-      about: pick.about,
-      value: pick.display,
-      control: h_flex()
-        .gap(6)
-        .items_center()
-        .when(writing, (el) =>
-          el.child(div().text_size(TEXT.id).text_color(colors.amber).child("saving…")),
-        )
-        .child(
-          h_flex()
-            .id(`pick-${key}`)
-            .h(H.sm)
-            .px(8)
-            .flex_none()
-            .items_center()
-            .rounded(RADIUS.control)
-            .border_1()
-            .border_color(isOpen ? t.accent : t.border)
-            .text_size(TEXT.id)
-            .text_color(t.muted)
-            .cursor_pointer()
-            .hover((style) => style.bg(t.hover))
-            .on_click(() => this.toggle(key))
-            .child(isOpen ? "▴" : "▾"),
-        ),
-      scope,
-      below: isOpen ? this.choices(t, pick) : null,
-    });
-  }
-
-  /** The choices one pick offers: the inherit row, then every value. */
-  choices(t, pick) {
-    const blocks = [];
-    if (pick.choices.length === 0) {
-      blocks.push(
-        div().px(8).py(4).text_size(TEXT.id).text_color(t.dim).child(pick.note ?? "nothing to pick"),
-      );
-    }
-    for (const choice of pick.choices) {
-      const current = (pick.value ?? null) === choice.value;
-      blocks.push(
-        h_flex()
-          .h(H.sm)
-          .flex_none()
-          .px(8)
-          .gap(6)
-          .items_center()
-          .rounded(RADIUS.control)
-          .when(current, (el) => el.bg(t.selected ?? t.raised))
-          .cursor_pointer()
-          .hover((style) => style.bg(t.hover))
-          .on_click(() => this.apply(pick.key, choice.value))
-          .child(
-            div()
-              .text_size(TEXT.label)
-              .text_color(choice.value === null ? t.muted : t.foreground)
-              .child(choice.label),
-          )
-          .when(choice.hint !== null && choice.hint !== undefined, (el) =>
-            el.child(div().text_size(TEXT.id).text_color(t.dim).child(choice.hint)),
-          )
-          .when(current, (el) =>
-            el.child(div().flex_1()).child(div().text_size(TEXT.id).text_color(t.dim).child("✓")),
-          ),
-      );
-    }
-    // A program that lists no models, or a model its catalog has not heard of, is
-    // still a value a person may type: Shepherdr's "use the id typed".
-    if (pick.field === "model" || pick.field === "effort") {
-      if (this.typedKey === pick.key) {
-        blocks.push(
-          h_flex()
-            .h(H.lg)
-            .flex_none()
-            .px(8)
-            .gap(6)
-            .items_center()
-            .child(div().flex_1().min_w(0).child(Input.new(this.typed)))
-            .child(link(t, `use-${pick.key}`, "Use", () => this.applyTyped(pick.key), this.writing !== null)),
-        );
-      } else {
-        blocks.push(
-          h_flex()
-            .h(H.sm)
-            .flex_none()
-            .px(8)
-            .items_center()
-            .child(link(t, `typed-${pick.key}`, "Use an id typed", () => this.typePick(pick.key))),
-        );
-      }
-    }
-    if (pick.note && pick.choices.length > 0) {
-      blocks.push(div().px(8).py(2).text_size(TEXT.id).text_color(t.dim).child(pick.note));
-    }
-    return v_flex().w_full().gap(0).pl(8).children(blocks);
+    return h_flex()
+      .w_full()
+      .gap(8)
+      .items_center()
+      .flex_wrap()
+      .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child("Fallback"))
+      .children(field.choices.map(chip))
+      .when(field.choices.length === 0, (el) => el.child(div().text_size(TEXT.label).text_color(t.dim).child("no other program")));
   }
 
   /** The one row that makes a new role. */
@@ -1632,17 +1746,18 @@ export default class Settings extends View {
   workflowRow(t, row) {
     const scope = { key: row.key, layer: row.layer, mine: row.source === "repo_entry" };
     if (row.control === "segmented") {
+      const options = row.choices.map(([value, word]) => ({ id: String(value), label: word }));
+      const shown = row.choices.find(([value]) => value === row.value)?.[1] ?? row.display;
       return this.row(t, {
         title: row.title,
         about: row.about,
-        value: row.display,
-        control: segmented(
+        control: selectButton(
           t,
-          row.key,
-          row.choices,
-          row.value,
-          (value) => this.apply(row.key, value),
-          { disabled: this.writing !== null },
+          `wf-${row.key}`,
+          [div().child(shown)],
+          this.rec(`wf-${row.key}`),
+          (at) => this.openPick(at, `wf:${row.key}`, "choice", options, String(row.value)),
+          { bordered: true, disabled: this.writing !== null },
         ),
         scope,
       });
@@ -1651,7 +1766,6 @@ export default class Settings extends View {
       return this.row(t, {
         title: row.title,
         about: row.about,
-        value: row.display,
         control: toggleSwitch(t, row.key, row.value === true, (on) => this.apply(row.key, on)),
         scope,
       });
@@ -1660,7 +1774,6 @@ export default class Settings extends View {
       return this.row(t, {
         title: row.title,
         about: row.about,
-        value: row.display,
         control: this.stepper(t, row),
         scope,
       });
@@ -1670,8 +1783,7 @@ export default class Settings extends View {
     return this.row(t, {
       title: row.title,
       about: row.about,
-      value: justSaved ? "Saved" : null,
-      control: null,
+      status: justSaved ? "Saved" : null,
       scope,
       below: v_flex()
         .w_full()
@@ -1703,7 +1815,7 @@ export default class Settings extends View {
         .text_size(TEXT.body)
         .text_color(t.muted)
         .hover((style) => style.bg(t.hover).text_color(t.foreground))
-        .on_click(() => this.step(row, by))
+        .on_click(press(() => this.step(row, by)))
         .child(glyph);
     return h_flex()
       .h(H.sm)
@@ -1796,51 +1908,30 @@ export default class Settings extends View {
       blocks.push(
         h_flex()
           .py(6)
-          .child(link(t, "tunnel-stop", this.remoteBusy === "stop" ? "Stopping…" : "Stop tunnel", () => this.tunnelCall("stop"), this.remoteBusy !== null)),
+          .child(button(t, "tunnel-stop", this.remoteBusy === "stop" ? "Stopping…" : "Stop tunnel", { disabled: this.remoteBusy !== null, onClick: () => this.tunnelCall("stop") })),
       );
     } else {
+      const options = view.providers.map((entry) => ({ id: entry.id, label: entry.word }));
+      const shown = view.providers.find((entry) => entry.id === view.provider)?.word ?? "Choose";
       blocks.push(
-        h_flex()
-          .py(6)
-          .gap(10)
-          .items_center()
-          .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child("Provider"))
-          .child(
-            h_flex()
-              .flex_1()
-              .min_w(0)
-              .flex_wrap()
-              .gap(6)
-              .children(
-                view.providers.map((entry) => {
-                  const on = entry.id === view.provider;
-                  return h_flex()
-                    .id(`provider-${entry.id}`)
-                    .h(H.sm)
-                    .px(8)
-                    .flex_none()
-                    .items_center()
-                    .rounded(RADIUS.control)
-                    .border_1()
-                    .border_color(on ? t.accent : t.border)
-                    .text_size(TEXT.label)
-                    .text_color(on ? t.foreground : t.muted)
-                    .cursor_pointer()
-                    .hover((style) => style.bg(t.hover))
-                    .on_click(() => {
-                      this.provider = entry.id;
-                      this.cx.notify();
-                    })
-                    .child(entry.word);
-                }),
-              ),
+        this.row(t, {
+          title: "Provider",
+          about: "What carries the tunnel.",
+          control: selectButton(
+            t,
+            "provider",
+            [div().child(shown)],
+            this.rec("provider"),
+            (at) => this.openPick(at, "provider", "provider", options, view.provider),
+            { bordered: true },
           ),
+        }),
       );
       if (view.note) blocks.push(note(t, view.note));
       blocks.push(
         h_flex()
           .py(6)
-          .child(link(t, "tunnel-start", starting ? "Starting…" : "Start tunnel", () => this.tunnelCall("start"), starting || this.remoteBusy !== null)),
+          .child(button(t, "tunnel-start", starting ? "Starting…" : "Start tunnel", { disabled: starting || this.remoteBusy !== null, onClick: () => this.tunnelCall("start") })),
       );
     }
     return v_flex().w_full().children(blocks);
@@ -1939,7 +2030,7 @@ export default class Settings extends View {
       .border_color(t.border)
       .cursor_pointer()
       .hover((style) => style.bg(t.hover))
-      .on_click(() => this.openPrompt(row))
+      .on_click(press(() => this.openPrompt(row)))
       .child(
         v_flex()
           .flex_1()

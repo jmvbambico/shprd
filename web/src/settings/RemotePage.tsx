@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, type ApiClient } from "../api/client";
 import type { SessionListDto, TunnelStatusDto } from "../gen";
+import { Dropdown } from "./Dropdown";
 import { reason } from "./useSettings";
 
 /** How a section's read stands. */
@@ -222,22 +223,19 @@ function TunnelBody({
         </button>
       ) : (
         <div className="tunnel-start">
-          <label className="field">
+          <div className="field">
             <span className="field-label">Provider</span>
-            <select
-              className="input"
+            <Dropdown
+              label="Provider"
               value={provider}
               disabled={starting}
-              onChange={(event) => onProvider(event.target.value)}
-            >
-              {status.providers.map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {entry.id}
-                  {entry.public_internet ? " (public internet)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+              options={status.providers.map((entry) => ({
+                id: entry.id,
+                label: entry.public_internet ? `${entry.id} (public internet)` : entry.id,
+              }))}
+              onPick={onProvider}
+            />
+          </div>
           {needsPassword ? (
             <p className="snote">
               A public tunnel needs a login password first: run `shprd web password set`.

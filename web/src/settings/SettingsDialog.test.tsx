@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsDialog } from "./SettingsDialog";
 import { NOTE_MS } from "./TasksPage";
 import { PROMPT_MS } from "./PromptsPage";
-import { json, prompt, PROMPTS, reads, refusal, scripted, settings, row } from "./testkit";
+import { json, prompt, PROMPTS, reads, refusal, ROSTER, scripted, settings, row } from "./testkit";
 
 function width(px: number) {
   Object.defineProperty(globalThis, "innerWidth", { value: px, configurable: true, writable: true });
@@ -70,14 +70,33 @@ describe("SettingsDialog: frame", () => {
 });
 
 describe("SettingsDialog: Agents", () => {
-  it("shows each role's picks with the layer that set them", async () => {
+  it("shows one compact row a role: its name, one line, and one model button", async () => {
     open(reads());
     const worker = await screen.findByRole("region", { name: "Worker" });
-    expect(within(worker).getByText("Claude Code")).toBeDefined();
-    expect(within(worker).getByText("sonnet")).toBeDefined();
-    expect(within(worker).getAllByText("you").length).toBeGreaterThan(0);
-    expect(within(worker).getByText("nothing sets it")).toBeDefined();
+    const button = within(worker).getByRole("button", { name: "Worker model" });
+    expect(button.textContent).toContain("Sonnet");
+    expect(within(worker).getByRole("button", { name: "Edit instructions" })).toBeDefined();
+    // No stacked Program / Model / Effort rows, and no "nothing sets it" captions.
+    expect(screen.queryByText("nothing sets it")).toBeNull();
+    expect(screen.queryByText("Program")).toBeNull();
     expect(screen.getByText("reads only")).toBeDefined();
+  });
+
+  it("the model button opens the menu on a click, with only the detected programs as tabs", async () => {
+    const roster = {
+      programs: [
+        ...ROSTER.programs,
+        { ...ROSTER.programs[1]!, id: "pi", name: "Pi", installed: false },
+      ],
+    };
+    open(reads({ "GET /api/roster": json(200, roster) }));
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
+    const tabs = within(screen.getByRole("tablist", { name: "Programs" })).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Claude Code", "Codex"]);
+    expect(screen.queryByRole("tab", { name: "Pi" })).toBeNull();
+    expect(screen.getByRole("option", { name: /Sonnet/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("radiogroup", { name: "Reasoning" })).toBeDefined();
   });
 
   it("writes a model pick at once, to your own settings", async () => {
@@ -89,16 +108,19 @@ describe("SettingsDialog: Agents", () => {
         }),
       }),
     );
-    await screen.findByText("Worker");
-    fireEvent.click(screen.getByRole("button", { name: "Change model (roles.worker.model)" }));
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
     fireEvent.click(await screen.findByRole("option", { name: /opus/ }));
-    await screen.findByText("Saved");
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
     const put = calls.find((call) => call.method === "PUT");
+    // the level the model does not take is dropped, the model is written
     expect(put?.body).toEqual({ key: "roles.worker.model", value: "opus" });
-    expect(await screen.findByText("opus")).toBeDefined();
+    await waitFor(() =>
+      expect(within(worker).getByRole("button", { name: "Worker model" }).textContent).toContain("opus"),
+    );
   });
 
-  it("writes to the repo's entry in the This repo scope, and Reset removes the key", async () => {
+  it("writes to the repo's entry in This repo, shows a repo badge, and Reset removes the key", async () => {
     const { calls } = open(
       reads({
         "GET /api/settings": json(
@@ -108,29 +130,90 @@ describe("SettingsDialog: Agents", () => {
         "PUT /api/settings": json(200, { outcome: "removed", settings: settings() }),
       }),
     );
-    await screen.findByText("Worker");
-    fireEvent.click(screen.getByRole("button", { name: "This repo" }));
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    expect(within(worker).getByText("repo")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Reset worker" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Applies to" }));
+    fireEvent.click(await screen.findByRole("option", { name: /This repo/ }));
     expect(screen.getByText(/Only this repository \(shprd\)/)).toBeDefined();
-    expect(screen.getAllByText(/inherited from/).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "Reset roles.worker.model" }));
-    await screen.findByText(/Removed: it inherits again/);
+    fireEvent.click(screen.getByRole("button", { name: "Reset worker" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
     const put = calls.find((call) => call.method === "PUT");
     expect(put?.body).toEqual({ key: "roles.worker.model", for_repo: true });
   });
 
-  it("shows the same-vendor refusal exactly as the API words it", async () => {
+  it("shows the same-vendor refusal exactly as the API words it, and writes no more of the choice", async () => {
     const words = "the reviewer (codex, openai) and the worker (codex, openai) share a vendor";
-    open(
+    const { calls } = open(
       reads({
         "PUT /api/settings": refusal(409, "refused", words),
       }),
     );
-    await screen.findByText("Worker");
-    fireEvent.click(screen.getByRole("button", { name: "Change program (roles.worker.agent)" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Codex/ }));
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "gpt-6" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use gpt-6/ }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(words);
     expect(alert.textContent).toContain("roles.worker.agent");
+    // the program was refused, so the model after it was never sent
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+  });
+
+  it("puts back what a choice already wrote when a later write of it is refused", async () => {
+    let puts = 0;
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": (call) => {
+          puts += 1;
+          const body = call.body as { key: string };
+          // the program goes through, the model after it is refused
+          return body.key === "roles.worker.model" && puts === 2
+            ? refusal(409, "refused", "that model is not one codex has")
+            : json(200, {
+                outcome: "stored",
+                settings: settings([row("roles.worker.agent", "codex", "you")]),
+              });
+        },
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use bad-id/ }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(3));
+    expect(calls.filter((call) => call.method === "PUT").map((call) => call.body)).toEqual([
+      { key: "roles.worker.agent", value: "codex" },
+      { key: "roles.worker.model", value: "bad-id" },
+      // the program goes back to what the layer held
+      { key: "roles.worker.agent", value: "claude" },
+    ]);
+    expect((await screen.findByRole("alert")).textContent).toContain("that model is not one codex has");
+  });
+
+  it("says so when putting a write back is refused too", async () => {
+    let puts = 0;
+    open(
+      reads({
+        "PUT /api/settings": (call) => {
+          puts += 1;
+          const body = call.body as { key: string };
+          if (body.key === "roles.worker.model") return refusal(409, "refused", "that model is not one codex has");
+          return puts === 3
+            ? refusal(409, "refused", "the worker and the reviewer share a vendor")
+            : json(200, { outcome: "stored", settings: settings([row("roles.worker.agent", "codex", "you")]) });
+        },
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use bad-id/ }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/back was refused too: the worker and the reviewer share a vendor/));
+    expect(screen.getByRole("alert").textContent).toContain("that model is not one codex has");
   });
 
   it("types an id for a program that lists no models", async () => {
@@ -139,11 +222,10 @@ describe("SettingsDialog: Agents", () => {
         "PUT /api/settings": json(200, { outcome: "stored", settings: settings() }),
       }),
     );
-    await screen.findByText("Reviewer");
-    fireEvent.click(screen.getByRole("button", { name: "Change model (roles.reviewer.model)" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Use an id typed" }));
-    fireEvent.change(screen.getByLabelText("Type an id"), { target: { value: "gpt-6-luna" } });
-    fireEvent.click(screen.getByRole("button", { name: "Use" }));
+    const reviewer = await screen.findByRole("region", { name: "Reviewer" });
+    fireEvent.click(await within(reviewer).findByRole("button", { name: "Reviewer model" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "gpt-6-luna" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use gpt-6-luna/ }));
     await waitFor(() =>
       expect(calls.find((call) => call.method === "PUT")?.body).toEqual({
         key: "roles.reviewer.model",
@@ -201,7 +283,8 @@ describe("SettingsDialog: Tasks", () => {
 
   it("writes a choice, a switch and a step as they are made", async () => {
     const { calls } = await tasks();
-    fireEvent.click(screen.getByRole("button", { name: "By itself" }));
+    fireEvent.click(screen.getByRole("button", { name: "When a task lands" }));
+    fireEvent.click(await screen.findByRole("option", { name: "By itself" }));
     await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1));
     fireEvent.click(screen.getByRole("switch", { name: "Ask for proof" }));
     await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2));

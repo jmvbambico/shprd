@@ -18,11 +18,15 @@ export const PROMPT_MS = 700;
 export function PromptsPage({
   client,
   state,
+  initial = null,
 }: {
   client: ApiClient;
   state: SettingsState;
+  /** A prompt to open on at once (a role's Edit instructions). */
+  initial?: string | null;
 }) {
   const [open, setOpen] = useState<PromptDto | null>(null);
+  const opened = useRef<string | null>(null);
   const rows = promptRows(state.prompts);
 
   async function openPrompt(id: string) {
@@ -33,6 +37,15 @@ export function PromptsPage({
       state.refuse(`prompts.${id}`, error);
     }
   }
+
+  useEffect(() => {
+    if (initial !== null && opened.current !== initial) {
+      opened.current = initial;
+      void openPrompt(initial);
+    }
+    // openPrompt only reads `client` and `state`'s notices.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial]);
 
   if (open !== null) {
     return (

@@ -22,7 +22,7 @@ import {
 } from "./model";
 import { PromptsPage } from "./PromptsPage";
 import { RemotePage } from "./RemotePage";
-import { Segmented } from "./rows";
+import { Dropdown } from "./Dropdown";
 import { TasksPage } from "./TasksPage";
 import { useSettings } from "./useSettings";
 
@@ -46,6 +46,8 @@ export function SettingsDialog({ client, onClose, onSignedOut, page: first }: Se
   // On a phone the page list is the first screen; a page is a second one.
   const [listing, setListing] = useState(first === undefined);
   const [scope, setScope] = useState<ScopeId>("you");
+  // The prompt an Edit instructions button opened the Prompts page on.
+  const [prompt, setPrompt] = useState<string | null>(null);
   const state = useSettings(client);
   const titleId = useId();
   const panel = useRef<HTMLDivElement>(null);
@@ -148,6 +150,11 @@ export function SettingsDialog({ client, onClose, onSignedOut, page: first }: Se
                 page={current.id}
                 scope={scope}
                 state={state}
+                prompt={prompt}
+                onEditInstructions={(id) => {
+                  setPrompt(id);
+                  pick("prompts");
+                }}
                 onSignedOut={onSignedOut}
               />
             </div>
@@ -163,19 +170,23 @@ function PageBody({
   page,
   scope,
   state,
+  prompt,
+  onEditInstructions,
   onSignedOut,
 }: {
   client: ApiClient;
   page: Page["id"];
   scope: ScopeId;
   state: ReturnType<typeof useSettings>;
+  prompt: string | null;
+  onEditInstructions: (promptId: string) => void;
   onSignedOut: () => void;
 }) {
   if (page === "remote") {
     return <RemotePage client={client} onSignedOut={onSignedOut} />;
   }
   if (page === "prompts") {
-    return <PromptsPage client={client} state={state} />;
+    return <PromptsPage client={client} state={state} initial={prompt} />;
   }
   if (state.settings === null) {
     return state.failure === null ? <p className="snote">Reading the settings…</p> : null;
@@ -183,7 +194,7 @@ function PageBody({
   return page === "tasks" ? (
     <TasksPage state={state} scope={scope} />
   ) : (
-    <AgentsPage state={state} scope={scope} />
+    <AgentsPage state={state} scope={scope} onEditInstructions={onEditInstructions} />
   );
 }
 
@@ -197,10 +208,6 @@ function Notices({ state }: { state: ReturnType<typeof useSettings> }) {
           <div className="refusal-key">{state.refusal.key}</div>
           <div className="refusal-text">{state.refusal.text}</div>
         </div>
-      ) : state.saved !== null ? (
-        <p className="saved" role="status">
-          {state.saved}
-        </p>
       ) : null}
       {checks.problems.map((problem) => (
         <p key={problem} className="problem">
@@ -234,17 +241,20 @@ function LevelBar({
     <div className="level">
       <div className="level-line">
         <span className="level-label">{LEVEL.label}</span>
-        <Segmented
+        <Dropdown
           label={LEVEL.label}
-          options={SCOPES.map((entry) => [entry.id, entry.word])}
           value={scope}
+          options={SCOPES.map((entry) => ({
+            id: entry.id,
+            label: entry.id === "repo" ? "This repo" : "Everywhere",
+            ...(entry.id === "repo" && repository !== null ? { hint: repository } : {}),
+          }))}
           onPick={(id) => {
             onScope(id as ScopeId);
             state.clearNotices();
           }}
         />
         <span className="grow" />
-        {repository !== null ? <span className="level-repo">{repository}</span> : null}
       </div>
       <p className="level-note">{levelNote(scope, repository)}</p>
     </div>
