@@ -33,6 +33,7 @@ import {
   nextLineProgram,
   otherCli,
   reviewBlocks,
+  reviewModelBlocks,
   repoKeysOf,
   roleSelection,
   selectionLabel,
@@ -280,6 +281,7 @@ function RoleRow({
                     disabled={loading || none}
                     taken={lines.filter((_, i) => i !== at).map((other) => other.agent ?? "")}
                     blocked={reviewBlocks(state.settings, state.roster, role.id, at)}
+                    blockedModels={reviewModelBlocks(state.settings, state.roster, role.id, at)}
                     onChange={(next) => void setLines(withLine(lines.length > 0 ? lines : [sel], at, next))}
                   />
                   <span className="x-slot">

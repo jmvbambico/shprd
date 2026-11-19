@@ -100,13 +100,13 @@ export default class ModelMenu extends View {
   }
 
   /** Why a program cannot be picked (another line has it, or a cross-vendor review would be refused), or null. */
-  blockedWhy(agent) {
+  blockedWhy(agent, model = null) {
     if ((this.p.taken ?? []).includes(agent)) return "another line has it";
-    return this.p.blocked?.[agent] ?? null;
+    return this.p.blocked?.[agent] ?? (model === null ? null : (this.p.blockedModels?.[`${agent}/${model}`] ?? null));
   }
 
   pickRow(row) {
-    if (this.blockedWhy(row.agent) !== null) return;
+    if (this.blockedWhy(row.agent, row.id) !== null) return;
     const menus = this.menus();
     if (row.typed) {
       const program = menus.programs[row.agent];
@@ -274,7 +274,7 @@ export default class ModelMenu extends View {
             .children(
               rows.map((x, i) =>
                 this.row(t, `m-${x.agent}-${x.id}`, () => this.pickRow(x))
-                  .when(this.blockedWhy(x.agent) !== null, (el) => el.opacity(0.5))
+                  .when(this.blockedWhy(x.agent, x.id) !== null, (el) => el.opacity(0.5))
                   .when(i === this.cursor && (this.input?.value?.() ?? "") !== "", (el) => el.bg(t.selected ?? t.hover))
                   .child(this.icon(x.agent, t))
                   .child(div().flex_1().min_w(0).truncate().child(x.name))

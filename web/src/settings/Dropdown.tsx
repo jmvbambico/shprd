@@ -149,6 +149,7 @@ export function ModelMenu({
   onNone,
   taken = [],
   blocked = {},
+  blockedModels = {},
 }: {
   label: string;
   shown: string;
@@ -161,6 +162,8 @@ export function ModelMenu({
   taken?: string[];
   /** Programs the line cannot pick, and why (a cross-vendor review rules them out). */
   blocked?: Record<string, string>;
+  /** `{ "program/model": reason }`: models of a multi-model program the line cannot pick. */
+  blockedModels?: Record<string, string>;
 }) {
   const { open, setOpen, root } = usePopover();
   const [tab, setTab] = useState<string | null>(null);
@@ -185,10 +188,13 @@ export function ModelMenu({
     setOpen(!open);
   }
 
-  const why = (agent: string) => (taken.includes(agent) ? "another line has it" : (blocked[agent] ?? null));
+  const why = (agent: string, model: string | null = null) =>
+    taken.includes(agent)
+      ? "another line has it"
+      : (blocked[agent] ?? (model === null ? null : (blockedModels[`${agent}/${model}`] ?? null)));
 
   function pickModel(row: { agent: string; id: string; typed: boolean }) {
-    if (why(row.agent) !== null) {
+    if (why(row.agent, row.id) !== null) {
       return;
     }
     const unlisted = row.typed
@@ -306,8 +312,8 @@ export function ModelMenu({
                 type="button"
                 role="option"
                 aria-selected={!row.typed && row.agent === sel.agent && row.id === sel.model}
-                aria-disabled={why(row.agent) !== null}
-                disabled={why(row.agent) !== null}
+                aria-disabled={why(row.agent, row.id) !== null}
+                disabled={why(row.agent, row.id) !== null}
                 className="pop-row"
                 onClick={() => pickModel(row)}
               >

@@ -63,6 +63,7 @@ import {
   plainRefusal,
   refused,
   reviewBlocks,
+  reviewModelBlocks,
   roleIds,
   roleOf,
   roles,
@@ -307,6 +308,19 @@ test("a reviewer's list rules out the worker's vendor, so the refusal cannot be 
   // No worker program, no rule.
   row.value = null;
   assert.deepEqual(reviewBlocks(document, ROSTER, "reviewer", 0), {});
+});
+
+test("a reviewer cannot pick a Pi model of the worker's vendor", () => {
+  const document = fixture("settings.json");
+  document.values.find((entry) => entry.key === "roles.worker.agent").value = "claude";
+  const roster = structuredClone(ROSTER);
+  const pi = roster.programs.find((program) => program.id === "pi");
+  pi.models = [
+    { id: "a", name: "A", vendor: "anthropic" },
+    { id: "o", name: "O", vendor: "openai" },
+  ];
+  assert.deepEqual(Object.keys(reviewModelBlocks(document, roster, "reviewer", 0)), ["pi/a"]);
+  assert.deepEqual(reviewModelBlocks(document, roster, "worker", 0), {});
 });
 
 test("a refusal is drawn in plain words, with no key path or backticks", () => {

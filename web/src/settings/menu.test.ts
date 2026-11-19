@@ -23,6 +23,7 @@ import {
   plainRefusal,
   restartNotice,
   reviewBlocks,
+  reviewModelBlocks,
   roleSelection,
   selectionLabel,
   selectionWrites,
@@ -205,6 +206,20 @@ describe("a reviewer's list and a refusal in plain words", () => {
     ]);
     expect(reviewBlocks(two, roster, "reviewer", 0)).toEqual({ claude: expect.any(String) });
     expect(reviewBlocks(two, roster, "reviewer", 1)).toEqual({});
+  });
+
+  it("rules out a multi-model program's models of the worker's vendor", () => {
+    const multi = {
+      programs: [
+        roster.programs[0]!,
+        { ...roster.programs[1]!, id: "pi", installed: true, multi_model: true, vendor: "pi", models: [
+          { id: "a", name: "A", vendor: "anthropic", efforts: [], default_effort: null, fast: false },
+          { id: "o", name: "O", vendor: "openai", efforts: [], default_effort: null, fast: false },
+        ] },
+      ],
+    };
+    expect(Object.keys(reviewModelBlocks(doc, multi as never, "reviewer", 0))).toEqual(["pi/a"]);
+    expect(reviewModelBlocks(doc, multi as never, "worker", 0)).toEqual({});
   });
 
   it("never adds a reviewer line a same-vendor rule would refuse", () => {

@@ -58,6 +58,7 @@ import {
   lineLabel,
   plainRefusal,
   reviewBlocks,
+  reviewModelBlocks,
   promptName,
   lineWrites,
   nextLineProgram,
@@ -713,6 +714,7 @@ export default class Settings extends View {
         allowNone: opts.allowNone === true,
         taken: opts.taken ?? [],
         blocked: opts.blocked ?? {},
+        blockedModels: opts.blockedModels ?? {},
       },
     });
   }
@@ -1546,6 +1548,7 @@ export default class Settings extends View {
     const id = `line-${role.id}-${at}`;
     const taken = lines.filter((_, i) => i !== at).map((line) => line.agent);
     const blocked = reviewBlocks(this.settings, this.roster, role.id, at);
+    const blockedModels = reviewModelBlocks(this.settings, this.roster, role.id, at);
     return h_flex()
       .w(LINE_W)
       .h(36)
@@ -1559,7 +1562,7 @@ export default class Settings extends View {
           id,
           [div().flex_1().min_w(0).truncate().child(this.roster === null ? "Loading…" : lineLabel(menus, sel, this.roster))],
           this.rec(id),
-          (point) => this.openModelMenu(point, `line:${role.id}:${at}`, sel, { taken, blocked }),
+          (point) => this.openModelMenu(point, `line:${role.id}:${at}`, sel, { taken, blocked, blockedModels }),
           { disabled, width: BTN_W },
         ),
       )

@@ -458,6 +458,29 @@ export function reviewBlocks(document, roster, roleId, at) {
 }
 
 /**
+ * The models of a multi-model program (`pi`) a reviewer's line `at` cannot pick,
+ * as `{ "<program>/<model id>": reason }`: the ones of the worker's vendor.
+ */
+export function reviewModelBlocks(document, roster, roleId, at) {
+  if (roleId !== "reviewer") return {};
+  const vendors = workerLines(document, "worker")
+    .map((line) => lineVendor(roster, line))
+    .filter(Boolean);
+  if (vendors.length === 0) return {};
+  const held = at === 0 ? vendors.slice(0, 1) : vendors;
+  const out = {};
+  for (const program of detectedPrograms(roster)) {
+    if (!program.multi_model) continue;
+    for (const model of program.models ?? []) {
+      if (model.vendor && held.every((vendor) => vendor === model.vendor)) {
+        out[`${program.id}/${model.id}`] = SAME_VENDOR;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * A refusal in plain words for the page: no key paths, no backticks. The
  * service's own sentence stays in `refused()`; this is what is drawn.
  */
