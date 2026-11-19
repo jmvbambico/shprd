@@ -32,6 +32,7 @@ import {
   newLine,
   nextLineProgram,
   otherCli,
+  reviewBlocks,
   repoKeysOf,
   roleSelection,
   selectionLabel,
@@ -255,6 +256,7 @@ function RoleRow({
                     sel={line}
                     disabled={loading || none}
                     taken={lines.filter((_, i) => i !== at).map((other) => other.agent ?? "")}
+                    blocked={reviewBlocks(state.settings, state.roster, role.id, at)}
                     onChange={(next) => void setLines(withLine(lines.length > 0 ? lines : [sel], at, next))}
                   />
                   <span className="x-slot">
@@ -273,10 +275,10 @@ function RoleRow({
                 </div>
               ))}
               {canAdd ? (
-                <div className="role-add">
+                <div className="role-add" data-single={lines.length < 2 ? "true" : "false"}>
                   <button type="button" className="link" aria-label="Add New +" disabled={busy} onClick={() => void addLine()}>
                     <span>Add New</span>
-                    <span className="x-slot" aria-hidden="true">
+                    <span className="x-slot add-slot" aria-hidden="true">
                       +
                     </span>
                   </button>

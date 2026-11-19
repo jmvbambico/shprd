@@ -428,6 +428,50 @@ export function lineVendor(roster, line) {
   return program.models.find((model) => model.id === line.model)?.vendor ?? null;
 }
 
+/** What a program the reviewer cannot use says on its row. */
+export const SAME_VENDOR = "same vendor as a Worker (s) line";
+
+/**
+ * The programs a reviewer's line `at` cannot pick, with the reason: every program
+ * whose own vendor is the worker's, so the cross-vendor rule can't be hit by a
+ * click. The first line is held to the worker's first line; a later line to all
+ * of the worker's lines (it reviews when the one before cannot). A program that
+ * runs several vendors' models (`pi`) is never blocked: it gets a model of
+ * another vendor. Only the `reviewer` role is held to the rule.
+ */
+export function reviewBlocks(document, roster, roleId, at) {
+  if (roleId !== "reviewer") return {};
+  const vendors = workerLines(document, "worker")
+    .map((line) => lineVendor(roster, line))
+    .filter(Boolean);
+  if (vendors.length === 0) return {};
+  const held = at === 0 ? vendors.slice(0, 1) : vendors;
+  const out = {};
+  for (const program of detectedPrograms(roster)) {
+    if (program.multi_model || !program.vendor) continue;
+    if (held.every((vendor) => vendor === program.vendor)) out[program.id] = SAME_VENDOR;
+  }
+  return out;
+}
+
+/**
+ * A refusal in plain words for the page: no key paths, no backticks. The
+ * service's own sentence stays in `refused()`; this is what is drawn.
+ */
+export function plainRefusal(text, roster = null) {
+  const raw = String(text ?? "");
+  const later = /later line `([^`]*)` and the worker `[^`]*` are both/.exec(raw);
+  if (later) {
+    const id = later[1].split("/")[0];
+    const name = programOf(roster, id)?.name ?? id.charAt(0).toUpperCase() + id.slice(1);
+    return `${name} is the same vendor as a Worker (s) line; pick another harness for review.`;
+  }
+  if (/the reviewer `[^`]*` and the worker `[^`]*` are both/.test(raw)) {
+    return "The first Reviewer (s) line is the same vendor as a Worker (s) line; pick another harness for review.";
+  }
+  return raw.replace(/^`[^`]*` (would be refused|cannot be stored): /, "").replace(/`/g, "");
+}
+
 /**
  * The model a program is given when it is picked without one: none for a program
  * with a default of its own, but a program that needs a provider (`pi`) has none,

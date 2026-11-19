@@ -219,7 +219,7 @@ export function press(fn) {
  * placed at the button. The press remembers the button's bounds (`rec.at`) so the
  * popup lands under it, as Shepherdr's model button does.
  */
-export function selectButton(t, id, content, rec, onOpen, { bordered = false, disabled = false, fill = false } = {}) {
+export function selectButton(t, id, content, rec, onOpen, { bordered = false, disabled = false, fill = false, width = null } = {}) {
   const el = h_flex()
     .id(id)
     .h(bordered ? 28 : 28)
@@ -228,6 +228,7 @@ export function selectButton(t, id, content, rec, onOpen, { bordered = false, di
     .gap(4)
     .when(fill, (e) => e.flex_1().w_full())
     .when(!fill, (e) => e.flex_none())
+    .when(width !== null, (e) => e.w(width))
     .min_w(0)
     .items_center()
     .rounded(RADIUS.control)

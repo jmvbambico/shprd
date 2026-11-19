@@ -20,7 +20,9 @@ import {
   menusOf,
   modelRows,
   otherCli,
+  plainRefusal,
   restartNotice,
+  reviewBlocks,
   roleSelection,
   selectionLabel,
   selectionWrites,
@@ -183,5 +185,33 @@ describe("a worker's program lines", () => {
     ]);
     const added = [...lines, { agent: "pi", model: null, effort: null, fast: false, perm: null }];
     expect(lineWrites(old, "reviewer", added).find((w) => w.key === "roles.reviewer.agents")?.value).toEqual(["claude|haiku|||", "pi||||"]);
+  });
+});
+
+describe("a reviewer's list and a refusal in plain words", () => {
+  const doc = settings([row("roles.worker.agent", "claude", "you")]);
+
+  it("rules out the worker's vendor, on every line of the reviewer", () => {
+    expect(Object.keys(reviewBlocks(doc, roster, "reviewer", 0))).toEqual(["claude"]);
+    expect(Object.keys(reviewBlocks(doc, roster, "reviewer", 1))).toEqual(["claude"]);
+    expect(reviewBlocks(doc, roster, "reviewer", 1).claude).toMatch(/same vendor as a Worker/);
+    expect(reviewBlocks(doc, roster, "worker", 0)).toEqual({});
+  });
+
+  it("holds the later lines to every worker line", () => {
+    const two = settings([
+      row("roles.worker.agent", "claude", "you"),
+      row("roles.worker.agents", ["codex"], "you"),
+    ]);
+    expect(reviewBlocks(two, roster, "reviewer", 0)).toEqual({ claude: expect.any(String) });
+    expect(reviewBlocks(two, roster, "reviewer", 1)).toEqual({});
+  });
+
+  it("says a same-vendor refusal in a sentence, with no key path or backticks", () => {
+    const later =
+      "`roles.reviewer.agents` would be refused: the reviewer `reviewer`'s later line `claude` and the worker `worker` are both anthropic, so the review is not cross-vendor: pick a program from another family";
+    const plain = plainRefusal(later, roster);
+    expect(plain).toBe("Claude Code is the same vendor as a Worker (s) line; pick another harness for review.");
+    expect(plainRefusal("`roles.x` would be refused: no `thing` here")).toBe("no thing here");
   });
 });

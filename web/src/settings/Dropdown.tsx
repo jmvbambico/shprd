@@ -91,6 +91,7 @@ export function Dropdown({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={label}
+        title={shown ?? current?.label ?? "Choose"}
         disabled={disabled}
         onClick={() => setOpen(!open)}
       >
@@ -147,6 +148,7 @@ export function ModelMenu({
   light = false,
   onNone,
   taken = [],
+  blocked = {},
 }: {
   label: string;
   shown: string;
@@ -157,6 +159,8 @@ export function ModelMenu({
   light?: boolean;
   onNone?: () => void;
   taken?: string[];
+  /** Programs the line cannot pick, and why (a cross-vendor review rules them out). */
+  blocked?: Record<string, string>;
 }) {
   const { open, setOpen, root } = usePopover();
   const [tab, setTab] = useState<string | null>(null);
@@ -181,7 +185,12 @@ export function ModelMenu({
     setOpen(!open);
   }
 
+  const why = (agent: string) => (taken.includes(agent) ? "another line has it" : (blocked[agent] ?? null));
+
   function pickModel(row: { agent: string; id: string; typed: boolean }) {
+    if (why(row.agent) !== null) {
+      return;
+    }
     const unlisted = row.typed
       ? { id: row.id, name: row.id, efforts: [], defaultEffort: null, fast: false }
       : undefined;
@@ -201,6 +210,7 @@ export function ModelMenu({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={label}
+        title={shown}
         disabled={disabled}
         onClick={openMenu}
       >
@@ -258,7 +268,8 @@ export function ModelMenu({
               <div className="mm-head">Programs</div>
               <div className="mm-list" role="listbox" aria-label="Programs">
                 {menus.order.map((id) => {
-                  const blocked = taken.includes(id);
+                  const reason = why(id);
+                  const blocked = reason !== null;
                   return (
                     <button
                       key={id}
@@ -275,7 +286,7 @@ export function ModelMenu({
                       }}
                     >
                       <span className="pop-row-label">{menus.programs[id]!.name}</span>
-                      {blocked ? <span className="pop-row-hint">another line has it</span> : null}
+                      {reason !== null ? <span className="pop-row-hint">{reason}</span> : null}
                       <span className="pop-check" aria-hidden="true">
                         {id === active ? "✓" : ""}
                       </span>
@@ -295,6 +306,8 @@ export function ModelMenu({
                 type="button"
                 role="option"
                 aria-selected={!row.typed && row.agent === sel.agent && row.id === sel.model}
+                aria-disabled={why(row.agent) !== null}
+                disabled={why(row.agent) !== null}
                 className="pop-row"
                 onClick={() => pickModel(row)}
               >

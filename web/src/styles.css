@@ -3480,6 +3480,10 @@ textarea.input {
 .pop-button {
   display: inline-flex;
   align-items: center;
+  justify-content: space-between;
+  /* compact: just wide enough for "Select Harness ⌄"; a longer label is cut (its full text is the title) */
+  width: 132px;
+  max-width: 100%;
   gap: 4px;
   height: 28px;
   padding: 0 5px 0 8px;
@@ -3508,6 +3512,12 @@ textarea.input {
 .pop-button:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.pop-button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pop-chevron {
@@ -3747,34 +3757,27 @@ textarea.input {
   flex: none;
   flex-direction: column;
   align-items: flex-start;
-  width: 340px;
+  width: 178px;
   max-width: 100%;
 }
 
 .role-line-row {
   display: flex;
   align-items: center;
-  width: 340px;
+  justify-content: flex-end;
+  width: 178px;
   max-width: 100%;
   min-height: 36px;
 }
 
 .role-line-row > .pop {
   display: flex;
-  flex: 1;
+  flex: none;
   min-width: 0;
 }
 
 .role-line-row > .pop > .pop-button {
-  flex: 1;
-  min-width: 0;
-  justify-content: space-between;
-}
-
-.role-line-row > .pop > .pop-button > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: none;
 }
 
 .x-slot {
@@ -3789,9 +3792,19 @@ textarea.input {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  width: 340px;
+  width: 178px;
   max-width: 100%;
   height: 28px;
+}
+
+/* one line has no ×: the "+" sits in the ⌄'s column (button padding 5 + 12px caret), one × slot in */
+.role-add[data-single="true"] {
+  box-sizing: border-box;
+  padding-right: 24px;
+}
+
+.role-add[data-single="true"] .add-slot {
+  width: 22px;
 }
 
 .role-add .link {

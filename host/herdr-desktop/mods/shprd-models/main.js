@@ -15,7 +15,7 @@
 // Two modes, by props:
 //
 // - `{ mode: "models", key, current: { agent, model, effort, fast, perm }, menus,
-//   icons, overlay, light?, allowNone?, taken? }` — the model menu. `menus` is
+//   icons, overlay, light?, allowNone?, taken?, blocked? }` — the model menu. `menus` is
 //   `menusOf(roster)`: every program the roster says is installed, listed in a
 //   dropdown at the top (a row of tabs does not scale to many CLIs). Every change
 //   goes back at once as shared `shprd.settings.pick` = `{ key, field:
@@ -23,7 +23,8 @@
 //   program-and-model choice only (the reviewer's fallback): no Reasoning, Fast or
 //   Permissions, and the menu closes on a pick; `allowNone` adds a "None" row, which
 //   answers `value: null`; `taken` is the programs another line of the same role
-//   already runs, shown but not pickable.
+//   already runs, shown but not pickable; `blocked` is `{ program: reason }`, the same for
+//   programs a cross-vendor review rules out.
 // - `{ mode: "pick", key, field, options: [{ id, label, hint? }], current, overlay }`
 //   — a plain list with a check on the current one; the choice goes back as
 //   `{ key, field, value, at }`.
@@ -98,7 +99,14 @@ export default class ModelMenu extends View {
     setShared(PICK, { key: this.p.key, field: "selection", value: { ...this.sel }, at: Date.now() });
   }
 
+  /** Why a program cannot be picked (another line has it, or a cross-vendor review would be refused), or null. */
+  blockedWhy(agent) {
+    if ((this.p.taken ?? []).includes(agent)) return "another line has it";
+    return this.p.blocked?.[agent] ?? null;
+  }
+
   pickRow(row) {
+    if (this.blockedWhy(row.agent) !== null) return;
     const menus = this.menus();
     if (row.typed) {
       const program = menus.programs[row.agent];
@@ -116,7 +124,7 @@ export default class ModelMenu extends View {
 
   /** The program dropdown's choice: that program's models are listed. */
   pickProgram(agent) {
-    if ((this.p.taken ?? []).includes(agent)) return;
+    if (this.blockedWhy(agent) !== null) return;
     this.tab = agent;
     this.progOpen = false;
     this.input.set_value("");
@@ -177,7 +185,6 @@ export default class ModelMenu extends View {
 
     // The program is a dropdown, not a row of tabs: it holds as many CLIs as the
     // machine has. Opened, its list takes the models' place below the search.
-    const taken = this.p.taken ?? [];
     const programSelect = h_flex()
       .h(PROGRAM)
       .flex_none()
@@ -221,11 +228,11 @@ export default class ModelMenu extends View {
       .children(
         menus.order.map((a) =>
           this.row(t, `program-${a}`, () => this.pickProgram(a))
-            .when(taken.includes(a), (el) => el.opacity(0.5))
+            .when(this.blockedWhy(a) !== null, (el) => el.opacity(0.5))
             .child(this.icon(a, t))
             .child(div().flex_1().min_w(0).truncate().child(menus.programs[a].name))
-            .when(taken.includes(a), (el) =>
-              el.child(div().flex_none().text_size(11).text_color(t.dim).child("another line has it")),
+            .when(this.blockedWhy(a) !== null, (el) =>
+              el.child(div().flex_none().text_size(11).text_color(t.dim).child(this.blockedWhy(a))),
             )
             .child(this.check(t, a === this.tab)),
         ),
@@ -267,6 +274,7 @@ export default class ModelMenu extends View {
             .children(
               rows.map((x, i) =>
                 this.row(t, `m-${x.agent}-${x.id}`, () => this.pickRow(x))
+                  .when(this.blockedWhy(x.agent) !== null, (el) => el.opacity(0.5))
                   .when(i === this.cursor && (this.input?.value?.() ?? "") !== "", (el) => el.bg(t.selected ?? t.hover))
                   .child(this.icon(x.agent, t))
                   .child(div().flex_1().min_w(0).truncate().child(x.name))

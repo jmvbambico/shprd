@@ -160,8 +160,8 @@ describe("SettingsDialog: Agents", () => {
     fireEvent.click(await screen.findByRole("option", { name: /Use gpt-6/ }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(words);
-    // the old model is written out first, and that is refused, so nothing after it was sent
-    expect(alert.textContent).toContain("roles.worker.model");
+    // the key path is not drawn, and the old model is written out first and refused, so nothing after it was sent
+    expect(alert.textContent).not.toContain("roles.");
     expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
   });
 

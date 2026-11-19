@@ -56,6 +56,8 @@ import {
   CHAIN_NOTE,
   hasLines,
   lineLabel,
+  plainRefusal,
+  reviewBlocks,
   promptName,
   lineWrites,
   nextLineProgram,
@@ -102,9 +104,17 @@ import {
 } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, tone } from "./lib/tokens.js";
 
-/** The width of every program button's row (gutter, button, × slot) and of the × slot: one grid for every line of every role. */
-const LINE_W = 340;
+/**
+ * One compact grid for every line of every role: a gutter, a button just wide enough
+ * for "Select Harness ⌄" (a longer label is cut with an ellipsis), and the × slot.
+ * Every dropdown in the window is as wide as the button.
+ */
+const BTN_W = 132;
+const GUTTER_W = 22;
 const X_SLOT = 24;
+/** The button's right padding (5) and its 12 px ⌄: a "+" centred in this lines up with the caret. */
+const CARET_SLOT = 22;
+const LINE_W = GUTTER_W + BTN_W + X_SLOT;
 
 /** How often the window re-reads the service, so another window's write shows. */
 const FLOOR_MS = 10_000;
@@ -702,6 +712,7 @@ export default class Settings extends View {
         light: opts.light === true,
         allowNone: opts.allowNone === true,
         taken: opts.taken ?? [],
+        blocked: opts.blocked ?? {},
       },
     });
   }
@@ -1390,10 +1401,10 @@ export default class Settings extends View {
             selectButton(
               t,
               "level",
-              [icon(this.scope === "repo" ? "branch" : "globe", 14, t.muted), div().child(word)],
+              [icon(this.scope === "repo" ? "branch" : "globe", 14, t.muted), div().flex_1().min_w(0).truncate().child(word)],
               rec,
               (at) => this.openPick(at, "scope", "pick", options, this.scope),
-              { bordered: true },
+              { bordered: true, width: BTN_W },
             ),
           )
           .child(div().flex_1())
@@ -1466,8 +1477,7 @@ export default class Settings extends View {
       .rounded(RADIUS.card)
       .border_1()
       .border_color(colors.red)
-      .child(div().text_size(TEXT.id).text_color(t.dim).child(this.refusal.key ?? "refused"))
-      .child(div().text_size(TEXT.label).text_color(colors.red).child(this.refusal.text));
+      .child(div().text_size(TEXT.label).text_color(colors.red).child(plainRefusal(this.refusal.text, this.roster)));
   }
 
   /** A page's title, at the top of its body (Shepherdr's `TEXT.title`). */
@@ -1509,6 +1519,7 @@ export default class Settings extends View {
       .h(36)
       .flex_none()
       .items_center()
+      .justify_end()
       .child(
         selectButton(
           t,
@@ -1516,7 +1527,7 @@ export default class Settings extends View {
           [div().flex_1().min_w(0).truncate().child(disabled && this.roster !== null ? "No program found" : word)],
           this.rec(`model-${role.id}`),
           (at) => this.openModelMenu(at, `role:${role.id}`, roleSelection(this.settings, role.id)),
-          { disabled, fill: true },
+          { disabled, width: BTN_W },
         ),
       )
       .child(div().w(X_SLOT).flex_none());
@@ -1534,11 +1545,13 @@ export default class Settings extends View {
     const disabled = this.roster === null || menus.order.length === 0;
     const id = `line-${role.id}-${at}`;
     const taken = lines.filter((_, i) => i !== at).map((line) => line.agent);
+    const blocked = reviewBlocks(this.settings, this.roster, role.id, at);
     return h_flex()
       .w(LINE_W)
       .h(36)
       .flex_none()
       .items_center()
+      .justify_end()
       .when(lines.length > 1, (el) => el.child(this.chainGutter(t, role.id, at, lines.length)))
       .child(
         selectButton(
@@ -1546,8 +1559,8 @@ export default class Settings extends View {
           id,
           [div().flex_1().min_w(0).truncate().child(this.roster === null ? "Loading…" : lineLabel(menus, sel, this.roster))],
           this.rec(id),
-          (point) => this.openModelMenu(point, `line:${role.id}:${at}`, sel, { taken }),
-          { disabled, fill: true },
+          (point) => this.openModelMenu(point, `line:${role.id}:${at}`, sel, { taken, blocked }),
+          { disabled, width: BTN_W },
         ),
       )
       .child(
@@ -1574,7 +1587,7 @@ export default class Settings extends View {
       div().id(id).w(2).flex_1().when(show, (el) => el.bg(t.border));
     return v_flex()
       .id(`chain-${roleId}-${at}`)
-      .w(22)
+      .w(GUTTER_W)
       .h(36)
       .flex_none()
       .items_center()
@@ -1617,7 +1630,12 @@ export default class Settings extends View {
             .flex_none()
             .items_center()
             .justify_end()
-            .child(addNew(t, `add-line-${role.id}`, () => this.addLine(role.id), this.writing !== null, X_SLOT)),
+            // With one line there is no ×: the "+" sits in the ⌄'s column (the button's own
+            // right padding and chevron), one × slot in from the edge. With more it is in the × slot.
+            .pr(shown.length > 1 ? 0 : X_SLOT)
+            .child(
+              addNew(t, `add-line-${role.id}`, () => this.addLine(role.id), this.writing !== null, shown.length > 1 ? X_SLOT : CARET_SLOT),
+            ),
         ),
       );
   }
@@ -1826,10 +1844,10 @@ export default class Settings extends View {
         control: selectButton(
           t,
           `wf-${row.key}`,
-          [div().child(shown)],
+          [div().flex_1().min_w(0).truncate().child(shown)],
           this.rec(`wf-${row.key}`),
           (at) => this.openPick(at, `wf:${row.key}`, "choice", options, String(row.value)),
-          { bordered: true, disabled: this.writing !== null },
+          { bordered: true, disabled: this.writing !== null, width: BTN_W },
         ),
         scope,
       });
@@ -1999,10 +2017,10 @@ export default class Settings extends View {
           control: selectButton(
             t,
             "provider",
-            [div().child(shown)],
+            [div().flex_1().min_w(0).truncate().child(shown)],
             this.rec("provider"),
             (at) => this.openPick(at, "provider", "provider", options, view.provider),
-            { bordered: true },
+            { bordered: true, width: BTN_W },
           ),
         }),
       );
