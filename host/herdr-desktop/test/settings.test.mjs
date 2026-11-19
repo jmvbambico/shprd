@@ -59,7 +59,11 @@ import {
   programOf,
   promptLine,
   promptRows,
+  nextLineProgram,
+  plainRefusal,
   refused,
+  reviewBlocks,
+  reviewModelBlocks,
   roleIds,
   roleOf,
   roles,
@@ -286,6 +290,51 @@ test("a refusal is the service's sentence, kept word for word", () => {
   assert.equal(shown.text, reason(error));
   // A transport failure says what it can, and never nothing.
   assert.match(refused("roles.worker.agent", new Error("the service did not answer")).text, /did not answer/);
+});
+
+test("a reviewer's list rules out the worker's vendor, so the refusal cannot be clicked into", () => {
+  const document = fixture("settings.json");
+  const row = document.values.find((entry) => entry.key === "roles.worker.agent");
+  row.value = "claude";
+  const first = reviewBlocks(document, ROSTER, "reviewer", 0);
+  assert.deepEqual(Object.keys(first), ["claude"]);
+  assert.match(first.claude, /same vendor as a Worker/);
+  assert.deepEqual(Object.keys(reviewBlocks(document, ROSTER, "reviewer", 1)), ["claude"]);
+  // Pi runs several vendors' models, so it is never ruled out; other roles are not held to the rule.
+  assert.equal(reviewBlocks(document, ROSTER, "reviewer", 0).pi, undefined);
+  assert.deepEqual(reviewBlocks(document, ROSTER, "worker", 0), {});
+  // Add New never picks a program the rule rules out: the reviewer's second line is not claude.
+  assert.equal(nextLineProgram(document, ROSTER, "reviewer"), "codex");
+  // No worker program, no rule.
+  row.value = null;
+  assert.deepEqual(reviewBlocks(document, ROSTER, "reviewer", 0), {});
+});
+
+test("a reviewer cannot pick a Pi model of the worker's vendor", () => {
+  const document = fixture("settings.json");
+  document.values.find((entry) => entry.key === "roles.worker.agent").value = "claude";
+  const roster = structuredClone(ROSTER);
+  const pi = roster.programs.find((program) => program.id === "pi");
+  pi.models = [
+    { id: "a", name: "A", vendor: "anthropic" },
+    { id: "o", name: "O", vendor: "openai" },
+  ];
+  assert.deepEqual(Object.keys(reviewModelBlocks(document, roster, "reviewer", 0)), ["pi/a"]);
+  assert.deepEqual(reviewModelBlocks(document, roster, "worker", 0), {});
+});
+
+test("a refusal is drawn in plain words, with no key path or backticks", () => {
+  const later =
+    "`roles.reviewer.agents` would be refused: the reviewer `reviewer`'s later line `claude` and the worker `worker` are both anthropic, so the review is not cross-vendor: pick a program from another family";
+  assert.equal(
+    plainRefusal(later, ROSTER),
+    "Claude Code is the same vendor as a Worker (s) line; pick another harness for review.",
+  );
+  const first =
+    "`roles.reviewer.agent` would be refused: the reviewer `reviewer` and the worker `worker` are both anthropic, so the review is not cross-vendor: set roles.reviewer.agent to a program from another family";
+  assert.match(plainRefusal(first, ROSTER), /^The first Reviewer \(s\) line is the same vendor/);
+  assert.equal(plainRefusal("`roles.x` would be refused: no `thing` here"), "no thing here");
+  assert.doesNotMatch(plainRefusal(later), /`|roles\./);
 });
 
 test("a write says what it did", () => {

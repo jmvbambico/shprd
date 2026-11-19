@@ -23,6 +23,7 @@ import {
 import { PromptsPage } from "./PromptsPage";
 import { RemotePage } from "./RemotePage";
 import { Dropdown } from "./Dropdown";
+import { plainRefusal } from "./menu";
 import { TasksPage } from "./TasksPage";
 import { useSettings } from "./useSettings";
 
@@ -194,8 +195,7 @@ function Notices({ state }: { state: ReturnType<typeof useSettings> }) {
     <div className="notices">
       {state.refusal !== null ? (
         <div className="refusal" role="alert">
-          <div className="refusal-key">{state.refusal.key}</div>
-          <div className="refusal-text">{state.refusal.text}</div>
+          <div className="refusal-text">{plainRefusal(state.refusal.text, state.roster)}</div>
         </div>
       ) : null}
       {checks.problems.map((problem) => (

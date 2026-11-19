@@ -32,6 +32,8 @@ import {
   newLine,
   nextLineProgram,
   otherCli,
+  reviewBlocks,
+  reviewModelBlocks,
   repoKeysOf,
   roleSelection,
   selectionLabel,
@@ -239,65 +241,7 @@ function RoleRow({
               Reset
             </button>
           ) : null}
-          {chained ? (
-            <div className="role-lines" data-chain={lines.length > 1 ? "true" : "false"}>
-              {(lines.length > 0 ? lines : [sel]).map((line, at) => (
-                <div className="role-line-row" key={at}>
-                  {lines.length > 1 ? (
-                    <span className="chain-gutter" aria-hidden="true" data-step={at + 1}>
-                      <span className="chain-dot">{at + 1}</span>
-                    </span>
-                  ) : null}
-                  <ModelMenu
-                    label={`${role.title} program ${at + 1}`}
-                    shown={loading ? "Loading…" : none ? "No program found" : lineLabel(menus, line, state.roster)}
-                    menus={menus}
-                    sel={line}
-                    disabled={loading || none}
-                    taken={lines.filter((_, i) => i !== at).map((other) => other.agent ?? "")}
-                    onChange={(next) => void setLines(withLine(lines.length > 0 ? lines : [sel], at, next))}
-                  />
-                  <span className="x-slot">
-                    {lines.length > 1 ? (
-                      <button
-                        type="button"
-                        className="link"
-                        aria-label={`Remove program ${at + 1}`}
-                        disabled={busy}
-                        onClick={() => void setLines(withLine(lines, at, null))}
-                      >
-                        ×
-                      </button>
-                    ) : null}
-                  </span>
-                </div>
-              ))}
-              {canAdd ? (
-                <div className="role-add">
-                  <button type="button" className="link" aria-label="Add New +" disabled={busy} onClick={() => void addLine()}>
-                    <span>Add New</span>
-                    <span className="x-slot" aria-hidden="true">
-                      +
-                    </span>
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <div className="role-lines">
-              <div className="role-line-row">
-                <ModelMenu
-                  label={`${role.title} model`}
-                  shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
-                  menus={menus}
-                  sel={sel}
-                  disabled={loading || none}
-                  onChange={(next) => void choose(next)}
-                />
-                <span className="x-slot" />
-              </div>
-            </div>
-          )}
+          {/* buttons beside the lines sit to their left, so the ⌄ column never moves */}
           {other !== null ? (
             <button
               type="button"
@@ -320,6 +264,67 @@ function RoleRow({
               Remove
             </button>
           ) : null}
+          {chained ? (
+            <div className="role-lines" data-chain={lines.length > 1 ? "true" : "false"}>
+              {(lines.length > 0 ? lines : [sel]).map((line, at) => (
+                <div className="role-line-row" key={at}>
+                  {lines.length > 1 ? (
+                    <span className="chain-gutter" aria-hidden="true" data-step={at + 1}>
+                      <span className="chain-dot">{at + 1}</span>
+                    </span>
+                  ) : null}
+                  <ModelMenu
+                    label={`${role.title} program ${at + 1}`}
+                    shown={loading ? "Loading…" : none ? "No program found" : lineLabel(menus, line, state.roster)}
+                    menus={menus}
+                    sel={line}
+                    disabled={loading || none}
+                    taken={lines.filter((_, i) => i !== at).map((other) => other.agent ?? "")}
+                    blocked={reviewBlocks(state.settings, state.roster, role.id, at)}
+                    blockedModels={reviewModelBlocks(state.settings, state.roster, role.id, at)}
+                    onChange={(next) => void setLines(withLine(lines.length > 0 ? lines : [sel], at, next))}
+                  />
+                  <span className="x-slot">
+                    {lines.length > 1 ? (
+                      <button
+                        type="button"
+                        className="link"
+                        aria-label={`Remove program ${at + 1}`}
+                        disabled={busy}
+                        onClick={() => void setLines(withLine(lines, at, null))}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+              ))}
+              {canAdd ? (
+                <div className="role-add" data-single={lines.length < 2 ? "true" : "false"}>
+                  <button type="button" className="link" aria-label="Add New +" disabled={busy} onClick={() => void addLine()}>
+                    <span>Add New</span>
+                    <span className="x-slot add-slot" aria-hidden="true">
+                      +
+                    </span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="role-lines">
+              <div className="role-line-row">
+                <ModelMenu
+                  label={`${role.title} model`}
+                  shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
+                  menus={menus}
+                  sel={sel}
+                  disabled={loading || none}
+                  onChange={(next) => void choose(next)}
+                />
+                <span className="x-slot" />
+              </div>
+            </div>
+          )}
         </div>
       </div>
       {showNotice ? (

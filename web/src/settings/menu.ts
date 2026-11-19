@@ -394,8 +394,11 @@ export function lineWrites(document: SettingsDto | null, roleId: string, lines: 
 
 /** The program a "+" adds a line for: the first detected program no line has, or null. */
 export function nextLineProgram(document: SettingsDto | null, roster: RosterDto | null, roleId = "worker"): string | null {
-  const used = new Set(workerLines(document, roleId).map((line) => line.agent));
-  return detectedPrograms(roster).find((program) => !used.has(program.id))?.id ?? null;
+  const lines = workerLines(document, roleId);
+  const used = new Set(lines.map((line) => line.agent));
+  // A reviewer's new line is never a program its own rule would refuse.
+  const blocked = reviewBlocks(document, roster, roleId, lines.length);
+  return detectedPrograms(roster).find((program) => !used.has(program.id) && !(program.id in blocked))?.id ?? null;
 }
 
 /**
@@ -411,6 +414,96 @@ export function lineVendor(roster: RosterDto | null, line: Selection): string | 
     return program.vendor ?? null;
   }
   return program.models.find((model) => model.id === line.model)?.vendor ?? null;
+}
+
+/** What a program the reviewer cannot use says on its row. */
+export const SAME_VENDOR = "same vendor as a Worker (s) line";
+
+/**
+ * The programs a reviewer's line `at` cannot pick, with the reason: every program
+ * whose own vendor is the worker's, so the cross-vendor rule can't be hit by a
+ * click. The first line is held to the worker's first line; a later line to all
+ * of the worker's lines (it reviews when the one before cannot). A program that
+ * runs several vendors' models (`pi`) is never blocked: it gets a model of
+ * another vendor. Only the `reviewer` role is held to the rule.
+ */
+export function reviewBlocks(
+  document: SettingsDto | null,
+  roster: RosterDto | null,
+  roleId: string,
+  at: number,
+): Record<string, string> {
+  if (roleId !== "reviewer") {
+    return {};
+  }
+  const vendors = workerLines(document, "worker")
+    .map((line) => lineVendor(roster, line))
+    .filter((vendor): vendor is string => Boolean(vendor));
+  if (vendors.length === 0) {
+    return {};
+  }
+  const held = at === 0 ? vendors.slice(0, 1) : vendors;
+  const out: Record<string, string> = {};
+  for (const program of detectedPrograms(roster)) {
+    if (program.multi_model || !program.vendor) {
+      continue;
+    }
+    if (held.every((vendor) => vendor === program.vendor)) {
+      out[program.id] = SAME_VENDOR;
+    }
+  }
+  return out;
+}
+
+/**
+ * The models of a multi-model program (`pi`) a reviewer's line `at` cannot pick,
+ * as `{ "<program>/<model id>": reason }`: the ones of the worker's vendor.
+ */
+export function reviewModelBlocks(
+  document: SettingsDto | null,
+  roster: RosterDto | null,
+  roleId: string,
+  at: number,
+): Record<string, string> {
+  if (roleId !== "reviewer") {
+    return {};
+  }
+  const vendors = workerLines(document, "worker")
+    .map((line) => lineVendor(roster, line))
+    .filter((vendor): vendor is string => Boolean(vendor));
+  if (vendors.length === 0) {
+    return {};
+  }
+  const held = at === 0 ? vendors.slice(0, 1) : vendors;
+  const out: Record<string, string> = {};
+  for (const program of detectedPrograms(roster)) {
+    if (!program.multi_model) {
+      continue;
+    }
+    for (const model of program.models ?? []) {
+      if (model.vendor && held.every((vendor) => vendor === model.vendor)) {
+        out[`${program.id}/${model.id}`] = SAME_VENDOR;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A refusal in plain words for the page: no key paths, no backticks. The
+ * service's own sentence stays in the state; this is what is drawn.
+ */
+export function plainRefusal(text: string, roster: RosterDto | null = null): string {
+  const later = /later line `([^`]*)` and the worker `[^`]*` are both/.exec(text);
+  if (later) {
+    const id = later[1]!.split("/")[0]!;
+    const name = programOf(roster, id)?.name ?? id.charAt(0).toUpperCase() + id.slice(1);
+    return `${name} is the same vendor as a Worker (s) line; pick another harness for review.`;
+  }
+  if (/the reviewer `[^`]*` and the worker `[^`]*` are both/.test(text)) {
+    return "The first Reviewer (s) line is the same vendor as a Worker (s) line; pick another harness for review.";
+  }
+  return text.replace(/^`[^`]*` (would be refused|cannot be stored): /, "").replace(/`/g, "");
 }
 
 /**
