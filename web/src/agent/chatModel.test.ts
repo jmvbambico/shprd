@@ -28,6 +28,11 @@ describe("fold", () => {
     expect(two.cursor).toBe("c2");
   });
 
+  it("keeps what the service told the agent as news, not as the person's words", () => {
+    const held = fold(null, page({ messages: [say("T7 needs you: pick one", "news")] }));
+    expect(held.messages[0]?.role).toBe("news");
+  });
+
   it("starts over when the agent began a new session", () => {
     const one = fold(null, page({ messages: [say("old")] }));
     const two = fold(one, page({ session: "s2", messages: [say("new")] }));

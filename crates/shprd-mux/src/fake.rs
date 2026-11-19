@@ -109,6 +109,10 @@ struct Inner {
     /// shprd's marks on spaces: mark -> space id.
     marks: HashMap<String, WorkspaceId>,
     spaces: Vec<Workspace>,
+    /// The folder each space was made for.
+    folders: HashMap<WorkspaceId, PathBuf>,
+    /// Coordinators, which keep a tab: listed by [`Host::list_coordinators`].
+    coordinators: Vec<(Tab, AgentMeta)>,
     /// Tabs with the space that owns each, so listing stays scoped.
     tabs: Vec<(WorkspaceId, Tab)>,
     /// Headless agents: terminals with no tab and no space, by handle.
@@ -160,6 +164,8 @@ impl Inner {
             calls: Vec::new(),
             marks: HashMap::new(),
             spaces: Vec::new(),
+            folders: HashMap::new(),
+            coordinators: Vec::new(),
             tabs: Vec::new(),
             agents: Vec::new(),
             panes: BTreeSet::new(),
@@ -585,6 +591,15 @@ impl FakeMux {
         }
     }
 
+    /// A space a person or an older shprd made: `name`, open on `folder`, with
+    /// no mark.
+    pub fn add_space(&self, name: &str, folder: &Path) -> WorkspaceId {
+        let space = self.create_space(name, folder).ok();
+        space
+            .map(|space| space.id)
+            .unwrap_or_else(|| WorkspaceId::new("none"))
+    }
+
     /// Queue an event for the next `subscribe` call.
     pub fn push_event(&self, event: MuxEvent) {
         if let Ok(mut inner) = self.lock() {
@@ -636,6 +651,55 @@ impl Host for FakeMux {
         Ok(())
     }
 
+    fn rename_space(&self, space: &WorkspaceId, name: &str) -> Result<()> {
+        let mut inner = self.lock()?;
+        match inner.spaces.iter_mut().find(|found| &found.id == space) {
+            Some(found) => {
+                found.name = name.to_string();
+                Ok(())
+            }
+            None => Err(MuxError::not_found("space", space)),
+        }
+    }
+
+    fn spaces_in_folder(&self, folder: &Path) -> Result<Vec<Workspace>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .spaces
+            .iter()
+            .filter(|space| inner.folders.get(&space.id).is_some_and(|at| at == folder))
+            .cloned()
+            .collect())
+    }
+
+    fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .coordinators
+            .iter()
+            .enumerate()
+            .filter(|(_, (tab, _))| inner.tabs.iter().any(|(_, kept)| kept.id == tab.id))
+            .map(|(order, (tab, meta))| {
+                let state = inner
+                    .states
+                    .get(&tab.root_pane)
+                    .copied()
+                    .unwrap_or(AgentState::Idle);
+                LiveAgent {
+                    live: state != AgentState::Done,
+                    state,
+                    tab: tab.clone(),
+                    task: None,
+                    role: AgentRole::Coordinator,
+                    program: meta.program.clone(),
+                    space: meta.space.clone(),
+                    started_ms: Some(order as u64 + 1),
+                    ended_ms: None,
+                }
+            })
+            .collect())
+    }
+
     fn list_spaces(&self) -> Result<Vec<Workspace>> {
         let mut inner = self.lock()?;
         inner.calls.push(Call::ListSpaces);
@@ -677,6 +741,7 @@ impl Host for FakeMux {
             name: name.to_string(),
         };
         inner.spaces.push(space.clone());
+        inner.folders.insert(space.id.clone(), cwd.to_path_buf());
         if self.starter_tab {
             inner.new_tab(&space.id, "1");
         }
@@ -841,13 +906,26 @@ impl Host for FakeMux {
                     launch.parent.cloned(),
                 ));
             }
-            return self.spawn(
+            let tab = self.spawn(
                 launch.space,
                 launch.title,
                 launch.argv,
                 launch.env,
                 launch.cwd,
-            );
+            )?;
+            if launch.role == AgentRole::Coordinator {
+                let mut inner = self.lock()?;
+                inner.coordinators.push((
+                    tab.clone(),
+                    AgentMeta {
+                        task: None,
+                        role: launch.role,
+                        program: launch.program.to_string(),
+                        space: launch.space.clone(),
+                    },
+                ));
+            }
+            return Ok(tab);
         }
         let mut inner = self.lock()?;
         inner.calls.push(Call::SpawnAgent(
@@ -1462,6 +1540,72 @@ mod tests {
         mux.rename_space(&old.id, "renamed");
         let marked = ok(mux.marked_space("shprd · repo"));
         assert_eq!(marked.map(|space| space.id), Some(old.id));
+    }
+
+    #[test]
+    fn a_space_already_open_on_the_folder_is_the_repo_space_not_a_second_one() {
+        let mux = FakeMux::default();
+        // What the person's window held: a space for the folder, named after it.
+        let old = mux.add_space("scratchpad", Path::new("/work/scratchpad"));
+        let (found, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · scratchpad",
+            Path::new("/work/scratchpad"),
+        ));
+        assert!(!created, "reused, not created");
+        assert_eq!(found.id, old);
+        assert_eq!(found.name, "shprd · scratchpad");
+        let spaces = ok(mux.list_spaces());
+        assert_eq!(spaces.len(), 1, "one repo, one space: {spaces:?}");
+        assert_eq!(spaces[0].name, "shprd · scratchpad");
+        // And it is marked: a restart finds it by the mark.
+        let marked = ok(mux.marked_space("shprd · scratchpad"));
+        assert_eq!(marked.map(|space| space.id), Some(old));
+    }
+
+    #[test]
+    fn a_space_the_host_shows_by_its_raw_id_or_no_name_gets_the_label() {
+        for shown in ["", "space-1"] {
+            let mux = FakeMux::default();
+            let old = ok(mux.create_space("tmp-name", Path::new("/work/repo")));
+            mux.rename_space(&old.id, shown);
+            let (found, created) = ok(crate::ensure_marked_space(
+                &mux,
+                "shprd · repo",
+                Path::new("/work/repo"),
+            ));
+            assert!(!created);
+            assert_eq!(found.name, "shprd · repo", "shown as {shown:?}");
+            assert_eq!(ok(mux.list_spaces())[0].name, "shprd · repo");
+        }
+    }
+
+    #[test]
+    fn a_name_the_person_chose_is_kept_and_another_folders_space_is_left_alone() {
+        let mux = FakeMux::default();
+        let (space, _) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/work/repo"),
+        ));
+        mux.rename_space(&space.id, "my favourite place");
+        let (again, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · repo",
+            Path::new("/work/repo"),
+        ));
+        assert!(!created);
+        assert_eq!(again.id, space.id);
+        assert_eq!(ok(mux.list_spaces())[0].name, "my favourite place");
+        // A space for another folder is never adopted.
+        let other = mux.add_space("repo2", Path::new("/work/repo2"));
+        let (third, created) = ok(crate::ensure_marked_space(
+            &mux,
+            "shprd · other",
+            Path::new("/work/other"),
+        ));
+        assert!(created);
+        assert_ne!(third.id, other);
     }
 
     #[test]

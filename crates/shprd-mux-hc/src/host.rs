@@ -975,6 +975,69 @@ impl Host for HcHost {
         Ok(self.spaces()?.iter().map(space_of).collect())
     }
 
+    /// Rename a space with the window's own `space.rename`: the id and the mark
+    /// stay, only the name a person reads changes.
+    fn rename_space(&self, space: &SpaceId, name: &str) -> Result<()> {
+        let found = self.space_with(space.as_str(), "space")?;
+        self.window_call(
+            "space.rename",
+            &[("--id", &found.id), ("--name", name)],
+            "renaming a space",
+        )?;
+        Ok(())
+    }
+
+    /// The spaces the layout opened on `folder`.
+    fn spaces_in_folder(&self, folder: &Path) -> Result<Vec<Space>> {
+        let wanted = comparable(folder);
+        Ok(self
+            .spaces()?
+            .iter()
+            .filter(|space| {
+                space
+                    .folder
+                    .as_deref()
+                    .is_some_and(|at| comparable(Path::new(at)) == wanted)
+            })
+            .map(space_of)
+            .collect())
+    }
+
+    /// Every terminal the core knows that runs as a coordinator, whichever tab
+    /// or space it was placed in.
+    fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
+        let state = self.inner.client.state();
+        Ok(state
+            .terminals()
+            .filter_map(|terminal| {
+                let role = AgentRole::parse(terminal.labels.get(ROLE_LABEL)?)?;
+                if role != AgentRole::Coordinator {
+                    return None;
+                }
+                let address = terminal.bare_address().to_string();
+                Some(LiveAgent {
+                    tab: Tab {
+                        id: TabId::new(format!("{HANDLE_PREFIX}{address}")),
+                        title: terminal.name.clone().unwrap_or_else(|| address.clone()),
+                        root_pane: PaneId::new(address),
+                    },
+                    task: None,
+                    role,
+                    program: terminal
+                        .labels
+                        .get(AGENT_LABEL)
+                        .cloned()
+                        .unwrap_or_default(),
+                    space: SpaceId::new(terminal.labels.get(TASK_SPACE_LABEL)?.clone()),
+                    state: reported_state(terminal),
+                    live: terminal.is_live(),
+                    started_ms: terminal.created_ms,
+                    ended_ms: terminal.finished_ms,
+                })
+            })
+            .collect())
+    }
+
     /// A space the window makes: named as shprd names it, with its first pane in
     /// `cwd`.
     ///
@@ -1698,6 +1761,15 @@ fn reported_state(terminal: &Terminal) -> AgentState {
         None if !terminal.is_live() => AgentState::Done,
         None => AgentState::Unknown,
     }
+}
+
+/// A folder as it is compared: resolved when it exists, else as written, with
+/// no trailing slash.
+fn comparable(folder: &Path) -> PathBuf {
+    let resolved = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf());
+    resolved.components().collect()
 }
 
 /// The space of a layout entry, named as a person sees it.

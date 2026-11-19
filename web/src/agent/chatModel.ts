@@ -77,7 +77,7 @@ export function fold(chat: Chat | null, answer: ChatDto): Chat {
 /** One message with the fields a row draws always present. */
 export function normalize(message: ChatMessageDto): ChatMessageDto {
   return {
-    role: message.role === "assistant" ? "assistant" : "user",
+    role: message.role === "assistant" || message.role === "news" ? message.role : "user",
     text: String(message.text ?? ""),
     tools: Array.isArray(message.tools)
       ? message.tools.map((tool) => ({ name: String(tool.name ?? "tool"), summary: String(tool.summary ?? "") }))

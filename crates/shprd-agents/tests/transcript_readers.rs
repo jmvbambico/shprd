@@ -505,6 +505,57 @@ fn a_claude_session_is_found_through_a_symlinked_directory() {
     assert_eq!(page.messages.len(), 4);
 }
 
+/// SHPR-65 bug 5: the chat of an agent that started at a given moment shows the
+/// first session begun after it, never an earlier one in the same directory (the
+/// person's own, or the last coordinator's).
+#[test]
+fn an_agent_reads_the_session_begun_after_it_started_not_an_older_one_in_the_folder() {
+    let dir = tempfile::tempdir().expect("a temp home");
+    let folder = dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("-work-repo");
+    fs::create_dir_all(&folder).unwrap();
+    let user = |text: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
+        )
+    };
+    fs::write(folder.join("older.jsonl"), user("an earlier conversation")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1_600));
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let roots = shprd_agents::transcript::Roots::at(dir.path());
+    let spec = harness("claude");
+    // Nothing has been said since the agent started: no conversation is its.
+    assert!(
+        Transcript::locate_since(spec.transcript(), &roots, Path::new(CWD), Some(started))
+            .is_none(),
+        "the older session is not this agent's"
+    );
+    // The old rule still shows the newest one, whoever's it is.
+    assert_eq!(
+        Transcript::locate_in(spec.transcript(), &roots, Path::new(CWD))
+            .unwrap()
+            .session(),
+        "older"
+    );
+    fs::write(folder.join("mine.jsonl"), user("hello")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(folder.join("someone-elses-later.jsonl"), user("another")).unwrap();
+    let found = Transcript::locate_since(spec.transcript(), &roots, Path::new(CWD), Some(started))
+        .expect("the agent's session is found");
+    assert_eq!(
+        found.session(),
+        "mine",
+        "the first one begun after it started"
+    );
+}
+
 #[test]
 fn a_program_with_no_transcript_section_has_nothing_to_read() {
     let kilo = harness("kilo");
