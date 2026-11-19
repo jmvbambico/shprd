@@ -1007,6 +1007,81 @@ async fn dropping_a_task_records_the_persons_reason_once() {
 }
 
 #[tokio::test]
+async fn dropping_many_tasks_takes_one_reason_and_skips_the_ones_it_cannot() {
+    let fixture = Fixture::new();
+    for (title, scope) in [("old one", "a"), ("old two", "b"), ("new one", "c")] {
+        let add = fixture
+            .add(json!({"title": title, "scope": [scope], "acceptance": ["y"]}))
+            .await;
+        assert_eq!(add.status, StatusCode::OK);
+    }
+    // One of the three is already dropped: it is skipped, not a failure.
+    fixture
+        .act(json!({"kind": "task.drop", "task": "old-two", "reason": "first"}))
+        .await;
+    let reply = fixture
+        .act(json!({
+            "kind": "task.drop_many",
+            "tasks": ["old-one", "old-two", "no-such-task", "old-one"],
+            "reason": "an earlier session's leftovers",
+        }))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(reply.json()["dropped"], json!(["old-one"]));
+    let skipped = reply.json()["skipped"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    let state = fixture
+        .send(Method::GET, "/api/state", None)
+        .await
+        .json()
+        .clone();
+    let status = |id: &str| {
+        state["tasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|t| t["id"] == json!(id)))
+            .map(|t| t["status"].clone())
+    };
+    assert_eq!(status("old-one"), Some(json!("dropped")));
+    assert_eq!(status("new-one"), Some(json!("queued")), "untouched");
+    // Nothing droppable at all is a refusal, never a quiet success.
+    let none = fixture
+        .act(json!({"kind": "task.drop_many", "tasks": ["old-one"], "reason": "again"}))
+        .await;
+    assert_eq!(none.status, StatusCode::CONFLICT);
+    assert_eq!(none.code(), "refused");
+    // A missing reason is refused before anything is dropped.
+    let blank = fixture
+        .act(json!({"kind": "task.drop_many", "tasks": ["new-one"], "reason": " "}))
+        .await;
+    assert_eq!(blank.status, StatusCode::CONFLICT);
+    let empty = fixture
+        .act(json!({"kind": "task.drop_many", "tasks": [], "reason": "x"}))
+        .await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_task_says_when_it_was_added_and_last_touched() {
+    let fixture = Fixture::new();
+    fixture
+        .add(json!({"title": "dated task", "scope": ["a"], "acceptance": ["y"]}))
+        .await;
+    let state = fixture
+        .send(Method::GET, "/api/state", None)
+        .await
+        .json()
+        .clone();
+    let task = &state["tasks"][0];
+    assert!(task["added_at_ms"].as_u64().unwrap_or(0) > 0, "{task}");
+    assert!(
+        task["touched_at_ms"].as_u64().unwrap_or(0) >= task["added_at_ms"].as_u64().unwrap_or(0)
+    );
+}
+
+#[tokio::test]
 async fn a_drop_with_no_reason_is_refused() {
     let fixture = Fixture::new();
     fixture

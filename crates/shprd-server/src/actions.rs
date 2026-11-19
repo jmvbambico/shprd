@@ -113,9 +113,72 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
             let kind = EventKind::TaskDropped { task, reason };
             commit(ctx, kind)
         }
+        Action::TaskDropMany { tasks, reason } => drop_many(ctx, tasks, reason),
         Action::TaskAccept { task } => accept(ctx, &task),
         Action::TaskResendBrief { task } => resend_brief(ctx, &task),
     }
+}
+
+/// Drops every task in `tasks` with one reason, skipping the ones the rules
+/// refuse (already landed or dropped, or not on the board).
+///
+/// Each drop is its own event through [`commit`], so the log reads exactly as if
+/// the person had dropped them one at a time. When none could be dropped the
+/// whole action is refused with the first reason, so a button never reports
+/// success for nothing.
+fn drop_many(
+    ctx: &Context<'_>,
+    tasks: Vec<String>,
+    reason: String,
+) -> Result<ActionReply, ApiReject> {
+    if tasks.is_empty() {
+        return Err(ApiReject::bad_request(
+            "a task.drop_many action needs at least one task",
+        ));
+    }
+    if reason.trim().is_empty() {
+        return Err(ApiReject::refused(
+            "dropping tasks needs a reason: say why they are not wanted",
+        ));
+    }
+    let mut dropped: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut seq = 0;
+    let mut first_refusal: Option<ApiReject> = None;
+    for task in tasks {
+        if dropped.contains(&task)
+            || skipped
+                .iter()
+                .any(|line| line.starts_with(&format!("{task}: ")))
+        {
+            continue;
+        }
+        let kind = EventKind::TaskDropped {
+            task: task.clone(),
+            reason: reason.clone(),
+        };
+        match commit(ctx, kind) {
+            Ok(reply) => {
+                seq = reply.seq;
+                dropped.push(task);
+            }
+            Err(err) => {
+                skipped.push(format!("{task}: {}", err.body.message));
+                first_refusal.get_or_insert(err);
+            }
+        }
+    }
+    if dropped.is_empty() {
+        return Err(first_refusal
+            .unwrap_or_else(|| ApiReject::refused("none of those tasks could be dropped")));
+    }
+    Ok(ActionReply {
+        ok: true,
+        seq,
+        task: None,
+        dropped,
+        skipped,
+    })
 }
 
 /// Starts a run when the log has none, so the first task in a fresh repository
@@ -552,6 +615,8 @@ pub(crate) fn commit(ctx: &Context<'_>, kind: EventKind) -> Result<ActionReply, 
             ok: true,
             seq: event.seq,
             task: None,
+            dropped: Vec::new(),
+            skipped: Vec::new(),
         }),
     }
 }
@@ -580,6 +645,8 @@ fn folded_task(repo: &Path, task: &str, seq: u64) -> Result<ActionReply, ApiReje
         ok: true,
         seq,
         task: folded,
+        dropped: Vec::new(),
+        skipped: Vec::new(),
     })
 }
 

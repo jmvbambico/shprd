@@ -273,6 +273,15 @@ pub struct Task {
     /// cut it answers, so the same one is never acted on twice, and a backup is
     /// a `Backup` record whether or not its process started.
     pub fallbacks: Vec<FallbackRecord>,
+    /// When the task was added, ms since the Unix epoch (the `TaskAdded` event's
+    /// time). A board uses it to show the newest work first and to tell a run's
+    /// old leftovers from tasks added just now.
+    pub added_at_ms: u64,
+    /// When something last happened to the task that a person or the engine
+    /// decided: any event naming it except a progress line (the engine writes
+    /// "Waiting: …" lines on its own, which must not make an abandoned task look
+    /// fresh).
+    pub touched_at_ms: u64,
 }
 
 /// One thing the fallback ladder did, as the ledger recorded it.
@@ -537,6 +546,12 @@ impl RunState {
     pub fn apply(&mut self, event: &Event) -> Result<(), RuleError> {
         rules::replay_as(self, &event.actor, &event.kind, event.at_ms)?;
         self.mutate(event);
+        if !matches!(event.kind, EventKind::TaskStatus { .. })
+            && let Some(id) = event.kind.task()
+            && let Some(task) = self.tasks.get_mut(id)
+        {
+            task.touched_at_ms = event.at_ms;
+        }
         self.last_seq = event.seq;
         Ok(())
     }
@@ -588,6 +603,8 @@ impl RunState {
                         approved_head: None,
                         nothing_to_merge: None,
                         fallbacks: Vec::new(),
+                        added_at_ms: event.at_ms,
+                        touched_at_ms: event.at_ms,
                     },
                 );
             }

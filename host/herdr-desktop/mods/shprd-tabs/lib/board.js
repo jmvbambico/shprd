@@ -74,13 +74,15 @@ export function isLive(task) {
 }
 
 /** The counts a badge or the status bar shows, over the live tasks. */
-export function counts(state) {
+export function counts(state, now = Date.now()) {
   const tally = { needs: 0, ready: 0, working: 0, done: 0, total: 0, open_asks: 0 };
+  const old = staleIds(state, now);
   for (const task of state?.tasks ?? []) {
     if (!isLive(task)) continue;
     tally.total += 1;
     const word = task?.derived?.status;
-    if (word === "needs_you") tally.needs += 1;
+    // An old leftover does not make the badge shout: it sits under "Older".
+    if (word === "needs_you") tally.needs += old.has(task.id) ? 0 : 1;
     else if (word === "ready") tally.ready += 1;
     else if (word === "working" || word === "merging") tally.working += 1;
     else if (word === "done") tally.done += 1;
@@ -110,6 +112,51 @@ export function grouped(state) {
     groups.push({ status: word, word: STATUS[word].word, tasks });
   }
   return groups;
+}
+
+/** How long an open task may sit untouched before the board calls it old (3 hours). */
+export const STALE_MS = 3 * 60 * 60 * 1000;
+
+/** The words of a task that is open and waiting: it needs the person, or has not started. */
+const WAITING_WORDS = ["needs_you", "to_do", "scheduled", "queued"];
+
+/**
+ * The ids of the tasks that are old leftovers: open (Needs you, or Queued and not
+ * started) and untouched for [`STALE_MS`], plus a Queued task that waits on one of
+ * them (it can never start while its dependency is stuck).
+ *
+ * A task the service gave no `touched_at_ms` (an older service) is never old, and
+ * Working, Ready, Merging and Done are never old: they are moving, or waiting for
+ * a decision the person is expected to make on fresh work.
+ */
+export function staleIds(state, now = Date.now()) {
+  const tasks = (state?.tasks ?? []).filter(isLive);
+  const stale = new Set();
+  for (const task of tasks) {
+    const touched = task?.touched_at_ms;
+    if (!Number.isFinite(touched) || touched <= 0) continue;
+    if (!WAITING_WORDS.includes(task?.derived?.status)) continue;
+    if (now - touched >= STALE_MS) stale.add(task.id);
+  }
+  // A queued task behind an old one is old with it, however recently it was added.
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const task of tasks) {
+      if (stale.has(task.id)) continue;
+      if (!["to_do", "scheduled", "queued"].includes(task?.derived?.status)) continue;
+      if ((task.deps ?? []).some((dep) => stale.has(dep))) {
+        stale.add(task.id);
+        grew = true;
+      }
+    }
+  }
+  return stale;
+}
+
+/** Newest first: a task added later sorts before one added earlier. */
+export function newestFirst(a, b) {
+  return (b?.added_at_ms ?? 0) - (a?.added_at_ms ?? 0);
 }
 
 /** Done rows a group shows before "Show N more" (Shepherdr `DONE_SHOWN`). */
@@ -189,6 +236,9 @@ export function groupMode(value) {
  *   - `status`: one group per word, needs you and Ready included, same Done rule.
  *   - `space`: one group per space in `spaces` (`{id, name}`), tasks in status
  *     order, Done rows included.
+ *   Old leftovers (see [`staleIds`]) leave every grouping for one folded "Older"
+ *   group at the bottom (`stale: true`, `ids`: what a "Clear old tasks" drops),
+ *   open with `olderOpen`; inside a word the newest task is on top.
  *   Tasks in `pinned` (a set of ids) come out of their group into a "Pinned"
  *   group on top, in status order, Done included.
  * - a status word: that word's tasks, flat, under no heading.
@@ -208,6 +258,8 @@ export function listView(
     groupBy = "you",
     pinned = new Set(),
     spaces = [],
+    now = Date.now(),
+    olderOpen = false,
   } = {},
 ) {
   const searching = String(query ?? "").trim() !== "";
@@ -217,7 +269,8 @@ export function listView(
     const at = STATUS_ORDER.indexOf(word(t));
     return at === -1 ? STATUS_ORDER.length : at;
   };
-  const byRank = (list) => [...list].sort((a, b) => rank(a) - rank(b));
+  // Newest first inside a word, so what the coordinator just added is on top.
+  const byRank = (list) => [...list].sort((a, b) => rank(a) - rank(b) || newestFirst(a, b));
   const make = (key, label, tasks, extra = {}) => {
     const done = key === "done";
     const open = searching;
@@ -243,28 +296,49 @@ export function listView(
   const pins = pinned instanceof Set ? pinned : new Set(pinned ?? []);
   const pinnedTasks = byRank(live.filter((t) => pins.has(t.id)));
   if (pinnedTasks.length > 0) groups.push(make("pinned", "Pinned", pinnedTasks, { shown: true }));
-  const rest = live.filter((t) => !pins.has(t.id));
+  // Old leftovers (stale open tasks and what waits on them) leave the groups and
+  // sit in one folded "Older" group at the bottom, which a heading button clears.
+  // A search still finds them in place.
+  const old = searching ? new Set() : staleIds(state, now);
+  const rest = live.filter((t) => !pins.has(t.id) && !old.has(t.id));
+  const older = byRank(live.filter((t) => !pins.has(t.id) && old.has(t.id)));
+  const olderGroup = () =>
+    older.length === 0
+      ? []
+      : [
+          make("older", "Older", older, {
+            shut: !olderOpen,
+            stale: true,
+            ids: older.map((t) => t.id),
+          }),
+        ];
   let doneLine = null;
   if (groupBy === "space") {
     const list = spaces.length > 0 ? spaces : [{ id: null, name: "Tasks" }];
     const home = list[0].id;
     const known = new Set(list.map((space) => space.id));
     for (const space of list) {
-      const tasks = byRank(
+      let tasks = byRank(
         rest.filter((t) => (t.space != null && known.has(t.space) ? t.space : home) === space.id),
       );
+      if (!searching && !doneOpen) tasks = tasks.filter((t) => word(t) !== "done");
       if (tasks.length > 0) groups.push(make(`space-${space.id}`, space.name ?? String(space.id), tasks));
     }
+    const finished = rest.filter((t) => word(t) === "done").length;
+    if (!searching && !doneOpen && finished > 0) {
+      doneLine = { count: finished, label: `${finished} done` };
+    }
+    groups.push(...olderGroup());
     return { groups, doneLine };
   }
   const first = groupBy === "status" ? [] : ["needs_you", "ready"];
   if (groupBy !== "status") {
-    const you = [...rest.filter((t) => word(t) === "needs_you"), ...rest.filter((t) => word(t) === "ready")];
+    const you = byRank([...rest.filter((t) => word(t) === "needs_you"), ...rest.filter((t) => word(t) === "ready")]);
     if (you.length > 0) groups.push(make("you", "For you", you));
   }
   for (const w of STATUS_ORDER) {
     if (first.includes(w)) continue;
-    const tasks = rest.filter((t) => word(t) === w);
+    const tasks = [...rest.filter((t) => word(t) === w)].sort(newestFirst);
     if (tasks.length === 0) continue;
     if (w === "done" && !searching && !doneOpen) {
       doneLine = { count: tasks.length, label: `${tasks.length} done` };
@@ -272,6 +346,7 @@ export function listView(
     }
     groups.push(make(w, STATUS[w].word, tasks));
   }
+  groups.push(...olderGroup());
   return { groups, doneLine };
 }
 

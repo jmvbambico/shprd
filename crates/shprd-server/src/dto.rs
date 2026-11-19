@@ -296,6 +296,15 @@ pub struct TaskDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub phase: Option<String>,
+    /// When the task was added, ms since the Unix epoch.
+    ///
+    /// A board shows the newest work first and folds a run's old leftovers out
+    /// of the way by it.
+    pub added_at_ms: u64,
+    /// When something last happened to the task (any event naming it but a
+    /// progress line), ms since the Unix epoch. An open task untouched for hours
+    /// is stale: a board offers to clear such tasks together.
+    pub touched_at_ms: u64,
 }
 
 /// Whether a task's pull request has been merged.
@@ -1013,6 +1022,21 @@ pub enum Action {
         /// Why the person decided against it.
         reason: String,
     },
+    /// Drop several tasks at once, with one reason: a fresh start without
+    /// dropping an earlier run's leftovers one by one.
+    ///
+    /// Each task is dropped exactly as `task.drop` would drop it, and the rules
+    /// still refuse one that already landed or was dropped: such a task (and an
+    /// unknown id) is skipped and named in the reply's `skipped`, and the rest
+    /// are dropped. Nothing is deleted. It is destructive on the same terms as
+    /// `task.drop`.
+    #[serde(rename = "task.drop_many")]
+    TaskDropMany {
+        /// The tasks to drop.
+        tasks: Vec<String>,
+        /// Why the person decided against them, listed under `## Dropped`.
+        reason: String,
+    },
     /// Accept a task's work at the head its branch is at, as `shprd approve`
     /// does for a task.
     ///
@@ -1059,6 +1083,8 @@ impl Action {
         "task_stop",
         "task.drop",
         "task_drop",
+        "task.drop_many",
+        "task_drop_many",
         "task.accept",
         "task_accept",
         "task.resend_brief",
@@ -1074,7 +1100,10 @@ impl Action {
     /// its work) are the two today; "stop everything" joins them when its action
     /// exists. It is one place so the rule cannot drift.
     pub fn is_destructive(&self) -> bool {
-        matches!(self, Self::TaskDrop { .. } | Self::TaskAccept { .. })
+        matches!(
+            self,
+            Self::TaskDrop { .. } | Self::TaskDropMany { .. } | Self::TaskAccept { .. }
+        )
     }
 
     /// The action's kind, as the envelope spells it.
@@ -1086,6 +1115,7 @@ impl Action {
             Self::TaskRetry { .. } => "task.retry",
             Self::TaskStop { .. } => "task.stop",
             Self::TaskDrop { .. } => "task.drop",
+            Self::TaskDropMany { .. } => "task.drop_many",
             Self::TaskAccept { .. } => "task.accept",
             Self::TaskResendBrief { .. } => "task.resend_brief",
         }
@@ -1106,6 +1136,7 @@ impl Action {
                 "task_retry" => Some("task.retry"),
                 "task_stop" => Some("task.stop"),
                 "task_drop" => Some("task.drop"),
+                "task_drop_many" => Some("task.drop_many"),
                 "task_accept" => Some("task.accept"),
                 "task_resend_brief" => Some("task.resend_brief"),
                 _ => None,
@@ -1133,6 +1164,12 @@ pub struct ActionReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub task: Option<TaskDto>,
+    /// The tasks a `task.drop_many` dropped, in the order asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
+    /// The tasks a `task.drop_many` left alone, each with the rule's reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 /// Why a request was refused.
@@ -1890,6 +1927,15 @@ mod tests {
             }
         );
         assert_eq!(drop.kind(), "task.drop");
+        let many = Action::from_value(serde_json::json!({
+            "kind": "task_drop_many", "tasks": ["T1", "T2"], "reason": "old",
+        }))
+        .expect("a bulk drop");
+        assert_eq!(many.kind(), "task.drop_many");
+        assert!(
+            many.is_destructive(),
+            "a bulk drop is as destructive as a drop"
+        );
         let accept = Action::from_value(serde_json::json!({
             "kind": "task.accept", "task": "T1",
         }))

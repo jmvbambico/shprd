@@ -16,4 +16,12 @@ seq: number,
 /**
  * The task the action was about, folded as it is now.
  */
-task?: TaskDto, };
+task?: TaskDto, 
+/**
+ * The tasks a `task.drop_many` dropped, in the order asked.
+ */
+dropped?: Array<string>, 
+/**
+ * The tasks a `task.drop_many` left alone, each with the rule's reason.
+ */
+skipped?: Array<string>, };

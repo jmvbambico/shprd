@@ -75,4 +75,17 @@ space?: string,
 /**
  * A short group word for the Graph view, from a `phase:<word>` tag.
  */
-phase?: string, };
+phase?: string, 
+/**
+ * When the task was added, ms since the Unix epoch.
+ *
+ * A board shows the newest work first and folds a run's old leftovers out
+ * of the way by it.
+ */
+added_at_ms: number, 
+/**
+ * When something last happened to the task (any event naming it but a
+ * progress line), ms since the Unix epoch. An open task untouched for hours
+ * is stale: a board offers to clear such tasks together.
+ */
+touched_at_ms: number, };
