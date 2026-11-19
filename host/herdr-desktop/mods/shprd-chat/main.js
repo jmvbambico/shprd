@@ -258,6 +258,17 @@ export default class Chat extends View {
     }
     this.answerRefusal = null;
     this.cx.notify();
+    // Opening the box gives it the keyboard: without this the keys keep going to
+    // the composer that had it. The box is drawn by the render this notify asks
+    // for, so the focus is taken again once it is on screen (a mod has no
+    // `setTimeout`; the app's timer is the way, as the add-task form does it).
+    if (this.typing !== null) {
+      const id = this.typing;
+      this.draft.focus();
+      this.cx.timer?.after?.(50, () => {
+        if (this.typing === id) this.draft?.focus();
+      });
+    }
   }
 
   /** Answers one card; the service takes it exactly once. */

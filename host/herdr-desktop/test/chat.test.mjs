@@ -242,6 +242,27 @@ function panel(answers = [page()]) {
   return { view, calls, ...run };
 }
 
+test("opening a card's answer box focuses it, and a refresh leaves it there", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  const focused = [];
+  view.input.focus = () => focused.push("composer");
+  view.draft = inputState({ placeholder: "Type your answer" });
+  view.draft.focus = () => focused.push("answer");
+  const later = [];
+  view.cx.timer.after = (ms, fn) => later.push(fn);
+  view.type({ id: "ask-1" });
+  assert.deepEqual(focused, ["answer"], "the box takes the keyboard when it opens");
+  for (const fn of later) fn();
+  assert.deepEqual(focused, ["answer", "answer"], "and again once it is drawn");
+  await view.refresh();
+  assert.equal(focused.includes("composer"), false, "a refresh never hands focus to the composer");
+  // Closing the box before the timer fires does not focus a box that is gone.
+  view.type({ id: "ask-1" });
+  focused.length = 0;
+  for (const fn of later) fn();
+  assert.deepEqual(focused, []);
+});
+
 test("a submit types the composer's words into the coordinator and clears it", async () => {
   const { view, calls } = panel([page({ messages: [] })]);
   view.input.set_value("  what landed?  ");
