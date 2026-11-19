@@ -37,6 +37,7 @@ import {
   changeRows,
   changeCounts,
   checks,
+  proofs,
   commitRows,
   canReview,
   findings,
@@ -557,6 +558,7 @@ export default class Accept extends View {
           )
           .child(this.section(t, WORDS.changes, this.changesBody(t, colors)))
           .child(this.section(t, WORDS.checks, this.checksBody(t, colors, task)))
+          .when(proofs(task).length > 0, (el) => el.child(this.section(t, WORDS.proof, this.proofBody(t, task))))
           .child(this.section(t, WORDS.review, this.reviewBody(t, colors, task)))
           .when(said.details !== "", (el) => el.child(this.detailsSection(t, said.details)));
     return v_flex()
@@ -691,6 +693,22 @@ export default class Accept extends View {
             ]
           : []),
       ]);
+  }
+
+  /** Proof: the files the hand-in named as its proof. */
+  proofBody(t, task) {
+    return v_flex()
+      .gap(4)
+      .children(
+        proofs(task).map((row) =>
+          h_flex()
+            .h(20)
+            .gap(8)
+            .items_center()
+            .child(div().flex_none().text_size(TEXT.label).text_color(t.foreground).child(row.name))
+            .child(div().flex_1().min_w(0).truncate().text_size(TEXT.id).text_color(t.dim).child(row.path)),
+        ),
+      );
   }
 
   /** Review: who reviewed it and what they found — shprd's own section. */

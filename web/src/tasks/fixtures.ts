@@ -55,6 +55,7 @@ export function attemptWithReport(): AttemptDto {
       ],
       changed_paths: ["a.rs"],
       skills_used: [],
+      proofs: [".shprd/proof/T5-usage.txt"],
     },
     gates: [
       {

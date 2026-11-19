@@ -41,6 +41,7 @@ export const WORDS = {
   noSummary: "The agent wrote no summary.",
   changes: "Changes",
   checks: "Checks",
+  proof: "Proof",
   review: "Review",
   details: "Details",
   noChanges: "Nothing changed on its branch yet.",
@@ -204,6 +205,17 @@ export function checks(task) {
     };
   });
   return { rows, alsoRan: report?.tests ?? [] };
+}
+
+/**
+ * The proof the hand-in named: one row per path, with its file name. Empty when
+ * the worker named none (or the service predates the field).
+ */
+export function proofs(task) {
+  return (attempt(task)?.report?.proofs ?? []).map((path) => ({
+    name: String(path).split("/").filter((part) => part !== "").pop() ?? String(path),
+    path: String(path),
+  }));
 }
 
 /**

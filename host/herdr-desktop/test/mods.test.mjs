@@ -99,6 +99,7 @@ import {
   threadAgent,
   threadViews,
   checks as handInChecks,
+  proofs as handInProofs,
   findings as reviewFindings,
   head as acceptHead,
   reviewLine,
@@ -899,6 +900,14 @@ test("the checks are the ones the hand-in recorded, with their exit codes", () =
     attempts: [{ report: { checks: [{ gate: "tests", command: "cargo test", output_tail: "timed out" }] } }],
   };
   assert.equal(handInChecks(timedOut).rows[0].state, "unknown");
+});
+
+test("the proof the hand-in named is listed by file name and path", () => {
+  const named = { attempts: [{ report: { proofs: [".shprd/proof/T5-usage.txt"] } }] };
+  assert.deepEqual(handInProofs(named), [{ name: "T5-usage.txt", path: ".shprd/proof/T5-usage.txt" }]);
+  // A report that names none, or a service that predates the field, lists none.
+  assert.deepEqual(handInProofs({ attempts: [{ report: { checks: [] } }] }), []);
+  assert.deepEqual(handInProofs(boardTask("T6")), []);
 });
 
 test("the reviewer's findings are worst first, each with its wave", () => {
