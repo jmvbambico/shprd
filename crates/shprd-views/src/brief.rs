@@ -409,8 +409,10 @@ fn task_sections(input: &BriefInput<'_>) -> String {
     ));
     if let Some(ref_name) = input.archive {
         out.push_str(&format!(
-            "the attempt before this one was archived at `{ref_name}`: \
-             `git cherry-pick {ref_name}` brings over whatever of its work you still need\n\n"
+            "the attempt before this one was archived at `{ref_name}`. If it committed \
+             anything, your branch starts from its last commit, so that work is already in \
+             your history (`git log` shows it): carry on from it rather than redoing it. \
+             If your branch does not hold it, `git cherry-pick {ref_name}` brings it over\n\n"
         ));
     }
     if let Some(gate) = previous_failure(input.task, input.attempt) {

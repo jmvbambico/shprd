@@ -172,6 +172,11 @@ pub struct Replaced {
     pub attempt: u32,
     /// The archive ref holding its commits.
     pub ref_name: String,
+    /// The commit its branch ended on, when the new attempt carries that
+    /// attempt's commits forward by starting from it. `None` when the earlier
+    /// attempt left nothing of its own (or already landed), so the new one
+    /// starts from the base.
+    pub carried: Option<String>,
 }
 
 impl Replaced {
@@ -361,7 +366,10 @@ pub fn spawn(
     // that refuses (tuios without the `admin` grant, say) refuses here, before
     // the worktree exists.
     let space = agent_space(mux, env)?;
-    let created = create_worktree(env, &task.id)?;
+    let carried = replaced
+        .as_ref()
+        .and_then(|earlier| earlier.carried.as_deref());
+    let created = create_worktree(env, &task.id, carried)?;
     // The ask hook goes in before the program starts, because a program reads
     // its hooks once at launch. A worktree that cannot take it is a spawn that
     // would promise cards it can never raise, so it fails and undoes itself.
@@ -1215,9 +1223,14 @@ fn work_place(env: &SpawnEnv<'_>, task: &str) -> Result<(PathBuf, String), CliEr
     Ok((env.ctx.root.clone(), branch))
 }
 
-/// Creates the attempt's worktree from [`base_for_new_work`], or, with
+/// Creates the attempt's worktree from `carried` (the earlier attempt's last
+/// commit, on a retry) or else [`base_for_new_work`], or, with
 /// worktrees off, points the attempt at the repository's own checkout.
-fn create_worktree(env: &SpawnEnv<'_>, task: &str) -> Result<Worktree, CliError> {
+fn create_worktree(
+    env: &SpawnEnv<'_>,
+    task: &str,
+    carried: Option<&str>,
+) -> Result<Worktree, CliError> {
     if !uses_worktrees(env) {
         let (path, branch) = work_place(env, task)?;
         let base_sha = Git::new(&path).head_sha().map_err(|err| {
@@ -1234,9 +1247,12 @@ fn create_worktree(env: &SpawnEnv<'_>, task: &str) -> Result<Worktree, CliError>
         &env.layout,
         &env.run,
         task,
-        &base_for_new_work(env),
+        // A retry continues from where the attempt before it ended.
+        carried
+            .map_or_else(|| base_for_new_work(env), str::to_owned)
+            .as_str(),
     )
-    .map_err(|err| CliError::other(anyhow!(err).context(format!("creating a worktree for {task}"))))
+    .map_err(|err| plain_failure(task, "its new workspace could not be created", &err))
 }
 
 /// Puts `program`'s ask hook into the worktree it is about to work in.
@@ -1326,6 +1342,13 @@ fn replace_previous(
     }
     let ref_name = archive::archive_ref_for_attempt(&env.run, &task.id, previous);
     let task_id = Some(task.id.clone());
+    // What the new attempt starts from: the branch's last commit, when the
+    // attempt made commits of its own that have not landed.
+    let carried = if branch_exists && task.status != TaskStatus::Integrated {
+        carried_head(env, &branch)
+    } else {
+        None
+    };
     let mut archive_events: Vec<EventKind> = Vec::new();
     if branch_exists {
         if allows(
@@ -1391,9 +1414,7 @@ fn replace_previous(
     }
     if branch_exists {
         archive::archive_to(&env.ctx.root, &branch, &ref_name).map_err(|err| {
-            CliError::other(
-                anyhow!(err).context(format!("archiving attempt {previous} of {:?}", task.id)),
-            )
+            plain_failure(&task.id, "the old attempt's work could not be saved", &err)
         })?;
         for event in archive_events {
             env.ctx.commit(event)?;
@@ -1405,20 +1426,39 @@ fn replace_previous(
     if let Err(err) = close_worker(mux, &env.briefs_dir, &env.run, &task.id) {
         eprintln!("warning: {err}");
     }
-    if worktree_event.is_some() {
-        worktree::remove_worktree_only(&env.ctx.root, &env.layout, &path, true).map_err(|err| {
-            CliError::other(anyhow!(err).context(format!(
-                "removing the failed attempt's worktree {}",
-                path.display()
-            )))
-        })?;
+    // Git knows the old worktree by the path it was made at, which can be
+    // spelled differently from the layout's now (`/tmp` against `/private/tmp`,
+    // a symlinked home), so what holds the branch is asked of git rather than
+    // assumed from the layout's string.
+    let held = worktrees_holding(env, &branch);
+    if worktree_event.is_some() || path.exists() || !held.is_empty() {
+        for place in held.iter().chain(std::iter::once(&path)) {
+            if place.exists() {
+                worktree::remove_worktree_only(&env.ctx.root, &env.layout, place, true).map_err(
+                    |err| {
+                        plain_failure(
+                            &task.id,
+                            "the old attempt's workspace is still in use",
+                            &err,
+                        )
+                    },
+                )?;
+            }
+        }
+        // A registration whose folder is already gone would still pin the branch.
+
+        let _ = Git::new(&env.ctx.root).run(&["worktree", "prune"]);
         if let Some(event) = worktree_event {
             env.ctx.commit(event)?;
         }
     }
     if branch_exists {
         worktree::delete_branch(&env.ctx.root, &env.layout, &branch).map_err(|err| {
-            CliError::other(anyhow!(err).context(format!("deleting the branch {branch:?}")))
+            plain_failure(
+                &task.id,
+                "the old attempt's branch could not be cleared",
+                &err,
+            )
         })?;
         if let Some(event) = branch_event {
             env.ctx.commit(event)?;
@@ -1427,7 +1467,55 @@ fn replace_previous(
     Ok(Some(Replaced {
         attempt: previous,
         ref_name,
+        carried,
     }))
+}
+
+/// The commit a retry should start from: `branch`'s tip, when the attempt
+/// committed something the base does not already have. An attempt that made no
+/// commits (or whose commits the base holds) gives `None`, so the retry starts
+/// from the current base instead of an older point.
+fn carried_head(env: &SpawnEnv<'_>, branch: &str) -> Option<String> {
+    let git = Git::new(&env.ctx.root);
+    let head = git.rev_parse(branch).ok()?;
+    let base = base_for_new_work(env);
+    let own = git
+        .run(&["merge-base", "--is-ancestor", &head, &base])
+        .is_err();
+    own.then_some(head)
+}
+
+/// Every place git has `branch` checked out, as git spells the path.
+fn worktrees_holding(env: &SpawnEnv<'_>, branch: &str) -> Vec<PathBuf> {
+    let Ok(listing) = Git::new(&env.ctx.root).run(&["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    let wanted = format!("refs/heads/{branch}");
+    let mut found = Vec::new();
+    let mut current: Option<PathBuf> = None;
+    for line in listing.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path));
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str())
+            && let Some(path) = current.clone()
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// A failure to start a new attempt, as a sentence a person can read.
+///
+/// The detail (git's own words) goes to the log, never to the card: the card
+/// tells the person what happened, that nothing was lost and what to do.
+fn plain_failure(task: &str, what: &str, detail: &dyn std::fmt::Display) -> CliError {
+    eprintln!("retry of {task}: {what}: {detail}");
+    CliError::other(anyhow!(
+        "Could not start a new attempt of {task}: {what}. \
+         Nothing was lost, and the old attempt's commits are kept. \
+         Try Retry again, and if it keeps failing, ask your Assistant to look at it."
+    ))
 }
 
 /// True when an attempt at a task in `status` may be archived and replaced.
@@ -3416,7 +3504,7 @@ project_dirs = []
         let scratch = Scratch::new();
         let ctx = scratch.ctx();
         let env = scratch.spawn_env(&ctx);
-        let created = create_worktree(&env, "T1").unwrap_or_else(|err| panic!("{err}"));
+        let created = create_worktree(&env, "T1", None).unwrap_or_else(|err| panic!("{err}"));
         // The third append is the `Spawned` event; the two resources land.
         let mut commits = 0;
         let outcome = append_in_order(attempt_events("T1", 1, &pick(), &created, true), |event| {
@@ -4636,19 +4724,15 @@ project_dirs = []
             ),
             tip
         );
-        // Every attempt works at the same path, so what proves the old worktree
-        // was replaced rather than reused is what is not in it: the fresh one is
-        // cut from the integration branch's current head, and the replaced
-        // attempt's commit is only reachable through the archive ref.
+        // The retry continues from the replaced attempt's last commit: its work is
+        // in the new worktree and its branch, and the archive ref keeps it too.
         assert!(second.worktree.is_dir(), "the new worktree is missing");
         assert!(
-            !second.worktree.join("retry.txt").exists(),
-            "the fresh worktree still carries the replaced attempt's work"
+            second.worktree.join("retry.txt").exists(),
+            "the retry lost the replaced attempt's work"
         );
-        assert_eq!(
-            git_out(scratch.root(), &["rev-parse", &second.branch]),
-            git_out(scratch.root(), &["rev-parse", "integration/m4"])
-        );
+        assert_eq!(git_out(scratch.root(), &["rev-parse", &second.branch]), tip);
+        assert_eq!(replaced.carried.as_deref(), Some(tip.as_str()));
         // The brief names the ref, so the worker can cherry-pick what is useful.
         let brief = std::fs::read_to_string(&second.brief).unwrap_or_default();
         assert!(brief.contains("refs/shprd/archive/t1/T1"), "{brief}");
@@ -4720,6 +4804,144 @@ project_dirs = []
             ),
             Some(ResourceStatus::Live)
         );
+    }
+
+    /// Blocker 3: a retry carries the earlier attempt's commits forward, and a
+    /// third attempt carries both, with each attempt's archive ref kept.
+    #[test]
+    fn a_retry_starts_from_the_previous_attempts_commits() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        commit_in(&first.worktree, "one.txt", "one\n");
+        let tip = commit_in(&first.worktree, "two.txt", "two\n");
+        fail_review(&ctx, 1);
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(git_out(&second.worktree, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(
+            git_out(
+                &second.worktree,
+                &["rev-list", "--count", "integration/m4..HEAD"]
+            ),
+            "2"
+        );
+        let brief = std::fs::read_to_string(&second.brief).unwrap_or_default();
+        assert!(brief.contains("starts from its last commit"), "{brief}");
+        let third_tip = commit_in(&second.worktree, "three.txt", "three\n");
+        fail_review(&ctx, 2);
+        let third = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(git_out(&third.worktree, &["rev-parse", "HEAD"]), third_tip);
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
+            ),
+            tip
+        );
+    }
+
+    /// An attempt that committed nothing leaves nothing to carry, so the retry
+    /// starts from the integration branch's current head, not an older point.
+    #[test]
+    fn a_retry_of_an_attempt_with_no_commits_starts_from_the_base() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        fail_review(&ctx, 1);
+        // The base moves on while the attempt is down.
+        git(scratch.root(), &["checkout", "-q", "integration/m4"]);
+        commit_in(scratch.root(), "moved.txt", "moved\n");
+        git(scratch.root(), &["checkout", "-q", "main"]);
+        assert!(first.worktree.is_dir());
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert!(
+            second
+                .replaced
+                .as_ref()
+                .is_some_and(|r| r.carried.is_none())
+        );
+        assert_eq!(
+            git_out(&second.worktree, &["rev-parse", "HEAD"]),
+            git_out(scratch.root(), &["rev-parse", "integration/m4"])
+        );
+    }
+
+    /// Blocker 6: the retry finds the old worktree by what git registered, so a
+    /// home spelled another way (a symlink, `/tmp` against `/private/tmp`) does
+    /// not leave the branch pinned and the retry failing with git's own text.
+    #[test]
+    fn a_retry_replaces_a_worktree_registered_under_another_spelling_of_the_home() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let tip = commit_in(&first.worktree, "kept.txt", "kept\n");
+        fail_review(&ctx, 1);
+        // The same home, reached through a symlink.
+        let links = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let link = links.path().join("home");
+        std::os::unix::fs::symlink(scratch.home.path(), &link)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mut again = scratch.spawn_env(&ctx);
+        again.layout = Layout::default_for_home(&link);
+
+        let second = spawn(&mux, &again, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2);
+        assert_eq!(git_out(&second.worktree, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(
+            git_out(
+                scratch.root(),
+                &["rev-parse", "--verify", "refs/shprd/archive/t1/T1-a1"]
+            ),
+            tip
+        );
+    }
+
+    /// The old worktree's folder is gone but git still lists it, so the branch
+    /// stays pinned to it: the retry prunes that registration instead of failing
+    /// with git's "cannot delete branch used by worktree".
+    #[test]
+    fn a_retry_clears_a_registration_whose_folder_is_gone() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = host(&scratch);
+        let first = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        let tip = commit_in(&first.worktree, "kept.txt", "kept\n");
+        fail_review(&ctx, 1);
+        std::fs::remove_dir_all(&first.worktree).unwrap_or_else(|err| panic!("{err}"));
+
+        let second = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        assert_eq!(second.attempt, 2);
+        assert_eq!(git_out(&second.worktree, &["rev-parse", "HEAD"]), tip);
+    }
+
+    /// Whatever git refuses, the person reads a plain sentence, not git's text.
+    #[test]
+    fn a_git_failure_on_retry_is_a_plain_sentence() {
+        let err = plain_failure(
+            "T1",
+            "the old attempt's branch could not be cleared",
+            &"git branch -D shprd/q1/T1 failed (exit Some(1)): error: cannot delete branch",
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("Could not start a new attempt of T1"),
+            "{text}"
+        );
+        assert!(!text.contains("git branch"), "{text}");
+        assert!(!text.contains("exit Some"), "{text}");
     }
 
     /// Every attempt reuses one branch name, so a third attempt must not
