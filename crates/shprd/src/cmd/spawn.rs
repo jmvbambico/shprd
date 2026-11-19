@@ -2939,9 +2939,25 @@ pub(crate) fn write_tab_checked(path: &Path, tab: &shprd_mux::TabId) -> Result<(
 /// safe direction for the tick: a task it cannot see is a task it will not start
 /// a second attempt on.
 pub fn live_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<String> {
+    agent_states(mux, home, state).0
+}
+
+/// The tasks whose agent is there but idle: its process is up and it is not at
+/// work. A task whose agent ended its turn without handing in is one of these.
+pub fn idle_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<String> {
+    agent_states(mux, home, state).1
+}
+
+/// The live tasks and, among them, the idle ones, from one reading of the host.
+fn agent_states(
+    mux: &dyn Host,
+    home: &Path,
+    state: &RunState,
+) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut live = BTreeSet::new();
+    let mut idle = BTreeSet::new();
     let Some(run) = state.run.as_ref() else {
-        return live;
+        return (live, idle);
     };
     let tabs = all_handles(mux);
     let briefs = home.join(".shprd").join("briefs");
@@ -2968,8 +2984,12 @@ pub fn live_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<Str
         // either that, or a program this host cannot report — and the attempt's
         // spawn record is what tells the two apart.
         match mux.agent_state(&tab.root_pane) {
-            Ok(AgentState::Working | AgentState::Idle | AgentState::Blocked) => {
+            Ok(AgentState::Working | AgentState::Blocked) => {
                 live.insert(id.clone());
+            }
+            Ok(AgentState::Idle) => {
+                live.insert(id.clone());
+                idle.insert(id.clone());
             }
             Ok(AgentState::Unknown) if unreadable_by_host(&briefs, &run.run_id, id) => {
                 live.insert(id.clone());
@@ -2977,7 +2997,7 @@ pub fn live_tasks(mux: &dyn Host, home: &Path, state: &RunState) -> BTreeSet<Str
             _ => {}
         }
     }
-    live
+    (live, idle)
 }
 
 /// Whether this task's newest attempt is a program the host cannot report.

@@ -1258,23 +1258,40 @@ fn check_spawned(
             agent: agent.clone(),
         });
     }
-    for (other_id, other) in &state.tasks {
+    if let Some((other, path)) = scope_holder(state, found) {
+        return Err(RuleError::ScopeConflict {
+            task: task.to_string(),
+            other,
+            path,
+        });
+    }
+    Ok(())
+}
+
+/// The task in flight whose scope keeps `task` from starting, and the first
+/// path that clashes: `(other task, path)`.
+///
+/// A task is in flight while its agent works or while its hand-in waits to be
+/// accepted (`Reported`, `Passed`). The planner asks this before it plans a
+/// start, so a task that waits for another's scope is waiting, not failing; the
+/// spawn rule asks it too, so the two never disagree.
+pub fn scope_holder(state: &RunState, task: &crate::state::Task) -> Option<(String, String)> {
+    state.tasks.iter().find_map(|(other_id, other)| {
         let busy = matches!(
             other.status,
             TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
         );
-        if other_id == task || !busy {
-            continue;
+        if other_id == &task.id || !busy {
+            return None;
         }
-        if let Some(path) = first_overlap(&found.scope, &other.scope) {
-            return Err(RuleError::ScopeConflict {
-                task: task.to_string(),
-                other: other_id.clone(),
-                path,
-            });
-        }
-    }
-    Ok(())
+        first_overlap(&task.scope, &other.scope).map(|path| (other_id.clone(), path))
+    })
+}
+
+/// The first path of `a` that clashes with a path of `b`, for a planner that
+/// holds the scopes of the starts it has already planned.
+pub fn scope_clash(a: &[String], b: &[String]) -> Option<String> {
+    first_overlap(a, b)
 }
 
 /// Rules for widening a task's scope: only a person does it, to paths that

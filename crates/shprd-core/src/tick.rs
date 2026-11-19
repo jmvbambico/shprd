@@ -158,6 +158,19 @@ pub enum Step {
         /// The task to start.
         task: String,
     },
+    /// Say that a queued task waits for another task's scope.
+    ///
+    /// Nothing is started and nothing fails: the task stays Queued with a
+    /// status line, and the next pass asks again. It is a step so the planner
+    /// stays pure and the executor owns the write.
+    Wait {
+        /// The queued task that waits.
+        task: String,
+        /// The path both tasks hold.
+        path: String,
+        /// The task in flight that holds it.
+        other: String,
+    },
     /// Start the engine's reviewer on a task that just handed in.
     Review {
         /// The task to review.
@@ -228,6 +241,7 @@ impl Step {
             Self::Start { task }
             | Self::Review { task }
             | Self::Verdict { task }
+            | Self::Wait { task, .. }
             | Self::Land { task, .. }
             | Self::MarkLanded { task, .. }
             | Self::NeedsYou { task, .. }
@@ -240,6 +254,7 @@ impl Step {
     pub fn action(&self) -> &'static str {
         match self {
             Self::Start { .. } => "start",
+            Self::Wait { .. } => "wait",
             Self::Review { .. } => "review",
             Self::Verdict { .. } => "verdict",
             Self::Land { .. } => "land",
@@ -297,13 +312,24 @@ pub fn plan(input: &Input<'_>) -> Vec<Step> {
     let max_running = input.config.tick.max_running.max(1);
     let mut running = running_count(state, input.facts, input.phases);
     let mut steps = Vec::new();
+    // The scopes of the starts this pass has already planned: two queued tasks
+    // that share a path must not both start in one pass.
+    let mut claimed: Vec<(String, Vec<String>)> = Vec::new();
     for (id, task) in &state.tasks {
         let phase = input
             .phases
             .get(id)
             .copied()
             .unwrap_or_else(|| Phase::of(task.status));
-        if let Some(step) = step_for(input, task, phase, &target, &mut running, max_running) {
+        if let Some(step) = step_for(
+            input,
+            task,
+            phase,
+            &target,
+            &mut running,
+            max_running,
+            &mut claimed,
+        ) {
             steps.push(step);
         }
     }
@@ -322,6 +348,7 @@ fn step_for(
     landing_target: &str,
     running: &mut u32,
     max_running: u32,
+    claimed: &mut Vec<(String, Vec<String>)>,
 ) -> Option<Step> {
     let state = input.state;
     let facts = input.facts;
@@ -418,11 +445,29 @@ fn step_for(
     if task.status != TaskStatus::Queued
         || !matches!(phase, Phase::ToDo | Phase::Queued)
         || !deps_landed(state, task)
-        || *running >= max_running
     {
         return None;
     }
+    // A task that shares a path with one in flight, or with a start planned
+    // earlier in this pass, waits for it. That is not a failed start: it takes
+    // no slot and the tasks after it in the queue are still considered.
+    let holder = rules::scope_holder(state, task).or_else(|| {
+        claimed.iter().find_map(|(other, scope)| {
+            rules::scope_clash(&task.scope, scope).map(|path| (other.clone(), path))
+        })
+    });
+    if let Some((other, path)) = holder {
+        return Some(Step::Wait {
+            task: task.id.clone(),
+            path,
+            other,
+        });
+    }
+    if *running >= max_running {
+        return None;
+    }
     *running += 1;
+    claimed.push((task.id.clone(), task.scope.clone()));
     Some(Step::Start {
         task: task.id.clone(),
     })
@@ -522,10 +567,16 @@ fn running_count(state: &RunState, facts: &Facts, phases: &BTreeMap<String, Phas
 }
 
 /// Whether one task counts as running.
+///
+/// A task whose derived phase is `NeedsYou` holds no slot, even while its agent
+/// is still there: an agent that stopped, or went idle without handing in,
+/// is waiting for a person, and counting it would starve the queue behind it.
 fn is_running(id: &str, task: &Task, facts: &Facts, phases: &BTreeMap<String, Phase>) -> bool {
-    facts.is_live(id)
-        || matches!(phases.get(id), Some(Phase::Working | Phase::Merging))
-        || task.status == TaskStatus::Working
+    match phases.get(id) {
+        Some(Phase::NeedsYou) => false,
+        Some(Phase::Working | Phase::Merging) => true,
+        _ => facts.is_live(id) || task.status == TaskStatus::Working,
+    }
 }
 
 /// Whether a task hands in work that passed its own checks and has no review
@@ -901,6 +952,117 @@ mod tests {
     /// Plans a pass with review off, which is what most rules are about.
     fn plan_for(state: &RunState, facts: &Facts, config: &Config) -> Vec<Step> {
         plan_with(state, facts, config, false)
+    }
+
+    /// A task added with a scope of its own.
+    fn added_scoped(seq: u64, id: &str, scope: &str) -> Event {
+        ev(
+            seq,
+            EventKind::TaskAdded {
+                task: id.to_string(),
+                title: format!("task {id}"),
+                scope: vec![scope.to_string()],
+                acceptance: vec!["it works".to_string()],
+                tags: Vec::new(),
+                skills: Vec::new(),
+                deps: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_task_on_a_busy_scope_waits_and_the_rest_start() {
+        let log = vec![
+            started(1),
+            added_scoped(2, "T1", "calc"),
+            spawned(3, "T1", 1),
+            added_scoped(4, "T4", "calc/ops.py"),
+            added_scoped(5, "T5", "README.md"),
+            added_scoped(6, "T6", "docs"),
+            added_scoped(7, "T7", "README.md"),
+        ];
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Ask, 4));
+        assert_eq!(
+            steps,
+            vec![
+                Step::Wait {
+                    task: "T4".to_string(),
+                    path: "calc/ops.py".to_string(),
+                    other: "T1".to_string()
+                },
+                Step::Start {
+                    task: "T5".to_string()
+                },
+                Step::Start {
+                    task: "T6".to_string()
+                },
+                // T7 clashes with T5, started in this same pass.
+                Step::Wait {
+                    task: "T7".to_string(),
+                    path: "README.md".to_string(),
+                    other: "T5".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_task_waiting_for_a_handed_in_task_waits_too() {
+        // Reported, not yet accepted: it still holds its scope.
+        let log = vec![
+            started(1),
+            added_scoped(2, "T6", "src/T6"),
+            spawned(3, "T6", 1),
+            reported(4, "T6", 1),
+            added_scoped(5, "T7", "src/T6/y.rs"),
+        ];
+        let state = folded(&log);
+        let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Ask, 4));
+        assert!(
+            steps.iter().any(|step| matches!(
+                step,
+                Step::Wait { task, other, .. } if task == "T7" && other == "T6"
+            )),
+            "{steps:?}"
+        );
+        assert!(!steps.iter().any(|step| matches!(step, Step::Start { .. })));
+    }
+
+    #[test]
+    fn a_working_task_that_needs_you_holds_no_slot() {
+        // Bug 15: two workers, one slot each of two. T1's agent is gone (or idle
+        // without handing in), so its derived phase is NeedsYou: T5 may start.
+        let log = vec![
+            started(1),
+            added(2, "T1", &[]),
+            spawned(3, "T1", 1),
+            added(4, "T2", &[]),
+            spawned(5, "T2", 1),
+            added(6, "T5", &[]),
+        ];
+        let state = folded(&log);
+        let mut phases = phases(&state);
+        let mut facts = Facts::default();
+        facts.live.insert("T1".to_string());
+        facts.live.insert("T2".to_string());
+        let input = |phases: &BTreeMap<String, Phase>| {
+            plan(&Input {
+                state: &state,
+                phases,
+                facts: &facts,
+                config: &config(MergePolicy::Ask, 2),
+                review: false,
+            })
+        };
+        assert!(input(&phases).is_empty(), "both slots are held");
+        phases.insert("T1".to_string(), Phase::NeedsYou);
+        assert_eq!(
+            input(&phases),
+            vec![Step::Start {
+                task: "T5".to_string()
+            }]
+        );
     }
 
     #[test]
