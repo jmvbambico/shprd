@@ -193,6 +193,29 @@ describe("SettingsDialog: Agents", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("that model is not one codex has");
   });
 
+  it("says so when putting a write back is refused too", async () => {
+    let puts = 0;
+    open(
+      reads({
+        "PUT /api/settings": (call) => {
+          puts += 1;
+          const body = call.body as { key: string };
+          if (body.key === "roles.worker.model") return refusal(409, "refused", "that model is not one codex has");
+          return puts === 3
+            ? refusal(409, "refused", "the worker and the reviewer share a vendor")
+            : json(200, { outcome: "stored", settings: settings([row("roles.worker.agent", "codex", "you")]) });
+        },
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use bad-id/ }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/back was refused too: the worker and the reviewer share a vendor/));
+    expect(screen.getByRole("alert").textContent).toContain("that model is not one codex has");
+  });
+
   it("types an id for a program that lists no models", async () => {
     const { calls } = open(
       reads({

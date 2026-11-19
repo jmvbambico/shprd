@@ -269,6 +269,25 @@ test("a refused later write puts back what the choice already wrote", async () =
   assert.match(view.refusal.text, /not one codex has/, "the refusal still shows");
 });
 
+test("an undo the service refuses is said, not swallowed", async () => {
+  const { view, calls } = await drawn("agents");
+  view.settings = structuredClone(SETTINGS);
+  view.settings.values.find((v) => v.key === "roles.worker.agent").source = "you";
+  view.client.putSetting = async (key, value, forRepo) => {
+    calls.push({ key, value, forRepo });
+    if (key === "roles.worker.model") throw new Error("that model is not one codex has");
+    if (calls.length === 3) throw new Error("the worker and the reviewer share a vendor");
+    return { outcome: "stored", settings: view.settings };
+  };
+  await view.applyBatch([
+    { key: "roles.worker.agent", value: "codex" },
+    { key: "roles.worker.model", value: "bad-id" },
+  ]);
+  await view.pump();
+  assert.match(view.refusal.text, /not one codex has/);
+  assert.match(view.refusal.text, /putting roles\.worker\.agent back was refused too: the worker and the reviewer share a vendor/);
+});
+
 test("a typed word that is already a model's name is not offered as a new id", () => {
   const menus = menusOf(ROSTER);
   const first = menus.programs.claude.models[0];

@@ -435,7 +435,17 @@ export default class Settings extends View {
         // A refusal is the service's sentence, shown as it was sent: the person has
         // to read *why* ("they are both anthropic"), not a summary of it. The words
         // stay in the box, unsaved, and the person can try again.
-        if (!next.undo) this.refusal = refused(next.key, err);
+        if (!next.undo) {
+          this.refusal = refused(next.key, err);
+        } else {
+          // Putting a write back was refused too: say so, so the person knows the role
+          // is still half switched and which key to look at.
+          const base = this.refusal ?? { key: next.key, text: "" };
+          this.refusal = {
+            key: base.key,
+            text: `${base.text} (and putting ${next.key} back was refused too: ${reason(err)}; it still holds the new value)`.trim(),
+          };
+        }
         // The rest of this choice is not written, and the popup that made it goes.
         this.queue = this.queue.filter((write) => write.batch !== next.batch);
         // ...and what the choice had already written is put back, newest first, so the

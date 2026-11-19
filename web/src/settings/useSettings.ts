@@ -211,8 +211,17 @@ export function useSettings(client: ApiClient): SettingsState {
           }
           return true;
         } catch (error) {
-          if (alive.current && !undo) {
-            setRefusal({ key, text: reason(error) });
+          if (alive.current) {
+            if (!undo) {
+              setRefusal({ key, text: reason(error) });
+            } else {
+              // Putting a write back was refused too: say so, so the person knows the
+              // role is still half switched and which key to look at.
+              setRefusal((was) => ({
+                key: was?.key ?? key,
+                text: `${was?.text ?? ""} (and putting ${key} back was refused too: ${reason(error)}; it still holds the new value)`.trim(),
+              }));
+            }
           }
           return false;
         } finally {
