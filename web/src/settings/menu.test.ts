@@ -55,6 +55,12 @@ describe("the button and the rows", () => {
     expect(modelRows(menus, "codex", "gpt-6")).toEqual([{ agent: "codex", id: "gpt-6", name: "Use gpt-6", typed: true }]);
   });
 
+  it("offers a typed id only when the word is not already a listed model's id or name", () => {
+    expect(modelRows(menus, "claude", "Opus 5.5").map((r) => r.id)).toEqual(["opus"]);
+    expect(modelRows(menus, "claude", "opus").map((r) => r.typed)).toEqual([false]);
+    expect(modelRows(menus, "claude", "opu").map((r) => r.id)).toEqual(["opus", "opu"]);
+  });
+
   it("offers only the levels the model takes", () => {
     expect(levelsFor(menus, { agent: "claude", model: "opus", effort: null, fast: false, perm: null })).toEqual(["low", "medium"]);
     expect(levelsFor(menus, { agent: "claude", model: "haiku", effort: null, fast: false, perm: null })).toEqual(["low", "high"]);

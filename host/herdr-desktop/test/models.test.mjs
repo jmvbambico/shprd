@@ -241,6 +241,40 @@ test("the restart notice shows only after the coordinator's own choice changed, 
   assert.equal(coordinatorRunning({ live_agents: [{ role: "coordinator", state: "working" }] }), true);
 });
 
+test("a refused later write puts back what the choice already wrote", async () => {
+  const { view, calls } = await drawn("agents");
+  view.settings = structuredClone(SETTINGS);
+  const before = view.settings.values.find((v) => v.key === "roles.worker.agent");
+  before.source = "you";
+  const held = before.value;
+  view.client.putSetting = async (key, value, forRepo) => {
+    calls.push({ key, value, forRepo });
+    if (key === "roles.worker.model" && value === "bad-id") throw new Error("that model is not one codex has");
+    return { outcome: "stored", settings: view.settings };
+  };
+  await view.applyBatch([
+    { key: "roles.worker.agent", value: "codex" },
+    { key: "roles.worker.model", value: "bad-id" },
+  ]);
+  await view.pump();
+  assert.deepEqual(
+    calls.map((c) => [c.key, c.value]),
+    [
+      ["roles.worker.agent", "codex"],
+      ["roles.worker.model", "bad-id"],
+      ["roles.worker.agent", held],
+    ],
+    "the program is put back after the model was refused",
+  );
+  assert.match(view.refusal.text, /not one codex has/, "the refusal still shows");
+});
+
+test("a typed word that is already a model's name is not offered as a new id", () => {
+  const menus = menusOf(ROSTER);
+  const first = menus.programs.claude.models[0];
+  assert.deepEqual(modelRows(menus, "claude", first.name).filter((r) => r.typed), []);
+});
+
 test("a refused write drops the rest of its choice and closes the popup", async () => {
   const { view, calls } = await drawn("agents");
   const popup = herdr.openOverlay({ mod: "shprd-models", kind: "popup" });

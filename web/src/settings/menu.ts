@@ -193,7 +193,8 @@ export function modelRows(menus: Menus, tab: string, query: string): ModelRow[] 
       }
     }
   }
-  const exact = rows.some((row) => row.id.toLowerCase() === lower);
+  // "Use <word>" unless the word is already a listed model's id or name.
+  const exact = rows.some((row) => row.id.toLowerCase() === lower || row.name.toLowerCase() === lower);
   if (word !== "" && !exact && menus.programs[tab]) {
     rows.push({ agent: tab, id: word, name: `Use ${word}`, typed: true });
   }
@@ -229,18 +230,33 @@ export function chooseModel(menus: Menus, sel: Selection, agent: string, id: str
 export interface Write {
   key: string;
   value: string | boolean | null;
+  /** What the key held before, to put back if a later write of the same choice is refused. */
+  prior?: string | boolean | null;
 }
 
 /** The writes that take a role from one selection to another: program, model, effort, speed, access. */
 export function selectionWrites(roleId: string, before: Selection, after: Selection): Write[] {
   const writes: Write[] = [];
-  const put = (field: string, value: string | boolean | null) => writes.push({ key: `roles.${roleId}.${field}`, value });
-  if (after.agent !== before.agent) put("agent", after.agent ?? null);
-  if (after.model !== before.model) put("model", after.model ?? null);
-  if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null);
-  if (after.fast !== before.fast) put("fast", after.fast);
-  if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null);
+  const put = (field: string, value: string | boolean | null, prior: string | boolean | null) =>
+    writes.push({ key: `roles.${roleId}.${field}`, value, prior });
+  if (after.agent !== before.agent) put("agent", after.agent ?? null, before.agent ?? null);
+  if (after.model !== before.model) put("model", after.model ?? null, before.model ?? null);
+  if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null, before.effort ?? null);
+  if (after.fast !== before.fast) put("fast", after.fast, before.fast);
+  if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null, before.perm ?? null);
   return writes;
+}
+
+/**
+ * What putting a key back would write to leave a scope's layer as it was: the value
+ * that layer itself held, or `null` (take the key out) when it came from another
+ * layer or nothing set it.
+ */
+export function priorInScope(document: SettingsDto | null, key: string, forRepo: boolean): string | boolean | null {
+  const row = document?.values.find((entry) => entry.key === key);
+  const value = row?.value;
+  const mine = forRepo ? "repo_entry" : "you";
+  return row?.source === mine && (typeof value === "string" || typeof value === "boolean") ? value : null;
 }
 
 /** The program "Use other CLI" switches the reviewer to, or null (already another vendor, or none). */

@@ -1091,7 +1091,8 @@ export function modelRows(menus, tab, query) {
       }
     }
   }
-  const exact = rows.some((row) => row.id.toLowerCase() === lower);
+  // "Use <word>" unless the word is already a listed model's id or name.
+  const exact = rows.some((row) => row.id.toLowerCase() === lower || row.name.toLowerCase() === lower);
   if (word !== "" && !exact && menus.programs[tab]) rows.push({ agent: tab, id: word, name: `Use ${word}`, typed: true });
   return rows;
 }
@@ -1117,13 +1118,25 @@ export function chooseModel(menus, sel, agent, id) {
  */
 export function selectionWrites(roleId, before, after) {
   const writes = [];
-  const put = (field, value) => writes.push({ key: `roles.${roleId}.${field}`, value });
-  if (after.agent !== before.agent) put("agent", after.agent ?? null);
-  if (after.model !== before.model) put("model", after.model ?? null);
-  if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null);
-  if (Boolean(after.fast) !== Boolean(before.fast)) put("fast", Boolean(after.fast));
-  if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null);
+  const put = (field, value, prior) => writes.push({ key: `roles.${roleId}.${field}`, value, prior });
+  if (after.agent !== before.agent) put("agent", after.agent ?? null, before.agent ?? null);
+  if (after.model !== before.model) put("model", after.model ?? null, before.model ?? null);
+  if ((after.effort ?? null) !== (before.effort ?? null)) put("effort", after.effort ?? null, before.effort ?? null);
+  if (Boolean(after.fast) !== Boolean(before.fast)) put("fast", Boolean(after.fast), Boolean(before.fast));
+  if ((after.perm ?? null) !== (before.perm ?? null)) put("perm", after.perm ?? null, before.perm ?? null);
   return writes;
+}
+
+/**
+ * What a write put back would be to leave a scope's layer as it was: the value the
+ * layer itself held, or `null` (take the key out) when the value came from another
+ * layer or nothing set it. Used to undo the writes of a choice whose later write
+ * the service refused, so a role is never left half switched.
+ */
+export function priorInScope(document, key, forRepo) {
+  const row = (document?.values ?? []).find((entry) => entry.key === key);
+  const mine = forRepo ? "repo_entry" : "you";
+  return row && row.source === mine ? (row.value ?? null) : null;
 }
 
 /**

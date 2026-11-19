@@ -161,6 +161,38 @@ describe("SettingsDialog: Agents", () => {
     expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
   });
 
+  it("puts back what a choice already wrote when a later write of it is refused", async () => {
+    let puts = 0;
+    const { calls } = open(
+      reads({
+        "PUT /api/settings": (call) => {
+          puts += 1;
+          const body = call.body as { key: string };
+          // the program goes through, the model after it is refused
+          return body.key === "roles.worker.model" && puts === 2
+            ? refusal(409, "refused", "that model is not one codex has")
+            : json(200, {
+                outcome: "stored",
+                settings: settings([row("roles.worker.agent", "codex", "you")]),
+              });
+        },
+      }),
+    );
+    const worker = await screen.findByRole("region", { name: "Worker" });
+    fireEvent.click(await within(worker).findByRole("button", { name: "Worker model" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    fireEvent.change(screen.getByLabelText("Search every agent’s models"), { target: { value: "bad-id" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Use bad-id/ }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(3));
+    expect(calls.filter((call) => call.method === "PUT").map((call) => call.body)).toEqual([
+      { key: "roles.worker.agent", value: "codex" },
+      { key: "roles.worker.model", value: "bad-id" },
+      // the program goes back to what the layer held
+      { key: "roles.worker.agent", value: "claude" },
+    ]);
+    expect((await screen.findByRole("alert")).textContent).toContain("that model is not one codex has");
+  });
+
   it("types an id for a program that lists no models", async () => {
     const { calls } = open(
       reads({

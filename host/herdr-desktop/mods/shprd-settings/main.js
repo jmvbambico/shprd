@@ -45,6 +45,7 @@ import {
   coordinatorRunning,
   menusOf,
   otherCli,
+  priorInScope,
   repoKeysOf,
   restartNotice,
   roleSelection,
@@ -145,6 +146,8 @@ export default class Settings extends View {
     this.icons = {};
     /** Counts the batches of writes, so a refusal can drop the rest of its own. */
     this.batchId = 0;
+    /** What each batch has written so far, by batch id: what an undo puts back. */
+    this.batchDone = {};
     /** The key a write is in flight for. */
     this.writing = null;
     /**
@@ -375,7 +378,11 @@ export default class Settings extends View {
     this.batchId += 1;
     const batch = this.batchId;
     const repo = forRepo(this.scope);
-    for (const write of writes) this.queue.push({ key: write.key, value: write.value, for_repo: repo, batch });
+    for (const write of writes) {
+      // What this scope's layer held before, so a refused later write can undo the earlier ones.
+      const prior = priorInScope(this.settings, write.key, repo);
+      this.queue.push({ key: write.key, value: write.value, for_repo: repo, batch, prior });
+    }
     return this.pump();
   }
 
@@ -400,7 +407,8 @@ export default class Settings extends View {
     while (this.queue.length > 0) {
       const next = this.queue.shift();
       this.writing = next.key;
-      this.refusal = null;
+      // An undo runs behind the refusal that caused it and must not wipe it.
+      if (!next.undo) this.refusal = null;
       this.saved = null;
       this.cx.notify();
       if (!this.client) {
@@ -422,13 +430,23 @@ export default class Settings extends View {
         // A box or the editor whose words this write carried is "saved" now, so a
         // later blur or debounce sees nothing left to do.
         this.markSaved(next.key, next.value);
+        if (!next.undo) (this.batchDone[next.batch] ??= []).push(next);
       } catch (err) {
         // A refusal is the service's sentence, shown as it was sent: the person has
         // to read *why* ("they are both anthropic"), not a summary of it. The words
         // stay in the box, unsaved, and the person can try again.
-        this.refusal = refused(next.key, err);
+        if (!next.undo) this.refusal = refused(next.key, err);
         // The rest of this choice is not written, and the popup that made it goes.
         this.queue = this.queue.filter((write) => write.batch !== next.batch);
+        // ...and what the choice had already written is put back, newest first, so the
+        // role is not left half switched (a program changed under its old model).
+        if (!next.undo) {
+          const done = this.batchDone[next.batch] ?? [];
+          for (const write of done) {
+            this.queue.unshift({ key: write.key, value: write.prior ?? null, for_repo: write.for_repo, batch: next.batch, undo: true });
+          }
+        }
+        delete this.batchDone[next.batch];
         this.saved = null;
         this.closePopup();
         this.refresh();
