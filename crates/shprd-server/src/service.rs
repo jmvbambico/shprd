@@ -932,7 +932,29 @@ mod tests {
         // The first one still owns it, and dropping it frees it for the next.
         assert!(first.owns_record() || !first.service_json_path().exists());
         drop(first);
-        ServiceFiles::prepare(dir.path()).expect("the lock is released when the service ends");
+        prepare_once_released(dir.path()).expect("the lock is released when the service ends");
+    }
+
+    /// Prepares `dir` once a dropped service's lock is really free.
+    ///
+    /// Closing the lock holder's file frees its `flock` only when the last
+    /// reference to the open file goes. A parallel test that spawns a child
+    /// (`process_alive` runs `kill(1)`) forks while the holder's descriptor is
+    /// open, and the child keeps the lock alive until it execs, a few
+    /// milliseconds later. The record here names this test's own live pid, so
+    /// [`take_lock`] rightly refuses at once instead of waiting: the refusal
+    /// is correct, and what the test must do is wait for the release. It still
+    /// fails if the lock is never released: the wait is bounded.
+    fn prepare_once_released(dir: &Path) -> Result<ServiceFiles, ServerError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match ServiceFiles::prepare(dir) {
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
     }
 
     #[test]

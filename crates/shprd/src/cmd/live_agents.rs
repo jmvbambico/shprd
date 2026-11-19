@@ -144,9 +144,13 @@ impl HostLive {
             .map(|name| crate::cmd::spawn::repo_space_name(&name))
             .ok()?;
         let space = self.host.find_space(&name).ok()??;
-        let text =
-            std::fs::read_to_string(crate::cmd::spawn::coordinator_pane_path(&self.home)).ok()?;
-        let pane = PaneId::new(text.lines().next()?.trim());
+        let record = crate::cmd::spawn::coordinator_record(
+            &self.home,
+            &self.repo,
+            self.host.as_ref(),
+            &space,
+        )?;
+        let pane = record.pane;
         // Only a pane that is still a tab of the space is the coordinator: a
         // closed tab is no longer its record's.
         let tab = self
@@ -164,8 +168,7 @@ impl HostLive {
             terminal: pane.as_str().to_string(),
             task: None,
             role: AgentRole::Coordinator.as_str().to_string(),
-            program: crate::cmd::spawn::recorded_coordinator_program(&self.home)
-                .unwrap_or_default(),
+            program: record.program.unwrap_or_default(),
             state: state.to_string(),
             started_ms: None,
             ended_ms: None,
