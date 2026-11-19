@@ -619,7 +619,7 @@ export default class Settings extends View {
   openPick(at, key, field, options, current) {
     this.closePopup();
     const W = 260;
-    const H = 10 + 31 * Math.min(options.length, 8);
+    const H = 14 + 31 * Math.min(options.length, 8);
     this.popup = openOverlay({
       mod: "shprd-models",
       kind: "popup",
