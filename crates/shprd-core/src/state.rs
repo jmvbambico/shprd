@@ -1163,6 +1163,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_task_remembers_when_it_was_added_and_last_touched_by_something_real() {
         let mut events = log("a", "some-rule");
         // The engine's notes about the task do not count as a touch.
