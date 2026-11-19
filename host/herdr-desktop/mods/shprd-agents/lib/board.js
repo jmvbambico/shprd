@@ -321,12 +321,15 @@ export function listView(
       let tasks = byRank(
         rest.filter((t) => (t.space != null && known.has(t.space) ? t.space : home) === space.id),
       );
-      if (!searching && !doneOpen) tasks = tasks.filter((t) => word(t) !== "done");
+      // Done is one folded line, then one Done group, like the other groupings:
+      // finished work does not fill a space's rows (a search still finds it there).
+      if (!searching) tasks = tasks.filter((t) => word(t) !== "done");
       if (tasks.length > 0) groups.push(make(`space-${space.id}`, space.name ?? String(space.id), tasks));
     }
-    const finished = rest.filter((t) => word(t) === "done").length;
-    if (!searching && !doneOpen && finished > 0) {
-      doneLine = { count: finished, label: `${finished} done` };
+    const finished = [...rest.filter((t) => word(t) === "done")].sort(newestFirst);
+    if (!searching && finished.length > 0) {
+      if (doneOpen) groups.push(make("done", STATUS.done.word, finished));
+      else doneLine = { count: finished.length, label: `${finished.length} done` };
     }
     groups.push(...olderGroup());
     return { groups, doneLine };
