@@ -171,8 +171,7 @@ fn agent_marker(env: &[(String, String)]) -> Option<String> {
         if value.is_empty() {
             return None;
         }
-        let child =
-            (key.starts_with("HC_") || key.starts_with("HERDR_")) && key != "HERDR_APP_HOME";
+        let child = key.starts_with("HC_") || key.starts_with("HERDR_");
         let actor = key == "SHPRD_ACTOR" && value.starts_with("agent:");
         (child || actor).then(|| key.clone())
     })
