@@ -244,6 +244,8 @@ export interface Role {
   readonly: boolean;
   /** Whether the person made it (not one this build ships). */
   custom: boolean;
+  /** The template this role starts with (`prompt:<id>`), or null (a path). */
+  promptId: string | null;
   /** Program, model, effort. */
   picks: Pick[];
 }
@@ -301,6 +303,10 @@ function pickOf(
   };
 }
 
+function promptIdOf(prompt: string | null): string | null {
+  return prompt?.startsWith("prompt:") ? prompt.slice("prompt:".length) : null;
+}
+
 /** Every role the page draws, in order. */
 export function roles(document: SettingsDto | null, roster: RosterDto | null): Role[] {
   const rows = rowsOf(document);
@@ -321,6 +327,7 @@ export function roles(document: SettingsDto | null, roster: RosterDto | null): R
     kind: textOf(rows.get(`roles.${id}.kind`)) ?? "helper",
     readonly: rows.get(`roles.${id}.readonly`)?.value === true,
     custom: !BUILTIN.includes(id),
+    promptId: promptIdOf(textOf(rows.get(`roles.${id}.prompt`))),
     picks: PICKS.map((field) => pickOf(id, field, rows, roster)),
     };
   });

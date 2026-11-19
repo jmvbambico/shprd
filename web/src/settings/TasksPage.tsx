@@ -6,7 +6,8 @@ import { useEffect, useRef, useState } from "react";
 
 import type { SettingsState } from "./useSettings";
 import { forRepo, stepped, workflowRows, type ScopeId, type WorkflowRow } from "./model";
-import { Row, Segmented, Switch } from "./rows";
+import { Dropdown } from "./Dropdown";
+import { Row, Switch } from "./rows";
 
 /** How long a note waits after the last key before it saves itself. */
 export const NOTE_MS = 500;
@@ -49,10 +50,10 @@ function WorkflowRowView({
   let below: React.ReactNode = null;
   if (row.kind === "choice") {
     control = (
-      <Segmented
+      <Dropdown
         label={row.title}
-        options={row.choices ?? []}
         value={typeof row.value === "string" ? row.value : null}
+        options={(row.choices ?? []).map(([id, word]) => ({ id, label: word }))}
         disabled={busy}
         onPick={write}
       />
@@ -106,7 +107,6 @@ function WorkflowRowView({
       id={row.key}
       title={row.title}
       about={row.about}
-      value={row.kind === "choice" || row.kind === "switch" || row.kind === "number" ? row.display : undefined}
       scopeId={scope}
       scope={{ key: row.key, layer: row.layer, mine: row.source === "repo_entry" }}
       onReset={() => write(null)}

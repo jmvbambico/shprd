@@ -4,7 +4,7 @@
 
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RemotePage } from "./RemotePage";
@@ -55,10 +55,11 @@ describe("RemotePage: the tunnel", () => {
       "POST /api/tunnels/start": json(200, tunnelOn()),
     });
     expect(await screen.findByText("Off")).toBeDefined();
-    const select = screen.getByLabelText("Provider") as HTMLSelectElement;
-    expect(select.value).toBe("tailscale");
-    expect(within(select).getByText("cloudflared (public internet)")).toBeDefined();
-    fireEvent.change(select, { target: { value: "cloudflared" } });
+    const select = screen.getByRole("button", { name: "Provider" });
+    expect(select.textContent).toContain("tailscale");
+    fireEvent.click(select);
+    expect(screen.getByRole("option", { name: /cloudflared \(public internet\)/ })).toBeDefined();
+    fireEvent.click(screen.getByRole("option", { name: /cloudflared/ }));
     fireEvent.click(screen.getByRole("button", { name: "Start tunnel" }));
     expect(await screen.findByText("On")).toBeDefined();
     expect(calls.find((c) => c.url === "/api/tunnels/start")?.body).toEqual({ provider: "cloudflared" });
@@ -72,7 +73,8 @@ describe("RemotePage: the tunnel", () => {
       "POST /api/tunnels/start": refusal(409, "refused", words),
     });
     await screen.findByText("Off");
-    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "cloudflared" } });
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    fireEvent.click(screen.getByRole("option", { name: /cloudflared/ }));
     expect(screen.getByText(/needs a login password first/)).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Start tunnel" }));
     const alert = await screen.findByRole("alert");

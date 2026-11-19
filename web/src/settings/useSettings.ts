@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, type ApiClient } from "../api/client";
 import type { PromptListDto, RosterDto, SettingsDto } from "../gen";
 import { outcomeOf, type SettingValue } from "./model";
+import { coordinatorRunning, needsCoordinatorRestart, restartNotice, type Write } from "./menu";
 
 /** How often the dialog re-reads the service, so another window's write shows. */
 export const POLL_MS = 10_000;
@@ -57,6 +58,13 @@ export interface SettingsState {
    * Resolves once the write has been answered, whether stored or refused.
    */
   write: (key: string, value: SettingValue, forRepo: boolean) => Promise<boolean>;
+  /**
+   * Writes several keys as one choice (program, model, level…), stopping at the
+   * first the service refuses, so a role is never left half switched.
+   */
+  writeAll: (writes: Write[], forRepo: boolean) => Promise<boolean>;
+  /** Whether the inline "restart the coordinator" notice shows. */
+  restartNotice: boolean;
   /** Clears the refusal and the saved word. */
   clearNotices: () => void;
   /** Restarts the coordinator; the service's sentence when it cannot, else null. */
@@ -80,6 +88,9 @@ export function useSettings(client: ApiClient): SettingsState {
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [writing, setWriting] = useState<string | null>(null);
+  const [coordChanged, setCoordChanged] = useState(false);
+  const [coordRunning, setCoordRunning] = useState(false);
+  const running = useRef(false);
   const tail = useRef<Promise<unknown>>(Promise.resolve());
   const pending = useRef(0);
   const alive = useRef(true);
@@ -140,6 +151,14 @@ export function useSettings(client: ApiClient): SettingsState {
       }).catch(() => {
         // The Prompts page says it is still reading.
       }),
+      client.state().then((next) => {
+        if (alive.current) {
+          running.current = coordinatorRunning(next);
+          setCoordRunning(running.current);
+        }
+      }).catch(() => {
+        // Not knowing whether a coordinator runs leaves the notice off.
+      }),
     ];
     await Promise.all(reads);
   }, [client]);
@@ -177,6 +196,9 @@ export function useSettings(client: ApiClient): SettingsState {
           if (alive.current) {
             setSettings(reply.settings);
             say(outcomeOf(reply.outcome));
+            if (needsCoordinatorRestart(key) && running.current) {
+              setCoordChanged(true);
+            }
           }
           return true;
         } catch (error) {
@@ -196,6 +218,18 @@ export function useSettings(client: ApiClient): SettingsState {
       return next;
     },
     [client, say],
+  );
+
+  const writeAll = useCallback(
+    async (writes: Write[], forRepo: boolean): Promise<boolean> => {
+      for (const next of writes) {
+        if (!(await write(next.key, next.value as SettingValue, forRepo))) {
+          return false;
+        }
+      }
+      return true;
+    },
+    [write],
   );
 
   const reloadPrompts = useCallback(async () => {
@@ -218,12 +252,15 @@ export function useSettings(client: ApiClient): SettingsState {
     saved,
     writing,
     write,
+    writeAll,
+    restartNotice: restartNotice({ changed: coordChanged, running: coordRunning }),
     reloadPrompts,
     setPrompts,
     refuse: (key, error) => setRefusal({ key, text: reason(error) }),
     restartCoordinator: async () => {
       try {
         await client.restartCoordinator();
+        setCoordChanged(false);
         return null;
       } catch (error) {
         return reason(error);

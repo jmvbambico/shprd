@@ -1,12 +1,14 @@
-// Agents: one block a role — its name, what it does, and the program, model and
-// effort it runs — then the one row that makes another.
+// Agents, in Shepherdr's shape: one compact row a role — its name (click it to
+// rename in place) and one line about it, a single "<Model> · <Effort>" button that
+// opens the model menu, and Edit instructions — then the Backup agent switch.
 //
 // Mirrors the Herdr desktop's `shprd-settings` Agents page. The roles and their
 // words are the service's answer to `GET /api/settings`; the programs and their
-// models are `GET /api/roster`'s. A refused write (a cross-vendor review, say) is
-// shown as the service's own sentence.
+// models are `GET /api/roster`'s, and the model menu's tabs are only the programs
+// installed on this machine. A refused write (a cross-vendor review, say) is shown
+// as the service's own sentence.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import type { SettingsState } from "./useSettings";
 import {
@@ -14,29 +16,38 @@ import {
   roles,
   withRole,
   withoutRole,
-  type Pick,
   type Role,
   type ScopeId,
 } from "./model";
 import { cleanTitle } from "../roles";
-import { Row } from "./rows";
-import { TextBox } from "./TasksPage";
+import { ModelMenu } from "./Dropdown";
+import {
+  backupChoice,
+  menusOf,
+  otherCli,
+  repoKeysOf,
+  roleSelection,
+  selectionLabel,
+  selectionWrites,
+  type Selection,
+} from "./menu";
+import { Switch } from "./rows";
 
 /** The Agents page. */
-export function AgentsPage({ state, scope }: { state: SettingsState; scope: ScopeId }) {
+export function AgentsPage({
+  state,
+  scope,
+  onEditInstructions,
+}: {
+  state: SettingsState;
+  scope: ScopeId;
+  /** Opens a role's prompt on the Prompts page. */
+  onEditInstructions: (promptId: string) => void;
+}) {
   const list = roles(state.settings, state.roster);
-  const [open, setOpen] = useState<string | null>(null);
-  const [typed, setTyped] = useState<{ key: string; text: string } | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
   const busy = state.writing !== null;
-
-  async function apply(key: string, value: string | string[] | null) {
-    const ok = await state.write(key, value, forRepo(scope));
-    if (ok) {
-      setOpen(null);
-      setTyped(null);
-    }
-  }
+  const menus = menusOf(state.roster);
 
   async function addRole() {
     const order = withRole(state.settings, adding ?? "");
@@ -52,27 +63,21 @@ export function AgentsPage({ state, scope }: { state: SettingsState; scope: Scop
   return (
     <div className="spage" data-page="agents">
       <h2 className="spage-title">Agents</h2>
-      {list.map((role) => (
-        <RoleBlock
-          key={role.id}
-          role={role}
-          scope={scope}
-          open={open}
-          typed={typed}
-          busy={busy}
-          writing={state.writing}
-          onToggle={(key) => {
-            setOpen(open === key ? null : key);
-            setTyped(null);
-            state.clearNotices();
-          }}
-          onApply={(key, value) => void apply(key, value)}
-          onTyped={setTyped}
-          onName={(text) => void apply(role.name.key, cleanTitle(text) === "" ? null : cleanTitle(text))}
-          restart={state.restartCoordinator}
-          onRemove={() => void apply("roles.order", withoutRole(state.settings, role.id))}
-        />
-      ))}
+      {list.map((role) =>
+        role.id === "backup" ? (
+          <BackupRow key={role.id} role={role} state={state} scope={scope} busy={busy} />
+        ) : (
+          <RoleRow
+            key={role.id}
+            role={role}
+            state={state}
+            scope={scope}
+            busy={busy}
+            menus={menus}
+            onEditInstructions={onEditInstructions}
+          />
+        ),
+      )}
       {adding === null ? (
         <button type="button" className="link add-role" onClick={() => setAdding("")}>
           Add a role
@@ -105,214 +110,239 @@ export function AgentsPage({ state, scope }: { state: SettingsState; scope: Scop
   );
 }
 
-function RoleBlock({
+/** The role's name: click it (or the pencil) to edit in place; Enter saves, Esc cancels, empty is the built-in name. */
+function RoleName({
   role,
-  scope,
-  open,
-  typed,
-  busy,
-  writing,
-  onToggle,
-  onApply,
-  onTyped,
-  onName,
-  restart,
-  onRemove,
+  onCommit,
 }: {
   role: Role;
-  scope: ScopeId;
-  open: string | null;
-  typed: { key: string; text: string } | null;
-  busy: boolean;
-  writing: string | null;
-  onToggle: (key: string) => void;
-  onApply: (key: string, value: string | null) => void;
-  onTyped: (typed: { key: string; text: string } | null) => void;
-  /** The name box was left or Enter pressed: write it. */
-  onName: (text: string) => void;
-  /** Restarts the coordinator; the coordinator's block offers it. */
-  restart: () => Promise<string | null>;
-  onRemove: () => void;
+  onCommit: (text: string) => void;
 }) {
-  const [restarting, setRestarting] = useState<"working" | "done" | string | null>(null);
-  async function restartNow() {
-    setRestarting("working");
-    const failed = await restart();
-    setRestarting(failed === null ? "done" : `failed:${failed}`);
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState("");
+  const cancelled = useRef(false);
+
+  function start() {
+    cancelled.current = false;
+    setText(role.title);
+    setEditing(true);
+  }
+  function finish() {
+    if (!cancelled.current && text !== role.title) {
+      onCommit(text);
+    }
+    setEditing(false);
+  }
+  if (editing) {
+    return (
+      <input
+        className="input role-name-input"
+        aria-label={`${role.title} name`}
+        placeholder={role.name.fallback}
+        autoFocus
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        onBlur={finish}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.currentTarget.blur();
+          } else if (event.key === "Escape") {
+            // Esc leaves the field and writes nothing; it does not close the window.
+            event.stopPropagation();
+            cancelled.current = true;
+            event.currentTarget.blur();
+          }
+        }}
+      />
+    );
   }
   return (
-    <section className="role" data-role={role.id} aria-label={role.title}>
-      <header className="role-head">
-        <span className="role-title">{role.title}</span>
-        <span className="role-kind">{role.kind}</span>
-        {role.custom ? <span className="badge">custom</span> : null}
-        {role.readonly ? <span className="role-kind">reads only</span> : null}
-        <span className="grow" />
-        {role.custom ? (
-          <button type="button" className="link" disabled={busy} onClick={onRemove}>
-            Remove
-          </button>
-        ) : null}
-      </header>
-      {role.about !== "" ? <p className="role-about">{role.about}</p> : null}
-      <Row
-        id={role.name.key}
-        title="Name"
-        about={`What the app calls this role. Empty goes back to “${role.name.fallback}”.`}
-        scopeId={scope}
-        scope={{ key: role.name.key, layer: role.name.layer, mine: role.name.source === "repo_entry" }}
-        onReset={() => onApply(role.name.key, null)}
-        busy={busy}
-        below={<TextBox label={`${role.title} name`} value={role.name.value} rows={1} debounce={false} onCommit={onName} />}
-      />
-      {role.picks.map((pick) => {
-        const key = `${role.id}.${pick.field}`;
-        return (
-          <PickRow
-            key={key}
-            pick={pick}
-            scope={scope}
-            isOpen={open === key}
-            typed={typed?.key === pick.key ? typed.text : null}
-            busy={busy}
-            saving={writing === pick.key}
-            onToggle={() => onToggle(key)}
-            onApply={(value) => onApply(pick.key, value)}
-            onTyped={(text) => onTyped(text === null ? null : { key: pick.key, text })}
+    <button type="button" className="role-name" aria-label={`Rename ${role.title}`} onClick={start}>
+      <span className="role-title">{role.title}</span>
+      <span className="role-pencil" aria-hidden="true">
+        ✎
+      </span>
+    </button>
+  );
+}
+
+function RoleRow({
+  role,
+  state,
+  scope,
+  busy,
+  menus,
+  onEditInstructions,
+}: {
+  role: Role;
+  state: SettingsState;
+  scope: ScopeId;
+  busy: boolean;
+  menus: ReturnType<typeof menusOf>;
+  onEditInstructions: (promptId: string) => void;
+}) {
+  const repo = forRepo(scope);
+  const sel = roleSelection(state.settings, role.id);
+  const mine = repoKeysOf(state.settings, role.id).length > 0;
+  const other = role.id === "reviewer" ? otherCli(state.settings, state.roster) : null;
+  const [restarting, setRestarting] = useState<"working" | "done" | string | null>(null);
+
+  async function choose(next: Selection) {
+    await state.writeAll(selectionWrites(role.id, sel, next), repo);
+  }
+  async function restartNow() {
+    setRestarting("working");
+    const failed = await state.restartCoordinator();
+    setRestarting(failed === null ? "done" : `failed:${failed}`);
+    if (failed === null) {
+      setTimeout(() => setRestarting((now) => (now === "done" ? null : now)), 2000);
+    }
+  }
+  const loading = state.roster === null;
+  const none = !loading && menus.order.length === 0;
+  const showNotice = role.kind === "coordinator" && (state.restartNotice || restarting !== null);
+
+  return (
+    <section className="role-row" data-role={role.id} aria-label={role.title}>
+      <div className="role-main">
+        <div className="srow-words">
+          <div className="role-line">
+            <RoleName
+              role={role}
+              onCommit={(text) => void state.write(role.name.key, cleanTitle(text) === "" ? null : cleanTitle(text), repo)}
+            />
+            {role.readonly ? <span className="role-kind">reads only</span> : null}
+            {role.custom ? <span className="badge">custom</span> : null}
+            {mine ? <span className="badge">repo</span> : null}
+          </div>
+          {role.about !== "" ? <div className="srow-about">{role.about}</div> : null}
+        </div>
+        <div className="role-controls">
+          {mine && scope === "repo" ? (
+            <button
+              type="button"
+              className="link"
+              aria-label={`Reset ${role.id}`}
+              disabled={busy}
+              onClick={() => {
+                void state.writeAll(
+                  repoKeysOf(state.settings, role.id).map((key) => ({ key, value: null })),
+                  true,
+                );
+              }}
+            >
+              Reset
+            </button>
+          ) : null}
+          <ModelMenu
+            label={`${role.title} model`}
+            shown={loading ? "Loading…" : none ? "No program found" : selectionLabel(menus, sel, state.roster)}
+            menus={menus}
+            sel={sel}
+            disabled={loading || none}
+            onChange={(next) => void choose(next)}
           />
-        );
-      })}
-      {role.kind === "coordinator" ? (
-        <Row
-          id="restart-coordinator"
-          scopeId={scope}
-          title="Restart the coordinator"
-          about="A new program or model reaches the coordinator when it next starts."
-          value={restarting === "working" ? "Restarting…" : restarting === "done" ? "Restarted" : undefined}
-          control={
-            <button type="button" className="link" disabled={restarting === "working"} onClick={() => void restartNow()}>
+          {other !== null ? (
+            <button
+              type="button"
+              className="btn plain"
+              disabled={busy}
+              onClick={() =>
+                void choose({ agent: other, model: null, effort: null, fast: false, perm: null })
+              }
+            >
+              Use other CLI
+            </button>
+          ) : null}
+          {role.promptId ? (
+            <button type="button" className="btn" onClick={() => onEditInstructions(role.promptId!)}>
+              Edit instructions
+            </button>
+          ) : null}
+          {role.custom ? (
+            <button
+              type="button"
+              className="btn plain"
+              disabled={busy}
+              onClick={() => void state.write("roles.order", withoutRole(state.settings, role.id), repo)}
+            >
+              Remove
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {showNotice ? (
+        <div className="restart-notice" role="status">
+          <span className={restarting?.startsWith("failed:") ? "tone-red" : ""}>
+            {restarting === "working"
+              ? "Restarting…"
+              : restarting === "done"
+                ? "Restarted"
+                : restarting?.startsWith("failed:")
+                  ? restarting.slice(7)
+                  : "Applies when the coordinator next starts."}
+          </span>
+          {restarting !== "working" && restarting !== "done" ? (
+            <button type="button" className="link" onClick={() => void restartNow()}>
               Restart the coordinator now
             </button>
-          }
-          below={
-            restarting?.startsWith("failed:") ? (
-              <div className="refusal" role="alert">
-                {restarting.slice(7)}
-              </div>
-            ) : null
-          }
-        />
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
 }
 
-function PickRow({
-  pick,
+function BackupRow({
+  role,
+  state,
   scope,
-  isOpen,
-  typed,
   busy,
-  saving,
-  onToggle,
-  onApply,
-  onTyped,
 }: {
-  pick: Pick;
+  role: Role;
+  state: SettingsState;
   scope: ScopeId;
-  isOpen: boolean;
-  typed: string | null;
   busy: boolean;
-  saving: boolean;
-  onToggle: () => void;
-  onApply: (value: string | null) => void;
-  onTyped: (text: string | null) => void;
 }) {
+  const menus = menusOf(state.roster);
+  const sel = roleSelection(state.settings, role.id);
+  const on = sel.agent !== null;
+  const repo = forRepo(scope);
+  async function flip() {
+    if (on) {
+      await state.write("roles.backup.agent", null, repo);
+      return;
+    }
+    const program = backupChoice(state.settings, state.roster);
+    if (program === null) {
+      state.refuse("roles.backup.agent", new Error("there is no other program to take a task over"));
+      return;
+    }
+    await state.write("roles.backup.agent", program, repo);
+  }
   return (
-    <Row
-      id={pick.key}
-      title={pick.label}
-      about={pick.about}
-      value={pick.display}
-      scopeId={scope}
-      scope={{ key: pick.key, layer: pick.layer, mine: pick.source === "repo_entry" }}
-      onReset={() => onApply(null)}
-      busy={busy}
-      control={
-        <span className="pick-control">
-          {saving ? <span className="saving">saving…</span> : null}
-          <button
-            type="button"
-            className="pick-button"
-            aria-expanded={isOpen}
-            aria-label={`Change ${pick.label.toLowerCase()} (${pick.key})`}
-            onClick={onToggle}
-          >
-            {isOpen ? "▴" : "▾"}
-          </button>
-        </span>
-      }
-      below={
-        isOpen ? (
-          <div className="choices" role="listbox" aria-label={`${pick.label} choices`}>
-            {pick.choices.length === 0 ? (
-              <div className="choice-note">{pick.note ?? "nothing to pick"}</div>
-            ) : null}
-            {pick.choices.map((choice) => {
-              const current = (pick.value ?? null) === choice.value;
-              return (
-                <button
-                  key={choice.value ?? "default"}
-                  type="button"
-                  role="option"
-                  aria-selected={current}
-                  className="choice"
-                  disabled={busy}
-                  onClick={() => onApply(choice.value)}
-                >
-                  <span className={choice.value === null ? "choice-label muted" : "choice-label"}>
-                    {choice.label}
-                  </span>
-                  {choice.hint ? <span className="choice-hint">{choice.hint}</span> : null}
-                  {current ? <span className="choice-check">✓</span> : null}
-                </button>
-              );
-            })}
-            {pick.field !== "agent" ? (
-              typed !== null ? (
-                <form
-                  className="typed-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (typed.trim() !== "") {
-                      onApply(typed.trim());
-                    }
-                  }}
-                >
-                  <input
-                    className="input"
-                    aria-label="Type an id"
-                    placeholder="Type an id"
-                    autoFocus
-                    value={typed}
-                    onChange={(event) => onTyped(event.target.value)}
-                  />
-                  <button type="submit" className="link" disabled={busy}>
-                    Use
-                  </button>
-                </form>
-              ) : (
-                <button type="button" className="link typed-link" onClick={() => onTyped("")}>
-                  Use an id typed
-                </button>
-              )
-            ) : null}
-            {pick.note && pick.choices.length > 0 ? (
-              <div className="choice-note">{pick.note}</div>
-            ) : null}
+    <section className="role-row" data-role={role.id} aria-label={role.title}>
+      <div className="role-main">
+        <div className="srow-words">
+          <div className="role-line">
+            <span className="role-title">{role.title}</span>
           </div>
-        ) : null
-      }
-    />
+          <div className="srow-about">The other CLI takes a task over once when its agent can't go on.</div>
+        </div>
+        <div className="role-controls">
+          {on ? (
+            <ModelMenu
+              label={`${role.title} model`}
+              shown={selectionLabel(menus, sel, state.roster)}
+              menus={menus}
+              sel={sel}
+              onChange={(next) => void state.writeAll(selectionWrites(role.id, sel, next), repo)}
+            />
+          ) : null}
+          <Switch label={role.title} on={on} disabled={busy} onToggle={() => void flip()} />
+        </div>
+      </div>
+    </section>
   );
 }

@@ -7,7 +7,7 @@
 
 import { type ReactNode } from "react";
 
-import { CHANGED_HERE, RESET, type ScopeId } from "./model";
+import { RESET, type ScopeId } from "./model";
 
 /** What a row says about where its value came from. */
 export interface RowScope {
@@ -25,9 +25,7 @@ export interface RowProps {
   title: string;
   /** The line under it. */
   about?: string;
-  /** The value shown at the right. */
-  value?: string;
-  /** The layer line. */
+  /** Where the value comes from: only whether this repository set it matters. */
   scope?: RowScope;
   /** Which scope the page writes to. */
   scopeId: ScopeId;
@@ -43,11 +41,10 @@ export interface RowProps {
   id?: string;
 }
 
-/** One row. */
+/** One row: the words at the left, the control at the right, `below` under both. */
 export function Row({
   title,
   about,
-  value,
   scope,
   scopeId,
   onReset,
@@ -56,66 +53,33 @@ export function Row({
   below,
   id,
 }: RowProps) {
+  const mine = scope?.mine === true;
   return (
     <div className="srow" data-row={id}>
       <div className="srow-main">
         <div className="srow-words">
-          <div className="srow-title">{title}</div>
+          <div className="srow-title">
+            {title}
+            {mine ? <span className="badge">repo</span> : null}
+          </div>
           {about ? <div className="srow-about">{about}</div> : null}
         </div>
-        {value !== undefined || scope ? (
-          <div className="srow-value">
-            {value !== undefined ? <span className="srow-display">{value}</span> : null}
-            {scope ? (
-              <ScopeLine scope={scope} scopeId={scopeId} onReset={onReset} busy={busy} />
-            ) : null}
-          </div>
+        {mine && scopeId === "repo" && scope ? (
+          <button
+            type="button"
+            className="link"
+            aria-label={`${RESET} ${scope.key}`}
+            disabled={busy}
+            onClick={onReset}
+          >
+            {RESET}
+          </button>
         ) : null}
         {control ? <div className="srow-control">{control}</div> : null}
       </div>
       {below}
     </div>
   );
-}
-
-/**
- * Where a row's value comes from.
- *
- * In `This repo` the row says whether the repository set its own (`Set for this
- * repository · Reset`) or which layer it inherits from; in `You` it names the
- * layer that answered, in the service's own words.
- */
-export function ScopeLine({
-  scope,
-  scopeId,
-  onReset,
-  busy,
-}: {
-  scope: RowScope;
-  scopeId: ScopeId;
-  onReset?: (() => void) | undefined;
-  busy: boolean;
-}) {
-  if (scopeId !== "repo") {
-    return <span className="srow-layer">{scope.layer}</span>;
-  }
-  if (scope.mine) {
-    return (
-      <span className="srow-layer">
-        <span className="srow-mine">{CHANGED_HERE}</span> ·{" "}
-        <button
-          type="button"
-          className="link"
-          aria-label={`${RESET} ${scope.key}`}
-          disabled={busy}
-          onClick={onReset}
-        >
-          {RESET}
-        </button>
-      </span>
-    );
-  }
-  return <span className="srow-layer">inherited from {scope.layer}</span>;
 }
 
 /** A segmented control: one button per choice, the current one marked. */
