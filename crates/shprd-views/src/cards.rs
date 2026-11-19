@@ -253,11 +253,7 @@ mod tests {
             "{}",
             drawn.body
         );
-        assert!(
-            drawn.body.contains("`shprd drop T1 --reason …`"),
-            "{}",
-            drawn.body
-        );
+        assert!(!drawn.body.contains("shprd "), "{}", drawn.body);
     }
 
     #[test]
@@ -275,13 +271,7 @@ mod tests {
     fn a_card_answered_with_take_it_as_it_is_goes_once_the_override_is_recorded() {
         let (mut state, escalation) = spent_run(Some("take it as it is"));
         let waiting = card(&state, &escalation).expect("the person still has to accept it");
-        assert!(
-            waiting
-                .body
-                .contains("`shprd override --task T1 --rule integrate_after_failed_gate"),
-            "{}",
-            waiting.body
-        );
+        assert!(!waiting.body.contains("shprd "), "{}", waiting.body);
         state.tasks.get_mut("T1").expect("the task").overrides.push(
             shprd_core::state::OverrideRecord {
                 rule: String::from(shprd_core::rules::INTEGRATE_AFTER_FAILED_GATE),

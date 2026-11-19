@@ -282,6 +282,12 @@ pub(crate) fn list_asks(repo: &Path, now_ms: u64) -> Result<AskListDto, ApiRejec
         .asks
         .values()
         .filter(|ask| ask.is_open_at(now_ms))
+        .filter(|ask| {
+            state
+                .tasks
+                .get(&ask.task)
+                .is_none_or(|task| !ask.is_retired_by_newer_attempt(task))
+        })
         .collect();
     asks.sort_by(|left, right| {
         left.created_at_ms
@@ -311,6 +317,19 @@ pub(crate) fn answer_ask(
             "an answer needs at least one character",
         ));
     }
+    // A spent review's card acts on its answer, and the rules are asked before
+    // anything is written: an answer whose consequence they would refuse (a
+    // task already dropped, say) must not be consumed and then do nothing.
+    let (before, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    let followup = before
+        .tasks
+        .get(task)
+        .and_then(|found| shprd_core::gate::rounds_spent_followup(found, ask, answer));
+    if let Some(kind) = &followup {
+        before
+            .check_as(ctx.actor, kind, SystemClock.now_ms())
+            .map_err(|err| ApiReject::refused(err.to_string()))?;
+    }
     let queue = shprd_core::ask::AskQueue::for_repo(ctx.repo);
     let now_ms = SystemClock.now_ms();
     let answered: shprd_core::ask::Ask =
@@ -331,6 +350,13 @@ pub(crate) fn answer_ask(
         }
     };
     ctx.hub.publish(event.seq);
+    // The card's answer is the person's confirmation, so what it chose is
+    // recorded as theirs: the override `take it as it is` means (the tick lands
+    // the task on its own policy afterwards) or the drop.
+    if let Some(kind) = followup {
+        let acted = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
+        ctx.hub.publish(acted.seq);
+    }
     if let Some(step) = ctx.after_write {
         step.call(ctx.repo);
     }

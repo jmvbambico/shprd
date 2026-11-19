@@ -202,13 +202,9 @@ fn tagged_attempt(body: &str) -> Option<u32> {
 /// choice so the card answers itself.
 pub fn rounds_spent_body(task: &Task, attempt: u32, rounds: u32) -> String {
     let found = findings_line(task);
-    let id = &task.id;
     format!(
-        "{}: {found}; answer the card `{}`: retry with another round, take it as it is, or drop \
-         it (by hand: `shprd agent spawn --task {id}`, `shprd override --task {id} --rule \
-         integrate_after_failed_gate --reason …` then `shprd land {id}`, or `shprd drop {id} \
-         --reason …`)",
-        rounds_spent_prefix(id, attempt, rounds),
+        "{}: {found}; answer the card `{}`: retry with another round, take it as it is, or drop it",
+        rounds_spent_prefix(&task.id, attempt, rounds),
         rounds_spent_ask(attempt),
     )
 }
@@ -241,30 +237,43 @@ fn findings_line(task: &Task) -> String {
 /// `answer` is the answer as the log recorded it, so `drop it` reads as *you
 /// answered `drop it`: run `shprd drop T1 --reason …`*.
 pub fn answered_rounds_body(task: &Task, attempt: u32, rounds: u32, answer: &str) -> String {
-    let id = &task.id;
     let found = findings_line(task);
     let choice = answer.trim();
-    let lower = choice.to_ascii_lowercase();
-    let verb = if lower.starts_with("drop") {
-        format!("`shprd drop {id} --reason …`")
-    } else if lower.starts_with("take") {
-        format!(
-            "`shprd override --task {id} --rule integrate_after_failed_gate --reason …` then \
-             `shprd land {id}`"
-        )
-    } else {
-        // An answer in the person's own words names no choice, so the card
-        // names every by-hand verb instead of guessing which one they meant.
-        format!(
-            "`shprd agent spawn --task {id}`, or `shprd override --task {id} --rule \
-             integrate_after_failed_gate --reason …` then `shprd land {id}`, or `shprd drop {id} \
-             --reason …`"
-        )
-    };
     format!(
-        "{}: {found}; you answered `{choice}`, so run {verb}",
-        rounds_spent_prefix(id, attempt, rounds),
+        "{}: {found}; you answered `{choice}`, which has not been carried out yet: send the task \
+         back, accept it or drop it from its row",
+        rounds_spent_prefix(&task.id, attempt, rounds),
     )
+}
+
+/// The event a person's answer to a spent review's card carries out, if it has one.
+///
+/// The card's answer is the person's own decision, so no second confirmation is
+/// asked: `take it as it is` is the `integrate_after_failed_gate` override the
+/// `shprd override` verb would record (after which the task lands on the policy
+/// it is configured with), and `drop it` is the drop. `retry` is not an event
+/// of the person's: the engine spends the round it grants. `None` for any other
+/// ask, any other answer, or a task the run no longer holds open.
+pub fn rounds_spent_followup(task: &Task, ask: &str, answer: &str) -> Option<EventKind> {
+    if !ask.starts_with(ROUNDS_SPENT_ASK_PREFIX) {
+        return None;
+    }
+    let choice = answer.trim();
+    let lower = choice.to_ascii_lowercase();
+    if lower.starts_with("take") {
+        return Some(EventKind::Override {
+            task: task.id.clone(),
+            rule: INTEGRATE_AFTER_FAILED_GATE.to_string(),
+            reason: format!("the person answered `{choice}` on the card `{ask}`"),
+        });
+    }
+    if lower.starts_with("drop") {
+        return Some(EventKind::TaskDropped {
+            task: task.id.clone(),
+            reason: format!("the person answered `{choice}` on the card `{ask}`"),
+        });
+    }
+    None
 }
 
 /// Whether a card's answer asks for one more review round.
@@ -443,7 +452,8 @@ mod tests {
         ESCALATION_ACTION, Next, REVIEW_GATE, ROUNDS_SPENT_OPTIONS, after_failure,
         answer_leaves_a_verb, answered_rounds_body, card_attempt, decide, failed_review_rounds,
         latest_failed_review, provenance, rounds_spent_answer, rounds_spent_ask, rounds_spent_body,
-        rounds_spent_prefix, rounds_spent_verb_ran, send_back_failure_prefix, verdict,
+        rounds_spent_followup, rounds_spent_prefix, rounds_spent_verb_ran,
+        send_back_failure_prefix, verdict,
     };
     use crate::config::Review;
     use crate::event::{EventKind, Finding, ReviewSource, Severity};
@@ -691,8 +701,7 @@ mod tests {
                 assert!(body.starts_with(&prefix), "{body}");
                 assert!(body.contains("a finding"), "it names what failed: {body}");
                 assert!(body.contains("retry with another round"), "{body}");
-                assert!(body.contains("shprd agent spawn --task T1"), "{body}");
-                assert!(body.contains("shprd drop T1"), "{body}");
+                assert!(!body.contains("shprd "), "no CLI commands: {body}");
                 assert_eq!(default_action, ESCALATION_ACTION);
             }
             other => panic!("the last round asks for a human, got {other:?}"),
@@ -827,46 +836,41 @@ mod tests {
     }
 
     #[test]
-    fn an_answered_card_names_the_verb_the_answer_leaves() {
-        // Bug 1 of gate run #4: a card answered with `drop it` kept pointing at
-        // an ask that had been consumed, so every click on it was refused. Once
-        // the answer is known the card stops offering choices and says the verb
-        // that is left.
+    fn an_answered_card_names_no_cli_verb() {
         let found = spent("T1", 2);
-        let drop = answered_rounds_body(&found, 2, 2, "drop it");
-        assert!(drop.starts_with(&rounds_spent_prefix("T1", 2, 2)), "{drop}");
-        assert!(!drop.contains("answer the card"), "{drop}");
-        assert!(drop.contains("you answered `drop it`"), "{drop}");
-        assert!(drop.contains("`shprd drop T1 --reason …`"), "{drop}");
-        assert!(
-            !drop.contains("`shprd agent spawn --task T1`"),
-            "one verb, not every one: {drop}"
-        );
-        // It names the failure it is about, exactly as the offered card did.
-        assert!(
-            drop.contains("No evidence that test_calc.py still passes"),
-            "{drop}"
-        );
-
-        let take = answered_rounds_body(&found, 2, 2, "take it as it is");
-        assert!(take.contains("you answered `take it as it is`"), "{take}");
-        assert!(
-            take.contains("`shprd override --task T1 --rule integrate_after_failed_gate"),
-            "{take}"
-        );
-        assert!(take.contains("`shprd land T1`"), "{take}");
-    }
-
-    #[test]
-    fn an_answer_in_the_persons_own_words_names_every_by_hand_verb() {
-        let found = spent("T1", 1);
-        let body = answered_rounds_body(&found, 1, 1, "I will look at it tomorrow");
+        let body = answered_rounds_body(&found, 2, 2, "I will look at it tomorrow");
+        assert!(body.starts_with(&rounds_spent_prefix("T1", 2, 2)), "{body}");
+        assert!(!body.contains("answer the card"), "{body}");
         assert!(
             body.contains("you answered `I will look at it tomorrow`"),
             "{body}"
         );
-        assert!(body.contains("`shprd agent spawn --task T1`"), "{body}");
-        assert!(body.contains("`shprd drop T1 --reason …`"), "{body}");
+        assert!(!body.contains("shprd "), "no CLI commands: {body}");
+        assert!(
+            body.contains("No evidence that test_calc.py still passes"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn take_and_drop_answers_carry_themselves_out() {
+        let found = spent("T1", 1);
+        let ask = rounds_spent_ask(1);
+        match rounds_spent_followup(&found, &ask, " Take it as it is ") {
+            Some(EventKind::Override { task, rule, reason }) => {
+                assert_eq!(task, "T1");
+                assert_eq!(rule, INTEGRATE_AFTER_FAILED_GATE);
+                assert!(reason.contains("person answered"), "{reason}");
+            }
+            other => panic!("take it is an override, got {other:?}"),
+        }
+        assert!(matches!(
+            rounds_spent_followup(&found, &ask, "drop it"),
+            Some(EventKind::TaskDropped { .. })
+        ));
+        // A retry is the engine's own work; another ask is not this card.
+        assert!(rounds_spent_followup(&found, &ask, "retry with another round").is_none());
+        assert!(rounds_spent_followup(&found, "plan-1", "take it as it is").is_none());
     }
 
     #[test]

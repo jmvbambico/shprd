@@ -175,6 +175,23 @@ impl AskRecord {
     pub fn is_open_at(&self, now_ms: u64) -> bool {
         self.answer.is_none() && self.expires_at_ms.is_none_or(|until| until > now_ms)
     }
+
+    /// Whether a newer attempt of `task` started after this ask was raised.
+    ///
+    /// An ask belongs to the attempt that was newest when it was raised, and a
+    /// new attempt retires what the old one left open: its agent is gone, so
+    /// nobody waits on the answer, and a task that read `Needs you` for it
+    /// would keep saying so while the new attempt works. An ask raised before
+    /// any attempt started belongs to the first one.
+    pub fn is_retired_by_newer_attempt(&self, task: &Task) -> bool {
+        let spawned_after =
+            |attempt: &Attempt| attempt.spawn_seq.is_some_and(|seq| seq > self.raised_seq);
+        let spawned_before = task
+            .attempts
+            .iter()
+            .any(|attempt| attempt.spawn_seq.is_some_and(|seq| seq < self.raised_seq));
+        spawned_before && task.attempts.iter().any(spawned_after)
+    }
 }
 
 /// One ask's answer as the log records it.
@@ -1103,6 +1120,59 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    fn spawned(seq: u64, attempt: u32) -> Event {
+        ev(
+            seq,
+            EventKind::Spawned {
+                task: "a".to_string(),
+                attempt,
+                agent: "w1".to_string(),
+                model: None,
+                worktree: "/wt/a".to_string(),
+                branch: "shprd/r1/a".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_new_attempt_retires_the_asks_the_old_one_left_open() {
+        let raised = ev(
+            4,
+            EventKind::AskRaised {
+                task: "a".to_string(),
+                ask: "plan-1".to_string(),
+                ask_kind: AskKind::Plan,
+                text: "Plan to approve".to_string(),
+                options: Vec::new(),
+                created_at_ms: 4000,
+                expires_at_ms: None,
+            },
+        );
+        let mut events = log("", "no_main_push");
+        events.truncate(2);
+        events.push(spawned(3, 1));
+        events.push(raised);
+        let state = RunState::fold(&events).expect("folds");
+        let task = state.tasks.get("a").expect("a");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(
+            !ask.is_retired_by_newer_attempt(task),
+            "the attempt that raised it is still the newest"
+        );
+        events.push(ev(
+            5,
+            EventKind::TaskStopped {
+                task: "a".to_string(),
+                attempt: 1,
+            },
+        ));
+        events.push(spawned(6, 2));
+        let state = RunState::fold(&events).expect("folds");
+        let task = state.tasks.get("a").expect("a");
+        let ask = state.asks.values().next().expect("the ask");
+        assert!(ask.is_retired_by_newer_attempt(task));
     }
 
     #[test]
