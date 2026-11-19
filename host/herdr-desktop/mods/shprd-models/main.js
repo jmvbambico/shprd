@@ -209,7 +209,7 @@ export default class ModelMenu extends View {
               .min_w(0)
               .truncate()
               .font_medium()
-              .child(this.tab ? (menus.programs[this.tab]?.name ?? this.tab) : "Select program"),
+              .child(this.tab ? (menus.programs[this.tab]?.name ?? this.tab) : "Select Harness"),
           )
           .child(svg(iconFile("chevron-down")).size(12).flex_none().text_color(t.dim)),
       );

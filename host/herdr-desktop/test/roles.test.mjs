@@ -91,7 +91,7 @@ test("the settings page lists each role's name, with the built-in word as its fa
   const [coordinator, worker] = list;
   assert.equal(coordinator.title, "Orchestrator");
   assert.deepEqual([coordinator.name.key, coordinator.name.value, coordinator.name.fallback], ["roles.coordinator.title", "Orchestrator", "Assistant"]);
-  assert.equal(worker.title, "Worker");
+  assert.equal(worker.title, "Worker(s)", "the built-in word is headed as a list");
 });
 
 test("only the coordinator's own starting keys ask for a restart", () => {

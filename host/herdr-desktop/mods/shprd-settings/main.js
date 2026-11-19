@@ -40,8 +40,7 @@ import {
   MENU_W,
   menuHeight,
   PICK_KEY,
-  backupChoice,
-  boxProblem,
+    boxProblem,
   coordinatorRunning,
   menusOf,
   otherCli,
@@ -54,10 +53,10 @@ import {
   cleanTitle,
   needsCoordinatorRestart,
   sessionRows,
-  WORKER_LINES_ABOUT,
-  fallbackLabel,
-  fallbackWrite,
+  CHAIN_NOTE,
+  hasLines,
   lineLabel,
+  promptName,
   lineWrites,
   nextLineProgram,
   withLine,
@@ -749,11 +748,6 @@ export default class Settings extends View {
       this.setLines(roleId, withLine(workerLines(this.settings, roleId), Number(at), reply.value));
       return;
     }
-    // The reviewer's fallback was chosen, or None.
-    if (kind === "fb" && reply.field === "selection") {
-      const writes = fallbackWrite(this.settings, id, reply.value ?? null);
-      if (writes.length > 0) this.applyBatch(writes);
-    }
   }
 
   /** Writes the worker's lines as one choice. */
@@ -796,16 +790,6 @@ export default class Settings extends View {
     box?.state?.set_value?.(box.saved ?? "");
     this.renaming = null;
     this.cx.notify();
-  }
-
-  /** Opens a role's instructions: the Prompts page, on that template. */
-  editInstructions(role) {
-    if (!role.promptId) return;
-    this.closePopup();
-    this.page = "prompts";
-    this.refusal = null;
-    this.saved = null;
-    this.openPrompt({ id: role.promptId });
   }
 
   /** Puts back what a repository overrode for a role (the keys its own layer holds). */
@@ -1062,7 +1046,7 @@ export default class Settings extends View {
     this.keepKeyboard();
   }
 
-  /** Puts the shipped words back over the open prompt. */
+  /** Puts the default words back over the open prompt. */
   async resetPrompt() {
     const prompt = this.prompt;
     if (!this.client || !prompt || this.writing !== null) return;
@@ -1079,7 +1063,7 @@ export default class Settings extends View {
         this.editorSaved = reset.text;
         this.editorGen += 1;
       }
-      this.saved = { outcome: "stored", text: "Reset: the shipped words are back." };
+      this.saved = { outcome: "stored", text: "Reset: the default words are back." };
       this.savedAt = Date.now();
       const list = await this.client.prompts();
       if (list) this.prompts = list;
@@ -1490,8 +1474,9 @@ export default class Settings extends View {
 
   /**
    * Agents, in Shepherdr's shape: one compact row a role — its name and one line
-   * about it, then a single "<Model> · <Effort>" button that opens the model menu
-   * and an Edit instructions button — and the toggles shprd has (Backup agent).
+   * about it, then a single "<Model> · <Effort>" button that opens the model menu.
+   * Workers and reviewers hold a chain of program lines (Add / remove, a gutter
+   * that joins them in order); one note at the bottom says how a chain is walked.
    *
    * The roles, their order and their words are the service's answer to
    * `GET /api/settings`; the programs and their models are `GET /api/roster`'s.
@@ -1502,8 +1487,9 @@ export default class Settings extends View {
     const list = roles(this.settings, this.roster);
     return [
       this.title(t, "Agents"),
-      ...list.map((role) => (role.id === "backup" ? this.backupRow(t, role) : this.roleRow(t, colors, role))),
+      ...list.map((role) => this.roleRow(t, colors, role)),
       this.addRoleRow(t),
+      div().id("chain-note").pt(12).text_size(TEXT.label).line_height("17px").text_color(t.dim).child(CHAIN_NOTE),
     ];
   }
 
@@ -1533,6 +1519,7 @@ export default class Settings extends View {
     return h_flex()
       .gap(4)
       .items_center()
+      .when(lines.length > 1, (el) => el.child(this.chainGutter(t, role.id, at, lines.length)))
       .child(
         selectButton(
           t,
@@ -1550,44 +1537,51 @@ export default class Settings extends View {
       );
   }
 
-  /** The worker's lines, one picker each, and the "+" that adds another. */
+  /**
+   * The gutter of a chain of two or more lines: the line's order in a dot, and a
+   * rail that joins it to the line before and the line after.
+   */
+  chainGutter(t, roleId, at, count) {
+    const rail = (id, show) =>
+      div().id(id).w(2).flex_1().when(show, (el) => el.bg(t.border));
+    return v_flex()
+      .id(`chain-${roleId}-${at}`)
+      .w(22)
+      .h(36)
+      .flex_none()
+      .items_center()
+      .child(rail(`chain-up-${roleId}-${at}`, at > 0))
+      .child(
+        div()
+          .w(16)
+          .h(16)
+          .flex_none()
+          .flex()
+          .items_center()
+          .justify_center()
+          .rounded(8)
+          .border_1()
+          .border_color(at === 0 ? t.accent : t.border)
+          .bg(t.raised)
+          .text_size(10)
+          .text_color(at === 0 ? t.foreground : t.muted)
+          .child(String(at + 1)),
+      )
+      .child(rail(`chain-down-${roleId}-${at}`, at < count - 1));
+  }
+
+  /** The role's lines, one picker each, and the "Add" that adds another. */
   workerLinesControl(t, role) {
     const lines = workerLines(this.settings, role.id);
     const shown = lines.length > 0 ? lines : [{ agent: null, model: null, effort: null, fast: false, perm: null }];
     const more = this.roster !== null && lines.length > 0 && nextLineProgram(this.settings, this.roster, role.id) !== null;
     return v_flex()
       .flex_none()
-      .gap(6)
+      .gap(shown.length > 1 ? 0 : 6)
       .items_end()
       .children(shown.map((_, at) => this.lineRow(t, role, shown, at)))
       .when(more, (el) =>
-        el.child(link(t, `add-line-${role.id}`, "+ Add a program", () => this.addLine(role.id), this.writing !== null)),
-      );
-  }
-
-  /** The reviewer's fallback: "Fallback: Codex · GPT-6-Luna ⌄", the same menu as the main pick, with None. */
-  fallbackPicker(t, role) {
-    const menus = menusOf(this.roster);
-    const sel = role.fallback.value;
-    const id = `fallback-${role.id}`;
-    const disabled = this.roster === null || menus.order.length === 0;
-    return h_flex()
-      .gap(6)
-      .items_center()
-      .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child("Fallback"))
-      .child(
-        selectButton(
-          t,
-          id,
-          [div().min_w(0).truncate().child(this.roster === null ? "Loading…" : fallbackLabel(menus, sel, this.roster))],
-          this.rec(id),
-          (at) =>
-            this.openModelMenu(at, `fb:${role.id}`, sel ?? { agent: null, model: null, effort: null, fast: false, perm: null }, {
-              light: true,
-              allowNone: true,
-            }),
-          { disabled },
-        ),
+        el.child(link(t, `add-line-${role.id}`, "Add", () => this.addLine(role.id), this.writing !== null)),
       );
   }
 
@@ -1661,9 +1655,6 @@ export default class Settings extends View {
               .when(role.about !== "", (el) =>
                 el.child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(role.about)),
               )
-              .when(role.id === "worker", (el) =>
-                el.child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(WORKER_LINES_ABOUT)),
-              ),
           )
           .child(
             h_flex()
@@ -1673,13 +1664,9 @@ export default class Settings extends View {
               .when(mine && this.scope === "repo", (el) =>
                 el.child(link(t, `reset-${role.id}`, RESET, () => this.resetRole(role), this.writing !== null)),
               )
-              .child(role.id === "worker" ? this.workerLinesControl(t, role) : this.modelButton(t, role))
-              .when(role.id === "reviewer" && role.fallback !== null, (el) => el.child(this.fallbackPicker(t, role)))
+              .child(hasLines(role.id) ? this.workerLinesControl(t, role) : this.modelButton(t, role))
               .when(other !== null, (el) =>
                 el.child(button(t, `other-${role.id}`, "Use other CLI", { kind: "plain", onClick: () => this.useOtherCli(role, other) })),
-              )
-              .when(Boolean(role.promptId), (el) =>
-                el.child(button(t, `instructions-${role.id}`, "Edit instructions", { onClick: () => this.editInstructions(role) })),
               )
               .when(role.custom, (el) =>
                 el.child(button(t, `remove-${role.id}`, "Remove", { kind: "plain", disabled: this.writing !== null, onClick: () => this.removeRole(role) })),
@@ -1739,35 +1726,6 @@ export default class Settings extends View {
     const before = roleSelection(this.settings, role.id);
     const after = { agent: program, model: null, effort: null, fast: false, perm: null };
     this.applyBatch(selectionWrites(role.id, before, after));
-  }
-
-  /**
-   * The Backup agent, a switch in Shepherdr's row. On names the other program
-   * (another vendor, one that is installed, when there is one) and shows its
-   * button beside the switch; off takes the program away again.
-   */
-  backupRow(t, role) {
-    const field = role.backup;
-    const flip = (on) => {
-      if (!on) return this.apply(field.key, null);
-      const program = backupChoice(this.settings, this.roster);
-      if (program === null) {
-        this.refusal = { key: field.key, text: "there is no other program to take a task over" };
-        this.cx.notify();
-        return undefined;
-      }
-      return this.apply(field.key, program);
-    };
-    return this.row(t, {
-      title: role.title,
-      about: "The other CLI takes a task over once when its agent can't go on.",
-      scope: { key: field.key, layer: field.layer, mine: field.source === "repo_entry" },
-      control: h_flex()
-        .gap(8)
-        .items_center()
-        .when(field.on, (el) => el.child(this.modelButton(t, role)))
-        .child(toggleSwitch(t, field.key, field.on, flip)),
-    });
   }
 
   /** The one row that makes a new role. */
@@ -1877,12 +1835,15 @@ export default class Settings extends View {
     });
   }
 
-  /** A number's two buttons and its value, inside the row's own bounds. */
+  /**
+   * A number's two buttons and its value, inside the row's own bounds: one
+   * compact bordered pill (Shepherdr-sized), the number centred between the two.
+   */
   stepper(t, row) {
     const button = (id, glyph, by) =>
       div()
         .id(`${row.key}-${id}`)
-        .w(H.sm)
+        .w(24)
         .h_full()
         .flex_none()
         .flex()
@@ -1895,7 +1856,7 @@ export default class Settings extends View {
         .on_click(press(() => this.step(row, by)))
         .child(glyph);
     return h_flex()
-      .h(H.sm)
+      .h(26)
       .flex_none()
       .items_center()
       .rounded(RADIUS.control)
@@ -1906,9 +1867,13 @@ export default class Settings extends View {
       .child(button("minus", "−", -1))
       .child(
         div()
-          .min_w(52)
-          .px(6)
+          .min_w(32)
+          .h_full()
+          .px(4)
           .flex_none()
+          .flex()
+          .items_center()
+          .justify_center()
           .text_size(TEXT.label)
           .text_color(t.foreground)
           .whitespace_nowrap()
@@ -2079,62 +2044,65 @@ export default class Settings extends View {
 
   /** Prompts: the list of templates, or the one being edited. */
   promptsPage(t, colors) {
-    if (this.prompt !== null) return [this.title(t, this.prompt.id), this.promptEditor(t, colors)];
+    if (this.prompt !== null) return [this.promptEditor(t, colors)];
     const rows = promptRows(this.prompts);
     if (rows.length === 0) {
-      return [
-        this.title(t, "Prompts"),
-        note(t, "No prompts yet."),
-        note(t, "The service writes the shipped ones on first read."),
-      ];
+      return [this.title(t, "Prompts"), note(t, "No prompts yet.")];
     }
-    return [this.title(t, "Prompts"), ...rows.map((row) => this.promptRow(t, colors, row))];
+    return [
+      this.title(t, "Prompts"),
+      note(t, "What each agent is told before it starts. Edit any of them: an edit is kept."),
+      ...rows.map((row) => this.promptRow(t, colors, row)),
+    ];
   }
 
-  /** One template in the list: its id, what it is for, and whether it is edited. */
+  /** One prompt in the list: its name, a state tag (Default / Edited), what it is for, and Edit. */
   promptRow(t, colors, row) {
-    const word = row.problem !== null ? colors.red : row.edited ? colors.amber : t.dim;
+    const tag = row.problem !== null ? colors.red : row.edited ? colors.amber : t.dim;
     return h_flex()
       .id(`prompt-${row.id}`)
-      .h(SPACE.rowTwo)
       .w_full()
       .flex_none()
-      .px(8)
-      .gap(8)
+      .py(12)
+      .gap(16)
       .items_center()
-      .rounded(RADIUS.card)
       .border_b(1)
       .border_color(t.border)
-      .cursor_pointer()
-      .hover((style) => style.bg(t.hover))
-      .on_click(press(() => this.openPrompt(row)))
       .child(
         v_flex()
           .flex_1()
           .min_w(0)
-          .gap(2)
+          .gap(3)
           .child(
             h_flex()
-              .gap(6)
+              .gap(8)
               .items_center()
+              .child(div().text_size(TEXT.body).font_medium().text_color(t.foreground).child(row.name))
               .child(
-                div().font_family("JetBrains Mono").text_size(TEXT.label).text_color(t.foreground).child(row.id),
-              )
-              .child(div().flex_none().text_size(TEXT.id).text_color(word).child(row.word)),
+                div()
+                  .flex_none()
+                  .px(7)
+                  .rounded(999)
+                  .border_1()
+                  .border_color(tag)
+                  .text_size(TEXT.id)
+                  .text_color(tag)
+                  .child(row.word),
+              ),
           )
-          .child(div().text_size(TEXT.id).text_color(t.dim).child(row.problem ?? row.about)),
+          .child(div().text_size(TEXT.label).line_height("17px").text_color(t.dim).child(row.problem ?? row.about)),
       )
-      .child(div().flex_none().text_size(TEXT.id).text_color(t.dim).child("›"));
+      .child(button(t, `edit-prompt-${row.id}`, "Edit", { onClick: () => this.openPrompt(row) }));
   }
 
   /**
    * The editor: what the file is, its words in a box that saves itself, and the
-   * one way back to the shipped words.
+   * one way back to the default words.
    *
    * There is no Save button, as on every page of Shepherdr's settings: the words
    * are written a moment after typing stops, when the box loses the keyboard, and
    * when the window closes. Reset is not an edit — it asks the service to put the
-   * words this build ships back (`DELETE /api/prompts/:id`).
+   * default words back (`DELETE /api/prompts/:id`).
    */
   promptEditor(t, colors) {
     const prompt = this.prompt;
@@ -2148,14 +2116,7 @@ export default class Settings extends View {
         h_flex()
           .gap(8)
           .items_center()
-          .child(
-            badge(
-              t,
-              prompt.state === "edited" ? "edited" : "shipped",
-              prompt.state === "edited" ? colors.amber : t.raised,
-              prompt.state === "edited" ? colors.on : t.muted,
-            ),
-          )
+          .child(link(t, "prompt-back", "‹ Prompts", () => this.leavePrompt()))
           .child(div().flex_1())
           .when(writing || justSaved, (el) =>
             el.child(
@@ -2166,13 +2127,29 @@ export default class Settings extends View {
                 .child(writing ? "saving…" : "Saved"),
             ),
           )
-          .child(link(t, "prompt-back", "Back", () => this.leavePrompt())),
       )
-      .child(div().font_family("JetBrains Mono").text_size(TEXT.id).text_color(t.dim).child(prompt.path))
+      .child(
+        h_flex()
+          .gap(10)
+          .items_center()
+          .child(this.title(t, promptName(prompt.id)))
+          .child(
+            div()
+              .flex_none()
+              .px(7)
+              .rounded(999)
+              .border_1()
+              .border_color(prompt.state === "edited" ? colors.amber : t.dim)
+              .text_size(TEXT.id)
+              .text_color(prompt.state === "edited" ? colors.amber : t.dim)
+              .child(prompt.state === "edited" ? "Edited" : "Default"),
+          ),
+      )
       .child(div().text_size(TEXT.id).text_color(t.dim).child(promptLine(prompt)))
+      .child(div().font_family("JetBrains Mono").text_size(TEXT.id).text_color(t.dim).child(prompt.path))
       .child(
         v_flex()
-          .h(320)
+          .h(420)
           .flex_none()
           .w_full()
           .rounded(RADIUS.control)
@@ -2187,7 +2164,7 @@ export default class Settings extends View {
           .h(H.lg)
           .gap(6)
           .items_center()
-          .child(link(t, "prompt-reset", "Reset to the shipped words", () => this.resetPrompt(), writing)),
+          .child(link(t, "prompt-reset", "Reset to default", () => this.resetPrompt(), writing)),
       );
   }
 }

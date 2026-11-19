@@ -30,7 +30,6 @@ export const ROLE_DEFAULTS = {
   coordinator: "Assistant",
   worker: "Worker",
   reviewer: "Reviewer",
-  backup: "Backup agent",
 };
 
 /**

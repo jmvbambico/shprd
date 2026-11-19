@@ -36,7 +36,10 @@ import {
   WORKFLOW,
   HIDDEN,
   ARCHIVE_PRESETS,
-  backupChoice,
+  CHAIN_NOTE,
+  hasLines,
+  SELECT_HARNESS,
+  promptName,
   boxProblem,
   branchProblem,
   maskLink,
@@ -99,10 +102,10 @@ function pick(id, field) {
 // -- the roles table -------------------------------------------------------
 
 test("the roles are the ones the settings resolve, in their order", () => {
-  assert.deepEqual(roleIds(SETTINGS), ["coordinator", "worker", "reviewer", "backup", "docs"]);
+  assert.deepEqual(roleIds(SETTINGS), ["coordinator", "worker", "reviewer", "docs"]);
   assert.deepEqual(
     roles(SETTINGS, ROSTER).map((entry) => entry.title),
-    ["Assistant", "Worker", "Reviewer", "Backup agent", "docs"],
+    ["Assistant", "Worker(s)", "Reviewer(s)", "docs"],
   );
   assert.deepEqual(role("worker").picks.map((entry) => entry.field), PICKS);
 });
@@ -143,7 +146,6 @@ test("every value says the layer that answered it, in the service's words", () =
   ]);
   assert.equal(pick("worker", "agent").layer, "you");
   assert.equal(pick("worker", "effort").layer, UNSET_LAYER, "nothing set the effort");
-  assert.equal(pick("backup", "model").value, null);
 });
 
 test("a program is shown by its name, and written by its id", () => {
@@ -152,9 +154,6 @@ test("a program is shown by its name, and written by its id", () => {
   assert.equal(agent.value, "pi");
   assert.equal(agent.display, "Pi");
   assert.equal(agent.note, null);
-  const backup = pick("backup", "agent");
-  assert.equal(backup.value, "codex");
-  assert.equal(backup.display, "Codex");
   // An unset role reads as one that has not chosen yet, not as a broken one.
   const empty = roles({ values: SETTINGS.values.filter((row) => row.key !== "roles.worker.agent") }, ROSTER);
   const worker = empty.find((entry) => entry.id === "worker");
@@ -260,7 +259,6 @@ test("a role is added and removed through the order alone", () => {
     "coordinator",
     "worker",
     "reviewer",
-    "backup",
     "docs",
     "tester",
   ]);
@@ -272,7 +270,6 @@ test("a role is added and removed through the order alone", () => {
     "coordinator",
     "worker",
     "reviewer",
-    "backup",
   ]);
 });
 
@@ -321,7 +318,7 @@ test("the template list says which prompts are the person's own", () => {
     ["assistant", "worker", "reviewer", "backup"],
   );
   for (const row of rows) {
-    assert.equal(row.word, "Shipped");
+    assert.equal(row.word, "Default");
     assert.equal(row.edited, false);
     assert.equal(row.shipped, true);
     assert.equal(row.problem, null);
@@ -340,7 +337,7 @@ test("an edited or unreadable template is marked as such", () => {
   });
   assert.equal(edited[0].word, "Edited");
   assert.equal(edited[0].edited, true);
-  assert.equal(edited[1].word, "Shipped");
+  assert.equal(edited[1].word, "Default");
   assert.equal(edited[1].about, "a prompt of your own");
   assert.equal(edited[2].word, "Unreadable");
   assert.equal(edited[2].state, null);
@@ -351,7 +348,7 @@ test("the editor says what saving and resetting do", () => {
   assert.match(promptLine({ state: "edited" }), /never replaced by an upgrade/);
   assert.match(promptLine({ state: "default" }), /saving your own stores them/);
   // What a save just answered wins over what was read before it.
-  assert.match(promptLine({ state: "edited" }, { state: "default" }), /shipped words/);
+  assert.match(promptLine({ state: "edited" }, { state: "default" }), /default words/);
   assert.equal(promptLine(null), "");
 });
 
@@ -1044,7 +1041,7 @@ test("a branch box never writes a name git would refuse", async () => {
   assert.deepEqual(view.client.calls, [{ key: "tasks.branch", value: "work/{n}-{slug}", forRepo: false }]);
 });
 
-test("Fast, Permissions and Fallback are offered where the program has them", () => {
+test("Fast and Permissions are offered where the program has them", () => {
   const list = roles(SETTINGS, ROSTER);
   const worker = list.find((entry) => entry.id === "worker");
   const reviewer = list.find((entry) => entry.id === "reviewer");
@@ -1056,24 +1053,20 @@ test("Fast, Permissions and Fallback are offered where the program has them", ()
     [null, "manual", "auto", "acceptEdits", "plan", "bypassPermissions"],
   );
   assert.match(reviewer.perm.display, /Ask/);
-  assert.equal(worker.fallback, null, "the worker has lines now, not a fallback list");
-  assert.equal(reviewer.fallback.key, "roles.reviewer.fallback");
-  assert.equal(reviewer.fallback.value, null, "no fallback is None");
+  assert.equal(worker.fallback, undefined, "no separate Fallback control: workers and reviewers hold lines");
+  assert.equal(reviewer.fallback, undefined);
 });
 
-test("the Backup agent is a switch: on names another vendor's program, off takes it away", () => {
-  const backup = roles(SETTINGS, ROSTER).find((entry) => entry.id === "backup");
-  assert.equal(backup.backup.on, true);
-  assert.equal(backup.backup.key, "roles.backup.agent");
-  const off = roles({ values: SETTINGS.values.filter((row) => row.key !== "roles.backup.agent") }, ROSTER);
-  assert.equal(off.find((entry) => entry.id === "backup").backup.on, false);
-  // The worker runs pi; the first installed program of another vendor is claude.
-  assert.equal(backupChoice(SETTINGS, ROSTER), "claude");
-  assert.equal(backupChoice(SETTINGS, { programs: [] }), null);
-  assert.equal(roles(SETTINGS, ROSTER).find((entry) => entry.id === "worker").backup, null);
+test("no Backup agent: its role is gone, and workers and reviewers hold a chain of lines", () => {
+  assert.equal(roles(SETTINGS, ROSTER).find((entry) => entry.id === "backup"), undefined);
+  assert.ok(!BUILTIN.includes("backup"));
+  assert.ok(hasLines("worker") && hasLines("reviewer") && !hasLines("coordinator"));
+  assert.match(CHAIN_NOTE, /first line is the default/);
+  assert.equal(SELECT_HARNESS, "Select Harness");
+  assert.equal(promptName("backup"), "Takeover");
 });
 
-test("a role's fast, permission and fallback writes go to its own keys", async () => {
+test("a role's fast, permission and lines writes go to its own keys", async () => {
   const { view } = await settled();
   view.settings = SETTINGS;
   view.roster = ROSTER;
