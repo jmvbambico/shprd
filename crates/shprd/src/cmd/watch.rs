@@ -905,7 +905,7 @@ fn awaiting_review(task: &Task) -> Option<u32> {
 /// to somebody else.
 fn pane_for(mux: &dyn Host, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
     let name = spawn::repo_space_name(&env.repo_name);
-    let Some(space) = shprd_mux::find_marked_space(mux, &name)? else {
+    let Some(space) = mux.find_space(&name)? else {
         // The repository's space is gone, but a tab may still be somewhere and
         // a headless agent never had one: everything is asked before the agent
         // is called gone.
