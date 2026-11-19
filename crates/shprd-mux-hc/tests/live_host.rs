@@ -264,3 +264,56 @@ fn wait_for_tab(
     }
     tabs
 }
+
+/// Connects a fresh host over the live session, as a restarted `shprd serve`
+/// does.
+fn reconnect(live: &Live) -> HcHost {
+    let endpoint = Endpoint::with_binary(live.hc().to_string_lossy())
+        .with_session(live.session())
+        .with_directories(live.directories())
+        .with_timeout(Duration::from_secs(30));
+    let mut window = Window::from_endpoint(&endpoint);
+    for (key, value) in live.environment() {
+        window = window.with_variable(key, value);
+    }
+    HcHost::connect(endpoint, window).expect("the private core answers")
+}
+
+#[test]
+#[ignore = "needs a real hc and a private Herdr desktop; run at the milestone gate"]
+fn a_restarted_serve_finds_its_space_by_mark_and_keeps_its_name() {
+    let mut live = match Live::new() {
+        Ok(live) => live,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    live.start_window()
+        .expect("a private Herdr window over this session");
+    let name = format!("shprd · restart {}", std::process::id());
+
+    let first = reconnect(&live);
+    let (made, created) = shprd_mux::ensure_marked_space(&first, &name, live.root())
+        .expect("the first start makes and marks the space");
+    assert!(created, "the first start made it");
+    wait_for_space(&first, &name);
+
+    // The restart: a new connection to the same window.
+    let second = reconnect(&live);
+    let (again, created) = shprd_mux::ensure_marked_space(&second, &name, live.root())
+        .expect("the restart finds the space");
+    assert!(!created, "the restart made a second space");
+    assert_eq!(again.id, made.id, "the restart found the same space");
+    assert_eq!(again.name, name, "the space keeps its name");
+
+    let spaces = second.list_spaces().expect("the layout lists");
+    let same: Vec<_> = spaces.iter().filter(|space| space.id == made.id).collect();
+    assert_eq!(same.len(), 1, "one space: {spaces:?}");
+    assert_eq!(same[0].name, name, "the sidebar name, not the raw id");
+    assert_eq!(
+        spaces.iter().filter(|space| space.name == name).count(),
+        1,
+        "no second space of that name: {spaces:?}"
+    );
+}
