@@ -131,7 +131,7 @@ function WorkflowRowView({
  * line) and, for notes, a moment after typing stops. A value that came from the
  * service never overwrites a box the person is in.
  */
-function TextBox({
+export function TextBox({
   label,
   value,
   rows,

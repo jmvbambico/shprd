@@ -10,6 +10,7 @@ import { SCREENS, SCREEN_LABEL, type Screen } from "../layout/layout";
 import { useLayout } from "../layout/useLayout";
 import { AgentScreen } from "../agent/AgentScreen";
 import { COORDINATOR } from "../agent/chatModel";
+import { roleTitle } from "../roles";
 import { GraphScreen } from "../graph/GraphScreen";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { AcceptDialog } from "../tasks/AcceptDialog";
@@ -144,7 +145,7 @@ export function Shell({ client, reauth, onReauthClose, onSignedOut }: ShellProps
           <section className="card side-card">
             <h2 className="side-title">Chat</h2>
             <button type="button" className="quiet" onClick={() => setScreen("chat")}>
-              Open the coordinator&rsquo;s chat
+              Open {roleTitle(board.state?.role_titles, "coordinator")}&rsquo;s chat
             </button>
           </section>
         </aside>

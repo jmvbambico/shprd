@@ -377,6 +377,15 @@ export class ApiClient {
     return this.#write<ChatSendReply>("/api/chat", body);
   }
 
+  /**
+   * `POST /api/coordinator/restart`: end the coordinator and start it again from
+   * its role, in the same tab. A new program or model reaches a running
+   * coordinator only this way.
+   */
+  async restartCoordinator(): Promise<void> {
+    await this.#request<void>("POST", "/api/coordinator/restart", { body: {} });
+  }
+
   /** `PUT /api/settings`: write one settings key. */
   putSetting(body: SettingsPutDto): Promise<SettingsWriteDto> {
     return this.#request<SettingsWriteDto>("PUT", "/api/settings", { body });

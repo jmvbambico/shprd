@@ -12,6 +12,7 @@ import type { ApiClient } from "../api/client";
 import { useLiveRefresh } from "../api/useLive";
 import type { TaskDto } from "../gen";
 import { COORDINATOR } from "./chatModel";
+import { roleTitle } from "../roles";
 import { ChatView } from "./ChatView";
 import type { ScreenFactory } from "./screen";
 
@@ -29,9 +30,12 @@ export interface SpaceChoice {
 }
 
 /** The coordinator, then every task of the run, in plan order. */
-export function spaceChoices(tasks: readonly Pick<TaskDto, "id" | "title">[]): SpaceChoice[] {
+export function spaceChoices(
+  tasks: readonly Pick<TaskDto, "id" | "title">[],
+  coordinatorName: string = roleTitle(null, "coordinator"),
+): SpaceChoice[] {
   return [
-    { id: COORDINATOR, label: "Coordinator" },
+    { id: COORDINATOR, label: coordinatorName },
     ...tasks.map((task) => ({ id: task.id, label: `${task.id} · ${task.title}` })),
   ];
 }
@@ -52,11 +56,13 @@ export interface AgentScreenProps {
 /** The Chat or Terminal screen. */
 export function AgentScreen({ client, view, onView, space, onSpace, screenFactory }: AgentScreenProps) {
   const [tasks, setTasks] = useState<Pick<TaskDto, "id" | "title">[]>([]);
+  const [coordinatorName, setCoordinatorName] = useState(() => roleTitle(null, "coordinator"));
 
   const loadTasks = useCallback(async () => {
     try {
       const snapshot = await client.state();
       setTasks(snapshot.tasks);
+      setCoordinatorName(roleTitle(snapshot.role_titles, "coordinator"));
     } catch {
       // The picker keeps what it had; the coordinator is always there.
     }
@@ -67,7 +73,7 @@ export function AgentScreen({ client, view, onView, space, onSpace, screenFactor
   }, [loadTasks]);
   useLiveRefresh(client, () => void loadTasks());
 
-  const choices = spaceChoices(tasks);
+  const choices = spaceChoices(tasks, coordinatorName);
   // A task that left the run falls back to the coordinator, never a dead chat.
   const known = choices.some((choice) => choice.id === space);
   useEffect(() => {
@@ -107,7 +113,7 @@ export function AgentScreen({ client, view, onView, space, onSpace, screenFactor
         </div>
       </header>
       {view === "chat" ? (
-        <ChatView client={client} space={space} />
+        <ChatView client={client} space={space} coordinatorName={coordinatorName} />
       ) : (
         <Suspense fallback={<p className="terminal-wait" role="status">Opening the terminal…</p>}>
           <TerminalView client={client} space={space} screenFactory={screenFactory} />

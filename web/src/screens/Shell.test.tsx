@@ -50,6 +50,7 @@ describe("Shell: tasks", () => {
     finished: false,
     spaces: [],
     live_agents: [],
+    role_titles: {},
   };
   const routes = () =>
     reads({

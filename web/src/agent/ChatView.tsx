@@ -34,15 +34,17 @@ export interface ChatViewProps {
   cards?: Card[];
   /** An answer to a card went through: the board should be read again. */
   onAnswered?: () => Promise<void> | void;
+  /** What the person calls the coordinator (its role's name). */
+  coordinatorName?: string;
 }
 
 /** The composer's hint, by whose chat this is. */
-export function placeholderFor(space: string): string {
-  return space === COORDINATOR ? "Message the coordinator" : "Message the agent";
+export function placeholderFor(space: string, coordinatorName: string = "the coordinator"): string {
+  return space === COORDINATOR ? `Message ${coordinatorName}` : "Message the agent";
 }
 
 /** One space's chat. */
-export function ChatView({ client, space, cards = [], onAnswered }: ChatViewProps) {
+export function ChatView({ client, space, cards = [], onAnswered, coordinatorName = "the coordinator" }: ChatViewProps) {
   const { loading, chat, failure, refusal, sending, send, retry } = useChat(client, space);
   const [draft, setDraft] = useState("");
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -100,7 +102,7 @@ export function ChatView({ client, space, cards = [], onAnswered }: ChatViewProp
   const said = refusal ?? failure ?? (chat.messages.length === 0 && !loading ? chat.note : null);
 
   return (
-    <section className="chat" aria-label={`Chat with ${space === COORDINATOR ? "the coordinator" : space}`}>
+    <section className="chat" aria-label={`Chat with ${space === COORDINATOR ? coordinatorName : space}`}>
       <div
         className="chat-rows"
         ref={scroller}
@@ -154,8 +156,8 @@ export function ChatView({ client, space, cards = [], onAnswered }: ChatViewProp
           className="chat-input"
           rows={1}
           value={draft}
-          placeholder={placeholderFor(space)}
-          aria-label={placeholderFor(space)}
+          placeholder={placeholderFor(space, coordinatorName)}
+          aria-label={placeholderFor(space, coordinatorName)}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKey}
         />

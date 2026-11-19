@@ -34,9 +34,13 @@ function Harness({ client }: { client: ReturnType<typeof scripted>["api"] }) {
 describe("spaceChoices", () => {
   it("offers the coordinator, then each task", () => {
     expect(spaceChoices([{ id: "T1", title: "Add a thing" }])).toEqual([
-      { id: "coordinator", label: "Coordinator" },
+      { id: "coordinator", label: "Assistant" },
       { id: "T1", label: "T1 · Add a thing" },
     ]);
+  });
+
+  it("calls the coordinator by the name the person gave it", () => {
+    expect(spaceChoices([], "Orchestrator")[0]).toEqual({ id: "coordinator", label: "Orchestrator" });
   });
 });
 
@@ -68,7 +72,7 @@ describe("AgentScreen", () => {
   it("offers the coordinator even when the run has no tasks", async () => {
     const { api } = scripted({ ...routes, "GET /api/state": json(200, snapshot([])) });
     render(<Harness client={api} />);
-    expect(screen.getByRole("option", { name: "Coordinator" })).toBeDefined();
+    expect(screen.getByRole("option", { name: "Assistant" })).toBeDefined();
     await screen.findByText("coordinator words");
   });
 

@@ -25,6 +25,7 @@ import type {
   SettingsSourceDto,
   SettingsValueDto,
 } from "../gen";
+import { roleTitle } from "../roles";
 
 /** One settings value as the service types it. */
 export type SettingValue = SettingsValueDto["value"];
@@ -231,8 +232,10 @@ export interface Pick {
 export interface Role {
   /** The role's id. */
   id: string;
-  /** Its title as the settings resolve it. */
+  /** What the app calls it: the person's name for it, else the built-in word. */
   title: string;
+  /** The name as stored (empty while the role has its built-in one), and the word it falls back to. */
+  name: { key: string; value: string; fallback: string; layer: string; source: string | null };
   /** What it does, in one line. */
   about: string;
   /** `worker`, `reviewer`, `helper`… */
@@ -301,15 +304,26 @@ function pickOf(
 /** Every role the page draws, in order. */
 export function roles(document: SettingsDto | null, roster: RosterDto | null): Role[] {
   const rows = rowsOf(document);
-  return roleIds(document).map((id) => ({
+  return roleIds(document).map((id) => {
+    const titleRow = rows.get(`roles.${id}.title`);
+    const stored = (textOf(titleRow) ?? "").trim();
+    return {
     id,
-    title: textOf(rows.get(`roles.${id}.title`)) ?? id,
+    title: stored || roleTitle(null, id),
+    name: {
+      key: `roles.${id}.title`,
+      value: stored,
+      fallback: roleTitle(null, id),
+      layer: layerOf(titleRow?.source),
+      source: titleRow?.source ?? null,
+    },
     about: textOf(rows.get(`roles.${id}.about`)) ?? "",
     kind: textOf(rows.get(`roles.${id}.kind`)) ?? "helper",
     readonly: rows.get(`roles.${id}.readonly`)?.value === true,
     custom: !BUILTIN.includes(id),
     picks: PICKS.map((field) => pickOf(id, field, rows, roster)),
-  }));
+    };
+  });
 }
 
 /**
