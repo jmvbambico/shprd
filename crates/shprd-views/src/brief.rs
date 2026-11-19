@@ -1336,7 +1336,9 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             Value::Text("Dev".to_owned()),
         );
         let resolved = resolve(&file, &Request::default());
-        let role = resolved.role("worker").expect("the worker");
+        let Some(role) = resolved.role("worker") else {
+            panic!("the worker role resolves");
+        };
         let text = settings_block(&resolved, Some(&role));
         assert!(
             text.contains("You are the Dev (the `worker` role)"),
