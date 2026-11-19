@@ -512,19 +512,24 @@ fn check_review(resolved: &Resolved, review: Review<'_>, table: &Table, problems
     };
     // A role that names no program has no vendor yet: the person has not
     // chosen, and the check cannot be made rather than failed.
-    // Only lines the person listed count; the old `fallback` spelling of a worker
-    // keeps meaning "after the first", as it always did.
+    // The default worker (the first line) is held to the rule when settings are
+    // saved. A later line of the reviewer's vendor is not refused: the review
+    // checks the vendor of whoever really wrote the change, and the reviewer's
+    // fallback (or a degraded label) answers a task that landed on such a line.
+    // Every line of the worker counts for the fallback; only the default does for
+    // the main reviewer. The old `fallback` spelling of a worker counts as no line.
     let counted = if worker.agents.value.is_empty() {
         1
     } else {
         usize::MAX
     };
-    let worker_vendors: Vec<String> = worker
+    let line_vendors: Vec<String> = worker
         .lines()
         .iter()
         .take(counted)
         .filter_map(|line| line_vendor(line, table))
         .collect();
+    let worker_vendors: Vec<String> = line_vendors.iter().take(1).cloned().collect();
     let main = reviewer
         .lines()
         .into_iter()
@@ -545,7 +550,9 @@ fn check_review(resolved: &Resolved, review: Review<'_>, table: &Table, problems
         else {
             continue;
         };
-        if worker_vendors.contains(&vendor) {
+        // Refused when it could review no line of the worker's work: every line
+        // runs this vendor's models.
+        if !line_vendors.is_empty() && line_vendors.iter().all(|kept| *kept == vendor) {
             problems.push(format!(
                 "the reviewer `{}`'s fallback `{entry}` and the worker `{}` are both {vendor}, so the review is not cross-vendor: pick a fallback from another family",
                 reviewer.id, worker.id
@@ -752,12 +759,21 @@ mod tests {
     }
 
     #[test]
-    fn any_worker_line_of_the_reviewers_vendor_is_refused() {
+    fn a_later_worker_line_of_the_reviewers_vendor_is_left_to_the_review() {
+        // The default worker is claude, the reviewer codex: fine. A second worker
+        // line on codex is allowed, because the review itself picks the reviewer
+        // by the vendor of whoever wrote the change (and uses the fallback).
         let settings = resolved(
-            "[roles.worker]\nagent = \"claude\"\nagents = [\"codex\"]\n[roles.reviewer]\nagent = \"codex\"\n",
+            "[roles.worker]\nagent = \"claude\"\nagents = [\"codex\"]\n[roles.reviewer]\nagent = \"codex\"\nfallback = [\"claude\"]\n",
         );
-        let message = refused(&settings);
-        assert!(message.contains("not cross-vendor"), "{message}");
+        assert!(
+            check(&settings, Review::default(), &table()).is_ok(),
+            "a fallback that can review the codex line is not refused"
+        );
+        // The default worker of the reviewer's vendor is still refused.
+        let same =
+            resolved("[roles.worker]\nagent = \"codex\"\n[roles.reviewer]\nagent = \"codex\"\n");
+        assert!(check(&same, Review::default(), &table()).is_err());
     }
 
     #[test]

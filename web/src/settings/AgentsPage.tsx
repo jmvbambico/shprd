@@ -258,21 +258,6 @@ function RoleRow({
               Reset
             </button>
           ) : null}
-          {role.id === "reviewer" ? (
-            <div className="role-fallback">
-              <span className="role-fallback-label">Fallback</span>
-              <ModelMenu
-                label={`${role.title} fallback`}
-                shown={loading ? "Loading…" : fallbackLabel(menus, fallback, state.roster)}
-                menus={menus}
-                sel={fallback ?? { agent: null, model: null, effort: null, fast: false, perm: null }}
-                disabled={loading || none}
-                light
-                onNone={() => void state.writeAll(fallbackWrite(state.settings, role.id, null), repo)}
-                onChange={(next) => void state.writeAll(fallbackWrite(state.settings, role.id, next), repo)}
-              />
-            </div>
-          ) : null}
           {isWorker ? (
             <div className="role-lines">
               {(lines.length > 0 ? lines : [sel]).map((line, at) => (
@@ -315,6 +300,21 @@ function RoleRow({
               onChange={(next) => void choose(next)}
             />
           )}
+          {role.id === "reviewer" ? (
+            <div className="role-fallback">
+              <span className="role-fallback-label">Fallback</span>
+              <ModelMenu
+                label={`${role.title} fallback`}
+                shown={loading ? "Loading…" : fallbackLabel(menus, fallback, state.roster)}
+                menus={menus}
+                sel={fallback ?? { agent: null, model: null, effort: null, fast: false, perm: null }}
+                disabled={loading || none}
+                light
+                onNone={() => void state.writeAll(fallbackWrite(state.settings, role.id, null), repo)}
+                onChange={(next) => void state.writeAll(fallbackWrite(state.settings, role.id, next), repo)}
+              />
+            </div>
+          ) : null}
           {other !== null ? (
             <button
               type="button"

@@ -1673,8 +1673,8 @@ export default class Settings extends View {
               .when(mine && this.scope === "repo", (el) =>
                 el.child(link(t, `reset-${role.id}`, RESET, () => this.resetRole(role), this.writing !== null)),
               )
-              .when(role.id === "reviewer" && role.fallback !== null, (el) => el.child(this.fallbackPicker(t, role)))
               .child(role.id === "worker" ? this.workerLinesControl(t, role) : this.modelButton(t, role))
+              .when(role.id === "reviewer" && role.fallback !== null, (el) => el.child(this.fallbackPicker(t, role)))
               .when(other !== null, (el) =>
                 el.child(button(t, `other-${role.id}`, "Use other CLI", { kind: "plain", onClick: () => this.useOtherCli(role, other) })),
               )

@@ -453,5 +453,5 @@ export function fallbackLabel(menus: Menus, sel: Selection | null, roster: Roste
 
 /** The one-line description of a worker's lines. */
 export const WORKER_LINES_ABOUT =
-  "The first line is the default worker; `shprd agent spawn --task <id> --agent <program>` runs a task on any line. " +
-  "When a line's program can't go on, the task moves to the next line.";
+  "The first line is the default worker; `shprd agent spawn --agent <program>` runs a task on any line. " +
+  "If a line's program can't go on, the task moves to the next line.";
