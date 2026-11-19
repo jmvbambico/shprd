@@ -1724,8 +1724,21 @@ fn tab_title(tab: &placement::Tab) -> String {
 
 /// The core document that holds shprd's mark `mark`: its value is the id of the
 /// space that carries it.
+///
+/// herdr-core names a document 1-32 of `a-z 0-9 - _ .`, starting with a letter
+/// or digit, so the name is `shprd-mark-` and 16 hex digits of the mark's
+/// SHA-256: stable for a mark, valid for any mark (spaces, `·`, 40+ characters)
+/// and distinct per mark. An older build's name (`shprd.space-mark.<label>`)
+/// was never a name this core accepts, so no such document can exist to lose.
 fn mark_document(mark: &str) -> String {
-    format!("shprd.space-mark.{}", tab_label(mark))
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(mark.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("shprd-mark-{hex}")
 }
 
 /// The space `name` matches: by id (a label-made space's id is its label), then
@@ -1943,11 +1956,34 @@ mod tests {
         use super::mark_document;
         // A document keyed by the mark holds the space id, so a space with no
         // terminals keeps it and a rename never loses it.
-        assert_eq!(
-            mark_document("shprd · repo"),
-            "shprd.space-mark.shprd · repo"
-        );
+        assert_eq!(mark_document("shprd · repo"), mark_document("shprd · repo"));
         assert_ne!(mark_document("shprd · a"), mark_document("shprd · b"));
+    }
+
+    #[test]
+    fn a_mark_document_name_satisfies_herdr_cores_rule_for_any_mark() {
+        use super::mark_document;
+        let long = format!("shprd · {}", "é·x ".repeat(30));
+        let longer = format!("{long}y");
+        for mark in [
+            "shprd · scratchpad",
+            "a b",
+            "·",
+            "",
+            long.as_str(),
+            "UPPER/..",
+        ] {
+            let name = mark_document(mark);
+            assert!((1..=32).contains(&name.len()), "{name}");
+            assert!(name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()));
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '-' | '_' | '.')),
+                "{name}"
+            );
+        }
+        assert_ne!(mark_document(&long), mark_document(&longer));
     }
 
     #[test]
