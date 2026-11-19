@@ -1025,7 +1025,7 @@ impl Host for HcHost {
         Ok(state
             .terminals()
             .filter_map(|terminal| {
-                let role = AgentRole::parse(terminal.labels.get(ROLE_LABEL)?)?;
+                let role = AgentRole::parse(agent_label(terminal, ROLE_LABEL)?)?;
                 if role != AgentRole::Coordinator {
                     return None;
                 }
@@ -1038,12 +1038,10 @@ impl Host for HcHost {
                     },
                     task: None,
                     role,
-                    program: terminal
-                        .labels
-                        .get(AGENT_LABEL)
+                    program: agent_label(terminal, AGENT_LABEL)
                         .cloned()
                         .unwrap_or_default(),
-                    space: SpaceId::new(terminal.labels.get(TASK_SPACE_LABEL)?.clone()),
+                    space: SpaceId::new(agent_label(terminal, TASK_SPACE_LABEL)?.clone()),
                     state: reported_state(terminal),
                     live: terminal.is_live(),
                     started_ms: terminal.created_ms,
