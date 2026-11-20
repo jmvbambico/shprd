@@ -147,12 +147,21 @@ fn write_defaults(dir: &Path, gates: &[String]) -> Result<(), String> {
     // The run's own files stay out of the history; only its config is kept.
     let ignore = dir.join(".gitignore");
     let existing = fs::read_to_string(&ignore).unwrap_or_default();
-    if !existing.lines().any(|line| line.trim() == ".shprd/*") {
+    // Each line is added on its own: a .gitignore that already has the first must
+    // still get the exception that keeps the config in the first commit.
+    let missing: Vec<&str> = [".shprd/*", "!.shprd/config.toml"]
+        .into_iter()
+        .filter(|rule| !existing.lines().any(|line| line.trim() == *rule))
+        .collect();
+    if !missing.is_empty() {
         let mut text = existing;
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(".shprd/*\n!.shprd/config.toml\n");
+        for rule in missing {
+            text.push_str(rule);
+            text.push('\n');
+        }
         fs::write(&ignore, text)
             .map_err(|why| failed("write shprd's settings into this folder", &why.to_string()))?;
     }
@@ -314,6 +323,15 @@ mod tests {
             out(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
             "trunk"
         );
+    }
+
+    #[test]
+    fn an_existing_ignore_with_the_run_rule_still_keeps_the_config() {
+        let temp = tempfile::tempdir().expect("dir");
+        fs::write(temp.path().join(".gitignore"), ".shprd/*\ntarget\n").expect("write");
+        ensure_repo(temp.path()).expect("made");
+        let tracked = out(temp.path(), &["ls-files"]);
+        assert!(tracked.contains(".shprd/config.toml"), "{tracked}");
     }
 
     #[test]
