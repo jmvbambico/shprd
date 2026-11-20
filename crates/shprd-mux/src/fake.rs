@@ -11,7 +11,7 @@
 //! answering [`MuxError::Unsupported`] naming it. A caller's degraded path is
 //! therefore testable without a host that really is old.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -136,6 +136,11 @@ struct Inner {
     read_failures: HashMap<PaneId, String>,
     /// Programs a test scripted to end, and with what code.
     exits: HashMap<PaneId, Option<i32>>,
+    /// When set, a coordinator spawned from now on has already ended with this
+    /// code and left this on its screen: a program that dies as it starts.
+    exit_at_start: Option<(Option<i32>, String)>,
+    /// Panes that run another product's agent.
+    foreign: HashSet<PaneId>,
     /// Spaces a test scripted `close_space` to refuse, with the reason.
     space_close_failures: HashMap<WorkspaceId, String>,
     /// The answer a scripted `exec` gives.
@@ -177,6 +182,8 @@ impl Inner {
             close_failures: HashMap::new(),
             read_failures: HashMap::new(),
             exits: HashMap::new(),
+            exit_at_start: None,
+            foreign: HashSet::new(),
             space_close_failures: HashMap::new(),
             exec_answer: None,
             doc_answer: None,
@@ -461,6 +468,22 @@ impl FakeMux {
         self
     }
 
+    /// From now on, a coordinator the host starts ends at once with `code`,
+    /// leaving `screen` behind (`None`: starts normally again).
+    pub fn exit_coordinators_at_start(&self, ended: Option<(Option<i32>, String)>) {
+        if let Ok(mut inner) = self.lock() {
+            inner.exit_at_start = ended;
+        }
+    }
+
+    /// Mark `pane` as running another product's agent
+    /// ([`Host::is_foreign_agent`]).
+    pub fn mark_foreign(&self, pane: &PaneId) {
+        if let Ok(mut inner) = self.lock() {
+            inner.foreign.insert(pane.clone());
+        }
+    }
+
     /// Script the program in `pane` to have ended with `code`, which is what
     /// `wait(.., Waited::Exit, ..)` and `exit_of` see.
     pub fn set_exited(&self, pane: &PaneId, code: Option<i32>) {
@@ -679,6 +702,8 @@ impl Host for FakeMux {
             .iter()
             .enumerate()
             .filter(|(_, (tab, _))| inner.tabs.iter().any(|(_, kept)| kept.id == tab.id))
+            // As the real host does, another product's agent is not listed.
+            .filter(|(_, (tab, _))| !inner.foreign.contains(&tab.root_pane))
             .map(|(order, (tab, meta))| {
                 let state = inner
                     .states
@@ -924,6 +949,12 @@ impl Host for FakeMux {
                         space: launch.space.clone(),
                     },
                 ));
+                if let Some((code, screen)) = inner.exit_at_start.clone() {
+                    inner.panes.insert(tab.root_pane.clone());
+                    inner.exits.insert(tab.root_pane.clone(), code);
+                    inner.states.insert(tab.root_pane.clone(), AgentState::Done);
+                    inner.screens.insert(tab.root_pane.clone(), screen);
+                }
             }
             return Ok(tab);
         }
@@ -1112,6 +1143,12 @@ impl Host for FakeMux {
         inner.exits.insert(pane.clone(), None);
         inner.states.insert(pane.clone(), AgentState::Done);
         Ok(())
+    }
+
+    fn is_foreign_agent(&self, pane: &PaneId) -> bool {
+        self.lock()
+            .map(|inner| inner.foreign.contains(pane))
+            .unwrap_or(false)
     }
 
     fn exit_of(&self, pane: &PaneId) -> Result<Option<Outcome>> {

@@ -168,12 +168,15 @@ export function tabLabel(tab, named, program) {
  */
 export function tabRows(space, panes, state) {
   const tabs = space?.tabs ?? [];
-  return tabs.map((tab, index) => {
+  return tabs.flatMap((tab, index) => {
+    // Another product's Assistant tab (Shepherdr's chat pane) is not shprd's to
+    // show: its message would reach that product's agent, not the coordinator.
+    if (foreignTab(tab, panes)) return [];
     const named = parseTabName(tab?.name);
     const shape = tabState(tab, panes, state);
     const task = taskOf(state, named.task);
     const program = tabProgram(panes, tab?.id);
-    return {
+    return [{
       id: tab.id,
       index,
       name: named.name,
@@ -205,8 +208,16 @@ export function tabRows(space, panes, state) {
       program: program?.name ?? null,
       zoomed: Boolean(tab.zoomed),
       panes: Number.isInteger(tab.panes) ? tab.panes : 0,
-    };
+    }];
   });
+}
+
+/** The mod Shepherdr's Assistant chat pane is; shprd's own is `shprd-chat`. */
+export const FOREIGN_CHAT_MOD = "chat";
+
+/** Whether a tab is another product's Assistant (a pane of Shepherdr's chat mod). */
+export function foreignTab(tab, panes) {
+  return (panes ?? []).some((pane) => pane?.tab === tab?.id && pane?.mod === FOREIGN_CHAT_MOD);
 }
 
 /** The pills' counts, for a heading or a test. */

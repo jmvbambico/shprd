@@ -38,6 +38,7 @@ import {
   COORDINATOR,
   WORDS,
   emptyWords,
+  coordinatorDown,
   empty,
   firstCard,
   fold,
@@ -335,7 +336,11 @@ export default class Chat extends View {
     const list = this.space === null ? [] : forSpace(cardsOf(this.state, this.asks), this.space);
     const rows = timeline(this.chat, list);
     this.reveal(rows, list);
-    const said = this.refusal ?? this.failure ?? (rows.length === 0 ? status(this.chat) : null);
+    const said =
+      this.refusal ??
+      this.failure ??
+      coordinatorDown(this.space, this.state) ??
+      (rows.length === 0 ? status(this.chat) : null);
     return v_flex()
       .size_full()
       .bg(t.background)

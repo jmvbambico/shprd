@@ -24,6 +24,7 @@ import {
   PARK_LABEL,
   WORDS,
   agentOf,
+  coordinatorDown,
   firstCard,
   folding,
   literal,
@@ -514,4 +515,19 @@ test("the thread opens on its chat; the Asks panel and the sidebar's coordinator
   const text = JSON.stringify(LAYOUT);
   assert.equal(text.includes("shprd-asks"), false);
   assert.equal(text.includes("shprd-coordinator"), false);
+});
+
+test("SHPR-69: the coordinator's chat says plainly when shprd's coordinator is not running", () => {
+  const none = { live_agents: [] };
+  assert.equal(coordinatorDown(COORDINATOR, none), WORDS.coordinatorDown);
+  // Only another product's agent is in the space: shprd's list has no coordinator, so it still says so.
+  const worker = { live_agents: [{ role: "worker", state: "working" }] };
+  assert.equal(coordinatorDown(COORDINATOR, worker), WORDS.coordinatorDown);
+  const ended = { live_agents: [{ role: "coordinator", state: "done", ended_ms: 5 }] };
+  assert.equal(coordinatorDown(COORDINATOR, ended), WORDS.coordinatorDown);
+  const running = { live_agents: [{ role: "coordinator", state: "idle" }] };
+  assert.equal(coordinatorDown(COORDINATOR, running), null);
+  // A task's chat, and a state that does not say, are left alone.
+  assert.equal(coordinatorDown("T1", none), null);
+  assert.equal(coordinatorDown(COORDINATOR, null), null);
 });
