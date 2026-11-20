@@ -2902,9 +2902,15 @@ fn remember_window_tabs(mux: &dyn Host, env: &SpawnEnv<'_>, prepared: &PreparedS
         .into_iter()
         .map(|agent| agent.tab.id)
         .collect();
-    let shells: Vec<_> = mux
-        .list_tabs(&space.id)
-        .unwrap_or_default()
+    // A host that cannot list the tabs now is asked again at the next start:
+    // an empty record would forget the window's tabs for good.
+    let Ok(listed) = mux.list_tabs(&space.id) else {
+        return;
+    };
+    let Ok(named) = mux.tab_names(&space.id) else {
+        return;
+    };
+    let shells: Vec<_> = listed
         .into_iter()
         .filter(|tab| {
             !tab.title.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
@@ -2922,7 +2928,7 @@ fn remember_window_tabs(mux: &dyn Host, env: &SpawnEnv<'_>, prepared: &PreparedS
     if prepared.created || (shells.len() == 1 && idle) {
         ids.extend(shells.iter().map(|tab| tab.id.as_str().to_owned()));
     }
-    for (id, name) in mux.tab_names(&space.id).unwrap_or_default() {
+    for (id, name) in named {
         if name.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
             && !is_coordinator_tab(id.as_str())
             && id.as_str() != OLD_COORDINATOR_TAB

@@ -262,10 +262,12 @@ test("hc's JSON spawn error reads as a sentence, not as JSON", async () => {
 
 test("a look that throws shows a reason in the footer, never silence", async () => {
   const { view } = await footer();
+  view.service = { record: { port: 1 } };
   view.inspect = async () => {
     throw new Error("the list broke");
   };
   await view.check(view.cx);
   assert.equal(view.failure, "the list broke");
+  assert.equal(view.service, null, "a stale service is not shown as up");
   assert.equal(herdr.shared("service.status").phase, "failed");
 });

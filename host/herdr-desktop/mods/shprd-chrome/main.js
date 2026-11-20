@@ -97,6 +97,7 @@ export default class Chrome extends View {
     } catch (err) {
       // A look that throws must never be silent: the row says why.
       this.starting = false;
+      this.service = null;
       this.failure = reason(err);
       this.publish();
       cx.notify();
