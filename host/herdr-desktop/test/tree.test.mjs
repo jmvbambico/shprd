@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
+import { inWindowOrder, subtitle, age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
 const NOW = 1_800_000_000_000;
 const state = JSON.parse(readFileSync(new URL("./fixtures/proto.json", import.meta.url), "utf8"));
@@ -68,8 +68,8 @@ test("spaces Herdr made show as plain rows; the served repo's own space does not
     { id: "s2", name: "notes", folder: "/home/me/notes", active: true },
   ];
   const tree = spaceTree(state, herdr, NOW);
-  assert.deepEqual(tree.map((space) => space.name), ["shprd", "shop", "relay", "notes"]);
-  const plain = tree.at(-1);
+  assert.deepEqual(tree.map((space) => space.name), ["shprd", "notes", "shop", "relay"], "window order first, spaces the window lacks after");
+  const plain = tree[1];
   assert.deepEqual([plain.plain, plain.herdr, plain.tasks.length], [true, "s2", 0]);
 });
 
@@ -84,8 +84,8 @@ const served = { run: null, tasks: [], spaces: [{ id: "sp-jmanager", name: "jman
 
 test("the served space is Herdr's real one, and only it is left out of the plain rows", () => {
   const tree = spaceTree(served, REAL, NOW);
-  assert.deepEqual(tree.map((space) => space.name), ["shprd · jmanager", "jmanager", "shprd"]);
-  const [own, mine, other] = tree;
+  assert.deepEqual(tree.map((space) => space.name), ["jmanager", "shprd", "shprd · jmanager"], "the window's own order, served row in its place");
+  const [mine, other, own] = tree;
   assert.deepEqual([own.plain, own.herdr, own.branch, own.id], [false, "w3", "main", "sp-jmanager"]);
   assert.deepEqual([mine.plain, mine.herdr, other.plain, other.herdr], [true, "w1", true, "w2"], "the person's own space in the same folder still shows");
 });
@@ -173,4 +173,29 @@ test("the Graph is a view of the Tasks panel: the layout holds no graph block, t
   assert.ok(!existsSync(new URL("../mods/shprd-graph", import.meta.url)), "the graph mod is gone");
   const tasks = readFileSync(new URL("../mods/shprd-tasks/main.js", import.meta.url), "utf8");
   assert.ok(tasks.includes('this.show("graph")'), "G switches the Tasks panel to its Graph");
+});
+
+test("the order is the window's own, whichever space is served or picked (SHPR-75)", () => {
+  const herdr = [
+    { id: "a", name: "jmanager", folder: "/p/jmanager" },
+    { id: "b", name: "shprd · scratchpad", folder: "/p/scratchpad" },
+    { id: "c", name: "sweatbrain", folder: "/p/sweatbrain" },
+  ];
+  const svc = { run: null, tasks: [], spaces: [{ id: "sp-s", name: "scratchpad", folder: "/p/scratchpad", branch: "main", herdr_id: "b", herdr_name: "shprd · scratchpad" }] };
+  assert.deepEqual(spaceTree(svc, herdr, NOW).map((row) => row.name), ["jmanager", "shprd · scratchpad", "sweatbrain"]);
+  const swapped = [herdr[2], herdr[0], herdr[1]];
+  assert.deepEqual(spaceTree(svc, swapped, NOW).map((row) => row.name), ["sweatbrain", "jmanager", "shprd · scratchpad"]);
+  // Without a herdr id the `shprd · repo` name places the row.
+  const bare = { ...svc, spaces: [{ ...svc.spaces[0], herdr_id: undefined, herdr_name: undefined }] };
+  assert.deepEqual(spaceTree(bare, herdr, NOW).map((row) => row.name), ["jmanager", "scratchpad", "sweatbrain"]);
+  // A served row with no window space yet goes last.
+  assert.deepEqual(inWindowOrder([{ id: "x", name: "x" }, { plain: true, herdr: "a", name: "a" }], [], [{ id: "a" }]).map((r) => r.name), ["a", "x"]);
+});
+
+test("every row's subtitle is its folder; only an unusual branch is added (SHPR-75)", () => {
+  assert.equal(subtitle({ folder: "/p/scratchpad", branch: "main" }), "/p/scratchpad");
+  assert.equal(subtitle({ folder: "/p/a", branch: "master" }), "/p/a");
+  assert.equal(subtitle({ folder: "/p/a", branch: "" }), "/p/a");
+  assert.equal(subtitle({ folder: "/p/a", branch: "integration/m11" }), "/p/a · integration/m11");
+  assert.equal(subtitle({ folder: "", branch: "dev" }), "dev");
 });

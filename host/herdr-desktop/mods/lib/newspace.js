@@ -74,7 +74,12 @@ export function spaceName(folder) {
   return base(folder) || "space";
 }
 
-/** The `herdr-app do space.new` arguments for a folder. */
+/**
+ * The `herdr-app do space.new` arguments for a folder. The first tab is named
+ * "Assistant" at once, so the new space opens on the assistant's tab and not on
+ * the window's default shell; `shprd serve` puts the coordinator into it (and
+ * tidies a placeholder it did not fill) when it is up.
+ */
 export function spaceNewArgs(folder) {
-  return ["do", "space.new", "--folder", folder, "--name", spaceName(folder)];
+  return ["do", "space.new", "--folder", folder, "--name", spaceName(folder), "--tab", "Assistant"];
 }

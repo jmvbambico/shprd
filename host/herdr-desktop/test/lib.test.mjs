@@ -709,3 +709,31 @@ test("a ready task's needs-you words point at the Tasks pane, never a command or
   }
   assert.equal(desktopWords("which format?", "T1"), "which format?");
 });
+
+// SHPR-75: the sidebar's chevron and name always toggle, picked or not.
+import { isOpen, pickOpen, toggleOpen } from "../mods/lib/spaces.js";
+
+test("the chevron toggles a space whether or not it is the picked one", () => {
+  const space = { id: "sp-scratch", plain: false };
+  const open = new Map();
+  assert.equal(isOpen(open, space, "sp-other"), false, "another space is picked: shut");
+  toggleOpen(open, space, "sp-other");
+  assert.equal(isOpen(open, space, "sp-other"), true, "its chevron opens it from the other pick");
+  toggleOpen(open, space, "sp-other");
+  assert.equal(isOpen(open, space, "sp-other"), false);
+  assert.equal(isOpen(new Map(), space, null), true, "no pick: every one is open");
+  toggleOpen(open, space, null);
+  assert.equal(isOpen(open, space, null), true, "shut then opened under All spaces: a flip each time");
+  assert.equal(isOpen(new Map(), { id: "h", plain: true }, null), false);
+});
+
+test("clicking the name opens a shut space and shuts the open picked one", () => {
+  const space = { id: "sp-scratch", plain: false };
+  const open = new Map();
+  pickOpen(open, space, "sp-other");
+  assert.equal(isOpen(open, space, "sp-scratch"), true);
+  pickOpen(open, space, "sp-scratch");
+  assert.equal(isOpen(open, space, "sp-scratch"), false, "the picked, open row's name shuts it");
+  pickOpen(open, space, "sp-scratch");
+  assert.equal(isOpen(open, space, "sp-scratch"), true);
+});

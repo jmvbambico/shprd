@@ -44,8 +44,8 @@ import { h_flex, v_flex } from "gpui-base";
 import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, spaces, theme } from "herdr";
 
 import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
-import { MENU, closeWords, menuHeight, menuItems } from "./lib/spaces.js";
-import { plainSpaces, spaceTree } from "./lib/tree.js";
+import { MENU, closeWords, isOpen, menuHeight, menuItems, pickOpen, toggleOpen } from "./lib/spaces.js";
+import { plainSpaces, spaceTree, subtitle } from "./lib/tree.js";
 import { note, openNewSpace, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -110,7 +110,9 @@ export default class Spaces extends View {
     this.watching = false;
     // The picked space is shared (`spaces.picked`: the Tasks list and the Graph
     // follow it; none is "All spaces"). The folded ones are this copy's own state.
-    this.folded = new Set();
+    // Per space: what its chevron or name last chose (open or shut), keyed by the
+    // stable service id, so a repaint or another pick never forgets it.
+    this.opened = new Map();
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
     // Commands, for a key, the palette or a script: `pick:<space id>` and
@@ -200,7 +202,7 @@ export default class Spaces extends View {
       run("space.select", { id: space.herdr });
       return;
     }
-    this.folded.delete(space.id);
+    pickOpen(this.opened, space, this.selected);
     setShared("spaces.picked", space.id);
     // Herdr's real space for the row, as the service reported it; a service that
     // did not falls back to the space named `shprd · <repo>`.
@@ -213,8 +215,7 @@ export default class Spaces extends View {
 
   /** Folds or unfolds a space's tree. */
   fold(space) {
-    if (this.folded.has(space.id)) this.folded.delete(space.id);
-    else this.folded.add(space.id);
+    toggleOpen(this.opened, space, this.selected);
     this.cx.notify();
   }
 
@@ -318,9 +319,7 @@ export default class Spaces extends View {
 
   /** Whether a space shows its tasks: the picked one (every one under "All spaces"), unless its ▾ folded it. */
   isOpen(space) {
-    if (space.plain || this.folded.has(space.id)) return false;
-    const picked = this.selected;
-    return picked === null || picked === space.id;
+    return isOpen(this.opened, space, this.selected);
   }
 
   /** "Spaces", and the "+" at the right that adds one (`S:mods/spaces-chat/main.js:818`). */
@@ -399,7 +398,7 @@ export default class Spaces extends View {
               .truncate()
               .text_size(TEXT.label)
               .text_color(t.dim)
-              .child(space.branch || space.folder),
+              .child(subtitle(space)),
           ),
       )
       .when(space.needs > 0 || space.ready > 0, (el) =>

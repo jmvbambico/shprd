@@ -25,7 +25,7 @@ test("a folder outside git is offered a repo, home never", () => {
 test("the space is named for its folder and made with space.new", () => {
   assert.equal(spaceName("/home/me/dev/shop"), "shop");
   assert.equal(base("/x/y/"), "y");
-  assert.deepEqual(spaceNewArgs("/a/shop"), ["do", "space.new", "--folder", "/a/shop", "--name", "shop"]);
+  assert.deepEqual(spaceNewArgs("/a/shop"), ["do", "space.new", "--folder", "/a/shop", "--name", "shop", "--tab", "Assistant"]);
 });
 
 test("New task from anywhere shares a request and selects the list: it never calls the list's own command", () => {
