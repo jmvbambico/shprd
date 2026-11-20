@@ -74,12 +74,35 @@ export function spaceName(folder) {
   return base(folder) || "space";
 }
 
-/**
- * The `herdr-app do space.new` arguments for a folder. The first tab is named
- * "Assistant" at once, so the new space opens on the assistant's tab and not on
- * the window's default shell; `shprd serve` puts the coordinator into it (and
- * tidies a placeholder it did not fill) when it is up.
- */
+/** The `herdr-app do space.new` arguments for a folder. */
 export function spaceNewArgs(folder) {
-  return ["do", "space.new", "--folder", folder, "--name", spaceName(folder), "--tab", "Assistant"];
+  return ["do", "space.new", "--folder", folder, "--name", spaceName(folder)];
+}
+
+/** The tab the new space opens on: the shprd assistant's chat view, named like Shepherdr's. */
+export const ASSISTANT_TAB = "Assistant";
+
+/**
+ * The `herdr-app do tab.new` arguments for the assistant's tab in a space: the
+ * chat mod as the tab's only pane, on the coordinator's conversation. Until
+ * `shprd serve` is up the chat says it is starting; it never shows a shell.
+ */
+export function assistantTabArgs(spaceId) {
+  return [
+    "do", "tab.new", "--space", spaceId, "--name", ASSISTANT_TAB, "--mod", "shprd-chat",
+    "--props", JSON.stringify({ space: "coordinator" }),
+  ];
+}
+
+/**
+ * The space `space.new` just made and the tabs the window put in it, read from
+ * two `herdr-app ls` answers (before and after): the one space that was not there
+ * before. Only those tabs are the window's own; a tab the person opens later is
+ * never in this list. Null when it cannot be told (none or several are new).
+ */
+export function newSpaceOf(before, after) {
+  const known = new Set((before?.spaces ?? []).map((space) => space.id));
+  const fresh = (after?.spaces ?? []).filter((space) => space?.id && !known.has(space.id));
+  if (fresh.length !== 1) return null;
+  return { id: fresh[0].id, tabs: (fresh[0].tabs ?? []).map((tab) => tab.id).filter(Boolean) };
 }

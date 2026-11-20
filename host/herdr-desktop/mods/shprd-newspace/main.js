@@ -17,7 +17,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import * as herdr from "herdr";
 
-import { NEW_REPO, WORDS, base, offersRepo, pathOf, spaceNewArgs, tilde } from "./lib/newspace.js";
+import { NEW_REPO, WORDS, assistantTabArgs, base, newSpaceOf, offersRepo, pathOf, spaceNewArgs, tilde } from "./lib/newspace.js";
 import { H, RADIUS, TEXT } from "./lib/tokens.js";
 
 const { closeOverlay, exec, home, props, theme } = herdr;
@@ -114,6 +114,7 @@ export default class NewSpace extends View {
           }
           this.repo.set(folder, true);
         }
+        const before = await this.listing();
         const out = await exec("herdr-app", spaceNewArgs(folder));
         let answer = {};
         try {
@@ -124,6 +125,7 @@ export default class NewSpace extends View {
         if (out.code !== 0 || answer.error) {
           throw new Error(WORDS.cantSpace(String(answer.error ?? out.stderr ?? "").trim().split("\n").pop()));
         }
+        await this.openAssistant(before);
         this.close();
         return;
       } catch (err) {
@@ -132,6 +134,35 @@ export default class NewSpace extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  /** `herdr-app ls` as an object, or null. */
+  async listing() {
+    try {
+      const out = await exec("herdr-app", ["ls"]);
+      return out.code === 0 ? JSON.parse(out.stdout || "{}") : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Opens the new space on the assistant's chat view and closes the shell tab the
+   * window made in it, at once: the chat says it is starting until the service is
+   * up. Only the tabs the space was born with are closed, and only after the
+   * assistant tab exists, so the space is never left with none. Best effort: a
+   * failure leaves the window's own tab, which `shprd serve` tidies later.
+   */
+  async openAssistant(before) {
+    const made = newSpaceOf(before, await this.listing());
+    if (!made) return;
+    try {
+      const tab = await exec("herdr-app", assistantTabArgs(made.id));
+      if (tab.code !== 0) return;
+      for (const id of made.tabs) await exec("herdr-app", ["do", "tab.close", "--id", id, "--confirmed", "true"]);
+    } catch {
+      // The window's own tab stays; serve tidies it.
+    }
   }
 
   /** A dialog button: plain Cancel, one solid primary. */
