@@ -220,6 +220,40 @@ pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
     Ok(run_repo(&resolve_checkout(explicit)?))
 }
 
+/// The root `shprd serve` works on: the repository the named folder (or the
+/// working directory) is inside, else the folder itself.
+///
+/// Every other verb needs a repository and refuses without one; the service
+/// starts for a folder the person only just added, which becomes a repository at
+/// their first chat message ([`crate::cmd::adopt`]). A folder inside a
+/// repository serves that repository, never a second one.
+pub fn resolve_serve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
+    let named = explicit.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os(REPO_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    let folder = match named {
+        Some(path) => path,
+        None => std::env::current_dir()
+            .map_err(|err| CliError::other(anyhow!("the current folder cannot be read: {err}")))?,
+    };
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(&folder)
+        .args(["rev-parse", "--show-toplevel"]);
+    let top = shprd_core::spawn::output(&mut command)
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|text| !text.is_empty());
+    Ok(match top {
+        Some(top) => run_repo(Path::new(&top)),
+        None => run_repo(&folder),
+    })
+}
+
 /// Resolves the checkout the caller works in, without leaving a worktree.
 ///
 /// `--repo`, then `$SHPRD_REPO`, then the git top level of the working

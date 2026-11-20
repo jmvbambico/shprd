@@ -18,7 +18,7 @@ use crate::dto::{
 ///
 /// A service that starts before `shprd run start` must not look like a run that
 /// is merely empty, so the board says what to do instead of drawing nothing.
-pub const NO_RUN_HINT: &str = "no run yet: start one with `shprd run start`";
+pub const NO_RUN_HINT: &str = "no tasks yet: say what you want in the chat";
 
 /// Folds a run into the snapshot a client draws, as of `now_ms`.
 ///

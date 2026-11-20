@@ -165,7 +165,12 @@ impl HostLive {
     fn coordinator(&self, space: &shprd_mux::Space) -> Option<LiveAgentRow> {
         let found =
             crate::cmd::spawn::find_coordinator(&self.home, &self.repo, self.host.as_ref(), space)?;
+        // `find_coordinator` only answers for a coordinator whose process is
+        // alive, so a host that reads its turn as `done` (pi, between two turns)
+        // means "waiting for the next message", not "gone": it reads as idle, and
+        // never takes an `ended_ms` the chat would then call "not running".
         let state = match self.host.agent_state(&found.pane) {
+            Ok(AgentState::Done) => "idle",
             Ok(state) => state_word(state),
             Err(_) => "done",
         };

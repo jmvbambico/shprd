@@ -517,22 +517,6 @@ fn verbs_before_run_start_are_refused() {
     let root = dir.path();
     refused(
         root,
-        &[
-            "agent",
-            "task",
-            "add",
-            "--id",
-            "T1",
-            "--title",
-            "t",
-            "--scope",
-            "crates/shprd",
-            "--acceptance",
-            "ok",
-        ],
-    );
-    refused(
-        root,
         &["agent", "escalate", "--body", "b", "--default", "d"],
     );
     refused(root, &["run", "finish"]);
@@ -2188,4 +2172,54 @@ fn a_drop_that_cannot_find_the_home_is_refused_and_logs_nothing() {
         "queued",
         "the task is still in the run"
     );
+}
+
+/// SHPR-70: the coordinator adds tasks with this verb, and nobody has typed
+/// `shprd run start`: the first task in a repository with a commit starts the run
+/// itself, on the checked-out branch.
+#[test]
+fn the_first_task_in_a_fresh_repo_starts_a_run() {
+    let root = repo();
+    for args in [
+        vec!["init", "--quiet", "-b", "main"],
+        vec!["config", "user.name", "t"],
+        vec!["config", "user.email", "t@example.invalid"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["commit", "--quiet", "--allow-empty", "-m", "seed"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(&args)
+            .status();
+        assert!(status.is_ok_and(|status| status.success()), "git {args:?}");
+    }
+    ok(
+        root.path(),
+        &[
+            "agent",
+            "task",
+            "add",
+            "--id",
+            "T1",
+            "--title",
+            "hello",
+            "--scope",
+            "hello.py",
+            "--acceptance",
+            "it prints hi",
+        ],
+    );
+    let state = ok(root.path(), &["state", "--json"]);
+    let Ok(value) = serde_json::from_str::<Value>(&state) else {
+        panic!("not json: {state}");
+    };
+    assert_eq!(value["run"]["base_branch"], "main", "{state}");
+    assert!(
+        value["run"]["integration_branch"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("integration/r")),
+        "{state}"
+    );
+    assert!(value["tasks"].to_string().contains("T1"), "{state}");
 }

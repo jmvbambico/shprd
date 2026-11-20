@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import Chrome from "../mods/shprd-chrome/main.js";
-import { terminalName } from "../mods/shprd-chrome/lib/client.js";
+import { SEND_PROBLEM, terminalName } from "../mods/shprd-chrome/lib/client.js";
 
 /** A context that answers `cx.sleep`, `cx.notify` and `cx.timer`. */
 function context() {
@@ -109,12 +109,25 @@ test("a service that dies at once is explained by what it said", async () => {
   assert.equal(view.failure, "a shprd service is already running for /repo/demo");
 });
 
-test("a folder that is not a git repository is not started", async () => {
+test("SHPR-70: a folder that is not a git repository is served all the same", async () => {
+  // The service makes the repository at the person's first chat message; the
+  // footer never refuses a folder, and never makes one by showing it.
   const { view } = await footer();
   herdr.setExec(async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }));
   await view.start("/repo/demo");
-  assert.equal(herdr.HC_CALLS.length, 0, "nothing was started");
-  assert.equal(view.failure, "demo is not a git repository");
+  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "the service was started for it");
+  assert.ok(!String(view.failure ?? "").includes("not a git repository"), `no refusal: ${view.failure}`);
+});
+
+test("SHPR-70: a chat line that could not be sent says why in the sidebar's foot", async () => {
+  const { view } = await footer();
+  view.service = { record: { port: 1 } };
+  herdr.setShared(SEND_PROBLEM, { folder: "/repo/demo", text: "I couldn't make this folder a git repository: no space left" });
+  const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
+  assert.match(word, /demo: I couldn't make this folder a git repository/);
+  herdr.setShared(SEND_PROBLEM, { folder: "/elsewhere", text: "not ours" });
+  assert.equal(view.actions(herdr.theme()).find((action) => action.id === "service").word, "demo: service up");
+  herdr.setShared(SEND_PROBLEM, null);
 });
 
 test("a space with no service starts one by itself; an up service is left alone", async () => {
@@ -136,7 +149,7 @@ test("a start with no space to point at says so and starts nothing", async () =>
   await view.check(view.cx);
   assert.equal(herdr.HC_CALLS.length, 0, "nothing was started");
   const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
-  assert.equal(word, "Open a repo's space");
+  assert.equal(word, "Add a folder to start");
 });
 
 test("a start that the core is already serving is not run twice", async () => {

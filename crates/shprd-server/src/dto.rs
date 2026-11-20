@@ -1673,6 +1673,10 @@ pub struct ChatSendReply {
     /// True when the line was typed into the agent's pane. A refusal is an
     /// error answer instead, so a `true` here means the host took it.
     pub sent: bool,
+    /// One plain sentence about something shprd did first so the line could be
+    /// sent (it made the folder a git repository), when it did. The chat shows it
+    /// once, above the conversation.
+    pub notice: Option<String>,
 }
 
 /// What one write did to the key it named.

@@ -86,6 +86,7 @@ pub(crate) mod roster;
 pub(crate) mod settings;
 pub(crate) mod web;
 
+pub use actions::default_run;
 pub use agents::{AgentOpener, Agents, OpenedTab};
 pub use api::{App, BODY_LIMIT, WsLimits};
 pub use changes::Touch;

@@ -645,11 +645,28 @@ pub fn repo_space_name(repo_name: &str) -> String {
 /// a person chose is left alone. Returns the space and whether this call made
 /// it. A host that cannot keep marks or rename still works by name.
 pub fn ensure_marked_space(host: &dyn Host, name: &str, cwd: &Path) -> Result<(Space, bool)> {
+    ensure_marked_space_from(host, name, cwd, &[])
+}
+
+/// [`ensure_marked_space`], also adopting a plain space open on one of `also`.
+///
+/// A person who adds a folder *inside* a repository gets a space on that
+/// subfolder; the repository's root is where shprd works, so the space on the
+/// folder the person added is the one adopted, not a second one made beside it.
+pub fn ensure_marked_space_from(
+    host: &dyn Host,
+    name: &str,
+    cwd: &Path,
+    also: &[&Path],
+) -> Result<(Space, bool)> {
     let known = match host.marked_space(name)? {
         Some(space) => Some(space),
         None => match host.find_space(name)? {
             Some(space) => Some(space),
-            None => same_folder_space(host, name, cwd),
+            None => same_folder_space(host, name, cwd).or_else(|| {
+                also.iter()
+                    .find_map(|folder| same_folder_space(host, name, folder))
+            }),
         },
     };
     let (mut space, created) = match known {

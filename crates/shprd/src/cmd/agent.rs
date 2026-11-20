@@ -43,6 +43,16 @@ pub fn dispatch(
 
 /// Adds a task to the run plan.
 fn task_add(ctx: &Ctx, args: &TaskAddArgs) -> Result<(), CliError> {
+    // The first task in a repository with no run starts one with the defaults, as
+    // the service's own first task does: the coordinator adds tasks with this
+    // verb, and nobody has typed `shprd run start`.
+    if ctx.state()?.run.is_none() {
+        for event in
+            shprd_server::default_run(&ctx.root).map_err(|why| CliError::Invalid(anyhow!(why)))?
+        {
+            ctx.commit(event)?;
+        }
+    }
     let kind = EventKind::TaskAdded {
         task: args.id.clone(),
         title: args.title.clone(),

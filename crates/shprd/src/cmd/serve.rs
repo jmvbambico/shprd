@@ -153,6 +153,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         home: home.clone(),
         host: host.clone(),
         start_failure: start_failure.clone(),
+        notice: Mutex::new(None),
     }));
     // The agents the host lists, headless: `live_agents` on the state answer, the
     // output and attach routes, and the terminal socket's `agent:<id>` space all
@@ -370,9 +371,16 @@ struct HostChat {
     /// Why the coordinator could not be started when the service started, so a
     /// chat that finds none says why and not only that there is none.
     start_failure: Arc<Mutex<Option<String>>>,
+    /// What the last send did first (made the folder a repository), until the
+    /// reply carries it out.
+    notice: Mutex<Option<String>>,
 }
 
 impl shprd_server::ChatWriter for HostChat {
+    fn take_notice(&self) -> Option<String> {
+        self.notice.lock().ok().and_then(|mut notice| notice.take())
+    }
+
     fn started_ms(&self, space: Option<&str>) -> Option<u64> {
         // Only the coordinator is pinned: a task's conversation is in its own
         // worktree, where nobody else's lives.
@@ -390,6 +398,20 @@ impl shprd_server::ChatWriter for HostChat {
     }
 
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
+        // A folder that is not a repository yet becomes one now, at the person's
+        // first message and not when the window merely showed it: the work
+        // needs a repository, and nobody types a command to get one.
+        if space.is_none() {
+            match crate::cmd::adopt::ensure_repo(&self.repo) {
+                Ok(Some(made)) => {
+                    if let Ok(mut notice) = self.notice.lock() {
+                        *notice = Some(made.note);
+                    }
+                }
+                Ok(None) => {}
+                Err(why) => return Err(why.trim_end_matches('.').to_string()),
+            }
+        }
         // Reading the log needs the root; the actor is the person, because the
         // line is theirs — the API never writes to the ledger for a chat turn,
         // so nothing here can be mistaken for an engine decision.
@@ -592,7 +614,11 @@ fn prepare_space(
         &crate::cmd::spawn::PreparedSpace,
     ) -> Result<crate::cmd::spawn::CoordinatorStart, CliError>,
 ) -> SpaceNotice {
-    let prepared = match crate::cmd::spawn::ensure_repo_space(mux, repo) {
+    // The folder the person added may be inside the repository: its plain space is
+    // adopted rather than a second one made at the root.
+    let launch = std::env::current_dir().ok();
+    let also: Vec<&Path> = launch.iter().map(PathBuf::as_path).collect();
+    let prepared = match crate::cmd::spawn::ensure_repo_space_from(mux, repo, &also) {
         Ok(prepared) => prepared,
         Err(err) => return SpaceNotice::Unavailable(err.to_string()),
     };

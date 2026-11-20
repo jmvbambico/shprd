@@ -69,6 +69,13 @@ pub trait ChatWriter: Send + Sync {
     fn started_ms(&self, _space: Option<&str>) -> Option<u64> {
         None
     }
+
+    /// What the last `send` did on its own first, as one plain sentence, taken
+    /// once: the chat shows it with the answer and it is not said again. `None`
+    /// is nothing.
+    fn take_notice(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The writer a service holds, with a `Debug` that never prints a host.
@@ -271,6 +278,7 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
     Ok(ChatSendReply {
         space: space.name().to_owned(),
         sent: true,
+        notice: writer.take_notice(),
     })
 }
 
