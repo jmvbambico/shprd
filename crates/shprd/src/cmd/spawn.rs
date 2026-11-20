@@ -606,15 +606,26 @@ pub(crate) struct PreparedSpace {
 
 /// [`PreparedSpace`]: find the coordinator's space, or create it.
 pub(crate) fn ensure_repo_space(mux: &dyn Host, repo: &Path) -> Result<PreparedSpace, CliError> {
+    ensure_repo_space_from(mux, repo, &[])
+}
+
+/// [`ensure_repo_space`], also adopting a plain space open on one of `also` (the
+/// folder the person added inside the repository).
+pub(crate) fn ensure_repo_space_from(
+    mux: &dyn Host,
+    repo: &Path,
+    also: &[&Path],
+) -> Result<PreparedSpace, CliError> {
     let name = repo_space_name(&repo_name(repo)?);
     // Found by shprd's own mark, so a space the person renamed is still the
     // one; a space with no mark is found by its old name once and gets marked.
-    let (space, created) = shprd_mux::ensure_marked_space(mux, &name, repo).map_err(|err| {
-        CliError::other(anyhow!(err).context(format!(
-            "finding or creating the space {name:?} at {}",
-            repo.display()
-        )))
-    })?;
+    let (space, created) =
+        shprd_mux::ensure_marked_space_from(mux, &name, repo, also).map_err(|err| {
+            CliError::other(anyhow!(err).context(format!(
+                "finding or creating the space {name:?} at {}",
+                repo.display()
+            )))
+        })?;
     Ok(PreparedSpace { space, created })
 }
 

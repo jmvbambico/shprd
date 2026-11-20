@@ -1,5 +1,6 @@
 //! Verb implementations, one module per verb family.
 
+pub mod adopt;
 pub mod agent;
 pub mod approve;
 pub mod ask;
@@ -85,7 +86,14 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Doctor(args)) = &cli.command {
         return doctor::run(args, cli.global.json, cli.global.home.as_deref());
     }
-    let root = resolve_root(cli.global.repo.as_deref())?;
+    // `serve` is the one verb that may start in a folder that is not a repository
+    // yet: the window shows a space the person just added, and the repository is
+    // made when they first chat (`adopt`), not when the folder is shown.
+    let root = if matches!(cli.command, Some(Command::Serve(_))) {
+        crate::ctx::resolve_serve_root(cli.global.repo.as_deref())?
+    } else {
+        resolve_root(cli.global.repo.as_deref())?
+    };
     let actor = resolve_actor(cli.global.actor.as_deref())?;
     // The home is resolved once, here, and carried down: the dagr projection
     // that follows every write reads `graph.dagr` from it and looks in the

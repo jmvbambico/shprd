@@ -362,6 +362,13 @@ export function lastReason(text) {
 export const SERVICE_STATUS = "service.status";
 
 /**
+ * The shared key the chat publishes under when a message could not be sent
+ * (`{folder, text}`, or `null` once one is), so the sidebar's foot says why in the
+ * same plain words the chat does.
+ */
+export const SEND_PROBLEM = "chat.problem";
+
+/**
  * Words for a service that is not answering, for the folder the window shows.
  *
  * The footer owns starting the service and publishes how it is going; every

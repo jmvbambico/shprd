@@ -1674,12 +1674,19 @@ async fn the_first_task_in_a_fresh_repo_starts_a_run() {
 }
 
 #[tokio::test]
-async fn a_task_in_a_repo_with_no_commit_is_refused_with_the_way_out() {
+async fn a_task_in_a_repo_with_no_commit_is_refused_in_plain_words() {
     let repo = tempfile::tempdir().expect("repo dir");
     git_in(repo.path(), &["init", "-b", "trunk"]);
     let fixture = Fixture::prepared(repo, tempfile::tempdir().expect("state dir"));
     let reply = fixture.add_task("T1").await;
     assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
     let message = reply.json()["message"].as_str().unwrap_or("").to_string();
-    assert!(message.contains("shprd run start"), "{message}");
+    assert!(
+        message.contains("no commit") || message.contains("commit to base"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("shprd run start"),
+        "names no command: {message}"
+    );
 }

@@ -87,6 +87,15 @@ engine validates every one:
 
 ## The service
 
+On the Herdr desktop nobody types `shprd serve`: the window starts it for the space
+the person added. A folder that is not a git repository is served too; at the person's
+first chat message the service makes it one (`git init` on `main`, a `.shprd/config.toml`
+with the test commands it found, an ignore for the run's files, and a first commit of what
+was there) and says so in one plain line in the chat. A folder inside a repository serves
+that repository. Showing a folder never makes a repository. The first task starts the run
+(base: the checked-out branch, integration branch `integration/r<time>`), so no
+`shprd run start` is needed either.
+
 `shprd serve` binds 127.0.0.1 only. It serves one repository, and every repository
 has its own service: its files live in `$XDG_STATE_HOME/shprd/repos/<name>-<hash>/`
 (`<name>` is the folder's name, `<hash>` an FNV-1a hash of its full path), so a second
@@ -118,7 +127,7 @@ says how to build the app.
 | `GET /api/session` | who is asking: `via` (token or session), whether the password is still fresh, whether a password is set at all, and the session's id, times and label |
 | `GET /api/sessions`, `DELETE /api/sessions/{id}` | the live sessions and which one asked / end one (by the 12-character id) |
 | `GET /api/tunnels`, `POST /api/tunnels/start`, `POST /api/tunnels/stop` | the tunnel as `shprd web status` shows it (provider, link, QR as SVG, whether a password is set, every provider, and `tailnet_user` on a request that came through Tailscale serve) / start one (`{provider?, stable?}`; a session needs a fresh password) / stop it |
-| `GET /api/state` | the snapshot: tasks with their derived status (`Needs you`, `Working`, …), `needs`, `asks`, agents, `run` (null with a `hint` when there is no run yet), `last_tick` (the last pass's steps and failures), `spaces` (one per repo: id, name, folder, branch, and Herdr's own `herdr_id` and `herdr_name` when the host has them) and `live_agents` (each worker, reviewer or coordinator the host lists: id, space, task, role, program, state `working`, `needs_you`, `idle` or `done`, its terminal id, and start, end and since times) |
+| `GET /api/state` | the snapshot: tasks with their derived status (`Needs you`, `Working`, …), `needs`, `asks`, agents, `run` (null with a `hint`, "no tasks yet: say what you want in the chat", when there is no run yet), `last_tick` (the last pass's steps and failures), `spaces` (one per repo: id, name, folder, branch, and Herdr's own `herdr_id` and `herdr_name` when the host has them) and `live_agents` (each worker, reviewer or coordinator the host lists: id, space, task, role, program, state `working`, `needs_you`, `idle` or `done`, its terminal id, and start, end and since times) |
 | `GET /api/changes`, `GET /api/ws` | what changed since a seq / the same pushed over a socket. A browser cannot set headers on a socket handshake, so `/api/ws` alone also takes the bearer token as `?token=` |
 | `GET /api/asks`, `POST /api/asks/answer` | open needs-you cards / answer one (`{task, ask, answer}`) |
 | `POST /api/action` | the person's actions on a task (`task.add`, `status`, `start`, `retry`, `stop`, `drop`, `drop_many`, `accept`, `resend_brief`). `task.drop_many` (`{tasks, reason}`) drops several tasks with one reason, skipping the ones the rules refuse and naming them in `skipped`. `task.drop` and `task.drop_many` are destructive: through a session it needs a password entered in the last five minutes, else `401` with `code: reauth` |
@@ -126,7 +135,7 @@ says how to build the app.
 | `GET /api/prompts`, `GET\|PUT\|DELETE /api/prompts/{id}` | the prompts: list, read, write, reset to the shipped words |
 | `POST /api/tasks` | add a task, as `shprd agent task add` does |
 | `GET /api/tasks/{id}/changes` | the task's branch against the branch it was cut from (the integration branch), for the accept card |
-| `GET /api/chat?space=&since=`, `POST /api/chat` | what a space's agent wrote since a point, read from the program's own transcript (Claude Code, Codex, Pi, OpenCode) / type one turn into it, as the person (`{space, text}`). `space` is `coordinator` or a task id; absent means the coordinator |
+| `GET /api/chat?space=&since=`, `POST /api/chat` | what a space's agent wrote since a point, read from the program's own transcript (Claude Code, Codex, Pi, OpenCode) / type one turn into it, as the person (`{space, text}`; the answer's `notice` is one plain sentence about what shprd did first, such as making the folder a repository). `space` is `coordinator` or a task id; absent means the coordinator |
 | `GET /api/terminal?space=&pane=` | upgrade to a WebSocket on one agent's terminal. `space` is `coordinator`, a task id or `agent:<id>` (a listed agent); a `pane` must equal the one the service resolves. It watches by default (the screen is pushed whole when it changes; the pane is never resized) and types only after the client sends `input_open`. Messages: server `hello`, `screen`, `input_ready`, `notice`, `ended`, `pong`; client `input_open`, `input`, `key`, `ping`. At most 8 sockets open, 200 client messages per 10 s per socket, 16 KiB per input; nothing typed is logged |
 | `GET /api/agents/{id}/output?lines=N`, `POST /api/agents/{id}/attach` | a listed agent's recent screen, read-only (the fallback for a client that cannot bind a terminal; a finished agent's stays readable) / what to bind a real terminal to (its terminal id and its socket path) |
 | `POST /api/agents` | start a program in a new tab, in the run's space (the "+" menu's *Start an agent*) |

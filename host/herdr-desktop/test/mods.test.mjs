@@ -242,10 +242,11 @@ test("the whole board is still read when the window has no spaces yet", () => {
 
 test("no run is a board with a hint, not an empty sidebar", () => {
   const rows = sidebarRows({ seq: 0, run: null, hint: "no run yet: start one with `shprd run start`", tasks: [] }, []);
+  // The window never repeats an old service's hint: nobody types a command here.
   assert.equal(rows.coordinator.word, "No run");
   assert.equal(rows.coordinator.tone, "dim");
   assert.equal(rows.coordinator.label, "This repository");
-  assert.equal(rows.coordinator.sub, "no run yet: start one with `shprd run start`");
+  assert.equal(rows.coordinator.sub, "no tasks yet: say what you want in the chat");
   assert.deepEqual(rows.tasks, []);
   assert.deepEqual(rows.waiting, []);
 });
@@ -668,7 +669,8 @@ test("the bar names the run, its failure and the service's absence", () => {
   assert.equal(runState({ seq: 0, run: null }), "none");
   assert.equal(runLabel(STATE), "run m10a · integration/m10");
   assert.equal(runShort(STATE), "run m10a", "the bar names the run; the sidebar names the branch");
-  assert.equal(runLabel({ seq: 0, run: null, hint: "no run yet" }), "no run yet");
+  assert.equal(runLabel({ seq: 0, run: null, hint: "no run yet" }), "no tasks yet: say what you want in the chat");
+  assert.equal(runShort({ seq: 0, run: null, hint: "no run yet: start one with `shprd run start`" }), "no tasks yet: say what you want in the chat");
   assert.match(lastFailure(STATE), /^land on T2: could not run git/);
   assert.equal(lastFailure({ seq: 1, run: null }), null);
 });

@@ -190,13 +190,15 @@ export const WORDS = {
  * What the coordinator's chat says when shprd's own coordinator is not running
  * (`GET /api/state`'s `live_agents` holds none). Only shprd's agents are listed
  * there, so another product's Assistant in the space never counts; the chat
- * never falls through to it. `null` when one runs, or when the state does not
+ * never falls through to it. A coordinator whose process is alive reads as up
+ * whatever word its state has between two turns (pi reads `done` there): only
+ * an ended one (`ended_ms`) is down. `null` when one runs, or when the state does not
  * say (an older service, or nothing read yet).
  */
 export function coordinatorDown(space, state) {
   if (space !== COORDINATOR || !Array.isArray(state?.live_agents)) return null;
   const running = state.live_agents.some(
-    (agent) => agent.role === "coordinator" && !agent.ended_ms && agent.state !== "done",
+    (agent) => agent.role === "coordinator" && !agent.ended_ms,
   );
   return running ? null : WORDS.coordinatorDown;
 }

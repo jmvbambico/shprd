@@ -678,10 +678,10 @@ fn a_service_started_before_the_run_says_so_and_sees_it_without_a_restart() {
     // the banner is printed, so a start that returned the moment the record
     // appeared can find the banner still empty; wait for the sentence itself.
     let text = wait_for_banner(&banner_path);
-    assert!(text.contains("no run yet"), "the banner says so: {text}");
+    assert!(text.contains("no tasks yet"), "the banner says so: {text}");
     assert!(
-        text.contains("shprd run start"),
-        "the banner names the verb: {text}"
+        !text.contains("shprd run start"),
+        "the banner names no command: {text}"
     );
 
     // And the board says the same thing.

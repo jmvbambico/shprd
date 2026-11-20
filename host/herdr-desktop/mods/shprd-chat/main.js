@@ -30,9 +30,9 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, ScrollHandle, TextView, h_flex, v_flex } from "gpui-base";
-import { exec, props, shared, theme } from "herdr";
+import { exec, props, setShared, shared, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
   COORDINATOR,
@@ -81,6 +81,8 @@ export default class Chat extends View {
     // A refused send keeps its words and its reason until the next send: the
     // reads that follow would otherwise clear the line before a person read it.
     this.refusal = null;
+    /** What shprd did first on the last send (made the folder a repository). */
+    this.notice = null;
     this.sending = false;
     /** Messages opened with "Show more", by key. */
     this.opened = new Set();
@@ -229,12 +231,18 @@ export default class Chat extends View {
     this.refusal = null;
     this.cx.notify();
     try {
-      await this.client.call("POST", "/api/chat", { body });
+      const reply = await this.client.call("POST", "/api/chat", { body });
       this.input.set_value("");
       this.pinned = "bottom";
+      // One plain line about what shprd did first (it made the folder a git
+      // repository); it stays above the composer for this conversation.
+      if (typeof reply?.notice === "string" && reply.notice !== "") this.notice = reply.notice;
+      setShared(SEND_PROBLEM, null);
     } catch (err) {
       // The words stay in the composer: a refused line is retyped, not lost.
       this.refusal = reason(err);
+      // The sidebar's foot says the same sentence, for the folder shown.
+      setShared(SEND_PROBLEM, { folder: this.client?.folder ?? activeFolder(), text: this.refusal });
     }
     this.sending = false;
     this.cx.notify();
@@ -359,6 +367,9 @@ export default class Chat extends View {
               ? [this.blank(t, said)]
               : [...rows.map((row) => this.row(t, colors, row)), div().h(10).flex_none()],
           ),
+      )
+      .when(this.space === COORDINATOR && Boolean(this.notice), (el) =>
+        el.child(div().flex_none().px(14).pb(4).text_size(TEXT.label).text_color(t.muted).child(this.notice)),
       )
       .when(said !== null && rows.length > 0, (el) =>
         el.child(div().flex_none().px(14).pb(4).text_size(TEXT.label).text_color(t.muted).child(said)),

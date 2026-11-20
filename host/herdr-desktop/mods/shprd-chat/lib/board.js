@@ -429,15 +429,20 @@ export function since(at, now = Date.now()) {
 }
 
 /**
- * The run as the status bar names it: the run's id, else why there is none.
- *
- * `GET /api/state` answers `run: null` with a `hint` before `shprd run start`,
- * and a bar that said "no run" without saying how to start one would be a dead
- * end (the M9 gate's bug 6 was exactly that kind of silence).
+ * What the window says when the repository has no run yet: where to go next, in
+ * words that name no command. The window never reads the service's own `hint`
+ * for it (an older service's says `shprd run start`): nobody types a command in
+ * the shprd layout, a run starts with the first task the chat makes.
+ */
+export const NO_TASKS = "no tasks yet: say what you want in the chat";
+
+/**
+ * The run as the status bar names it: the run's id, else [`NO_TASKS`], so a bar
+ * with no run is never a dead end (the M9 gate's bug 6 was that silence).
  */
 export function runLabel(state) {
   const run = state?.run;
-  if (!run) return state?.hint ?? "No run yet";
+  if (!run) return NO_TASKS;
   return `run ${run.id} · ${run.integration_branch}`;
 }
 
@@ -446,12 +451,11 @@ export function runLabel(state) {
  * on is on the sidebar's coordinator row already and the bar has one line for
  * everything.
  *
- * A bar with no run says why, exactly as [`runLabel`] does: a bar that said
- * "no run" without naming the verb would be a dead end.
+ * A bar with no run says [`NO_TASKS`], exactly as [`runLabel`] does.
  */
 export function runShort(state) {
   const run = state?.run;
-  if (!run) return state?.hint ?? "No run yet";
+  if (!run) return NO_TASKS;
   return `run ${run.id}`;
 }
 

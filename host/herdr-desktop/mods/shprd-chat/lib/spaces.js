@@ -29,7 +29,7 @@
 // every mod folder that imports it. Edit the source, never a copy.
 
 import { NEED, STATUS_ORDER, roleTitle, status as statusOf } from "./tokens.js";
-import { counts, isLive, progressOf, secondLine } from "./board.js";
+import { NO_TASKS, counts, isLive, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
 export const COORDINATOR_ID = "coordinator";
@@ -202,7 +202,7 @@ export function coordinatorRow(state, space = null) {
     id: COORDINATOR_ID,
     label: String(run?.repo ?? "").split("/").filter(Boolean).pop() || "This repository",
     title: roleTitle(state, "coordinator"),
-    sub: run ? `run ${run.id} · ${run.integration_branch}` : (state?.hint ?? "No run yet"),
+    sub: run ? `run ${run.id} · ${run.integration_branch}` : NO_TASKS,
     status: run ? (state?.finished ? "done" : "working") : "to_do",
     word: run ? (state?.finished ? "Finished" : "Running") : "No run",
     tone: run ? (state?.finished ? "green" : "amber") : "dim",

@@ -527,6 +527,10 @@ test("SHPR-69: the coordinator's chat says plainly when shprd's coordinator is n
   assert.equal(coordinatorDown(COORDINATOR, ended), WORDS.coordinatorDown);
   const running = { live_agents: [{ role: "coordinator", state: "idle" }] };
   assert.equal(coordinatorDown(COORDINATOR, running), null);
+  // SHPR-70: pi's turn ended and its state reads done, but the process is alive
+  // (no ended_ms): between two turns is up, not "not running".
+  const between = { live_agents: [{ role: "coordinator", state: "done" }] };
+  assert.equal(coordinatorDown(COORDINATOR, between), null);
   // A task's chat, and a state that does not say, are left alone.
   assert.equal(coordinatorDown("T1", none), null);
   assert.equal(coordinatorDown(COORDINATOR, null), null);

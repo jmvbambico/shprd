@@ -183,29 +183,41 @@ fn drop_many(
 
 /// Starts a run when the log has none, so the first task in a fresh repository
 /// can be added without a CLI step.
-///
-/// The defaults are the ones a person would type: the base is the branch the
-/// repository has checked out, the integration branch is `integration/<run id>`
-/// and is cut from the base when it does not exist, and the run id is the start
-/// time. A directory that is not a git repository gets a log-only run (the same
-/// as `shprd run start` there). A detached HEAD or a repository with no commit
-/// has no base to name, so it is refused with the way out.
 fn ensure_run(ctx: &Context<'_>) -> Result<(), ApiReject> {
     let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
     if folded.run.is_some() {
         return Ok(());
     }
-    let git = Git::new(ctx.repo);
+    for event in default_run(ctx.repo).map_err(ApiReject::refused)? {
+        commit(ctx, event)?;
+    }
+    Ok(())
+}
+
+/// The events that start a run with the defaults a person would type: the base
+/// is the branch the repository has checked out, the integration branch is
+/// `integration/<run id>` and is cut from the base when it does not exist, and
+/// the run id is the start time. A directory that is not a git repository gets
+/// a log-only run (the same as `shprd run start` there). A detached HEAD or a
+/// repository with no commit has no base to name, so it is refused in plain
+/// words.
+///
+/// The integration branch is created here, before the events are written; the
+/// caller appends the returned events in order. Both the service's first task
+/// and the CLI's `agent task add` start a run through this, so the coordinator
+/// (which adds tasks with the CLI) never meets "no run has started".
+pub fn default_run(repo: &Path) -> Result<Vec<EventKind>, String> {
+    let git = Git::new(repo);
     let in_repo = git.run(&["rev-parse", "--git-dir"]).is_ok();
     let base = if in_repo {
         match git.current_branch() {
             Ok(Some(branch)) if git.rev_parse(&branch).is_ok() => branch,
             _ => {
-                return Err(ApiReject::refused(
-                    "no run has started, and none can start on its own: the repository has no \
-                     checked-out branch with a commit to base it on; check one out, or run \
-                     `shprd run start --run-id … --base … --integration …`",
-                ));
+                return Err(
+                    "no run can start yet: the repository has no checked-out branch \
+                     with a commit to base the work on"
+                        .to_string(),
+                );
             }
         }
     } else {
@@ -216,42 +228,25 @@ fn ensure_run(ctx: &Context<'_>) -> Result<(), ApiReject> {
     let mut made = false;
     if in_repo && !git.branch_exists(&integration).unwrap_or(false) {
         git.run(&["branch", &integration, &base]).map_err(|err| {
-            ApiReject::refused(format!(
-                "could not create the integration branch {integration:?} from {base:?}: {err}"
-            ))
+            format!("could not create the integration branch {integration:?} from {base:?}: {err}")
         })?;
         made = true;
     }
-    let started = EventKind::RunStarted {
+    let mut events = vec![EventKind::RunStarted {
         run_id,
-        repo: ctx.repo.to_string_lossy().to_string(),
+        repo: repo.to_string_lossy().to_string(),
         base_branch: base,
         integration_branch: integration.clone(),
-    };
-    if let Err(refused) = commit(ctx, started) {
-        // Another request started the run between the load and this commit: the
-        // branch made for the lost start is taken back, and the add goes on
-        // against the run that won.
-        if made {
-            let _ = git.run(&["branch", "-D", &integration]);
-        }
-        let (now, _) = ledger::load(ctx.repo).map_err(read_error)?;
-        return if now.run.is_some() {
-            Ok(())
-        } else {
-            Err(refused)
-        };
-    }
+    }];
     if made {
-        let resource = EventKind::Resource {
+        events.push(EventKind::Resource {
             action: ResourceAction::Created,
             kind: ResourceKind::Branch,
             name: integration,
             task: None,
-        };
-        commit(ctx, resource)?;
+        });
     }
-    Ok(())
+    Ok(events)
 }
 
 /// Delivers a task's latest brief to its agent again and records that it went.

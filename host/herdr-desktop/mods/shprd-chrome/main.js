@@ -38,9 +38,10 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, home, run, setShared, theme } from "herdr";
+import { exec, hc, home, run, setShared, shared, theme } from "herdr";
 
 import {
+  SEND_PROBLEM,
   SERVICE_STATUS,
   activeFolder,
   discover,
@@ -163,10 +164,9 @@ export default class Chrome extends View {
     const name = terminalName(folder);
     let launched = false;
     try {
-      const probe = await exec("git", ["-C", folder, "rev-parse", "--git-common-dir"]).catch(() => null);
-      if (!probe || probe.code !== 0) {
-        throw new Error(`${repoName(folder) || folder} is not a git repository`);
-      }
+      // A folder that is not a git repository yet is served all the same: the
+      // service makes it one when the person sends their first chat message
+      // (never because a space was merely shown), so nothing is refused here.
       // A record whose process is alive is a service that did not answer in time
       // (busy), not one that is gone: it is left running, never killed.
       if (await this.alive(folder)) {
@@ -232,7 +232,7 @@ export default class Chrome extends View {
     const online = this.service !== null;
     const name = repoName(this.folder ?? "");
     const word = !this.folder
-      ? "Open a repo's space"
+      ? "Add a folder to start"
       : online
         ? `${name}: service up`
         : this.starting
@@ -241,14 +241,21 @@ export default class Chrome extends View {
             ? `${name}: ${this.failure}`
             : `${name}: service not up`;
     const colors = tone(t);
+    // A chat line that could not be sent (a folder git would not take) says why
+    // here too, in the chat's own words, while the service itself is fine.
+    const problem = shared(SEND_PROBLEM);
+    const stuck =
+      online && problem?.text && normalizeFolder(problem.folder ?? "") === normalizeFolder(this.folder ?? "")
+        ? String(problem.text).slice(0, 140)
+        : null;
     return [
       { id: "settings", word: "Settings", icon: "settings", color: t.muted, onClick: () => run("app.settings") },
       { id: "shprd", word: "shprd", icon: "crook", color: t.muted, onClick: () => openSettings() },
       {
         id: "service",
-        word,
+        word: stuck ? `${name}: ${stuck}` : word,
         icon: "plug",
-        color: online ? colors.green : this.starting ? colors.amber : colors.red,
+        color: stuck ? colors.red : online ? colors.green : this.starting ? colors.amber : colors.red,
         onClick: online || this.starting || !this.folder ? null : () => this.start(this.folder),
       },
     ];
