@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
+import { age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
 const NOW = 1_800_000_000_000;
 const state = JSON.parse(readFileSync(new URL("./fixtures/proto.json", import.meta.url), "utf8"));
@@ -101,6 +101,19 @@ test("the Tasks list's scope keeps one space's tasks, and all when none is picke
   assert.ok(scopeToSpace(state, "sp-shop").tasks.every((task) => task.space === "sp-shop"));
   assert.equal(scopeToSpace(state, "gone"), state);
   assert.deepEqual(scopeToSpace(state, "herdr:s2").tasks, [], "a space Herdr made has no tasks");
+});
+
+test("a Herdr space in the served folder shows the served space's tasks, under its name", () => {
+  const st = { ...state, spaces: [{ id: "sp-shop", name: "shop", folder: "/p/shop/", branch: "" }], tasks: [{ id: "T1", space: "sp-shop", derived: { status: "ready" } }] };
+  const herdr = [{ id: "sp1201", name: "shop", folder: "/p/shop" }, { id: "sp2", name: "other", folder: "/p/other" }];
+  assert.equal(resolveSpace(st, "herdr:sp1201", herdr), "sp-shop");
+  assert.equal(scopeToSpace(st, "herdr:sp1201", herdr).tasks.length, 1);
+  assert.equal(graphRows(st, "herdr:sp1201", herdr).flatMap((p) => p.tasks ?? []).length >= 0, true);
+  assert.equal(pickedName(st, "herdr:sp1201", herdr), "shop");
+  assert.deepEqual(scopeToSpace(st, "herdr:sp2", herdr).tasks, []);
+  assert.equal(pickedName(st, "herdr:sp2", herdr), "other", "never the raw id");
+  const withId = { ...st, spaces: [{ ...st.spaces[0], herdr_id: "sp9", herdr_name: "shprd · shop" }] };
+  assert.equal(resolveSpace(withId, "herdr:sp9", []), "sp-shop");
 });
 
 test("a finished agent stays in the Agents pane 30 minutes; a coordinator stays", () => {

@@ -193,7 +193,9 @@ export default class Spaces extends View {
    */
   pick(space) {
     if (space.plain) {
-      // It has no tasks, so the Tasks list and the Graph go empty for it; "All spaces" brings them back.
+      // A plain space in a served repository's folder shows that space's tasks
+      // (the Tasks list resolves it); any other has none, so those go empty and
+      // "All spaces" brings them back.
       setShared("spaces.picked", space.id);
       run("space.select", { id: space.herdr });
       return;

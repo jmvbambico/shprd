@@ -28,7 +28,7 @@
 // Shared: the source is `mods/lib/spaces.js`; `bin/sync-shared` copies it into
 // every mod folder that imports it. Edit the source, never a copy.
 
-import { NEED, STATUS_ORDER, roleTitle, status as statusOf } from "./tokens.js";
+import { NEED, STATUS_ORDER, desktopWords, roleTitle, status as statusOf } from "./tokens.js";
 import { NO_TASKS, counts, isLive, progressOf, secondLine } from "./board.js";
 
 /** The id a coordinator row carries, so a click and a test name the same thing. */
@@ -232,8 +232,8 @@ export function needWords(task, state) {
   const need = task?.derived?.need;
   if (!need) return null;
   const card = (state?.needs ?? []).find((entry) => entry?.task === task?.id);
-  if (card?.body) return card.body;
-  if (task?.derived?.reason) return task.derived.reason;
+  if (card?.body) return desktopWords(card.body, task?.id);
+  if (task?.derived?.reason) return desktopWords(task.derived.reason, task?.id);
   return NEED[need] ?? null;
 }
 

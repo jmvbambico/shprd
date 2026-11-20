@@ -84,13 +84,46 @@ export function spacesOf(state) {
   return [{ id: "run", name: repo, folder: state?.run?.repo ?? "", branch: state?.run?.integration_branch ?? "" }];
 }
 
+const trimFolder = (folder) => String(folder ?? "").replace(/\/+$/, "");
+
+/**
+ * The served space a picked id stands for. A Herdr space the person made in the
+ * served repository's folder (or the one the service says is its own) is listed
+ * as a plain `herdr:<id>` row, but its tasks are the served space's: picking it
+ * must show them. Any other id comes back unchanged.
+ */
+export function resolveSpace(state, pickedId, herdrSpaces = []) {
+  const id = String(pickedId ?? "");
+  if (!id.startsWith("herdr:")) return pickedId;
+  const herdrId = id.slice("herdr:".length);
+  const served = spacesOf(state);
+  const byId = served.find((space) => space.herdr_id && space.herdr_id === herdrId);
+  if (byId) return byId.id;
+  const herdr = (herdrSpaces ?? []).find((space) => space?.id === herdrId);
+  if (!herdr) return pickedId;
+  const folder = trimFolder(herdr.folder);
+  const same = served.find((space) => folder !== "" && trimFolder(space.folder) === folder);
+  return same ? same.id : pickedId;
+}
+
+/** The name to draw for a picked id: the served space's, else Herdr's, never a raw id. */
+export function pickedName(state, pickedId, herdrSpaces = []) {
+  const resolved = resolveSpace(state, pickedId, herdrSpaces);
+  const served = spacesOf(state).find((space) => space.id === resolved);
+  if (served) return served.herdr_name ?? served.name;
+  const herdrId = String(pickedId).replace(/^herdr:/, "");
+  const herdr = (herdrSpaces ?? []).find((space) => space?.id === herdrId);
+  return String(herdr?.name ?? String(pickedId).replace(/^(sp-|herdr:)/, ""));
+}
+
 /**
  * The state with only one space's tasks (`spaceId` null: all of them), for the
  * Tasks list. A task with no space belongs to the only space there is.
  */
-export function scopeToSpace(state, spaceId) {
-  if (!state || spaceId === null || spaceId === undefined) return state;
+export function scopeToSpace(state, pickedId, herdrSpaces = []) {
+  if (!state || pickedId === null || pickedId === undefined) return state;
   const list = spacesOf(state);
+  const spaceId = resolveSpace(state, pickedId, herdrSpaces);
   if (String(spaceId).startsWith("herdr:")) return { ...state, tasks: [] };
   if (!list.some((space) => space.id === spaceId)) return state;
   const tasks = (state.tasks ?? []).filter((task) => (task.space ?? (list.length === 1 ? list[0].id : null)) === spaceId);
@@ -283,8 +316,9 @@ export function agentRows(state, { grouped = false, now = Date.now() } = {}) {
  *
  * `guide` is the text before the id: the │ ├─ └─ lines of its ancestors.
  */
-export function graphRows(state, spaceId = null) {
+export function graphRows(state, pickedId = null, herdrSpaces = []) {
   const list = spacesOf(state);
+  const spaceId = pickedId === null ? null : resolveSpace(state, pickedId, herdrSpaces);
   const tasks = (state?.tasks ?? [])
     .filter(isLive)
     .filter((task) => spaceId === null || (task.space ?? (list.length === 1 ? list[0].id : null)) === spaceId);

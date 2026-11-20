@@ -696,3 +696,16 @@ test("a space opened through a symlink still finds its service by git's canonica
   assert.equal(found.base, "http://127.0.0.1:7001");
   assert.equal(await canonicalRoot("/nowhere", async () => ({ code: 128, stdout: "", stderr: "x" })), null);
 });
+
+test("a ready task's needs-you words point at the Tasks pane, never a command or the forge", async () => {
+  const { desktopWords } = await import("../mods/lib/tokens.js");
+  for (const body of [
+    "T5 is ready to land and its merge policy asks: approve its pull request on the forge, or run `shprd approve T5`",
+    "T1 is ready to land: run `shprd approve T1`",
+  ]) {
+    const words = desktopWords(body, "T5");
+    assert.match(words, /Accept it in the Tasks pane/);
+    assert.doesNotMatch(words, /shprd approve|forge/);
+  }
+  assert.equal(desktopWords("which format?", "T1"), "which format?");
+});
