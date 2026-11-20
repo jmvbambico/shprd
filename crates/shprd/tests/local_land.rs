@@ -576,3 +576,51 @@ fn the_settings_file_alone_sets_the_merge_policy_the_tick_lands_under() {
     );
     assert_eq!(fixture.integration_head(), before, "the ask moved nothing");
 }
+
+/// An accepted task in a repository whose `origin` is `url`: the land step
+/// merges locally and says so in one plain sentence, whatever `gh` thinks.
+fn accepted_task_lands_with_origin(url: &str) -> (Fixture, String) {
+    let fixture = Fixture::new();
+    fixture.write_config("ask");
+    fixture.git(&["remote", "add", "origin", url]);
+    fixture.start();
+    let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
+    let steps = fixture.tick();
+    assert_eq!(
+        actions(&steps),
+        vec!["needs_you:T1".to_string()],
+        "{steps:?}"
+    );
+    fixture.ok(&["approve", "T1", "--yes"]);
+    let steps = fixture.tick();
+    assert_eq!(actions(&steps), vec!["land:T1".to_string()], "{steps:?}");
+    assert_eq!(steps[0].get("ok"), Some(&Value::Bool(true)), "{steps:?}");
+    assert_eq!(fixture.integration_head(), head);
+    (fixture, head)
+}
+
+#[test]
+fn accepting_lands_when_origin_is_a_local_bare_repository_and_pushes_it() {
+    let temp = TempDir::new().expect("temp dir");
+    let bare = temp.path().join("remote.git");
+    let out = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&bare)
+        .output()
+        .expect("git runs");
+    assert!(out.status.success());
+    let (fixture, head) = accepted_task_lands_with_origin(bare.to_str().expect("utf8 path"));
+    assert_eq!(
+        fixture.git_in(&bare, &["rev-parse", "integration/m9"]),
+        head,
+        "the remote took the merge"
+    );
+}
+
+#[test]
+fn accepting_lands_when_origin_is_not_a_github_host() {
+    // The host does not resolve and is never contacted: no `gh pr list`, so no
+    // forge error, and the push to it fails quietly.
+    let (_fixture, _head) =
+        accepted_task_lands_with_origin("ssh://git@git.example.invalid/owner/repo.git");
+}

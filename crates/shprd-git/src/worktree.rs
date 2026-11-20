@@ -376,6 +376,53 @@ pub fn has_remote(git: &Git) -> bool {
     remote_of(git).is_some()
 }
 
+/// The host each of the repository's remotes points at, in `git remote` order.
+///
+/// A remote that is a path, a `file://` URL or anything else without a host
+/// (a local bare repository, say) has no entry: there is no forge behind it.
+pub fn remote_hosts(git: &Git) -> Vec<String> {
+    let Ok(names) = git.run(&["remote"]) else {
+        return Vec::new();
+    };
+    let mut hosts = Vec::new();
+    for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        let Ok(url) = git.run(&["remote", "get-url", name]) else {
+            continue;
+        };
+        if let Some(host) = host_of_url(&url)
+            && !hosts.contains(&host)
+        {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// The host of a git remote URL, lower-cased: `https://h/…`, `ssh://git@h/…` or
+/// scp-style `git@h:owner/repo`. A path or `file://` URL has none.
+pub fn host_of_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let authority = if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.eq_ignore_ascii_case("file") {
+            return None;
+        }
+        rest.split('/').next()?
+    } else if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
+        return None;
+    } else {
+        // scp-style: `[user@]host:path`; a colon must come before any slash.
+        let (host_part, _) = url.split_once(':')?;
+        if host_part.contains('/') {
+            return None;
+        }
+        host_part
+    };
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?.trim().to_ascii_lowercase();
+    // A Windows drive letter (`C:\repo`) is a path, not a host.
+    (host.len() > 1 && !host.is_empty()).then_some(host)
+}
+
 /// The remote a landing fetches from and pushes to: `origin` when the
 /// repository has it, else the only remote it has, else `None`.
 ///

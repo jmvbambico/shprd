@@ -195,6 +195,16 @@ export function newsItems(changes, state) {
 }
 
 /**
+ * One failed step as a person reads it. A land failure is already one plain
+ * sentence ("Couldn't merge T1: …"), so it stands alone: no step name in front
+ * and no command line behind.
+ */
+export function failureText(step, where = "") {
+  if (step.step === "land" && /^Couldn't /.test(step.error ?? "")) return step.error;
+  return `${step.step}${where}: ${step.error}`;
+}
+
+/**
  * The toast a failed pass asks for, or null when the last pass was clean.
  *
  * The pass is the engine's own act and not an event, so its failure is only in
@@ -212,7 +222,7 @@ export function passItem(state) {
     id: passId(tick.at_ms),
     level: "error",
     title: "The last pass failed",
-    body: clip(`${first.step}${where}: ${first.error}${others > 0 ? ` (+${others})` : ""}`),
+    body: clip(`${failureText(first, where)}${others > 0 ? ` (+${others})` : ""}`),
     task: first.task || "",
   };
 }

@@ -485,7 +485,11 @@ export function lastFailure(state) {
   const first = failed[0];
   const where = first.task ? ` on ${first.task}` : "";
   const others = failed.length - 1;
-  return `${first.step}${where}: ${cut(first.error, 80)}${others > 0 ? ` (+${others})` : ""}`;
+  const text =
+    first.step === "land" && /^Couldn't /.test(first.error ?? "")
+      ? cut(first.error, 80)
+      : `${first.step}${where}: ${cut(first.error, 80)}`;
+  return `${text}${others > 0 ? ` (+${others})` : ""}`;
 }
 
 /**

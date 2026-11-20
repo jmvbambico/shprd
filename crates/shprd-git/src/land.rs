@@ -41,7 +41,7 @@ use shprd_core::event::LandOutcome;
 use crate::forge::{Forge, ForgeError, Pr};
 use crate::git::{Git, GitError};
 use crate::integrate::IntegrationWorktree;
-use crate::worktree::remote_of;
+use crate::worktree::{remote_hosts, remote_of};
 
 /// The remote named when a repository has none to pick from: every failure
 /// then says which remote git could not reach.
@@ -328,6 +328,47 @@ pub enum LandError {
     },
 }
 
+impl LandError {
+    /// The failure as one plain sentence a person can read: no command line, no
+    /// forge advice, no "run X".
+    pub fn plain(&self, task: &str) -> String {
+        let reason = match self {
+            LandError::Git(_) => String::from("git could not finish the merge"),
+            LandError::Forge(ForgeError::Failed { stderr, .. }) => forge_reason(stderr),
+            LandError::Forge(_) => String::from("the code host could not be reached"),
+            LandError::HeadMoved { .. } => {
+                String::from("the task changed after it was accepted, so it needs accepting again")
+            }
+            LandError::NotMerged { .. } => String::from("the code host did not confirm the merge"),
+            LandError::ChecksFailed { .. } => String::from("its checks failed"),
+            LandError::Dirty { .. } => {
+                String::from("the integration branch has changes nobody saved")
+            }
+            LandError::Conflict { files, .. } => format!(
+                "its work conflicts with the integration branch in {} {}",
+                files.len(),
+                if files.len() == 1 { "file" } else { "files" }
+            ),
+            LandError::NotRestored { .. } => {
+                String::from("a failed merge could not be undone cleanly")
+            }
+        };
+        format!("Couldn't merge {task}: {reason}")
+    }
+}
+
+/// What a forge client's own complaint comes to, in plain words.
+fn forge_reason(stderr: &str) -> String {
+    let said = stderr.to_ascii_lowercase();
+    if said.contains("known github host") || said.contains("not a github") {
+        String::from("this repository has no GitHub remote")
+    } else if said.contains("auth") || said.contains("log in") || said.contains("login") {
+        String::from("GitHub is not signed in on this machine")
+    } else {
+        String::from("GitHub did not accept it")
+    }
+}
+
 /// A landing that found the work already in the base cannot be told apart from
 /// one that has to land it by type alone, so this says which it was.
 enum Reached {
@@ -463,7 +504,31 @@ pub fn land_local(
         return Ok(LocalLanded::Waiting { reason, head });
     }
     let merged = merge_local(&git, &base, &head, landing)?;
+    push_integration(&git, landing.base);
     Ok(LocalLanded::Merged { head: merged })
+}
+
+/// Pushes the integration branch to the repository's remote, when it has one.
+///
+/// Best effort and never forced: a repository with no remote has nothing to
+/// push to, and a remote that refuses (a diverged branch, a hook, no network)
+/// leaves the merge where it is, because the merge is already the person's
+/// decision and is recorded locally. Nothing here is an error.
+fn push_integration(git: &Git, branch: &str) {
+    let Some(remote) = remote_of(git) else {
+        return;
+    };
+    let _ = git.run(&["push", &remote, &format!("HEAD:refs/heads/{branch}")]);
+}
+
+/// Whether landing in `git`'s repository goes through a forge's pull request.
+///
+/// Only a remote at a host `authed` says a forge client can drive counts:
+/// a repository with no remote, a remote that is a local path or a bare
+/// repository, or one at a host the forge client does not know, lands locally.
+/// `authed` is asked once per distinct remote host, never for a hostless remote.
+pub fn uses_forge(git: &Git, authed: impl Fn(&str) -> bool) -> bool {
+    remote_hosts(git).iter().any(|host| authed(host))
 }
 
 /// Merges `head` into the integration worktree, fast-forwarding when it can.
@@ -1454,5 +1519,142 @@ mod tests {
             other_head,
             "the task's branch was never touched"
         );
+    }
+
+    #[test]
+    fn a_repo_with_no_remote_uses_no_forge() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let git = Git::new(&fixture.root);
+        assert!(!uses_forge(&git, |host| panic!("asked about {host}")));
+    }
+
+    #[test]
+    fn a_local_bare_remote_uses_no_forge_and_never_asks_one() {
+        let fixture = Fixture::new("shprd/r1/T1");
+        let git = Git::new(&fixture.root);
+        assert!(!uses_forge(&git, |host| panic!("asked about {host}")));
+    }
+
+    #[test]
+    fn a_non_github_url_uses_no_forge() {
+        let fixture = Fixture::new("shprd/r1/T1");
+        let git = Git::new(&fixture.root);
+        fixture.git(&["remote", "set-url", "origin", "git@git.example.org:o/r.git"]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let forge = uses_forge(&git, |host| {
+            asked.borrow_mut().push(host.to_string());
+            false
+        });
+        assert!(!forge);
+        assert_eq!(asked.into_inner(), vec!["git.example.org".to_string()]);
+    }
+
+    #[test]
+    fn a_github_remote_keeps_the_pull_request_path() {
+        let fixture = Fixture::new("shprd/r1/T1");
+        let git = Git::new(&fixture.root);
+        fixture.git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
+        assert!(uses_forge(&git, |host| host == "github.com"));
+        // Not signed in: nothing can drive it, so it lands locally.
+        assert!(!uses_forge(&git, |_| false));
+    }
+
+    #[test]
+    fn remote_urls_are_read_for_their_host() {
+        use crate::worktree::host_of_url;
+        assert_eq!(
+            host_of_url("https://GitHub.com/o/r"),
+            Some("github.com".into())
+        );
+        assert_eq!(
+            host_of_url("ssh://git@ghe.corp:2222/o/r"),
+            Some("ghe.corp".into())
+        );
+        assert_eq!(
+            host_of_url("git@github.com:o/r.git"),
+            Some("github.com".into())
+        );
+        assert_eq!(host_of_url("/Users/x/scratchpad-remote.git"), None);
+        assert_eq!(host_of_url("../remote.git"), None);
+        assert_eq!(host_of_url("file:///tmp/remote.git"), None);
+        assert_eq!(host_of_url("C:\\repos\\r"), None);
+    }
+
+    #[test]
+    fn a_land_failure_reads_as_one_plain_sentence() {
+        let raw = LandError::Forge(ForgeError::Failed {
+            args: vec!["pr".into(), "list".into(), "--head".into(), "x".into()],
+            code: Some(1),
+            stderr: "none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use `gh auth login`".into(),
+        });
+        let line = raw.plain("T1");
+        assert_eq!(
+            line,
+            "Couldn't merge T1: this repository has no GitHub remote"
+        );
+        let conflict = LandError::Conflict {
+            commit: "abc".into(),
+            files: vec!["a".into(), "b".into()],
+        };
+        assert_eq!(
+            conflict.plain("T2"),
+            "Couldn't merge T2: its work conflicts with the integration branch in 2 files"
+        );
+        for text in [line, conflict.plain("T2")] {
+            assert!(
+                !text.contains('`') && !text.contains("gh ") && !text.contains("run "),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_accepted_local_landing_is_pushed_to_a_remote_that_takes_it() {
+        let fixture = LocalFixture::new("the task's work\n");
+        let bare = fixture
+            .root
+            .parent()
+            .map(|p| p.join("remote.git"))
+            .unwrap_or_default();
+        fixture.git_in(
+            &fixture.root,
+            &["init", "--bare", "-q", bare.to_str().unwrap_or("")],
+        );
+        fixture.git_in(
+            &fixture.root,
+            &["remote", "add", "origin", bare.to_str().unwrap_or("")],
+        );
+        match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Ask,
+            true,
+            true,
+        ) {
+            Ok(LocalLanded::Merged { .. }) => {}
+            other => panic!("expected a merge, got {other:?}"),
+        }
+        let there = fixture.git_in(&bare, &["rev-parse", "integration/m9"]);
+        assert_eq!(there, fixture.task_head);
+    }
+
+    #[test]
+    fn a_remote_that_refuses_the_push_does_not_undo_the_merge() {
+        let fixture = LocalFixture::new("the task's work\n");
+        fixture.git_in(
+            &fixture.root,
+            &["remote", "add", "origin", "/nonexistent/remote.git"],
+        );
+        match land_local(
+            &fixture.int,
+            &fixture.landing("shprd/r1/T1"),
+            MergePolicy::Ask,
+            true,
+            true,
+        ) {
+            Ok(LocalLanded::Merged { .. }) => {}
+            other => panic!("expected a merge, got {other:?}"),
+        }
+        assert_eq!(fixture.integration_head(), fixture.task_head);
     }
 }
