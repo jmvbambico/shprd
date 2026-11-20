@@ -600,7 +600,7 @@ export default class Tasks extends View {
         ...(this.adding ? [this.form(t, colors)] : []),
         ...(this.clearing !== null ? [this.clearForm(t, colors)] : []),
         ...(this.failure !== null
-          ? [note(t, this.failure), note(t, "Start it from the sidebar's footer, then this fills in.")]
+          ? [note(t, this.failure), note(t, "This fills in when the service answers.")]
           : this.state === null || (this.state.tasks ?? []).length === 0
             ? [note(t, "No tasks yet."), note(t, "Add one with + above; the engine starts it when it may.")]
             : empty

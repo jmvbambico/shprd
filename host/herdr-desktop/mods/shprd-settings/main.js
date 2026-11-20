@@ -1320,7 +1320,7 @@ export default class Settings extends View {
     const blocks = [];
     if (this.failure !== null) {
       blocks.push(note(t, this.failure));
-      blocks.push(note(t, "Start it from the sidebar's footer; this window fills in when it answers."));
+      blocks.push(note(t, "This window fills in when the service answers."));
       return v_flex()
         .flex_1()
         .min_h(0)

@@ -295,7 +295,7 @@ export default class Spaces extends View {
       for (const space of plain) sections.push(this.spaceRow(t, colors, { ...space, branch: "" }));
       sections.push(
         note(t, this.failure ?? "No run yet."),
-        note(t, this.failure ? "Start it from the footer below." : "Tasks appear here as the run adds them."),
+        note(t, this.failure ? "This fills in when the service answers." : "Tasks appear here as the run adds them."),
       );
     } else {
       for (const space of tree) {

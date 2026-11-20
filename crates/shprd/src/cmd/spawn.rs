@@ -2918,7 +2918,7 @@ const ASSISTANT_FALLBACK_TITLE: &str = "shprd";
 /// The id the coordinator's tab had before the chat tab: its title, as a label.
 const OLD_COORDINATOR_TAB: &str = "coordinator";
 
-use shprd_mux_hc::host::COORDINATOR_TAB;
+use shprd_mux_hc::host::{COORDINATOR_TAB, is_coordinator_tab};
 
 /// Ends the repository's coordinator and starts it again from its role.
 ///
@@ -2979,7 +2979,7 @@ fn assistant_title(mux: &dyn Host, space: &shprd_mux::Space, wanted: &str) -> St
         .unwrap_or_default()
         .into_iter()
         .any(|(id, name)| {
-            let own = matches!(id.as_str(), COORDINATOR_TAB | OLD_COORDINATOR_TAB);
+            let own = is_coordinator_tab(id.as_str()) || id.as_str() == OLD_COORDINATOR_TAB;
             !own && name.trim().eq_ignore_ascii_case(wanted)
         });
     if taken {
@@ -3011,7 +3011,7 @@ pub(crate) fn rename_coordinator_tab(
         .list_tabs(&space.id)
         .unwrap_or_default()
         .into_iter()
-        .find(|tab| tab.id.as_str() == COORDINATOR_TAB);
+        .find(|tab| is_coordinator_tab(tab.id.as_str()));
     let Some(tab) = current else {
         return Ok(false);
     };
@@ -3028,7 +3028,8 @@ pub(crate) fn rename_coordinator_tab(
 /// another product could have chosen.
 fn close_own_tabs(mux: &dyn Host, space: &shprd_mux::Space, ids: &[&str]) {
     for tab in mux.list_tabs(&space.id).unwrap_or_default() {
-        if ids.contains(&tab.id.as_str()) {
+        let id = tab.id.as_str();
+        if ids.contains(&id) || (ids.contains(&COORDINATOR_TAB) && is_coordinator_tab(id)) {
             close_tab(mux, &tab.id);
         }
     }
