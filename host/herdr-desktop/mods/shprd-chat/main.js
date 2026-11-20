@@ -497,10 +497,18 @@ export default class Chat extends View {
           .max_w(BUBBLE_W)
           .min_w(0)
           .gap(3)
-          .when(mine(message), (el) => el.items_end())
           .children(parts)
           .when(message.at_ms !== null, (el) =>
-            el.child(div().px(4).text_size(TEXT.id).text_color(t.dim).child(when(message.at_ms) || "")),
+            el.child(
+              div()
+                .w_full()
+                .flex()
+                .px(4)
+                .when(mine(message), (inner) => inner.justify_end())
+                .text_size(TEXT.id)
+                .text_color(t.dim)
+                .child(when(message.at_ms) || ""),
+            ),
           ),
       );
   }
