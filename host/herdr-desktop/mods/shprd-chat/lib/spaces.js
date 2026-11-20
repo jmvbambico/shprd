@@ -316,3 +316,29 @@ export function closeWords(p) {
     verb: "Close space",
   };
 }
+
+/**
+ * Whether a space shows its tasks. `overrides` maps a space id to what the person
+ * last chose with its chevron or name (true: open, false: shut); with no choice
+ * the picked space is open (every one under "All spaces"). Plain rows never open.
+ */
+export function isOpen(overrides, space, picked) {
+  if (space.plain) return false;
+  const chosen = overrides.get(space.id);
+  if (typeof chosen === "boolean") return chosen;
+  return picked === null || picked === undefined || picked === space.id;
+}
+
+/** The chevron's click: flips what the row shows now, whichever space is picked. */
+export function toggleOpen(overrides, space, picked) {
+  overrides.set(space.id, !isOpen(overrides, space, picked));
+}
+
+/**
+ * Picking a row: the first click opens its tasks, a click on the picked row that
+ * is open shuts them (the name toggles as the chevron does).
+ */
+export function pickOpen(overrides, space, picked) {
+  if (picked === space.id) toggleOpen(overrides, space, picked);
+  else overrides.set(space.id, true);
+}

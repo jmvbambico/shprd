@@ -78,3 +78,29 @@ export function spaceName(folder) {
 export function spaceNewArgs(folder) {
   return ["do", "space.new", "--folder", folder, "--name", spaceName(folder)];
 }
+
+/** The tab the new space opens on: the shprd assistant's chat view, named like Shepherdr's. */
+export const ASSISTANT_TAB = "Assistant";
+
+/**
+ * The `herdr-app do tab.new` arguments for the assistant's tab in a space: the
+ * chat mod as the tab's only pane, on the coordinator's conversation. Until
+ * `shprd serve` is up the chat says it is starting; it never shows a shell.
+ */
+export function assistantTabArgs(spaceId) {
+  return [
+    "do", "tab.new", "--space", spaceId, "--name", ASSISTANT_TAB, "--mod", "shprd-chat",
+    "--props", JSON.stringify({ space: "coordinator" }),
+  ];
+}
+
+/**
+ * The space `space.new` made and the one tab the window put in it, from its own
+ * answer (`{space, tab, terminal}`). Only that tab is the window's: a tab the
+ * person opens later is never named here. Null when the answer names no space.
+ */
+export function madeOf(answer) {
+  const space = typeof answer?.space === "string" ? answer.space : "";
+  if (!space) return null;
+  return { id: space, tab: typeof answer?.tab === "string" ? answer.tab : "" };
+}

@@ -17,7 +17,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import * as herdr from "herdr";
 
-import { NEW_REPO, WORDS, base, offersRepo, pathOf, spaceNewArgs, tilde } from "./lib/newspace.js";
+import { NEW_REPO, WORDS, assistantTabArgs, base, madeOf, offersRepo, pathOf, spaceNewArgs, tilde } from "./lib/newspace.js";
 import { H, RADIUS, TEXT } from "./lib/tokens.js";
 
 const { closeOverlay, exec, home, props, theme } = herdr;
@@ -124,6 +124,7 @@ export default class NewSpace extends View {
         if (out.code !== 0 || answer.error) {
           throw new Error(WORDS.cantSpace(String(answer.error ?? out.stderr ?? "").trim().split("\n").pop()));
         }
+        await this.openAssistant(madeOf(answer));
         this.close();
         return;
       } catch (err) {
@@ -132,6 +133,25 @@ export default class NewSpace extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  /**
+   * Opens the new space on the assistant's chat view and closes the shell tab the
+   * window made in it, at once: the chat says it is starting until the service is
+   * up. Only the one tab `space.new` named is closed, and only after the assistant
+   * tab exists, so the space is never left with none and a tab the person opens is
+   * never touched. Best effort: a failure leaves the window's own tab, which
+   * `shprd serve` tidies later.
+   */
+  async openAssistant(made) {
+    if (!made) return;
+    try {
+      const tab = await exec("herdr-app", assistantTabArgs(made.id));
+      if (tab.code !== 0 || !made.tab) return;
+      await exec("herdr-app", ["do", "tab.close", "--id", made.tab, "--confirmed", "true"]);
+    } catch {
+      // The window's own tab stays; serve tidies it.
+    }
   }
 
   /** A dialog button: plain Cancel, one solid primary. */

@@ -237,7 +237,39 @@ export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
       ready: tasks.filter((task) => task.status === "ready").length,
     };
   });
-  return [...own, ...plainSpaces(list, herdrSpaces)];
+  return inWindowOrder([...own, ...plainSpaces(list, herdrSpaces)], list, herdrSpaces);
+}
+
+/**
+ * The rows in the window's own space order (Herdr's `spaces()`), never the
+ * service's: a served row sits where its Herdr space is (`herdr` id, else the
+ * `shprd · <repo>` name), so picking a space or a task changing state never moves
+ * a row. A row with no Herdr space (the service is up, the window has none yet)
+ * goes last, in the service's order.
+ */
+export function inWindowOrder(rows, served, herdrSpaces = []) {
+  const order = new Map((herdrSpaces ?? []).map((space, at) => [space?.id, at]));
+  const byName = new Map((herdrSpaces ?? []).map((space, at) => [space?.name, at]));
+  const slot = (row, at) => {
+    if (row.plain) return order.get(row.herdr) ?? rows.length + at;
+    const named = byName.get(`shprd · ${row.name}`) ?? byName.get(row.name);
+    return order.get(row.herdr) ?? (row.herdr ? undefined : named) ?? rows.length + at;
+  };
+  return rows
+    .map((row, at) => ({ row, key: slot(row, at), at }))
+    .sort((a, b) => a.key - b.key || a.at - b.at)
+    .map((entry) => entry.row);
+}
+
+/**
+ * A row's second line, the same rule for every row: its folder, then the branch
+ * after it only when it is not the usual one (Shepherdr's `gitTail` hides
+ * main/master). A row with no folder shows the unusual branch alone.
+ */
+export function subtitle(space) {
+  const branch = String(space?.branch ?? "").trim();
+  const unusual = branch && branch !== "main" && branch !== "master" ? branch : "";
+  return [space?.folder ?? "", unusual].filter(Boolean).join(" · ");
 }
 
 /**
