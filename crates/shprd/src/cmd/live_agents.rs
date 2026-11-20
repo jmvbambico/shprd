@@ -421,6 +421,20 @@ mod tests {
     }
 
     #[test]
+    fn another_products_assistant_is_never_listed_as_the_coordinator() {
+        // SHPR-69: Shepherdr's per-space Assistant is not shprd's coordinator.
+        let (live, mux, _clock, _home) = source();
+        let ours = start(&mux, AgentRole::Coordinator, None);
+        assert_eq!(live.agents().len(), 1, "shprd's own is listed");
+        mux.mark_foreign(&ours.root_pane);
+        let rows = live.agents();
+        assert!(
+            rows.iter().all(|row| row.role != "coordinator"),
+            "a foreign agent is not shown or counted: {rows:?}"
+        );
+    }
+
+    #[test]
     fn a_state_change_restarts_its_clock() {
         let (live, mux, clock, _home) = source();
         let worker = start(&mux, AgentRole::Worker, Some("T1"));

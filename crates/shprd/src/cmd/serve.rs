@@ -28,7 +28,7 @@
 //! banner says whether it found the space, made it, or could not reach the host
 //! at all.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -82,16 +82,11 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     let host: std::sync::Arc<dyn Host> = std::sync::Arc::from(host);
     let workspace = match &leakage {
         Some(reason) => SpaceNotice::Withheld(reason.clone()),
-        None => prepare_space(host.as_ref(), &ctx.root, |prepared| {
-            let data = crate::cmd::roster::resolve_data_dir();
-            let env = crate::cmd::spawn::build_repo_env(ctx, Some(&home), &data)?;
-            let delivering = host.clone();
-            crate::cmd::spawn::ensure_coordinator(host.as_ref(), &env, prepared, move |pending| {
-                // The wait for the program to take a turn runs beside the
-                // service: the banner and the API do not wait for a program.
-                std::thread::spawn(move || pending.deliver(delivering.as_ref()));
-            })
-        }),
+        None => prepare_space(
+            host.as_ref(),
+            &ctx.root,
+            coordinator_start(host.clone(), ctx.clone(), home.clone()),
+        ),
     };
     if let SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) = &workspace {
         tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
@@ -143,17 +138,18 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // drives: one code path types into a pane, so a chat line lands where a
     // prompt does and never in a tab shprd did not open.
     let agent_host = host.clone();
+    let start_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(match &workspace {
+        SpaceNotice::Created(_, None, why) | SpaceNotice::Reused(_, None, why) => why.clone(),
+        SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) => {
+            Some(format!("the space was not ready: {reason}"))
+        }
+        _ => None,
+    }));
     config.chat = shprd_server::ChatHost::with(Arc::new(HostChat {
         repo: ctx.root.clone(),
         home: home.clone(),
         host: host.clone(),
-        start_failure: match &workspace {
-            SpaceNotice::Created(_, None, why) | SpaceNotice::Reused(_, None, why) => why.clone(),
-            SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) => {
-                Some(format!("the space was not ready: {reason}"))
-            }
-            _ => None,
-        },
+        start_failure: start_failure.clone(),
     }));
     // The agents the host lists, headless: `live_agents` on the state answer, the
     // output and attach routes, and the terminal socket's `agent:<id>` space all
@@ -173,6 +169,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         live,
     }));
     let resend_host = host.clone();
+    let retry_host = host.clone();
     let tick = tick_config(
         ctx,
         &home,
@@ -183,6 +180,17 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
         ),
         host,
     )?;
+    // A coordinator that could not start (its program missing, or ended as it
+    // started) is tried again every pass, so it comes up once the program is
+    // back, and the chat's reason follows each try.
+    if start_failure.lock().is_ok_and(|why| why.is_some())
+        && !matches!(workspace, SpaceNotice::Withheld(_))
+    {
+        let (host, ctx, home) = (retry_host, ctx.clone(), home.clone());
+        let failure = start_failure.clone();
+        let every = tick.interval;
+        std::thread::spawn(move || retry_coordinator(host, ctx, home, failure, every));
+    }
     let announced = AnnouncedTick {
         interval_secs: tick.interval.as_secs(),
         max_running: tick.max_running,
@@ -243,6 +251,78 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     })
 }
 
+/// The step that starts the coordinator in a prepared space: the same one at
+/// start and on every retry, so a retry reads the settings and the installed
+/// programs afresh.
+fn coordinator_start(
+    host: Arc<dyn Host>,
+    ctx: Ctx,
+    home: PathBuf,
+) -> impl FnOnce(
+    &crate::cmd::spawn::PreparedSpace,
+) -> Result<crate::cmd::spawn::CoordinatorStart, CliError> {
+    move |prepared| {
+        let data = crate::cmd::roster::resolve_data_dir();
+        let env = crate::cmd::spawn::build_repo_env(&ctx, Some(&home), &data)?;
+        let delivering = host.clone();
+        crate::cmd::spawn::ensure_coordinator(host.as_ref(), &env, prepared, move |pending| {
+            // The wait for the program to take a turn runs beside the
+            // service: the banner and the API do not wait for a program.
+            std::thread::spawn(move || pending.deliver(delivering.as_ref()));
+        })
+    }
+}
+
+/// One try at starting a coordinator that failed to: `true` once it runs (the
+/// chat's reason is cleared), `false` with the reason kept up to date.
+fn retry_coordinator_once(
+    host: &dyn Host,
+    repo: &Path,
+    failure: &Mutex<Option<String>>,
+    start: impl FnOnce(
+        &crate::cmd::spawn::PreparedSpace,
+    ) -> Result<crate::cmd::spawn::CoordinatorStart, CliError>,
+) -> bool {
+    let notice = prepare_space(host, repo, start);
+    let (started, why) = match notice {
+        SpaceNotice::Created(_, pane, why) | SpaceNotice::Reused(_, pane, why) => {
+            (pane.is_some(), why)
+        }
+        SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) => {
+            (false, Some(format!("the space was not ready: {reason}")))
+        }
+    };
+    if let Ok(mut kept) = failure.lock() {
+        if started {
+            *kept = None;
+        } else if *kept != why {
+            if let Some(why) = &why {
+                eprintln!("   coordinator:  still not started: {why}");
+            }
+            *kept = why;
+        }
+    }
+    started
+}
+
+/// Tries again every `every` until the coordinator runs.
+fn retry_coordinator(
+    host: Arc<dyn Host>,
+    ctx: Ctx,
+    home: PathBuf,
+    failure: Arc<Mutex<Option<String>>>,
+    every: Duration,
+) {
+    loop {
+        std::thread::sleep(every);
+        let start = coordinator_start(host.clone(), ctx.clone(), home.clone());
+        if retry_coordinator_once(host.as_ref(), &ctx.root, &failure, start) {
+            println!("   coordinator:  started (it could not be at first)");
+            return;
+        }
+    }
+}
+
 /// Installs the subscriber every `tracing` line in the service goes through.
 ///
 /// The binary is the only place that decides where log lines go, so it is the
@@ -286,7 +366,7 @@ struct HostChat {
     host: Arc<dyn Host>,
     /// Why the coordinator could not be started when the service started, so a
     /// chat that finds none says why and not only that there is none.
-    start_failure: Option<String>,
+    start_failure: Arc<Mutex<Option<String>>>,
 }
 
 impl shprd_server::ChatWriter for HostChat {
@@ -319,11 +399,14 @@ impl shprd_server::ChatWriter for HostChat {
                 crate::cmd::spawn::prompt_in(self.host.as_ref(), &self.home, &ctx, task, text)
             }
         }
-        .map_err(|err| match (&self.start_failure, space) {
-            (Some(why), None) if matches!(err, CliError::Invalid(_)) => {
-                format!("{err} (it could not be started when the service started: {why})")
+        .map_err(|err| {
+            let why = self.start_failure.lock().ok().and_then(|why| why.clone());
+            match (why, space) {
+                (Some(why), None) if matches!(err, CliError::Invalid(_)) => {
+                    format!("{err} (it could not be started: {why}; the service tries again)")
+                }
+                _ => err.to_string(),
             }
-            _ => err.to_string(),
         })
     }
 }
@@ -930,6 +1013,32 @@ mod tests {
             space_json(&notice)["coordinator_error"],
             "invalid: no installed worker CLI"
         );
+    }
+
+    /// SHPR-69: a coordinator that could not start is tried again, the chat's
+    /// reason follows each try, and it is cleared once the coordinator runs.
+    #[test]
+    fn a_failed_coordinator_start_is_retried_until_it_runs() {
+        let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mux = FakeMux::default();
+        let failure = Mutex::new(Some("claude is not installed".to_owned()));
+
+        let still = retry_coordinator_once(&mux, repo.path(), &failure, |_| {
+            Err(CliError::other(anyhow!("claude exited as it started")))
+        });
+        assert!(!still, "the program is still missing");
+        let why = failure.lock().map(|why| why.clone()).unwrap_or_default();
+        assert_eq!(why.as_deref(), Some("claude exited as it started"));
+
+        let up = retry_coordinator_once(
+            &mux,
+            repo.path(),
+            &failure,
+            start_in(&mux, home.path(), repo.path()),
+        );
+        assert!(up, "the program is back, so the coordinator starts");
+        assert!(failure.lock().is_ok_and(|why| why.is_none()));
     }
 
     #[test]

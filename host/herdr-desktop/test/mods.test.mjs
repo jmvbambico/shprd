@@ -44,6 +44,7 @@ import {
   tabLabel,
   tabProgram,
   tabRows,
+  foreignTab,
   tabState,
 } from "../mods/lib/tabstrip.js";
 import {
@@ -1379,4 +1380,23 @@ test("old tasks fold into one Older group at the bottom; new ones are on top, ne
 test("an old needs-you task does not light the Needs you badge", () => {
   const board = { tasks: [aged("OLD", "needs_you", 9), aged("NEW", "needs_you", 0.1)] };
   assert.equal(counts(board, NOW).needs, 1);
+});
+
+test("SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar", () => {
+  const space = { id: "sp1", tabs: [
+    { id: "tb1", name: "Assistant", active: false },
+    { id: "tb2", name: "shprd", active: true },
+    { id: "tb3", name: "pi·T1" },
+  ] };
+  const panes = [
+    { tab: "tb1", mod: "chat" },
+    { tab: "tb2", mod: "shprd-chat" },
+    { tab: "tb3", terminal: "t9" },
+  ];
+  assert.equal(foreignTab(space.tabs[0], panes), true);
+  assert.equal(foreignTab(space.tabs[1], panes), false);
+  const rows = tabRows(space, panes, STATE);
+  assert.deepEqual(rows.map((row) => row.id), ["tb2", "tb3"]);
+  // The tabs keep the host's own positions: a drag still names the right slot.
+  assert.deepEqual(rows.map((row) => row.index), [1, 2]);
 });

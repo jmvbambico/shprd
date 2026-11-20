@@ -182,7 +182,24 @@ export const WORDS = {
   emptyTitle: "No messages yet",
   emptyTask: "The agent's conversation shows here as it writes it.",
   emptyCoordinator: "The coordinator plans the work and keeps you posted.",
+  coordinatorDown:
+    "shprd's coordinator isn't running, so a message has nowhere to go. shprd tries to start it again; nothing is sent to any other assistant.",
 };
+
+/**
+ * What the coordinator's chat says when shprd's own coordinator is not running
+ * (`GET /api/state`'s `live_agents` holds none). Only shprd's agents are listed
+ * there, so another product's Assistant in the space never counts; the chat
+ * never falls through to it. `null` when one runs, or when the state does not
+ * say (an older service, or nothing read yet).
+ */
+export function coordinatorDown(space, state) {
+  if (space !== COORDINATOR || !Array.isArray(state?.live_agents)) return null;
+  const running = state.live_agents.some(
+    (agent) => agent.role === "coordinator" && !agent.ended_ms && agent.state !== "done",
+  );
+  return running ? null : WORDS.coordinatorDown;
+}
 
 /**
  * A reply folds when it would run past [`FOLD_TALL`] lines, to its first [`FOLD`]

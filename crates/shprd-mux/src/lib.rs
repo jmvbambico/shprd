@@ -126,6 +126,13 @@ pub trait Host: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether `pane` runs another product's agent (Shepherdr's per-space
+    /// Assistant), which shprd never adopts, types into or counts. A host that
+    /// cannot tell answers `false`.
+    fn is_foreign_agent(&self, _pane: &PaneId) -> bool {
+        false
+    }
+
     /// Every space the host has, in the host's display order.
     ///
     /// Only where a name cannot be guessed: a refusal is worth reading when it
@@ -555,6 +562,10 @@ macro_rules! forward_a_wrapper {
 
                 fn list_coordinators(&self) -> Result<Vec<LiveAgent>> {
                     (**self).list_coordinators()
+                }
+
+                fn is_foreign_agent(&self, pane: &PaneId) -> bool {
+                    (**self).is_foreign_agent(pane)
                 }
 
                 fn doc(&self, space: &SpaceId, name: &str, body: &str) -> Result<String> {

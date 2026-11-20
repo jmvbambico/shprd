@@ -96,11 +96,53 @@ const ROLE_LABEL: &str = "shprd.role";
 const TASK_SPACE_LABEL: &str = "shprd.task.space";
 /// The label naming the coordinator tab an agent reports to.
 const COORDINATOR_LABEL: &str = "shprd.coordinator";
+/// Whether a terminal is another product's agent: Shepherdr's per-space
+/// Assistant carries `herdr.coordinator.space` / `herdr.coordinator.tab`, a
+/// `herdr.chat.slot` of `coord-…` or the `assistant` template. Such a terminal
+/// is never shprd's, whatever else it carries, `shprd.*` labels included
+/// (SHPR-69): shprd's own agents carry none of these markers.
+pub(crate) fn is_foreign_agent(terminal: &Terminal) -> bool {
+    let marked = terminal.labels.contains_key("herdr.coordinator.space")
+        || terminal.labels.contains_key("herdr.coordinator.tab")
+        || terminal.labels.contains_key("herdr.coordinator")
+        || terminal
+            .labels
+            .get("herdr.chat.slot")
+            .is_some_and(|slot| slot.starts_with("coord-"));
+    let template = terminal.template.as_deref().is_some_and(|name| {
+        name == "assistant" || name == "coordinator" || name.starts_with("herdr-assistant")
+    });
+    marked || template
+}
+
+/// Whether a terminal that carries no `shprd.*` agent labels is one an older
+/// shprd build started: its brief or its environment is in its argv, or it was
+/// parked behind a shprd chat pane. `herdr.role=coordinator` alone is
+/// Shepherdr's marker too, so it proves nothing.
+fn is_legacy_shprd(terminal: &Terminal) -> bool {
+    if is_foreign_agent(terminal) {
+        return false;
+    }
+    terminal.labels.contains_key(PARK_LABEL)
+        || terminal.argv.iter().any(|arg| {
+            arg.starts_with("SHPRD_")
+                || arg.contains("/.shprd/briefs/")
+                || arg.contains("/briefs/coordinator.md")
+        })
+}
+
 /// An agent label's value, from the `shprd.*` key or, for a terminal an older
-/// build started, the `herdr.*` key it used then, so a restart adopts the
-/// coordinator and workers already running instead of starting a second set.
+/// shprd build started ([`is_legacy_shprd`]), the `herdr.*` key it used then,
+/// so a restart adopts the coordinator and workers already running instead of
+/// starting a second set. Another product's terminal gives nothing.
 fn agent_label<'a>(terminal: &'a Terminal, key: &str) -> Option<&'a String> {
+    if is_foreign_agent(terminal) {
+        return None;
+    }
     terminal.labels.get(key).or_else(|| {
+        if !is_legacy_shprd(terminal) {
+            return None;
+        }
         let legacy = key.replacen("shprd.", "herdr.", 1);
         terminal.labels.get(&legacy)
     })
@@ -1049,6 +1091,12 @@ impl Host for HcHost {
                 })
             })
             .collect())
+    }
+
+    fn is_foreign_agent(&self, pane: &PaneId) -> bool {
+        self.terminal(pane)
+            .map(|terminal| is_foreign_agent(&terminal))
+            .unwrap_or(false)
     }
 
     /// A space the window makes: named as shprd names it, with its first pane in
@@ -2029,9 +2077,13 @@ fn decode_base64(text: &str) -> Result<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{match_space, tab_label, terminal_of_pane};
+    use super::{
+        ROLE_LABEL, TASK_SPACE_LABEL, agent_label, is_foreign_agent, match_space, tab_label,
+        terminal_of_pane,
+    };
+    use crate::model::Terminal;
     use crate::placement::spaces_from_document;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn a_mark_lives_in_a_core_document_not_on_a_terminal() {
@@ -2171,5 +2223,97 @@ mod tests {
         ]}]});
         assert_eq!(terminal_of_pane(&layout, "p2").as_deref(), Some("box/t9"));
         assert!(terminal_of_pane(&layout, "p9").is_none());
+    }
+
+    /// A terminal as the core reports it, from its labels and argv.
+    fn terminal_with(labels: Value, argv: Value, template: Option<&str>) -> Terminal {
+        serde_json::from_value(json!({
+            "address": "t1", "labels": labels, "argv": argv, "template": template,
+            "state": "live",
+        }))
+        .expect("a terminal")
+    }
+
+    /// SHPR-69: Shepherdr's per-space Assistant (labels as read live off one)
+    /// is never shprd's coordinator, even when something gave it a
+    /// `herdr.task.space`; shprd's own labels and an older shprd's terminal,
+    /// recognised by its brief, still are.
+    #[test]
+    fn shepherdrs_assistant_is_never_shprds_coordinator() {
+        let shepherdr = json!({
+            "herdr.role": "coordinator",
+            "herdr.coordinator.space": "spaf6081",
+            "herdr.coordinator.tab": "tb6b44",
+            "herdr.chat.slot": "coord-spaf6081-ndgoswzr",
+            "herdr.chat": "paff1f48",
+            "herdr.task.space": "spaf6081",
+        });
+        let assistant = terminal_with(
+            shepherdr.clone(),
+            json!(["claude", "--model", "opus"]),
+            Some("herdr-assistant-mwo65bwi"),
+        );
+        assert!(is_foreign_agent(&assistant));
+        assert!(agent_label(&assistant, ROLE_LABEL).is_none());
+        assert!(agent_label(&assistant, TASK_SPACE_LABEL).is_none());
+        // Its markers alone, with no template, settle it too.
+        let bare = terminal_with(shepherdr, json!(["claude"]), None);
+        assert!(is_foreign_agent(&bare));
+        assert!(agent_label(&bare, ROLE_LABEL).is_none());
+
+        // A bare `herdr.role=coordinator` proves nothing: not shprd's.
+        let unmarked = terminal_with(
+            json!({"herdr.role": "coordinator", "herdr.task.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&unmarked, ROLE_LABEL).is_none());
+
+        // An older shprd's coordinator: its brief is in its argv.
+        let legacy = terminal_with(
+            json!({"herdr.role": "coordinator", "herdr.task.space": "sp1"}),
+            json!([
+                "env",
+                "SHPRD_ACTOR=agent:claude",
+                "claude",
+                "--append-system-prompt-file",
+                "/home/me/.shprd/briefs/coordinator.md"
+            ]),
+            None,
+        );
+        assert!(!is_foreign_agent(&legacy));
+        assert_eq!(
+            agent_label(&legacy, ROLE_LABEL).map(String::as_str),
+            Some("coordinator")
+        );
+        assert_eq!(
+            agent_label(&legacy, TASK_SPACE_LABEL).map(String::as_str),
+            Some("sp1")
+        );
+        // Its chat label (shprd.chat) also says it is shprd's.
+        let parked = terminal_with(
+            json!({"herdr.role": "coordinator", "herdr.task.space": "sp1", "shprd.chat": "p1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&parked, ROLE_LABEL).is_some());
+        // Shepherdr's markers win over any shprd label that lands on it.
+        let both = terminal_with(
+            json!({"shprd.role": "coordinator", "shprd.task.space": "sp1",
+                "herdr.coordinator.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&both, ROLE_LABEL).is_none());
+        // shprd's own labels are read as they are.
+        let own = terminal_with(
+            json!({"shprd.role": "coordinator", "shprd.task.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert_eq!(
+            agent_label(&own, ROLE_LABEL).map(String::as_str),
+            Some("coordinator")
+        );
     }
 }

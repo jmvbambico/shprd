@@ -273,6 +273,11 @@ pub fn spawn(
         .clone()
         .or_else(|| line.and_then(|line| line.effort.clone()))
         .or_else(|| {
+            // The role's own effort belongs to the role's program: another
+            // program a fallback picked does not inherit it.
+            if !lines.is_empty() {
+                return None;
+            }
             role.as_ref()
                 .and_then(|role| role.effort.as_ref())
                 .map(|effort| effort.value.clone())
@@ -1788,6 +1793,24 @@ fn role_candidates(role: Option<&ResolvedRole>, workers: &[String]) -> Vec<Strin
     candidates
 }
 
+/// The agent strings the coordinator tries, in order: its own role's chain
+/// (the program and its fallbacks) and nothing else.
+///
+/// The configured workers are another role's programs, so they are used only
+/// when the role names no program at all. A coordinator whose program is
+/// missing says so and is retried; it never becomes the worker's program
+/// (SHPR-69).
+fn coordinator_candidates(role: Option<&ResolvedRole>, workers: &[String]) -> Vec<String> {
+    let own: Vec<String> = role
+        .map(|role| role.lines().iter().map(|line| line.agent_ref()).collect())
+        .unwrap_or_default();
+    if own.is_empty() {
+        workers.to_vec()
+    } else {
+        own
+    }
+}
+
 /// Picks the agent for an attempt.
 ///
 /// An explicit `--agent` wins even when its CLI is not installed, because the
@@ -2597,7 +2620,7 @@ fn recorded_coordinator(
     space: &shprd_mux::Space,
 ) -> Option<FoundCoordinator> {
     let record = coordinator_record(home, repo, mux, space)?;
-    if !record.agent {
+    if !record.agent || mux.is_foreign_agent(&record.pane) {
         return None;
     }
     let pane = mux
@@ -2674,26 +2697,52 @@ pub(crate) fn ensure_coordinator(
     close_own_tabs(mux, space, &[COORDINATOR_TAB]);
     let role = env.settings.resolve(None).role(COORDINATOR_ROLE);
     let title = assistant_title(mux, space, &coordinator_name(role.as_ref()));
-    let candidates = role_candidates(role.as_ref(), &env.workers);
-    let mut pick = choose_agent(None, &candidates, &env.programs)?;
-    if let Some(model) = role
-        .as_ref()
-        .and_then(|role| role.model.as_ref())
-        .filter(|model| !model.value.trim().is_empty())
-    {
-        pick.model = Some(model.value.clone());
+    let candidates = coordinator_candidates(role.as_ref(), &env.workers);
+    let mut pick = choose_agent(None, &candidates, &env.programs).map_err(|err| {
+        CliError::other(anyhow!(
+            "the coordinator could not start: none of its programs is installed here ({}); \
+             install one or change `roles.coordinator` in the settings: {err}",
+            if candidates.is_empty() {
+                "none named".to_owned()
+            } else {
+                candidates.join(", ")
+            }
+        ))
+    })?;
+    // The settings that go with the program that was picked: its own line's
+    // model, effort, fast mode and access mode. A fallback program never gets
+    // another program's model; a role that names no program at all has only its
+    // plain settings to give.
+    let lines = role.as_ref().map(ResolvedRole::lines).unwrap_or_default();
+    let line = lines.iter().find(|line| line.agent == pick.agent);
+    let plain = |field: Option<&shprd_core::settings::Sourced<String>>| {
+        field
+            .map(|sourced| sourced.value.clone())
+            .filter(|text| !text.trim().is_empty())
+    };
+    if pick.model.is_none() {
+        pick.model = match line {
+            Some(line) => line.model.clone(),
+            None if lines.is_empty() => plain(role.as_ref().and_then(|role| role.model.as_ref())),
+            None => None,
+        };
     }
-    let effort = role
-        .as_ref()
-        .and_then(|role| role.effort.as_ref())
-        .map(|effort| effort.value.clone())
-        .filter(|effort| !effort.trim().is_empty());
+    let effort = match line {
+        Some(line) => line.effort.clone(),
+        None if lines.is_empty() => plain(role.as_ref().and_then(|role| role.effort.as_ref())),
+        None => None,
+    }
+    .filter(|effort| !effort.trim().is_empty());
     let program = program_of(env.programs.as_slice(), &pick.agent)?;
-    let chosen = applied(
-        &program.spec,
-        named(role.as_ref().and_then(|role| role.perm.as_ref())),
-        role.as_ref().is_some_and(|role| role.fast.value),
-    );
+    let chosen = match line {
+        Some(line) => applied(&program.spec, line.perm.as_deref(), line.fast),
+        None if lines.is_empty() => applied(
+            &program.spec,
+            named(role.as_ref().and_then(|role| role.perm.as_ref())),
+            role.as_ref().is_some_and(|role| role.fast.value),
+        ),
+        None => applied(&program.spec, None, false),
+    };
     let prompt = role_prompt(env, COORDINATOR_ROLE)?;
     let brief_path = env.briefs_dir.join("coordinator.md");
     write_brief(&brief_path, &prompt)?;
@@ -2741,6 +2790,16 @@ pub(crate) fn ensure_coordinator(
             parent: None,
         })
         .map_err(|err| CliError::other(anyhow!(err).context("starting the coordinator")))?;
+    // A program that exits at once (a model it does not know, a flag it
+    // refuses) is no coordinator: it is cleared and the reason is the start's
+    // error, so the banner and the chat say it and the next pass tries again.
+    if let Some(reason) = exited_at_start(mux, &tab.root_pane, env.ready_wait) {
+        close_tab(mux, &tab.id);
+        return Err(CliError::other(anyhow!(
+            "the coordinator's program `{}` exited as it started ({reason})",
+            pick.agent
+        )));
+    }
     // A coordinator nobody can find again is one a restart would start a second
     // of, so a record that cannot be written stops the one just started.
     if let Err(err) = record_coordinator_pane(
@@ -2779,6 +2838,37 @@ pub(crate) fn ensure_coordinator(
         });
     }
     Ok(CoordinatorStart::Started(tab.root_pane))
+}
+
+/// How long a new agent is watched for an exit at start, at most.
+const START_WATCH: Duration = Duration::from_millis(2500);
+
+/// Why the program in `pane` ended as it started, when it did within the
+/// watch: its exit code and the last words on its screen. `None` is "still
+/// running". The pane is looked at once at least, however short `wait` is.
+fn exited_at_start(mux: &dyn Host, pane: &PaneId, wait: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + wait.min(START_WATCH);
+    loop {
+        if let Ok(Some(outcome)) = mux.exit_of(pane) {
+            let screen = mux.read(pane, 40).unwrap_or_default();
+            let said = screen
+                .lines()
+                .map(str::trim)
+                .rfind(|line| !line.is_empty())
+                .map(|line| line.chars().take(200).collect::<String>());
+            let code = outcome
+                .exit_code
+                .map_or_else(|| "no exit code".to_owned(), |code| format!("exit {code}"));
+            return Some(match said {
+                Some(said) => format!("{code}: {said}"),
+                None => code,
+            });
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The words a freshly started coordinator is still to be given, once it is
@@ -4487,6 +4577,185 @@ project_dirs = []
         assert_eq!(
             coordinator_name(plain.role("coordinator").as_ref()),
             "Assistant"
+        );
+    }
+
+    /// The settings SHPR-69 was found with: the coordinator is `claude` with a
+    /// model only claude knows, the worker is another program.
+    const COORDINATOR_ON_CLAUDE: &str = "[roles.coordinator]\nagent = \"claude\"\n\
+         model = \"opus[1m]\"\n[roles.worker]\nagent = \"sh\"\n";
+
+    /// The coordinator's launch line, from the host's calls.
+    fn coordinator_argv(mux: &FakeMux) -> Vec<String> {
+        mux.calls()
+            .into_iter()
+            .rev()
+            .find_map(|call| match call {
+                Call::Spawn(_, _, argv, _, _) => Some(argv),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn started(mux: &FakeMux, env: &SpawnEnv<'_>, scratch: &Scratch) -> Result<(), CliError> {
+        let prepared = ensure_repo_space(mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        ensure_coordinator(mux, env, &prepared, |pending| pending.deliver(mux)).map(|_| ())
+    }
+
+    /// SHPR-69 bug 2: the coordinator's program is not installed, so it does
+    /// not start as the worker's program (with the coordinator's model, which
+    /// that program then refuses). It is an error that names the program.
+    #[test]
+    fn a_missing_coordinator_program_never_becomes_the_workers() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(&ctx, COORDINATOR_ON_CLAUDE);
+        env.programs = vec![
+            Program {
+                spec: claude_spec(),
+                installed: false,
+            },
+            Program {
+                spec: fake_spec("sh"),
+                installed: true,
+            },
+        ];
+        env.workers = vec!["sh".to_owned()];
+        let mux = FakeMux::default().with_ready_agent();
+
+        let Err(err) = started(&mux, &env, &scratch) else {
+            panic!("no coordinator program is installed");
+        };
+
+        let text = err.to_string();
+        assert!(text.contains("claude"), "{text}");
+        assert!(
+            !mux.calls()
+                .iter()
+                .any(|call| matches!(call, Call::Spawn(..))),
+            "nothing was started in the worker's place"
+        );
+    }
+
+    /// A fallback program takes its own line's model, never the first line's.
+    #[test]
+    fn a_fallback_coordinator_program_never_gets_anothers_model() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(
+            &ctx,
+            "[roles.coordinator]\nagent = \"claude\"\nmodel = \"opus[1m]\"\n\
+             fallback = [\"sh\"]\n",
+        );
+        env.programs = vec![
+            Program {
+                spec: claude_spec(),
+                installed: false,
+            },
+            Program {
+                spec: fake_spec("sh"),
+                installed: true,
+            },
+        ];
+        env.workers = Vec::new();
+        let mux = FakeMux::default().with_ready_agent();
+
+        started(&mux, &env, &scratch).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = coordinator_argv(&mux);
+        assert!(
+            argv.iter().any(|arg| arg == "sh") && !argv.iter().any(|arg| arg.contains("opus")),
+            "the fallback runs with its own default model: {argv:?}"
+        );
+    }
+
+    /// With the program installed the configured model reaches it.
+    #[test]
+    fn the_coordinator_keeps_its_own_programs_model() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(&ctx, COORDINATOR_ON_CLAUDE);
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        env.workers = Vec::new();
+        let mux = FakeMux::default().with_ready_agent();
+
+        started(&mux, &env, &scratch).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = coordinator_argv(&mux);
+        assert!(argv.iter().any(|arg| arg == "opus[1m]"), "{argv:?}");
+    }
+
+    /// A program that dies as it starts is an error with its exit and what it
+    /// said, its tab is cleared, and the next try starts it once it works.
+    #[test]
+    fn a_coordinator_that_exits_at_start_is_an_error_and_the_next_try_recovers() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env(&ctx);
+        env.workers = vec!["sh".to_owned()];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.exit_coordinators_at_start(Some((
+            Some(1),
+            "Error: Model \"opus[1m]\" not found".to_owned(),
+        )));
+
+        let Err(err) = started(&mux, &env, &scratch) else {
+            panic!("it exited at once");
+        };
+
+        let text = err.to_string();
+        assert!(
+            text.contains("exit 1") && text.contains("not found"),
+            "{text}"
+        );
+        let space = repo_space(&mux, &scratch);
+        assert!(
+            mux.list_tabs(&space.id)
+                .unwrap_or_default()
+                .iter()
+                .all(|tab| tab.title != "Assistant"),
+            "the dead tab is cleared"
+        );
+
+        mux.exit_coordinators_at_start(None);
+        started(&mux, &env, &scratch).unwrap_or_else(|err| panic!("{err}"));
+        let prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(find_coordinator(&env.home, scratch.root(), &mux, &prepared.space).is_some());
+    }
+
+    /// SHPR-69 bug 1: a pane the host says is another product's agent is
+    /// never found as the coordinator, even when a record names it.
+    #[test]
+    fn another_products_agent_is_never_the_recorded_coordinator() {
+        let scratch = Scratch::new();
+        let mux = FakeMux::default().with_starter_tab().with_ready_agent();
+        let space = repo_space(&mux, &scratch);
+        let pane = mux
+            .list_tabs(&space.id)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .first()
+            .map(|tab| tab.root_pane.clone())
+            .unwrap_or_else(|| panic!("no tab"));
+        record_coordinator_pane(
+            scratch.home.path(),
+            scratch.root(),
+            &space.id,
+            &pane,
+            "claude",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            find_coordinator(scratch.home.path(), scratch.root(), &mux, &space).is_some(),
+            "before the host says it is foreign, the record is trusted"
+        );
+        mux.mark_foreign(&pane);
+        assert!(
+            find_coordinator(scratch.home.path(), scratch.root(), &mux, &space).is_none(),
+            "a foreign agent is never typed into"
         );
     }
 

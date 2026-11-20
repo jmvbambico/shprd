@@ -267,6 +267,10 @@ pub struct Terminal {
     /// The argv it runs.
     #[serde(default)]
     pub argv: Vec<String>,
+    /// The template the core started it from, when any (Shepherdr's Assistant
+    /// is `herdr-assistant-…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     /// Where it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
