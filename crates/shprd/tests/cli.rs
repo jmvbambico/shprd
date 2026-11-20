@@ -517,22 +517,6 @@ fn verbs_before_run_start_are_refused() {
     let root = dir.path();
     refused(
         root,
-        &[
-            "agent",
-            "task",
-            "add",
-            "--id",
-            "T1",
-            "--title",
-            "t",
-            "--scope",
-            "crates/shprd",
-            "--acceptance",
-            "ok",
-        ],
-    );
-    refused(
-        root,
         &["agent", "escalate", "--body", "b", "--default", "d"],
     );
     refused(root, &["run", "finish"]);
@@ -2207,9 +2191,8 @@ fn the_first_task_in_a_fresh_repo_starts_a_run() {
             .arg("-C")
             .arg(root.path())
             .args(&args)
-            .status()
-            .expect("git");
-        assert!(status.success(), "git {args:?}");
+            .status();
+        assert!(status.is_ok_and(|status| status.success()), "git {args:?}");
     }
     ok(
         root.path(),
@@ -2228,7 +2211,9 @@ fn the_first_task_in_a_fresh_repo_starts_a_run() {
         ],
     );
     let state = ok(root.path(), &["state", "--json"]);
-    let value: Value = serde_json::from_str(&state).expect("json");
+    let Ok(value) = serde_json::from_str::<Value>(&state) else {
+        panic!("not json: {state}");
+    };
     assert_eq!(value["run"]["base_branch"], "main", "{state}");
     assert!(
         value["run"]["integration_branch"]

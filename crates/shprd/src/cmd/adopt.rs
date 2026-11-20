@@ -95,16 +95,17 @@ pub fn detect_gates(dir: &Path) -> Vec<String> {
     if dir.join("Cargo.toml").is_file() {
         gates.push("cargo test".to_string());
     }
-    if let Ok(text) = fs::read_to_string(dir.join("package.json")) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-            let script = json
-                .pointer("/scripts/test")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            // `npm init`'s placeholder is not a test.
-            if !script.is_empty() && !script.contains("no test specified") {
-                gates.push("npm test".to_string());
-            }
+    let package = fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    if let Some(json) = package {
+        let script = json
+            .pointer("/scripts/test")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        // `npm init`'s placeholder is not a test.
+        if !script.is_empty() && !script.contains("no test specified") {
+            gates.push("npm test".to_string());
         }
     }
     if dir.join("go.mod").is_file() {
@@ -244,6 +245,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn out(dir: &Path, args: &[&str]) -> String {
