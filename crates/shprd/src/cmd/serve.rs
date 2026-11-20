@@ -99,7 +99,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // discovery files' state directory, the person's home, their prompts and the
     // harness table. The service itself reads no environment variable.
     let state_home = resolve_state_home(&home);
-    let mut config = Config::new(ctx.root.clone(), shprd_server::state_dir(&state_home));
+    let mut config = Config::new(
+        ctx.root.clone(),
+        shprd_server::repo_state_dir(&state_home, &ctx.root),
+    );
     config.port = args.port;
     config.actor = ctx.actor.clone();
     // The context the service's own writes run with: the same repository, actor

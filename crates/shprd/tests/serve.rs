@@ -138,15 +138,14 @@ impl Service {
 
     /// Polls for `service.json`, which the service writes after it binds.
     fn wait_for_record(&self, state: &Path) {
-        let path = record_path(state);
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
-            if path.exists() {
+            if record_path(state).exists() {
                 return;
             }
             sleep(Duration::from_millis(50));
         }
-        panic!("the service never wrote {}", path.display());
+        panic!("the service never wrote {}", record_path(state).display());
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
@@ -231,7 +230,7 @@ esac
 
 /// Where the service writes its discovery file.
 fn record_path(state: &Path) -> PathBuf {
-    state.join("shprd").join("service.json")
+    service_dir(state).join("service.json")
 }
 
 /// A throwaway repository root, with a run started in it.
@@ -338,7 +337,7 @@ fn wait_for_banner(path: &Path) -> String {
 
 /// The token a client reads from the state directory.
 fn read_token(state: &Path) -> String {
-    fs::read_to_string(state.join("shprd").join("token"))
+    fs::read_to_string(service_dir(state).join("token"))
         .expect("the token is there")
         .trim()
         .to_string()
@@ -400,6 +399,48 @@ fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigint() {
         status.success(),
         "Ctrl-C must stop the service quietly too, and it stopped with {status}"
     );
+}
+
+#[test]
+fn two_repositories_are_served_at_once_from_one_state_home() {
+    let (repo, state, home) = repo_with_a_run();
+    let other = TempDir::new().expect("a second repository");
+    let first = Service::start(repo.path(), state.path(), home.path());
+    // The second repository needs the first one neither stopped nor in another
+    // state home: it gets its own directory under the same one, and its own port.
+    let second = Service::start(other.path(), state.path(), home.path());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let records = loop {
+        let found: Vec<Value> = fs::read_dir(state.path().join("shprd").join("repos"))
+            .expect("the repos directory")
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| fs::read_to_string(entry.path().join("service.json")).ok())
+            .filter_map(|text| serde_json::from_str(&text).ok())
+            .collect();
+        if found.len() == 2 || Instant::now() > deadline {
+            break found;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert_eq!(records.len(), 2, "both services have a record: {records:?}");
+    assert_ne!(
+        records[0]["port"], records[1]["port"],
+        "each has its own port"
+    );
+    let roots: Vec<String> = records
+        .iter()
+        .map(|record| record["root"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    for dir in [repo.path(), other.path()] {
+        let real = fs::canonicalize(dir).expect("canonical");
+        assert!(
+            roots.iter().any(|root| Path::new(root) == real),
+            "a record names {}: {roots:?}",
+            real.display()
+        );
+    }
+    first.stop();
+    second.stop();
 }
 
 #[test]
@@ -603,7 +644,7 @@ fn serve_answers_the_api_and_leaves_no_record_behind() {
         "a clean shutdown removes service.json"
     );
     assert_eq!(
-        fs::read_to_string(state.path().join("shprd").join("token"))
+        fs::read_to_string(service_dir(state.path()).join("token"))
             .expect("the token stays for the next start")
             .trim()
             .len(),
@@ -1033,7 +1074,7 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
     let (repo, state, home) = repo_with_a_run();
     // Held for the whole test: its `Drop` is what stops the service.
     let _service = Service::start(repo.path(), state.path(), home.path());
-    let change = state.path().join("shprd").join("changes");
+    let change = service_dir(state.path()).join("changes");
 
     // It is there as soon as the service is: a window that starts first has a
     // real answer rather than a missing file.
@@ -1093,4 +1134,15 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
         Some(3),
         "a write by another process reaches a watching mod: {third}"
     );
+}
+
+/// The one service directory under this state home (each repository has its own,
+/// and these tests serve one repository each).
+fn service_dir(state: &Path) -> PathBuf {
+    let repos = state.join("shprd").join("repos");
+    std::fs::read_dir(&repos)
+        .ok()
+        .and_then(|mut dirs| dirs.find_map(|entry| entry.ok()))
+        .map(|entry| entry.path())
+        .unwrap_or_else(|| repos.join("none"))
 }

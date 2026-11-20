@@ -70,6 +70,19 @@ export function setExec(next) {
 }
 
 export async function exec(command, args, options) {
+  // The shared client lists services with one shell loop (`LIST_SCRIPT`); the
+  // stub answers it from the files a test put in place: `<base>/repos/*/service.json`.
+  if (command === "sh" && args?.[2] === "sh" && String(args[1]).includes("service.json")) {
+    const base = args[3];
+    const lines = [];
+    for (const [path, text] of FILES) {
+      const match = path.match(/^(.*)\/service\.json$/);
+      if (match && path.startsWith(`${base}/repos/`)) {
+        lines.push(`${match[1]}\t${String(text).replace(/\n/g, "")}`);
+      }
+    }
+    return { code: 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
+  }
   return RUN(command, args, options);
 }
 

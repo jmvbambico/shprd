@@ -34,7 +34,7 @@ import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
 import { closeOverlay, openOverlay, panes, props, run, setShared, spaces, terminals, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, downNotice, reason } from "./lib/client.js";
 import {
   appMenu,
   firstPickable,
@@ -232,7 +232,7 @@ export default class Menu extends View {
     try {
       const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
       if (!next.client) {
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         this.cx?.notify?.();
         return;
       }
@@ -260,7 +260,7 @@ export default class Menu extends View {
     try {
       const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
       if (!next.client) {
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         this.cx?.notify?.();
         return;
       }
@@ -286,7 +286,7 @@ export default class Menu extends View {
     try {
       const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
       if (!next.client) {
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         this.cx?.notify?.();
         return;
       }

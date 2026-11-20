@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import Chrome from "../mods/shprd-chrome/main.js";
+import { terminalName } from "../mods/shprd-chrome/lib/client.js";
 
 /** A context that answers `cx.sleep`, `cx.notify` and `cx.timer`. */
 function context() {
@@ -49,52 +50,99 @@ async function footer() {
   const view = new Chrome();
   view.cx = run.cx;
   view.service = null;
+  view.folder = "/repo/demo";
   return { view, ...run };
 }
 
 test("the start is hc run --bg, never the app's bounded exec", async () => {
   const { view } = await footer();
-  await view.start();
+  await view.start("/repo/demo");
 
-  assert.equal(herdr.HC_CALLS.length, 1, "one call");
-  const args = herdr.HC_CALLS[0];
+  const run = herdr.HC_CALLS.find((args) => args[0] === "run");
+  assert.ok(run, "a terminal was started");
   // `--bg` is the whole point: `hc run` without it waits on the program, and the
   // app's `exec` would kill it when the call ends.
-  assert.ok(args.includes("--bg"), `the start asks the core to come back: ${args}`);
-  assert.ok(args.includes("--keep"), "a lost program leaves a shell, not a restart");
-  assert.ok(args.includes("--no-parent"), "the service is nobody's child");
-  assert.equal(args[args.indexOf("--name") + 1], "shprd-serve");
-  assert.equal(args[args.indexOf("--cwd") + 1], "/repo/demo");
-  // The command itself comes after `--`, and is `shprd serve`.
-  const command = args.slice(args.indexOf("--") + 1);
-  assert.deepEqual(command, ["shprd", "serve"]);
-  // And the app's own `exec` was never used for it: the only thing asked of the
-  // machine is `hc`, and the only `run` is none at all. (The footer does look
-  // for `service.json` afterwards, which is how it reports what the service
-  // itself says rather than what this button hoped.)
-  assert.equal(herdr.RUNS.length, 0, "no app command was run");
+  assert.ok(run.includes("--bg"), `the start asks the core to come back: ${run}`);
+  assert.ok(run.includes("--keep"), "a lost program leaves a shell, not a restart");
+  assert.ok(run.includes("--no-parent"), "the service is nobody's child");
+  const name = run[run.indexOf("--name") + 1];
+  assert.equal(name, terminalName("/repo/demo"), "a terminal per repository");
+  assert.match(name, /^[a-z0-9_-]{1,32}$/, "a name hc accepts");
+  assert.equal(run[run.indexOf("--cwd") + 1], "/repo/demo");
+  assert.deepEqual(run.slice(run.indexOf("--") + 1), ["shprd", "serve"]);
+  // A kept terminal that outlived its service holds the name: it is ended first.
+  assert.deepEqual(herdr.HC_CALLS[0], ["kill", name]);
 });
 
-test("a start that fails says why, in the row", async () => {
+test("two repositories get two terminals, and two folders of one name stay apart", () => {
+  assert.notEqual(terminalName("/work/shop"), terminalName("/work/scratchpad"));
+  assert.notEqual(terminalName("/work/shop"), terminalName("/other/shop"));
+  assert.equal(terminalName("/work/shop/"), terminalName("/work/shop"));
+});
+
+test("a start that fails says why, in the row, and does not retry every look", async () => {
   const { view } = await footer();
-  herdr.setHc(async () => ({ code: 1, stdout: "", stderr: "no such folder: /repo/demo\nmore text" }));
-  await view.start();
+  herdr.setHc(async (args) =>
+    args[0] === "run" ? { code: 1, stdout: "", stderr: "no such folder: /repo/demo\nmore text" } : { code: 0, stdout: "", stderr: "" },
+  );
+  await view.start("/repo/demo");
   assert.equal(view.failure, "no such folder: /repo/demo", "the first line, not the stack");
   assert.equal(view.service, null);
+  const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
+  assert.equal(word, "demo: no such folder: /repo/demo");
+  assert.equal(herdr.shared("service.status").phase, "failed");
+
+  // The next look inside the retry window starts nothing.
+  const before = herdr.HC_CALLS.length;
+  await view.check(view.cx);
+  assert.equal(herdr.HC_CALLS.length, before, "a failed repository waits before it is tried again");
+});
+
+test("a service that dies at once is explained by what it said", async () => {
+  const { view } = await footer();
+  herdr.setHc(async (args) =>
+    args[0] === "read"
+      ? { code: 0, stdout: "starting\nError: a shprd service is already running for /repo/demo\n", stderr: "" }
+      : { code: 0, stdout: "", stderr: "" },
+  );
+  await view.start("/repo/demo");
+  assert.equal(view.failure, "a shprd service is already running for /repo/demo");
+});
+
+test("a folder that is not a git repository is not started", async () => {
+  const { view } = await footer();
+  herdr.setExec(async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }));
+  await view.start("/repo/demo");
+  assert.equal(herdr.HC_CALLS.length, 0, "nothing was started");
+  assert.equal(view.failure, "demo is not a git repository");
+});
+
+test("a space with no service starts one by itself; an up service is left alone", async () => {
+  const { view } = await footer();
+  await view.check(view.cx);
+  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "clicking a repo's space starts its service");
+
+  const second = await footer();
+  second.view.service = null;
+  second.view.starting = true;
+  const calls = herdr.HC_CALLS.length;
+  await second.view.check(second.view.cx);
+  assert.equal(herdr.HC_CALLS.length, calls, "no second start while one is starting");
 });
 
 test("a start with no space to point at says so and starts nothing", async () => {
   const { view } = await footer();
   herdr.setSpaces([]);
-  await view.start();
+  await view.check(view.cx);
   assert.equal(herdr.HC_CALLS.length, 0, "nothing was started");
-  assert.equal(view.failure, "No space names a repository yet");
+  const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
+  assert.equal(word, "Open a repo's space");
 });
 
 test("a start that the core is already serving is not run twice", async () => {
   const { view } = await footer();
   view.starting = true;
-  await view.start();
+  await view.start("/repo/demo");
   assert.equal(herdr.HC_CALLS.length, 0, "a second click while starting does nothing");
 });
 
@@ -109,10 +157,13 @@ test("the footer's rows are the app's settings, shprd's own, and the service", a
     "Shepherdr's three rows, with shprd's service in place of Add machine",
   );
   // The service row is a click only while there is nothing to look at.
-  assert.equal(typeof actions[2].onClick, "function");
+  view.folder = "/repo/demo";
+  assert.equal(typeof view.actions(herdr.theme())[2].onClick, "function");
   herdr.setSpaces([{ id: "s1", active: true, folder: "/repo/demo" }]);
+  view.folder = "/repo/demo";
   view.service = { record: { port: 7311 } };
   assert.equal(view.actions(herdr.theme())[2].onClick, null);
+  assert.equal(view.actions(herdr.theme())[2].word, "demo: service up");
 });
 
 test("the shprd row opens the settings window over the layout, not a panel tab", async () => {
@@ -143,4 +194,14 @@ test("the app's own settings row is still the app's", async () => {
   row.onClick();
   assert.deepEqual(herdr.RUNS, [{ name: "app.settings", args: undefined }]);
   assert.deepEqual(herdr.OVERLAYS, [], "and opens no overlay of ours");
+});
+
+test("a record whose process is alive is never killed or restarted", async () => {
+  const { view } = await footer();
+  herdr.setHome("/home/ana");
+  herdr.putFile("/home/ana/.local/state/shprd/repos/demo-1/service.json", JSON.stringify({ port: 7001, id: "x", pid: 4242, root: "/repo/demo" }));
+  herdr.setExec(async (command, args) => (command === "kill" ? { code: 0, stdout: "", stderr: "" } : { code: 0, stdout: "", stderr: "" }));
+  await view.start("/repo/demo");
+  assert.equal(herdr.HC_CALLS.length, 0, "a busy service is left alone");
+  assert.equal(view.failure, null);
 });

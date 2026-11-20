@@ -121,8 +121,15 @@ service the way Shepherdr's window does — read `service.json` from the state
 directory, confirm its `id` at `GET /api/health`, then send the bearer token from
 the `token` file beside it — and follows it with a long poll
 (`GET /api/changes`) plus the change file the service rewrites after every
-ledger write (`<state>/shprd/changes`, watched with `watchFolder`). See
+ledger write (`<state dir>/changes`, watched with `watchFolder`). See
 `mods/lib/watch.js`.
+
+Every repository has its own service and state directory
+(`<state>/shprd/repos/<name>-<hash>/`), so the client picks the one for the space
+the window shows: it lists every `repos/*/service.json` and matches the record's
+`root` with that space's folder (`pickService`). A panel that sees the shown space
+change to another repository gets a new client and re-reads everything (`attach`
+reports a restart), and its change watcher moves to the new directory.
 
 ### A service that restarted
 
@@ -295,12 +302,18 @@ switch to.
 
 ## Starting the service
 
-The footer's third row starts it with **`hc run --bg`**, never the app's `exec`.
+The footer's third row says which repository's service the shown space uses and
+whether it is up, and **starts it by itself** when there is none (a click on a repo's
+space is enough; nobody types `shprd serve`). A failed start shows its reason in the
+row (the dead terminal's last words), is not retried for a minute, and a click on the
+row tries again. Other panels read how it is going from the shared key
+`service.status` (`downNotice` in `lib/client.js`). It starts the service with
+**`hc run --bg`**, never the app's `exec`.
 `exec` is `machine.exec`, which the Herdr docs and the M7ef spike both describe as
 "no terminal, ≤600 s, everything it starts dies with it" — a server started
 through it would be gone when the call ended. `hc run --bg` starts a herdr-core
 terminal and returns at once, so the service outlives the click and keeps a
-terminal called `shprd-serve` where a person can read its output. Measured in a
+terminal per repository (`sv-<name>-<hash>`) where a person can read its output. Measured in a
 private session: the call returned in 0.3 s, and the service was still answering
 `GET /api/health` minutes later.
 

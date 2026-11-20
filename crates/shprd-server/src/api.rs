@@ -321,7 +321,7 @@ impl App {
         hub: Hub,
         paths: Paths,
     ) -> Result<Self, ServerError> {
-        let files = ServiceFiles::prepare(state_dir)?;
+        let files = ServiceFiles::prepare(state_dir)?.with_root(repo);
         // A mod that starts before the run moves has nothing to watch for: the
         // change file is written once here, naming the log as it stands, so a
         // panel's first look at it is a real answer rather than a missing file.

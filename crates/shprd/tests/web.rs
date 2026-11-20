@@ -13,7 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ impl Fixture {
 
     /// The state directory the service and these verbs share.
     fn state(&self) -> PathBuf {
-        self.home.path().join(".local/state/shprd")
+        shprd_server::repo_state_dir(&self.home.path().join(".local/state"), self.home.path())
     }
 
     /// Runs `shprd web <args>` with `stdin` as the given lines.
@@ -59,6 +59,7 @@ impl Fixture {
             .arg(self.home.path())
             .env("HOME", self.home.path())
             .env("SHPRD_HOME", self.home.path())
+            .env("SHPRD_REPO", self.home.path())
             .env_remove("XDG_STATE_HOME")
             .env_remove("XDG_CONFIG_HOME")
             .stdin(Stdio::piped())
@@ -252,8 +253,11 @@ fn the_password_lives_in_the_state_directory_the_service_reads() {
     let state = fixture.state();
     assert_eq!(
         state,
-        Path::new(&fixture.home.path().join(".local/state/shprd")),
-        "the same `<state>/shprd` the service's discovery files live in"
+        shprd_server::repo_state_dir(
+            &fixture.home.path().join(".local/state"),
+            fixture.home.path()
+        ),
+        "the same per-repository directory the service's discovery files live in"
     );
     assert!(state.join("web-auth.json").is_file());
 }

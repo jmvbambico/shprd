@@ -15,7 +15,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, shared, theme } from "herdr";
 
-import { attach, reason, singleFlight } from "./lib/client.js";
+import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { taskById } from "./lib/board.js";
 import { VIEW_WORDS, artifactSections, streamLines } from "./lib/taskview.js";
 import { threadAgent } from "./lib/accept.js";
@@ -59,7 +59,7 @@ export default class TaskView extends View {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
         this.client = null;
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         this.state = null;
         cx.notify();
         return;
@@ -96,11 +96,14 @@ export default class TaskView extends View {
 
   /** Follows the service's change file for as long as this copy lives. */
   follow() {
-    if (this.watching || !this.client) return;
-    this.watching = true;
+    if (!this.client || this.watching === this.client.dir) return;
+    // The service follows the shown repository: a new directory is a new watch,
+    // and the loop on the old one ends at its next look.
+    this.watching = this.client.dir;
     const cx = this.cx;
+    const dir = this.client.dir;
     cx.spawn(async () => {
-      await followChanges(this.client.dir, () => this.refresh(cx));
+      await followChanges(dir, () => this.refresh(cx), { stop: () => this.watching !== dir });
     });
   }
 

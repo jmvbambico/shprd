@@ -34,7 +34,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, Textarea, TextareaState, h_flex, v_flex } from "gpui-base";
 import { closeOverlay, knownAgents, openOverlay, props, shared, theme } from "herdr";
 
-import { attach, reason, ServiceError, singleFlight } from "./lib/client.js";
+import { ServiceError, attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import {
   CHANGED_HERE,
   MENU_W,
@@ -261,7 +261,7 @@ export default class Settings extends View {
   async readOnce(cx) {
     // The window says it is up before it asks anything: the copy's place is kept
     // by being renewed on every read, and a service that is down must not let the
-    // record go stale — a window that says "shprd serve is not running" is still a
+    // record go stale — a window that says downNotice() is still a
     // window, and the footer's next click must keep it rather than stack another.
     settingsWindowOpened(this.window_, this.page);
     try {
@@ -269,7 +269,7 @@ export default class Settings extends View {
       if (!next.client) {
         this.client = null;
         this.settings = null;
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         cx.notify();
         return;
       }
@@ -1320,7 +1320,7 @@ export default class Settings extends View {
     const blocks = [];
     if (this.failure !== null) {
       blocks.push(note(t, this.failure));
-      blocks.push(note(t, "Start it from the sidebar's footer; this window fills in when it answers."));
+      blocks.push(note(t, "This window fills in when the service answers."));
       return v_flex()
         .flex_1()
         .min_h(0)

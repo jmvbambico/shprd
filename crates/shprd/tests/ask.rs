@@ -116,10 +116,10 @@ impl Service {
 
     /// Polls for `service.json`, which the service writes after it binds.
     fn wait_for_record(&self, state: &Path) {
-        let path = record_path(state);
-        wait_until(&format!("the service wrote {}", path.display()), || {
-            path.exists()
-        });
+        wait_until(
+            &format!("the service wrote {}", record_path(state).display()),
+            || record_path(state).exists(),
+        );
     }
 
     /// Stops the service with `SIGTERM`, as a supervisor would, and waits.
@@ -149,7 +149,7 @@ impl Drop for Service {
 
 /// Where the service writes its discovery file.
 fn record_path(state: &Path) -> PathBuf {
-    state.join("shprd").join("service.json")
+    service_dir(state).join("service.json")
 }
 
 /// Runs the binary with `--repo <root> --no-dagr` and the given arguments.
@@ -298,7 +298,7 @@ fn repo_with_a_task() -> (TempDir, TempDir, TempDir) {
 
 /// The token a client reads from the state directory.
 fn read_token(state: &Path) -> String {
-    fs::read_to_string(state.join("shprd").join("token"))
+    fs::read_to_string(service_dir(state).join("token"))
         .expect("the token is there")
         .trim()
         .to_string()
@@ -1014,4 +1014,15 @@ fn a_programs_harness_says_how_long_its_hook_waits() {
         1_000,
         "the ask expires when the harness's timeout says"
     );
+}
+
+/// The one service directory under this state home (each repository has its own,
+/// and these tests serve one repository each).
+fn service_dir(state: &Path) -> PathBuf {
+    let repos = state.join("shprd").join("repos");
+    std::fs::read_dir(&repos)
+        .ok()
+        .and_then(|mut dirs| dirs.find_map(|entry| entry.ok()))
+        .map(|entry| entry.path())
+        .unwrap_or_else(|| repos.join("none"))
 }

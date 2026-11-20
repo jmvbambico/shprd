@@ -155,6 +155,16 @@ fn agent_label<'a>(terminal: &'a Terminal, key: &str) -> Option<&'a String> {
 /// never be mistaken for another product's tab of the same name (Shepherdr's
 /// "Assistant").
 pub const COORDINATOR_TAB: &str = "shprd-coordinator";
+
+/// Whether a tab id is one shprd gave a coordinator's tab: [`COORDINATOR_TAB`]
+/// itself (older starts) or [`COORDINATOR_TAB`] with its space's id after a dash
+/// (the window finds a tab by id across spaces, so each space's is its own).
+pub fn is_coordinator_tab(id: &str) -> bool {
+    id == COORDINATOR_TAB
+        || id
+            .strip_prefix(COORDINATOR_TAB)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
 /// The mod a chat pane is (`mods/shprd-chat`).
 const CHAT_MOD: &str = "shprd-chat";
 /// The label a parked agent carries, naming the chat pane that shows it
@@ -1315,8 +1325,11 @@ impl Host for HcHost {
             labels.insert(placement::TASK_LABEL.to_string(), task.to_string());
         }
         if launch.role == AgentRole::Coordinator {
-            // The tab's id is shprd's own; the title is only its name.
-            let tab = COORDINATOR_TAB.to_string();
+            // The tab's id is shprd's own; the title is only its name. The window
+            // finds a tab by its id across every space, so two repositories served
+            // at once (each with its own coordinator) need an id per space, or the
+            // second coordinator lands in the first one's tab.
+            let tab = format!("{COORDINATOR_TAB}-{}", model::bare(launch.space.as_str()));
             labels.extend(Placement::new(launch.space.as_str(), &tab).labels());
             let address = self.run_terminal(
                 launch.title,

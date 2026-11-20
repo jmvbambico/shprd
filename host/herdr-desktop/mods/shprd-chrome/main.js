@@ -13,10 +13,12 @@
 // `lib/panel.js`), never as a tab of the side panel. It is the only way in, which
 // is why the row is the one that says what is behind it.
 //
-// shprd's own twist: the third row is the service. A window whose board is empty
-// because `shprd serve` was never started looks exactly like a run nobody added a
-// task to, so this row says which one it is and starts the service when it is
-// missing. Everything else in the window reads that service.
+// shprd's own twist: the third row is the service of the repository whose space
+// the window shows (every repository has its own, side by side). A window whose
+// board is empty because no service runs looks exactly like a run nobody added a
+// task to, so this row says which repository it is and whether it is up, and it
+// starts the service itself when the shown space has none. Nobody types
+// `shprd serve`. Everything else in the window reads that service.
 //
 // The start is `hc run --bg`, not the app's own `exec`, and that is deliberate:
 //
@@ -36,16 +38,33 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { hc, run, spaces, theme } from "herdr";
+import { exec, hc, home, run, setShared, theme } from "herdr";
 
-import { discover, reason } from "./lib/client.js";
+import {
+  SERVICE_STATUS,
+  activeFolder,
+  discover,
+  lastReason,
+  listServices,
+  normalizeFolder,
+  pickService,
+  reason,
+  repoName,
+  stateDir,
+  stateHome,
+  terminalName,
+} from "./lib/client.js";
 import { icon, openSettings } from "./lib/panel.js";
 import { SPACE, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the footer asks whether the service is up. */
 const FLOOR_MS = 8000;
-/** The name of the terminal the service runs in, so a person can find it twice. */
-const TERMINAL = "shprd-serve";
+/** How often it looks at which space is shown, so a click on a space is answered at once. */
+const WATCH_MS = 1200;
+/** How long a failed start waits before the footer tries that repository again on its own. */
+const RETRY_MS = 60_000;
+/** How long a start waits for the service to write its record, ms. */
+const UP_WAIT_MS = 12_000;
 
 export default class Chrome extends View {
   init(_props, cx) {
@@ -53,69 +72,136 @@ export default class Chrome extends View {
     this.service = null;
     this.failure = null;
     this.starting = false;
+    this.folder = activeFolder();
+    this.failedAt = new Map();
     this.check();
     cx.timer.every(FLOOR_MS, (cx) => this.check(cx));
-  }
-
-  /** Looks for the service, and remembers what it found. */
-  async check(cx = this.cx) {
-    this.service = await discover({ wait: (ms) => cx.sleep(ms) });
-    cx.notify();
+    cx.timer.every(WATCH_MS, (cx) => {
+      if ((activeFolder() ?? null) !== (this.folder ?? null)) this.check(cx);
+    });
   }
 
   /**
-   * Starts `shprd serve` in the shown space's folder, which in shprd is the
-   * repository the run works on.
+   * Looks for the service of the shown space, remembers what it found, and starts
+   * it when the space names a repository nobody serves yet.
+   *
+   * The footer is the one owner of starting: every other panel only reads the
+   * state it publishes (`downNotice`), so a click on a repo's space just works and
+   * nobody types a command.
+   */
+  async check(cx = this.cx) {
+    const folder = activeFolder();
+    if ((folder ?? null) !== (this.folder ?? null)) {
+      this.folder = folder;
+      this.failure = null;
+    }
+    const found = await discover({ wait: (ms) => cx.sleep(ms), folder });
+    // The window moved to another space while this look was in flight: the answer
+    // is for the one it left, so look again for the one it shows.
+    if ((activeFolder() ?? null) !== (folder ?? null)) return this.check(cx);
+    this.service = found;
+    if (this.service) {
+      this.failure = null;
+      this.failedMap().delete(normalizeFolder(folder ?? ""));
+    }
+    this.publish();
+    cx.notify();
+    if (this.service === null && folder && !this.starting) {
+      const failed = this.failedMap().get(normalizeFolder(folder));
+      if (failed === undefined || Date.now() - failed > RETRY_MS) await this.start(folder);
+    }
+  }
+
+  /** Whether a record for `folder` names a process that is still running. */
+  async alive(folder) {
+    const entries = await listServices(stateDir(home(), await stateHome()));
+    const entry = pickService(entries, folder);
+    if (!entry || !entry.record.pid) return false;
+    const probe = await exec("kill", ["-0", String(entry.record.pid)]).catch(() => null);
+    return probe?.code === 0;
+  }
+
+  /** When each repository's start last failed (made on first use). */
+  failedMap() {
+    this.failedAt ??= new Map();
+    return this.failedAt;
+  }
+
+  /** Tells the other panels how the shown repository's service is doing. */
+  publish() {
+    const folder = this.folder;
+    const phase = this.service ? "up" : this.starting ? "starting" : this.failure ? "failed" : "none";
+    setShared(SERVICE_STATUS, {
+      folder,
+      repo: repoName(folder ?? ""),
+      phase,
+      reason: this.failure,
+      port: this.service?.record.port ?? null,
+    });
+  }
+
+  /**
+   * Starts `shprd serve` for `folder`: the repository a space shows.
    *
    * The command is `hc run --bg`, so the call is the *start* of a terminal and
    * not the life of the server: it answers as soon as the core has it, and the
-   * process stays in the core. The row then polls for `service.json` itself, so
-   * what it reports is the service's own answer and never this button's hope.
+   * process stays in the core. The footer then waits for `service.json` itself, so
+   * what it reports is the service's own answer and never this call's hope. A
+   * service that dies at once leaves its words in the terminal; they are read back
+   * and shown, and the dead terminal is ended so its name is free for the retry.
+   *
+   * The terminal is `--keep` (a crash leaves a shell, never a re-run) and named per
+   * repository, so two repositories run side by side.
    */
-  async start() {
-    const folder = spaces().find((space) => space.active)?.folder;
-    if (!folder) {
-      this.failure = "No space names a repository yet";
-      this.cx.notify();
-      return;
-    }
+  async start(folder) {
     if (this.starting) return;
+    const key = normalizeFolder(folder);
     this.starting = true;
     this.failure = null;
+    this.publish();
     this.cx.notify();
+    const name = terminalName(folder);
+    let launched = false;
     try {
-      // `--keep`: if the program is lost (a crash, a reboot) the core leaves a
-      // shell in its place rather than re-running a server nobody asked to
-      // restart. `--no-parent`: the service is not a child of whatever terminal
-      // the click came from, so that terminal ending must not take it down.
+      const probe = await exec("git", ["-C", folder, "rev-parse", "--git-common-dir"]).catch(() => null);
+      if (!probe || probe.code !== 0) {
+        throw new Error(`${repoName(folder) || folder} is not a git repository`);
+      }
+      // A record whose process is alive is a service that did not answer in time
+      // (busy), not one that is gone: it is left running, never killed.
+      if (await this.alive(folder)) {
+        this.starting = false;
+        this.failure = null;
+        this.publish();
+        this.cx.notify();
+        return;
+      }
+      // A kept terminal that outlived its service still holds the name.
+      launched = true;
+      await hc(["kill", name]).catch(() => null);
       const answer = await hc([
-        "run",
-        "--bg",
-        "--keep",
-        "--no-parent",
-        "--name",
-        TERMINAL,
-        "--cwd",
-        folder,
-        "--",
-        "shprd",
-        "serve",
+        "run", "--bg", "--keep", "--no-parent", "--name", name, "--cwd", folder, "--", "shprd", "serve",
       ]);
       if (answer?.code !== 0) {
-        this.failure = firstLine(answer?.stderr) || `hc run answered ${answer?.code}`;
+        throw new Error(firstLine(answer?.stderr) || `hc run answered ${answer?.code}`);
+      }
+      for (let waited = 0; ; waited += 500) {
+        await this.cx.sleep(500);
+        this.service = await discover({ wait: (ms) => this.cx.sleep(ms), folder });
+        if (this.service) break;
+        if (waited >= UP_WAIT_MS) {
+          const tail = await hc(["read", name, "--lines", "30"]).catch(() => null);
+          throw new Error(lastReason(tail?.stdout) || "it did not come up in time");
+        }
       }
     } catch (err) {
-      // `hc` rejects when it cannot start a terminal at all: a missing `hc`, a
-      // core that is not running, a folder that is gone.
       this.failure = reason(err);
+      this.failedMap().set(key, Date.now());
+      if (launched) await hc(["kill", name]).catch(() => null);
     }
     this.starting = false;
-    await this.check();
-    // A service takes a moment to bind and write its record; one more look is
-    // worth it, so the click reads as "started" rather than "start failed".
-    if (this.service === null && this.failure === null) {
-      this.cx.timer.after(1200, (cx) => this.check(cx));
-    }
+    this.publish();
+    this.cx.notify();
   }
 
   render() {
@@ -144,11 +230,16 @@ export default class Chrome extends View {
    */
   actions(t) {
     const online = this.service !== null;
-    const word = online
-      ? `Service on :${this.service.record.port}`
-      : this.starting
-        ? "Starting the service…"
-        : (this.failure ?? "Start the service");
+    const name = repoName(this.folder ?? "");
+    const word = !this.folder
+      ? "Open a repo's space"
+      : online
+        ? `${name}: service up`
+        : this.starting
+          ? `${name}: starting the service…`
+          : this.failure
+            ? `${name}: ${this.failure}`
+            : `${name}: service not up`;
     const colors = tone(t);
     return [
       { id: "settings", word: "Settings", icon: "settings", color: t.muted, onClick: () => run("app.settings") },
@@ -158,7 +249,7 @@ export default class Chrome extends View {
         word,
         icon: "plug",
         color: online ? colors.green : this.starting ? colors.amber : colors.red,
-        onClick: online || this.starting ? null : () => this.start(),
+        onClick: online || this.starting || !this.folder ? null : () => this.start(this.folder),
       },
     ];
   }
