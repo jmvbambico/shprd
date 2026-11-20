@@ -195,3 +195,13 @@ test("the app's own settings row is still the app's", async () => {
   assert.deepEqual(herdr.RUNS, [{ name: "app.settings", args: undefined }]);
   assert.deepEqual(herdr.OVERLAYS, [], "and opens no overlay of ours");
 });
+
+test("a record whose process is alive is never killed or restarted", async () => {
+  const { view } = await footer();
+  herdr.setHome("/home/ana");
+  herdr.putFile("/home/ana/.local/state/shprd/repos/demo-1/service.json", JSON.stringify({ port: 7001, id: "x", pid: 4242, root: "/repo/demo" }));
+  herdr.setExec(async (command, args) => (command === "kill" ? { code: 0, stdout: "", stderr: "" } : { code: 0, stdout: "", stderr: "" }));
+  await view.start("/repo/demo");
+  assert.equal(herdr.HC_CALLS.length, 0, "a busy service is left alone");
+  assert.equal(view.failure, null);
+});

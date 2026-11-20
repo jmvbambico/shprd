@@ -38,16 +38,20 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, run, setShared, theme } from "herdr";
+import { exec, hc, home, run, setShared, theme } from "herdr";
 
 import {
   SERVICE_STATUS,
   activeFolder,
   discover,
   lastReason,
+  listServices,
   normalizeFolder,
+  pickService,
   reason,
   repoName,
+  stateDir,
+  stateHome,
   terminalName,
 } from "./lib/client.js";
 import { icon, openSettings } from "./lib/panel.js";
@@ -91,7 +95,11 @@ export default class Chrome extends View {
       this.folder = folder;
       this.failure = null;
     }
-    this.service = await discover({ wait: (ms) => cx.sleep(ms), folder });
+    const found = await discover({ wait: (ms) => cx.sleep(ms), folder });
+    // The window moved to another space while this look was in flight: the answer
+    // is for the one it left, so look again for the one it shows.
+    if ((activeFolder() ?? null) !== (folder ?? null)) return this.check(cx);
+    this.service = found;
     if (this.service) {
       this.failure = null;
       this.failedMap().delete(normalizeFolder(folder ?? ""));
@@ -102,6 +110,15 @@ export default class Chrome extends View {
       const failed = this.failedMap().get(normalizeFolder(folder));
       if (failed === undefined || Date.now() - failed > RETRY_MS) await this.start(folder);
     }
+  }
+
+  /** Whether a record for `folder` names a process that is still running. */
+  async alive(folder) {
+    const entries = await listServices(stateDir(home(), await stateHome()));
+    const entry = pickService(entries, folder);
+    if (!entry || !entry.record.pid) return false;
+    const probe = await exec("kill", ["-0", String(entry.record.pid)]).catch(() => null);
+    return probe?.code === 0;
   }
 
   /** When each repository's start last failed (made on first use). */
@@ -149,6 +166,15 @@ export default class Chrome extends View {
       const probe = await exec("git", ["-C", folder, "rev-parse", "--git-common-dir"]).catch(() => null);
       if (!probe || probe.code !== 0) {
         throw new Error(`${repoName(folder) || folder} is not a git repository`);
+      }
+      // A record whose process is alive is a service that did not answer in time
+      // (busy), not one that is gone: it is left running, never killed.
+      if (await this.alive(folder)) {
+        this.starting = false;
+        this.failure = null;
+        this.publish();
+        this.cx.notify();
+        return;
       }
       // A kept terminal that outlived its service still holds the name.
       launched = true;
