@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { NEW_REPO, base, offersRepo, pathOf, spaceName, spaceNewArgs, tilde, assistantTabArgs, newSpaceOf } from "../mods/lib/newspace.js";
+import { NEW_REPO, base, offersRepo, pathOf, spaceName, spaceNewArgs, tilde, assistantTabArgs, madeOf } from "../mods/lib/newspace.js";
 import { openAddTask, openNewSpace } from "../mods/lib/panel.js";
 import { OVERLAYS, RUNS, SHARED } from "./stub-herdr.js";
 
@@ -50,10 +50,8 @@ test("the new space opens on the chat view, not a shell (SHPR-75)", () => {
   const args = assistantTabArgs("sp9");
   assert.deepEqual(args.slice(0, 8), ["do", "tab.new", "--space", "sp9", "--name", "Assistant", "--mod", "shprd-chat"]);
   assert.deepEqual(JSON.parse(args[9]), { space: "coordinator" });
-  const before = { spaces: [{ id: "a", tabs: [{ id: "t0" }] }] };
-  const after = { spaces: [{ id: "a", tabs: [{ id: "t0" }] }, { id: "b", tabs: [{ id: "t1" }] }] };
-  assert.deepEqual(newSpaceOf(before, after), { id: "b", tabs: ["t1"] }, "only the new space's own tab");
-  assert.equal(newSpaceOf(before, before), null, "nothing new: nothing to close");
-  assert.equal(newSpaceOf(before, { spaces: [...after.spaces, { id: "c", tabs: [] }] }), null, "two new: not told apart");
-  assert.equal(newSpaceOf(null, null), null);
+  assert.deepEqual(madeOf({ space: "b", tab: "t1", terminal: "t2" }), { id: "b", tab: "t1" }, "only the tab space.new made");
+  assert.deepEqual(madeOf({ space: "b" }), { id: "b", tab: "" });
+  assert.equal(madeOf({}), null);
+  assert.equal(madeOf(null), null);
 });

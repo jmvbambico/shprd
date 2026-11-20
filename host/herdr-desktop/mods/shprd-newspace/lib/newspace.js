@@ -95,14 +95,12 @@ export function assistantTabArgs(spaceId) {
 }
 
 /**
- * The space `space.new` just made and the tabs the window put in it, read from
- * two `herdr-app ls` answers (before and after): the one space that was not there
- * before. Only those tabs are the window's own; a tab the person opens later is
- * never in this list. Null when it cannot be told (none or several are new).
+ * The space `space.new` made and the one tab the window put in it, from its own
+ * answer (`{space, tab, terminal}`). Only that tab is the window's: a tab the
+ * person opens later is never named here. Null when the answer names no space.
  */
-export function newSpaceOf(before, after) {
-  const known = new Set((before?.spaces ?? []).map((space) => space.id));
-  const fresh = (after?.spaces ?? []).filter((space) => space?.id && !known.has(space.id));
-  if (fresh.length !== 1) return null;
-  return { id: fresh[0].id, tabs: (fresh[0].tabs ?? []).map((tab) => tab.id).filter(Boolean) };
+export function madeOf(answer) {
+  const space = typeof answer?.space === "string" ? answer.space : "";
+  if (!space) return null;
+  return { id: space, tab: typeof answer?.tab === "string" ? answer.tab : "" };
 }
