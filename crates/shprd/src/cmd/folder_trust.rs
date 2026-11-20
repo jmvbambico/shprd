@@ -130,7 +130,7 @@ pub(crate) enum Trusted {
     /// argument that was appended.
     Argument,
     /// The folder was already trusted; nothing was written.
-    AlreadyTrusted,
+    Already,
     /// The entry was written to this file.
     Wrote(PathBuf),
     /// No file could be named from the environment, so nothing was written and
@@ -167,7 +167,7 @@ pub(crate) fn trust_folder(
     }
     match trust_claude_projects(&config, &folders)? {
         true => Ok(Trusted::Wrote(config)),
-        false => Ok(Trusted::AlreadyTrusted),
+        false => Ok(Trusted::Already),
     }
 }
 
@@ -305,6 +305,7 @@ fn make_private(_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -363,7 +364,7 @@ mod tests {
         let mut argv = Vec::new();
         let env = env_with(&[("HOME", home.path())]);
         let done = trust_folder("claude", &folder, &env, &mut argv).expect("trust");
-        assert_eq!(done, Trusted::AlreadyTrusted);
+        assert_eq!(done, Trusted::Already);
         assert_eq!(std::fs::read_to_string(&config).expect("read"), seed);
     }
 
