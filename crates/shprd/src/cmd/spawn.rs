@@ -2910,6 +2910,9 @@ fn remember_window_tabs(mux: &dyn Host, env: &SpawnEnv<'_>, prepared: &PreparedS
     let Ok(named) = mux.tab_names(&space.id) else {
         return;
     };
+    // Only a tab no program runs in can be the other product's empty
+    // "Assistant": a tab with a terminal that a person titled so is theirs.
+    let program_tabs: Vec<_> = listed.iter().map(|tab| tab.id.clone()).collect();
     let shells: Vec<_> = listed
         .into_iter()
         .filter(|tab| {
@@ -2933,6 +2936,7 @@ fn remember_window_tabs(mux: &dyn Host, env: &SpawnEnv<'_>, prepared: &PreparedS
             && !is_coordinator_tab(id.as_str())
             && id.as_str() != OLD_COORDINATOR_TAB
             && !coordinators.contains(&id)
+            && !program_tabs.contains(&id)
         {
             ids.push(id.as_str().to_owned());
         }
@@ -2956,13 +2960,25 @@ fn tidy_window_tabs(
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
+    // A tab that could not be closed stays on the record for the next start.
+    let mut left: Vec<&str> = Vec::new();
     for id in text.lines().map(str::trim).filter(|id| !id.is_empty()) {
         if keep.is_some_and(|keep| keep.as_str() == id) || is_coordinator_tab(id) {
             continue;
         }
-        close_tab(mux, &shprd_mux::TabId::new(id));
+        match mux.close_tab(&shprd_mux::TabId::new(id)) {
+            Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+            Err(err) => {
+                tracing::debug!(%err, tab = id, "a window tab was not closed");
+                left.push(id);
+            }
+        }
     }
-    let _ = std::fs::remove_file(&path);
+    if left.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let _ = write_record(&path, &left.join("\n"));
+    }
     if let Some(keep) = keep
         && let Err(err) = mux.focus_tab(keep)
     {
