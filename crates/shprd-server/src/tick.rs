@@ -1139,7 +1139,20 @@ impl Worker {
             Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
-            Step::Land { task, policy } => self.land_task(state, task, *policy),
+            Step::Land { task, policy } => {
+                self.land_task(state, task, *policy).map_err(|raw| {
+                    // A person reads one plain sentence; the raw text (a git
+                    // command line, a path) goes to the log.
+                    if raw.starts_with("Couldn't merge ") {
+                        raw
+                    } else {
+                        tracing::warn!(task = %task, %raw, "a landing failed");
+                        format!(
+                            "Couldn't merge {task}: it hit a problem on this machine, and the details are in the shprd log"
+                        )
+                    }
+                })
+            }
             Step::MarkLanded {
                 task,
                 outcome,

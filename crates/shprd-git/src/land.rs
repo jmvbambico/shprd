@@ -28,8 +28,9 @@
 //! A repository with no remote, or with no forge to drive, lands through
 //! [`land_local`] instead: the same checks and the same merge policy, but the
 //! task's branch is merged into the run's integration branch inside shprd's own
-//! integration worktree. Nothing is pushed and the user's checkout is never
-//! touched.
+//! integration worktree. The user's checkout is never touched. The merge is
+//! pushed afterwards only to a remote that is not GitHub, and only as a courtesy:
+//! a refusal leaves the merge standing.
 
 use std::path::Path;
 
@@ -518,6 +519,11 @@ fn push_integration(git: &Git, branch: &str) {
     let Some(remote) = remote_of(git) else {
         return;
     };
+    // A GitHub remote without a signed-in client lands locally too, and the
+    // person never agreed to put the integration branch on GitHub that way.
+    if remote_hosts(git).iter().any(|host| host.contains("github")) {
+        return;
+    }
     let _ = git.run(&["push", &remote, &format!("HEAD:refs/heads/{branch}")]);
 }
 

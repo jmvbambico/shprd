@@ -371,7 +371,7 @@ pub fn ensure_state_excluded(worktree: &Path) -> Result<(), WorktreeError> {
 /// Whether the repository has a remote a landing could push to.
 ///
 /// A repository with no remote lands locally: its task branches are merged into
-/// the run's integration branch in shprd's own worktree, and nothing is pushed.
+/// the run's integration branch in shprd's own worktree.
 pub fn has_remote(git: &Git) -> bool {
     remote_of(git).is_some()
 }

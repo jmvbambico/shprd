@@ -207,7 +207,7 @@ fn land_task(
         || task.pr.is_some();
     // A repository with no remote, or with no forge to drive, lands locally:
     // the task's branch is merged into the run's integration branch in shprd's
-    // own worktree, and nothing is pushed anywhere.
+    // own worktree; a non-GitHub remote is then pushed to, best effort.
     if local_landing(&Git::new(&ctx.root)) {
         return land_task_local(
             ctx, &events, task, task_id, run, &branch, approved, has_work, &base, &config, home,
