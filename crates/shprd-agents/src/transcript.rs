@@ -445,19 +445,22 @@ fn hc_clean(message: Message) -> Option<Message> {
         return Some(message);
     }
     let trimmed = message.text.trim();
-    if message.role == Role::User && trimmed.starts_with("<hc") && trimmed.ends_with("</hc>") {
-        if let Some(open_end) = trimmed.find('>') {
-            let open = &trimmed[..open_end];
-            let inner = &trimmed[open_end + 1..trimmed.len() - "</hc>".len()];
-            if !open.ends_with('/') && !inner.contains("<hc") {
-                let from = open.contains("from=\"");
-                let words = inner.trim();
-                return (from && !words.is_empty()).then(|| Message {
-                    role: Role::News,
-                    text: words.to_owned(),
-                    ..message
-                });
-            }
+    if message.role == Role::User
+        && trimmed.starts_with("<hc")
+        && trimmed.ends_with("</hc>")
+        && let Some(open_end) = trimmed.find('>')
+        && open_end < trimmed.len() - "</hc>".len()
+    {
+        let open = &trimmed[..open_end];
+        let inner = &trimmed[open_end + 1..trimmed.len() - "</hc>".len()];
+        if !open.ends_with('/') && !inner.contains("<hc") {
+            let from = open.contains("from=\"");
+            let words = inner.trim();
+            return (from && !words.is_empty()).then(|| Message {
+                role: Role::News,
+                text: words.to_owned(),
+                ..message
+            });
         }
     }
     let text = strip_hc_tags(&message.text);
@@ -1969,6 +1972,8 @@ mod tests {
         let reply = parse("user", "<hc reply-to=\"first words\"/>\nyes, merge it").unwrap();
         assert_eq!(reply.role, Role::User);
         assert_eq!(reply.text, "yes, merge it");
+        // Malformed wrappers never panic.
+        let _ = parse("user", "<hc</hc>");
         // A reply that is only a tag shows nothing.
         assert!(parse("assistant", "<hc no-reply/>").is_none());
         let said = parse("assistant", "Merged.\n<hc suggest=\"show me the diff\"/>").unwrap();
