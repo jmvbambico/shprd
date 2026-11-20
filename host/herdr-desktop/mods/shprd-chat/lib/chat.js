@@ -112,6 +112,54 @@ export function toolLine(tool) {
   return summary === "" ? name : `${name} · ${summary}`;
 }
 
+/** What a tool call did, in Shepherdr's words: read, edit, run, search, web, agent, plan or tool. */
+export function toolKind(name) {
+  const n = String(name ?? "").toLowerCase();
+  if (/^(read|view|cat|notebookread)$/.test(n)) return "read";
+  if (/^(edit|write|multiedit|notebookedit|apply_patch|patch|str_replace.*)$/.test(n)) return "edit";
+  if (/^(bash|shell|exec|exec_command|run|command|bashoutput|local_shell)$/.test(n)) return "run";
+  if (/^(grep|glob|ls|find|search|toolsearch)$/.test(n)) return "search";
+  if (/^(webfetch|websearch|fetch)$/.test(n)) return "web";
+  if (/^(task|agent|subagent)$/.test(n)) return "agent";
+  if (/^(todowrite|update_plan|plan|exitplanmode)$/.test(n)) return "plan";
+  return "tool";
+}
+
+/**
+ * A run of tool calls as one folded line (Shepherdr `core/chat-log.js`
+ * `summary`): "Ran a command", "Read a file, ran 2 commands".
+ */
+export function toolsSummary(calls) {
+  const n = {};
+  for (const call of calls ?? []) {
+    const kind = toolKind(call?.name);
+    n[kind] = (n[kind] ?? 0) + 1;
+  }
+  const say = (k, one, many) => (n[k] ? (n[k] === 1 ? one : many.replace("#", n[k])) : null);
+  const parts = [
+    say("read", "read a file", "read # files"),
+    say("edit", "edited a file", "edited # files"),
+    say("run", "ran a command", "ran # commands"),
+    say("search", "searched", "searched # times"),
+    say("web", "looked on the web", "looked on the web # times"),
+    say("agent", "asked a helper", "asked # helpers"),
+    say("plan", "updated its plan", "updated its plan"),
+    say("tool", "used a tool", "used # tools"),
+  ].filter(Boolean);
+  const line = parts.join(", ");
+  return line ? line[0].toUpperCase() + line.slice(1) : "Worked";
+}
+
+/**
+ * The name a pane's header gives an agent of shprd's own: "shprd · claude",
+ * the way Shepherdr labels its Assistant ("Assistant · claude"). The program's
+ * own name ("Claude Code") is its first word, lowercased.
+ */
+export function agentLabel(programName) {
+  const word = String(programName ?? "").trim().split(/\s+/)[0].toLowerCase();
+  return word === "" ? "shprd" : `shprd · ${word}`;
+}
+
 /** How much of a bubble is drawn: the words up to [`BUBBLE_MAX`]. */
 export function bubble(text, max = BUBBLE_MAX) {
   const words = String(text ?? "").trim();
@@ -290,7 +338,8 @@ export function messageKey(message) {
  * without one (an escalation) and any card newer than the last message end the
  * timeline, which is where the newest thing is.
  *
- * Rows: `{ kind: "top" | "empty" | "message" | "card", key, ... }`.
+ * Rows: `{ kind: "top" | "message" | "tools" | "card", key, ... }`. A `tools` row
+ * holds a whole run of tool calls (`calls`), drawn folded as [`toolsSummary`].
  */
 export function timeline(chat, cards = []) {
   const rows = [];
@@ -303,7 +352,16 @@ export function timeline(chat, cards = []) {
       rows.push({ kind: "card", key: waiting[next].id, card: waiting[next] });
       next += 1;
     }
-    rows.push({ kind: "message", key: messageKey(message), message });
+    if (message.text.trim() !== "" || message.tools.length === 0) {
+      rows.push({ kind: "message", key: messageKey(message), message: { ...message, tools: [] } });
+    }
+    if (message.tools.length > 0) {
+      // A run of tool calls is one folded row, however many replies it spans: a
+      // row of words between two runs ends the first.
+      const last = rows[rows.length - 1];
+      if (last?.kind === "tools") last.calls.push(...message.tools);
+      else rows.push({ kind: "tools", key: `tools:${messageKey(message)}`, calls: message.tools.slice() });
+    }
   }
   for (; next < waiting.length; next += 1) {
     rows.push({ kind: "card", key: waiting[next].id, card: waiting[next] });

@@ -29,7 +29,7 @@
 // wrote is shown as text, and only a web link may be opened from it.
 
 import { View, div } from "gpui-kit";
-import { Input, InputState, ScrollHandle, TextView, h_flex, v_flex } from "gpui-base";
+import { Input, InputState, ScrollHandle, Textarea, TextareaState, TextView, h_flex, v_flex } from "gpui-base";
 import { exec, props, setShared, shared, theme } from "herdr";
 
 import { SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
@@ -41,6 +41,7 @@ import {
   coordinatorDown,
   empty,
   firstCard,
+  lineCount,
   fold,
   folding,
   markdownOf,
@@ -52,6 +53,7 @@ import {
   status,
   timeline,
   toolLine,
+  toolsSummary,
   when,
 } from "./lib/chat.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
@@ -97,9 +99,14 @@ export default class Chat extends View {
     this.drawn = { rows: 0, cards: 0 };
     this.loading = false;
     this.loadedAt = Date.now();
-    this.input = InputState.new({ placeholder: this.placeholder() });
-    // A submit is Enter in the composer: the same act as the send button.
-    this.input.on("submit", () => this.send());
+    // A text area, because the person pastes whole prompts: Enter sends, Shift+Enter
+    // is a new line, and the line breaks they typed reach the agent.
+    this.input = TextareaState.new({ placeholder: this.placeholder() });
+    this.input.set_rows?.(1);
+    this.inputRows = 1;
+    this.input.on("submit", (e) => {
+      if (!e?.shift) this.send();
+    });
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
   }
@@ -427,6 +434,7 @@ export default class Chat extends View {
         .child(WORDS.top);
     }
     if (row.kind === "card") return this.card(t, colors, row.card);
+    if (row.kind === "tools") return this.tools(t, row);
     return this.message(t, row);
   }
 
@@ -476,16 +484,6 @@ export default class Chat extends View {
           .child(open ? WORDS.showLess : WORDS.showMore),
       );
     }
-    for (const tool of message.tools) {
-      parts.push(
-        div()
-          .px(4)
-          .text_size(TEXT.id)
-          .font_family("JetBrains Mono")
-          .text_color(t.dim)
-          .child(`→ ${toolLine(tool)}`),
-      );
-    }
     if (parts.length === 0) return div();
     return h_flex()
       .w_full()
@@ -503,6 +501,56 @@ export default class Chat extends View {
           .children(parts)
           .when(message.at_ms !== null, (el) =>
             el.child(div().px(4).text_size(TEXT.id).text_color(t.dim).child(when(message.at_ms) || "")),
+          ),
+      );
+  }
+
+  /**
+   * A run of tool calls as one folded row (Shepherdr's "tools" row): "Ran a
+   * command", "Read a file, ran 2 commands", opening to each call on a click.
+   */
+  tools(t, row) {
+    const open = this.opened.has(row.key);
+    return v_flex()
+      .id(`chat-tools-${row.key}`)
+      .w_full()
+      .flex_none()
+      .px(14)
+      .py(3)
+      .child(
+        v_flex()
+          .max_w(BUBBLE_W)
+          .min_w(0)
+          .px(4)
+          .gap(3)
+          .child(
+            h_flex()
+              .gap(6)
+              .items_center()
+              .cursor_pointer()
+              .text_size(TEXT.label)
+              .text_color(t.dim)
+              .hover((s) => s.text_color(t.foreground))
+              .on_click(() => this.toggle(row.key))
+              .child(div().flex_none().w(10).child(open ? "⌄" : "›"))
+              .child(div().flex_1().min_w(0).truncate().child(toolsSummary(row.calls))),
+          )
+          .when(open, (el) =>
+            el.child(
+              v_flex()
+                .pl(16)
+                .gap(2)
+                .children(
+                  row.calls.map((call) =>
+                    div()
+                      .text_size(TEXT.id)
+                      .font_family("JetBrains Mono")
+                      .text_color(t.muted)
+                      .truncate()
+                      .child(toolLine(call)),
+                  ),
+                ),
+            ),
           ),
       );
   }
@@ -613,6 +661,12 @@ export default class Chat extends View {
 
   /** The composer: one line of words, and the round send at its end. */
   composer(t, colors) {
+    // The box grows with what is in it, up to eight lines, then scrolls.
+    const lines = Math.min(8, Math.max(1, lineCount(this.input.value(), 70)));
+    if (lines !== this.inputRows) {
+      this.inputRows = lines;
+      this.input.set_rows?.(lines);
+    }
     const sendable = this.input.value().trim() !== "" && !this.sending && this.space !== null;
     return h_flex()
       .flex_none()
@@ -624,15 +678,16 @@ export default class Chat extends View {
       .child(
         h_flex()
           .flex_1()
-          .h(32)
+          .min_h(32)
           .px(10)
+          .py(4)
           .items_center()
           .rounded(RADIUS.bubble)
           .bg(t.input)
           .border_1()
           .border_color(t.border)
           .on_click(() => this.input.focus())
-          .child(div().flex_1().text_size(TEXT.body).child(Input.new(this.input))),
+          .child(div().flex_1().min_w(0).text_size(TEXT.body).child(Textarea.new(this.input))),
       )
       .child(
         h_flex()
