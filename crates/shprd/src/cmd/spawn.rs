@@ -624,8 +624,8 @@ pub(crate) fn ensure_repo_space_from(
     let name = repo_space_name(&repo_name(repo)?);
     // Found by shprd's own mark, so a space the person renamed is still the
     // one; a space with no mark is found by its old name once and gets marked.
-    let (space, created, fresh) =
-        shprd_mux::ensure_marked_space_detail(mux, &name, repo, also).map_err(|err| {
+    let (space, created, fresh) = shprd_mux::ensure_marked_space_detail(mux, &name, repo, also)
+        .map_err(|err| {
             CliError::other(anyhow!(err).context(format!(
                 "finding or creating the space {name:?} at {}",
                 repo.display()
@@ -4474,7 +4474,10 @@ project_dirs = []
         remember_window_tabs(&mux, &env, &first);
 
         let again = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
-        assert!(!again.created && !again.fresh, "a retry finds a marked space");
+        assert!(
+            !again.created && !again.fresh,
+            "a retry finds a marked space"
+        );
         ensure_coordinator(&mux, &env, &again, |pending| pending.deliver(&mux))
             .unwrap_or_else(|err| panic!("{err}"));
         let tabs = mux
@@ -4501,7 +4504,11 @@ project_dirs = []
         let tabs = mux
             .list_tabs(&prepared.space.id)
             .unwrap_or_else(|err| panic!("{err}"));
-        assert_eq!(tabs.len(), 2, "the person's tab and the coordinator: {tabs:?}");
+        assert_eq!(
+            tabs.len(),
+            2,
+            "the person's tab and the coordinator: {tabs:?}"
+        );
     }
 
     /// `shprd serve` starts the coordinator agent in the space it made, closes
