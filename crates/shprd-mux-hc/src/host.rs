@@ -98,13 +98,10 @@ const TASK_SPACE_LABEL: &str = "shprd.task.space";
 const COORDINATOR_LABEL: &str = "shprd.coordinator";
 /// Whether a terminal is another product's agent: Shepherdr's per-space
 /// Assistant carries `herdr.coordinator.space` / `herdr.coordinator.tab`, a
-/// `herdr.chat.slot` of `coord-…` or the `assistant` template, and none of
-/// shprd's own labels. Such a terminal is never shprd's, whatever else it
-/// carries (SHPR-69).
+/// `herdr.chat.slot` of `coord-…` or the `assistant` template. Such a terminal
+/// is never shprd's, whatever else it carries, `shprd.*` labels included
+/// (SHPR-69): shprd's own agents carry none of these markers.
 pub(crate) fn is_foreign_agent(terminal: &Terminal) -> bool {
-    if terminal.labels.keys().any(|key| key.starts_with("shprd.")) {
-        return false;
-    }
     let marked = terminal.labels.contains_key("herdr.coordinator.space")
         || terminal.labels.contains_key("herdr.coordinator.tab")
         || terminal.labels.contains_key("herdr.coordinator")
@@ -139,6 +136,9 @@ fn is_legacy_shprd(terminal: &Terminal) -> bool {
 /// so a restart adopts the coordinator and workers already running instead of
 /// starting a second set. Another product's terminal gives nothing.
 fn agent_label<'a>(terminal: &'a Terminal, key: &str) -> Option<&'a String> {
+    if is_foreign_agent(terminal) {
+        return None;
+    }
     terminal.labels.get(key).or_else(|| {
         if !is_legacy_shprd(terminal) {
             return None;
@@ -2297,6 +2297,14 @@ mod tests {
             None,
         );
         assert!(agent_label(&parked, ROLE_LABEL).is_some());
+        // Shepherdr's markers win over any shprd label that lands on it.
+        let both = terminal_with(
+            json!({"shprd.role": "coordinator", "shprd.task.space": "sp1",
+                "herdr.coordinator.space": "sp1"}),
+            json!(["claude"]),
+            None,
+        );
+        assert!(agent_label(&both, ROLE_LABEL).is_none());
         // shprd's own labels are read as they are.
         let own = terminal_with(
             json!({"shprd.role": "coordinator", "shprd.task.space": "sp1"}),

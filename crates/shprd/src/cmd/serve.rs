@@ -184,10 +184,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // started) is tried again every pass, so it comes up once the program is
     // back, and the chat's reason follows each try.
     if start_failure.lock().is_ok_and(|why| why.is_some())
-        && matches!(
-            workspace,
-            SpaceNotice::Created(..) | SpaceNotice::Reused(..)
-        )
+        && !matches!(workspace, SpaceNotice::Withheld(_))
     {
         let (host, ctx, home) = (retry_host, ctx.clone(), home.clone());
         let failure = start_failure.clone();
