@@ -168,3 +168,15 @@ export function ref(id, max = 14) {
   const text = String(id ?? "");
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
+
+/**
+ * What the desktop says for a service's needs-you words. The engine's card for a
+ * ready task sends a reader to `shprd approve` or to the forge (words for a
+ * terminal); the person here accepts in the Tasks pane and types no command, so
+ * those cards read as a pointer to it. Any other card is left as it is.
+ */
+export function desktopWords(body, taskId = "") {
+  const text = String(body ?? "");
+  if (!/shprd approve|approve .*(on the forge|pull request)|waiting for your approval/i.test(text)) return text;
+  return `${taskId ? `${taskId} is ready. ` : "It is ready. "}Accept it in the Tasks pane.`;
+}

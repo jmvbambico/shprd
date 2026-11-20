@@ -24,7 +24,7 @@
 
 import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
-import { nextCommand, openOverlay, run, setShared, shared, theme } from "herdr";
+import { nextCommand, openOverlay, run, setShared, shared, spaces, theme } from "herdr";
 
 import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import {
@@ -42,7 +42,7 @@ import {
 } from "./lib/board.js";
 import { MENU, menuHeight, tasksMenu } from "./lib/menu.js";
 import { badge, card, cardHeader, countBadge, keycap, note, openAccept, openThread, segmented, statusGlyph } from "./lib/panel.js";
-import { graphRows, scopeToSpace, spacesOf } from "./lib/tree.js";
+import { graphRows, pickedName, scopeToSpace, spacesOf } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -543,7 +543,7 @@ export default class Tasks extends View {
     const colors = tone(t);
     // The picked space (`spaces.picked`) narrows the list and the Graph; the
     // "All spaces" chip puts every space back.
-    const board = scopeToSpace(this.state, shared("spaces.picked") ?? null);
+    const board = scopeToSpace(this.state, shared("spaces.picked") ?? null, spaces());
     const tally = counts(board);
     const query = this.query.value() ?? "";
     const chips = filterChips(board);
@@ -630,7 +630,7 @@ export default class Tasks extends View {
    * `graphRows`; nothing is asked of a graph program.
    */
   graph(t, colors, head) {
-    const rows = this.state ? graphRows(this.state, shared("spaces.picked") ?? null) : [];
+    const rows = this.state ? graphRows(this.state, shared("spaces.picked") ?? null, spaces()) : [];
     const body =
       this.failure !== null
         ? [note(t, this.failure)]
@@ -779,9 +779,8 @@ export default class Tasks extends View {
             // The picked space is a chip of its own (its name); "All spaces" puts
             // every space back (Q1).
             const picked = shared("spaces.picked") ?? null;
-            const named = picked === null ? null : spacesOf(this.state).find((space) => space.id === picked);
             return el
-              .when(picked !== null, (e) => e.child(this.chip(t, "picked", named?.name ?? String(picked).replace(/^sp-/, ""), 0, true, () => {})))
+              .when(picked !== null, (e) => e.child(this.chip(t, "picked", pickedName(this.state, picked, spaces()), 0, true, () => {})))
               .child(
                 this.chip(t, "space", "All spaces", 0, picked === null, () => {
                   setShared("spaces.picked", null);

@@ -200,12 +200,23 @@ const ASSISTANT_M11_IDENTITY: &str =
 const ASSISTANT_M11_IDENTITY_DIGEST: &str =
     "7845593091f7af65662ce6df93571183751c0d5e15be1d1ec3438a0a999839c3";
 
+/// The coordinator wording that made every ask a task but did not say how the
+/// person accepts one: a coordinator told the person to run `shprd approve`.
+#[cfg(test)]
+const ASSISTANT_M11_TASKS_ONLY: &str =
+    include_str!("../../../data/templates/history/assistant-m11-tasks-only.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_TASKS_ONLY`].
+const ASSISTANT_M11_TASKS_ONLY_DIGEST: &str =
+    "09e6b9146233e0219a4718d4782707c71accaa030743a15096b7d88a7c415a50";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
     ASSISTANT_ASKS_RAISE_DIGEST,
     ASSISTANT_PRE_IDENTITY_DIGEST,
     ASSISTANT_M11_IDENTITY_DIGEST,
+    ASSISTANT_M11_TASKS_ONLY_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet

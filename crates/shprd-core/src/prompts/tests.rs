@@ -614,3 +614,30 @@ fn the_coordinator_turns_every_ask_into_tasks_and_never_does_the_work() {
         assert!(text.contains(needed), "the brief must say {needed:?}");
     }
 }
+
+/// SHPR-74: the tasks-only coordinator wording is retired and upgrades.
+#[test]
+fn the_tasks_only_coordinator_words_are_retired_and_upgrade() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_M11_TASKS_ONLY.as_bytes()),
+        ASSISTANT_M11_TASKS_ONLY_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_TASKS_ONLY_DIGEST));
+    assert!(ASSISTANT_M11_TASKS_ONLY != shipped.text);
+    let temp = dir();
+    std::fs::create_dir_all(temp.path()).expect("dir");
+    std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_TASKS_ONLY)
+        .expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// SHPR-74: the coordinator points the person at the Tasks pane to accept, never
+/// at a command or the forge.
+#[test]
+fn the_coordinator_says_accept_in_the_tasks_pane() {
+    let text = shipped_prompt("assistant").expect("shipped").text;
+    assert!(text.contains("Accept it in the Tasks pane"));
+    assert!(text.contains("Never tell them to run `shprd approve`"));
+}
