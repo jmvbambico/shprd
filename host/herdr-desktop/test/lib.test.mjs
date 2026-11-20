@@ -677,7 +677,7 @@ test("a panel without a service says which repository and why, never a command",
   herdr.setShared("service.status", { folder: "/work/shop", phase: "starting" });
   assert.equal(downNotice(), "Starting the service for shop…");
   herdr.setShared("service.status", { folder: "/work/shop", phase: "failed", reason: "no git repository" });
-  assert.equal(downNotice(), "The service for shop could not start: no git repository");
+  assert.equal(downNotice(), "The service for shop isn't running (the reason is in the footer)");
   herdr.setShared("service.status", { folder: "/work/other", phase: "starting" });
   assert.equal(downNotice(), "The service for shop is not up yet", "another repo's status is not this one's");
   herdr.setSpaces([]);

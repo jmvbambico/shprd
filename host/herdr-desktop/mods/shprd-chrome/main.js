@@ -50,6 +50,7 @@ import {
   normalizeFolder,
   pickService,
   reason,
+  resolveShprd,
   repoName,
   stateDir,
   stateHome,
@@ -75,10 +76,10 @@ export default class Chrome extends View {
     this.starting = false;
     this.folder = activeFolder();
     this.failedAt = new Map();
-    this.check();
-    cx.timer.every(FLOOR_MS, (cx) => this.check(cx));
+    this.look();
+    cx.timer.every(FLOOR_MS, (cx) => this.look(cx));
     cx.timer.every(WATCH_MS, (cx) => {
-      if ((activeFolder() ?? null) !== (this.folder ?? null)) this.check(cx);
+      if ((activeFolder() ?? null) !== (this.folder ?? null)) this.look(cx);
     });
   }
 
@@ -91,6 +92,24 @@ export default class Chrome extends View {
    * nobody types a command.
    */
   async check(cx = this.cx) {
+    try {
+      await this.inspect(cx);
+    } catch (err) {
+      // A look that throws must never be silent: the row says why.
+      this.starting = false;
+      this.failure = reason(err);
+      this.publish();
+      cx.notify();
+    }
+  }
+
+  /** `check` fired from a timer or `init`: nothing is left unhandled. */
+  look(cx = this.cx) {
+    return this.check(cx).catch(() => {});
+  }
+
+  /** The look itself (see `check`). */
+  async inspect(cx) {
     const folder = activeFolder();
     if ((folder ?? null) !== (this.folder ?? null)) {
       this.folder = folder;
@@ -99,7 +118,7 @@ export default class Chrome extends View {
     const found = await discover({ wait: (ms) => cx.sleep(ms), folder });
     // The window moved to another space while this look was in flight: the answer
     // is for the one it left, so look again for the one it shows.
-    if ((activeFolder() ?? null) !== (folder ?? null)) return this.check(cx);
+    if ((activeFolder() ?? null) !== (folder ?? null)) return this.inspect(cx);
     this.service = found;
     if (this.service) {
       this.failure = null;
@@ -177,13 +196,21 @@ export default class Chrome extends View {
         return;
       }
       // A kept terminal that outlived its service still holds the name.
+      // herdr-core starts the program with its own PATH (the one it was started
+      // under, which lacks ~/.cargo/bin), so the start names `shprd` by its path
+      // and hands it the PATH the person's login shell has.
+      const where = await resolveShprd();
+      if (!where.bin) {
+        throw new Error(`shprd isn't installed where Herdr can find it (looked in ${shorten(where.looked, home())})`);
+      }
       launched = true;
       await hc(["kill", name]).catch(() => null);
       const answer = await hc([
-        "run", "--bg", "--keep", "--no-parent", "--name", name, "--cwd", folder, "--", "shprd", "serve",
+        "run", "--bg", "--keep", "--no-parent", "--name", name, "--cwd", folder, "--",
+        "/usr/bin/env", `PATH=${where.path}`, where.bin, "serve",
       ]);
       if (answer?.code !== 0) {
-        throw new Error(firstLine(answer?.stderr) || `hc run answered ${answer?.code}`);
+        throw new Error(firstLine(answer?.stderr) || firstLine(answer?.stdout) || `hc run answered ${answer?.code}`);
       }
       for (let waited = 0; ; waited += 500) {
         await this.cx.sleep(500);
@@ -277,6 +304,13 @@ export default class Chrome extends View {
     const live = action.onClick ? base.cursor_pointer().on_click(action.onClick) : base;
     return live.child(icon(action.icon, 14, action.color)).child(action.word);
   }
+}
+
+/** Directories for a sentence: the home folder as `~`, a few of them. */
+function shorten(dirs, base) {
+  const home = String(base ?? "").replace(/\/+$/, "");
+  const names = dirs.map((dir) => (home && dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir));
+  return names.length > 4 ? `${names.slice(0, 4).join(", ")} and ${names.length - 4} more` : names.join(", ");
 }
 
 /** The first line of what a command said, or an empty string. */

@@ -382,7 +382,8 @@ export function downNotice(folder = activeFolder()) {
   if (status && normalizeFolder(status.folder) === normalizeFolder(folder)) {
     if (status.phase === "starting") return `Starting the service for ${name}…`;
     if (status.phase === "failed") {
-      return `The service for ${name} could not start: ${status.reason || "no reason given"}`;
+      // The footer says why in full; every other panel only points at it.
+      return `The service for ${name} isn't running (the reason is in the footer)`;
     }
   }
   return `The service for ${name} is not up yet`;
@@ -909,5 +910,87 @@ export async function alive(client) {
 export function reason(err) {
   if (err instanceof ServiceError) return err.message;
   const text = err?.message ?? String(err ?? "");
-  return text.trim() === "" ? "the service did not answer" : text.trim();
+  return text.trim() === "" ? "the service did not answer" : plainWords(text.trim());
+}
+
+/**
+ * One plain sentence for what a command said. `hc` answers a failure as a JSON
+ * document (`{"error":{"kind","message","hint"}}`); a person is shown its message,
+ * and a program that could not be found is said as that, not as an errno.
+ */
+export function plainWords(text) {
+  let message = String(text ?? "").trim();
+  let kind = "";
+  try {
+    const doc = JSON.parse(message);
+    if (doc?.error?.message) {
+      message = String(doc.error.message);
+      kind = String(doc.error.kind ?? "");
+    }
+  } catch {
+    // not JSON: the words stand as they are.
+  }
+  const missing = message.match(/cannot start "([^"]+)": No such file or directory/i);
+  if (missing || kind === "spawn_failed") {
+    const name = missing ? missing[1] : "the program";
+    return `${name} isn't installed where Herdr can find it`;
+  }
+  return message;
+}
+
+/** Directories a program is looked for in when the app's own PATH is minimal (a Dock launch). */
+export function fallbackDirs(base) {
+  const home = String(base ?? "").replace(/\/+$/, "");
+  return [
+    ...(home ? [`${home}/.cargo/bin`, `${home}/.local/bin`, `${home}/.bun/bin`] : []),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+}
+
+/**
+ * Where `shprd` is and what PATH it should run with.
+ *
+ * herdr-core starts a terminal's program with the PATH the core itself was
+ * started under, and the app is launched from the Dock, not from a shell, so a bare
+ * `shprd` is "No such file or directory" (SHPR-72). The person's own login shell is
+ * asked for its PATH (the marker lines survive a banner in the rc files), the
+ * fallback directories are added behind it, and `shprd` is looked for in all of
+ * them. The same PATH is handed to the service so the programs it starts
+ * (`claude`, `codex`, `pi`, `git`) are found the way the person's terminal finds
+ * them. `{bin: null}` says nothing was found; `looked` lists where.
+ */
+export async function resolveShprd(run = exec, base = home()) {
+  let login = "";
+  let found = "";
+  try {
+    const shell = await run("/bin/zsh", [
+      "-lic",
+      'printf "\n@@PATH@@%s@@\n" "$PATH"; printf "@@BIN@@%s@@\n" "$(command -v shprd 2>/dev/null)"',
+    ]);
+    const out = String(shell?.stdout ?? "");
+    login = out.match(/@@PATH@@(.*?)@@/)?.[1] ?? "";
+    found = out.match(/@@BIN@@(.*?)@@/)?.[1] ?? "";
+  } catch {
+    // no login shell to ask: the fallback directories are what is left.
+  }
+  const dirs = [];
+  for (const dir of [...login.split(":"), ...fallbackDirs(base)]) {
+    if (dir.startsWith("/") && !dirs.includes(dir)) dirs.push(dir);
+  }
+  const executable = async (path) => {
+    const probe = await run("test", ["-x", path]).catch(() => null);
+    return probe?.code === 0;
+  };
+  let bin = null;
+  if (found.startsWith("/") && (await executable(found))) bin = found;
+  for (const dir of dirs) {
+    if (bin) break;
+    if (await executable(`${dir}/shprd`)) bin = `${dir}/shprd`;
+  }
+  return { bin, path: dirs.join(":"), looked: dirs };
 }

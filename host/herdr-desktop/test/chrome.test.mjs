@@ -42,10 +42,23 @@ function context() {
   };
 }
 
+/** What the app's `exec` answers: a login shell with `shprd` in cargo's bin, `test -x` yes for it only. */
+function shell(bin = "/Users/me/.cargo/bin/shprd") {
+  return async (command, args) => {
+    if (command === "/bin/zsh") {
+      // a banner in the rc files comes first; the markers still parse.
+      return { code: 0, stdout: `neofetch banner\n\n@@PATH@@/Users/me/.cargo/bin:/usr/bin@@\n@@BIN@@${bin}@@\n`, stderr: "" };
+    }
+    if (command === "test") return { code: args[1] === bin ? 0 : 1, stdout: "", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+}
+
 /** A footer whose first look found nothing, so the start row is live. */
 async function footer() {
   herdr.reset();
   herdr.setSpaces([{ id: "s1", active: true, folder: "/repo/demo" }]);
+  herdr.setExec(shell());
   const run = context();
   const view = new Chrome();
   view.cx = run.cx;
@@ -69,7 +82,12 @@ test("the start is hc run --bg, never the app's bounded exec", async () => {
   assert.equal(name, terminalName("/repo/demo"), "a terminal per repository");
   assert.match(name, /^[a-z0-9_-]{1,32}$/, "a name hc accepts");
   assert.equal(run[run.indexOf("--cwd") + 1], "/repo/demo");
-  assert.deepEqual(run.slice(run.indexOf("--") + 1), ["shprd", "serve"]);
+  // herdr-core's PATH lacks ~/.cargo/bin (SHPR-72): the program is named by its
+  // path and carries the login shell's PATH, never a bare `shprd`.
+  const after = run.slice(run.indexOf("--") + 1);
+  assert.equal(after[0], "/usr/bin/env");
+  assert.match(after[1], /^PATH=\/Users\/me\/\.cargo\/bin:/);
+  assert.deepEqual(after.slice(2), ["/Users/me/.cargo/bin/shprd", "serve"]);
   // A kept terminal that outlived its service holds the name: it is ended first.
   assert.deepEqual(herdr.HC_CALLS[0], ["kill", name]);
 });
@@ -113,7 +131,10 @@ test("SHPR-70: a folder that is not a git repository is served all the same", as
   // The service makes the repository at the person's first chat message; the
   // footer never refuses a folder, and never makes one by showing it.
   const { view } = await footer();
-  herdr.setExec(async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }));
+  const base = shell();
+  herdr.setExec(async (command, args, options) =>
+    command === "git" ? { code: 128, stdout: "", stderr: "fatal: not a git repository" } : base(command, args, options),
+  );
   await view.start("/repo/demo");
   assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "the service was started for it");
   assert.ok(!String(view.failure ?? "").includes("not a git repository"), `no refusal: ${view.failure}`);
@@ -217,4 +238,34 @@ test("a record whose process is alive is never killed or restarted", async () =>
   await view.start("/repo/demo");
   assert.equal(herdr.HC_CALLS.length, 0, "a busy service is left alone");
   assert.equal(view.failure, null);
+});
+
+test("a shprd that is nowhere is said in one plain sentence, and nothing is started", async () => {
+  const { view } = await footer();
+  herdr.setExec(async () => ({ code: 1, stdout: "", stderr: "" }));
+  await view.start("/repo/demo");
+  assert.match(view.failure, /^shprd isn't installed where Herdr can find it \(looked in /);
+  assert.ok(!herdr.HC_CALLS.some((args) => args[0] === "run"), "no terminal was started");
+  assert.equal(herdr.shared("service.status").phase, "failed");
+});
+
+test("hc's JSON spawn error reads as a sentence, not as JSON", async () => {
+  const { view } = await footer();
+  herdr.setHc(async (args) =>
+    args[0] === "run"
+      ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { hint: "check the program name and cwd", kind: "spawn_failed", message: 'cannot start "shprd": No such file or directory (os error 2)' } }) }
+      : { code: 0, stdout: "", stderr: "" },
+  );
+  await view.start("/repo/demo");
+  assert.equal(view.failure, "shprd isn't installed where Herdr can find it");
+});
+
+test("a look that throws shows a reason in the footer, never silence", async () => {
+  const { view } = await footer();
+  view.inspect = async () => {
+    throw new Error("the list broke");
+  };
+  await view.check(view.cx);
+  assert.equal(view.failure, "the list broke");
+  assert.equal(herdr.shared("service.status").phase, "failed");
 });
