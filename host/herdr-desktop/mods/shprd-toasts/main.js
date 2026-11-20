@@ -150,15 +150,17 @@ export default class Toasts extends View {
 
   /** Follows the service's change file, so a poll that died is woken anyway. */
   follow() {
-    if (this.watching || !this.client) return;
-    this.watching = true;
+    if (!this.client || this.watching === this.client.dir) return;
+    // The service follows the shown repository: a new directory is a new watch,
+    // and the loop on the old one ends at its next look.
+    this.watching = this.client.dir;
     const cx = this.cx;
     const dir = this.client.dir;
     cx.spawn(async () => {
       // One watcher for the life of this copy: it used to be re-armed on every
       // change, which left a new followChanges loop (and its host reads)
       // outstanding per ledger write until the runtime's 1024-task limit.
-      await followChanges(dir, () => this.reload(cx));
+      await followChanges(dir, () => this.reload(cx), { stop: () => this.watching !== dir });
     });
   }
 

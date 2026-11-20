@@ -12,10 +12,14 @@
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
-// What is shprd's own here: the state directory is `$XDG_STATE_HOME/shprd`
-// (else `<home>/.local/state/shprd`), `GET /api/health` answers
+// What is shprd's own here: each repository has its own service, and each service
+// its own state directory, `$XDG_STATE_HOME/shprd/repos/<name>-<hash>` (else under
+// `<home>/.local/state`). A mod finds the service for the space the window shows
+// by reading every `repos/*/service.json` and matching the record's `root` with
+// that space's folder (`pickService`), so a second repository never needs the first
+// one stopped. `GET /api/health` answers
 // `{ok, id, version}`, a write needs `x-shprd: 1` beside the bearer token, and
-// the service touches `<state>/shprd/changes` after every ledger write so a mod
+// the service touches `<its state dir>/changes` after every ledger write so a mod
 // can watch a file instead of guessing when to read again (`lib/watch.js`).
 //
 // A mod has no environment of its own (the M7ef spike measured it), so the state
@@ -49,7 +53,7 @@
 //   `catch` drops the client, the next look rediscovers, and the panel fills in
 //   again.
 
-import { exec, home, readTextFile } from "herdr";
+import { exec, home, readTextFile, shared, spaces } from "herdr";
 
 /** The first look at a service gives up after this many ms. */
 export const HEALTH_WAIT = 1500;
@@ -190,15 +194,12 @@ export function forgetStateHome() {
 }
 
 /**
- * Reads and checks `service.json`: `{port, id, pid, version}` or null.
+ * Checks the text of a `service.json`: `{port, id, pid, version, root}` or null.
  *
  * A file that names no usable port is not a service: a stale or half-written
  * record must leave a mod looking rather than dialling whatever holds a port.
- * `read` is injected so a test can drive it without Herdr (`readTextFile`
- * otherwise).
  */
-export async function readServiceRecord(path, read = readTextFile) {
-  const text = await read(path).catch(() => null);
+export function parseServiceRecord(text) {
   if (typeof text !== "string" || text.trim() === "") return null;
   let record;
   try {
@@ -215,7 +216,146 @@ export async function readServiceRecord(path, read = readTextFile) {
     id: record.id,
     pid: Number.isInteger(record.pid) ? record.pid : 0,
     version: typeof record.version === "string" ? record.version : "",
+    root: typeof record.root === "string" ? record.root : "",
   };
+}
+
+/**
+ * Reads and checks `service.json`: `{port, id, pid, version, root}` or null.
+ *
+ * `read` is injected so a test can drive it without Herdr (`readTextFile`
+ * otherwise).
+ */
+export async function readServiceRecord(path, read = readTextFile) {
+  const text = await read(path).catch(() => null);
+  return parseServiceRecord(text);
+}
+
+/** The shell loop that prints every service's directory and record, a line each. */
+export const LIST_SCRIPT =
+  'for f in "$1"/repos/*/service.json; do [ -f "$f" ] || continue; ' +
+  'printf "%s\\t" "${f%/service.json}"; tr -d "\\n" < "$f"; printf "\\n"; done';
+
+/**
+ * Every service this computer has written a record for: `[{dir, record}]`.
+ *
+ * It is one `exec` of a shell loop, because a mod has no directory listing. A
+ * panel asks only when it has no service or the window moved to another space
+ * (a service it already talks to is checked by reading its own record), so it is
+ * not on the hot path. A record does not mean the service is up: [`discover`]
+ * checks it answers.
+ */
+export async function listServices(base, run = exec) {
+  const result = await run("sh", ["-c", LIST_SCRIPT, "sh", base]).catch(() => null);
+  const entries = [];
+  for (const line of String(result?.stdout ?? "").split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab < 1) continue;
+    const record = parseServiceRecord(line.slice(tab + 1));
+    if (record) entries.push({ dir: line.slice(0, tab), record });
+  }
+  return entries;
+}
+
+/** Kept for callers that used to drop a cached list: there is none now. */
+export function forgetServices() {}
+
+/**
+ * A folder as it is compared: no trailing slash, and macOS's `/private` prefix of
+ * `/var`, `/tmp` and `/etc` taken off (a service reports the real path, a space
+ * often the symlinked one).
+ */
+export function normalizeFolder(folder) {
+  let text = String(folder ?? "").trim();
+  while (text.length > 1 && text.endsWith("/")) text = text.slice(0, -1);
+  return text.replace(/^\/private(?=\/(var|tmp|etc)(\/|$))/, "");
+}
+
+/** The last part of a folder: the repository's name, as a person calls it. */
+export function repoName(folder) {
+  const text = normalizeFolder(folder);
+  return text.split("/").filter(Boolean).pop() ?? "";
+}
+
+/**
+ * The service for `folder` among `entries`: the one whose `root` is that folder
+ * or holds it (the deepest wins), else null.
+ *
+ * A window with no shown folder uses the one service there is, so a person who
+ * runs one repository sees what they always did; with several it is ambiguous and
+ * answers null rather than a guess.
+ */
+export function pickService(entries, folder) {
+  const want = folder ? normalizeFolder(folder) : "";
+  if (want === "") return entries.length === 1 ? entries[0] : null;
+  let best = null;
+  for (const entry of entries) {
+    const root = normalizeFolder(entry.record.root);
+    if (root === "") continue;
+    if (want === root || want.startsWith(`${root}/`)) {
+      if (!best || root.length > normalizeFolder(best.record.root).length) best = entry;
+    }
+  }
+  return best;
+}
+
+/** The folder of the space the window shows, or null. */
+export function activeFolder() {
+  try {
+    const space = (spaces() ?? []).find((entry) => entry.active);
+    return space?.folder ? String(space.folder) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The name of the terminal one repository's service runs in: `hc` takes 1-32 of
+ * `a-z 0-9 - _`, and two folders of one name must not share a terminal.
+ */
+export function terminalName(folder) {
+  const path = normalizeFolder(folder);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < path.length; i += 1) {
+    hash ^= path.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const name = (repoName(path).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repo").slice(0, 14);
+  return `sv-${name}-${hash.toString(16).padStart(8, "0")}`;
+}
+
+/** The sentence a dead service's last words give: the last line, without colour codes. */
+export function lastReason(text) {
+  const lines = String(text ?? "")
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const hit = [...lines].reverse().find((line) => /error|refus|cannot|could not|failed|not a /i.test(line));
+  return (hit ?? lines.pop() ?? "").replace(/^error:\s*/i, "").slice(0, 160);
+}
+
+/** The shared key the footer publishes the shown repository's service state under. */
+export const SERVICE_STATUS = "service.status";
+
+/**
+ * Words for a service that is not answering, for the folder the window shows.
+ *
+ * The footer owns starting the service and publishes how it is going; every
+ * other panel says that in one plain sentence instead of telling the person to run
+ * a command. `folder` defaults to the shown space's.
+ */
+export function downNotice(folder = activeFolder()) {
+  if (!folder) return "Open a repository's space to use shprd";
+  const name = repoName(folder) || "this repository";
+  const status = shared(SERVICE_STATUS);
+  if (status && normalizeFolder(status.folder) === normalizeFolder(folder)) {
+    if (status.phase === "starting") return `Starting the service for ${name}…`;
+    if (status.phase === "failed") {
+      return `The service for ${name} could not start: ${status.reason || "no reason given"}`;
+    }
+  }
+  return `The service for ${name} is not up yet`;
 }
 
 /**
@@ -373,30 +513,46 @@ export function singleFlight(owner, work) {
 }
 
 /**
- * Finds the service this computer is running: `{base, dir, record, token,
- * health}` or null when there is none.
+ * Finds the service for the space the window shows: `{base, dir, record, token,
+ * health, folder}` or null when there is none.
+ *
+ * Several repositories can be served at once, each with its own state directory,
+ * so the record is the one whose `root` holds the shown space's folder
+ * ([`pickService`]).
  *
  * The `id` check is the point of the handshake (Shepherdr's GitHub #635): a
  * record left behind by a service that died names a port something else may now
  * hold, and only the service that wrote the record answers its `id`. The token
  * is read *after* that check, so a squatter never receives it.
  *
- * `io` is `{read, fetch, wait, dir}` when a caller supplies its own (a test);
- * the defaults are Herdr's `readTextFile` and the mod runtime's `fetch`.
+ * `io` is `{read, fetch, wait, dir, folder, run}` when a caller supplies its own
+ * (a test); the defaults are Herdr's `readTextFile` and the mod runtime's `fetch`.
+ * `io.dir` names one state directory outright and skips the search.
  */
 export async function discover(io = {}) {
   const read = io.read ?? readTextFile;
   const doFetch = io.fetch ?? fetch;
-  const xdg = io.dir ? {} : (io.xdg ?? (await stateHome(io.run)));
-  const dir = io.dir ?? stateDir(home(), xdg);
-  const record = await readServiceRecord(serviceFile(dir), read);
+  const folder = io.folder === undefined ? activeFolder() : io.folder;
+  let dir = io.dir;
+  let record = null;
+  if (dir) {
+    record = await readServiceRecord(serviceFile(dir), read);
+  } else {
+    const xdg = io.xdg ?? (await stateHome(io.run));
+    const entries = await listServices(stateDir(home(), xdg), io.run);
+    const entry = pickService(entries, folder);
+    if (entry) {
+      dir = entry.dir;
+      record = entry.record;
+    }
+  }
   if (!record) return null;
   const base = baseUrl(record);
   const health = await getJson(doFetch, `${base}/api/health`, io.wait ?? null);
   if (!health || health.id !== record.id) return null;
   const token = await readToken(tokenFile(dir), read);
   if (!token) return null;
-  return { base, dir, record, token, health };
+  return { base, dir, record, token, health, folder: folder ?? null };
 }
 
 /**
@@ -408,7 +564,7 @@ export async function discover(io = {}) {
  */
 export class Client {
   /**
-   * @param {{base: string, dir: string, record: object, token: string}} found
+   * @param {{base: string, dir: string, record: object, token: string, folder?: string}} found
    *   what `discover` answered
    * @param {{fetch?: Function, wait?: Function}} [io] the runtime's own `fetch`
    *   and its "give up after" helper; a test passes its own
@@ -417,6 +573,7 @@ export class Client {
     this.base = found.base;
     this.dir = found.dir;
     this.record = found.record;
+    this.folder = found.folder ?? null;
     this.token = found.token;
     this.fetch = io.fetch ?? fetch;
     this.wait = io.wait ?? null;
@@ -675,6 +832,13 @@ export async function attach(current, io = {}) {
   if (!current) {
     const found = await find();
     return { client: found ? make(found) : null, restarted: false };
+  }
+  // The window moved to another repository's space: that is another service, and
+  // everything the panel kept belongs to the one it left.
+  const folder = io.folder === undefined ? activeFolder() : io.folder;
+  if ((folder ?? null) !== (current.folder ?? null)) {
+    const found = await find();
+    return { client: found ? make(found) : null, restarted: true };
   }
   const record = await readServiceRecord(serviceFile(current.dir), read);
   if (record && record.id === current.id()) return { client: current, restarted: false };

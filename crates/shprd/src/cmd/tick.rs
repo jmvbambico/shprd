@@ -199,7 +199,7 @@ pub(crate) fn worker_with_hub(
     Ok(Worker {
         repo,
         home: home.to_path_buf(),
-        state_dir: shprd_server::state_dir(&crate::ctx::resolve_state_home(home)),
+        state_dir: shprd_server::repo_state_dir(&crate::ctx::resolve_state_home(home), &ctx.root),
         config,
         facts,
         fallback,

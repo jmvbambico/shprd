@@ -34,7 +34,7 @@ import {
 const HOME = "/home/ana";
 
 /** The state directory under [`HOME`], with the XDG defaults. */
-const DIR = stateDir(HOME, {});
+const DIR = `${stateDir(HOME, {})}/repos/shop-1`;
 
 /** A fake `fetch`: `routes` maps a URL path to `{status, body}` or a function. */
 function fakeFetch(routes) {
@@ -95,7 +95,7 @@ function context() {
  * restart replaces: the record, the token and the health answer behind it.
  */
 function serve(id, port = 7788) {
-  herdr.putFile(serviceFile(DIR), JSON.stringify({ port, id, pid: 42 }));
+  herdr.putFile(serviceFile(DIR), JSON.stringify({ port, id, pid: 42, root: "/work/shop" }));
   herdr.putFile(tokenFile(DIR), "token-1\n");
   return { "/api/health": { body: { ok: true, id, version: "0.0.0" } } };
 }
@@ -300,7 +300,8 @@ test("a panel whose service stopped says so instead of keeping the old board", a
 
     assert.equal(view.state, null, "no old board is left to paint");
     assert.equal(view.client, null);
-    assert.equal(view.failure, "shprd serve is not running");
+    assert.match(view.failure, /space|service/);
+    assert.doesNotMatch(view.failure, /shprd serve/, "the panel never tells a person to run a command");
   } finally {
     globalThis.fetch = real;
   }

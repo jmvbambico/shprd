@@ -83,7 +83,10 @@ fn worth_a_warning(state: &RunState, last: &shprd_server::LastPass) -> bool {
 fn last_pass(ctx: &Ctx, home: Option<&Path>) -> Option<shprd_server::LastPass> {
     let home = resolve_home(home).ok()?;
     let state_home = crate::ctx::resolve_state_home(&home);
-    shprd_server::LastPass::read(&shprd_server::state_dir(&state_home), &ctx.root)
+    shprd_server::LastPass::read(
+        &shprd_server::repo_state_dir(&state_home, &ctx.root),
+        &ctx.root,
+    )
 }
 
 /// `shprd pr-body`: the pull-request body: the log, rendered as Markdown.

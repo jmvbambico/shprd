@@ -31,7 +31,7 @@ import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
 import { closeOverlay, props, run, spaces, theme } from "herdr";
 
-import { attach, reason } from "./lib/client.js";
+import { attach, downNotice, reason } from "./lib/client.js";
 import { agentChoices, firstPickable, MENU, NEW_WORDS, newMenu, stepPick } from "./lib/menu.js";
 import { menuRow, openAddTask, openNewSpace } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
@@ -130,7 +130,7 @@ export default class NewMenu extends View {
     try {
       const next = await attach(this.client, { wait: (ms) => this.cx?.sleep?.(ms) });
       if (!next.client) {
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         this.cx?.notify?.();
         return;
       }

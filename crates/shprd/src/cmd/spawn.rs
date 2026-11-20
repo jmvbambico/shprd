@@ -3104,9 +3104,9 @@ pub(crate) fn coordinator_pane(mux: &dyn Host, home: &Path, ctx: &Ctx) -> Result
 /// The refusal a coordinator with no recorded pane earns.
 fn no_coordinator(space: &str) -> CliError {
     CliError::Invalid(anyhow!(
-        "no coordinator is running in the space {space:?}: `shprd serve` starts it when it \
-         starts (the `coordinator` role's program), so start the service or restart it, then \
-         send again — nothing was typed"
+        "no coordinator is running in the space {space:?} yet: the service for this \
+         repository starts it with the space (the `coordinator` role's program), and it is \
+         still starting or could not — nothing was typed, send again in a moment"
     ))
 }
 

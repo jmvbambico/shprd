@@ -53,7 +53,7 @@ impl Fixture {
     }
 
     fn state(&self) -> PathBuf {
-        self.home.path().join(".local/state/shprd")
+        shprd_server::repo_state_dir(&self.home.path().join(".local/state"), self.home.path())
     }
 
     fn set_password(&self) {
@@ -97,6 +97,7 @@ impl Fixture {
                 .arg(&home)
                 .env("HOME", &home)
                 .env("SHPRD_HOME", &home)
+                .env("SHPRD_REPO", &home)
                 .env_remove("XDG_STATE_HOME")
                 .env_remove("XDG_CONFIG_HOME")
                 .stdin(Stdio::null())

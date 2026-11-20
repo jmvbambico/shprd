@@ -23,7 +23,11 @@ import {
   changeFile,
   describe,
   discover,
+  downNotice,
   forgetStateHome,
+  normalizeFolder,
+  pickService,
+  repoName,
   probeStateDir,
   readServiceRecord,
   readToken,
@@ -91,7 +95,7 @@ test("service.json is accepted only with a usable port and an id", async () => {
   const good = '{"port": 7788, "id": "abc", "pid": 12, "version": "0.1.0"}';
   assert.deepEqual(
     await readServiceRecord("/f", async () => good),
-    { port: 7788, id: "abc", pid: 12, version: "0.1.0" },
+    { port: 7788, id: "abc", pid: 12, version: "0.1.0", root: "" },
   );
 
   const read = (text) => async () => text;
@@ -179,8 +183,8 @@ test("a record with no token beside it is no service", async () => {
 
 test("discovery is probed from the home when no directory is given", async () => {
   herdr.setHome("/home/ana");
-  const dir = stateDir("/home/ana", {});
-  herdr.putFile(serviceFile(dir), '{"port": 9000, "id": "abc"}');
+  const dir = `${stateDir("/home/ana", {})}/repos/shop-1`;
+  herdr.putFile(serviceFile(dir), '{"port": 9000, "id": "abc", "root": "/work/shop"}');
   herdr.putFile(tokenFile(dir), "token-1");
   const doFetch = fakeFetch({ "/api/health": { body: { id: "abc" } } });
   const found = await discover({ fetch: doFetch });
@@ -209,13 +213,15 @@ test("a mod with no environment asks the shell where the state directory is", as
 
   // And `discover` uses it, which is the whole point: the record is looked for
   // under what the shell said, not under the XDG default.
-  herdr.putFile("/var/state/shprd/service.json", '{"port": 7788, "id": "abc"}');
-  herdr.putFile("/var/state/shprd/token", "token-1");
+  herdr.putFile("/var/state/shprd/repos/shop-1/service.json", '{"port": 7788, "id": "abc", "root": "/work/shop"}');
+  herdr.putFile("/var/state/shprd/repos/shop-1/token", "token-1");
+  const exec = herdr.exec;
   const found = await discover({
-    run,
+    run: (command, args) =>
+      command === "sh" && args[2] === "sh" ? exec(command, args) : run(command, args),
     fetch: fakeFetch({ "/api/health": { body: { id: "abc" } } }),
   });
-  assert.equal(found.dir, "/var/state/shprd");
+  assert.equal(found.dir, "/var/state/shprd/repos/shop-1");
   assert.equal(found.base, "http://127.0.0.1:7788");
   forgetStateHome();
 });
@@ -605,4 +611,75 @@ test("attach looks once more before believing a null", async () => {
   };
   const next = await attach(null, io);
   assert.ok(next.client, "the second look found the service");
+});
+
+// -- several repositories, one service each (SHPR-68) -------------------------
+
+/** A service per repository, as two `shprd serve` runs write them. */
+function twoServices() {
+  const base = stateDir("/home/ana", {});
+  herdr.setHome("/home/ana");
+  for (const [name, root, port, id] of [
+    ["shop-1", "/work/shop", 7001, "id-shop"],
+    ["pad-2", "/work/scratchpad", 7002, "id-pad"],
+  ]) {
+    herdr.putFile(serviceFile(`${base}/repos/${name}`), JSON.stringify({ port, id, pid: 1, root }));
+    herdr.putFile(tokenFile(`${base}/repos/${name}`), `token-${name}\n`);
+  }
+  return fakeFetch({
+    "/api/health": (url) => ({ body: { id: new URL(url).port === "7001" ? "id-shop" : "id-pad" } }),
+  });
+}
+
+test("the service found is the one for the space the window shows", async () => {
+  const doFetch = twoServices();
+  const shop = await discover({ fetch: doFetch, folder: "/work/shop" });
+  const pad = await discover({ fetch: doFetch, folder: "/work/scratchpad" });
+  assert.equal(shop.base, "http://127.0.0.1:7001");
+  assert.equal(pad.base, "http://127.0.0.1:7002");
+  assert.equal(shop.token, "token-shop-1", "each service's own token");
+  assert.equal(await discover({ fetch: doFetch, folder: "/work/other" }), null, "no service for another repo");
+  // With no space shown and two services there is no honest pick.
+  assert.equal(await discover({ fetch: doFetch, folder: null }), null);
+});
+
+test("a space under the repository's folder, or a symlinked path, finds its service", () => {
+  const entries = [
+    { dir: "/s/a", record: { root: "/private/var/work/shop" } },
+    { dir: "/s/b", record: { root: "/private/var/work/shop/vendor" } },
+  ];
+  assert.equal(pickService(entries, "/var/work/shop/")?.dir, "/s/a");
+  assert.equal(pickService(entries, "/var/work/shop/vendor/x")?.dir, "/s/b", "the deepest root wins");
+  assert.equal(pickService(entries, "/var/work/shopping"), null, "a prefix of the name is not a parent");
+  assert.equal(normalizeFolder("/private/tmp/x/"), "/tmp/x");
+  assert.equal(repoName("/work/shop/"), "shop");
+});
+
+test("moving to another repository's space is a new client and a restart", async () => {
+  const doFetch = twoServices();
+  const made = await attach(null, { fetch: doFetch, folder: "/work/shop" });
+  assert.equal(made.client.base, "http://127.0.0.1:7001");
+  const same = await attach(made.client, { fetch: doFetch, folder: "/work/shop" });
+  assert.equal(same.client, made.client);
+  assert.equal(same.restarted, false);
+  const moved = await attach(made.client, { fetch: doFetch, folder: "/work/scratchpad" });
+  assert.equal(moved.client.base, "http://127.0.0.1:7002");
+  assert.equal(moved.restarted, true, "everything kept for the repo left is thrown away");
+  const none = await attach(moved.client, { fetch: doFetch, folder: "/work/new" });
+  assert.equal(none.client, null);
+  assert.equal(none.restarted, true);
+});
+
+test("a panel without a service says which repository and why, never a command", () => {
+  herdr.setSpaces([{ id: "s1", active: true, folder: "/work/shop" }]);
+  assert.equal(downNotice(), "The service for shop is not up yet");
+  herdr.setShared("service.status", { folder: "/work/shop", phase: "starting" });
+  assert.equal(downNotice(), "Starting the service for shop…");
+  herdr.setShared("service.status", { folder: "/work/shop", phase: "failed", reason: "no git repository" });
+  assert.equal(downNotice(), "The service for shop could not start: no git repository");
+  herdr.setShared("service.status", { folder: "/work/other", phase: "starting" });
+  assert.equal(downNotice(), "The service for shop is not up yet", "another repo's status is not this one's");
+  herdr.setSpaces([]);
+  assert.equal(downNotice(), "Open a repository's space to use shprd");
+  assert.doesNotMatch(downNotice("/work/shop"), /shprd serve/);
 });

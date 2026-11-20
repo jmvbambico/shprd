@@ -87,12 +87,23 @@ engine validates every one:
 
 ## The service
 
-`shprd serve` binds 127.0.0.1 only. It writes `service.json` (port, id, pid,
-version) and a bearer `token` to `$XDG_STATE_HOME/shprd/`; a client reads the port
-there rather than guessing. On a clean stop it removes `service.json`. The same
-folder holds the remote files: `web-auth.json` (the password's argon2id hash),
-`sessions.json` (the SHA-256 of each session id, never the id) and `web.json`
-(the tunnel's record). All are private to you (mode 0600).
+`shprd serve` binds 127.0.0.1 only. It serves one repository, and every repository
+has its own service: its files live in `$XDG_STATE_HOME/shprd/repos/<name>-<hash>/`
+(`<name>` is the folder's name, `<hash>` an FNV-1a hash of its full path), so a second
+repository's service never needs the first one stopped, and each has its own port. It
+writes `service.json` (port, id, pid, version, `root`: the repository's path) and a
+bearer `token` there; a client finds the service for the space it shows by matching
+`root` with the space's folder, and reads the port from the record rather than guessing.
+On a clean stop it removes `service.json`. The same folder holds that service's remote
+files: `web-auth.json` (the password's argon2id hash), `sessions.json` (the SHA-256 of
+each session id, never the id) and `web.json` (the tunnel's record), so `shprd web`
+works on the repository you run it in (or `--repo`). All are private to you (mode
+0600). A state directory still allows one service at a time.
+
+The Herdr desktop starts the service itself: its footer starts `shprd serve` (a core
+terminal per repository) when the shown space's repository has none, and says which
+repository's service the space uses and whether it is up, with the reason in plain
+words when a start fails. Nobody types `shprd serve`.
 
 The web app (`web/dist`, embedded in the binary) is served from the same
 listener: any path that is not `/api…` is an asset, or `index.html` for an

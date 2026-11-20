@@ -32,7 +32,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, ScrollHandle, TextView, h_flex, v_flex } from "gpui-base";
 import { exec, props, shared, theme } from "herdr";
 
-import { attach, reason, singleFlight } from "./lib/client.js";
+import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
   COORDINATOR,
@@ -158,7 +158,7 @@ export default class Chat extends View {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
         this.client = null;
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         cx.notify();
         return;
       }
@@ -205,11 +205,14 @@ export default class Chat extends View {
 
   /** Follows the service's change file for as long as this copy lives. */
   follow() {
-    if (this.watching || !this.client) return;
-    this.watching = true;
+    if (!this.client || this.watching === this.client.dir) return;
+    // The service follows the shown repository: a new directory is a new watch,
+    // and the loop on the old one ends at its next look.
+    this.watching = this.client.dir;
     const cx = this.cx;
+    const dir = this.client.dir;
     cx.spawn(async () => {
-      await followChanges(this.client.dir, () => this.refresh(cx));
+      await followChanges(dir, () => this.refresh(cx), { stop: () => this.watching !== dir });
     });
   }
 
@@ -218,7 +221,7 @@ export default class Chat extends View {
     const body = outgoing(this.space, this.input.value());
     if (body === null || this.sending) return;
     if (!this.client) {
-      this.refusal = "shprd serve is not running";
+      this.refusal = downNotice();
       this.cx.notify();
       return;
     }

@@ -98,7 +98,7 @@ pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
 pub use service::{
     AfterWrite, Config, PassNotice, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig,
-    VERSION, serve, shutdown_signal, state_dir, state_home,
+    VERSION, repo_state_dir, serve, shutdown_signal, state_dir, state_home,
 };
 pub use shprd_remote::AllowedHosts;
 pub use snapshot::NO_RUN_HINT;

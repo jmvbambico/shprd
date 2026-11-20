@@ -43,7 +43,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, spaces, theme } from "herdr";
 
-import { attach, reason, singleFlight } from "./lib/client.js";
+import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { MENU, closeWords, menuHeight, menuItems } from "./lib/spaces.js";
 import { plainSpaces, spaceTree } from "./lib/tree.js";
 import { note, openNewSpace, openThread, statusGlyph } from "./lib/panel.js";
@@ -150,7 +150,7 @@ export default class Spaces extends View {
       if (!next.client) {
         this.client = null;
         this.state = null;
-        this.failure = "shprd serve is not running";
+        this.failure = downNotice();
         cx.notify();
         return;
       }
@@ -169,11 +169,14 @@ export default class Spaces extends View {
 
   /** Follows the service's change file for as long as this copy lives. */
   follow() {
-    if (this.watching || !this.client) return;
-    this.watching = true;
+    if (!this.client || this.watching === this.client.dir) return;
+    // The service follows the shown repository: a new directory is a new watch,
+    // and the loop on the old one ends at its next look.
+    this.watching = this.client.dir;
     const cx = this.cx;
+    const dir = this.client.dir;
     cx.spawn(async () => {
-      await followChanges(this.client.dir, () => this.refresh(cx));
+      await followChanges(dir, () => this.refresh(cx), { stop: () => this.watching !== dir });
     });
   }
 

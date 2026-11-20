@@ -34,7 +34,7 @@ export const JUMP_WORDS = {
   loading: "Reading the board…",
   none: "Nothing found. Try fewer words.",
   empty: "Nothing here.",
-  down: "shprd serve is not running: only this window's spaces are listed.",
+  down: "This repository's service is not up yet: only this window's spaces are listed.",
 };
 
 /** The group headings, in the order they are drawn. */

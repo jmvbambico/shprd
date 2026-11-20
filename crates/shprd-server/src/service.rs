@@ -29,6 +29,43 @@ pub fn state_dir(state_home: &Path) -> PathBuf {
     state_home.join("shprd")
 }
 
+/// Where the service for the repository at `root` keeps its files:
+/// `<state_home>/shprd/repos/<name>-<hash>`.
+///
+/// One state directory serves one repository (the directory's lock allows one
+/// service), so several repositories are served at once by giving each its own
+/// directory under `repos/`. The name is the folder's name, for a person looking
+/// at the disk; the hash (FNV-1a over the whole path) keeps two folders of the
+/// same name apart. Everything a service owns lives in it: the discovery record,
+/// the token, the change file, the web password, the sessions and the tunnel's
+/// record.
+pub fn repo_state_dir(state_home: &Path, root: &Path) -> PathBuf {
+    // The same folder reached through a symlink (macOS's `/var` and `/private/var`)
+    // is one repository, so it is one directory.
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root.display().to_string().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let name: String = root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("repo")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    state_dir(state_home)
+        .join("repos")
+        .join(format!("{name}-{hash:016x}"))
+}
+
 /// The state home for `home`: `xdg_state_home` (the `$XDG_STATE_HOME` the caller
 /// read) when it names a directory, else `<home>/.local/state`.
 ///
@@ -58,6 +95,11 @@ pub struct ServiceRecord {
     pub pid: u32,
     /// The service's version.
     pub version: String,
+    /// The repository this service serves (an absolute path), so a client with
+    /// several services running picks the one for the space it shows. Empty in a
+    /// record an older service wrote.
+    #[serde(default)]
+    pub root: String,
 }
 
 /// A step the binary runs after an action appended an event.
@@ -94,6 +136,8 @@ pub struct ServiceFiles {
     dir: PathBuf,
     token: String,
     id: String,
+    /// The repository this service serves, written into the record.
+    root: String,
     /// The lock this service holds for its state directory, for its whole life.
     ///
     /// Only one service can be found through one `service.json`, so only one is
@@ -132,8 +176,17 @@ impl ServiceFiles {
             dir: dir.to_path_buf(),
             token,
             id: random_hex(16)?,
+            root: String::new(),
             _lock: lock,
         })
+    }
+
+    /// Names the repository this service serves, so `service.json` carries it.
+    #[must_use]
+    pub fn with_root(mut self, root: &Path) -> Self {
+        let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        self.root = root.display().to_string();
+        self
     }
 
     /// The directory the files live in.
@@ -168,6 +221,7 @@ impl ServiceFiles {
             id: self.id.clone(),
             pid: std::process::id(),
             version: VERSION.to_string(),
+            root: self.root.clone(),
         };
         let text = serde_json::to_string(&record).map_err(|source| ServerError::Json {
             what: "service.json",
@@ -970,6 +1024,7 @@ mod tests {
             id: String::from("a-start-that-died"),
             pid: dead,
             version: VERSION.to_string(),
+            root: String::new(),
         };
         let path = dir.path().join("service.json");
         fs::write(
@@ -1004,6 +1059,7 @@ mod tests {
             id: String::from("a-start-that-is-dying"),
             pid: dead_pid(),
             version: VERSION.to_string(),
+            root: String::new(),
         };
         fs::write(
             dir.path().join("service.json"),
@@ -1035,6 +1091,7 @@ mod tests {
             id: String::from("a-live-start"),
             pid: std::process::id(),
             version: VERSION.to_string(),
+            root: String::new(),
         };
         fs::write(
             dir.path().join("service.json"),
@@ -1142,5 +1199,40 @@ mod tests {
             !info.service_json.exists(),
             "service.json is removed on a clean shutdown"
         );
+    }
+
+    #[test]
+    fn each_repository_gets_its_own_state_directory_under_the_one_home() {
+        let home = Path::new("/state");
+        let one = repo_state_dir(home, Path::new("/work/shop"));
+        let two = repo_state_dir(home, Path::new("/work/scratchpad"));
+        let same_name = repo_state_dir(home, Path::new("/other/shop"));
+        assert!(one.starts_with("/state/shprd/repos"), "{one:?}");
+        assert_ne!(one, two);
+        assert_ne!(one, same_name, "two folders of one name stay apart");
+        assert_eq!(one, repo_state_dir(home, Path::new("/work/shop")));
+        // A golden vector: the path-to-folder rule is a contract the docs name.
+        assert_eq!(
+            one.file_name().and_then(|n| n.to_str()),
+            Some("shop-55b59e8ddb35f8b8")
+        );
+    }
+
+    #[test]
+    fn two_repositories_are_served_from_one_state_home_at_once() {
+        let home = tempfile::tempdir().expect("home");
+        let a = repo_state_dir(home.path(), Path::new("/work/a"));
+        let b = repo_state_dir(home.path(), Path::new("/work/b"));
+        let first = ServiceFiles::prepare(&a)
+            .expect("the first repository's service")
+            .with_root(Path::new("/work/a"));
+        let second = ServiceFiles::prepare(&b)
+            .expect("a second repository never needs the first one stopped")
+            .with_root(Path::new("/work/b"));
+        let one = first.write_record(1111).expect("write one");
+        let two = second.write_record(2222).expect("write two");
+        assert_eq!(one.root, "/work/a");
+        assert_eq!(two.root, "/work/b");
+        assert!(first.owns_record() && second.owns_record());
     }
 }
