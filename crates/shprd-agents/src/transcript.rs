@@ -491,12 +491,16 @@ fn strip_hc_tags(text: &str) -> String {
             let open = &after[..gt];
             let mut tail = &after[gt + 1..];
             if !open.ends_with('/') {
-                // An opener: only a task mention's block goes, wrapper and words.
-                match (open.contains("task="), tail.find("</hc>")) {
-                    (true, Some(end)) => tail = &tail[end + "</hc>".len()..],
-                    _ => {
-                        out.push_str(&rest[at..at + 3 + gt + 1]);
+                // An opener. A task mention's block and a host notice (no
+                // sender) go whole; another agent's wrapper (`from=`) goes and
+                // its words stay.
+                match tail.find("</hc>") {
+                    Some(end) if open.contains("from=") && !open.contains("task=") => {
+                        out.push_str(&tail[..end]);
+                        tail = &tail[end + "</hc>".len()..];
                     }
+                    Some(end) => tail = &tail[end + "</hc>".len()..],
+                    None => {}
                 }
             }
             rest = tail.strip_prefix('\n').unwrap_or(tail);
@@ -1951,7 +1955,8 @@ mod tests {
     #[test]
     fn hc_markup_is_never_shown_raw() {
         let parse = |role: &str, text: &str| {
-            let value = serde_json::json!({"type": role, "message": {"role": role, "content": text}});
+            let value =
+                serde_json::json!({"type": role, "message": {"role": role, "content": text}});
             parse_line(TranscriptFormat::ClaudeJsonl, &line(&value))
         };
         // A host notice has no sender: hidden.
@@ -1972,8 +1977,17 @@ mod tests {
         let code = parse("assistant", "Write `<hc react=\"👀\"/>` on a line").unwrap();
         assert!(code.text.contains("<hc react"), "{}", code.text);
         // A task mention's block goes whole.
-        let task = parse("user", "look at <hc task=\"T1\" title=\"x\">prompt</hc>this").unwrap();
+        let task = parse(
+            "user",
+            "look at <hc task=\"T1\" title=\"x\">prompt</hc>this",
+        )
+        .unwrap();
         assert!(!task.text.contains("<hc"), "{}", task.text);
+        // A notice among other words goes whole; a sender's wrapper keeps its words.
+        let mixed = parse("user", "ok\n<hc>t9v exited (signal 1)</hc>\nnext").unwrap();
+        assert_eq!(mixed.text, "ok\nnext");
+        let from = parse("user", "see <hc from=\"t7 x\">done</hc> ok").unwrap();
+        assert_eq!(from.text, "see done ok");
     }
 
     #[test]
