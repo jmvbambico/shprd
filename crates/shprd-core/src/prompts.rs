@@ -188,11 +188,24 @@ const ASSISTANT_PRE_IDENTITY: &str =
 const ASSISTANT_PRE_IDENTITY_DIGEST: &str =
     "41298d28d3c74f5dfb9844e5ae33254dfc940a61e3b327b1411e83498b46e185";
 
+/// The coordinator wording that opened with its identity but only said "never
+/// write code yourself": a Sonnet coordinator asked "add a hello.py that prints
+/// hi" wrote the file. Today's words say every ask that changes the repository
+/// is a task, however it is worded.
+#[cfg(test)]
+const ASSISTANT_M11_IDENTITY: &str =
+    include_str!("../../../data/templates/history/assistant-m11-identity.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_IDENTITY`].
+const ASSISTANT_M11_IDENTITY_DIGEST: &str =
+    "7845593091f7af65662ce6df93571183751c0d5e15be1d1ec3438a0a999839c3";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
     ASSISTANT_ASKS_RAISE_DIGEST,
     ASSISTANT_PRE_IDENTITY_DIGEST,
+    ASSISTANT_M11_IDENTITY_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet

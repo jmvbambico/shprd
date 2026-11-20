@@ -37,6 +37,7 @@ use shprd_git::git::Git;
 use shprd_git::worktree::{self, Layout, Worktree};
 use shprd_mux::{AgentState, Host, PaneId};
 
+use crate::cmd::folder_trust;
 use crate::ctx::{CliError, Ctx};
 
 /// How long one model listing may take while a spawn decides whether to pass an
@@ -734,7 +735,7 @@ pub(crate) fn open_agent(
     // contract. The brief still follows as its own turn, because a host starts
     // a program and never types for it.
     let program = program_of(env.programs.as_slice(), &pick.agent)?;
-    let (argv, brief_in_args) = launch_argv(
+    let (mut argv, brief_in_args) = launch_argv(
         &pick.launch,
         &program.spec,
         applied,
@@ -743,7 +744,8 @@ pub(crate) fn open_agent(
         brief,
         brief_path,
     )?;
-    let pairs = env_pairs(launch_env(
+    trust_launch_folder(&pick.agent, &worktree.path, &env.base_env, &mut argv);
+    let mut pairs = env_pairs(launch_env(
         &env.base_env,
         EnvRole::Worker,
         &EnvContext {
@@ -756,6 +758,15 @@ pub(crate) fn open_agent(
             data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
+    // A worker the coordinator's own `shprd tick` starts inherits the
+    // coordinator's shell, so a coordinator-only permission rule is removed.
+    if env
+        .base_env
+        .get(folder_trust::OPENCODE_PERMISSION)
+        .is_some_and(|value| folder_trust::is_coordinator_rule(value))
+    {
+        pairs.push((folder_trust::OPENCODE_PERMISSION.to_string(), None));
+    }
     // The coordinator that is running in the repository's space is the agent's
     // parent, so the host can keep it under a restarted coordinator; none
     // running leaves it parentless, which is a worker all the same.
@@ -2757,7 +2768,7 @@ pub(crate) fn ensure_coordinator(
     let prompt = role_prompt(env, COORDINATOR_ROLE)?;
     let brief_path = env.briefs_dir.join("coordinator.md");
     write_brief(&brief_path, &prompt)?;
-    let (argv, brief_in_args) = launch_argv(
+    let (mut argv, brief_in_args) = launch_argv(
         &pick.launch,
         &program.spec,
         &chosen,
@@ -2766,7 +2777,12 @@ pub(crate) fn ensure_coordinator(
         &prompt,
         &brief_path,
     )?;
-    let pairs = env_pairs(launch_env(
+    // The repository is the person's own, so no first-run dialog asks about it;
+    // and the coordinator plans the work, it never edits it.
+    trust_launch_folder(&pick.agent, &env.ctx.root, &env.base_env, &mut argv);
+    let guard = folder_trust::coordinator_guard(&pick.agent);
+    argv.extend(guard.args);
+    let mut pairs = env_pairs(launch_env(
         &env.base_env,
         EnvRole::Orchestrator,
         &EnvContext {
@@ -2779,6 +2795,12 @@ pub(crate) fn ensure_coordinator(
             data: env.data_dir.env_value().map(Path::to_path_buf),
         },
     ));
+    pairs.extend(
+        guard
+            .env
+            .into_iter()
+            .map(|(name, value)| (name, Some(value))),
+    );
     // The starter shell is whatever the space held before the coordinator, except
     // a tab named "Assistant": that is another product's, added to a space the
     // moment it exists, and never ours to close.
@@ -3411,6 +3433,23 @@ pub(crate) fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<
         }
     }
     best.map(|(_, path)| path)
+}
+
+/// Tells the program its launch folder is trusted, so its own first-run dialog
+/// never opens in the pane. A trust that cannot be said is only a note on stderr:
+/// the dialog it was meant to prevent is still answered from the pane.
+fn trust_launch_folder(
+    program: &str,
+    folder: &Path,
+    base_env: &BTreeMap<String, String>,
+    argv: &mut Vec<String>,
+) {
+    if let Err(err) = folder_trust::trust_folder(program, folder, base_env, argv) {
+        eprintln!(
+            "shprd: could not mark {} as trusted for {program}: {err}",
+            folder.display()
+        );
+    }
 }
 
 /// Builds the argv the agent's CLI starts with.
@@ -4698,6 +4737,135 @@ project_dirs = []
 
         let argv = coordinator_argv(&mux);
         assert!(argv.iter().any(|arg| arg == "opus[1m]"), "{argv:?}");
+    }
+
+    /// The environment a launched program would inherit, with a private home so
+    /// a trust entry never reaches the real `~/.claude.json`.
+    fn private_env(env: &mut SpawnEnv<'_>, home: &Path) {
+        env.base_env
+            .insert("HOME".to_string(), home.display().to_string());
+    }
+
+    fn coordinator_env(mux: &FakeMux) -> Vec<(String, Option<String>)> {
+        mux.calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Spawn(_, _, _, env, _) => Some(env),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// SHPR-71: a claude coordinator is launched without its edit tools and in
+    /// a repository it already trusts, so no folder dialog opens.
+    #[test]
+    fn a_claude_coordinator_cannot_edit_and_its_folder_is_already_trusted() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let home = tempfile::TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mut env = scratch.spawn_env_with(&ctx, COORDINATOR_ON_CLAUDE);
+        private_env(&mut env, home.path());
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        env.workers = Vec::new();
+        let mux = FakeMux::default().with_ready_agent();
+
+        started(&mux, &env, &scratch).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = coordinator_argv(&mux);
+        let at = argv
+            .iter()
+            .position(|arg| arg == "--disallowedTools")
+            .unwrap_or_else(|| panic!("the edit tools are refused: {argv:?}"));
+        assert!(argv[at + 1].starts_with("Edit,Write"), "{argv:?}");
+        let text = std::fs::read_to_string(home.path().join(".claude.json"))
+            .unwrap_or_else(|err| panic!("no trust entry written: {err}"));
+        let doc: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|err| panic!("{err}"));
+        let key = scratch.root().display().to_string();
+        assert_eq!(doc["projects"][&key]["hasTrustDialogAccepted"], true);
+    }
+
+    /// SHPR-71: a claude worker's worktree is trusted too, and it is not
+    /// refused its edit tools.
+    #[test]
+    fn a_claude_worker_is_trusted_in_its_worktree_and_keeps_its_edit_tools() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let home = tempfile::TempDir::new().unwrap_or_else(|err| panic!("{err}"));
+        let mut env = scratch.spawn_env_with(&ctx, "[roles.worker]\nagent = \"claude\"\n");
+        private_env(&mut env, home.path());
+        env.programs = vec![Program {
+            spec: claude_spec(),
+            installed: true,
+        }];
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+
+        let report = spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+
+        let argv = spawn_argv(&mux.calls());
+        assert!(
+            !argv.iter().any(|arg| arg == "--disallowedTools"),
+            "{argv:?}"
+        );
+        let text = std::fs::read_to_string(home.path().join(".claude.json"))
+            .unwrap_or_else(|err| panic!("no trust entry written: {err}"));
+        let doc: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|err| panic!("{err}"));
+        let key = report.worktree.display().to_string();
+        assert_eq!(doc["projects"][&key]["hasTrustDialogAccepted"], true);
+    }
+
+    /// SHPR-71: an opencode coordinator is told by its environment to deny
+    /// edits; the workers it starts from its own shell are not.
+    #[test]
+    fn an_opencode_coordinators_edit_rule_never_reaches_its_workers() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env_with(&ctx, "[roles.coordinator]\nagent = \"opencode\"\n");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/harness");
+        let opencode = shprd_agents::spec::load_dir(&dir)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .into_iter()
+            .find(|spec| spec.id == "opencode")
+            .unwrap_or_else(|| panic!("no opencode spec"));
+        env.programs = vec![Program {
+            spec: opencode,
+            installed: true,
+        }];
+        env.workers = Vec::new();
+        let mux = FakeMux::default().with_ready_agent();
+        started(&mux, &env, &scratch).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            coordinator_env(&mux).contains(&(
+                "OPENCODE_PERMISSION".to_string(),
+                Some("{\"edit\":\"deny\"}".to_string())
+            )),
+            "{:?}",
+            coordinator_env(&mux)
+        );
+
+        // The worker inherits the coordinator's shell: its launch removes it.
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let mut env = scratch.spawn_env(&ctx);
+        env.base_env.insert(
+            "OPENCODE_PERMISSION".to_string(),
+            "{\"edit\":\"deny\"}".to_string(),
+        );
+        let mux = FakeMux::default().with_ready_agent();
+        mux.create_space(&repo_space_name(&scratch.repo_name()), scratch.root())
+            .unwrap_or_else(|err| panic!("{err}"));
+        spawn(&mux, &env, &request()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            coordinator_env(&mux).contains(&("OPENCODE_PERMISSION".to_string(), None)),
+            "{:?}",
+            coordinator_env(&mux)
+        );
     }
 
     /// A program that dies as it starts is an error with its exit and what it

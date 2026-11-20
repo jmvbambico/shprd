@@ -9,6 +9,7 @@ pub mod dagr;
 pub mod deliver;
 pub mod doctor;
 pub mod drop;
+pub mod folder_trust;
 pub mod fullgate;
 pub mod handoff;
 pub mod install;

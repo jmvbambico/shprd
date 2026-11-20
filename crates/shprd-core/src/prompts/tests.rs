@@ -573,3 +573,44 @@ fn the_pre_identity_defaults_are_retired_and_upgrade() {
         assert_eq!(installed.change, Change::Upgraded, "{id}: {installed:?}");
     }
 }
+
+/// SHPR-71: the identity-era coordinator wording is retired and upgrades.
+#[test]
+fn the_identity_era_coordinator_words_are_retired_and_upgrade() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_M11_IDENTITY.as_bytes()),
+        ASSISTANT_M11_IDENTITY_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_IDENTITY_DIGEST));
+    assert!(ASSISTANT_M11_IDENTITY != shipped.text);
+    let temp = dir();
+    std::fs::create_dir_all(temp.path()).expect("dir");
+    std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_IDENTITY)
+        .expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// SHPR-71: whatever the ask's wording, the coordinator makes tasks and never
+/// edits; several items are several tasks; a dependency is `--dep`; a question
+/// the person wants asked is the task's first acceptance line.
+#[test]
+fn the_coordinator_turns_every_ask_into_tasks_and_never_does_the_work() {
+    let text = shipped_prompt("assistant").expect("shipped").text;
+    for needed in [
+        "Every ask that changes the repository becomes tasks, however it is worded",
+        "\"Add a hello.py that prints hi\"",
+        "\"do it yourself, it is one line\"",
+        "I'll make that a task",
+        "Never create, edit, move or delete a file",
+        "never run `git add`, `git commit`",
+        "one task per item",
+        "`--dep <ID>`",
+        "asks the person that question before it changes anything",
+        "Questions about the repository are yours to answer by reading it",
+        "do not look for a way around that with the shell",
+    ] {
+        assert!(text.contains(needed), "the brief must say {needed:?}");
+    }
+}
