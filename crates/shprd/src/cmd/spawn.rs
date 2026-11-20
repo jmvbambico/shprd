@@ -603,6 +603,10 @@ pub(crate) struct PreparedSpace {
     pub(crate) space: shprd_mux::Space,
     /// True when this call created it, false when it was already there.
     pub(crate) created: bool,
+    /// True when the space was the window's own plain space, adopted for the
+    /// first time: its default shell tab (and another product's empty
+    /// "Assistant" tab) are the window's, not the person's work.
+    pub(crate) fresh: bool,
 }
 
 /// [`PreparedSpace`]: find the coordinator's space, or create it.
@@ -620,14 +624,18 @@ pub(crate) fn ensure_repo_space_from(
     let name = repo_space_name(&repo_name(repo)?);
     // Found by shprd's own mark, so a space the person renamed is still the
     // one; a space with no mark is found by its old name once and gets marked.
-    let (space, created) =
-        shprd_mux::ensure_marked_space_from(mux, &name, repo, also).map_err(|err| {
+    let (space, created, fresh) = shprd_mux::ensure_marked_space_detail(mux, &name, repo, also)
+        .map_err(|err| {
             CliError::other(anyhow!(err).context(format!(
                 "finding or creating the space {name:?} at {}",
                 repo.display()
             )))
         })?;
-    Ok(PreparedSpace { space, created })
+    Ok(PreparedSpace {
+        space,
+        created,
+        fresh,
+    })
 }
 
 /// One program the "+" menu started, as `POST /api/agents` answers it.
@@ -2706,11 +2714,13 @@ pub(crate) fn ensure_coordinator(
     // What older shprd left behind goes first: a coordinator in a bare terminal
     // tab is replaced by the chat tab, never kept beside it.
     tidy_old_coordinator_tabs(mux, space);
+    remember_window_tabs(mux, env, prepared);
     // A coordinator that is running is reused and every other one this
     // repository's earlier starts left behind is ended: a restart never adds
     // one, and the Agents list does not fill up with them.
     if let Some(found) = find_coordinator(&env.home, &env.ctx.root, mux, space) {
         end_other_coordinators(mux, &env.ctx.root, space, Some(&found.pane));
+        tidy_window_tabs(mux, env, space, None);
         return Ok(CoordinatorStart::Running(found.pane));
     }
     end_other_coordinators(mux, &env.ctx.root, space, None);
@@ -2801,15 +2811,6 @@ pub(crate) fn ensure_coordinator(
             .into_iter()
             .map(|(name, value)| (name, Some(value))),
     );
-    // The starter shell is whatever the space held before the coordinator, except
-    // a tab named "Assistant": that is another product's, added to a space the
-    // moment it exists, and never ours to close.
-    let starters: Vec<_> = mux
-        .list_tabs(&space.id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|tab| !tab.title.trim().eq_ignore_ascii_case(ASSISTANT_TITLE))
-        .collect();
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
@@ -2845,11 +2846,7 @@ pub(crate) fn ensure_coordinator(
         close_tab(mux, &tab.id);
         return Err(err);
     }
-    if prepared.created {
-        for starter in starters {
-            close_tab(mux, &starter.id);
-        }
-    }
+    tidy_window_tabs(mux, env, space, Some(&tab.id));
     // The tab shows the coordinator as a chat with the terminal one switch
     // away, as Shepherdr's Assistant does. A host with no window keeps the
     // plain terminal tab, and so does a window that cannot do it: the agent
@@ -2871,6 +2868,122 @@ pub(crate) fn ensure_coordinator(
         });
     }
     Ok(CoordinatorStart::Started(tab.root_pane))
+}
+
+/// Where the tabs the window put in a space are remembered until the
+/// coordinator runs: beside the coordinator's own record.
+fn window_tabs_path(home: &Path, repo: &Path, space: &shprd_mux::SpaceId) -> PathBuf {
+    let mut path = coordinator_pane_path(home, repo, space).into_os_string();
+    path.push(".window-tabs");
+    PathBuf::from(path)
+}
+
+/// Remembers, once, which tabs the window made in a space shprd has just made or
+/// adopted for the first time: its default shell tab and another product's empty
+/// "Assistant" tab. A coordinator that cannot start at first (and starts on a
+/// retry) must still end with the assistant alone in the center, and a tab the
+/// person opens meanwhile is never in this list.
+///
+/// A space adopted rather than made is only tidied when it is the window's plain
+/// one and holds a single idle shell tab: a person's own tabs are never listed.
+fn remember_window_tabs(mux: &dyn Host, env: &SpawnEnv<'_>, prepared: &PreparedSpace) {
+    if !(prepared.created || prepared.fresh) {
+        return;
+    }
+    let space = &prepared.space;
+    let path = window_tabs_path(&env.home, &env.ctx.root, &space.id);
+    if path.exists() {
+        return;
+    }
+    // A coordinator already running here is never the window's tab.
+    let coordinators: Vec<_> = mux
+        .list_coordinators()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|agent| agent.tab.id)
+        .collect();
+    // A host that cannot list the tabs now is asked again at the next start:
+    // an empty record would forget the window's tabs for good.
+    let Ok(listed) = mux.list_tabs(&space.id) else {
+        return;
+    };
+    let Ok(named) = mux.tab_names(&space.id) else {
+        return;
+    };
+    // Only a tab no program runs in can be the other product's empty
+    // "Assistant": a tab with a terminal that a person titled so is theirs.
+    let program_tabs: Vec<_> = listed.iter().map(|tab| tab.id.clone()).collect();
+    let shells: Vec<_> = listed
+        .into_iter()
+        .filter(|tab| {
+            !tab.title.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
+                && !is_coordinator_tab(tab.id.as_str())
+                && !coordinators.contains(&tab.id)
+        })
+        .collect();
+    let idle = shells.iter().all(|tab| {
+        !matches!(
+            mux.agent_state(&tab.root_pane),
+            Ok(shprd_mux::AgentState::Working | shprd_mux::AgentState::Blocked)
+        )
+    });
+    let mut ids: Vec<String> = Vec::new();
+    if prepared.created || (shells.len() == 1 && idle) {
+        ids.extend(shells.iter().map(|tab| tab.id.as_str().to_owned()));
+    }
+    for (id, name) in named {
+        if name.trim().eq_ignore_ascii_case(ASSISTANT_TITLE)
+            && !is_coordinator_tab(id.as_str())
+            && id.as_str() != OLD_COORDINATOR_TAB
+            && !coordinators.contains(&id)
+            && !program_tabs.contains(&id)
+        {
+            ids.push(id.as_str().to_owned());
+        }
+    }
+    // Written even when empty, so a later start does not look again.
+    if let Err(err) = write_record(&path, &ids.join("\n")) {
+        tracing::debug!(%err, "the window's tabs were not remembered");
+    }
+}
+
+/// Closes the tabs [`remember_window_tabs`] listed, now that the coordinator
+/// runs, and shows the coordinator. `keep` is the coordinator's own tab, which
+/// is never closed.
+fn tidy_window_tabs(
+    mux: &dyn Host,
+    env: &SpawnEnv<'_>,
+    space: &shprd_mux::Space,
+    keep: Option<&shprd_mux::TabId>,
+) {
+    let path = window_tabs_path(&env.home, &env.ctx.root, &space.id);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    // A tab that could not be closed stays on the record for the next start.
+    let mut left: Vec<&str> = Vec::new();
+    for id in text.lines().map(str::trim).filter(|id| !id.is_empty()) {
+        if keep.is_some_and(|keep| keep.as_str() == id) || is_coordinator_tab(id) {
+            continue;
+        }
+        match mux.close_tab(&shprd_mux::TabId::new(id)) {
+            Ok(()) | Err(shprd_mux::MuxError::NotFound { .. }) => {}
+            Err(err) => {
+                tracing::debug!(%err, tab = id, "a window tab was not closed");
+                left.push(id);
+            }
+        }
+    }
+    if left.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let _ = write_record(&path, &left.join("\n"));
+    }
+    if let Some(keep) = keep
+        && let Err(err) = mux.focus_tab(keep)
+    {
+        tracing::debug!(%err, "the coordinator's tab was not brought to the front");
+    }
 }
 
 /// How long a new agent is watched for an exit at start, at most.
@@ -4365,6 +4478,59 @@ project_dirs = []
             .marked_space(&name)
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(marked.map(|space| space.id), Some(old.id));
+    }
+
+    /// SHPR-72: a start that failed at first and succeeded on a retry (the space
+    /// is no longer "just made") still ends with the assistant alone: the tab the
+    /// window put in the space was remembered by the first look.
+    #[test]
+    fn a_retried_start_still_leaves_only_the_coordinator() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_starter_tab().with_ready_agent();
+
+        let first = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(first.created);
+        // The first start remembered the window's tab and then failed.
+        remember_window_tabs(&mux, &env, &first);
+
+        let again = ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !again.created && !again.fresh,
+            "a retry finds a marked space"
+        );
+        ensure_coordinator(&mux, &env, &again, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let tabs = mux
+            .list_tabs(&again.space.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(tabs.len(), 1, "only the coordinator is left: {tabs:?}");
+        assert_eq!(tabs[0].title, ASSISTANT_TITLE);
+    }
+
+    /// A space nobody just made or adopted is never tidied: its tabs are the
+    /// person's.
+    #[test]
+    fn a_space_that_was_not_fresh_keeps_its_tabs() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        let env = scratch.spawn_env(&ctx);
+        let mux = FakeMux::default().with_starter_tab().with_ready_agent();
+        let mut prepared =
+            ensure_repo_space(&mux, scratch.root()).unwrap_or_else(|err| panic!("{err}"));
+        prepared.created = false;
+        prepared.fresh = false;
+        ensure_coordinator(&mux, &env, &prepared, |pending| pending.deliver(&mux))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let tabs = mux
+            .list_tabs(&prepared.space.id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            tabs.len(),
+            2,
+            "the person's tab and the coordinator: {tabs:?}"
+        );
     }
 
     /// `shprd serve` starts the coordinator agent in the space it made, closes

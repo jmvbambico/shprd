@@ -781,7 +781,7 @@ export default class Tasks extends View {
             const picked = shared("spaces.picked") ?? null;
             const named = picked === null ? null : spacesOf(this.state).find((space) => space.id === picked);
             return el
-              .when(picked !== null, (e) => e.child(this.chip(t, "picked", named?.name ?? String(picked), 0, true, () => {})))
+              .when(picked !== null, (e) => e.child(this.chip(t, "picked", named?.name ?? String(picked).replace(/^sp-/, ""), 0, true, () => {})))
               .child(
                 this.chip(t, "space", "All spaces", 0, picked === null, () => {
                   setShared("spaces.picked", null);

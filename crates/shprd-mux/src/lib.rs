@@ -659,6 +659,22 @@ pub fn ensure_marked_space_from(
     cwd: &Path,
     also: &[&Path],
 ) -> Result<(Space, bool)> {
+    ensure_marked_space_detail(host, name, cwd, also).map(|(space, created, _)| (space, created))
+}
+
+/// [`ensure_marked_space_from`], also saying whether the space was *adopted
+/// fresh*: one the window made a moment ago (shown by its raw id, no name or its
+/// folder's name) and shprd had never marked. The window's own add-folder flow
+/// makes such a space with a default shell tab; the caller may tidy that tab
+/// once, because after this call the space carries shprd's mark and name and is
+/// never "fresh" again.
+pub fn ensure_marked_space_detail(
+    host: &dyn Host,
+    name: &str,
+    cwd: &Path,
+    also: &[&Path],
+) -> Result<(Space, bool, bool)> {
+    let marked_before = matches!(host.marked_space(name), Ok(Some(_)));
     let known = match host.marked_space(name)? {
         Some(space) => Some(space),
         None => match host.find_space(name)? {
@@ -680,14 +696,15 @@ pub fn ensure_marked_space_from(
             },
         },
     };
-    if shows_as_auto(&space, name, cwd) && host.rename_space(&space.id, name).is_ok() {
+    let auto = shows_as_auto(&space, name, cwd);
+    if auto && host.rename_space(&space.id, name).is_ok() {
         space.name = name.to_string();
     }
     match host.mark_space(&space.id, name) {
         Ok(()) | Err(MuxError::Unsupported(_)) => {}
         Err(err) => return Err(err),
     }
-    Ok((space, created))
+    Ok((space, created, !created && auto && !marked_before))
 }
 
 /// The space already open on `cwd` that is not another repository's label: the
