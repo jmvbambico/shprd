@@ -427,7 +427,90 @@ fn parse_line(format: TranscriptFormat, line: &[u8]) -> Option<Message> {
         // OpenCode's two shapes are read from files of their own, not lines.
         TranscriptFormat::OpencodeStorage | TranscriptFormat::OpencodeSqlite => None,
     }?;
-    Some(news_of(message))
+    hc_clean(news_of(message))
+}
+
+/// Herdr's own `<hc …>` markup, taken out of a message.
+///
+/// `hc` tags are for the agent, never for the person: a wrapper
+/// `<hc from="t7 name">text</hc>` is another agent's message (shown as a news
+/// line with its words), a wrapper without a sender is a notice the host typed
+/// (`<hc>t9v exited (signal 1)…</hc>`: hidden, as Shepherdr's chat hides it),
+/// and the self-closing tags (`<hc react=…/>`, `suggest`, `no-reply`,
+/// `reply-to`) and a task mention's `<hc task=…>…</hc>` block carry no words a
+/// person reads. Code, fenced or inline, is left as written. `None` when
+/// nothing is left to show.
+fn hc_clean(message: Message) -> Option<Message> {
+    if !message.text.contains("<hc") {
+        return Some(message);
+    }
+    let trimmed = message.text.trim();
+    if message.role == Role::User
+        && trimmed.starts_with("<hc")
+        && trimmed.ends_with("</hc>")
+        && let Some(open_end) = trimmed.find('>')
+        && open_end < trimmed.len() - "</hc>".len()
+    {
+        let open = &trimmed[..open_end];
+        let inner = &trimmed[open_end + 1..trimmed.len() - "</hc>".len()];
+        if !open.ends_with('/') && !inner.contains("<hc") {
+            let from = open.contains("from=\"");
+            let words = inner.trim();
+            return (from && !words.is_empty()).then(|| Message {
+                role: Role::News,
+                text: words.to_owned(),
+                ..message
+            });
+        }
+    }
+    let text = strip_hc_tags(&message.text);
+    let text = text.trim().to_owned();
+    let cleaned = Message { text, ..message };
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// `text` without its self-closing `<hc …/>` tags and `<hc task=…>…</hc>`
+/// blocks, outside code.
+fn strip_hc_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, part) in text.split('`').enumerate() {
+        if index > 0 {
+            out.push('`');
+        }
+        if index % 2 == 1 {
+            out.push_str(part);
+            continue;
+        }
+        let mut rest = part;
+        while let Some(at) = rest.find("<hc") {
+            let after = &rest[at + 3..];
+            let tag = after.starts_with(|c: char| c.is_whitespace() || c == '/' || c == '>');
+            let Some(gt) = after.find('>').filter(|_| tag) else {
+                out.push_str(&rest[..at + 3]);
+                rest = after;
+                continue;
+            };
+            out.push_str(&rest[..at]);
+            let open = &after[..gt];
+            let mut tail = &after[gt + 1..];
+            if !open.ends_with('/') {
+                // An opener. A task mention's block and a host notice (no
+                // sender) go whole; another agent's wrapper (`from=`) goes and
+                // its words stay.
+                match tail.find("</hc>") {
+                    Some(end) if open.contains("from=") && !open.contains("task=") => {
+                        out.push_str(&tail[..end]);
+                        tail = &tail[end + "</hc>".len()..];
+                    }
+                    Some(end) => tail = &tail[end + "</hc>".len()..],
+                    None => {}
+                }
+            }
+            rest = tail.strip_prefix('\n').unwrap_or(tail);
+        }
+        out.push_str(rest);
+    }
+    out
 }
 
 /// A user turn that is shprd's news, as news lines.
@@ -1870,6 +1953,46 @@ mod tests {
         });
         let message = parse_line(TranscriptFormat::ClaudeJsonl, &line(&said)).unwrap();
         assert_eq!(message.role, Role::User);
+    }
+
+    #[test]
+    fn hc_markup_is_never_shown_raw() {
+        let parse = |role: &str, text: &str| {
+            let value =
+                serde_json::json!({"type": role, "message": {"role": role, "content": text}});
+            parse_line(TranscriptFormat::ClaudeJsonl, &line(&value))
+        };
+        // A host notice has no sender: hidden.
+        assert!(parse("user", "<hc>t9v exited (signal 1). Read: hc read t9v</hc>").is_none());
+        // Another agent's message is a news line with its words.
+        let from = parse("user", "<hc from=\"t7 herd-1\">Done, see the PR.</hc>").unwrap();
+        assert_eq!(from.role, Role::News);
+        assert_eq!(from.text, "Done, see the PR.");
+        // Self-closing tags and a reply-to line go, the words stay.
+        let reply = parse("user", "<hc reply-to=\"first words\"/>\nyes, merge it").unwrap();
+        assert_eq!(reply.role, Role::User);
+        assert_eq!(reply.text, "yes, merge it");
+        // Malformed wrappers never panic.
+        let _ = parse("user", "<hc</hc>");
+        // A reply that is only a tag shows nothing.
+        assert!(parse("assistant", "<hc no-reply/>").is_none());
+        let said = parse("assistant", "Merged.\n<hc suggest=\"show me the diff\"/>").unwrap();
+        assert_eq!(said.text, "Merged.");
+        // Code keeps its tags.
+        let code = parse("assistant", "Write `<hc react=\"👀\"/>` on a line").unwrap();
+        assert!(code.text.contains("<hc react"), "{}", code.text);
+        // A task mention's block goes whole.
+        let task = parse(
+            "user",
+            "look at <hc task=\"T1\" title=\"x\">prompt</hc>this",
+        )
+        .unwrap();
+        assert!(!task.text.contains("<hc"), "{}", task.text);
+        // A notice among other words goes whole; a sender's wrapper keeps its words.
+        let mixed = parse("user", "ok\n<hc>t9v exited (signal 1)</hc>\nnext").unwrap();
+        assert_eq!(mixed.text, "ok\nnext");
+        let from = parse("user", "see <hc from=\"t7 x\">done</hc> ok").unwrap();
+        assert_eq!(from.text, "see done ok");
     }
 
     #[test]

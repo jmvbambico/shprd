@@ -35,6 +35,8 @@ import {
   spaceOf,
   spaceOfTab,
   timeline,
+  toolsSummary,
+  agentLabel,
   typed,
   KEEP,
   bubble,
@@ -534,4 +536,35 @@ test("SHPR-69: the coordinator's chat says plainly when shprd's coordinator is n
   // A task's chat, and a state that does not say, are left alone.
   assert.equal(coordinatorDown("T1", none), null);
   assert.equal(coordinatorDown(COORDINATOR, null), null);
+});
+
+test("a run of tool calls is one folded row, and a reply's words end the run", () => {
+  const bash = (summary) => ({ name: "Bash", summary });
+  const chat = fold(
+    empty(),
+    page({
+      messages: [
+        { role: "user", text: "go", tools: [], at_ms: 1 },
+        { role: "assistant", text: "", tools: [bash("ls"), { name: "Read", summary: "a.py" }], at_ms: 2 },
+        { role: "assistant", text: "", tools: [bash("pwd")], at_ms: 3 },
+        { role: "assistant", text: "Done.", tools: [bash("git log")], at_ms: 4 },
+      ],
+    }),
+  );
+  const rows = timeline(chat, []);
+  const kinds = rows.map((row) => row.kind);
+  assert.deepEqual(kinds, ["top", "message", "tools", "message", "tools"]);
+  assert.equal(rows[2].calls.length, 3);
+  assert.equal(toolsSummary(rows[2].calls), "Read a file, ran 2 commands");
+  assert.equal(toolsSummary([bash("x")]), "Ran a command");
+  assert.deepEqual(rows[3].message.tools, []);
+});
+
+test("an shprd agent's header says whose it is", () => {
+  assert.equal(agentLabel("Claude Code"), "shprd · claude");
+  assert.equal(agentLabel(""), "shprd");
+});
+
+test("the person's typed line breaks stay breaks", () => {
+  assert.equal(markdownOf({ role: "user" }, "a\n1. b\n2. c"), "a  \n1. b  \n2. c");
 });

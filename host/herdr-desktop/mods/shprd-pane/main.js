@@ -31,7 +31,7 @@ import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { exec, hc, home, openOverlay, panes, props, run, spaces, terminals, theme } from "herdr";
 
-import { CHAT_MOD, PARK_LABEL, chatLabel, endAgent, paneChat } from "./lib/chat.js";
+import { CHAT_MOD, PARK_LABEL, agentLabel, chatLabel, endAgent, paneChat } from "./lib/chat.js";
 import { menuHeight, MENU, paneMenu } from "./lib/menu.js";
 import { button, iconFile, segmented } from "./lib/panel.js";
 import { RADIUS, TEXT } from "./lib/tokens.js";
@@ -186,11 +186,16 @@ export default class Pane extends View {
     const pane = view.chatMode ? { ...(agent ?? {}), title: agent?.title, cwd: agent?.cwd ?? null } : self;
     const status = (view.chatMode ? agent?.status : (self?.agent?.status ?? self?.status)) ?? "idle";
     const program = view.chatMode ? agent?.program : self?.program;
-    const name = view.chatMode
-      ? (agent?.program?.name ?? "Chat")
-      : (pane?.title ?? pane?.program?.name ?? "Terminal");
     // An agent's × asks before it ends the agent; a shell's just closes its pane.
     const isAgent = view.chatMode || Boolean(program?.agent);
+    // shprd's own agent (a task's, the coordinator) says whose it is, as Shepherdr
+    // labels its Assistant, not the program's name.
+    const name =
+      isAgent && view.space !== null
+        ? agentLabel(program?.name)
+        : view.chatMode
+          ? (agent?.program?.name ?? "Chat")
+          : (pane?.title ?? pane?.program?.name ?? "Terminal");
     const asking = isAgent && this.ending === true;
     const id = wired?.pane;
     const compact = (this.width ?? Infinity) < COMPACT_BELOW;
