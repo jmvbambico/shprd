@@ -16,6 +16,7 @@ import * as herdr from "herdr";
 import {
   Client,
   attach,
+  canonicalRoot,
   pendingDeadlines,
   singleFlight,
   ServiceError,
@@ -682,4 +683,16 @@ test("a panel without a service says which repository and why, never a command",
   herdr.setSpaces([]);
   assert.equal(downNotice(), "Open a repository's space to use shprd");
   assert.doesNotMatch(downNotice("/work/shop"), /shprd serve/);
+});
+
+test("a space opened through a symlink still finds its service by git's canonical root", async () => {
+  const doFetch = twoServices();
+  const exec = herdr.exec;
+  const run = async (command, args, options) =>
+    command === "git"
+      ? { code: 0, stdout: "/work/shop/.git\n", stderr: "" }
+      : exec(command, args, options);
+  const found = await discover({ fetch: doFetch, folder: "/home/ana/link/shop", run });
+  assert.equal(found.base, "http://127.0.0.1:7001");
+  assert.equal(await canonicalRoot("/nowhere", async () => ({ code: 128, stdout: "", stderr: "x" })), null);
 });

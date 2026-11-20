@@ -299,6 +299,29 @@ export function pickService(entries, folder) {
   return best;
 }
 
+const roots = new Map();
+/** How long a folder that resolved to no repository is left alone, ms. */
+const ROOT_RETRY_MS = 10_000;
+
+/**
+ * The repository a folder belongs to, as git writes it (every symlink resolved,
+ * a subfolder or a linked worktree answered by its repository): the path a
+ * service records as its `root`. Null when it is no repository.
+ *
+ * The footer's names for a folder (`~/dev` through a symlink) and the service's
+ * canonical root differ, and a string match alone would miss the service that is
+ * running. The answer is kept: a repository does not move.
+ */
+export async function canonicalRoot(folder, run = exec) {
+  const kept = roots.get(folder);
+  if (kept && (kept.root || Date.now() - kept.at < ROOT_RETRY_MS)) return kept.root;
+  const answer = await run("git", ["-C", folder, "rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
+  const line = String(answer?.stdout ?? "").trim().split("\n").pop() ?? "";
+  const root = answer?.code === 0 && line.endsWith("/.git") ? line.slice(0, -"/.git".length) : null;
+  roots.set(folder, { root, at: Date.now() });
+  return root;
+}
+
 /** The folder of the space the window shows, or null. */
 export function activeFolder() {
   try {
@@ -540,7 +563,11 @@ export async function discover(io = {}) {
   } else {
     const xdg = io.xdg ?? (await stateHome(io.run));
     const entries = await listServices(stateDir(home(), xdg), io.run);
-    const entry = pickService(entries, folder);
+    let entry = pickService(entries, folder);
+    if (!entry && folder && entries.length > 0) {
+      const root = await canonicalRoot(folder, io.run);
+      if (root) entry = pickService(entries, root);
+    }
     if (entry) {
       dir = entry.dir;
       record = entry.record;
