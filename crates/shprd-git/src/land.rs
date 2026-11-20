@@ -521,7 +521,12 @@ fn push_integration(git: &Git, branch: &str) {
     };
     // A GitHub remote without a signed-in client lands locally too, and the
     // person never agreed to put the integration branch on GitHub that way.
-    if remote_hosts(git).iter().any(|host| host.contains("github")) {
+    let to_github = git
+        .run(&["remote", "get-url", &remote])
+        .ok()
+        .and_then(|url| crate::worktree::host_of_url(&url))
+        .is_some_and(|host| host.contains("github"));
+    if to_github {
         return;
     }
     let _ = git.run(&["push", &remote, &format!("HEAD:refs/heads/{branch}")]);
