@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn old_logs_with_the_command_wording_read_as_the_desktop_words() {
         assert_eq!(
-            plain_body("T1 is ready to land: run `shprd approve T1`"),
+            super::plain_body("T1 is ready to land: run `shprd approve T1`"),
             "T1 is ready to land: Review and Accept it in the Tasks pane"
         );
         assert_eq!(
