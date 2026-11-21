@@ -173,6 +173,28 @@ const NO_CHANGE = 204;
 /** How long a change long-poll waits when the caller says nothing. */
 export const DEFAULT_CHANGE_WAIT_MS = 10_000;
 
+/** The routes one repository answers: they carry `?repo=` when the page names one. */
+const REPO_ROUTES = /^\/api\/(state|changes|asks|chat|terminal|action|graph|tasks|settings|coordinator|agents|ws)(\/|\?|$)/;
+
+/**
+ * `path` with the repository the page names (`?repo=<id or folder>` on the page's
+ * own address). One `shprd serve` serves every repository; a page that names none
+ * is answered by the only repository registered, and refused in words when there
+ * are several.
+ */
+function scopedPath(path: string, fallback: string | null = null): string {
+  if (!REPO_ROUTES.test(path)) return path;
+  let repo: string | null = null;
+  try {
+    repo = new URLSearchParams(globalThis.location?.search ?? "").get("repo");
+  } catch {
+    repo = null;
+  }
+  repo = repo ?? fallback;
+  if (!repo) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(repo)}`;
+}
+
 /**
  * One client for one service.
  *
@@ -183,6 +205,7 @@ export class ApiClient {
   readonly #base: string;
   readonly #fetch: FetchLike;
   readonly #WebSocket: WebSocketLikeCtor | undefined;
+  #repo: string | null | undefined;
   readonly #unauthorized = new Set<() => void>();
   readonly #reauth = new Set<() => void>();
 
@@ -532,6 +555,21 @@ export class ApiClient {
     return JSON.parse(text) as T;
   }
 
+  /** The first repository `GET /api/repos` lists, kept; null when there is none. */
+  async #firstRepo(): Promise<string | null> {
+    try {
+      const response = await this.#fetch(`${this.#base}/api/repos`, {
+        headers: { accept: "application/json" },
+        credentials: "same-origin",
+      });
+      const body = (await response.json()) as { repos?: { id: string }[] };
+      this.#repo = body.repos?.[0]?.id ?? null;
+    } catch {
+      this.#repo = null;
+    }
+    return this.#repo;
+  }
+
   async #send(method: string, path: string, body: unknown): Promise<Response> {
     const headers: Record<string, string> = { accept: "application/json" };
     if (body !== undefined) {
@@ -541,12 +579,21 @@ export class ApiClient {
       headers[WRITE_HEADER] = "1";
     }
     try {
-      return await this.#fetch(`${this.#base}${path}`, {
-        method,
-        headers,
-        credentials: "same-origin",
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
+      const call = () =>
+        this.#fetch(`${this.#base}${scopedPath(path, this.#repo ?? null)}`, {
+          method,
+          headers,
+          credentials: "same-origin",
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+      const first = await call();
+      // Several repositories are served and the page named none: it shows the
+      // first one the service lists, and asks again.
+      if (first.status === 400 && this.#repo === undefined && REPO_ROUTES.test(path)) {
+        const pick = await this.#firstRepo();
+        if (pick) return await call();
+      }
+      return first;
     } catch (cause) {
       throw new ApiError(
         0,
@@ -574,12 +621,12 @@ export class ApiClient {
 
   #socketUrl(): string {
     if (this.#base !== "") {
-      return `${this.#base.replace(/^http/, "ws")}/api/ws`;
+      return `${this.#base.replace(/^http/, "ws")}${scopedPath("/api/ws", this.#repo ?? null)}`;
     }
     const location = globalThis.location;
     const scheme = location?.protocol === "https:" ? "wss:" : "ws:";
     const host = location?.host ?? "127.0.0.1";
-    return `${scheme}//${host}/api/ws`;
+    return `${scheme}//${host}${scopedPath("/api/ws", this.#repo ?? null)}`;
   }
 }
 

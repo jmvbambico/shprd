@@ -34,7 +34,7 @@ import {
 const HOME = "/home/ana";
 
 /** The state directory under [`HOME`], with the XDG defaults. */
-const DIR = `${stateDir(HOME, {})}/repos/shop-1`;
+const DIR = stateDir(HOME, {});
 
 /** A fake `fetch`: `routes` maps a URL path to `{status, body}` or a function. */
 function fakeFetch(routes) {
@@ -97,7 +97,11 @@ function context() {
 function serve(id, port = 7788) {
   herdr.putFile(serviceFile(DIR), JSON.stringify({ port, id, pid: 42, root: "/work/shop" }));
   herdr.putFile(tokenFile(DIR), "token-1\n");
-  return { "/api/health": { body: { ok: true, id, version: "0.0.0" } } };
+  return {
+    "/api/health": { body: { ok: true, id, version: "0.0.0" } },
+    // The window registers the shown repository once per service: it answers at once.
+    "/api/repos": { body: { id: "shop-1", root: "/work/shop", dir: `${DIR}/repos/shop-1` } },
+  };
 }
 
 /** The board a service answers with: one task per id, at `seq`. */

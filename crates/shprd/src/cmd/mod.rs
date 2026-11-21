@@ -27,6 +27,7 @@ pub mod roster;
 pub mod run;
 pub mod run_lock;
 pub mod serve;
+pub mod serve_migrate;
 pub mod set;
 pub mod settings;
 pub mod spawn;
@@ -75,13 +76,11 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Some(Command::Install(args)) = &cli.command {
         return install::run(args, cli.global.home.as_deref(), cli.global.json);
     }
-    // `web` reads and writes the state directory of the repository's service
-    // (each repository is served on its own), not a log, so it answers before
-    // any run exists — a password is set before one does — but not outside a
-    // repository: `--repo` names the one.
+    // `web` reads and writes the state directory of the one service (every
+    // repository is served by it), not a log, so it answers before any run
+    // exists — a password is set before one does — and outside a repository.
     if let Some(Command::Web { cmd }) = &cli.command {
-        let root = resolve_root(cli.global.repo.as_deref())?;
-        return web::run(cmd, &root, cli.global.home.as_deref(), cli.global.json);
+        return web::run(cmd, cli.global.home.as_deref(), cli.global.json);
     }
     // `doctor` diagnoses the machine, so it answers outside a repository too.
     if let Some(Command::Doctor(args)) = &cli.command {
@@ -90,6 +89,8 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // `serve` is the one verb that may start in a folder that is not a repository
     // yet: the window shows a space the person just added, and the repository is
     // made when they first chat (`adopt`), not when the folder is shown.
+    let named = matches!(cli.command, Some(Command::Serve(_)))
+        && crate::ctx::serve_names_a_repo(cli.global.repo.as_deref());
     let root = if matches!(cli.command, Some(Command::Serve(_))) {
         crate::ctx::resolve_serve_root(cli.global.repo.as_deref())?
     } else {
@@ -132,9 +133,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         }
         Some(Command::Roster(args)) => roster::run(&args, ctx.json),
         // Unreachable in practice: `web` returns above, before any log is read.
-        Some(Command::Web { cmd }) => {
-            web::run(&cmd, &ctx.root, cli.global.home.as_deref(), ctx.json)
-        }
+        Some(Command::Web { cmd }) => web::run(&cmd, cli.global.home.as_deref(), ctx.json),
         // Unreachable in practice: `set` returns above, before any log is read.
         Some(Command::Set(args)) => set::run(
             &args,
@@ -161,7 +160,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         Some(Command::Readmit(args)) => readmit::readmit_verb(&ctx, &args),
         Some(Command::Override(args)) => override_rule::override_verb(&ctx, &args),
         Some(Command::Drop(args)) => drop::drop_verb(&ctx, &args, cli.global.home.as_deref()),
-        Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref()),
+        Some(Command::Serve(args)) => serve::run(&ctx, &args, cli.global.home.as_deref(), named),
         Some(Command::Tick(args)) => tick::tick_verb(&ctx, &args, cli.global.home.as_deref()),
     }
 }

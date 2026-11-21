@@ -30,8 +30,8 @@ use crate::cli::{PasswordCommand, SessionsArgs, WebCommand};
 use crate::ctx::{CliError, resolve_home, resolve_state_home};
 
 /// Runs one `shprd web` verb.
-pub fn run(cmd: &WebCommand, root: &Path, home: Option<&Path>, json: bool) -> Result<(), CliError> {
-    let dir = state_dir(root, home)?;
+pub fn run(cmd: &WebCommand, home: Option<&Path>, json: bool) -> Result<(), CliError> {
+    let dir = state_dir(home)?;
     match cmd {
         WebCommand::Password { cmd } => password(cmd, &dir, json),
         WebCommand::Sessions(args) => sessions(args, &dir, json),
@@ -41,14 +41,11 @@ pub fn run(cmd: &WebCommand, root: &Path, home: Option<&Path>, json: bool) -> Re
     }
 }
 
-/// The state directory of the service for the repository at `root`, resolved
-/// once at this edge.
-fn state_dir(root: &Path, home: Option<&Path>) -> Result<PathBuf, CliError> {
+/// The state directory of the one service, resolved once at this edge. Its
+/// password, sessions and tunnel are the service's, not a repository's.
+fn state_dir(home: Option<&Path>) -> Result<PathBuf, CliError> {
     let home = resolve_home(home)?;
-    Ok(shprd_server::repo_state_dir(
-        &resolve_state_home(&home),
-        root,
-    ))
+    Ok(shprd_server::state_dir(&resolve_state_home(&home)))
 }
 
 /// `shprd web password set|clear`.

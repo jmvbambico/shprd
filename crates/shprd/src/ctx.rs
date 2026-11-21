@@ -238,20 +238,47 @@ pub fn resolve_serve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> 
         None => std::env::current_dir()
             .map_err(|err| CliError::other(anyhow!("the current folder cannot be read: {err}")))?,
     };
+    Ok(serve_root_of(&folder))
+}
+
+/// Whether a `shprd serve` start names a repository: `--repo`, `$SHPRD_REPO`, or
+/// a working directory inside one. The window's own launch names none, and the
+/// service then waits to be told its repositories rather than serving whatever
+/// folder it was started in.
+pub fn serve_names_a_repo(explicit: Option<&Path>) -> bool {
+    if explicit.is_some() || std::env::var_os(REPO_ENV).is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    let Ok(folder) = std::env::current_dir() else {
+        return false;
+    };
     let mut command = std::process::Command::new("git");
     command
         .arg("-C")
-        .arg(&folder)
+        .arg(folder)
+        .args(["rev-parse", "--show-toplevel"]);
+    shprd_core::spawn::output(&mut command)
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+/// The repository a folder belongs to, else the folder itself: what the one
+/// service registers for a space's folder.
+pub fn serve_root_of(folder: &Path) -> PathBuf {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(folder)
         .args(["rev-parse", "--show-toplevel"]);
     let top = shprd_core::spawn::output(&mut command)
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|text| !text.is_empty());
-    Ok(match top {
+    match top {
         Some(top) => run_repo(Path::new(&top)),
-        None => run_repo(&folder),
-    })
+        None => run_repo(folder),
+    }
 }
 
 /// Resolves the checkout the caller works in, without leaving a worktree.

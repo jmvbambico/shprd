@@ -402,45 +402,67 @@ fn a_service_on_the_desktop_host_stops_with_code_zero_on_sigint() {
 }
 
 #[test]
-fn two_repositories_are_served_at_once_from_one_state_home() {
+fn two_repositories_are_served_at_once_by_one_service() {
     let (repo, state, home) = repo_with_a_run();
     let other = TempDir::new().expect("a second repository");
-    let first = Service::start(repo.path(), state.path(), home.path());
-    // The second repository needs the first one neither stopped nor in another
-    // state home: it gets its own directory under the same one, and its own port.
-    let second = Service::start(other.path(), state.path(), home.path());
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let records = loop {
-        let found: Vec<Value> = fs::read_dir(state.path().join("shprd").join("repos"))
-            .expect("the repos directory")
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| fs::read_to_string(entry.path().join("service.json")).ok())
-            .filter_map(|text| serde_json::from_str(&text).ok())
-            .collect();
-        if found.len() == 2 || Instant::now() > deadline {
-            break found;
-        }
-        sleep(Duration::from_millis(50));
+    let service = Service::start(repo.path(), state.path(), home.path());
+    let record = read_record(state.path());
+    let base = format!("http://127.0.0.1:{}", record["port"]);
+    let token = read_token(state.path());
+
+    // The second repository needs no second process: it is registered with the
+    // one that runs, by the token door, and answers on the same port.
+    let register = |folder: &Path| {
+        ureq::post(&format!("{base}/api/repos"))
+            .header("authorization", &format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("x-shprd", "1")
+            .send(serde_json::json!({ "folder": folder.display().to_string() }).to_string())
+            .expect("the registration is answered")
+            .body_mut()
+            .read_to_string()
+            .expect("a body")
     };
-    assert_eq!(records.len(), 2, "both services have a record: {records:?}");
-    assert_ne!(
-        records[0]["port"], records[1]["port"],
-        "each has its own port"
+    let added: Value = serde_json::from_str(&register(other.path())).expect("JSON");
+    let real = fs::canonicalize(other.path()).expect("canonical");
+    assert_eq!(
+        fs::canonicalize(added["root"].as_str().unwrap()).expect("a root"),
+        real
     );
-    let roots: Vec<String> = records
-        .iter()
-        .map(|record| record["root"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    for dir in [repo.path(), other.path()] {
-        let real = fs::canonicalize(dir).expect("canonical");
-        assert!(
-            roots.iter().any(|root| Path::new(root) == real),
-            "a record names {}: {roots:?}",
-            real.display()
-        );
-    }
-    first.stop();
-    second.stop();
+    let again: Value = serde_json::from_str(&register(other.path())).expect("JSON");
+    assert_eq!(
+        added["id"], again["id"],
+        "registering twice is one repository"
+    );
+
+    let (status, listed) = get(&format!("{base}/api/repos"), Some(&token)).expect("list");
+    assert_eq!(status, 200);
+    let listed: Value = serde_json::from_str(&listed).expect("JSON");
+    assert_eq!(
+        listed["repos"].as_array().map(Vec::len),
+        Some(2),
+        "{listed}"
+    );
+
+    // With two registered a request must name its repository, by id or path.
+    assert_eq!(
+        get(&format!("{base}/api/state"), Some(&token)).unwrap_err(),
+        400
+    );
+    let id = added["id"].as_str().unwrap();
+    let (status, _) = get(&format!("{base}/api/state?repo={id}"), Some(&token)).expect("by id");
+    assert_eq!(status, 200);
+    let by_path = format!(
+        "{base}/api/state?repo={}",
+        repo.path().canonicalize().unwrap().display()
+    );
+    assert_eq!(get(&by_path, Some(&token)).expect("by path").0, 200);
+    assert_eq!(
+        get(&format!("{base}/api/state?repo=/nowhere"), Some(&token)).unwrap_err(),
+        404,
+        "an unregistered repository is not opened as a path"
+    );
+    service.stop();
 }
 
 #[test]
@@ -1074,7 +1096,7 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
     let (repo, state, home) = repo_with_a_run();
     // Held for the whole test: its `Drop` is what stops the service.
     let _service = Service::start(repo.path(), state.path(), home.path());
-    let change = service_dir(state.path()).join("changes");
+    let change = repo_dir(state.path()).join("changes");
 
     // It is there as soon as the service is: a window that starts first has a
     // real answer rather than a missing file.
@@ -1136,11 +1158,16 @@ fn the_service_touches_a_change_file_a_herdr_mod_can_watch() {
     );
 }
 
-/// The one service directory under this state home (each repository has its own,
-/// and these tests serve one repository each).
+/// The one service's directory under this state home.
 fn service_dir(state: &Path) -> PathBuf {
+    state.join("shprd")
+}
+
+/// The one repository's own directory under the service (its change file and
+/// last pass).
+fn repo_dir(state: &Path) -> PathBuf {
     let repos = state.join("shprd").join("repos");
-    std::fs::read_dir(&repos)
+    fs::read_dir(&repos)
         .ok()
         .and_then(|mut dirs| dirs.find_map(|entry| entry.ok()))
         .map(|entry| entry.path())

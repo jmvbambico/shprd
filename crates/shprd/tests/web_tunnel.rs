@@ -53,7 +53,7 @@ impl Fixture {
     }
 
     fn state(&self) -> PathBuf {
-        shprd_server::repo_state_dir(&self.home.path().join(".local/state"), self.home.path())
+        shprd_server::state_dir(&self.home.path().join(".local/state"))
     }
 
     fn set_password(&self) {

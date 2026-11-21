@@ -219,6 +219,7 @@ function panel(answers = [page()]) {
   herdr.putFile(serviceFile("/state"), '{"port": 7788, "id": "abc"}');
   const client = {
     dir: "/state",
+    serviceDir: "/state",
     record: { port: 7788, id: "abc" },
     id: () => "abc",
     state: async () => ({ tasks: [], needs: [] }),

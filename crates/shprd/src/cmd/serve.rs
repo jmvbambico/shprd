@@ -57,70 +57,55 @@ use crate::ctx::{
 const LOG_ENV: &str = "SHPRD_LOG";
 
 /// Runs the service until the process is asked to stop.
-pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliError> {
+///
+/// There is one service per user (SHPR-77): it serves every repository its
+/// window registers, each with its own run, event log, tick, news and
+/// coordinator. `named` says the caller named a repository (`--repo`,
+/// `$SHPRD_REPO`, or a working directory inside one): that repository is
+/// registered before the banner, so a CLI start still shows its space and run;
+/// a start from the window's own launch names none and waits to be told.
+pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     install_subscriber();
     // The host is resolved once, here, and passed down: every pass, every spawn
     // and every close of this service drives the same adapter, so a run cannot
     // half-happen on one multiplexer and half on another (M10.9).
     let (resolution, host) = crate::host::select();
-    // The coordinator's space is part of the host setup a run needs, and its
-    // label is derived rather than chosen, so the service makes it rather than
-    // leaving a pass to refuse (M9 gate bug 6). A host that cannot be reached is
-    // a warning and not a refusal to serve: the board is still what a person
-    // reads, and the next start can make the space.
-    //
-    // It is not made at all when the checkout and the socket disagree about
-    // whose machine this is (M11 fix Y): a live check run from a temporary
-    // checkout inherits the pane's `HERDR_SOCKET_PATH`, and a service that
-    // prepared its space would make one in the person's own window. The guard
-    // is asked before anything touches the host, and its refusal is a banner
-    // line rather than a failure to serve — the API is still a board to read.
-    let leakage = crate::guard::leakage(&crate::guard::Edge::from_environment(&ctx.root));
-    // The host is the one this service resolved, handed on as an `Arc` because
-    // the tick and the chat's writer both hold it: one service, one adapter.
-    let host: std::sync::Arc<dyn Host> = std::sync::Arc::from(host);
-    let workspace = match &leakage {
-        Some(reason) => SpaceNotice::Withheld(reason.clone()),
-        None => prepare_space(
-            host.as_ref(),
-            &ctx.root,
-            coordinator_start(host.clone(), ctx.clone(), home.clone()),
-        ),
-    };
-    if let SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) = &workspace {
-        tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
-    }
-    // The banner says whether there is a run at all, and the passes say so again
-    // if one is started after the service was: a service that came up too early
-    // must not look like an empty run.
-    let run_at_start = ctx.state()?.run;
+    let host: Arc<dyn Host> = Arc::from(host);
     // Everything the service reads from the machine is resolved here, once: the
     // discovery files' state directory, the person's home, their prompts and the
     // harness table. The service itself reads no environment variable.
     let state_home = resolve_state_home(&home);
-    let mut config = Config::new(
-        ctx.root.clone(),
-        shprd_server::repo_state_dir(&state_home, &ctx.root),
-    );
+    let state_dir = shprd_server::state_dir(&state_home);
+    // The per-repository services an earlier version ran are stopped and their
+    // records removed before anything is registered, so nothing doubles up.
+    let migrated = crate::cmd::serve_migrate::migrate(&state_dir);
+    for note in &migrated {
+        eprintln!("   migrated:     {note}");
+    }
+    let data = resolve_data_dir();
+    let factory = Arc::new(Factory {
+        actor: ctx.actor.clone(),
+        json: ctx.json,
+        no_dagr: ctx.no_dagr,
+        home: home.clone(),
+        host: host.clone(),
+        data: data.clone(),
+        built: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    });
+    let mut config = Config::service(state_dir, factory.clone());
     config.port = args.port;
     config.actor = ctx.actor.clone();
-    // The context the service's own writes run with: the same repository, actor
-    // and flags, plus the home this start resolved. A write made through the
-    // API reaches the same dagr projection a CLI write does.
     let write_ctx = ctx.clone().with_home(Some(home.clone()));
-    config.after_write = Some(after_write(&write_ctx));
     // Where the graph's program is, found once here: the web app's graph reads
     // it from the service (`GET /api/graph`), and the answer is the same one the
     // projection is checked with. The desktop draws no graph terminal any more.
-    let dagr = crate::cmd::dagr::dagr(&write_ctx);
-    config.dagr = Some(dagr);
+    config.dagr = Some(crate::cmd::dagr::dagr(&write_ctx));
     config.home = Some(home.clone());
     config.prompts_dir = Some(shprd_core::prompts::prompts_dir(&resolve_config_home(
         &home,
     )));
-    let data = resolve_data_dir();
-    config.data = Some(data.clone());
+    config.data = Some(data);
     // A chat reads an agent CLI's own session record, and that file is written
     // by the CLI under the home and data home *it* resolves — the `HOME` it
     // inherits (shprd never rewrites it: it is a protected variable) and the
@@ -137,122 +122,269 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>) -> Result<(), CliEr
     // of its own: what a request may start is the binary's decision, resolved
     // once, here.
     config.path_env = Some(std::env::var("PATH").unwrap_or_default());
-    // The chat's writes go through the host, the same adapter every other verb
-    // drives: one code path types into a pane, so a chat line lands where a
-    // prompt does and never in a tab shprd did not open.
-    let agent_host = host.clone();
-    let start_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(match &workspace {
-        SpaceNotice::Created(_, None, why) | SpaceNotice::Reused(_, None, why) => why.clone(),
-        SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) => {
-            Some(format!("the space was not ready: {reason}"))
-        }
-        _ => None,
-    }));
-    config.chat = shprd_server::ChatHost::with(Arc::new(HostChat {
-        repo: ctx.root.clone(),
-        home: home.clone(),
-        host: host.clone(),
-        start_failure: start_failure.clone(),
-        notice: Mutex::new(None),
-    }));
-    // The agents the host lists, headless: `live_agents` on the state answer, the
-    // output and attach routes, and the terminal socket's `agent:<id>` space all
-    // read this one list, so a client can only reach an agent that was listed.
-    let live = Arc::new(
-        crate::cmd::live_agents::HostLive::new(ctx.root.clone(), home.clone(), host.clone())
-            .with_space(matches!(
-                workspace,
-                SpaceNotice::Created(..) | SpaceNotice::Reused(..)
-            )),
-    );
-    config.live = shprd_server::LiveAgents::with(live.clone());
-    config.terminal = shprd_server::TerminalPort::with(Arc::new(HostTerminal {
-        repo: ctx.root.clone(),
-        home: home.clone(),
-        host: host.clone(),
-        live,
-    }));
-    let resend_host = host.clone();
-    let retry_host = host.clone();
-    let tick = tick_config(
-        ctx,
-        &home,
-        config.hub.clone(),
-        run_notice(
-            ctx.json,
-            run_at_start.as_ref().map(|run| run.run_id.clone()),
-        ),
-        host,
-    )?;
-    // A coordinator that could not start (its program missing, or ended as it
-    // started) is tried again every pass, so it comes up once the program is
-    // back, and the chat's reason follows each try.
-    if start_failure.lock().is_ok_and(|why| why.is_some())
-        && !matches!(workspace, SpaceNotice::Withheld(_))
-    {
-        let (host, ctx, home) = (retry_host, ctx.clone(), home.clone());
-        let failure = start_failure.clone();
-        let every = tick.interval;
-        std::thread::spawn(move || retry_coordinator(host, ctx, home, failure, every));
-    }
-    let announced = AnnouncedTick {
-        interval_secs: tick.interval.as_secs(),
-        max_running: tick.max_running,
-    };
-    // The person's start, retry and stop actions are the same two closures the
-    // tick's steps run: one spawn path, one way of closing a task's space, so a
-    // board's Start and the engine's own start cannot drift apart.
-    config.engine = Some(
-        engine_of(&tick.worker)
-            .with_resend(resender(resend_host, &home))
-            .with_review_again(review_again(&home, tick.worker.actor.clone())),
-    );
-    // The tab bar's "+" menu's *Start an agent* is the same host and the same
-    // harness table: a program is a tab with its plain launch line in it, never
-    // a task's attempt, so it goes through the service and not through the mod.
-    config.agents = shprd_server::Agents::with(Arc::new(HostAgents {
-        repo: ctx.root.clone(),
-        data,
-        host: agent_host.clone(),
-        ctx: ctx.clone(),
-        home: home.clone(),
-    }));
-    config.tick = Some(tick);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| CliError::other(anyhow!(err).context("starting the async runtime")))?;
 
-    runtime.block_on(async move {
-        // Stop handling is installed before the service announces itself: the
-        // record `Service::start` writes is what a supervisor waits for, and a
-        // signal sent right after it must stop the service quietly.
-        let shutdown = shutdown_signal();
-        // A second service for the same state directory would take the record
-        // over and leave the running one undiscoverable, so it is refused with
-        // the exit code a refused verb uses rather than an error's.
-        let service = Service::start(config).await.map_err(|err| match err {
+    // Stop handling is installed before the service announces itself: the
+    // record `Service::start` writes is what a supervisor waits for, and a
+    // signal sent right after it must stop the service quietly.
+    let shutdown = {
+        let _in_runtime = runtime.enter();
+        shutdown_signal()
+    };
+    // A second service for the same state directory would take the record over
+    // and leave the running one undiscoverable, so it is refused with the exit
+    // code a refused verb uses rather than an error's.
+    let service = runtime
+        .block_on(Service::start(config))
+        .map_err(|err| match err {
             // A service that is up, or one whose stop is still in flight, is a
             // person's verb that did not happen rather than a fault: the message
             // says which, and the retry fixes the second.
             AlreadyRunning { .. } | ShuttingDown { .. } => CliError::Invalid(anyhow!(err)),
             other => CliError::other(anyhow!(other).context("starting the service")),
         })?;
-        let info = service.info().clone();
-        announce(
-            ctx,
-            &info,
-            &announced,
-            run_at_start.as_ref(),
-            &workspace,
-            &resolution,
-        );
+    // The repository the caller named is registered here, outside the async
+    // context and with its space prepared before the banner: the host it asks
+    // may own a runtime of its own, which must never be dropped inside this
+    // one's.
+    let registry = service.registry();
+    let mut first = None;
+    if named {
+        match registry.register_folder_wait(&ctx.root, true, true) {
+            Ok(found) => first = Some(found),
+            Err(why) => tracing::warn!(%why, "the named repository could not be served"),
+        }
+    }
+    let info = service.info().clone();
+    let banner = Banner {
+        first: first.map(|found| PathBuf::from(found.root)),
+        factory: factory.clone(),
+        migrated: migrated.len(),
+    };
+    announce(ctx, &info, &banner, &resolution);
+    runtime.block_on(async move {
         service
             .run(shutdown)
             .await
             .map_err(|err| CliError::other(anyhow!(err).context("serving the run")))
     })
+}
+
+/// What the banner says about the service and the repository it was started for.
+struct Banner {
+    /// The repository registered at start, when the caller named one.
+    first: Option<PathBuf>,
+    /// Where that repository's setup notices were kept.
+    factory: Arc<Factory>,
+    /// How many per-repository services were stopped and removed.
+    migrated: usize,
+}
+
+/// What `build` found out about one repository, for the banner.
+#[derive(Clone)]
+struct Built {
+    /// The tick the banner announces.
+    tick: AnnouncedTick,
+    /// The run at registration.
+    run: Option<RunInfo>,
+    /// What preparing the space did, once it has run.
+    space: Option<SpaceNotice>,
+}
+
+/// What makes one repository's slot: the binary's half of the registry.
+struct Factory {
+    actor: Actor,
+    json: bool,
+    no_dagr: bool,
+    home: PathBuf,
+    host: Arc<dyn Host>,
+    data: shprd_agents::data::DataDir,
+    /// What each registered repository's build and preparation reported.
+    built: Arc<Mutex<std::collections::HashMap<PathBuf, Built>>>,
+}
+
+impl std::fmt::Debug for Factory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Factory").finish_non_exhaustive()
+    }
+}
+
+impl Factory {
+    fn ctx_for(&self, root: &Path) -> Ctx {
+        Ctx::new(
+            root.to_path_buf(),
+            self.actor.clone(),
+            self.json,
+            self.no_dagr,
+        )
+        .with_home(Some(self.home.clone()))
+    }
+
+    fn built_of(&self, root: &Path) -> Option<Built> {
+        self.built.lock().ok()?.get(root).cloned()
+    }
+}
+
+impl shprd_server::RepoFactory for Factory {
+    fn root_of(&self, folder: &Path) -> PathBuf {
+        crate::ctx::serve_root_of(folder)
+    }
+
+    fn build(
+        &self,
+        root: &Path,
+        folder: &Path,
+        hub: shprd_server::hub::Hub,
+        _dir: &Path,
+    ) -> Result<shprd_server::RepoParts, String> {
+        let ctx = self.ctx_for(root);
+        let host = self.host.clone();
+        let home = self.home.clone();
+        // The banner says whether there is a run at all, and the passes say so
+        // again if one is started after the service was: a service that came up
+        // too early must not look like an empty run.
+        let run_at_start = ctx.state().map_err(|err| err.to_string())?.run;
+        let start_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let live = Arc::new(crate::cmd::live_agents::HostLive::new(
+            root.to_path_buf(),
+            home.clone(),
+            host.clone(),
+        ));
+        let tick = tick_config(
+            &ctx,
+            &home,
+            hub,
+            run_notice(
+                self.json,
+                run_at_start.as_ref().map(|run| run.run_id.clone()),
+            ),
+            host.clone(),
+        )
+        .map_err(|err| err.to_string())?;
+        let announced = AnnouncedTick {
+            interval_secs: tick.interval.as_secs(),
+            max_running: tick.max_running,
+        };
+        // The person's start, retry and stop actions are the same two closures
+        // the tick's steps run: one spawn path, one way of closing a task's
+        // space, so a board's Start and the engine's own start cannot drift.
+        let engine = engine_of(&tick.worker)
+            .with_resend(resender(host.clone(), &home))
+            .with_review_again(review_again(&home, tick.worker.actor.clone()));
+        if let Ok(mut built) = self.built.lock() {
+            built.insert(
+                root.to_path_buf(),
+                Built {
+                    tick: announced,
+                    run: run_at_start,
+                    space: None,
+                },
+            );
+        }
+        // The coordinator's space is part of the host setup a run needs, and its
+        // label is derived rather than chosen, so the service makes it rather
+        // than leaving a pass to refuse (M9 gate bug 6). It is prepared after the
+        // slot answers: it asks the host, which can take seconds, and a window
+        // that switches to this repository must not wait for it.
+        let prepare = {
+            let (host, ctx, home) = (host.clone(), ctx.clone(), home.clone());
+            let (root, folder) = (root.to_path_buf(), folder.to_path_buf());
+            let (failure, live, every) = (start_failure.clone(), live.clone(), tick.interval);
+            let built = self.built.clone();
+            Box::new(move || {
+                // The guard is asked before anything touches the host (M11 fix
+                // Y): a live check run from a temporary checkout inherits the
+                // pane's `HERDR_SOCKET_PATH`, and a service that prepared its
+                // space would make one in the person's own window.
+                let leakage = crate::guard::leakage(&crate::guard::Edge::from_environment(&root));
+                let workspace = match &leakage {
+                    Some(reason) => SpaceNotice::Withheld(reason.clone()),
+                    None => prepare_space(
+                        host.as_ref(),
+                        &root,
+                        Some(&folder),
+                        coordinator_start(host.clone(), ctx.clone(), home.clone()),
+                    ),
+                };
+                if let SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) = &workspace
+                {
+                    tracing::warn!(%reason, "the repository's space is not ready: a pass cannot start a task until it is");
+                }
+                live.set_space(matches!(
+                    workspace,
+                    SpaceNotice::Created(..) | SpaceNotice::Reused(..)
+                ));
+                let failed = match &workspace {
+                    SpaceNotice::Created(_, None, why) | SpaceNotice::Reused(_, None, why) => {
+                        why.clone()
+                    }
+                    SpaceNotice::Unavailable(reason) | SpaceNotice::Withheld(reason) => {
+                        Some(format!("the space was not ready: {reason}"))
+                    }
+                    _ => None,
+                };
+                let withheld = matches!(workspace, SpaceNotice::Withheld(_));
+                if let Ok(mut kept) = failure.lock() {
+                    *kept = failed.clone();
+                }
+                if let Ok(mut built) = built.lock()
+                    && let Some(entry) = built.get_mut(&root)
+                {
+                    entry.space = Some(workspace);
+                }
+                // A coordinator that could not start (its program missing, or
+                // ended as it started) is tried again every pass, so it comes up
+                // once the program is back, and the chat's reason follows each try.
+                if failed.is_some() && !withheld {
+                    std::thread::spawn(move || {
+                        retry_coordinator(host, ctx, home, root, folder, failure, every);
+                    });
+                }
+            }) as Box<dyn FnOnce() + Send>
+        };
+        Ok(shprd_server::RepoParts {
+            after_write: Some(after_write(&ctx)),
+            engine: Some(engine),
+            // The chat's writes go through the host, the same adapter every
+            // other verb drives: one code path types into a pane, so a chat line
+            // lands where a prompt does and never in a tab shprd did not open.
+            chat: shprd_server::ChatHost::with(Arc::new(HostChat {
+                repo: root.to_path_buf(),
+                home: home.clone(),
+                host: host.clone(),
+                start_failure,
+                notice: Mutex::new(None),
+            })),
+            terminal: shprd_server::TerminalPort::with(Arc::new(HostTerminal {
+                repo: root.to_path_buf(),
+                home: home.clone(),
+                host: host.clone(),
+                live: live.clone(),
+            })),
+            // The tab bar's "+" menu's *Start an agent* is the same host and the
+            // same harness table: a program is a tab with its plain launch line
+            // in it, never a task's attempt, so it goes through the service and
+            // not through the mod.
+            agents: shprd_server::Agents::with(Arc::new(HostAgents {
+                repo: root.to_path_buf(),
+                data: self.data.clone(),
+                host: host.clone(),
+                ctx: ctx.clone(),
+                home: home.clone(),
+            })),
+            // The agents the host lists, headless: `live_agents` on the state
+            // answer, the output and attach routes, and the terminal socket's
+            // `agent:<id>` space all read this one list, so a client can only
+            // reach an agent that was listed.
+            live: shprd_server::LiveAgents::with(live),
+            tick: Some(tick),
+            prepare: Some(prepare),
+        })
+    }
 }
 
 /// The step that starts the coordinator in a prepared space: the same one at
@@ -282,12 +414,13 @@ fn coordinator_start(
 fn retry_coordinator_once(
     host: &dyn Host,
     repo: &Path,
+    folder: &Path,
     failure: &Mutex<Option<String>>,
     start: impl FnOnce(
         &crate::cmd::spawn::PreparedSpace,
     ) -> Result<crate::cmd::spawn::CoordinatorStart, CliError>,
 ) -> bool {
-    let notice = prepare_space(host, repo, start);
+    let notice = prepare_space(host, repo, Some(folder), start);
     let (started, why) = match notice {
         SpaceNotice::Created(_, pane, why) | SpaceNotice::Reused(_, pane, why) => {
             (pane.is_some(), why)
@@ -314,13 +447,15 @@ fn retry_coordinator(
     host: Arc<dyn Host>,
     ctx: Ctx,
     home: PathBuf,
+    repo: PathBuf,
+    folder: PathBuf,
     failure: Arc<Mutex<Option<String>>>,
     every: Duration,
 ) {
     loop {
         std::thread::sleep(every);
         let start = coordinator_start(host.clone(), ctx.clone(), home.clone());
-        if retry_coordinator_once(host.as_ref(), &ctx.root, &failure, start) {
+        if retry_coordinator_once(host.as_ref(), &repo, &folder, &failure, start) {
             println!("   coordinator:  started (it could not be at first)");
             return;
         }
@@ -610,14 +745,14 @@ pub(crate) enum SpaceNotice {
 fn prepare_space(
     mux: &dyn Host,
     repo: &Path,
+    folder: Option<&Path>,
     start: impl FnOnce(
         &crate::cmd::spawn::PreparedSpace,
     ) -> Result<crate::cmd::spawn::CoordinatorStart, CliError>,
 ) -> SpaceNotice {
     // The folder the person added may be inside the repository: its plain space is
     // adopted rather than a second one made at the root.
-    let launch = std::env::current_dir().ok();
-    let also: Vec<&Path> = launch.iter().map(PathBuf::as_path).collect();
+    let also: Vec<&Path> = folder.into_iter().collect();
     let prepared = match crate::cmd::spawn::ensure_repo_space_from(mux, repo, &also) {
         Ok(prepared) => prepared,
         Err(err) => return SpaceNotice::Unavailable(err.to_string()),
@@ -735,6 +870,7 @@ fn review_again(home: &Path, actor: Actor) -> shprd_server::Resender {
 }
 
 /// What the startup line says about the tick.
+#[derive(Clone)]
 struct AnnouncedTick {
     /// Seconds between two passes.
     interval_secs: u64,
@@ -764,22 +900,27 @@ fn after_write(ctx: &Ctx) -> AfterWrite {
 /// Says where the service is and how to reach it.
 ///
 /// The token itself is never printed — only the file it is in, which is `0600`
-/// in the state directory. The run is named when there is one, and the line
-/// says what to do when there is not: a service that came up before
-/// `shprd run start` must not look like a run with no tasks in it.
+/// in the state directory. When the caller named a repository, the run, the
+/// space and the tick are its own; the service itself serves every repository
+/// its window registers, so a start from the window names none.
 fn announce(
     ctx: &Ctx,
     info: &shprd_server::ServiceInfo,
-    tick: &AnnouncedTick,
-    run: Option<&RunInfo>,
-    space: &SpaceNotice,
+    banner: &Banner,
     host: &crate::host::Resolution,
 ) {
     let limits = WsLimits::default();
-    let hint = run.is_none().then_some(NO_RUN_HINT);
+    let first = banner
+        .first
+        .as_deref()
+        .and_then(|root| banner.factory.built_of(root).map(|built| (root, built)));
+    let run = first.as_ref().and_then(|(_, built)| built.run.as_ref());
+    let space = first.as_ref().and_then(|(_, built)| built.space.as_ref());
+    let tick = first.as_ref().map(|(_, built)| &built.tick);
+    let hint = (first.is_some() && run.is_none()).then_some(NO_RUN_HINT);
     if ctx.json {
         let value = serde_json::json!({
-            "serving": ctx.root.display().to_string(),
+            "serving": first.as_ref().map(|(root, _)| root.display().to_string()),
             "port": info.port,
             "url": format!("http://127.0.0.1:{}", info.port),
             "id": info.id,
@@ -787,12 +928,13 @@ fn announce(
             "pid": info.pid,
             "token": info.token_path.display().to_string(),
             "service_json": info.service_json.display().to_string(),
+            "migrated": banner.migrated,
             "run": run.map(|run| serde_json::json!({
                 "id": run.run_id,
                 "base": run.base_branch,
                 "integration": run.integration_branch,
             })),
-            "space": space_json(space),
+            "space": space.map(space_json),
             "host": {
                 "kind": host.kind.name(),
                 "binary": host.kind.binary(),
@@ -808,29 +950,39 @@ fn announce(
                 "idle_secs": limits.idle.as_secs(),
                 "session_secs": limits.session.as_secs(),
             },
-            "tick": {
+            "tick": tick.map(|tick| serde_json::json!({
                 "interval_secs": tick.interval_secs,
                 "max_running": tick.max_running,
-            },
+            })),
         });
         println!("{value}");
         return;
     }
-    println!(
-        "ok serving {} on http://127.0.0.1:{} (id {}, version {})",
-        ctx.root.display(),
-        info.port,
-        info.id,
-        info.version
-    );
-    match run {
-        Some(run) => println!(
-            "   run:          {} · {} → {}",
-            run.run_id, run.base_branch, run.integration_branch
+    match &first {
+        Some((root, _)) => println!(
+            "ok serving {} (and every repository the window registers) on http://127.0.0.1:{} (id {}, version {})",
+            root.display(),
+            info.port,
+            info.id,
+            info.version
         ),
-        None => println!("   run:          {NO_RUN_HINT}"),
+        None => println!(
+            "ok serving every repository the window registers on http://127.0.0.1:{} (id {}, version {})",
+            info.port, info.id, info.version
+        ),
     }
-    println!("   space:        {}", space_line(space, &ctx.root));
+    if let Some((root, _)) = &first {
+        match run {
+            Some(run) => println!(
+                "   run:          {} · {} → {}",
+                run.run_id, run.base_branch, run.integration_branch
+            ),
+            None => println!("   run:          {NO_RUN_HINT}"),
+        }
+        if let Some(space) = space {
+            println!("   space:        {}", space_line(space, root));
+        }
+    }
     println!("   host:         {}", host.line());
     println!("   token:        {}", info.token_path.display());
     println!("   service.json: {}", info.service_json.display());
@@ -840,10 +992,12 @@ fn announce(
         limits.idle.as_secs(),
         limits.session.as_secs() / 60
     );
-    println!(
-        "   tick:         every {}s, at most {} task(s) running",
-        tick.interval_secs, tick.max_running
-    );
+    if let Some(tick) = tick {
+        println!(
+            "   tick:         every {}s, at most {} task(s) running",
+            tick.interval_secs, tick.max_running
+        );
+    }
     println!("   stop with Ctrl-C or SIGTERM");
 }
 
@@ -958,7 +1112,12 @@ mod tests {
         let label = label_of(repo.path());
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
+        let notice = prepare_space(
+            &mux,
+            repo.path(),
+            None,
+            start_in(&mux, home.path(), repo.path()),
+        );
 
         let SpaceNotice::Created(reported, pane, _) = &notice else {
             panic!("the space is created, not {notice:?}");
@@ -1015,7 +1174,12 @@ mod tests {
         let old = mux.add_space(&folder, repo.path());
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
+        let notice = prepare_space(
+            &mux,
+            repo.path(),
+            None,
+            start_in(&mux, home.path(), repo.path()),
+        );
 
         let SpaceNotice::Reused(reported, _, _) = &notice else {
             panic!("the older space is reused, not {notice:?}");
@@ -1032,7 +1196,7 @@ mod tests {
     fn a_coordinator_that_cannot_start_says_why_in_the_banner() {
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default();
-        let notice = prepare_space(&mux, repo.path(), |_| {
+        let notice = prepare_space(&mux, repo.path(), None, |_| {
             Err(CliError::Invalid(anyhow!("no installed worker CLI")))
         });
         let line = space_line(&notice, repo.path());
@@ -1053,7 +1217,7 @@ mod tests {
         let mux = FakeMux::default();
         let failure = Mutex::new(Some("claude is not installed".to_owned()));
 
-        let still = retry_coordinator_once(&mux, repo.path(), &failure, |_| {
+        let still = retry_coordinator_once(&mux, repo.path(), repo.path(), &failure, |_| {
             Err(CliError::other(anyhow!("claude exited as it started")))
         });
         assert!(!still, "the program is still missing");
@@ -1062,6 +1226,7 @@ mod tests {
 
         let up = retry_coordinator_once(
             &mux,
+            repo.path(),
             repo.path(),
             &failure,
             start_in(&mux, home.path(), repo.path()),
@@ -1081,7 +1246,12 @@ mod tests {
         let _ = mux.take_calls();
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), start_in(&mux, home.path(), repo.path()));
+        let notice = prepare_space(
+            &mux,
+            repo.path(),
+            None,
+            start_in(&mux, home.path(), repo.path()),
+        );
 
         let SpaceNotice::Reused(reported, pane, _) = &notice else {
             panic!("the space is reused, not {notice:?}");
@@ -1181,7 +1351,12 @@ mod tests {
         });
         let notice = match &guard {
             Some(reason) => SpaceNotice::Withheld(reason.clone()),
-            None => prepare_space(&mux, repo.path(), start_in(&mux, repo.path(), repo.path())),
+            None => prepare_space(
+                &mux,
+                repo.path(),
+                None,
+                start_in(&mux, repo.path(), repo.path()),
+            ),
         };
         assert!(matches!(notice, SpaceNotice::Withheld(_)), "{notice:?}");
         assert_eq!(
