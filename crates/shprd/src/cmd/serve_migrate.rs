@@ -69,7 +69,10 @@ pub(crate) fn migrate(state_dir: &Path) -> Vec<String> {
                 ));
                 continue;
             }
-            notes.push(format!("stopped the old service for {name} (pid {})", record.pid));
+            notes.push(format!(
+                "stopped the old service for {name} (pid {})",
+                record.pid
+            ));
         }
         let mut removed = false;
         for file in OWN_FILES {
@@ -208,7 +211,10 @@ mod tests {
             "the newest password is the service's"
         );
         assert!(!a.join("web-auth.json").exists());
-        assert!(notes.iter().any(|note| note.contains("web password")), "{notes:?}");
+        assert!(
+            notes.iter().any(|note| note.contains("web password")),
+            "{notes:?}"
+        );
         assert!(
             migrate(state.path()).is_empty(),
             "a second start has nothing to migrate"

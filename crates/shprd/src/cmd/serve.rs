@@ -64,12 +64,7 @@ const LOG_ENV: &str = "SHPRD_LOG";
 /// `$SHPRD_REPO`, or a working directory inside one): that repository is
 /// registered before the banner, so a CLI start still shows its space and run;
 /// a start from the window's own launch names none and waits to be told.
-pub fn run(
-    ctx: &Ctx,
-    args: &ServeArgs,
-    home: Option<&Path>,
-    named: bool,
-) -> Result<(), CliError> {
+pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Result<(), CliError> {
     let home = resolve_home(home)?;
     install_subscriber();
     // The host is resolved once, here, and passed down: every pass, every spawn
@@ -217,8 +212,13 @@ impl std::fmt::Debug for Factory {
 
 impl Factory {
     fn ctx_for(&self, root: &Path) -> Ctx {
-        Ctx::new(root.to_path_buf(), self.actor.clone(), self.json, self.no_dagr)
-            .with_home(Some(self.home.clone()))
+        Ctx::new(
+            root.to_path_buf(),
+            self.actor.clone(),
+            self.json,
+            self.no_dagr,
+        )
+        .with_home(Some(self.home.clone()))
     }
 
     fn built_of(&self, root: &Path) -> Option<Built> {
@@ -244,10 +244,7 @@ impl shprd_server::RepoFactory for Factory {
         // The banner says whether there is a run at all, and the passes say so
         // again if one is started after the service was: a service that came up
         // too early must not look like an empty run.
-        let run_at_start = ctx
-            .state()
-            .map_err(|err| err.to_string())?
-            .run;
+        let run_at_start = ctx.state().map_err(|err| err.to_string())?.run;
         let start_failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let live = Arc::new(crate::cmd::live_agents::HostLive::new(
             root.to_path_buf(),
@@ -1112,7 +1109,12 @@ mod tests {
         let label = label_of(repo.path());
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), None, start_in(&mux, home.path(), repo.path()));
+        let notice = prepare_space(
+            &mux,
+            repo.path(),
+            None,
+            start_in(&mux, home.path(), repo.path()),
+        );
 
         let SpaceNotice::Created(reported, pane, _) = &notice else {
             panic!("the space is created, not {notice:?}");
@@ -1169,7 +1171,12 @@ mod tests {
         let old = mux.add_space(&folder, repo.path());
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), None, start_in(&mux, home.path(), repo.path()));
+        let notice = prepare_space(
+            &mux,
+            repo.path(),
+            None,
+            start_in(&mux, home.path(), repo.path()),
+        );
 
         let SpaceNotice::Reused(reported, _, _) = &notice else {
             panic!("the older space is reused, not {notice:?}");
@@ -1236,7 +1243,12 @@ mod tests {
         let _ = mux.take_calls();
 
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let notice = prepare_space(&mux, repo.path(), None, start_in(&mux, home.path(), repo.path()));
+        let notice = prepare_space(
+            &mux,
+            repo.path(),
+            None,
+            start_in(&mux, home.path(), repo.path()),
+        );
 
         let SpaceNotice::Reused(reported, pane, _) = &notice else {
             panic!("the space is reused, not {notice:?}");
@@ -1336,7 +1348,12 @@ mod tests {
         });
         let notice = match &guard {
             Some(reason) => SpaceNotice::Withheld(reason.clone()),
-            None => prepare_space(&mux, repo.path(), None, start_in(&mux, repo.path(), repo.path())),
+            None => prepare_space(
+                &mux,
+                repo.path(),
+                None,
+                start_in(&mux, repo.path(), repo.path()),
+            ),
         };
         assert!(matches!(notice, SpaceNotice::Withheld(_)), "{notice:?}");
         assert_eq!(

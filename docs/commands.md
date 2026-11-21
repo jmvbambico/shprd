@@ -87,8 +87,8 @@ engine validates every one:
 
 ## The service
 
-On the Herdr desktop nobody types `shprd serve`: the window starts it for the space
-the person added. A folder that is not a git repository is served too; at the person's
+On the Herdr desktop nobody types `shprd serve`: the window starts the one service and
+registers each space the person adds. A folder that is not a git repository is served too; at the person's
 first chat message the service makes it one (`git init` on `main`, a `.shprd/config.toml`
 with the test commands it found, an ignore for the run's files, and a first commit of what
 was there) and says so in one plain line in the chat. A folder inside a repository serves
@@ -96,23 +96,48 @@ that repository. Showing a folder never makes a repository. The first task start
 (base: the checked-out branch, integration branch `integration/r<time>`), so no
 `shprd run start` is needed either.
 
-`shprd serve` binds 127.0.0.1 only. It serves one repository, and every repository
-has its own service: its files live in `$XDG_STATE_HOME/shprd/repos/<name>-<hash>/`
-(`<name>` is the folder's name, `<hash>` an FNV-1a hash of its full path), so a second
-repository's service never needs the first one stopped, and each has its own port. It
-writes `service.json` (port, id, pid, version, `root`: the repository's path) and a
-bearer `token` there; a client finds the service for the space it shows by matching
-`root` with the space's folder, and reads the port from the record rather than guessing.
-On a clean stop it removes `service.json`. The same folder holds that service's remote
-files: `web-auth.json` (the password's argon2id hash), `sessions.json` (the SHA-256 of
-each session id, never the id) and `web.json` (the tunnel's record), so `shprd web`
-works on the repository you run it in (or `--repo`). All are private to you (mode
-0600). A state directory still allows one service at a time.
+`shprd serve` binds 127.0.0.1 only. There is **one service per user**, for every
+repository: one state directory (`$XDG_STATE_HOME/shprd`), one port, one token and
+one `service.json` (port, id, pid, version). A client finds it there and reads the
+port from the record rather than guessing. On a clean stop it removes `service.json`.
+The same folder holds the service's remote files: `web-auth.json` (the password's
+argon2id hash), `sessions.json` (the SHA-256 of each session id, never the id) and
+`web.json` (the tunnel's record), so `shprd web` works from any folder. All are
+private to you (mode 0600). A state directory allows one service at a time.
 
-The Herdr desktop starts the service itself: its footer starts `shprd serve` (a core
-terminal per repository) when the shown space's repository has none, and says which
-repository's service the space uses and whether it is up, with the reason in plain
-words when a start fails. Nobody types `shprd serve`.
+Each repository the service serves has its own run, event log (`.shprd/` in the
+repository), tick, news and coordinator, and a directory of its own,
+`<state>/repos/<name>-<hash>/` (`<name>` is the folder's name, `<hash>` an FNV-1a hash of
+its full path), holding its `changes` file and last pass. That name is the repository's
+stable id in the API. A repository is **registered** with the running service:
+`POST /api/repos {folder}` (idempotent, answers `{id, root, dir}` at once and prepares
+the repository's space and coordinator in the background), `PUT /api/repos {folders}`
+(exactly the layout's spaces: new ones are registered, every other repository stops
+being ticked and is dropped, and its coordinator is left idle where it is),
+`DELETE /api/repos {folder}`, and `GET /api/repos`. The three writes take the token
+door only, never a web session. `shprd serve --repo <path>` (or started inside a
+repository) registers that repository before it answers, and never drops it.
+
+Every repository-scoped route (`state`, `changes`, `asks`, `chat`, `terminal`, `action`,
+`graph`, `tasks`, `settings`, `coordinator`, `agents`, `ws`) names its repository with
+`?repo=<id or path>` (or the `x-shprd-repo` header). Only a registered repository
+resolves, and the value is never opened as a path. A request that names none is
+answered by the only repository registered, and refused in words when there are none
+or several. Health, login, sessions, tunnels, `roster` and `prompts` are the
+service's own and name no repository.
+
+Starting the one service: the first `shprd serve` after an upgrade stops the
+per-repository services an earlier version ran (only a pid its own record names, and
+only while that pid is still a `shprd serve`), removes their records, and keeps one
+web password (the newest) as the service's own; the others are dropped and
+`shprd web password set` asks again.
+
+The Herdr desktop starts the service itself, once, when its layout loads (a core
+terminal named `shprd-service`, kept across space switches and window restarts), and
+tells it every space's folder. Switching spaces only changes which repository the
+panels read: nothing is started or looked for again. The footer says
+`shprd: service up · <repository>`, or the reason in plain words when a start fails.
+Nobody types `shprd serve`.
 
 The web app (`web/dist`, embedded in the binary) is served from the same
 listener: any path that is not `/api…` is an asset, or `index.html` for an

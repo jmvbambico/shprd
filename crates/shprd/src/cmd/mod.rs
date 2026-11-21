@@ -133,9 +133,7 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         }
         Some(Command::Roster(args)) => roster::run(&args, ctx.json),
         // Unreachable in practice: `web` returns above, before any log is read.
-        Some(Command::Web { cmd }) => {
-            web::run(&cmd, cli.global.home.as_deref(), ctx.json)
-        }
+        Some(Command::Web { cmd }) => web::run(&cmd, cli.global.home.as_deref(), ctx.json),
         // Unreachable in practice: `set` returns above, before any log is read.
         Some(Command::Set(args)) => set::run(
             &args,

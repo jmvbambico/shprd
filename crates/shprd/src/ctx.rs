@@ -246,16 +246,17 @@ pub fn resolve_serve_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> 
 /// service then waits to be told its repositories rather than serving whatever
 /// folder it was started in.
 pub fn serve_names_a_repo(explicit: Option<&Path>) -> bool {
-    if explicit.is_some()
-        || std::env::var_os(REPO_ENV).is_some_and(|value| !value.is_empty())
-    {
+    if explicit.is_some() || std::env::var_os(REPO_ENV).is_some_and(|value| !value.is_empty()) {
         return true;
     }
     let Ok(folder) = std::env::current_dir() else {
         return false;
     };
     let mut command = std::process::Command::new("git");
-    command.arg("-C").arg(folder).args(["rev-parse", "--show-toplevel"]);
+    command
+        .arg("-C")
+        .arg(folder)
+        .args(["rev-parse", "--show-toplevel"]);
     shprd_core::spawn::output(&mut command)
         .ok()
         .is_some_and(|output| output.status.success())

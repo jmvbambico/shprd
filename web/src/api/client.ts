@@ -173,6 +173,27 @@ const NO_CHANGE = 204;
 /** How long a change long-poll waits when the caller says nothing. */
 export const DEFAULT_CHANGE_WAIT_MS = 10_000;
 
+/** The routes one repository answers: they carry `?repo=` when the page names one. */
+const REPO_ROUTES = /^\/api\/(state|changes|asks|chat|terminal|action|graph|tasks|settings|coordinator|agents|ws)(\/|\?|$)/;
+
+/**
+ * `path` with the repository the page names (`?repo=<id or folder>` on the page's
+ * own address). One `shprd serve` serves every repository; a page that names none
+ * is answered by the only repository registered, and refused in words when there
+ * are several.
+ */
+function scopedPath(path: string): string {
+  if (!REPO_ROUTES.test(path)) return path;
+  let repo: string | null = null;
+  try {
+    repo = new URLSearchParams(globalThis.location?.search ?? "").get("repo");
+  } catch {
+    repo = null;
+  }
+  if (!repo) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(repo)}`;
+}
+
 /**
  * One client for one service.
  *
@@ -541,7 +562,7 @@ export class ApiClient {
       headers[WRITE_HEADER] = "1";
     }
     try {
-      return await this.#fetch(`${this.#base}${path}`, {
+      return await this.#fetch(`${this.#base}${scopedPath(path)}`, {
         method,
         headers,
         credentials: "same-origin",
@@ -574,12 +595,12 @@ export class ApiClient {
 
   #socketUrl(): string {
     if (this.#base !== "") {
-      return `${this.#base.replace(/^http/, "ws")}/api/ws`;
+      return `${this.#base.replace(/^http/, "ws")}${scopedPath("/api/ws")}`;
     }
     const location = globalThis.location;
     const scheme = location?.protocol === "https:" ? "wss:" : "ws:";
     const host = location?.host ?? "127.0.0.1";
-    return `${scheme}//${host}/api/ws`;
+    return `${scheme}//${host}${scopedPath("/api/ws")}`;
   }
 }
 

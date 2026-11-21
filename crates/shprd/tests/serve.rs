@@ -430,15 +430,25 @@ fn two_repositories_are_served_at_once_by_one_service() {
         real
     );
     let again: Value = serde_json::from_str(&register(other.path())).expect("JSON");
-    assert_eq!(added["id"], again["id"], "registering twice is one repository");
+    assert_eq!(
+        added["id"], again["id"],
+        "registering twice is one repository"
+    );
 
     let (status, listed) = get(&format!("{base}/api/repos"), Some(&token)).expect("list");
     assert_eq!(status, 200);
     let listed: Value = serde_json::from_str(&listed).expect("JSON");
-    assert_eq!(listed["repos"].as_array().map(Vec::len), Some(2), "{listed}");
+    assert_eq!(
+        listed["repos"].as_array().map(Vec::len),
+        Some(2),
+        "{listed}"
+    );
 
     // With two registered a request must name its repository, by id or path.
-    assert_eq!(get(&format!("{base}/api/state"), Some(&token)).unwrap_err(), 400);
+    assert_eq!(
+        get(&format!("{base}/api/state"), Some(&token)).unwrap_err(),
+        400
+    );
     let id = added["id"].as_str().unwrap();
     let (status, _) = get(&format!("{base}/api/state?repo={id}"), Some(&token)).expect("by id");
     assert_eq!(status, 200);

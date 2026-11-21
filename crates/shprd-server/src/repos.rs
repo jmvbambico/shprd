@@ -164,7 +164,11 @@ impl Slot {
     /// Stops what [`Slot::start`] started; the pass in flight finishes.
     fn stop(&self) -> Vec<tokio::task::JoinHandle<()>> {
         let _ = self.stop.send(true);
-        let mut tasks = self.tasks.lock().map(|mut t| std::mem::take(&mut *t)).unwrap_or_default();
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map(|mut t| std::mem::take(&mut *t))
+            .unwrap_or_default();
         // The watcher has no state worth finishing.
         if !tasks.is_empty() {
             tasks.remove(0).abort();
@@ -175,7 +179,10 @@ impl Slot {
 
 impl std::fmt::Debug for Slot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Slot").field("id", &self.id).field("root", &self.root).finish()
+        f.debug_struct("Slot")
+            .field("id", &self.id)
+            .field("root", &self.root)
+            .finish()
     }
 }
 
@@ -301,23 +308,34 @@ impl Registry {
         pinned: bool,
         wait: bool,
     ) -> Result<RepoInfo, String> {
-        let factory = self
-            .factory
-            .as_ref()
-            .ok_or_else(|| "this service was started without a way to serve a repository".to_string())?;
+        let factory = self.factory.as_ref().ok_or_else(|| {
+            "this service was started without a way to serve a repository".to_string()
+        })?;
         if !folder.is_dir() {
-            return Err(format!("{} is not a folder this computer has", folder.display()));
+            return Err(format!(
+                "{} is not a folder this computer has",
+                folder.display()
+            ));
         }
         let folder = folder.to_path_buf();
-        let _one_at_a_time = self.registering.lock().map_err(|_| "registration failed".to_string())?;
+        let _one_at_a_time = self
+            .registering
+            .lock()
+            .map_err(|_| "registration failed".to_string())?;
         // The root is what the repository's own tools (git, the CLI's `--repo`)
         // call it; the id and the lookups below compare canonical paths.
         let root = factory.root_of(&folder);
         let (id, dir) = slot_dir(&self.dir, &root);
-        if let Some(found) = self.slots.read().ok().and_then(|slots| slots.get(&id).cloned()) {
+        if let Some(found) = self
+            .slots
+            .read()
+            .ok()
+            .and_then(|slots| slots.get(&id).cloned())
+        {
             return Ok(info(&found));
         }
-        std::fs::create_dir_all(&dir).map_err(|err| format!("could not make {}: {err}", dir.display()))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("could not make {}: {err}", dir.display()))?;
         let hub = Hub::touching(dir.clone());
         // The change file names the log as it stands, so a panel's first look
         // at it is a real answer rather than a missing file.
@@ -373,7 +391,12 @@ impl Registry {
     /// As [`Registry::register_folder`].
     pub fn show(&self, folder: &Path) -> Result<RepoInfo, String> {
         let found = self.register_folder(folder, false)?;
-        if let Some(slot) = self.slots.read().ok().and_then(|slots| slots.get(&found.id).cloned()) {
+        if let Some(slot) = self
+            .slots
+            .read()
+            .ok()
+            .and_then(|slots| slots.get(&found.id).cloned())
+        {
             slot.run_prepare(false);
         }
         Ok(found)
@@ -420,7 +443,11 @@ impl Registry {
     }
 
     fn remove(&self, id: &str) -> bool {
-        let removed = self.slots.write().ok().and_then(|mut slots| slots.remove(id));
+        let removed = self
+            .slots
+            .write()
+            .ok()
+            .and_then(|mut slots| slots.remove(id));
         match removed {
             Some(slot) => {
                 slot.stop();
@@ -477,7 +504,11 @@ impl Registry {
     /// caller runs one of its own (`Service::run_with_tick`).
     pub(crate) fn start_ticks(&self, first: Option<TickConfig>) {
         self.ticking.store(true, Ordering::SeqCst);
-        let slots: Vec<Arc<Slot>> = self.slots.read().map(|s| s.values().cloned().collect()).unwrap_or_default();
+        let slots: Vec<Arc<Slot>> = self
+            .slots
+            .read()
+            .map(|s| s.values().cloned().collect())
+            .unwrap_or_default();
         let only = slots.len() == 1;
         for slot in slots {
             slot.start(if only { first.clone() } else { None });
@@ -486,7 +517,11 @@ impl Registry {
 
     /// Stops every slot, and waits for the passes in flight to finish.
     pub(crate) async fn stop_all(&self) {
-        let slots: Vec<Arc<Slot>> = self.slots.read().map(|s| s.values().cloned().collect()).unwrap_or_default();
+        let slots: Vec<Arc<Slot>> = self
+            .slots
+            .read()
+            .map(|s| s.values().cloned().collect())
+            .unwrap_or_default();
         let mut handles = Vec::new();
         for slot in slots {
             handles.extend(slot.stop());
@@ -503,7 +538,10 @@ impl Registry {
         let repos = Router::new()
             .route(
                 "/api/repos",
-                get(list_repos).post(add_repo).put(sync_repos).delete(drop_repo),
+                get(list_repos)
+                    .post(add_repo)
+                    .put(sync_repos)
+                    .delete(drop_repo),
             )
             .layer(middleware::from_fn_with_state(base.clone(), auth::require))
             .layer(middleware::from_fn_with_state(base.clone(), auth::host))
@@ -545,9 +583,12 @@ fn is_scoped(path: &str) -> bool {
         "/api/agents",
         "/api/ws",
     ];
-    SCOPED
-        .iter()
-        .any(|prefix| path == *prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/')))
+    SCOPED.iter().any(|prefix| {
+        path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// The repository a request names: `?repo=`, else the header.
@@ -689,6 +730,9 @@ async fn drop_repo(
     if registry.unregister(&body.folder) {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiReject::not_found(format!("no repository {:?} is registered", body.folder)))
+        Err(ApiReject::not_found(format!(
+            "no repository {:?} is registered",
+            body.folder
+        )))
     }
 }
