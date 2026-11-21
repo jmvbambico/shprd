@@ -1709,10 +1709,16 @@ pub fn spent_pane(patterns: &[String], screen: &str, working: bool, now_ms: u64)
         .filter(|line| !line.starts_with("$ ") && !line.starts_with("> "))
         .collect();
     let text = tail.join("\n");
-    let phrase = shprd_agents::exhausted::exhausted(patterns, &text)?;
+    let phrase = shprd_agents::exhausted::exhausted_pane(patterns, &text)?;
     let lowered = phrase.to_ascii_lowercase();
     let rate = lowered.contains("rate") || lowered.contains("429") || lowered.contains("many");
-    let reset_at_ms = shprd_agents::exhausted::reset_at_ms(&text).filter(|at| *at > now_ms);
+    // A message whose printed reset has passed is a stale screen, not a spent
+    // account: it must not start a new cooldown.
+    let printed = shprd_agents::exhausted::reset_at_ms(&text);
+    if printed.is_some_and(|at| at <= now_ms) {
+        return None;
+    }
+    let reset_at_ms = printed;
     let (state, cooldown) = if rate {
         ("rate-limited", RATE_COOLDOWN_MS)
     } else {
@@ -3874,6 +3880,18 @@ project_dirs = []
         );
         // A prompt echoed at the bottom is never a verdict.
         assert!(spent_pane(&[], "> check the usage limit wording", false, now).is_none());
+        // A stale message (its printed reset has passed) is not a spent account.
+        assert!(spent_pane(&[], CODEX_PANE, false, u64::MAX / 2).is_none());
+        // Short words that are ordinary text are never a verdict.
+        assert!(
+            spent_pane(
+                &[],
+                "reviewing the billing quota code: 429 credit",
+                false,
+                now
+            )
+            .is_none()
+        );
         // No time printed: a bounded cooldown, not for ever.
         let bare =
             spent_pane(&[], "ERROR: rate limit reached, slow down", false, 100).expect("rate");

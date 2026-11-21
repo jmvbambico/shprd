@@ -606,7 +606,12 @@ impl Worker {
             .values()
             .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
             .collect();
-        if own.iter().any(|ask| ask.raised_seq > request.seq) {
+        // A card still waiting is the one question; an answered one that led
+        // nowhere (the retry was refused too) is asked again.
+        if own
+            .iter()
+            .any(|ask| ask.raised_seq > request.seq && ask.answer.is_none())
+        {
             return;
         }
         let text = shprd_core::review::none_left_body(&task, attempt, &why);

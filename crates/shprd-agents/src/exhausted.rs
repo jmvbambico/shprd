@@ -67,6 +67,35 @@ pub fn exhausted(patterns: &[String], text: &str) -> Option<String> {
     hit.map(|pattern| pattern.trim().to_owned())
 }
 
+/// Whole phrases a CLI's own error says when its account is spent, safe to read
+/// off a pane: unlike the short words in the table above, ordinary text a
+/// reviewer reads does not contain them.
+pub const PANE_PHRASES: &[&str] = &[
+    "usage limit",
+    "rate limit",
+    "hit your limit",
+    "weekly limit",
+    "monthly limit",
+    "too many requests",
+    "insufficient_quota",
+    "out of allowance",
+];
+
+/// The first of `patterns` or [`PANE_PHRASES`] the text holds (ASCII
+/// case-insensitively), for a pane: never the short table [`exhausted`] reads.
+pub fn exhausted_pane(patterns: &[String], text: &str) -> Option<String> {
+    let lowered = text.to_ascii_lowercase();
+    patterns
+        .iter()
+        .map(String::as_str)
+        .chain(PANE_PHRASES.iter().copied())
+        .find(|pattern| {
+            let pattern = pattern.trim();
+            !pattern.is_empty() && lowered.contains(&pattern.to_ascii_lowercase())
+        })
+        .map(|pattern| pattern.trim().to_owned())
+}
+
 /// When the account may answer again, read out of the CLI's own words, as ms
 /// since the Unix epoch in this machine's time zone.
 ///
