@@ -504,10 +504,20 @@ def main():
     t0 = time.time()
     stop_window(env)
     time.sleep(3)
+    # A mod's localStorage is a file in the app home, so the reopened window can come back on the
+    # Graph view (a click or `g` would be needed otherwise): g and h are then screenshots of the Graph pane.
+    store = f"{env.app}/data/shprd-tasks/store.json"
+    try:
+        data = json.load(open(store))
+    except (OSError, ValueError):
+        data = {}
+    data["tasks.view"] = json.dumps("graph")
+    os.makedirs(os.path.dirname(store), exist_ok=True)
+    json.dump(data, open(store, "w"))
     e = start_window(env, binary_dir)
     if e:
         time.sleep(10)
-        shot(e, out, "g-reopened")
+        shot(e, out, "g-reopened-graph")
         tabs, shown, ids, foreign, ntasks = view_ok("g")
         seen = f"tabs {ids}; shown {[t['name'] for t in shown]}; tasks {ntasks}"
         ok_g = len(shown) == 1 and 'shprd-coordinator' in str(shown[0]['id']) and not foreign and ntasks >= 3
@@ -538,7 +548,7 @@ def main():
             break
         time.sleep(8)
     time.sleep(4)
-    shot(e, out, "h-all-done") if e else None
+    shot(e, out, "h-all-done-graph") if e else None
     seen = f"{json.dumps({t['id']: (t['derived']['status'], t['derived'].get('reason')) for t in (final or st)['tasks']})[:300]}"
     ok_h = bool(final)
     failed |= not record("h every task to Done", "all Done; honest subtitles and status bar", seen, t0, ok_h)
