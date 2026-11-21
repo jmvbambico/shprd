@@ -210,6 +210,17 @@ const ASSISTANT_M11_TASKS_ONLY: &str =
 const ASSISTANT_M11_TASKS_ONLY_DIGEST: &str =
     "09e6b9146233e0219a4718d4782707c71accaa030743a15096b7d88a7c415a50";
 
+/// The coordinator wording that said to ignore another product's notes but not
+/// to never run its tools: a coordinator made tasks with `herdr-task`, which
+/// shprd's panes never showed (SHPR-79).
+#[cfg(test)]
+const ASSISTANT_M11_ACCEPT: &str =
+    include_str!("../../../data/templates/history/assistant-m11-accept.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_ACCEPT`].
+const ASSISTANT_M11_ACCEPT_DIGEST: &str =
+    "2edb55677e9ae75377a852243658a791b0169d71c55b8bd711c7192f1aa00a50";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -217,6 +228,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_PRE_IDENTITY_DIGEST,
     ASSISTANT_M11_IDENTITY_DIGEST,
     ASSISTANT_M11_TASKS_ONLY_DIGEST,
+    ASSISTANT_M11_ACCEPT_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet

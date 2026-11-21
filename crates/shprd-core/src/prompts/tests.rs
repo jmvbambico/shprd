@@ -641,3 +641,23 @@ fn the_coordinator_says_accept_in_the_tasks_pane() {
     assert!(text.contains("Accept it in the Tasks pane"));
     assert!(text.contains("Never tell them to run `shprd approve`"));
 }
+
+/// SHPR-79: the coordinator never uses Shepherdr's tools, and the wording that
+/// did not forbid them is retired and upgrades.
+#[test]
+fn the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    for needed in ["Never run `herdr-task`", "Every task is made with `shprd agent task add`"] {
+        assert!(shipped.text.contains(needed), "the brief must say {needed:?}");
+    }
+    assert_eq!(
+        digest(ASSISTANT_M11_ACCEPT.as_bytes()),
+        ASSISTANT_M11_ACCEPT_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_ACCEPT_DIGEST));
+    let temp = dir();
+    std::fs::create_dir_all(temp.path()).expect("dir");
+    std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_ACCEPT).expect("an old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}

@@ -1440,3 +1440,46 @@ test("SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar"
   // The tabs keep the host's own positions: a drag still names the right slot.
   assert.deepEqual(rows.map((row) => row.index), [1, 2]);
 });
+
+// SHPR-79: a shprd space's center shows shprd's coordinator, whatever Shepherdr's tab bar did.
+import { seenWith, strayTab, shprdCoordinatorTab } from "../mods/lib/tabstrip.js";
+import { COLUMN, GUTTER, bubbleWidth } from "../mods/lib/chat.js";
+
+test("strayTab moves a shprd space off Shepherdr's Assistant, and only there (SHPR-79)", () => {
+  const panes = [{ tab: "assist", mod: "chat" }, { tab: "shprd-coordinator-sp", mod: "shprd-chat" }];
+  const space = (active) => ({
+    id: "sp",
+    name: "shprd · scratchpad",
+    tabs: [
+      { id: "assist", name: "Assistant", active: active === "assist" },
+      { id: "shprd-coordinator-sp", name: "shprd", active: active === "shprd-coordinator-sp" },
+    ],
+  });
+  assert.equal(shprdCoordinatorTab({ id: "shprd-coordinator-sp" }), true);
+  assert.equal(shprdCoordinatorTab({ id: "assist" }), false);
+  assert.equal(strayTab(space("assist"), panes), "shprd-coordinator-sp");
+  assert.equal(strayTab(space("shprd-coordinator-sp"), panes), null);
+  // A space with no shprd coordinator (Shepherdr's own, or `shprd · shprd` where the orchestrator
+  // runs) keeps its Assistant: nothing moves.
+  const theirs = { id: "x", name: "sweatbrain", tabs: [{ id: "assist", name: "Assistant", active: true }] };
+  assert.equal(strayTab(theirs, panes), null);
+});
+
+test("seenWith notes shprd's spaces so Shepherdr never adds an Assistant to them (SHPR-79)", () => {
+  const spaces = [
+    { id: "a", name: "shprd · scratchpad" },
+    { id: "b", name: "sweatbrain" },
+    { id: "m/c", name: "shprd · remote", machine: "m" },
+  ];
+  assert.deepEqual(seenWith(["b"], spaces), ["b", "a"]);
+  assert.equal(seenWith(["a", "b"], spaces), null);
+  assert.equal(seenWith(null, spaces), null, "Shepherdr has not started the list: it notes every space itself");
+});
+
+test("the chat's column and bubbles follow Shepherdr's at every pane width (SHPR-79)", () => {
+  assert.equal(COLUMN, 760);
+  assert.equal(GUTTER, 18);
+  assert.equal(bubbleWidth(600), 480);
+  assert.equal(bubbleWidth(2000), 608);
+  assert.equal(bubbleWidth(100), 240);
+});
