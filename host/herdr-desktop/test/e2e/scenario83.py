@@ -141,6 +141,19 @@ def main():
     def shoot(name):
         return sc.shot(e, out, name)
 
+    def ensure_tasks_pane():
+        """The Tasks pane can be hidden (the real window's layout state is copied): the top-right Tasks button shows it."""
+        for _ in range(2):
+            p = shoot("pane-check")
+            ws, size = rc.words(p)
+            if [w for w in ws if w[0] > 0.59 * size[0] and w[4].startswith("Filter")]:
+                return True
+            btn = [w for w in ws if w[1] < 70 and w[0] > 0.8 * size[0] and w[4] == "Tasks"]
+            if btn:
+                click(p, (btn[0][0] + btn[0][2] / 2, btn[0][1] + btn[0][3] / 2), size, "the Tasks button (the pane was hidden)")
+                time.sleep(2)
+        return False
+
     def state():
         return sc.api(e, "GET", "/api/state", folder)
 
@@ -171,6 +184,7 @@ def main():
             return 1
         sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
 
+        ensure_tasks_pane()
         accepted, answered, clicked_review = set(), set(), {}
         deadline = time.time() + args.minutes * 60
         last = {}
@@ -201,7 +215,7 @@ def main():
                     ws, size = rc.words(p)
                     idw = [w for w in ws if w[0] > 0.59 * size[0] and w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and any(ch.isalnum() for ch in o[4]) and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
                     if not idw:
-                        time.sleep(2)
+                        ensure_tasks_pane()
                         continue
                     click(p, (idw[0][0] + 300, idw[0][1] - 40), size, f"the {a.get('task')} row")
                     time.sleep(2.5)
@@ -211,7 +225,7 @@ def main():
                     if head:
                         opened = True
                         break
-                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 0, size[0], 400))
+                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 70, size[0], 400))
                     if back:
                         click(p, back, size, "back to the list")
                         time.sleep(1.5)
@@ -245,7 +259,7 @@ def main():
                     if px:
                         break
                     # The pane may still show a task's thread (the card was answered there): back to the list.
-                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 0, size[0], 400))
+                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 70, size[0], 400))
                     if back:
                         click(p, back, size, "back to the Tasks list")
                         time.sleep(2)
