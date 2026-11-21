@@ -239,8 +239,16 @@ def main():
                     continue
                 t1 = time.time()
                 accepted.add(tid)
-                p = shoot(f"{tid}-ready-list")
-                px, size = row_action(p, tid, "Review")
+                for _ in range(3):
+                    p = shoot(f"{tid}-ready-list")
+                    px, size = row_action(p, tid, "Review")
+                    if px:
+                        break
+                    # The pane may still show a task's thread (the card was answered there): back to the list.
+                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 0, size[0], 400))
+                    if back:
+                        click(p, back, size, "back to the Tasks list")
+                        time.sleep(2)
                 if not px:
                     sc.record(f"{tid} Review", "the row shows a Review pill", "no Review pill found on the row", t1, False)
                     failed = True
