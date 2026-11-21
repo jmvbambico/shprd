@@ -184,12 +184,16 @@ export default class Chat extends View {
    */
   async bounded(cx) {
     const start = Date.now();
-    const read = this.readOnce(cx).then(() => "done");
+    // Each read has a generation; a read given up on is stale and changes nothing
+    // if it ever finishes (a newer read owns the state by then).
+    this.gen = (this.gen ?? 0) + 1;
+    const read = this.readOnce(cx, this.gen).then(() => "done");
     // A clock that fires early (a stub's) is not a read that took too long.
     const gave = (cx?.sleep?.(READ_MS) ?? new Promise(() => {})).then(() => (Date.now() - start >= READ_MS - 100 ? "late" : "early"));
     let outcome = await Promise.race([read, gave]);
     if (outcome === "early") outcome = await read;
     if (outcome === "late") {
+      this.gen += 1;
       this.client = null;
       this.failure = downNotice();
       cx.notify();
@@ -197,10 +201,12 @@ export default class Chat extends View {
   }
 
   /** One read of the service and one repaint; [`refresh`] is what callers use. */
-  async readOnce(cx) {
+  async readOnce(cx, gen = this.gen) {
     const space = this.space;
+    const stale = () => gen !== this.gen;
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (stale()) return;
       if (!next.client) {
         this.client = null;
         this.failure = downNotice();
@@ -219,8 +225,11 @@ export default class Chat extends View {
       // its answer another conversation's, which is not folded into this one.
       if (this.slot !== undefined && this.slotKey() !== this.slot) this.forget(false);
       const slot = this.slot;
-      this.state = await this.client.state();
-      this.asks = await this.client.asks();
+      const board = await this.client.state();
+      const asks = await this.client.asks();
+      if (stale()) return;
+      this.state = board;
+      this.asks = asks;
       if (space !== null) {
         // `more` means the page filled up: a long conversation arrives over a few
         // calls rather than one slow one, and the next timer catches any left over.
@@ -232,7 +241,7 @@ export default class Chat extends View {
           );
           // The person moved to another task while this was in flight: this answer
           // is for the one they left.
-          if (space !== this.space || slot !== this.slot) return;
+          if (space !== this.space || slot !== this.slot || stale()) return;
           this.chat = fold(this.chat, answer);
           if (!this.chat.more) break;
         }
@@ -240,6 +249,7 @@ export default class Chat extends View {
       this.failure = null;
       if (space === this.space && slot === this.slot) this.loaded?.add(slot);
     } catch (err) {
+      if (stale()) return;
       // A restarted service answers with another id: forget the client so the
       // next look finds the new port instead of dialling a dead one.
       this.client = null;

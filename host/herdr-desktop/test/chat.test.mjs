@@ -594,3 +594,18 @@ test("an unread conversation says Loading only at first; later it is the empty c
     Date.now = realNow;
   }
 });
+
+test("a read given up on changes nothing if it finishes late (SHPR-80)", async () => {
+  const { view } = panel([page({ messages: [{ role: "assistant", text: "late" }], cursor: "s1@4" })]);
+  let release;
+  view.client.state = () => new Promise((resolve) => { release = () => resolve({ tasks: [{ id: "OLD" }], needs: [] }); });
+  view.gen = 1;
+  const read = view.readOnce(view.cx, 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  view.gen = 2; // bounded() gave up on it and a newer read owns the state
+  const before = view.state;
+  release();
+  await read;
+  assert.equal(view.state, before, "the stale read left the board alone");
+  assert.equal(view.chat.messages.length, 0, "and the conversation");
+});
