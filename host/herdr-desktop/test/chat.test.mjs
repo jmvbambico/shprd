@@ -471,6 +471,7 @@ test("a card is answered through the service, once, and a refusal stays on the c
   const card = { id: "ask:T1:a1", task: "T1", ask: "a1" };
   await view.answer(card, "  Yes  ");
   assert.deepEqual(calls.find((call) => call.method === "ANSWER").body, { task: "T1", ask: "a1", answer: "Yes" });
+  herdr.SHARED.clear(); // the first answer's op would (rightly) block a second press of the same card
   const { view: refused } = panel();
   refused.client.answerAsk = async () => {
     const error = new Error("the ask was already answered");

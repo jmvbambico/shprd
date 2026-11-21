@@ -176,3 +176,10 @@ test("a newer action on a confirmed task wins over the older one", () => {
   const shown = opt.overlay(raw, FOLDER, opt.read().ops);
   assert.equal(shown.tasks[0].pending.label, "Stopping…");
 });
+
+test("a confirmed answer is not sent twice while its op lives", () => {
+  const raw = board();
+  const first = opt.begin({ kind: "ask.answer", tasks: ["A"], board: raw, folder: FOLDER, extra: { ask: "q1", remaining: 2 } });
+  opt.confirm(first.id);
+  assert.equal(opt.begin({ kind: "ask.answer", tasks: ["A"], board: raw, folder: FOLDER, extra: { ask: "q1", remaining: 2 } }), null);
+});

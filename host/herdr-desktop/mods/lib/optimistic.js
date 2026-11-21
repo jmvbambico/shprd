@@ -179,13 +179,13 @@ export function begin({ kind, tasks, board, folder, extra = {}, now = Date.now()
   const askKey = extra.ask ? `${ids[0]}/${extra.ask}` : null;
   // A task with an action still waiting for its answer takes no second press; once
   // confirmed, only the same verb again is a double press (Stop right after Start is
-  // a new decision), and a question answered is never answered twice from the pane.
+  // a new decision), and a question already answered is not answered twice while its op lives.
   const busy = live.some(
     (op) =>
       op.folder === key &&
       op.phase !== "failed" &&
       (op.tasks.some((id) => ids.includes(id)) || (askKey !== null && op.ask === askKey)) &&
-      (op.phase === "pending" || (op.kind === kind && kind !== "ask.answer")),
+      (op.phase === "pending" || op.kind === kind),
   );
   if (busy) return null;
   const op = {
