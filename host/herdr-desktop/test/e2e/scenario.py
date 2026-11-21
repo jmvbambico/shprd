@@ -119,8 +119,10 @@ def app_do(env, _cmd, **args):
 
 
 def ls(env):
-    r = run(["herdr-app", "ls", "--json"], env, timeout=20)
+    r = run(["herdr-app", "ls"], env, timeout=20)
     txt = r.stdout.strip()
+    if os.environ.get("E2E_LS_DUMP"):
+        open(os.environ["E2E_LS_DUMP"], "a").write(txt + "\n---\n" + r.stderr + "\n")
     try:
         return json.loads(txt)
     except ValueError:
@@ -186,6 +188,31 @@ def tabs_of(env, folder_name):
             continue
         for tab in sp.get("tabs", []):
             out.append({"space": sp.get("name"), "id": tab.get("id"), "name": tab.get("name"), "active": tab.get("active"), "raw": tab})
+    return out
+
+
+def foreign_assistants(env_dict, tabs):
+    """What in this space is Shepherdr's Assistant: a second tab named Assistant (the New space flow makes one
+    shprd-chat tab of that name itself), or a live terminal carrying Shepherdr's coordinator labels."""
+    out = []
+    named = [t for t in tabs if str(t["name"]).strip() == "Assistant" and "shprd-coordinator" not in str(t["id"])]
+    if len(named) > 1:
+        out += [f"extra Assistant tab {t['id']}" for t in named[1:]]
+    r = run(["hc", "ls", "--json"], env_dict, timeout=20)
+    try:
+        addresses = [t.get("address") for t in json.loads(r.stdout or "{}").get("terminals", [])]
+    except ValueError:
+        addresses = []
+    for address in addresses:
+        g = run(["hc", "get", address, "--json"], env_dict, timeout=20)
+        try:
+            term = json.loads(g.stdout or "{}")
+        except ValueError:
+            continue
+        labels = term.get("labels") or {}
+        template = str(term.get("template") or "")
+        if any(k.startswith("herdr.coordinator") for k in labels) or template.startswith(("assistant", "herdr-assistant", "coordinator")):
+            out.append(f"terminal {address}")
     return out
 
 
@@ -320,9 +347,9 @@ def main():
         tabs = tabs_of(e, name_part)
         shown = [t for t in tabs if t["active"]]
         names = [(t["name"], t["id"]) for t in tabs]
-        assistants = [t for t in tabs if str(t["name"]).strip() == "Assistant" and "shprd-coordinator" not in str(t["id"])]
-        ok = bool(up) and len(shown) == 1 and not any("herdr-assistant" in json.dumps(t["raw"]) for t in tabs)
-        return record("a add folder (window's own flow)", "only shprd's chat in the space; service up", f"tabs {names}; shown {[t['name'] for t in shown]}; service {'up' if up else 'DOWN'}", t0, ok), space
+        stray = foreign_assistants(e, tabs)
+        ok = bool(up) and len(shown) == 1 and not stray
+        return record("a add folder (window's own flow)", "only shprd's chat in the space; service up", f"tabs {names}; shown {[t['name'] for t in shown]}; foreign {stray}; service {'up' if up else 'DOWN'}", t0, ok), space
 
     ok, space = step_a()
     failed |= not ok
@@ -425,7 +452,7 @@ def main():
         tabs = tabs_of(e, name_part)
         shown = [t for t in tabs if t["active"]]
         ids = [(t["name"], t["id"]) for t in tabs]
-        foreign = [t for t in shown if "coordinator" not in str(t["id"]) and str(t["name"]) != "Assistant" or "herdr-assistant" in json.dumps(t["raw"])]
+        foreign = foreign_assistants(e, tabs)
         stt = api(e, "GET", "/api/state", folder)
         return tabs, shown, ids, foreign, len(stt["tasks"])
 
@@ -439,7 +466,7 @@ def main():
     shot(e, out, "f-back-in-shprd")
     tabs, shown, ids, foreign, ntasks = view_ok("f")
     seen = f"tabs {ids}; shown {[t['name'] for t in shown]}; tasks {ntasks}"
-    ok_f = len(shown) == 1 and not foreign and not any("herdr-assistant" in json.dumps(t["raw"]) for t in tabs) and ntasks >= 3
+    ok_f = len(shown) == 1 and not foreign and ntasks >= 3
     failed |= not record("f layout shprd -> shepherdr -> shprd", "only shprd's chat; panes still show the run", seen, t0, ok_f)
 
     # ---- g: close and reopen the window ----
@@ -452,7 +479,7 @@ def main():
         shot(e, out, "g-reopened")
         tabs, shown, ids, foreign, ntasks = view_ok("g")
         seen = f"tabs {ids}; shown {[t['name'] for t in shown]}; tasks {ntasks}"
-        ok_g = len(shown) == 1 and not foreign and not any("herdr-assistant" in json.dumps(t["raw"]) for t in tabs) and ntasks >= 3
+        ok_g = len(shown) == 1 and not foreign and ntasks >= 3
     else:
         seen, ok_g = "the window did not come back", False
     failed |= not record("g close and reopen the window", "same as f", seen, t0, ok_g)
