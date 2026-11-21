@@ -131,7 +131,10 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Res
     // Stop handling is installed before the service announces itself: the
     // record `Service::start` writes is what a supervisor waits for, and a
     // signal sent right after it must stop the service quietly.
-    let shutdown = runtime.block_on(async { shutdown_signal() });
+    let shutdown = {
+        let _in_runtime = runtime.enter();
+        shutdown_signal()
+    };
     // A second service for the same state directory would take the record over
     // and leave the running one undiscoverable, so it is refused with the exit
     // code a refused verb uses rather than an error's.
