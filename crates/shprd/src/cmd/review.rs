@@ -1119,7 +1119,7 @@ fn open_reviewer(
     let space = spawn::agent_space(mux, &env.spawn)?;
     let title = reviewer_title(&reviewer.agent, task);
     let text = render_review_brief(brief);
-    let (argv, brief_in_args) = reviewer_argv(
+    let (mut argv, brief_in_args) = reviewer_argv(
         &reviewer.spec,
         reviewer.model.as_deref(),
         reviewer.effort.as_deref(),
@@ -1145,6 +1145,10 @@ fn open_reviewer(
     // symlink, and the reviewer's cwd is its writable root: always hand it the
     // folder's real path, whatever spelling the packet was reached by.
     let real_cwd = real_dir(dir);
+    // The packet folder is one shprd made, so no first-run dialog may ask about
+    // it: a Claude reviewer sat on its folder-trust question and never got its
+    // kickoff.
+    spawn::trust_launch_folder(&reviewer.agent, &real_cwd, &env.spawn.base_env, &mut argv);
     let tab = mux
         .spawn_agent(&shprd_mux::AgentLaunch {
             space: &space.id,
@@ -1210,7 +1214,10 @@ fn deliver_review_turn(
         // The ledger says which turn was lost, the way the warning does: a
         // kickoff that never arrived and a brief that never arrived are fixed
         // the same way but are different causes to read.
-        body: format!("{what} not delivered"),
+        body: match delivery.blocked_by(&reviewer.agent) {
+            Some(cause) => format!("{what} not delivered: {cause}"),
+            None => format!("{what} not delivered"),
+        },
         default_action: format!(
             "press Retry review on the task in the Tasks pane, which closes the reviewer \
              tab and delivers the {what} again ({reason}); never type into the reviewer's tab"
@@ -2697,6 +2704,78 @@ project_dirs = []
             escalations[0].2
         );
         assert!(prompts(&mux).is_empty(), "nothing may be typed in");
+    }
+
+    /// A claude reviewer's environment with a private HOME, so the trust entry
+    /// goes to a temp file and never the person's `~/.claude.json`.
+    fn claude_review_env<'a>(scratch: &Scratch, ctx: &'a Ctx) -> ReviewEnv<'a> {
+        let mut claude = fake_prompt_spec("claude", "anthropic");
+        claude.blocking_prompts = vec![BlockingPrompt {
+            name: "folder trust".to_string(),
+            pattern: "Is this a project you created or one you trust".to_string(),
+            answer: None,
+        }];
+        let mut env = scratch.review_env_with(
+            ctx,
+            Some("claude/m1"),
+            vec![
+                Program {
+                    spec: fake_spec("sh", "pi"),
+                    installed: true,
+                },
+                Program {
+                    spec: claude,
+                    installed: true,
+                },
+            ],
+        );
+        env.spawn.base_env.insert(
+            "HOME".to_string(),
+            scratch.home.path().display().to_string(),
+        );
+        env
+    }
+
+    #[test]
+    fn a_claude_reviewers_packet_folder_is_trusted_before_it_starts() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = claude_review_env(&scratch, &ctx);
+        let mux = scratch.mux();
+
+        let report = review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let config = scratch.home.path().join(".claude.json");
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let key = real_dir(&report.dir).display().to_string();
+        assert_eq!(
+            doc["projects"][&key]["hasTrustDialogAccepted"], true,
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn a_kickoff_stuck_on_the_trust_prompt_says_so_plainly() {
+        let scratch = Scratch::new();
+        let ctx = scratch.ctx();
+        scratch.reported(&ctx);
+        let env = claude_review_env(&scratch, &ctx);
+        let mux = scratch.unready_mux();
+        mux.set_screen(
+            &reviewer_pane(),
+            "Is this a project you created or one you trust?\n  > 1. Yes, I trust",
+        );
+
+        review(&mux, &env, &request(false)).unwrap_or_else(|err| panic!("{err}"));
+
+        let escalations = escalations(&ctx);
+        assert_eq!(escalations.len(), 1, "{escalations:?}");
+        assert_eq!(
+            escalations[0].1,
+            "review kickoff not delivered: claude is asking to trust the folder"
+        );
+        assert!(prompts(&mux).is_empty(), "nothing may be typed over it");
     }
 
     #[test]

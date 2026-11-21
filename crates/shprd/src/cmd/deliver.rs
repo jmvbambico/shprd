@@ -119,6 +119,21 @@ impl Delivery {
         }
     }
 
+    /// Plain words for what stopped the brief when a known prompt did, naming
+    /// the program: `claude is asking to trust the folder`. `None` when the
+    /// brief arrived or was lost for no known reason.
+    pub fn blocked_by(&self, program: &str) -> Option<String> {
+        match self {
+            Self::Blocked { prompt } if prompt == "folder trust" => {
+                Some(format!("{program} is asking to trust the folder"))
+            }
+            Self::Blocked { prompt } => {
+                Some(format!("{program} is waiting on its \"{prompt}\" prompt"))
+            }
+            Self::Delivered { .. } | Self::NotDelivered(_) => None,
+        }
+    }
+
     /// How the agent was ready, when the brief arrived.
     pub fn ready(&self) -> Option<ReadyBy> {
         match self {
