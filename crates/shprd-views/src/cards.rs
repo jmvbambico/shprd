@@ -37,6 +37,15 @@ fn plain_body(body: &str) -> String {
     {
         return format!("{head} is ready to land: Review and Accept it in the Tasks pane");
     }
+    // The forge form of the same notice: "... asks: approve pull request #3 on the forge, or run `shprd approve T1`".
+    if let Some((head, rest)) = body.split_once(" and its merge policy asks: approve ")
+        && let Some((which, tail)) = rest.split_once(" on the forge, or run `shprd approve ")
+        && tail.ends_with('`')
+    {
+        return format!(
+            "{head} and its merge policy asks: Review and Accept it in the Tasks pane, or approve {which} on the forge"
+        );
+    }
     let plain = body
         .split_once(" step has failed the same way ")
         .filter(|(head, _)| head.ends_with("its `land`"))
@@ -357,6 +366,20 @@ mod tests {
         assert!(
             card(&state, &card_at(2)).is_none(),
             "a review started after it retires it"
+        );
+    }
+
+    #[test]
+    fn old_logs_with_the_command_wording_read_as_the_desktop_words() {
+        assert_eq!(
+            plain_body("T1 is ready to land: run `shprd approve T1`"),
+            "T1 is ready to land: Review and Accept it in the Tasks pane"
+        );
+        assert_eq!(
+            plain_body(
+                "T1 is ready to land and its merge policy asks: approve pull request #3 on the forge, or run `shprd approve T1`"
+            ),
+            "T1 is ready to land and its merge policy asks: Review and Accept it in the Tasks pane, or approve pull request #3 on the forge"
         );
     }
 

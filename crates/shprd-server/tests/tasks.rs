@@ -843,6 +843,19 @@ async fn retry_review_without_a_host_is_refused_and_an_unknown_task_is_not_found
         .act(json!({"kind": "task.review_again", "task": "T9"}))
         .await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND, "{:?}", reply.body);
+    // With a host that starts the review, the press is accepted.
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let engine = engine.with_review_again(Arc::new(|_repo: &Path, _task: &str| {
+        Ok("started a review".to_string())
+    }));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
 }
 
 #[tokio::test]

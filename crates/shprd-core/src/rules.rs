@@ -3432,6 +3432,33 @@ mod tests {
     }
 
     #[test]
+    fn an_escalation_remembers_whether_an_agent_wrote_it() {
+        // SHPR-83: a coordinator's claim is an opinion, the engine's card a fact: the fold must say which.
+        let mut by_agent = ev(
+            3,
+            EventKind::Escalated {
+                task: Some("a".to_string()),
+                body: "a worker never asked".to_string(),
+                default_action: "wait".to_string(),
+            },
+        );
+        by_agent.actor = Actor::Agent {
+            id: "claude".to_string(),
+        };
+        let mut by_engine = by_agent.clone();
+        by_engine.seq = 4;
+        by_engine.actor = Actor::Engine;
+        let state = folded(&[
+            started(1),
+            added(2, "a", &["src/a"], &[]),
+            by_agent,
+            by_engine,
+        ]);
+        let flags: Vec<bool> = state.escalations.iter().map(|e| e.by_agent).collect();
+        assert_eq!(flags, vec![true, false]);
+    }
+
+    #[test]
     fn escalation_is_recorded() {
         let state = folded(&[
             started(1),

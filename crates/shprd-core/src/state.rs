@@ -970,7 +970,7 @@ impl RunState {
                     body: body.clone(),
                     default_action: default_action.clone(),
                     seq: event.seq,
-                    by_agent: false,
+                    by_agent: matches!(event.actor, Actor::Agent { .. }),
                 });
             }
             EventKind::Override { task, rule, reason } => {

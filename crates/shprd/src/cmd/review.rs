@@ -1213,8 +1213,7 @@ fn deliver_review_turn(
         body: format!("{what} not delivered"),
         default_action: format!(
             "press Retry review on the task in the Tasks pane, which closes the reviewer \
-             tab and delivers the {what} again ({reason}; the CLI's `shprd agent review \
-             --task {task} --again` does the same); never type into the reviewer's tab"
+             tab and delivers the {what} again ({reason}); never type into the reviewer's tab"
         ),
     };
     if let Err(err) = env.spawn.ctx.commit(escalation) {
