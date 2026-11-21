@@ -30,7 +30,8 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { closeOverlay, focused, layout, nextCommand, props, run, setShared, shared, terminals, theme } from "herdr";
 
-import { RepoCache, attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { RepoCache, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
+import { finishReview, startReview } from "./lib/optimistic.js";
 import {
   WORDS,
   card,
@@ -88,6 +89,7 @@ export default class Accept extends View {
     // The last board read per repository (see `RepoCache`): the head keeps drawing
     // the shared task's row across a switch of space instead of going blank.
     this.cache = new RepoCache();
+    this.cache.label = "Accept";
     this.shownKey = this.cache.key();
     this.state = this.cache.get();
     // The dialog's first picture: the task as the Tasks panel held it, drawn until
@@ -127,7 +129,7 @@ export default class Accept extends View {
           const task = this.selected();
           const views = { "view-chat": VIEW.chat.id, "view-term": terminalChild(task ? threadAgent(this.state, task.id) : null, terminals()), "view-pr": VIEW.pr.id, "view-artifacts": VIEW.artifacts.id };
           if (command in views && task) this.view(views[command], task);
-          else if (command === "review" && task) openAccept({ task: task.id, title: task.title, snapshot: task });
+          else if (command === "review" && task) this.review(task);
         }
       });
     }
@@ -140,8 +142,9 @@ export default class Accept extends View {
   selected() {
     const id = this.headCopy ? (shared("tasks.thread")?.task ?? null) : this.taskId;
     const key = this.cache?.key();
-    if (this.cache && key !== this.shownKey) {
+    if (this.cache) {
       this.shownKey = key;
+      // Drawn again every time: an action pressed anywhere changes what the board says.
       this.state = this.cache.get();
     }
     const found = card(this.state, id);
@@ -279,25 +282,43 @@ export default class Accept extends View {
     if (!this.client || !task || this.busy) return;
     this.busy = action;
     this.error = null;
-    // The button says what it is doing at once, before the service has answered.
+    // The button says what it is doing at once, and so does every other pane: the
+    // row, the Graph, the status bar and the chat show the result before the
+    // service has answered (`press`).
     this.cx.notify();
-    try {
-      await this.client.action({ kind: action, task: task.id, ...extra });
+    const sent = await press(this, {
+      kind: action,
+      tasks: [task.id],
+      send: () => this.client.action({ kind: action, task: task.id, ...extra }),
+    });
+    this.busy = null;
+    if (sent.ignored) {
+      this.cx.notify();
+      return;
+    }
+    if (sent.ok) {
       this.dropping = false;
       this.details = false;
-      this.busy = null;
       // The decision is made: the dialog goes, as Shepherdr's does after Accept.
       this.close();
       return;
-    } catch (err) {
-      this.error = reason(err);
     }
-    this.busy = null;
+    // Refused: the panes are back as they were and one plain line says why.
+    this.error = sent.error;
     this.cx.notify();
+  }
+
+  /** Opens the card on a task, its row saying "Reviewing…" meanwhile. */
+  review(task) {
+    startReview(task, this.client?.folder ?? null);
+    openAccept({ task: task.id, title: task.title, snapshot: task });
   }
 
   /** Closes the dialog: × , Cancel, Esc and a finished verb all end here. */
   close() {
+    // A Review's "Reviewing…" ends with the card.
+    const id = this.headCopy ? null : this.taskId;
+    if (id) finishReview(id, this.client?.folder ?? null);
     closeOverlay(this.overlay);
   }
 
@@ -402,7 +423,7 @@ export default class Accept extends View {
           .bg(t.solid)
           .text_color(t.solid_foreground)
           .hover((style) => style.opacity(0.9))
-          .on_click(() => openAccept({ task: task.id, title: task.title, snapshot: task }))
+          .on_click(() => this.review(task))
           .child("Review")
       : null;
     return v_flex()

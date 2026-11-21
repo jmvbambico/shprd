@@ -32,7 +32,8 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, ScrollHandle, Textarea, TextareaState, TextView, h_flex, v_flex } from "gpui-base";
 import { exec, props, setShared, shared, theme } from "herdr";
 
-import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
+import { answeredAsks, errorLine, noticeLine, overlay, probe, read as readOps } from "./lib/optimistic.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
   COORDINATOR,
@@ -369,16 +370,22 @@ export default class Chat extends View {
     this.answering = card.id;
     this.answerRefusal = null;
     this.cx.notify();
-    try {
-      await this.client.answerAsk(body.task, body.ask, body.answer);
+    // The card is gone and its task resumes at once; a refusal puts it back.
+    const remaining = (this.asks?.asks ?? []).filter((ask) => ask.task === body.task).length;
+    const sent = await press(this, {
+      kind: "ask.answer",
+      tasks: [body.task],
+      extra: { ask: body.ask, remaining },
+      send: () => this.client.answerAsk(body.task, body.ask, body.answer),
+    });
+    if (sent.ok) {
       this.typing = null;
       this.draft?.set_value?.("");
       this.answering = null;
       await this.refresh();
       return;
-    } catch (err) {
-      this.answerRefusal = { card: card.id, text: reason(err) };
     }
+    if (!sent.ignored) this.answerRefusal = { card: card.id, text: sent.reason };
     this.answering = null;
     this.cx.notify();
   }
@@ -429,12 +436,21 @@ export default class Chat extends View {
     this.revalidate();
     const t = theme();
     const colors = tone(t);
-    const list = this.space === null ? [] : forSpace(cardsOf(this.state, this.asks), this.space);
+    // What the person just pressed shows at once: the board with the pending actions
+    // applied, and the questions they answered already gone (`tasks.optimistic`).
+    const folder = this.client?.folder ?? activeFolder();
+    const board = overlay(this.state, folder, readOps().ops);
+    probe("Chat", board);
+    const gone = answeredAsks(folder);
+    const open = this.asks ? { ...this.asks, asks: (this.asks.asks ?? []).filter((ask) => !gone.has(`${ask.task}/${ask.id}`)) } : this.asks;
+    const list = this.space === null ? [] : forSpace(cardsOf(board, open), this.space);
     const rows = timeline(this.chat, list);
     this.reveal(rows, list);
     const said =
       this.refusal ??
       this.failure ??
+      errorLine(board) ??
+      noticeLine(board) ??
       coordinatorDown(this.space, this.state) ??
       (rows.length === 0 ? status(this.chat) : null);
     return v_flex()

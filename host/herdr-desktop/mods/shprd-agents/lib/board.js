@@ -42,6 +42,9 @@ export function cut(text, max = LINE_MAX) {
  */
 export function secondLine(task) {
   const derived = task?.derived ?? {};
+  // A task whose action the service has not answered yet says what it is doing
+  // ("Merging…", "Stopping…"): the optimistic layer's label (SHPR-81).
+  if (task?.pending?.label) return task.pending.label;
   // A done task says it is done: its report's summary when it has one, else the
   // word. Never what its agent last said or the card's old reason ("No longer
   // waiting", "Handing in report"), which was true only while it worked.

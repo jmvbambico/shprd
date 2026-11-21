@@ -457,9 +457,9 @@ export function graphRows(state, pickedId = null, herdrSpaces = []) {
         glyph: shape.glyph,
         tone: shape.tone,
         pct: shape.pct,
-        word: words,
+        word: task.pending?.label ?? words,
         // The dependency a waiting task is held by, so the view can dim it.
-        waits: words.startsWith("waits"),
+        waits: !task.pending?.label && words.startsWith("waits"),
       });
       const next = top ? "" : `${prefix}${last ? "   " : "│  "}`;
       const own = kids.get(task.id) ?? [];
