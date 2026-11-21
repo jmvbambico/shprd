@@ -574,7 +574,7 @@ fn ask_history(events: &[Event], task: &str) -> String {
                 answer,
                 ..
             } if of == task => {
-                if let Some(found) = asks.iter_mut().find(|(id, _, _)| *id == ask.to_string()) {
+                if let Some(found) = asks.iter_mut().find(|(id, _, _)| id.as_str() == ask.as_str()) {
                     found.2 = Some(shorten(answer));
                 }
             }
@@ -3773,12 +3773,17 @@ project_dirs = []
             "a landing nobody has to approve names no verb: {}",
             passed[0].line
         );
-        // Under `ask` the person is the one who lands it, so the line names
-        // the verb that does it.
+        // Under `ask` the person is the one who lands it, and in the desktop nobody
+        // types a command: the line tells the coordinator to point at the Accept button.
         let asked = notices(&[plan.clone(), review(true, 2)], None, MergePolicy::Ask);
         assert_eq!(asked.len(), 1, "{asked:?}");
         assert!(
-            asked[0].line.contains("shprd approve T1"),
+            asked[0].line.contains("Review and Accept it in the Tasks pane"),
+            "{}",
+            asked[0].line
+        );
+        assert!(
+            !asked[0].line.contains("shprd approve"),
             "{}",
             asked[0].line
         );
@@ -3818,5 +3823,50 @@ project_dirs = []
             integrated[0].line,
             "all tasks integrated: shprd gate, then shprd land"
         );
+    }
+
+    #[test]
+    fn a_hand_in_notice_carries_what_the_log_says_the_worker_asked() {
+        // SHPR-83: a coordinator said "T1's worker never asked you" about an ask the person
+        // had answered, because nothing it read said so.
+        let events = vec![
+            ev(
+                1,
+                EventKind::TaskAdded {
+                    task: "T1".into(),
+                    title: "t".into(),
+                    scope: vec!["a".into()],
+                    acceptance: vec!["x".into()],
+                    deps: vec![],
+                    tags: vec![],
+                    skills: vec![],
+                },
+            ),
+            ev(
+                2,
+                EventKind::AskRaised {
+                    task: "T1".into(),
+                    ask: "a1".into(),
+                    ask_kind: shprd_core::ask::AskKind::Question,
+                    text: "What should dividing by zero do?".into(),
+                    options: vec![],
+                    created_at_ms: 0,
+                    expires_at_ms: None,
+                },
+            ),
+            ev(
+                3,
+                EventKind::AskAnswered {
+                    task: "T1".into(),
+                    ask: "a1".into(),
+                    answer: "Raise ZeroDivisionError".into(),
+                },
+            ),
+        ];
+        let said = ask_history(&events, "T1");
+        assert!(said.contains("asked the person"), "{said}");
+        assert!(said.contains("Raise ZeroDivisionError"), "{said}");
+        assert!(said.contains("never say it did not ask"), "{said}");
+        assert_eq!(ask_history(&events, "T2"), "");
     }
 }
