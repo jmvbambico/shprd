@@ -404,8 +404,8 @@ def main():
     gone = space not in picked_now()[1]
 
     def dropped():
-        """The window's sync has told the service the folder has no space: it stopped serving it, as it does
-        a minute after a person closes a space (a re-add inside that beat is a known gap, see the README)."""
+        """The window's sync has told the service the folder has no space and it stopped serving it. Either way
+        (dropped or not) the re-add must give a new coordinator; this wait only lets both orders be seen."""
         svc = service(e)
         req = urllib.request.Request(f"{svc['base']}/api/repos", headers={"authorization": f"Bearer {svc['token']}"})
         with urllib.request.urlopen(req, timeout=15) as r:

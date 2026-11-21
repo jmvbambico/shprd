@@ -320,10 +320,9 @@ window's own flows run (the New space dialog's commands, the chat pane's
 `POST /api/chat`, a card's answer and the Accept button's `POST /api/action`):
 the window has no command for a click or a keystroke. It tears the window down
 by recorded pid and stops the private core (`hc server stop`); never pkill by
-name. The run waits for the service to drop a closed space's repository before re-adding
-the folder, as a person's pause does: a re-add inside the window's sync beat (a few
-seconds) keeps the old repository's slot, whose coordinator is not started again
-(a known gap, `Registry::show` prepares a repository once). Run it against the base mods (`--mods` a `git archive` of the base's
+name. Closing a space and adding the same folder again (a new Herdr id) is a step of the run: the window tells
+the service again when the shown Herdr space changes, and the service prepares the space (its coordinator)
+each time it is shown, not once. Run it against the base mods (`--mods` a `git archive` of the base's
 `host/herdr-desktop`) to see a failing step: step f fails there.
 
 ## Starting the service

@@ -221,3 +221,70 @@ async fn the_repository_list_carries_each_ones_task_count() {
         "a repository with no task says zero, so a window shows its empty state at once: {listed}"
     );
 }
+
+/// A factory whose repositories count how often their space was prepared.
+#[derive(Debug)]
+struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+impl RepoFactory for Counting {
+    fn root_of(&self, folder: &Path) -> PathBuf {
+        folder.to_path_buf()
+    }
+
+    fn build(
+        &self,
+        _root: &Path,
+        _folder: &Path,
+        _hub: shprd_server::hub::Hub,
+        _dir: &Path,
+    ) -> Result<RepoParts, String> {
+        let count = Arc::clone(&self.0);
+        Ok(RepoParts {
+            prepare: Some(Arc::new(move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+            ..RepoParts::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn showing_a_repository_again_prepares_its_space_again() {
+    // SHPR-80: a folder's space closed and added again is shown again; the window tells the
+    // service, and the coordinator of the new space is started (the step is idempotent).
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state = tempfile::tempdir().unwrap();
+    let service = Service::start(Config::service(
+        state.path().join("shprd"),
+        Arc::new(Counting(Arc::clone(&count))),
+    ))
+    .await
+    .expect("the service starts");
+    let (_dir, shop) = folder("shop");
+    let token = std::fs::read_to_string(&service.info().token_path)
+        .unwrap()
+        .trim()
+        .to_string();
+    for _ in 0..2 {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/repos")
+            .header("host", "127.0.0.1")
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-shprd", "1")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"folder": shop}).to_string()))
+            .unwrap();
+        let response = service.registry().router().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // The step runs on its own thread: let it finish before the next show.
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    }
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
