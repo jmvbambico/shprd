@@ -151,7 +151,7 @@ def main():
         for _ in range(2):
             p = shoot("pane-check")
             ws, size = rc.words(p)
-            if [w for w in ws if w[0] > 0.59 * size[0] and w[4].startswith("Filter")]:
+            if [w for w in ws if w[0] > 0.59 * size[0] and w[1] < 420 and (w[4].startswith("Filter") or w[4].endswith("asks") or w[4] in ("Terminal", "Graph"))]:
                 return True
             btn = [w for w in ws if w[1] < 70 and w[0] > 0.8 * size[0] and w[4] == "Tasks"]
             if btn:
@@ -219,7 +219,7 @@ def main():
                     p = shoot(f"ask-{a.get('task')}-list")
                     ws, size = rc.words(p)
                     right0 = [w for w in ws if w[0] > 0.59 * size[0]]
-                    if [w for w in right0 if w[4] == "answer"] and [w for w in right0 if w[4].strip(".,:") == first]:
+                    if [w for w in right0 if w[4] == "answer"]:
                         opened = True  # the thread is already open on the card
                         break
                     idw = [w for w in ws if w[0] > 0.59 * size[0] and w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and any(ch.isalnum() for ch in o[4]) and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
@@ -235,7 +235,7 @@ def main():
                         p = shoot(f"ask-{a.get('task')}-card")
                         ws2, size2 = rc.words(p)
                         right = [w for w in ws2 if w[0] > 0.59 * size2[0]]
-                        if [w for w in right if w[4] == "answer"] and [w for w in right if w[4].strip(".,:") == first]:
+                        if [w for w in right if w[4] == "answer"]:
                             opened = True
                             break
                     if opened:
@@ -245,7 +245,13 @@ def main():
                     sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
                     time.sleep(1.5)
                 if opened:
-                    px = rc.find(p, first, nth=-1, region=(int(0.59 * size[0]), 0, size[0], size[1])) if first else None
+                    say(f"  ask options: {options}; picking {pick!r}")
+                    px = None
+                    for tok in (pick or "").replace("(", " ").split()[:3]:
+                        px = rc.find(p, tok, nth=-1, region=(int(0.59 * size[0]), 0, size[0], size[1]))
+                        if px:
+                            first = tok
+                            break
                     seen = f"opened the row; '{first}' {'found' if px else 'NOT on screen'}"
                     if px:
                         _, size = rc.words(p)
