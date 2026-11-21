@@ -419,6 +419,53 @@ test("the Worker (s) row shows a picker per line, a + while a program is free, a
   assert.ok(ids.some((id) => id.startsWith("chain-worker-")), "two lines: a gutter");
 });
 
+/** The nodes from `root` down to the one with id `id`, root first. */
+function pathTo(root, id) {
+  const visit = (el, trail) => {
+    const node = el?.__node;
+    if (!node) return null;
+    const here = [...trail, node];
+    if (node.idv === id) return here;
+    for (const kid of node.kids) {
+      const found = visit(kid, here);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(root, []);
+}
+
+/** What a line row ends with, from its right edge in: the widths of its last elements. */
+function endOf(view, id) {
+  const trail = pathTo(view.tree(), id);
+  const row = trail[trail.length - 2];
+  const last = row.kids[row.kids.length - 1].__node;
+  return { pr: row.calls.filter(([n]) => n === "pr").map(([, v]) => v), lastIs: last.idv, lastW: last.calls.find(([n]) => n === "w")?.[1] ?? null };
+}
+
+test("every role ends at one right edge: a lone line's ⌄ takes the × column, and + sits in it", async () => {
+  const one = await drawn("agents");
+  // One line: no × slot after the button (a spacer would push the ⌄ 24 px in), a 1 px inset puts the ⌄ in the × glyph's column.
+  const lone = endOf(one, "line-worker-0");
+  assert.equal(lone.lastIs, "line-worker-0", "the button is the last element");
+  assert.deepEqual(lone.pr, [1]);
+  const assistant = endOf(one, "model-coordinator");
+  assert.equal(assistant.lastIs, "model-coordinator");
+  assert.deepEqual(assistant.pr, [1]);
+  // Two lines: the × slot is last and as wide as the + slot below.
+  const two = await drawn("agents", { settings: withRows([["roles.worker.agents", ["codex"]]]) });
+  const first = endOf(two, "line-worker-0");
+  assert.equal(first.lastW, 24, "the × slot");
+  assert.deepEqual(first.pr, []);
+  for (const view of [one, two]) {
+    const trail = pathTo(view.tree(), "add-line-worker");
+    const box = trail.find((n) => n.idv === "add-line-box-worker");
+    assert.ok(!box.calls.some(([n]) => n === "pr"), "no extra right padding on the + row");
+    const plus = trail[trail.length - 1].kids[1].__node;
+    assert.equal(plus.calls.find(([n]) => n === "w")?.[1], 24, "the + slot is as wide as the × slot");
+  }
+});
+
 test("two or more lines draw a numbered gutter; a worker with three, a reviewer with two", async () => {
   const three = await drawn("agents", {
     settings: withRows([

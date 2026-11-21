@@ -19,7 +19,7 @@ export function record(on) {
 
 /** One chainable element: every method answers itself, `child`/`children` included. */
 function element() {
-  const node = { idv: null, click: null, down: null, kids: [] };
+  const node = { idv: null, click: null, down: null, kids: [], calls: [] };
   const add = (c) => {
     if (Array.isArray(c)) c.forEach(add);
     else if (c !== null && c !== undefined && c !== false) node.kids.push(c);
@@ -49,6 +49,12 @@ function element() {
       if (recording && name === "on_click") {
         return (fn) => {
           node.click = fn;
+          return proxy;
+        };
+      }
+      if (recording && (name === "w" || name === "pr")) {
+        return (n) => {
+          node.calls.push([name, n]);
           return proxy;
         };
       }
