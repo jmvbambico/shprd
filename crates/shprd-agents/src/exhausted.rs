@@ -67,8 +67,74 @@ pub fn exhausted(patterns: &[String], text: &str) -> Option<String> {
     hit.map(|pattern| pattern.trim().to_owned())
 }
 
+/// When the account may answer again, read out of the CLI's own words, as ms
+/// since the Unix epoch in this machine's time zone.
+///
+/// Codex says `try again at Dec 18th, 2026 6:50 AM`; the day alone, with no
+/// time, reads as that day's start. Nothing printed, or a form this does not
+/// know, is [`None`]: a caller then uses a bounded cooldown of its own.
+pub fn reset_at_ms(text: &str) -> Option<u64> {
+    use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+    let lowered = text.to_ascii_lowercase();
+    let at = lowered.rfind("try again at ")?;
+    let rest = text.get(at + "try again at ".len()..)?;
+    let line = rest.lines().next()?.trim().trim_end_matches('.');
+    // Ordinal suffixes (`18th`) and the comma are not part of any format.
+    let words: Vec<String> = line
+        .replace(',', " ")
+        .split_whitespace()
+        .map(|word| {
+            let digits: String = word.chars().take_while(char::is_ascii_digit).collect();
+            let tail = &word[digits.len()..];
+            if !digits.is_empty() && matches!(tail, "st" | "nd" | "rd" | "th") {
+                digits
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect();
+    let local = |naive: NaiveDateTime| {
+        Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .map(|at| at.timestamp_millis())
+            .and_then(|ms| u64::try_from(ms).ok())
+    };
+    for format in ["%b %d %Y %I:%M %p", "%b %d %Y %H:%M", "%B %d %Y %I:%M %p"] {
+        // Cut the line to as many words as the format has, so a trailing
+        // sentence does not spoil it.
+        let count = format.split_whitespace().count();
+        let head = words
+            .iter()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Ok(naive) = NaiveDateTime::parse_from_str(&head, format) {
+            return local(naive);
+        }
+    }
+    for format in ["%b %d %Y", "%B %d %Y"] {
+        let head = words.iter().take(3).cloned().collect::<Vec<_>>().join(" ");
+        if let Ok(day) = NaiveDate::parse_from_str(&head, format) {
+            return local(day.and_time(NaiveTime::MIN));
+        }
+    }
+    None
+}
+
+/// The day a reset time falls on, as a person says it: `Dec 18`.
+pub fn day_of(ms: u64) -> Option<String> {
+    use chrono::{Local, TimeZone};
+    let at = Local
+        .timestamp_millis_opt(i64::try_from(ms).ok()?)
+        .single()?;
+    Some(at.format("%b %-d").to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Codex's own wording, as the gate runs saw it: the phrase the harness's
@@ -133,5 +199,15 @@ mod tests {
             exhausted(&["Usage Limit Reached".to_string()], "usage limit reached"),
             Some("Usage Limit Reached".to_string())
         );
+    }
+
+    #[test]
+    fn codexs_reset_time_is_read_from_its_own_words() {
+        let ms = reset_at_ms(CODEX_LIMIT).expect("a time");
+        assert_eq!(day_of(ms).as_deref(), Some("Dec 4"));
+        let ms = reset_at_ms("ERROR: You've hit your usage limit. try again at Dec 18th, 2026.")
+            .expect("a day");
+        assert_eq!(day_of(ms).as_deref(), Some("Dec 18"));
+        assert_eq!(reset_at_ms("429 Too Many Requests"), None);
     }
 }

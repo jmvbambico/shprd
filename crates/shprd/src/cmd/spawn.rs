@@ -5541,6 +5541,7 @@ project_dirs = []
                 attempt,
                 reviewer: reviewer.clone(),
                 degraded: false,
+                note: None,
             })
             .unwrap_or_else(|err| panic!("{err}"));
         engine

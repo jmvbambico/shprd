@@ -234,6 +234,7 @@ impl Fixture {
                     attempt: 1,
                     reviewer: String::from("codex"),
                     degraded: false,
+                    note: None,
                 },
                 &SystemClock,
             )
@@ -278,6 +279,7 @@ impl Fixture {
             start,
             review: Some(review),
             close_reviewer: None,
+            switch_reviewers: None,
             close_worker: Some(close_worker),
             actor: Actor::Engine,
             after_write: None,
@@ -470,6 +472,7 @@ fn successive_passes_decide_the_review_and_land_the_task_on_their_own() {
         attempt: 1,
         reviewer: String::from("codex"),
         degraded: false,
+        note: None,
     });
     fixture.write_findings("T2", "[]");
     let reviewed = worker.tick().expect("the verdict pass ran");

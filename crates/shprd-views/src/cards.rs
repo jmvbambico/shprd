@@ -346,6 +346,7 @@ mod tests {
         at.reviews.push(shprd_core::state::ReviewRequest {
             reviewer: "claude".into(),
             degraded: false,
+            note: None,
             seq: 3,
         });
         let mut state = RunState::default();

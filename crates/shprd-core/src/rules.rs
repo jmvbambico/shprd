@@ -3015,6 +3015,7 @@ mod tests {
                 attempt,
                 reviewer: reviewer.to_string(),
                 degraded,
+                note: None,
             },
         )
     }
@@ -4272,6 +4273,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "agent-2".to_string(),
                 degraded: false,
+                note: None,
             },
             EventKind::HandedOff {
                 task: "a".to_string(),

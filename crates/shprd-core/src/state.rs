@@ -391,6 +391,9 @@ pub struct ReviewRequest {
     pub reviewer: AgentId,
     /// True when the reviewer shares the author's vendor.
     pub degraded: bool,
+    /// Why this reviewer and not the first choice, when the engine moved the
+    /// review on (out of quota); shown on the task's card.
+    pub note: Option<String>,
     /// The `seq` of the event that recorded this request.
     ///
     /// A restart records a second request for the same attempt, so the two are
@@ -806,6 +809,7 @@ impl RunState {
                 task,
                 reviewer,
                 degraded,
+                note,
                 ..
             } => {
                 // A review dispatch never moves the task on: it stays Reported
@@ -816,6 +820,7 @@ impl RunState {
                     current.reviews.push(ReviewRequest {
                         reviewer: reviewer.clone(),
                         degraded: *degraded,
+                        note: note.clone(),
                         seq: event.seq,
                     });
                 }

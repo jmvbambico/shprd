@@ -39,6 +39,39 @@ pub const REVIEW_AGAIN_CHOICE: &str = "review again";
 /// The choice that drops the task.
 pub const STUCK_DROP_CHOICE: &str = "drop it";
 
+/// What a refused review begins with when every reviewer is out of quota.
+pub const NO_REVIEWER_LEFT: &str = "no reviewer is left to take this review";
+
+/// What one pass over the running reviewers did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewSwitch {
+    /// A reviewer that ran out of quota was replaced by the next one.
+    Switched {
+        /// The task under review.
+        task: String,
+        /// The plain sentence for the log and the card.
+        line: String,
+    },
+    /// A reviewer ran out of quota and no other can take the review.
+    NoneLeft {
+        /// The task under review.
+        task: String,
+        /// The attempt being reviewed.
+        attempt: u32,
+        /// The reviewers that are out of quota, in plain words.
+        why: String,
+    },
+}
+
+/// What the person's card says when no reviewer is left.
+pub fn none_left_body(task: &str, attempt: u32, why: &str) -> String {
+    format!(
+        "{task}: no reviewer can review attempt {attempt} right now: {why}. Add another \
+         reviewer in Settings, or wait until one is back, then choose review again; or drop \
+         the task"
+    )
+}
+
 /// The id of the `n`th card a review of `attempt` has put in front of a person.
 pub fn stuck_ask(attempt: u32, n: usize) -> String {
     format!("{STUCK_ASK_PREFIX}{attempt}-{n}")

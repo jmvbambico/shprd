@@ -537,12 +537,16 @@ fn reported_wait(task: &Task) -> Option<String> {
                 .unwrap_or(0)
         })
         .unwrap_or(0);
-    let asked = task
+    let request = task
         .latest_attempt()
-        .and_then(|attempt| attempt.reviews.last())
-        .map_or(0, |request| request.seq);
+        .and_then(|attempt| attempt.reviews.last());
+    let asked = request.map_or(0, |request| request.seq);
     Some(if asked > answered {
-        "In review".to_string()
+        // A review the engine moved to the next reviewer says why, plainly.
+        match request.and_then(|request| request.note.as_deref()) {
+            Some(note) => format!("In review: {note}"),
+            None => "In review".to_string(),
+        }
     } else {
         "Running its gates".to_string()
     })
@@ -1762,6 +1766,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "codex".to_string(),
                 degraded: false,
+                note: None,
             },
         };
         match asked.apply(&review) {

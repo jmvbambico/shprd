@@ -109,5 +109,5 @@ pub use snapshot::NO_RUN_HINT;
 pub use terminal::{TermKey, TerminalHost, TerminalPort};
 pub use tick::{
     FactsSource, FallbackSource, FallbackSourceArc, IdleFn, LiveFacts, LiveFn, ReviewCloser,
-    Reviewer, SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,
+    ReviewSwitcher, Reviewer, SharedForge, Starter, StepReport, TickReport, Worker, WorkerCloser,
 };

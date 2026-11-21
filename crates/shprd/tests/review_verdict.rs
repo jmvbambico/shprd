@@ -155,6 +155,7 @@ impl Fixture {
                 attempt: n,
                 reviewer: reviewer.to_string(),
                 degraded: false,
+                note: None,
             },
         };
         let line = match serde_json::to_string(&event) {

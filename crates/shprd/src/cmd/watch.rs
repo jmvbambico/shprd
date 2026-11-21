@@ -953,7 +953,11 @@ fn awaiting_review(task: &Task) -> Option<u32> {
 /// that failed to answer is an error the caller must not read as an exit: a
 /// transient failure would otherwise mark a working agent dry and hand its task
 /// to somebody else.
-fn pane_for(mux: &dyn Host, env: &SpawnEnv<'_>, tab: &str) -> Result<Option<PaneId>, MuxError> {
+pub(crate) fn pane_for(
+    mux: &dyn Host,
+    env: &SpawnEnv<'_>,
+    tab: &str,
+) -> Result<Option<PaneId>, MuxError> {
     let name = spawn::repo_space_name(&env.repo_name);
     let Some(space) = mux.find_space(&name)? else {
         // The repository's space is gone, but a tab may still be somewhere and
@@ -1677,6 +1681,7 @@ project_dirs = []
             attempt: 1,
             reviewer: "codex".to_string(),
             degraded: false,
+            note: None,
         })
         .unwrap_or_else(|err| panic!("{err}"));
     }

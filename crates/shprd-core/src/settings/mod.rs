@@ -1954,7 +1954,17 @@ impl ResolvedRole {
     /// ignored, because a task picks a line by its program.
     pub fn lines(&self) -> Vec<WorkerLine> {
         let mut lines: Vec<WorkerLine> = Vec::new();
-        if let Some(agent) = &self.agent {
+        // The person's own `agents` list outranks the one program the old
+        // `config.toml` still names: a settings file that lists its programs
+        // never meant the pre-M9 key to go first (a reviewer list of only `pi`
+        // once reviewed on the `codex` an old roster named).
+        let legacy_first = self
+            .agent
+            .as_ref()
+            .is_some_and(|agent| agent.source == Source::Legacy)
+            && !self.agents.value.is_empty()
+            && self.agents.source != Source::Legacy;
+        if let Some(agent) = self.agent.as_ref().filter(|_| !legacy_first) {
             let some = |field: &Option<Sourced<String>>| {
                 field
                     .as_ref()

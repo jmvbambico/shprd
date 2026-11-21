@@ -517,6 +517,7 @@ mod tests {
             attempt: 1,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         }
     }
 

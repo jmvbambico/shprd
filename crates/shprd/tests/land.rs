@@ -266,6 +266,7 @@ impl Fixture {
                 attempt: 1,
                 reviewer: reviewer.to_string(),
                 degraded,
+                note: None,
             },
         };
         let line = match serde_json::to_string(&event) {
