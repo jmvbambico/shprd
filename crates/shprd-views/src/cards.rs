@@ -376,7 +376,7 @@ mod tests {
             "T1 is ready to land: Review and Accept it in the Tasks pane"
         );
         assert_eq!(
-            plain_body(
+            super::plain_body(
                 "T1 is ready to land and its merge policy asks: approve pull request #3 on the forge, or run `shprd approve T1`"
             ),
             "T1 is ready to land and its merge policy asks: Review and Accept it in the Tasks pane, or approve pull request #3 on the forge"
