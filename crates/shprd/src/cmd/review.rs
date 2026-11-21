@@ -2793,8 +2793,9 @@ project_dirs = []
         assert_eq!(body, "review brief not delivered");
         assert_eq!(
             default_action,
-            "run `shprd agent review --task T1 --again`, which closes the reviewer tab and \
-             delivers the review brief again; never type into the reviewer's tab"
+            "press Retry review on the task in the Tasks pane, which closes the reviewer tab and \
+             delivers the review brief again (the agent was not detected within 0 ms); never \
+             type into the reviewer's tab"
         );
         assert_eq!(
             detection_polls(&mux),
