@@ -502,8 +502,8 @@ fn a_local_ask_can_be_approved_on_the_task_itself() {
     let head = fixture.hand_in("T1", "integration/m9", "a.txt", "the task's work\n");
     let seed = fixture.seed.clone();
 
-    // The ask names the verb a person can actually run: there is no pull
-    // request, so nothing points at a forge.
+    // The ask names what a person in the desktop actually does (the Accept button, SHPR-83:
+    // nobody types a command there): there is no pull request, so nothing points at a forge.
     let steps = fixture.tick();
     assert_eq!(
         actions(&steps),
@@ -514,7 +514,10 @@ fn a_local_ask_can_be_approved_on_the_task_itself() {
         .get("detail")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    assert!(detail.contains("shprd approve T1"), "{detail}");
+    assert!(
+        detail.contains("T1 is ready to land: Review and Accept it in the Tasks pane"),
+        "{detail}"
+    );
     assert!(!detail.contains("pull request"), "{detail}");
     assert_eq!(fixture.integration_head(), seed);
 

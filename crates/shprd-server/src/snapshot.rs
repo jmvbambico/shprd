@@ -385,6 +385,7 @@ mod tests {
             body: "T1 is ready to land: run `shprd approve T1`".to_string(),
             default_action: "wait for a human to approve T1".to_string(),
             seq: 3,
+            by_agent: false,
         });
         let open = snapshot(&state, NOW);
         assert_eq!(open.needs.len(), 1, "the task still waits on a person");
@@ -408,6 +409,7 @@ mod tests {
             body: "the orchestrator is waiting on its own prompt".to_string(),
             default_action: "answer it in its tab".to_string(),
             seq: 4,
+            by_agent: false,
         });
         let run_wide = snapshot(&state, NOW);
         assert_eq!(run_wide.needs.len(), 1, "{:?}", run_wide.needs);
@@ -447,6 +449,7 @@ mod tests {
             body: body.clone(),
             default_action: String::from("retry, take it, or drop it"),
             seq: 3,
+            by_agent: false,
         });
         state.asks.insert(
             ("T1".to_string(), shprd_core::gate::rounds_spent_ask(1)),
@@ -524,6 +527,7 @@ mod tests {
             ),
             default_action: String::from("spawn it by hand"),
             seq: 3,
+            by_agent: false,
         });
         let waiting = snapshot(&state, NOW);
         assert_eq!(waiting.needs.len(), 1, "{:?}", waiting.needs);
@@ -595,6 +599,7 @@ mod tests {
             body: body.clone(),
             default_action: String::from(shprd_core::gate::ESCALATION_ACTION),
             seq: 4,
+            by_agent: false,
         });
         state.asks.insert(
             ("T1".to_string(), shprd_core::gate::rounds_spent_ask(1)),
@@ -654,6 +659,7 @@ mod tests {
             body: String::from("T1: the engine's review did not start: no workspace yet"),
             default_action: String::from("create the workspace"),
             seq: 3,
+            by_agent: false,
         });
         let board = snapshot(&state, NOW);
         assert_eq!(board.needs.len(), 1, "{:?}", board.needs);

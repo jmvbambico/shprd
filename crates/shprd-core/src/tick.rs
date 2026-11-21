@@ -700,9 +700,15 @@ pub fn needs_you_prefix(task: &str) -> String {
 /// What a human is told when a ready task's `ask` has no forge to approve on.
 ///
 /// A local landing has no pull request, so the only approval path is shprd's
-/// own `shprd approve <task>`: the message must not send the reader to a forge.
+/// own: the message must not send the reader to a forge. The person reads it in the
+/// desktop (a toast, the chat, the status bar, the row), where nobody types a
+/// command, so it names the Accept button, not `shprd approve` (SHPR-83). The words
+/// after the prefix are the only thing that changed: the prefix is the marker.
 pub fn needs_you_body_local(task: &str) -> String {
-    format!("{}: run `shprd approve {task}`", needs_you_prefix(task))
+    format!(
+        "{}: Review and Accept it in the Tasks pane",
+        needs_you_prefix(task)
+    )
 }
 
 /// What a human is told when a ready task's policy is `ask`.
@@ -712,7 +718,7 @@ pub fn needs_you_body(task: &str, number: Option<u64>) -> String {
         None => String::from("its pull request"),
     };
     format!(
-        "{} and its merge policy asks: approve {which} on the forge, or run `shprd approve {task}`",
+        "{} and its merge policy asks: Review and Accept it in the Tasks pane, or approve {which} on the forge",
         needs_you_prefix(task)
     )
 }

@@ -1062,6 +1062,16 @@ pub enum Action {
         /// The task whose brief should be delivered again.
         task: String,
     },
+    /// Close a task's reviewer and start its review again (SHPR-83).
+    ///
+    /// It is what `shprd agent review --task <id> --again` does, for the card a
+    /// review that could not start leaves ("review kickoff not delivered"): the
+    /// person presses Retry review and never types the verb.
+    #[serde(rename = "task.review_again")]
+    TaskReviewAgain {
+        /// The task whose review should start again.
+        task: String,
+    },
 }
 
 impl Action {
@@ -1089,6 +1099,8 @@ impl Action {
         "task_accept",
         "task.resend_brief",
         "task_resend_brief",
+        "task.review_again",
+        "task_review_again",
     ];
 
     /// Whether this action undoes something a person cannot get back, or lands
@@ -1118,6 +1130,7 @@ impl Action {
             Self::TaskDropMany { .. } => "task.drop_many",
             Self::TaskAccept { .. } => "task.accept",
             Self::TaskResendBrief { .. } => "task.resend_brief",
+            Self::TaskReviewAgain { .. } => "task.review_again",
         }
     }
 
@@ -1139,6 +1152,7 @@ impl Action {
                 "task_drop_many" => Some("task.drop_many"),
                 "task_accept" => Some("task.accept"),
                 "task_resend_brief" => Some("task.resend_brief"),
+                "task_review_again" => Some("task.review_again"),
                 _ => None,
             };
             if let (Some(canonical), Some(object)) = (canonical, value.as_object_mut()) {
@@ -1944,6 +1958,9 @@ mod tests {
                 task: "T1".to_string(),
             },
             Action::TaskResendBrief {
+                task: "T1".to_string(),
+            },
+            Action::TaskReviewAgain {
                 task: "T1".to_string(),
             },
         ] {

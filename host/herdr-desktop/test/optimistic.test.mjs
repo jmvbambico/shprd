@@ -183,3 +183,45 @@ test("a confirmed answer is not sent twice while its op lives", () => {
   opt.confirm(first.id);
   assert.equal(opt.begin({ kind: "ask.answer", tasks: ["A"], board: raw, folder: FOLDER, extra: { ask: "q1", remaining: 2 } }), null);
 });
+
+test("SHPR-83: Accept pressed in the card a Review opened is not ignored (the Review op ends, the Accept starts)", async () => {
+  const raw = board();
+  const cache = cacheWith(raw);
+  // The row's Review (a click), then the dialog's Accept (a click): the same task, one after the other.
+  assert.ok(opt.startReview(raw.tasks[0], FOLDER));
+  assert.equal(opt.startReview(raw.tasks[0], FOLDER), null, "a second Review press is still a double press");
+  const owner = { client: { folder: FOLDER }, cache, state: null };
+  let sent = 0;
+  const out = await press(owner, { kind: "task.accept", tasks: ["A"], send: async () => (sent += 1, { ok: true }) });
+  assert.equal(out.ignored, undefined, "the Accept is not turned away by the Review");
+  assert.equal(out.ok, true);
+  assert.equal(sent, 1);
+  const live = opt.read(herdr.shared).ops.filter((op) => op.tasks.includes("A"));
+  assert.deepEqual(live.map((op) => op.kind), ["task.accept"], "no Reviewing… is left under the Accept");
+  assert.equal(opt.begin({ kind: "task.accept", tasks: ["A"], board: raw, folder: FOLDER }), null, "a second Accept is a double press");
+});
+
+test("SHPR-83: a queued task held back for a shared file says so on the row and in the Graph", () => {
+  const t3 = task("T3", "working", "working", { title: "mul and div" });
+  const t4 = task("T4", "queued", "to_do", { title: "mod and pow", last_status: { message: "Waiting: tcalc/ops.py is in use by T3" } });
+  assert.equal(secondLine(t4), "waits for T3: both change tcalc/ops.py");
+  const rows = graphRows({ tasks: [t3, t4], run: { id: "r1" } }).filter((r) => r.kind === "task");
+  assert.equal(rows.find((r) => r.id === "T4").word, "waits T3");
+  assert.equal(rows.find((r) => r.id === "T4").waits, true);
+});
+
+test("SHPR-83: a hand-in whose review kickoff was not delivered has a Retry review button, not Review or Accept", async () => {
+  const stuck = task("T1", "reported", "needs_you", { derived: { status: "needs_you", need: "attention", reason: "review kickoff not delivered" } });
+  const acts = rowActions(stuck);
+  assert.deepEqual(acts.map((a) => [a.id, a.action]), [["retry_review", "task.review_again"], ["drop", null]]);
+  // Pressing it goes through the optimistic layer like any verb.
+  const raw = { run: { id: "r1" }, tasks: [stuck] };
+  const cache = cacheWith(raw);
+  const owner = { client: { folder: FOLDER }, cache, state: null };
+  let sent = null;
+  const out = await press(owner, { kind: "task.review_again", tasks: ["T1"], send: async () => (sent = "task.review_again", { ok: true }) });
+  assert.equal(out.ok, true);
+  assert.equal(sent, "task.review_again");
+  // A passed task whose engine card is something else is unchanged.
+  assert.equal(rowActions(task("T2", "passed", "ready"))[0].id, "review");
+});

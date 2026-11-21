@@ -53,6 +53,7 @@ export const LABELS = {
   "task.accept": "Merging…",
   "task.start": "Starting…",
   "task.retry": "Retrying…",
+  "task.review_again": "Retrying review…",
   "task.stop": "Stopping…",
   "task.drop": "Dropping…",
   "task.drop_many": "Dropping…",
@@ -65,6 +66,7 @@ const NOTICE = {
   "task.accept": "Accepting",
   "task.start": "Starting",
   "task.retry": "Retrying",
+  "task.review_again": "Retrying review of",
   "task.stop": "Stopping",
   "task.drop": "Dropping",
   "task.drop_many": "Dropping",
@@ -125,6 +127,7 @@ export function plan(kind, board, tasks, extra = {}) {
         put(task, { status: "dropped", word: word(task), label });
         break;
       case "review":
+      case "task.review_again":
         put(task, { label });
         break;
       case "ask.answer":
@@ -175,7 +178,11 @@ export function begin({ kind, tasks, board, folder, extra = {}, now = Date.now()
   const key = folderKey(folder);
   const ids = [...new Set(tasks)];
   const { ops } = read(get);
-  const live = ops.filter((op) => alive(op, now));
+  // A Review only opens the card (no answer to wait for): a verb pressed from that card
+  // (Accept, Send back, Drop) ends it instead of being turned away by it. Without this the
+  // Accept the person presses in the dialog they just opened is ignored, and nothing says so.
+  const supersedes = (op) => kind !== "review" && op.kind === "review" && op.folder === key && op.tasks.some((id) => ids.includes(id));
+  const live = ops.filter((op) => alive(op, now) && !supersedes(op));
   const askKey = extra.ask ? `${ids[0]}/${extra.ask}` : null;
   // A task with an action still waiting for its answer takes no second press; once
   // confirmed, only the same verb again is a double press (Stop right after Start is

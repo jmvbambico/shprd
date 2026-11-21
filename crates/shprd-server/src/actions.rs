@@ -116,6 +116,7 @@ pub(crate) fn run(ctx: &Context<'_>, action: Action) -> Result<ActionReply, ApiR
         Action::TaskDropMany { tasks, reason } => drop_many(ctx, tasks, reason),
         Action::TaskAccept { task } => accept(ctx, &task),
         Action::TaskResendBrief { task } => resend_brief(ctx, &task),
+        Action::TaskReviewAgain { task } => review_again(ctx, &task),
     }
 }
 
@@ -269,6 +270,28 @@ fn resend_brief(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject>
         progress: None,
     };
     commit(ctx, kind)
+}
+
+/// Starts a task's review again: closes its reviewer and delivers the review once more.
+///
+/// The engine records the new review request itself, which is what retires the
+/// `review kickoff not delivered` card (`shprd_views::cards::card`); a refusal
+/// (the reviewer's own words) leaves the card standing, with its button.
+fn review_again(ctx: &Context<'_>, task: &str) -> Result<ActionReply, ApiReject> {
+    let engine = ctx.engine.ok_or_else(|| {
+        ApiReject::refused("this service was started without a host, so it cannot start a review")
+    })?;
+    let (folded, _) = ledger::load(ctx.repo).map_err(read_error)?;
+    if !folded.tasks.contains_key(task) {
+        return Err(ApiReject::unknown_task(task));
+    }
+    engine
+        .review_again(ctx.repo, task)
+        .map_err(ApiReject::refused)?;
+    let seq = ledger::last_seq(ctx.repo)
+        .map_err(|err| ApiReject::internal(format!("could not read the run log: {err}")))?;
+    ctx.hub.publish(seq);
+    folded_task(ctx.repo, task, seq)
 }
 
 /// Starts an attempt at `task` through the binary's spawn path.

@@ -826,6 +826,39 @@ async fn a_resend_without_a_host_is_refused_and_the_card_stays() {
 }
 
 #[tokio::test]
+async fn retry_review_without_a_host_is_refused_and_an_unknown_task_is_not_found() {
+    // SHPR-83: the card "review kickoff not delivered" has a Retry review button
+    // (`task.review_again`); a service without a host says so, and a task nobody added is unknown.
+    let fixture = with_a_working_task();
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T9"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{:?}", reply.body);
+    // With a host that starts the review, the press is accepted.
+    let (engine, _, _) = recording_engine(Ok("x"));
+    let engine = engine.with_review_again(Arc::new(|_repo: &Path, _task: &str| {
+        Ok("started a review".to_string())
+    }));
+    let fixture = Fixture {
+        app: fixture.app.with_engine(engine),
+        ..fixture
+    };
+    let reply = fixture
+        .act(json!({"kind": "task.review_again", "task": "T1"}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+}
+
+#[tokio::test]
 async fn a_stop_of_a_working_task_moves_to_needs_you_and_a_retry_is_allowed() {
     // Bug 1 of the M10 gate: the stop closed the space and wrote nothing, so the
     // task read Working for ever and every retry was refused with "attempt 1

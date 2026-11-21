@@ -488,8 +488,10 @@ fn successive_passes_decide_the_review_and_land_the_task_on_their_own() {
         "{asked:?}"
     );
     assert!(
-        asked.steps[0].detail.contains("shprd approve T2"),
-        "the person is told the verb that lands it: {asked:?}"
+        asked.steps[0]
+            .detail
+            .contains("T2 is ready to land: Review and Accept it in the Tasks pane"),
+        "the person is told what lands it (the Accept button, no command): {asked:?}"
     );
     assert_eq!(
         fixture.integration_head(),

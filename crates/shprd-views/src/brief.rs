@@ -76,6 +76,7 @@ pub fn brief(state: &RunState, _events: &[Event]) -> String {
         Section::new("waiting on gates:", waiting_lines(state)),
         Section::new("failed gates:", failed_lines(state)),
         Section::new("dry agents:", dry_lines(state)),
+        Section::new("asks:", ask_lines(state)),
         Section::new("escalations:", escalation_lines(state)),
         Section::new("overrides:", override_lines(state)),
     ];
@@ -218,6 +219,29 @@ fn escalation_lines(state: &RunState) -> Vec<String> {
         lines.push(format!("  - {}", clock::clip(&escalation.body, TEXT_CHARS)));
     }
     lines
+}
+
+/// Every ask a worker raised, oldest first, with what the person answered.
+///
+/// This is what the log says happened, so a coordinator reports a worker's question
+/// from here and never from a guess: an ask the person answered reads `answered`,
+/// one nobody has answered reads `open`.
+fn ask_lines(state: &RunState) -> Vec<String> {
+    let mut asks: Vec<_> = state.asks.values().collect();
+    asks.sort_by_key(|ask| ask.raised_seq);
+    asks.iter()
+        .map(|ask| {
+            let said = clock::clip(&ask.text, TEXT_CHARS);
+            match &ask.answer {
+                Some(answer) => format!(
+                    "  {}: asked \"{said}\", the person answered \"{}\"",
+                    ask.task,
+                    clock::clip(&answer.text, TEXT_CHARS)
+                ),
+                None => format!("  {}: asked \"{said}\", not answered yet", ask.task),
+            }
+        })
+        .collect()
 }
 
 /// Every override the state holds, oldest first, as recorded by a human.
