@@ -43,7 +43,7 @@ import {
 } from "./lib/board.js";
 import { MENU, menuHeight, tasksMenu } from "./lib/menu.js";
 import { badge, card, cardHeader, countBadge, keycap, note, openAccept, openThread, segmented, statusGlyph } from "./lib/panel.js";
-import { graphRows, pickedName, scopeToSpace, spacesOf } from "./lib/tree.js";
+import { followPick, graphRows, pickedName, scopeToSpace, spacesOf } from "./lib/tree.js";
 import { H, RADIUS, TEXT, ref, SPACE, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
 
@@ -269,6 +269,7 @@ export default class Tasks extends View {
    * repository nothing was read for gives null: the pane says it is loading.
    */
   sync() {
+    this.tidyPick();
     const key = this.cache.key();
     if (key !== this.shownKey) {
       this.shownKey = key;
@@ -276,6 +277,26 @@ export default class Tasks extends View {
       this.actionError = null;
     }
     this.state = this.cache.get();
+  }
+
+  /**
+   * The picked space, kept true: a pick whose space was closed (or the window's
+   * space moving on) is replaced by the window's own space, so the panes follow
+   * the space the person is in and never name a space that is gone. A folder
+   * closed and added again is a new space with a new id.
+   */
+  tidyPick() {
+    const list = spaces() ?? [];
+    const now = list.find((space) => space?.active)?.id ?? null;
+    const picked = this.picked();
+    const next = followPick(this.state, picked, list, this.lastActive ?? null);
+    if (next !== picked) setShared("spaces.picked", next);
+    this.lastActive = now ?? this.lastActive ?? null;
+  }
+
+  /** The picked space's id after [`tidyPick`], or null for "All spaces". */
+  picked() {
+    return shared("spaces.picked") ?? null;
   }
 
   /** Follows the service's change file for as long as this copy lives. */
@@ -534,7 +555,7 @@ export default class Tasks extends View {
 
   /** Whether there is more than one space to choose between. */
   hasSpaces() {
-    return (this.state?.spaces ?? []).length > 1 || (shared("spaces.picked") ?? null) !== null;
+    return (this.state?.spaces ?? []).length > 1 || this.picked() !== null;
   }
 
   /** Opens the add-task form for a fresh `tasks.add` request, once. */
@@ -620,7 +641,7 @@ export default class Tasks extends View {
     const colors = tone(t);
     // The picked space (`spaces.picked`) narrows the list and the Graph; the
     // "All spaces" chip puts every space back.
-    const board = scopeToSpace(this.state, shared("spaces.picked") ?? null, spaces());
+    const board = scopeToSpace(this.state, this.picked(), spaces());
     const tally = counts(board);
     const query = this.query.value() ?? "";
     const chips = filterChips(board);
@@ -714,7 +735,7 @@ export default class Tasks extends View {
    */
   graph(t, colors, head) {
     const pane = this.pane();
-    const rows = this.state ? graphRows(this.state, shared("spaces.picked") ?? null, spaces()) : [];
+    const rows = this.state ? graphRows(this.state, this.picked(), spaces()) : [];
     const body =
       this.failure !== null
         ? [note(t, this.failure)]
@@ -866,7 +887,7 @@ export default class Tasks extends View {
           .when(this.hasSpaces(), (el) => {
             // The picked space is a chip of its own (its name); "All spaces" puts
             // every space back (Q1).
-            const picked = shared("spaces.picked") ?? null;
+            const picked = this.picked();
             return el
               .when(picked !== null, (e) => e.child(this.chip(t, "picked", pickedName(this.state, picked, spaces()), 0, true, () => {})))
               .child(

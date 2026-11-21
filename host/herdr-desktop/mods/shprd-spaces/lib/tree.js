@@ -106,6 +106,44 @@ export function resolveSpace(state, pickedId, herdrSpaces = []) {
   return same ? same.id : pickedId;
 }
 
+/**
+ * Whether a picked id still names a space: a `herdr:<id>` whose Herdr space was
+ * closed does not, and is dropped (`null`) rather than drawn as a raw id or used
+ * to scope the panes to nothing. A served id and an unknowable case (Herdr's list
+ * is empty) are kept; `scopeToSpace` already falls back for a served id it lacks.
+ */
+export function livePick(pickedId, herdrSpaces = []) {
+  if (pickedId === null || pickedId === undefined) return null;
+  const id = String(pickedId);
+  const list = Array.isArray(herdrSpaces) ? herdrSpaces : [];
+  if (!id.startsWith("herdr:") || list.length === 0) return pickedId;
+  const herdrId = id.slice("herdr:".length);
+  return list.some((space) => space?.id === herdrId) ? pickedId : null;
+}
+
+/**
+ * What `spaces.picked` should be now, so the panes follow the window's own space.
+ *
+ * - none picked ("All spaces") stays none;
+ * - a pick whose Herdr space was closed moves to the space the window shows;
+ * - when the window's space changes (`previousActive` was another), a pick that
+ *   does not stand for the new one follows it.
+ *
+ * Returns the id to share, the same as `pickedId` when nothing changes.
+ */
+export function followPick(state, pickedId, herdrSpaces = [], previousActive = null) {
+  if (pickedId === null || pickedId === undefined) return null;
+  const list = Array.isArray(herdrSpaces) ? herdrSpaces : [];
+  const active = list.find((space) => space?.active) ?? null;
+  const mine = active ? `herdr:${active.id}` : null;
+  if (livePick(pickedId, list) === null) return mine;
+  if (active && previousActive !== null && previousActive !== active.id) {
+    const same = resolveSpace(state, pickedId, list) === resolveSpace(state, mine, list);
+    if (!same) return mine;
+  }
+  return pickedId;
+}
+
 /** The name to draw for a picked id: the served space's, else Herdr's, never a raw id. */
 export function pickedName(state, pickedId, herdrSpaces = []) {
   const resolved = resolveSpace(state, pickedId, herdrSpaces);
@@ -113,7 +151,9 @@ export function pickedName(state, pickedId, herdrSpaces = []) {
   if (served) return served.herdr_name ?? served.name;
   const herdrId = String(pickedId).replace(/^herdr:/, "");
   const herdr = (herdrSpaces ?? []).find((space) => space?.id === herdrId);
-  return String(herdr?.name ?? String(pickedId).replace(/^(sp-|herdr:)/, ""));
+  // Never a raw `sp…` id: a closed space's name is gone, so say what it is.
+  if (herdr?.name) return String(herdr.name);
+  return String(pickedId).startsWith("herdr:") ? "This space" : String(pickedId).replace(/^sp-/, "");
 }
 
 /**

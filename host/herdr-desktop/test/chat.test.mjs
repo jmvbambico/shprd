@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
+import { record, walk } from "gpui-kit";
 import Chat from "../mods/shprd-chat/main.js";
 import { serviceFile } from "../mods/lib/client.js";
 import {
@@ -568,4 +569,28 @@ test("an shprd agent's header says whose it is", () => {
 
 test("the person's typed line breaks stay breaks", () => {
   assert.equal(markdownOf({ role: "user" }, "a\n1. b\n2. c"), "a  \n1. b  \n2. c");
+});
+
+// SHPR-80: a conversation never read says "Loading…" only briefly, never for ever.
+test("an unread conversation says Loading only at first; later it is the empty chat (SHPR-80)", () => {
+  const { view } = panel();
+  view.loaded = new Set();
+  view.slot = "k|coordinator";
+  view.failure = null;
+  const realNow = Date.now;
+  record(true);
+  try {
+    // The Loading block holds one child (its words); the empty chat a title and a line.
+    const kids = (el) => walk(el)[0].kids.length;
+    view.slotSince = realNow();
+    assert.equal(kids(view.blank({}, null)), 1, "Loading…");
+    Date.now = () => realNow() + 10_000;
+    assert.equal(kids(view.blank({}, null)), 2, "after a few seconds, never a spinner: the empty chat");
+    view.loaded.add(view.slot);
+    Date.now = realNow;
+    assert.equal(kids(view.blank({}, null)), 2, "a conversation that was read and is empty");
+  } finally {
+    record(false);
+    Date.now = realNow;
+  }
 });
