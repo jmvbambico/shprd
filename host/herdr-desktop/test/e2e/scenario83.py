@@ -226,7 +226,7 @@ def main():
                     p = shoot(f"ask-{a.get('task')}-list")
                     ws, size = rc.words(p)
                     right0 = [w for w in ws if w[0] > 0.59 * size[0]]
-                    if [w for w in right0 if w[4] == "answer"]:
+                    if [w for w in right0 if w[4].lower().startswith("answ") or w[4].strip(".,:") == first]:
                         opened = True  # the thread is already open on the card
                         break
                     idw = [w for w in ws if w[0] > 0.59 * size[0] and w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and any(ch.isalnum() for ch in o[4]) and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
@@ -242,7 +242,7 @@ def main():
                         p = shoot(f"ask-{a.get('task')}-card")
                         ws2, size2 = rc.words(p)
                         right = [w for w in ws2 if w[0] > 0.59 * size2[0]]
-                        if [w for w in right if w[4] == "answer"]:
+                        if [w for w in right if w[4].lower().startswith("answ") or w[4].strip(".,:") == first]:
                             opened = True
                             break
                     if opened:
