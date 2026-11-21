@@ -51,7 +51,7 @@ def row_action(shot_path, task_id, label):
     ws, size = rc.words(shot_path)
     ids = []
     for w in ws:
-        if w[4].strip(".,:") != task_id:
+        if w[0] < 0.59 * size[0] or w[4].strip(".,:") != task_id:
             continue
         same = [o for o in ws if o is not w and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]
         if not same:
@@ -82,6 +82,7 @@ def main():
     ap.add_argument("--coordinator-model", default="sonnet")
     ap.add_argument("--stop-on-fail", action="store_true")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--stop-after-ask", action="store_true")
     ap.add_argument("--minutes", type=int, default=45)
     args = ap.parse_args()
     binary = os.path.abspath(args.shprd)
@@ -193,17 +194,29 @@ def main():
                 options = a.get("options") or []
                 pick = next((o for o in options if "raise" in o.lower()), options[0] if options else None)
                 first = (pick or "").split()[0] if pick else ""
-                p = shoot(f"ask-{a.get('task')}-list")
-                ws, size = rc.words(p)
-                idw = [w for w in ws if w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
-                seen, ok = "task row not found on screen", False
-                if idw:
-                    # The row opens the task's thread, where the question card is: a click on the row's title.
-                    row = (idw[0][0] + 300, idw[0][1] - 40)
-                    click(p, row, size, f"the {a.get('task')} row")
-                    time.sleep(3)
+                seen, ok, opened = "task row not found on screen", False, False
+                for attempt in range(4):
+                    # The list moves as tasks change state: shoot, find the row and click in one go.
+                    p = shoot(f"ask-{a.get('task')}-list")
+                    ws, size = rc.words(p)
+                    idw = [w for w in ws if w[0] > 0.59 * size[0] and w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
+                    if not idw:
+                        time.sleep(2)
+                        continue
+                    click(p, (idw[0][0] + 300, idw[0][1] - 40), size, f"the {a.get('task')} row")
+                    time.sleep(2.5)
                     p = shoot(f"ask-{a.get('task')}-card")
-                    px = rc.find(p, first) if first else None
+                    ws2, size2 = rc.words(p)
+                    head = [w for w in ws2 if w[0] > 0.59 * size2[0] and w[4].strip(".,:") in ("Question", first)]
+                    if head:
+                        opened = True
+                        break
+                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 0, size[0], 400))
+                    if back:
+                        click(p, back, size, "back to the list")
+                        time.sleep(1.5)
+                if opened:
+                    px = rc.find(p, first, nth=-1, region=(int(0.59 * size[0]), 0, size[0], size[1])) if first else None
                     seen = f"opened the row; '{first}' {'found' if px else 'NOT on screen'}"
                     if px:
                         _, size = rc.words(p)
@@ -218,6 +231,8 @@ def main():
                 answered.add(key)
                 sc.record(f"ask {a.get('task')} answer by click", f"the card's answer ('{pick}') is taken", seen, t1, ok)
                 failed |= not ok
+                if args.stop_after_ask:
+                    return 0 if ok else 1
             # ---- Review and Accept, by real clicks ----
             for tid, t in sorted(ts.items()):
                 if t["derived"]["status"] != "ready" or tid in accepted:

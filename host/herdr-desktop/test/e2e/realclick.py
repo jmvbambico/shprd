@@ -126,7 +126,7 @@ def find(shot_path, text, row_of=None, nth=0, region=None):
         rows = [w for w in ws if w[4].strip(".,:") == row_of]
         hits = [w for w in hits if any(abs((w[1] + w[3] / 2) - (r[1] + r[3] / 2)) < 40 for r in rows)]
     hits.sort(key=lambda w: (w[1], w[0]))
-    if len(hits) <= nth:
+    if not hits or (nth >= 0 and len(hits) <= nth):
         return None
     w = hits[nth]
     return (w[0] + w[2] / 2, w[1] + w[3] / 2)
