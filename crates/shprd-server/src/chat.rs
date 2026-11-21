@@ -68,7 +68,9 @@ pub trait ChatWriter: Send + Sync {
     /// Press Escape in `space`'s agent, which every supported program takes as
     /// "stop what you are doing". A host that cannot press a key says so.
     fn interrupt(&self, _space: Option<&str>) -> Result<(), String> {
-        Err(String::from("this service cannot press a key in a terminal"))
+        Err(String::from(
+            "this service cannot press a key in a terminal",
+        ))
     }
 
     /// When the agent `send` types into for `space` started, in epoch

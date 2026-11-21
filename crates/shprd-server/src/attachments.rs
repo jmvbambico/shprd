@@ -172,6 +172,7 @@ pub fn compose(text: &str, files: &[PathBuf]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -227,7 +228,10 @@ mod tests {
             name: None,
         };
         assert!(store(cwd.path(), &[relative]).is_err());
-        assert!(store(cwd.path(), &[item(src.path(), None)]).is_err(), "a folder");
+        assert!(
+            store(cwd.path(), &[item(src.path(), None)]).is_err(),
+            "a folder"
+        );
     }
 
     #[test]

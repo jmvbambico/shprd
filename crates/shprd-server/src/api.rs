@@ -37,8 +37,8 @@ use crate::auth;
 use crate::chat::{self, ChatHost, ChatWriter, Space};
 use crate::dto::{
     Action, ActionReply, AgentTabDto, AnswerAsk, AskListDto, AskReply, ChangeDto, ChatDto,
-    ChatSendReply, ChatStopReply, ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto, PromptListDto,
-    RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
+    ChatSendReply, ChatStopReply, ClientMessage, ErrorCode, GraphDto, HealthDto, PromptDto,
+    PromptListDto, RosterDto, SettingsDto, SettingsWriteDto, SnapshotDto, WsMessage,
 };
 use crate::engine::Engine;
 use crate::error::{ApiReject, ServerError};

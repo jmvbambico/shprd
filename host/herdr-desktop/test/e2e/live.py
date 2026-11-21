@@ -6,8 +6,9 @@
 It builds the same private home as `scenario.py` (a copy of the real app home, private HC/XDG/SHPRD
 dirs, one window, torn down by recorded pid), adds a folder as a space with shprd's chat tab, waits for
 the coordinator, then writes `<base>/env.sh` (the private environment, to `source` before any
-`herdr-app`/`hc`/`drive` command) and `<base>/state.json`, and waits for `<base>/quit` (or --max
-seconds), then tears everything down. Real key and mouse events come from `drive.swift` (by pid).
+`herdr-app`/`hc` command) and `<base>/state.json`, and waits for `<base>/quit` (or --max
+seconds), then tears everything down. The window has no key or pointer driver that leaves the person's foreground alone, so the composer's own
+handlers are pressed by name: `herdr-app do shprd-chat.<command>` (see `command()` in the mod).
 The coordinator runs with claude's default permission mode, not bypass: the strict case an attachment
 must still be readable in.
 """

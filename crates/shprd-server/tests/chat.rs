@@ -660,7 +660,10 @@ async fn an_attachment_is_copied_into_the_agents_folder_and_named_by_path() {
     let lines = fixture.recorder.lines();
     assert_eq!(lines.len(), 1);
     let typed = &lines[0].1;
-    assert!(typed.starts_with("what is in the attachment?\n\nAttached file"), "{typed}");
+    assert!(
+        typed.starts_with("what is in the attachment?\n\nAttached file"),
+        "{typed}"
+    );
     let path = typed.lines().last().unwrap();
     assert!(
         std::path::Path::new(path).starts_with(fixture.repo.path().join(".shprd/attachments")),
