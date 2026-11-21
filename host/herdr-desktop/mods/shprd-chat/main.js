@@ -65,6 +65,7 @@ import {
   markdownOf,
   mine,
   nextCursor,
+  normalize,
   outgoing,
   safeLink,
   spaceOf,
@@ -97,6 +98,9 @@ const KEEP_MS = 10 * 60 * 1000;
 
 /** A second Enter this close to the first is the same press (the key and the chord's submit), ms. */
 const ENTER_DEBOUNCE_MS = 120;
+
+/** Where a restart's conversation waits for the chat pane the restart opens (the old pane is closed with the agent). */
+const CARRY_KEY = "shprd.chat.carry";
 
 /** The round buttons in the composer's bottom row, px. */
 const ROUND = 28;
@@ -333,6 +337,7 @@ export default class Chat extends View {
       }
       this.client = next.client;
       this.follow();
+      this.carry();
       // The conversation this read is for: a switch of space while it runs makes
       // its answer another conversation's, which is not folded into this one.
       if (this.slot !== undefined && this.slotKey() !== this.slot) this.forget(false);
@@ -372,6 +377,20 @@ export default class Chat extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * A restart the person asked for (the model menu) closes the coordinator's pane and opens
+   * a new one, so the conversation is handed over in shared state: this takes it, once, into
+   * an empty chat of the same folder, followed by the line saying why it changed hands.
+   */
+  carry() {
+    if (this.space !== COORDINATOR || (this.chat?.messages ?? []).length > 0) return;
+    const held = shared(CARRY_KEY);
+    if (!held || Date.now() - held.at > KEEP_MS || held.folder !== (this.client?.folder ?? null)) return;
+    setShared(CARRY_KEY, null);
+    const note = normalize({ role: "news", text: String(held.text ?? ""), tools: [], at_ms: held.at });
+    this.chat = { ...this.chat, messages: [...(held.messages ?? []), ...(note.text === "" ? [] : [note])] };
   }
 
   /** Starts the conversation again: a new record names nothing the old cursor did. */
@@ -546,6 +565,7 @@ export default class Chat extends View {
       this.doc = await this.client.settings();
       if (coordinatorRunning(this.state)) {
         this.keep = { text: `Switched the coordinator to ${label}`, until: Date.now() + KEEP_MS };
+        setShared(CARRY_KEY, { folder: this.client.folder ?? null, at: Date.now(), text: this.keep.text, messages: this.chat.messages });
         await this.client.restartCoordinator();
       }
     } catch (err) {

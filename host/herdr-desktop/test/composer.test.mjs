@@ -393,3 +393,17 @@ test("a restart the person asked for keeps the old messages and says why", () =>
   assert.deepEqual(fold(held, answer).messages, [], "a plain new session starts over");
   assert.deepEqual(fold(held, answer, "Switched").messages.map((m) => m.text), ["old", "Switched"]);
 });
+
+test("the restart's new chat pane takes the conversation over, once, for the same folder", () => {
+  const old = panel({ state: { live_agents: [{ role: "coordinator", state: "idle" }] } });
+  old.view.chat = { ...empty(), session: "s1", messages: [{ role: "user", text: "earlier", tools: [], at_ms: 1 }] };
+  herdr.setShared("shprd.chat.carry", { folder: "/f", at: Date.now(), text: "Switched the coordinator to Haiku 5.5 · Medium", messages: old.view.chat.messages });
+  const next = panel();
+  next.view.carry();
+  assert.deepEqual(next.view.chat.messages.map((m) => m.text), ["earlier", "Switched the coordinator to Haiku 5.5 · Medium"]);
+  assert.equal(herdr.shared("shprd.chat.carry"), null, "taken once");
+  const other = panel();
+  herdr.setShared("shprd.chat.carry", { folder: "/elsewhere", at: Date.now(), text: "x", messages: [] });
+  other.view.carry();
+  assert.equal(other.view.chat.messages.length, 0, "another folder's conversation is not this one's");
+});

@@ -44,6 +44,20 @@ def main():
     env = sc.Env(base)
     for d in [env.app, env.shprd_home, *env.dirs.values()]:
         os.makedirs(d, exist_ok=True)
+    # The window finds `shprd` through the person's login shell (`resolveShprd`), which would find
+    # their installed one first. A private ZDOTDIR puts the binary under test ahead of it for this
+    # window's shells only (the person's rc files are not read, and nothing of theirs is written).
+    zdot = f"{base}/zdot"
+    os.makedirs(zdot, exist_ok=True)
+    open(f"{zdot}/.zshrc", "w").write(f'export PATH="{binary_dir}:$PATH"\n')
+    plain_env = env.env
+
+    def with_zdot(bdir):
+        e = plain_env(bdir)
+        e["ZDOTDIR"] = zdot
+        return e
+
+    env.env = with_zdot
     try:
         shutil.rmtree(env.app)
         shutil.copytree(sc.REAL_APP, env.app, ignore=shutil.ignore_patterns("herdr-app.sock", "*.sock"), symlinks=True)
