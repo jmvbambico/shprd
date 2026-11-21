@@ -2408,6 +2408,11 @@ pub(crate) fn coordinator_pane_path(
     repo: &Path,
     space: &shprd_mux::SpaceId,
 ) -> PathBuf {
+    coordinator_dir(home, repo).join(path_safe(space.as_str()))
+}
+
+/// The folder one repository's coordinator records live in, one file per space.
+fn coordinator_dir(home: &Path, repo: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
     let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
     let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
@@ -2419,7 +2424,6 @@ pub(crate) fn coordinator_pane_path(
     home.join(".shprd")
         .join(COORDINATORS_DIR)
         .join(format!("{name}-{short}"))
-        .join(path_safe(space.as_str()))
 }
 
 /// The line that marks a recorded pane as an agent shprd started.
@@ -2571,6 +2575,74 @@ fn running_coordinators(
         .collect();
     found.sort_by_key(|agent| agent.started_ms);
     found
+}
+
+/// What stopping a closed space's agents did, for the caller's one line of log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Retired {
+    /// The coordinator and task agents the host was told to stop.
+    pub(crate) stopped: usize,
+    /// Agents the host kept, by pane id.
+    pub(crate) kept: Vec<String>,
+}
+
+/// Stops the agents shprd started for a repository whose space was closed: its
+/// coordinator, and every worker and reviewer of its run.
+///
+/// The space is gone, so the agents are found the way they were recorded: the
+/// coordinator records name the repository's spaces (`<home>/.shprd/coordinators/
+/// <repo>/<space>`), and every agent the host lists for one of those spaces is
+/// stopped, as is every tab the current run recorded for a task. Tasks, briefs
+/// and the run log stay as they are, so a folder added again resumes the run
+/// with a fresh coordinator. The records of the closed spaces are dropped:
+/// they name panes that no longer run.
+pub(crate) fn stop_repo_agents(mux: &dyn Host, ctx: &Ctx, home: &Path, repo: &Path) -> Retired {
+    let mut retired = Retired::default();
+    // Workers and reviewers the run recorded a tab for.
+    retired.kept.extend(
+        close_run_tabs(mux, ctx, Some(home))
+            .into_iter()
+            .map(|left| left.id),
+    );
+    let dir = coordinator_dir(home, repo);
+    let records: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    let spaces: Vec<String> = records
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .collect();
+    let mut agents = mux.list_coordinators().unwrap_or_default();
+    agents.extend(mux.list_agents().unwrap_or_default());
+    let mut seen: Vec<PaneId> = Vec::new();
+    for agent in agents {
+        let named = [
+            path_safe(agent.space.as_str()),
+            path_safe(&bare_id(agent.space.as_str())),
+        ];
+        if !agent.live
+            || !named.iter().any(|name| spaces.contains(name))
+            || seen.contains(&agent.tab.root_pane)
+        {
+            continue;
+        }
+        seen.push(agent.tab.root_pane.clone());
+        match mux.kill(&agent.tab.root_pane) {
+            Ok(()) => retired.stopped += 1,
+            Err(shprd_mux::MuxError::NotFound { .. }) => {}
+            Err(err) => {
+                tracing::warn!(pane = %agent.tab.root_pane.as_str(), %err, "an agent of a closed space could not be stopped");
+                retired.kept.push(agent.tab.root_pane.as_str().to_string());
+            }
+        }
+    }
+    if retired.kept.is_empty() {
+        for record in records {
+            let _ = std::fs::remove_file(record);
+        }
+    }
+    retired
 }
 
 /// Ends every running coordinator of this repository except `keep`, and lets go

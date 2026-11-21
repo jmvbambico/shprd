@@ -91,6 +91,11 @@ pub struct RepoParts {
     /// host and so can take seconds: it runs on its own thread after the slot
     /// answers, never in a request.
     pub prepare: Option<Prepare>,
+    /// What stops the agents started for this repository (its coordinator and
+    /// its task agents), run when the repository's space is closed and the
+    /// service drops it. It leaves the tasks and the run's state on disk, and it
+    /// asks the host, so it runs on a thread of its own.
+    pub retire: Option<Prepare>,
 }
 
 impl std::fmt::Debug for RepoParts {
@@ -126,6 +131,8 @@ pub(crate) struct Slot {
     /// repository nobody has opened and that has no run of its own is not
     /// prepared at all: a window that lists it does not start an agent for it.
     prepare: Option<Prepare>,
+    /// Stopping the repository's agents, when its space closed and it is dropped.
+    retire: Option<Prepare>,
     /// Whether a preparation is running: a second one is not started beside it.
     preparing: Arc<AtomicBool>,
 }
@@ -175,6 +182,14 @@ impl Slot {
             run();
         } else {
             std::thread::spawn(run);
+        }
+    }
+
+    /// Stops the repository's agents on a thread of its own: the host answers
+    /// slowly, and the request that dropped the repository must not wait.
+    fn run_retire(&self) {
+        if let Some(step) = self.retire.clone() {
+            std::thread::spawn(move || step());
         }
     }
 
@@ -309,6 +324,7 @@ impl Registry {
             stop,
             tasks: Mutex::new(Vec::new()),
             prepare: None,
+            retire: None,
             preparing: Arc::new(AtomicBool::new(false)),
         });
         if let Ok(mut slots) = self.slots.write() {
@@ -402,6 +418,7 @@ impl Registry {
             stop,
             tasks: Mutex::new(Vec::new()),
             prepare: parts.prepare,
+            retire: parts.retire,
             preparing: Arc::new(AtomicBool::new(false)),
         });
         if let Ok(mut slots) = self.slots.write() {
@@ -441,8 +458,9 @@ impl Registry {
 
     /// Makes `folders` exactly the set of repositories being served, apart from
     /// the pinned ones: new ones are registered, and every other repository
-    /// stops being ticked and is dropped (its coordinator keeps its space and
-    /// sits idle: nothing is closed).
+    /// stops being ticked and is dropped: its space was closed, so its
+    /// coordinator and task agents are stopped ([`RepoParts::retire`]) while its
+    /// tasks and run stay on disk.
     ///
     /// Answers the repositories now served and, per folder that failed, why.
     pub fn sync(&self, folders: &[PathBuf]) -> (Vec<RepoInfo>, Vec<(PathBuf, String)>) {
@@ -488,6 +506,7 @@ impl Registry {
         match removed {
             Some(slot) => {
                 slot.stop();
+                slot.run_retire();
                 true
             }
             None => false,
