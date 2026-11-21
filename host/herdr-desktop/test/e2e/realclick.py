@@ -24,14 +24,22 @@ if a.count >= 3 && a[2] == "--activate", let pid = Int32(a[1]) {
 guard a.count >= 4, let pid = Int32(a[1]), let rx = Double(a[2]), let ry = Double(a[3]) else { print("usage"); exit(2) }
 // Bounds come from every window of the pid, on this Space or not: an event posted to the pid
 // reaches only that process, so a window on another Space (or behind a full-screen app) is still clickable.
-let l = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String:Any]]
 let toPidMode = a.count >= 5 && a[4] == "--topid"
-var best: (Double, Double, Double, Double)? = nil
-for w in l where (w[kCGWindowOwnerPID as String] as! Int32) == pid && (w[kCGWindowLayer as String] as! Int) == 0 {
-  let b = w[kCGWindowBounds as String] as! [String:Any]
-  let r = (b["X"] as! Double, b["Y"] as! Double, b["Width"] as! Double, b["Height"] as! Double)
-  if best == nil || r.2*r.3 > best!.2*best!.3 { best = r }
+func biggest(_ l: [[String:Any]]) -> (Double, Double, Double, Double)? {
+  var best: (Double, Double, Double, Double)? = nil
+  for w in l where (w[kCGWindowOwnerPID as String] as! Int32) == pid && (w[kCGWindowLayer as String] as! Int) == 0 {
+    let b = w[kCGWindowBounds as String] as! [String:Any]
+    let r = (b["X"] as! Double, b["Y"] as! Double, b["Width"] as! Double, b["Height"] as! Double)
+    if r.2 < 200 || r.3 < 200 { continue }
+    if best == nil || r.2*r.3 > best!.2*best!.3 { best = r }
+  }
+  return best
 }
+// The window on screen when it is; else (another Space, behind a full-screen app) its last known bounds:
+// an event posted to the pid reaches only that process, so it is still safe to click.
+let l = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String:Any]]
+var best = biggest(l)
+if best == nil { best = biggest(CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as! [[String:Any]]) }
 guard let win = best else { print("no window for pid"); exit(3) }
 if a.count >= 5 && a[4] == "--bounds" { print("\(win.0) \(win.1) \(win.2) \(win.3)"); exit(0) }
 let x = win.0 + rx, y = win.1 + ry
