@@ -77,7 +77,20 @@ pub fn store(cwd: &Path, items: &[ChatAttachmentDto]) -> Result<Vec<PathBuf>, Ap
     // so an attachment can never be committed. A folder that is not a
     // repository has nothing to commit to; its own `.gitignore` is made when
     // shprd makes it one.
-    let _ = shprd_git::worktree::ensure_state_excluded(cwd);
+    if let Err(err) = shprd_git::worktree::ensure_state_excluded(cwd) {
+        // In a repository that cannot be told to ignore the folder an attachment could
+        // be committed, so nothing is copied; a folder that is no repository has
+        // nothing to commit to.
+        let in_repo = shprd_git::git::Git::new(cwd)
+            .run(&["rev-parse", "--git-dir"])
+            .is_ok();
+        if in_repo {
+            return Err(ApiReject::refused(format!(
+                "git could not be told to ignore {DIR} ({err}), so an attachment could be \
+                 committed. Nothing was sent"
+            )));
+        }
+    }
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis());
