@@ -207,7 +207,7 @@ fn land_task(
         || task.pr.is_some();
     // A repository with no remote, or with no forge to drive, lands locally:
     // the task's branch is merged into the run's integration branch in shprd's
-    // own worktree, and nothing is pushed anywhere.
+    // own worktree; a non-GitHub remote is then pushed to, best effort.
     if local_landing(&Git::new(&ctx.root)) {
         return land_task_local(
             ctx, &events, task, task_id, run, &branch, approved, has_work, &base, &config, home,
@@ -240,13 +240,10 @@ fn land_task(
             | land::LandError::HeadMoved { .. }
             | land::LandError::NotMerged { .. }),
         ) => {
-            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+            return Err(CliError::Invalid(anyhow!(err.plain(task_id))));
         }
         Err(err) => {
-            return Err(CliError::other(anyhow!(err).context(format!(
-                "landing task {task_id:?} from {}",
-                worktree.display()
-            ))));
+            return Err(CliError::other(anyhow!(err.plain(task_id))));
         }
     };
     record_landing(ctx, &events, task_id, &base, &landed)?;
@@ -304,13 +301,10 @@ fn land_task_local(
         Ok(landed) => landed,
         Err(err @ land::LandError::Conflict { .. }) => {
             record_conflict(ctx, task, task_id, branch, &err)?;
-            return Err(CliError::Invalid(anyhow!("task {task_id:?}: {err}")));
+            return Err(CliError::Invalid(anyhow!(err.plain(task_id))));
         }
         Err(err) => {
-            return Err(CliError::other(anyhow!(err).context(format!(
-                "landing task {task_id:?} in {}",
-                worktree.path.display()
-            ))));
+            return Err(CliError::other(anyhow!(err.plain(task_id))));
         }
     };
     record_local_landing(ctx, events, task_id, &run.integration_branch, &landed)?;
@@ -956,15 +950,12 @@ fn forge(dir: &Path) -> Result<Box<dyn Forge>, CliError> {
 /// debug build is always usable, so the tests that drive one never take this
 /// path by accident.
 pub(crate) fn local_landing(git: &Git) -> bool {
-    if !shprd_git::worktree::has_remote(git) {
-        return true;
-    }
     if cfg!(debug_assertions)
         && std::env::var_os(FAKE_FORGE_ENV).is_some_and(|value| !value.is_empty())
     {
-        return false;
+        return !shprd_git::worktree::has_remote(git);
     }
-    !gh_ready(git.dir())
+    !land::uses_forge(git, |host| gh_ready(git.dir(), host))
 }
 
 /// Whether `gh` is installed and signed in, asked in the repository it would
@@ -973,9 +964,9 @@ pub(crate) fn local_landing(git: &Git) -> bool {
 /// `gh auth status` answers from the local configuration, so this makes no
 /// network call; anything it cannot answer counts as "no forge", which is the
 /// safe answer because the local path writes to shprd's own worktree only.
-fn gh_ready(dir: &Path) -> bool {
+fn gh_ready(dir: &Path, host: &str) -> bool {
     Command::new("gh")
-        .args(["auth", "status"])
+        .args(["auth", "status", "--hostname", host])
         .current_dir(dir)
         .env("GH_PROMPT_DISABLED", "1")
         .env("LC_ALL", "C")

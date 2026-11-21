@@ -24,6 +24,20 @@ pub struct Card {
     pub default_action: String,
 }
 
+/// What a card says: a land step that keeps failing is already one plain
+/// sentence ("Couldn't merge T1: …"), so the engine's marker in front of it
+/// (`T1: its `land` step has failed the same way 3 passes in a row (attempt 1): `)
+/// is dropped; every other body is read as written.
+fn plain_body(body: &str) -> String {
+    let plain = body
+        .split_once(" step has failed the same way ")
+        .filter(|(head, _)| head.ends_with("its `land`"))
+        .and_then(|(_, rest)| rest.split_once("): "))
+        .map(|(_, tail)| tail)
+        .filter(|tail| tail.starts_with("Couldn't "));
+    plain.unwrap_or(body).to_string()
+}
+
 /// The body of the card a spawn records when the brief never reached the agent.
 pub const BRIEF_LOST: &str = "brief not delivered";
 
@@ -42,7 +56,7 @@ pub const BRIEF_LOST: &str = "brief not delivered";
 pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
     let Some(id) = escalation.task.as_deref() else {
         return Some(Card {
-            body: escalation.body.clone(),
+            body: plain_body(&escalation.body),
             default_action: escalation.default_action.clone(),
         });
     };
@@ -50,7 +64,7 @@ pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
         // A card about a task the log no longer holds is the log's to keep: it
         // was raised about something, and dropping it would lose the record.
         return Some(Card {
-            body: escalation.body.clone(),
+            body: plain_body(&escalation.body),
             default_action: escalation.default_action.clone(),
         });
     };
@@ -82,7 +96,7 @@ pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
         return answered(task, attempt, escalation, &answer);
     }
     Some(Card {
-        body: escalation.body.clone(),
+        body: plain_body(&escalation.body),
         default_action: escalation.default_action.clone(),
     })
 }
@@ -131,6 +145,7 @@ fn answered(
 
 #[cfg(test)]
 mod tests {
+
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use shprd_core::ask::AskKind;
@@ -140,6 +155,16 @@ mod tests {
         AskAnswerRecord, AskRecord, Attempt, Escalation, GateResult, RunState, Task, TaskStatus,
     };
 
+    #[test]
+    fn a_repeated_land_failure_card_reads_as_the_plain_sentence() {
+        let marked = "T1: its `land` step has failed the same way 3 passes in a row (attempt 1): Couldn't merge T1: this repository has no GitHub remote";
+        assert_eq!(
+            super::plain_body(marked),
+            "Couldn't merge T1: this repository has no GitHub remote"
+        );
+        let other = "T1: its `start` step has failed the same way 3 passes in a row (attempt 1): no workspace";
+        assert_eq!(super::plain_body(other), other);
+    }
     use super::card;
 
     /// One attempt that recorded a failed review gate.

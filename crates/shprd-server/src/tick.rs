@@ -43,7 +43,7 @@ use shprd_core::log::{Clock, SystemClock};
 use shprd_core::rules::RuleError;
 use shprd_core::state::{ResourceStatus, RunState, Task};
 use shprd_core::tick::{self, Facts, Input, Phase, PrFacts, Step};
-use shprd_git::forge::{Forge, ForgeError};
+use shprd_git::forge::Forge;
 use shprd_git::git::Git;
 use shprd_git::integrate;
 use shprd_git::land::{self, LandError, Landing, LocalLanding};
@@ -640,10 +640,14 @@ impl Worker {
         let seq = self.commit(EventKind::Escalated {
             task: Some(run.task.clone()),
             body: format!("{marker}{error}"),
-            default_action: format!(
-                "fix what the card names, then the engine retries `{}` on its next pass",
-                run.step
-            ),
+            default_action: if run.step == "land" {
+                String::from("the merge is tried again on the next pass")
+            } else {
+                format!(
+                    "fix what the card names, then the engine retries `{}` on its next pass",
+                    run.step
+                )
+            },
         })?;
         self.notify(Some(seq));
         Ok(())
@@ -1135,7 +1139,20 @@ impl Worker {
             Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
-            Step::Land { task, policy } => self.land_task(state, task, *policy),
+            Step::Land { task, policy } => {
+                self.land_task(state, task, *policy).map_err(|raw| {
+                    // A person reads one plain sentence; the raw text (a git
+                    // command line, a path) goes to the log.
+                    if raw.starts_with("Couldn't merge ") {
+                        raw
+                    } else {
+                        tracing::warn!(task = %task, %raw, "a landing failed");
+                        format!(
+                            "Couldn't merge {task}: it hit a problem on this machine, and the details are in the shprd log"
+                        )
+                    }
+                })
+            }
             Step::MarkLanded {
                 task,
                 outcome,
@@ -2264,22 +2281,7 @@ fn local_checks_passed(task: &Task) -> bool {
 
 /// Why a landing failed, in the words the CLI would use.
 fn describe_land_error(err: LandError, task: &str) -> String {
-    match err {
-        LandError::ChecksFailed { number } => {
-            format!("task {task:?}: the checks on pull request {number} failed")
-        }
-        LandError::HeadMoved { expected, found } => format!(
-            "task {task:?}: the pull request is at {found:?}, but the branch is at {expected:?}"
-        ),
-        LandError::NotMerged { number } => {
-            format!("the forge did not report pull request {number} merged")
-        }
-        LandError::Forge(ForgeError::Failed { args, code, stderr }) => format!(
-            "landing task {task:?}: forge {} failed (exit {code:?}): {stderr}",
-            args.join(" ")
-        ),
-        other => format!("landing task {task:?}: {other}"),
-    }
+    err.plain(task)
 }
 
 /// The settle window `tasks.news_settle_secs` names, in ms, when some settings

@@ -544,6 +544,19 @@ test("a failed pass is a toast, filed under the pass's own time", () => {
   assert.equal(passItem({ seq: 0, tasks: [] }), null);
 });
 
+test("a land failure is one plain sentence in the toast and the status bar", () => {
+  const plain = "Couldn't merge T1: this repository has no GitHub remote";
+  const state = {
+    ...STATE,
+    last_tick: { at_ms: 9, steps: 1, failed: [{ step: "land", task: "T1", error: plain }] },
+  };
+  assert.equal(passItem(state).body, plain);
+  assert.equal(lastFailure(state), plain);
+  for (const text of [passItem(state).body, lastFailure(state)]) {
+    assert.doesNotMatch(text, /`|gh |forge|run /);
+  }
+});
+
 test("one reading of the service is the news plus the pass", () => {
   const items = fromSnapshot(EVENTS, STATE);
   assert.equal(items.length, 5);
