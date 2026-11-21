@@ -37,7 +37,7 @@ mods_for() {
     taskview.js) echo "shprd-task-view" ;;
     tabstrip.js) echo "shprd-tabs shprd-menu shprd-new-menu shprd-pane shprd-tasks" ;;
     toasts.js) echo "shprd-toasts" ;;
-    settings.js) echo "shprd-settings shprd-models" ;;
+    settings.js) echo "shprd-settings shprd-models shprd-chat" ;;
     menu.js) echo "shprd-menu shprd-new-menu shprd-pane shprd-tabs shprd-tasks" ;;
     jump.js) echo "shprd-jump" ;;
     keybinds.js) echo "shprd-keybinds" ;;
