@@ -2584,6 +2584,8 @@ pub(crate) struct Retired {
     pub(crate) stopped: usize,
     /// Agents the host kept, by pane id.
     pub(crate) kept: Vec<String>,
+    /// Task tabs the host kept, by id (they never hold a coordinator record back).
+    pub(crate) tabs_kept: Vec<String>,
 }
 
 /// The agents of the spaces that are gone: those the host lists, still running,
@@ -2626,27 +2628,31 @@ fn agents_of_closed_spaces(
 /// panes that no longer run.
 pub(crate) fn stop_repo_agents(mux: &dyn Host, ctx: &Ctx, home: &Path, repo: &Path) -> Retired {
     let mut retired = Retired::default();
-    // Fail closed: without the host's list of open spaces nothing is known to be
-    // closed.
+    // Fail closed: an agent list or a list of open spaces the host could not give
+    // is not an empty one, and nothing is known to be closed without them.
+    let (Ok(mut agents), Ok(listed)) = (mux.list_coordinators(), mux.list_agents()) else {
+        return retired;
+    };
+    agents.extend(listed);
+    // Asked after the agents were listed, so a space opened in between (a folder
+    // added again) is seen before anything of it is killed.
     let Ok(spaces) = mux.list_spaces() else {
         return retired;
     };
-    let mut open: Vec<String> = spaces
+    let open: Vec<String> = spaces
         .iter()
-        .map(|space| path_safe(&bare_id(space.id.as_str())))
+        .flat_map(|space| {
+            [
+                path_safe(&bare_id(space.id.as_str())),
+                path_safe(space.id.as_str()),
+            ]
+        })
         .collect();
-    open.extend(
-        spaces
-            .iter()
-            .map(|space| path_safe(space.id.as_str()))
-            .collect::<Vec<_>>(),
-    );
     let reshown = mux
         .spaces_in_folder(repo)
         .map(|found| !found.is_empty())
         .unwrap_or(true);
-    let dir = coordinator_dir(home, repo);
-    let records: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let records: Vec<PathBuf> = std::fs::read_dir(coordinator_dir(home, repo))
         .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default();
     let recorded: Vec<String> = records
@@ -2656,22 +2662,11 @@ pub(crate) fn stop_repo_agents(mux: &dyn Host, ctx: &Ctx, home: &Path, repo: &Pa
         .collect();
     // The run's own tabs belong to whichever space shows the folder now.
     if !reshown {
-        retired.kept.extend(
+        retired.tabs_kept.extend(
             close_run_tabs(mux, ctx, Some(home))
                 .into_iter()
                 .map(|left| left.id),
         );
-    }
-    let mut agents = mux.list_coordinators().unwrap_or_default();
-    agents.extend(mux.list_agents().unwrap_or_default());
-    // Asked again after the agents were listed, so a space opened in between (a
-    // folder added again) is seen before anything of it is killed.
-    let Ok(spaces) = mux.list_spaces() else {
-        return retired;
-    };
-    for space in &spaces {
-        open.push(path_safe(&bare_id(space.id.as_str())));
-        open.push(path_safe(space.id.as_str()));
     }
     for agent in agents_of_closed_spaces(&recorded, &open, agents) {
         match mux.kill(&agent.tab.root_pane) {

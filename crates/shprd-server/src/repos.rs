@@ -97,7 +97,7 @@ pub struct RepoParts {
     /// asks the host, so it runs on a thread of its own.
     pub retire: Option<Prepare>,
     /// Set the moment the repository is dropped, before [`RepoParts::retire`]
-    /// runs on its thread, so a preparation still going stops starting agents.
+    /// runs on its thread, so a preparation that has not started yet, and a coordinator retry, stop starting agents.
     pub retired: Option<Arc<AtomicBool>>,
 }
 
