@@ -149,6 +149,20 @@ test("ops expire by their timestamps, and another repository's ops are not appli
   assert.equal(opt.overlay(raw, FOLDER, opt.read().ops, opt.PENDING_MS + 1).tasks[0].derived.status, "ready");
   assert.equal(opt.overlay(raw, "/work/blog", opt.read().ops, 1).tasks[0].derived.status, "ready");
   opt.confirm(op.id, 0);
-  assert.equal(opt.overlay(raw, FOLDER, opt.read().ops, opt.CONFIRMED_MS + 1).tasks[0].derived.status, "ready");
+  assert.equal(opt.overlay(raw, FOLDER, opt.read().ops, opt.ACCEPT_MS + 1).tasks[0].derived.status, "ready");
   assert.equal(counts(raw).total, 3);
+});
+
+test("an Accept whose merge the engine could not do shows the task as it is, with the engine's words", () => {
+  const raw = board();
+  const op = opt.begin({ kind: "task.accept", tasks: ["A"], board: raw, folder: FOLDER, now: 1000 });
+  opt.confirm(op.id, 1000);
+  // 20 s later the engine tried: the task is failed and says why.
+  const after = board();
+  after.tasks[0] = { ...task("A", "failed", "needs_you"), last_status: { message: "Waiting: Couldn't merge A: its work conflicts with the integration branch in 1 file" } };
+  const shown = opt.overlay(after, FOLDER, opt.read().ops, 21_000);
+  assert.equal(shown.tasks[0].derived.status, "needs_you", "the true state, not Merging");
+  assert.equal(opt.errorLine(shown), "Couldn't merge A: its work conflicts with the integration branch in 1 file");
+  // Still holding Merging at 20 s when the board has shown nothing yet.
+  assert.equal(opt.overlay(board(), FOLDER, opt.read().ops, 21_000).tasks[0].derived.status, "merging");
 });

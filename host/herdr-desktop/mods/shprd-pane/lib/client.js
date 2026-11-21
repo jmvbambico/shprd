@@ -425,7 +425,9 @@ export async function press(owner, { kind, tasks, send, extra = {} }) {
     if (owner.cache) owner.state = owner.cache.get(folder);
     return { ok: true, reply, op };
   } catch (err) {
-    const why = reason(err);
+    // One line: the service's first sentence, cut where it turns into a path or a git dump.
+    const said = reason(err).split(/\s+\(|\s+\/(?:private|Users|var|tmp)/)[0].trim();
+    const why = said.length > 160 ? `${said.slice(0, 157)}…` : said;
     const line = `${VERB_NAMES[kind] ?? "Action"} ${tasks[0] ?? ""}: ${why}`.replace(/\s+:/, ":");
     optimistic.fail(op.id, line);
     if (owner.cache) owner.state = owner.cache.get(folder);

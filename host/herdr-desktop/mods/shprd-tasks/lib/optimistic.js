@@ -37,6 +37,12 @@ export const KEY = "tasks.optimistic";
 export const PENDING_MS = 30_000;
 /** A confirmed op keeps its effect this long for a pane that has not read yet, ms. */
 export const CONFIRMED_MS = 6_000;
+/**
+ * An Accept's approval is recorded at once but the merge is the engine's next pass
+ * (seconds, and longer while it reviews or gates), so a confirmed Accept holds
+ * "Merging…" this long unless the board shows what happened, ms.
+ */
+export const ACCEPT_MS = 60_000;
 /** A failed op keeps its error line this long, ms. */
 export const FAILED_MS = 8_000;
 /** A Review is a local act (it opens the card): its word lasts until the card closes, at most this long, ms. */
@@ -143,7 +149,7 @@ export function read(get = shared) {
 /** How long an op lives in its phase, ms. */
 function lifeOf(op) {
   if (op.phase === "failed") return FAILED_MS;
-  if (op.phase === "confirmed") return CONFIRMED_MS;
+  if (op.phase === "confirmed") return op.kind === "task.accept" ? ACCEPT_MS : CONFIRMED_MS;
   return op.kind === "review" ? REVIEW_MS : PENDING_MS;
 }
 
@@ -261,6 +267,16 @@ export function opFor(task, folder, now = Date.now(), get = shared) {
  */
 export function resolved(op, board) {
   if (op.kind === "review") return "waiting";
+  // The engine tried to land it and could not (a merge conflict): the task no longer
+  // reads Ready but Needs you, with the engine's own words on it.
+  if (op.kind === "task.accept" && op.phase === "confirmed") {
+    const self = op.items?.[0];
+    const raw = find(board, op.tasks[0]);
+    const was = self?.from?.word;
+    if (raw && was !== "needs_you" && (raw.status === "failed" || word(raw) === "needs_you") && raw.status !== self?.from?.status) {
+      return "failed";
+    }
+  }
   const tried = board?.last_tick;
   if (op.kind === "task.accept" && op.phase === "confirmed" && tried) {
     const bad = (tried.failed ?? []).find((entry) => entry.step === "land" && op.tasks.includes(entry.task));
@@ -271,6 +287,10 @@ export function resolved(op, board) {
 
 /** The plain line for a failed land, like the status bar's. */
 function landError(op, board) {
+  const said = String(find(board, op.tasks[0])?.last_status?.message ?? "")
+    .replace(/^Waiting:\s*/, "")
+    .trim();
+  if (said.startsWith("Couldn't ")) return said;
   const bad = (board?.last_tick?.failed ?? []).find((entry) => entry.step === "land" && op.tasks.includes(entry.task));
   const why = String(bad?.error ?? "").trim();
   return why.startsWith("Couldn't ") ? why : `Couldn't merge ${op.tasks[0]}${why ? `: ${why}` : ""}`;
