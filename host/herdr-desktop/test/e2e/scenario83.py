@@ -88,6 +88,7 @@ def main():
     ap.add_argument("--stop-on-fail", action="store_true")
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--stop-after-ask", action="store_true")
+    ap.add_argument("--reviewer", default="claude", choices=["claude", "person"])
     ap.add_argument("--minutes", type=int, default=45)
     args = ap.parse_args()
     binary = os.path.abspath(args.shprd)
@@ -114,6 +115,11 @@ def main():
     settings = open(f"{private_cfg}/settings.toml").read()
     # The person's repo entry for shprd (a Sonnet worker) is not this folder's; the coordinator's model is the flag.
     settings = settings.replace('model = "opus[1m]"', f'model = "{args.coordinator_model}"')
+    # The reviewer: another vendor than the worker (shprd refuses a same-vendor review). The person's own is pi/glm; their
+    # codex quota can run out mid-run, so a private run reviews with Claude (a flag picks codex).
+    import re
+    if args.reviewer == "claude":
+        settings = re.sub(r"\[roles\.reviewer\][^\[]*", '[roles.reviewer]\nagent = "claude"\nmodel = "sonnet"\nperm = "auto"\n\n', settings, count=1)
     open(f"{private_cfg}/settings.toml", "w").write(settings)
     shared_path = f"{env.app}/shared.json"
     shared = json.load(open(shared_path))
