@@ -29,6 +29,14 @@ pub struct Card {
 /// (`T1: its `land` step has failed the same way 3 passes in a row (attempt 1): `)
 /// is dropped; every other body is read as written.
 fn plain_body(body: &str) -> String {
+    // A log written before SHPR-83 holds "T1 is ready to land: run `shprd approve T1`": the
+    // person in the desktop never types a command, so it reads as the new words do.
+    if let Some((head, rest)) = body.split_once(" is ready to land: run `shprd approve ")
+        && !head.contains(' ')
+        && rest.ends_with('`')
+    {
+        return format!("{head} is ready to land: Review and Accept it in the Tasks pane");
+    }
     let plain = body
         .split_once(" step has failed the same way ")
         .filter(|(head, _)| head.ends_with("its `land`"))
@@ -77,6 +85,21 @@ pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
         && task
             .latest_attempt()
             .is_some_and(|latest| latest.n > attempt)
+    {
+        return None;
+    }
+    // An agent's escalation is its opinion when it wrote it. A review that passed after it
+    // outranks it: the person is then asked to Accept, not to settle a claim the log has
+    // since answered (SHPR-83: a coordinator's false "the worker never asked you" kept a
+    // reviewed task at Needs you). The engine's own cards are facts and are never retired so.
+    if escalation.by_agent
+        && gate::card_attempt(id, &escalation.body).is_none()
+        && task.latest_attempt().is_some_and(|latest| {
+            latest
+                .gates
+                .iter()
+                .any(|g| g.gate == gate::REVIEW_GATE && g.passed && g.seq > escalation.seq)
+        })
     {
         return None;
     }
@@ -251,9 +274,46 @@ mod tests {
             body,
             default_action: String::from(gate::ESCALATION_ACTION),
             seq: 4,
+            by_agent: false,
         };
         state.escalations.push(escalation.clone());
         (state, escalation)
+    }
+
+    #[test]
+    fn an_agents_claim_is_retired_by_a_review_that_passed_after_it_but_the_engines_card_is_not() {
+        // SHPR-83: a coordinator wrote "T1's worker never asked you" before the review passed.
+        let mut at = attempt(1);
+        at.gates.push(shprd_core::state::GateResult {
+            gate: gate::REVIEW_GATE.to_string(),
+            passed: true,
+            findings: Vec::new(),
+            source: None,
+            seq: 9,
+        });
+        let mut state = RunState::default();
+        state
+            .tasks
+            .insert(String::from("T1"), task(TaskStatus::Passed, vec![at]));
+        let claim = |by_agent, seq| Escalation {
+            task: Some(String::from("T1")),
+            body: String::from("T1's worker never asked you about divide-by-zero"),
+            default_action: String::from("wait"),
+            seq,
+            by_agent,
+        };
+        assert!(
+            card(&state, &claim(true, 4)).is_none(),
+            "the review outranks the opinion"
+        );
+        assert!(
+            card(&state, &claim(true, 12)).is_some(),
+            "a claim after the review is still the person's"
+        );
+        assert!(
+            card(&state, &claim(false, 4)).is_some(),
+            "an engine card is a fact"
+        );
     }
 
     #[test]
@@ -346,6 +406,7 @@ mod tests {
             body: String::from("the orchestrator is waiting on its own prompt"),
             default_action: String::from("answer it in its tab"),
             seq: 1,
+            by_agent: false,
         };
         let drawn = card(&state, &escalation).expect("a run's own card is never resolved");
         assert_eq!(drawn.body, escalation.body);
@@ -372,6 +433,7 @@ mod tests {
             ),
             default_action: String::from("narrow C2's scope"),
             seq: 4,
+            by_agent: false,
         };
         assert!(card(&state, &escalation).is_some(), "the card still holds");
 
@@ -405,6 +467,7 @@ mod tests {
             ),
             default_action: String::from("spawn it by hand"),
             seq: 9,
+            by_agent: false,
         };
         let drawn = card(&state, &escalation).expect("the card still holds");
         assert_eq!(drawn.body, escalation.body);

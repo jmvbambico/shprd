@@ -42,6 +42,10 @@ export function cut(text, max = LINE_MAX) {
  */
 export function secondLine(task) {
   const derived = task?.derived ?? {};
+  // A queued task the engine holds back because another task has the same file says so
+  // in plain words ("waits for T3: both change tcalc/ops.py"), not as a path in use.
+  const held = heldBy(task);
+  if (held && !task?.pending?.label) return cut(`waits for ${held.task}: both change ${held.path}`, WAITING_MAX);
   // A task whose action the service has not answered yet says what it is doing
   // ("Merging…", "Stopping…"): the optimistic layer's label (SHPR-81).
   if (task?.pending?.label) return task.pending.label;
@@ -60,6 +64,18 @@ export function secondLine(task) {
   // the room it was written with (120) so the path and task id are not cut.
   if (line) return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   return cut(task?.title ?? "");
+}
+
+/**
+ * The task (and the file) that holds a queued task back, from the engine's own line
+ * "Waiting: <path> is in use by <task>", or null. The tasks have no dependency on each
+ * other; they only change the same file, so the later one starts when the first lands.
+ */
+export function heldBy(task) {
+  const word = task?.derived?.status;
+  if (task?.status !== "queued" || (word !== "to_do" && word !== "queued" && word !== "scheduled")) return null;
+  const m = /^Waiting: (.+) is in use by (\S+)$/.exec(String(task?.last_status?.message ?? "").trim());
+  return m ? { path: m[1], task: m[2] } : null;
 }
 
 /** The second line of a done task: its report's summary, else "Done". */

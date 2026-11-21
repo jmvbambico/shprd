@@ -512,25 +512,26 @@ fn shorten(body: &str) -> String {
 /// A passed review is the one notice that has to know the run's merge policy: the
 /// tick lands a ready task by itself, so the line says so and names the manual
 /// verb only when the policy is `ask` and the person is what it waits for.
-fn action_line(task: &str, kind: &EventKind, merge: MergePolicy) -> Option<String> {
+fn action_line(task: &str, kind: &EventKind, merge: MergePolicy, asked: &str) -> Option<String> {
     match kind {
         // A worker reported: nothing has looked at it yet.
         EventKind::Reported {
             status: ReportStatus::Completed,
             ..
         } => Some(format!(
-            "[{task}] review it: shprd agent review --task {task}"
+            "[{task}] review it: shprd agent review --task {task}{asked}"
         )),
         // The review decided. Passed means it is ready to land, which the tick
         // does on its own unless the policy waits for a person.
         EventKind::GatePassed { gate, .. } if gate == REVIEW_GATE => Some(match merge {
             MergePolicy::Ask => format!(
                 "[{task}] review passed: it is ready to land, and its merge policy is ask: \
-                 land it with `shprd approve {task}`"
+                 tell the person to Review and Accept it in the Tasks pane (they never type \
+                 a command){asked}"
             ),
             other => format!(
                 "[{task}] review passed: it is ready to land, and the tick will land it under \
-                 its {} merge policy",
+                 its {} merge policy{asked}",
                 merge_name(other)
             ),
         }),
@@ -550,6 +551,52 @@ fn action_line(task: &str, kind: &EventKind, merge: MergePolicy) -> Option<Strin
         )),
         _ => None,
     }
+}
+
+/// What the log says this task's worker asked the person, and what they answered.
+///
+/// It rides on the lines about a hand-in so a coordinator never has to guess whether a
+/// worker asked (a false "it never asked you" came from a notice that did not say).
+/// Empty when the worker raised no ask.
+fn ask_history(events: &[Event], task: &str) -> String {
+    let mut asks: Vec<(String, String, Option<String>)> = Vec::new();
+    for event in events {
+        match &event.kind {
+            EventKind::AskRaised {
+                task: of,
+                ask,
+                text,
+                ..
+            } if of == task => asks.push((ask.to_string(), shorten(text), None)),
+            EventKind::AskAnswered {
+                task: of,
+                ask,
+                answer,
+                ..
+            } if of == task => {
+                if let Some(found) = asks.iter_mut().find(|(id, _, _)| *id == ask.to_string()) {
+                    found.2 = Some(shorten(answer));
+                }
+            }
+            _ => {}
+        }
+    }
+    if asks.is_empty() {
+        return String::new();
+    }
+    let said: Vec<String> = asks
+        .iter()
+        .map(|(_, text, answer)| match answer {
+            Some(answer) => {
+                format!("the worker asked the person \"{text}\" and they answered \"{answer}\"")
+            }
+            None => format!("the worker asked the person \"{text}\" and it is not answered yet"),
+        })
+        .collect();
+    format!(
+        " [from the log: {}; never say it did not ask]",
+        said.join("; ")
+    )
 }
 
 /// What the orchestrator has not been told yet and has to act on.
@@ -605,7 +652,7 @@ fn notices(events: &[Event], since: Option<u64>, merge: MergePolicy) -> Vec<Noti
         if repeats {
             continue;
         }
-        if let Some(line) = action_line(task, &event.kind, merge) {
+        if let Some(line) = action_line(task, &event.kind, merge, &ask_history(events, task)) {
             wanted.push(Notice { line });
         }
     }

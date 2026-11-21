@@ -18,7 +18,7 @@
 // Shared: the source is `mods/lib/tree.js`; `bin/sync-shared` copies it. Edit the
 // source, never a copy.
 
-import { isLive, look } from "./board.js";
+import { heldBy, isLive, look } from "./board.js";
 import { roleRename, roleTitle } from "./tokens.js";
 
 
@@ -440,11 +440,15 @@ export function graphRows(state, pickedId = null, herdrSpaces = []) {
       const shape = look(task);
       const open = (task.deps ?? []).filter((dep) => byId.get(dep) && byId.get(dep).derived?.status !== "done");
       const at = task.derived?.status;
+      // No dependency, but the engine holds it back for another task that changes the same file.
+      const held = open.length === 0 ? heldBy(task) : null;
       const words =
         at === "queued" || at === "to_do"
           ? open.length > 0
             ? `waits ${open.join(" ")}`
-            : "queued"
+            : held
+              ? `waits ${held.task}`
+              : "queued"
           : at === "needs_you"
             ? "needs you"
             : at;

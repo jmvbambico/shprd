@@ -503,6 +503,11 @@ pub struct Escalation {
     pub default_action: String,
     /// Sequence number of the event that recorded it.
     pub seq: u64,
+    /// Whether an agent (the coordinator, say) wrote it rather than the engine.
+    ///
+    /// An agent's escalation is its opinion at the time; the engine's cards are facts. A
+    /// later review that passes outranks the opinion (see `shprd_views::cards`).
+    pub by_agent: bool,
 }
 
 impl Task {
@@ -965,6 +970,7 @@ impl RunState {
                     body: body.clone(),
                     default_action: default_action.clone(),
                     seq: event.seq,
+                    by_agent: false,
                 });
             }
             EventKind::Override { task, rule, reason } => {
