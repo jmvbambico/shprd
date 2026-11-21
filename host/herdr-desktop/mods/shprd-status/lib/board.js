@@ -42,6 +42,10 @@ export function cut(text, max = LINE_MAX) {
  */
 export function secondLine(task) {
   const derived = task?.derived ?? {};
+  // A done task says it is done: its report's summary when it has one, else the
+  // word. Never what its agent last said or the card's old reason ("No longer
+  // waiting", "Handing in report"), which was true only while it worked.
+  if (derived.status === "done") return doneLine(task);
   const said = derived.reason ?? (derived.need ? NEED[derived.need] : null);
   if (said) return cut(said);
   // A task that handed in is past its agent's progress line: that line is the
@@ -53,6 +57,13 @@ export function secondLine(task) {
   // the room it was written with (120) so the path and task id are not cut.
   if (line) return cut(line, line.startsWith("Waiting: ") ? WAITING_MAX : LINE_MAX);
   return cut(task?.title ?? "");
+}
+
+/** The second line of a done task: its report's summary, else "Done". */
+export function doneLine(task) {
+  const reports = (task?.attempts ?? []).map((a) => a?.report?.summary).filter((x) => String(x ?? "").trim() !== "");
+  const summary = reports.length > 0 ? String(reports[reports.length - 1]).replace(/\s+/g, " ") : "";
+  return summary !== "" ? cut(summary) : "Done";
 }
 
 /**
@@ -450,7 +461,14 @@ export function runLabel(state) {
 export function runShort(state) {
   const run = state?.run;
   if (!run) return NO_TASKS;
-  return `run ${run.id}`;
+  // The run's name and then where its tasks stand now, so the bar follows the
+  // board instead of naming a run whose work is long finished (SHPR-79).
+  const tally = counts(state);
+  const parts = [];
+  if (tally.working > 0) parts.push(`${tally.working} working`);
+  if (tally.ready > 0) parts.push(`${tally.ready} ready`);
+  if (parts.length === 0 && tally.total > 0 && tally.done === tally.total) parts.push("all done");
+  return [`run ${run.id}`, ...parts].join(" · ");
 }
 
 /** The newest attempt of a task, when it has one. */

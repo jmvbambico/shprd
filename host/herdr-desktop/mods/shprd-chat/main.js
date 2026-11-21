@@ -35,7 +35,10 @@ import { exec, props, setShared, shared, theme } from "herdr";
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
+  COLUMN,
   COORDINATOR,
+  GUTTER,
+  bubbleSpan,
   WORDS,
   emptyWords,
   coordinatorDown,
@@ -65,12 +68,12 @@ const FLOOR_MS = 3000;
 /** How many pages one refresh takes before leaving the rest to the next look. */
 const PAGES = 4;
 
-/** How wide a bubble may be: Shepherdr's readable column, narrower in a panel. */
-const BUBBLE_W = 560;
 
 export default class Chat extends View {
   init(_props, cx) {
     this.cx = cx;
+    /** The pane's width as the window reports it; Shepherdr starts at 600 too. */
+    this.width = 600;
     this.thread = props()?.thread === true;
     this.fixed = props()?.space ?? null;
     this.space = this.wanted();
@@ -396,6 +399,13 @@ export default class Chat extends View {
     return v_flex()
       .size_full()
       .bg(t.background)
+      .on_size_change((size, cx) => {
+        const w = size?.width ?? 0;
+        if (Math.abs(w - this.width) > 1) {
+          this.width = w;
+          cx?.notify?.();
+        }
+      })
       .child(
         v_flex()
           .id("chat-rows")
@@ -410,10 +420,10 @@ export default class Chat extends View {
           ),
       )
       .when(this.space === COORDINATOR && Boolean(this.notice), (el) =>
-        el.child(div().flex_none().px(14).pb(4).text_size(TEXT.label).text_color(t.muted).child(this.notice)),
+        el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(t.muted).child(this.notice))),
       )
       .when(said !== null && rows.length > 0, (el) =>
-        el.child(div().flex_none().px(14).pb(4).text_size(TEXT.label).text_color(t.muted).child(said)),
+        el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(t.muted).child(said))),
       )
       .child(this.composer(t, colors));
   }
@@ -439,6 +449,19 @@ export default class Chat extends View {
       if (this.pinned !== "card" || card !== -1 || this.chat.messages.length > 0) this.pinned = null;
     }
     this.drawn = { rows: rows.length, cards };
+  }
+
+  /**
+   * One row's place: Shepherdr's readable column, centered when the pane is
+   * wide, `GUTTER` px in from each edge when it is not. Every row, card and the
+   * composer sit in it, so the edges line up at every pane width.
+   */
+  column(el) {
+    return h_flex()
+      .w_full()
+      .flex_none()
+      .justify_center()
+      .child(div().w_full().max_w(COLUMN + 2 * GUTTER).px(GUTTER).child(el));
   }
 
   /** What an empty timeline says, in the panel and not in a tooltip. */
@@ -522,16 +545,17 @@ export default class Chat extends View {
       );
     }
     if (parts.length === 0) return div();
-    return h_flex()
+    return this.column(
+      h_flex()
       .w_full()
-      .flex_none()
-      .px(14)
       .py(5)
       .justify_end()
       .when(!mine(message), (el) => el.justify_start())
       .child(
         v_flex()
-          .max_w(BUBBLE_W)
+          // A definite width: sized by its content alone, a short message collapsed to one
+          // letter per row (see `bubbleSpan`).
+          .w(bubbleSpan(shown.text, this.width))
           .min_w(0)
           .gap(3)
           .children(parts)
@@ -547,7 +571,8 @@ export default class Chat extends View {
                 .child(when(message.at_ms) || ""),
             ),
           ),
-      );
+      ),
+    );
   }
 
   /**
@@ -556,15 +581,13 @@ export default class Chat extends View {
    */
   tools(t, row) {
     const open = this.opened.has(row.key);
-    return v_flex()
+    return this.column(
+      v_flex()
       .id(`chat-tools-${row.key}`)
       .w_full()
-      .flex_none()
-      .px(14)
       .py(3)
       .child(
         v_flex()
-          .max_w(BUBBLE_W)
           .min_w(0)
           .px(4)
           .gap(3)
@@ -597,7 +620,8 @@ export default class Chat extends View {
                 ),
             ),
           ),
-      );
+      ),
+    );
   }
 
   /**
@@ -609,10 +633,9 @@ export default class Chat extends View {
     const tone_ = card_.from === "ask" ? colors.red : colors.amber;
     const refused = this.answerRefusal?.card === card_.id;
     const busy = this.answering === card_.id;
-    return div()
+    return this.column(
+      div()
       .w_full()
-      .flex_none()
-      .px(14)
       .py(5)
       .child(
         v_flex()
@@ -685,7 +708,8 @@ export default class Chat extends View {
           .when(refused, (el) =>
             el.child(div().text_size(TEXT.label).text_color(colors.red).child(this.answerRefusal.text)),
           ),
-      );
+      ),
+    );
   }
 
   /** One small text button: the card's only act. */
@@ -713,9 +737,8 @@ export default class Chat extends View {
       this.input.set_rows?.(lines);
     }
     const sendable = this.input.value().trim() !== "" && !this.sending && this.space !== null;
-    return h_flex()
-      .flex_none()
-      .px(14)
+    return this.column(
+      h_flex()
       .pt(6)
       .pb(12)
       .gap(8)
@@ -749,6 +772,7 @@ export default class Chat extends View {
           .cursor_pointer()
           .on_click(() => this.send())
           .child(this.sending ? "…" : "↑"),
-      );
+      ),
+    );
   }
 }

@@ -41,6 +41,7 @@ import {
   run,
   setShared,
   settings,
+  shared,
   spaces,
   theme,
   window,
@@ -58,7 +59,7 @@ import {
   tabMenu,
 } from "./lib/menu.js";
 import { countsBadge, openAddTask, openNewSpace } from "./lib/panel.js";
-import { panelButtons, rememberPanel, shownPanel, tabRows } from "./lib/tabstrip.js";
+import { panelButtons, rememberPanel, seenWith, shownPanel, strayTab, tabRows } from "./lib/tabstrip.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the bar re-reads the board the pills borrow their words from. */
@@ -233,6 +234,26 @@ export default class Tabs extends View {
     }
   }
 
+  /**
+   * Keeps a shprd space showing its coordinator: if Shepherdr's Assistant tab
+   * became the active one, the coordinator's tab is selected again (at most once
+   * a second), and shprd's spaces are noted in Shepherdr's `coordinator.seen` so
+   * its tab bar never adds an Assistant to them.
+   */
+  keepCoordinator(space) {
+    try {
+      const stray = strayTab(space, panes());
+      if (stray && Date.now() - (this.strayAt ?? 0) > 1000) {
+        this.strayAt = Date.now();
+        run("tab.select", { id: stray });
+      }
+      const seen = seenWith(shared("coordinator.seen"), spaces());
+      if (seen) setShared("coordinator.seen", seen);
+    } catch {
+      // A window that cannot answer now is asked again on the next draw.
+    }
+  }
+
   /** The space the bar is drawing, or null. */
   space() {
     return spaces().find((entry) => entry.active) ?? null;
@@ -366,6 +387,7 @@ export default class Tabs extends View {
     // The buttons are data until they are drawn: the same list is what says which
     // stacks the panel has, and each becomes one element below.
     this.syncPanel();
+    this.keepCoordinator(space);
     const buttons = panelButtons(this.state, shownPanel(layout()));
     const w = window();
     // A bare window with its own title bar keeps the traffic lights clear: the

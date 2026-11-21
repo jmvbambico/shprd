@@ -681,7 +681,7 @@ test("the bar names the run, its failure and the service's absence", () => {
   assert.equal(runState({ ...STATE, finished: true }), "finished");
   assert.equal(runState({ seq: 0, run: null }), "none");
   assert.equal(runLabel(STATE), "run m10a · integration/m10");
-  assert.equal(runShort(STATE), "run m10a", "the bar names the run; the sidebar names the branch");
+  assert.equal(runShort(STATE), "run m10a · 1 working · 1 ready", "the bar names the run and where its tasks stand");
   assert.equal(runLabel({ seq: 0, run: null, hint: "no run yet" }), "no tasks yet: say what you want in the chat");
   assert.equal(runShort({ seq: 0, run: null, hint: "no run yet: start one with `shprd run start`" }), "no tasks yet: say what you want in the chat");
   assert.match(lastFailure(STATE), /^land on T2: could not run git/);
@@ -1439,4 +1439,68 @@ test("SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar"
   assert.deepEqual(rows.map((row) => row.id), ["tb2", "tb3"]);
   // The tabs keep the host's own positions: a drag still names the right slot.
   assert.deepEqual(rows.map((row) => row.index), [1, 2]);
+});
+
+// SHPR-79: a shprd space's center shows shprd's coordinator, whatever Shepherdr's tab bar did.
+import { seenWith, strayTab, shprdCoordinatorTab } from "../mods/lib/tabstrip.js";
+import { COLUMN, GUTTER, bubbleSpan, bubbleWidth } from "../mods/lib/chat.js";
+
+test("strayTab moves a shprd space off Shepherdr's Assistant, and only there (SHPR-79)", () => {
+  const panes = [{ tab: "assist", mod: "chat" }, { tab: "shprd-coordinator-sp", mod: "shprd-chat" }];
+  const space = (active) => ({
+    id: "sp",
+    name: "shprd · scratchpad",
+    tabs: [
+      { id: "assist", name: "Assistant", active: active === "assist" },
+      { id: "shprd-coordinator-sp", name: "shprd", active: active === "shprd-coordinator-sp" },
+    ],
+  });
+  assert.equal(shprdCoordinatorTab({ id: "shprd-coordinator-sp" }), true);
+  assert.equal(shprdCoordinatorTab({ id: "assist" }), false);
+  assert.equal(strayTab(space("assist"), panes), "shprd-coordinator-sp");
+  assert.equal(strayTab(space("shprd-coordinator-sp"), panes), null);
+  // A space with no shprd coordinator (Shepherdr's own, or `shprd · shprd` where the orchestrator
+  // runs) keeps its Assistant: nothing moves.
+  const theirs = { id: "x", name: "sweatbrain", tabs: [{ id: "assist", name: "Assistant", active: true }] };
+  assert.equal(strayTab(theirs, panes), null);
+});
+
+test("seenWith notes shprd's spaces so Shepherdr never adds an Assistant to them (SHPR-79)", () => {
+  const spaces = [
+    { id: "a", name: "shprd · scratchpad" },
+    { id: "b", name: "sweatbrain" },
+    { id: "m/c", name: "shprd · remote", machine: "m" },
+  ];
+  assert.deepEqual(seenWith(["b"], spaces), ["b", "a"]);
+  assert.equal(seenWith(["a", "b"], spaces), null);
+  assert.equal(seenWith(null, spaces), null, "Shepherdr has not started the list: it notes every space itself");
+});
+
+test("the chat's column and bubbles follow Shepherdr's at every pane width (SHPR-79)", () => {
+  assert.equal(COLUMN, 760);
+  assert.equal(GUTTER, 18);
+  assert.equal(bubbleWidth(600), 480);
+  assert.equal(bubbleWidth(2000), 608);
+  assert.equal(bubbleWidth(100), 240);
+});
+
+test("a done task's second line says it is done, never a stale agent line; the bar follows the board (SHPR-79)", () => {
+  const stale = { id: "T1", title: "ops", status: "passed", derived: { status: "done", reason: "No longer waiting" }, last_status: { message: "committed, handing in" }, attempts: [] };
+  assert.equal(secondLine(stale), "Done");
+  const reported = { ...stale, attempts: [{ report: { summary: "Added convert()" } }] };
+  assert.equal(secondLine(reported), "Added convert()");
+  const t = (id, status) => ({ id, title: id, status: "queued", derived: { status }, attempts: [] });
+  const state = (...words) => ({ run: { id: "tcalc1" }, tasks: words.map((w, i) => t(`T${i}`, w)) });
+  assert.equal(runShort(state("working", "working", "ready", "to_do")), "run tcalc1 · 2 working · 1 ready");
+  assert.equal(runShort(state("done", "done")), "run tcalc1 · all done");
+});
+
+test("a bubble gets a definite width from its longest line, within the column (SHPR-79)", () => {
+  assert.equal(bubbleSpan("ok", 900), 120);
+  const line = "T1 landed. T2 and T3 can now start, so I'll run a tick.";
+  assert.equal(bubbleSpan(line, 900), line.length * 8 + 30);
+  assert.equal(bubbleSpan("x".repeat(500), 900), bubbleWidth(900));
+  assert.equal(bubbleSpan("x".repeat(500), 300), bubbleWidth(300));
+  const second = "and a second much longer line of words here";
+  assert.equal(bubbleSpan(`short\n${second}`, 900), second.length * 8 + 30);
 });
