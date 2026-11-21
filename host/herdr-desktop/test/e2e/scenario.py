@@ -324,7 +324,6 @@ def main():
     )
     shared_path = f"{env.app}/shared.json"
     shared = json.load(open(shared_path))
-    shared.pop("spaces.picked", None)
     # The person's shared.json is kept as it is, `spaces.picked` included (SHPR-80: SHPR-79 dropped it and
     # so never met a pick of a closed space). Only the layout is set. A real file with no pick gets a dead one,
     # because a closed space is what a pick is left pointing at.
