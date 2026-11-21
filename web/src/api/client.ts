@@ -621,12 +621,12 @@ export class ApiClient {
 
   #socketUrl(): string {
     if (this.#base !== "") {
-      return `${this.#base.replace(/^http/, "ws")}${scopedPath("/api/ws")}`;
+      return `${this.#base.replace(/^http/, "ws")}${scopedPath("/api/ws", this.#repo ?? null)}`;
     }
     const location = globalThis.location;
     const scheme = location?.protocol === "https:" ? "wss:" : "ws:";
     const host = location?.host ?? "127.0.0.1";
-    return `${scheme}//${host}${scopedPath("/api/ws")}`;
+    return `${scheme}//${host}${scopedPath("/api/ws", this.#repo ?? null)}`;
   }
 }
 
