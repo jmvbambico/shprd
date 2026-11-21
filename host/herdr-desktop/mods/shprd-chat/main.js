@@ -38,7 +38,7 @@ import {
   COLUMN,
   COORDINATOR,
   GUTTER,
-  bubbleWidth,
+  bubbleSpan,
   WORDS,
   emptyWords,
   coordinatorDown,
@@ -553,11 +553,10 @@ export default class Chat extends View {
       .when(!mine(message), (el) => el.justify_start())
       .child(
         v_flex()
-          .max_w(bubbleWidth(this.width))
+          // A definite width: sized by its content alone, a short message collapsed to one
+          // letter per row (see `bubbleSpan`).
+          .w(bubbleSpan(shown.text, this.width))
           .min_w(0)
-          // A news line (what the service told the agent) is several short lines; sized to its
-          // content it collapsed to one letter per row, so it takes the whole bubble width.
-          .when(message.role === "news", (el) => el.w_full())
           .gap(3)
           .children(parts)
           .when(message.at_ms !== null, (el) =>

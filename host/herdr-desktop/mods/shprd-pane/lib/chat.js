@@ -49,6 +49,21 @@ export function bubbleWidth(width) {
   return Math.max(240, Math.floor(Math.min(Number(width) || 0, COLUMN) * 0.8));
 }
 
+/**
+ * The width a message's bubble is given: its longest line at about 8 px a
+ * character plus the bubble's padding, never past [`bubbleWidth`] and never
+ * under 120. A bubble sized by its content alone collapsed to one letter per
+ * row when its text was shorter than the column (SHPR-79 e2e run: "T1 landed.
+ * T2 and T3 can now start" drawn as a strip), because the markdown view
+ * measures a shrink-wrapped parent at its narrowest; a definite width cannot.
+ */
+export function bubbleSpan(text, paneWidth) {
+  const longest = String(text ?? "")
+    .split("\n")
+    .reduce((most, line) => Math.max(most, line.length), 0);
+  return Math.min(bubbleWidth(paneWidth), Math.max(120, Math.ceil(longest * 8 + 30)));
+}
+
 /** The space a panel shows when it was not told: the coordinator's. */
 export const COORDINATOR = "coordinator";
 

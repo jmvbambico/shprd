@@ -1443,7 +1443,7 @@ test("SHPR-69: another product's Assistant tab is not a pill in shprd's tab bar"
 
 // SHPR-79: a shprd space's center shows shprd's coordinator, whatever Shepherdr's tab bar did.
 import { seenWith, strayTab, shprdCoordinatorTab } from "../mods/lib/tabstrip.js";
-import { COLUMN, GUTTER, bubbleWidth } from "../mods/lib/chat.js";
+import { COLUMN, GUTTER, bubbleSpan, bubbleWidth } from "../mods/lib/chat.js";
 
 test("strayTab moves a shprd space off Shepherdr's Assistant, and only there (SHPR-79)", () => {
   const panes = [{ tab: "assist", mod: "chat" }, { tab: "shprd-coordinator-sp", mod: "shprd-chat" }];
@@ -1493,4 +1493,14 @@ test("a done task's second line says it is done, never a stale agent line; the b
   const state = (...words) => ({ run: { id: "tcalc1" }, tasks: words.map((w, i) => t(`T${i}`, w)) });
   assert.equal(runShort(state("working", "working", "ready", "to_do")), "run tcalc1 · 2 working · 1 ready");
   assert.equal(runShort(state("done", "done")), "run tcalc1 · all done");
+});
+
+test("a bubble gets a definite width from its longest line, within the column (SHPR-79)", () => {
+  assert.equal(bubbleSpan("ok", 900), 120);
+  const line = "T1 landed. T2 and T3 can now start, so I'll run a tick.";
+  assert.equal(bubbleSpan(line, 900), line.length * 8 + 30);
+  assert.equal(bubbleSpan("x".repeat(500), 900), bubbleWidth(900));
+  assert.equal(bubbleSpan("x".repeat(500), 300), bubbleWidth(300));
+  const second = "and a second much longer line of words here";
+  assert.equal(bubbleSpan(`short\n${second}`, 900), second.length * 8 + 30);
 });
