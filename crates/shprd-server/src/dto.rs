@@ -1660,8 +1660,28 @@ pub struct ChatDto {
 pub struct ChatSendDto {
     /// The space to type into: `coordinator`, or a task's id.
     pub space: String,
-    /// The words to send, as one turn of the person's input.
+    /// The words to send, as one turn of the person's input. May be empty when
+    /// files are attached.
     pub text: String,
+    /// Files to attach, picked by the person on this machine. Each is copied into
+    /// the agent's own working directory (`.shprd/attachments/`, kept out of git)
+    /// so the agent reads it without a permission prompt, and the message names
+    /// the copy by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attachments: Option<Vec<ChatAttachmentDto>>,
+}
+
+/// One file to attach to a chat line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatAttachmentDto.ts")]
+pub struct ChatAttachmentDto {
+    /// The file's absolute path on the machine the service runs on.
+    pub path: String,
+    /// The name to give the copy, when not the file's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
 }
 
 /// What one send did.
@@ -1797,6 +1817,7 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ChatToolDto>()?,
         one::<ChatDto>()?,
         one::<ChatSendDto>()?,
+        one::<ChatAttachmentDto>()?,
         one::<ChatSendReply>()?,
         one::<TerminalServerMsg>()?,
         one::<TerminalClientMsg>()?,

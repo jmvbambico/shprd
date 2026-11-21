@@ -14,6 +14,7 @@ export * from "./AskListDto";
 export * from "./AskReply";
 export * from "./AttemptDto";
 export * from "./ChangeDto";
+export * from "./ChatAttachmentDto";
 export * from "./ChatDto";
 export * from "./ChatMessageDto";
 export * from "./ChatSendDto";

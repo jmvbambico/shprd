@@ -33,6 +33,7 @@ use shprd_core::settings::{Loaded, RoleKind};
 use shprd_core::state::{RunState, Task};
 
 use crate::api::AppState;
+use crate::attachments;
 use crate::dto::{ChatDto, ChatMessageDto, ChatSendDto, ChatSendReply, ChatToolDto};
 use crate::error::ApiReject;
 use crate::ledger;
@@ -257,9 +258,10 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
         ))
     })?;
     let text = request.text.trim();
-    if text.is_empty() {
+    let attachments = request.attachments.unwrap_or_default();
+    if text.is_empty() && attachments.is_empty() {
         return Err(ApiReject::bad_request(
-            "a chat message needs some words: `text` was empty, so nothing was typed",
+            "a chat message needs some words or a file: `text` was empty, so nothing was typed",
         ));
     }
     let space = Space::parse(Some(&request.space));
@@ -271,9 +273,13 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
     })?;
     // Resolving the space first means a task that does not exist is refused
     // before anything is typed anywhere.
-    place_of(state, &space)?;
+    let place = place_of(state, &space)?;
+    // Files go where the agent reads without asking (its own working
+    // directory), and the message names the copies.
+    let stored = attachments::store(&place.cwd, &attachments)?;
+    let message = attachments::compose(text, &stored);
     writer
-        .send(space.target(), text)
+        .send(space.target(), &message)
         .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was sent")))?;
     Ok(ChatSendReply {
         space: space.name().to_owned(),

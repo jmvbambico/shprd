@@ -621,6 +621,90 @@ async fn sending_types_the_line_into_the_coordinators_pane() {
 }
 
 #[tokio::test]
+async fn an_attachment_is_copied_into_the_agents_folder_and_named_by_path() {
+    let fixture = Fixture::new("claude");
+    // The repository is one git knows, so "never committed" can be asked of git.
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(fixture.repo.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let picked = tempfile::tempdir().unwrap();
+    let file = picked.path().join("my notes.txt");
+    std::fs::write(&file, "the secret word is teal").unwrap();
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({
+                    "space": "coordinator",
+                    "text": "what is in the attachment?",
+                    "attachments": [{"path": file.display().to_string()}],
+                }),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let lines = fixture.recorder.lines();
+    assert_eq!(lines.len(), 1);
+    let typed = &lines[0].1;
+    assert!(typed.starts_with("what is in the attachment?\n\nAttached file"), "{typed}");
+    let path = typed.lines().last().unwrap();
+    assert!(
+        std::path::Path::new(path).starts_with(fixture.repo.path().join(".shprd/attachments")),
+        "{path}"
+    );
+    assert!(!path.contains(' '), "no quoting needed: {path}");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "the secret word is teal"
+    );
+    let ignored = std::process::Command::new("git")
+        .args(["check-ignore", "-q", path])
+        .current_dir(fixture.repo.path())
+        .status()
+        .unwrap();
+    assert!(ignored.success(), "git must ignore {path}");
+}
+
+#[tokio::test]
+async fn files_alone_are_a_message_and_a_missing_file_refuses_everything() {
+    let fixture = Fixture::new("claude");
+    let picked = tempfile::tempdir().unwrap();
+    let file = picked.path().join("a.png");
+    std::fs::write(&file, [1, 2, 3]).unwrap();
+    let alone = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "", "attachments": [{"path": file.display().to_string()}]}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(alone.status, StatusCode::OK, "{}", alone.body);
+    assert!(fixture.recorder.lines()[0].1.starts_with("Attached file"));
+    let gone = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "x", "attachments": [{"path": "/nonexistent/zzz.txt"}]}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(gone.status, StatusCode::BAD_REQUEST, "{}", gone.body);
+    assert_eq!(fixture.recorder.lines().len(), 1, "nothing was typed");
+}
+
+#[tokio::test]
 async fn sending_to_a_task_names_that_task_and_an_unknown_one_is_refused_before_typing() {
     let fixture = Fixture::new("claude");
     let worktree = fixture.home.path().join("worktrees").join("T1");
