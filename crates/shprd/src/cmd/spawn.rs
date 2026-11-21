@@ -850,7 +850,10 @@ fn hand_over(
     let escalation = EventKind::Escalated {
         task: Some(task.to_string()),
         body: shprd_views::cards::BRIEF_LOST.to_string(),
-        default_action: "resend the brief".to_string(),
+        default_action: match delivery.blocked_by(&pick.agent) {
+            Some(cause) => format!("{cause}: answer it in the tab, then resend the brief"),
+            None => "resend the brief".to_string(),
+        },
     };
     if let Err(err) = env.ctx.commit(escalation) {
         eprintln!("warning: could not record the escalation: {err}");
@@ -3551,7 +3554,7 @@ pub(crate) fn latest_tab_record(briefs: &Path, run: &str, task: &str) -> Option<
 /// Tells the program its launch folder is trusted, so its own first-run dialog
 /// never opens in the pane. A trust that cannot be said is only a note on stderr:
 /// the dialog it was meant to prevent is still answered from the pane.
-fn trust_launch_folder(
+pub(crate) fn trust_launch_folder(
     program: &str,
     folder: &Path,
     base_env: &BTreeMap<String, String>,
