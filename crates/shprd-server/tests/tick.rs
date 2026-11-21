@@ -2705,6 +2705,51 @@ fn a_review_out_too_long_becomes_one_card_with_a_review_again_choice() {
     assert_eq!(fixture.state().asks.len(), 2);
 }
 
+#[test]
+fn a_review_with_no_reviewer_left_is_one_plain_card_asked_again_once_answered() {
+    let fixture = reviewer_out();
+    let mut worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+    worker.switch_reviewers = Some(Arc::new(|_repo: &Path| {
+        vec![shprd_core::review::ReviewSwitch::NoneLeft {
+            task: String::from("A"),
+            attempt: 1,
+            why: String::from("codex is out of quota until Dec 18"),
+        }]
+    }));
+    let now = SystemClock.now_ms();
+
+    // At once, not after half an hour, and only once while it waits.
+    worker.watch_reviews(now);
+    worker.watch_reviews(now);
+    let state = fixture.state();
+    assert_eq!(state.asks.len(), 1, "{:?}", state.asks);
+    let ask = state.asks.values().next().expect("the card");
+    assert_eq!(ask.id, shprd_core::review::stuck_ask(1, 1));
+    assert!(ask.text.contains("no reviewer can review"), "{}", ask.text);
+    assert!(
+        ask.text.contains("codex is out of quota until Dec 18"),
+        "{}",
+        ask.text
+    );
+    assert!(!ask.text.contains("shprd "), "no commands: {}", ask.text);
+
+    // Answered, and the retry was refused again: the person is asked again.
+    append(
+        &fixture,
+        Actor::Engine,
+        EventKind::AskAnswered {
+            task: String::from("A"),
+            ask: shprd_core::review::stuck_ask(1, 1),
+            answer: String::from(shprd_core::review::REVIEW_AGAIN_CHOICE),
+        },
+    );
+    worker.watch_reviews(now);
+    assert_eq!(fixture.state().asks.len(), 2);
+}
+
 /// A task added with an explicit scope.
 fn added_scoped(seq: u64, id: &str, scope: &str) -> Event {
     ev(
