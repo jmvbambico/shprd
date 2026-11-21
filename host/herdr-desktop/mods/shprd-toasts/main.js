@@ -278,8 +278,7 @@ export default class Toasts extends View {
     return v_flex()
       .id("toasts")
       .w(WIDTH)
-      .gap(8)
-      .children(list.map((item) => this.item(t, colors, item, cx)));
+      .children(list.map((item, at) => this.item(t, colors, item, at === 0, cx)));
   }
 
   /**
@@ -289,7 +288,7 @@ export default class Toasts extends View {
    * The dot is filled, so a toast reads at a glance, and the × keeps its place
    * and shows only while the pointer is on the toast.
    */
-  item(t, colors, item, cx) {
+  item(t, colors, item, first, cx) {
     const shape = levelTone(item.level);
     const fill = shape === "accent" ? t.accent : (colors[shape] ?? t.accent);
     return h_flex()
@@ -300,9 +299,9 @@ export default class Toasts extends View {
       .gap(10)
       .items_start()
       .rounded(RADIUS.card)
-      .bg(t.popover)
-      .border_1()
-      .border_color(t.border)
+      // The float around the mod is the one card: a toast draws no frame or
+      // background of its own, and each one after the first has a divider on top.
+      .when(!first, (el) => el.border_t(1).border_color(t.border).rounded(0))
       .cursor_pointer()
       .hover((style) => style.bg(t.hover))
       .on_hover((over, own) => this.hover(item.id, over, own ?? cx))
