@@ -205,3 +205,19 @@ async fn a_request_without_the_token_learns_nothing_about_repositories() {
     }
     drop(fx.state);
 }
+
+#[tokio::test]
+async fn the_repository_list_carries_each_ones_task_count() {
+    let fx = fixture().await;
+    let (_a, shop) = folder("shop");
+    fx.call("POST", "/api/repos", Some(json!({"folder": shop})))
+        .await;
+    let (status, listed) = fx.call("GET", "/api/repos", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let repos = listed["repos"].as_array().unwrap();
+    assert_eq!(repos.len(), 1);
+    assert_eq!(
+        repos[0]["tasks"], 0,
+        "a repository with no task says zero, so a window shows its empty state at once: {listed}"
+    );
+}

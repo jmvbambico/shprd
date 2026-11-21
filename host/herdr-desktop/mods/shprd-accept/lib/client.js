@@ -261,6 +261,101 @@ export function activeFolder() {
   }
 }
 
+/**
+ * What a panel last read, per repository, for the window's life (SHPR-78).
+ *
+ * Switching spaces points a panel at another repository: with one slot for "the
+ * board" it had nothing to draw until the new read came back, and `null` read as
+ * "No tasks yet". Each repository keeps its own last answer, so a switch shows
+ * that repository's last board at once and the read refreshes it in place; only a
+ * repository never read before has nothing, and a panel says "Loading…" for it.
+ *
+ * Keys are the normalized folder (`normalizeFolder`), `""` for no space.
+ */
+export class RepoCache {
+  constructor() {
+    this.map = new Map();
+  }
+
+  /** The key of `folder` (default: the space the window shows). */
+  key(folder = activeFolder()) {
+    return folder ? normalizeFolder(folder) : "";
+  }
+
+  /** The last answer for `folder`, or null when none was read yet. */
+  get(folder = activeFolder()) {
+    return this.map.get(this.key(folder)) ?? null;
+  }
+
+  /** Remembers an answer for `folder`. */
+  set(folder, value) {
+    this.map.set(this.key(folder), value);
+  }
+
+  /** Whether `folder` has been read at least once. */
+  has(folder = activeFolder()) {
+    return this.map.has(this.key(folder));
+  }
+}
+
+/**
+ * The per-repository state of a panel that reads `GET /api/state`, as four small
+ * steps so every such panel does the same thing on a switch of space (SHPR-78):
+ *
+ * - [`adoptCache`] in `init`: the panel gets a [`RepoCache`] and its shown key;
+ * - [`remember`] after a read: the board is kept for the repository it was read
+ *   for, and drawn only if that is the shown one;
+ * - [`syncRepo`] at the top of `render`: after a switch, `state` is the shown
+ *   repository's last board (or null while it was never read: the panel says
+ *   "Loading…", never an empty state), once per switch;
+ * - [`watchSwitch`] in `init`: a switch is noticed within 300 ms and read at once,
+ *   not at the next floor tick;
+ * - [`forgetAll`] when no service answers: an old board is not painted for it.
+ */
+export function adoptCache(owner) {
+  owner.cache = new RepoCache();
+  owner.shownKey = owner.cache.key();
+}
+
+/** Points `owner.state` at the shown repository's cached board, once per switch. */
+export function syncRepo(owner) {
+  if (!owner.cache) return;
+  const key = owner.cache.key();
+  if (key === owner.shownKey) return;
+  owner.shownKey = key;
+  owner.failure = null;
+  owner.state = owner.cache.get();
+}
+
+/** Keeps a board for the repository `client` read it from, drawing it when that one is shown. */
+export function remember(owner, client, board) {
+  if (!owner.cache) {
+    owner.state = board;
+    return;
+  }
+  owner.cache.set(client?.folder ?? null, board);
+  if (owner.cache.key(client?.folder ?? null) === owner.cache.key()) {
+    owner.shownKey = owner.cache.key();
+    owner.state = board;
+  }
+}
+
+/** Throws every cached board away: the service they came from is gone. */
+export function forgetAll(owner) {
+  adoptCache(owner);
+  owner.state = null;
+}
+
+/** Notices a switch of space on a 300 ms beat: draws the cached board and reads at once. */
+export function watchSwitch(owner, cx) {
+  cx.timer.every(300, (cx) => {
+    if (!owner.cache || owner.cache.key() === owner.shownKey) return;
+    syncRepo(owner);
+    cx.notify();
+    owner.refresh(cx);
+  });
+}
+
 /** The terminal the one service runs in (`hc` takes 1-32 of `a-z 0-9 - _`). */
 export const SERVICE_TERMINAL = "shprd-service";
 
@@ -718,6 +813,15 @@ export class Client {
    */
   agentOutput(id, lines = 120) {
     return this.call("GET", `/api/agents/${encodeURIComponent(id)}/output?lines=${lines}`);
+  }
+
+  /**
+   * `GET /api/repos`: every served repository with the number of tasks its ledger
+   * holds (`tasks`). One light call tells a window which repositories are empty
+   * before it has read any board, so a first visit shows "No tasks yet" or "Loading".
+   */
+  repos() {
+    return this.call("GET", "/api/repos");
   }
 
   /** `GET /api/settings`: every key, its value and the layer it came from. */

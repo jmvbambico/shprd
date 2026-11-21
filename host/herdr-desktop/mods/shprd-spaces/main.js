@@ -43,7 +43,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, spaces, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { MENU, closeWords, isOpen, menuHeight, menuItems, pickOpen, toggleOpen } from "./lib/spaces.js";
 import { plainSpaces, spaceTree, subtitle } from "./lib/tree.js";
 import { note, openNewSpace, openThread, statusGlyph } from "./lib/panel.js";
@@ -105,6 +105,7 @@ export default class Spaces extends View {
       return;
     }
     this.state = null;
+    adoptCache(this);
     this.failure = null;
     this.client = null;
     this.watching = false;
@@ -115,6 +116,7 @@ export default class Spaces extends View {
     this.opened = new Map();
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    watchSwitch(this, cx);
     // Commands, for a key, the palette or a script: `pick:<space id>` and
     // `fold` act as their clicks do.
     cx.spawn(async () => {
@@ -151,14 +153,14 @@ export default class Spaces extends View {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
         this.client = null;
-        this.state = null;
+        forgetAll(this);
         this.failure = downNotice();
         cx.notify();
         return;
       }
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
+      remember(this, this.client, await this.client.state());
       this.failure = null;
     } catch (err) {
       // A service that restarted answers with another id: forget the client so
@@ -287,6 +289,7 @@ export default class Spaces extends View {
   }
 
   render() {
+    syncRepo(this);
     if (this.popup) return this.popup.view === "confirm" ? this.confirm() : this.menuView();
     const t = theme();
     const colors = tone(t);
@@ -297,8 +300,12 @@ export default class Spaces extends View {
       const plain = plainSpaces([], spaces());
       for (const space of plain) sections.push(this.spaceRow(t, colors, { ...space, branch: "" }));
       sections.push(
-        note(t, this.failure ?? "No run yet."),
-        note(t, this.failure ? "This fills in when the service answers." : "Tasks appear here as the run adds them."),
+        ...(this.failure === null && this.state === null
+          ? [note(t, "Loading…")]
+          : [
+              note(t, this.failure ?? "No run yet."),
+              note(t, this.failure ? "This fills in when the service answers." : "Tasks appear here as the run adds them."),
+            ]),
       );
     } else {
       for (const space of tree) {

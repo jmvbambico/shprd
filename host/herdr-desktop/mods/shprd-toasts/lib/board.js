@@ -239,8 +239,6 @@ export function groupMode(value) {
  *   Old leftovers (see [`staleIds`]) leave every grouping for one folded "Older"
  *   group at the bottom (`stale: true`, `ids`: what a "Clear old tasks" drops),
  *   open with `olderOpen`; inside a word the newest task is on top.
- *   Tasks in `pinned` (a set of ids) come out of their group into a "Pinned"
- *   group on top, in status order, Done included.
  * - a status word: that word's tasks, flat, under no heading.
  * - a query: every finding, Done included, all shown, headings not folding.
  *
@@ -256,7 +254,6 @@ export function listView(
     doneOpen = false,
     allDone = false,
     groupBy = "you",
-    pinned = new Set(),
     spaces = [],
     now = Date.now(),
     olderOpen = false,
@@ -279,7 +276,7 @@ export function listView(
     return {
       key,
       label,
-      top: key === "you" || key === "pinned",
+      top: key === "you",
       count: tasks.length,
       shut: !open && shut.has(key),
       cut,
@@ -293,15 +290,12 @@ export function listView(
     return { groups: tasks.length === 0 ? [] : [make(`flat-${filter}`, STATUS[filter].word, tasks, { flat: true })], doneLine: null };
   }
   const groups = [];
-  const pins = pinned instanceof Set ? pinned : new Set(pinned ?? []);
-  const pinnedTasks = byRank(live.filter((t) => pins.has(t.id)));
-  if (pinnedTasks.length > 0) groups.push(make("pinned", "Pinned", pinnedTasks, { shown: true }));
   // Old leftovers (stale open tasks and what waits on them) leave the groups and
   // sit in one folded "Older" group at the bottom, which a heading button clears.
   // A search still finds them in place.
   const old = searching ? new Set() : staleIds(state, now);
-  const rest = live.filter((t) => !pins.has(t.id) && !old.has(t.id));
-  const older = byRank(live.filter((t) => !pins.has(t.id) && old.has(t.id)));
+  const rest = live.filter((t) => !old.has(t.id));
+  const older = byRank(live.filter((t) => old.has(t.id)));
   const olderGroup = () =>
     older.length === 0
       ? []
@@ -512,9 +506,16 @@ export function rowActions(task) {
   // A task that is stuck (stopped, failed, waiting on the person) can be given up
   // from its row. Drop needs a reason, so it opens the card on its Drop step.
   const drop = status === "failed" || word === "needs_you" ? [{ id: "drop", label: "Drop", action: null }] : [];
-  if (word === "ready" || status === "passed" || status === "reported") {
+  // The button follows the word the row shows (SHPR-78): Review only where the row
+  // reads Ready, or needs the person about a hand-in. A task that handed in and
+  // whose agent took the work up again reads Working (or Merging): its status is
+  // still `passed`/`reported`, but there is nothing to review, and a Stop the
+  // engine would refuse is worse than no button, so such a row has none.
+  const handedIn = status === "passed" || status === "reported";
+  if (word === "ready" || (handedIn && (word === "needs_you" || word == null))) {
     return [{ id: "review", label: "Review", action: null }, ...(word === "needs_you" ? drop : [])];
   }
+  if (handedIn) return [];
   if (status === "queued" && (word === "to_do" || word === "scheduled")) {
     return [{ id: "start", label: "Start", action: "task.start" }];
   }
@@ -525,6 +526,25 @@ export function rowActions(task) {
     return [{ id: "stop", label: "Stop", action: "task.stop" }];
   }
   return drop;
+}
+
+/**
+ * What a per-repository list shows before and while its board is read (SHPR-78).
+ *
+ * - a cached board: `list` (drawn at once, refreshed in place);
+ * - none cached, and the repository is known to hold tasks (`count > 0`):
+ *   `loading` ("Loading tasks…");
+ * - none cached, and it is known to be empty (`count === 0`): `empty` at once,
+ *   never a loading line for a repository with nothing to load;
+ * - none cached and the count not back yet: `neutral`, a blank body for a moment,
+ *   never "Nothing here".
+ *
+ * `count` is null/undefined while unknown.
+ */
+export function paneState({ cached = false, count = null } = {}) {
+  if (cached) return "list";
+  if (!Number.isFinite(count)) return "neutral";
+  return count > 0 ? "loading" : "empty";
 }
 
 /**

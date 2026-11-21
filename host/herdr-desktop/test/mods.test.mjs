@@ -744,6 +744,36 @@ function boardTask(id) {
   return BOARD.tasks.find((entry) => entry.id === id);
 }
 
+test("a row's button follows the word the row shows, for every status and word (SHPR-78)", () => {
+  const ids = (task) => rowActions(task).map((act) => act.id);
+  const row = (status, word) => ({ id: "X", status, derived: { status: word } });
+  // Review only where the row reads Ready, or needs the person about a hand-in.
+  assert.deepEqual(ids(row("passed", "ready")), ["review"]);
+  assert.deepEqual(ids(row("reported", "ready")), ["review"]);
+  assert.deepEqual(ids(row("passed", "needs_you")), ["review", "drop"]);
+  assert.deepEqual(ids(row("reported", "needs_you")), ["review", "drop"]);
+  // A handed-in task whose agent took the work up again reads Working: no Review.
+  for (const status of ["passed", "reported"]) {
+    for (const word of ["working", "merging", "done", "queued", "to_do"]) {
+      assert.equal(ids(row(status, word)).includes("review"), false, `${status}/${word}`);
+      assert.deepEqual(ids(row(status, word)), [], `${status}/${word}`);
+    }
+  }
+  // An older service sends no word: the hand-in still reads as reviewable.
+  assert.deepEqual(ids({ id: "X", status: "passed" }), ["review"]);
+  // Review never shows on a row that is working, failed, dropped or not yet started.
+  for (const [status, word] of [["working", "working"], ["failed", "needs_you"], ["dropped", "done"], ["queued", "to_do"], ["queued", "scheduled"], ["integrated", "done"], ["integrated", "merging"]]) {
+    assert.equal(ids(row(status, word)).includes("review"), false, `${status}/${word}`);
+  }
+  assert.deepEqual(ids(row("working", "working")), ["stop"]);
+  assert.deepEqual(ids(row("queued", "to_do")), ["start"]);
+  assert.deepEqual(ids(row("failed", "needs_you")), ["retry", "drop"]);
+  // The head's Review and the card's Accept agree with the row.
+  const again = row("passed", "working");
+  assert.equal(canReview(again), false);
+  assert.equal(verbs(again, "ask").accept, false, "no Accept on a task that is working again");
+});
+
 test("a row offers the one verb the engine has for its state", () => {
   // T2 is passed, so its act opens the Accept card rather than posting a verb.
   // It needs the person too, so it can also be dropped from its row.
@@ -1289,14 +1319,9 @@ test("Group by Space gives each space its own heading, tasks in status order", (
   assert.equal(open.doneLine, null);
 });
 
-test("Pinned tasks come out of their group into a Pinned group on top, Done included", () => {
+test("There is no pinned group: a row has no star and listView takes no pins (SHPR-78)", () => {
   const view = listView(STATE, { pinned: new Set(["T3", "T1"]) });
-  assert.equal(view.groups[0].key, "pinned");
-  assert.equal(view.groups[0].label, "Pinned");
-  assert.deepEqual(view.groups[0].tasks.map((t) => t.id).sort(), ["T1", "T3"]);
-  const elsewhere = view.groups.slice(1).flatMap((g) => g.tasks.map((t) => t.id));
-  assert.equal(elsewhere.includes("T1"), false);
-  assert.equal(elsewhere.includes("T3"), false);
+  assert.equal(view.groups.some((g) => g.key === "pinned"), false);
   assert.equal(groupMode("nonsense"), "you");
   assert.equal(groupMode("space"), "space");
   assert.deepEqual(GROUP_MODES.map((m) => m.key), ["you", "space", "status"]);

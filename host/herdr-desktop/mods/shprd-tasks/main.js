@@ -26,7 +26,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { nextCommand, openOverlay, run, setShared, shared, spaces, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { RepoCache, attach, normalizeFolder, downNotice, reason, singleFlight } from "./lib/client.js";
 import {
   counts,
   etaMinutes,
@@ -36,6 +36,7 @@ import {
   listView,
   look,
   newTask,
+  paneState,
   rowActions,
   secondLine,
   taskIds,
@@ -52,15 +53,35 @@ const FLOOR_MS = 4000;
 /** The reason "Clear old tasks" records when the person types none. */
 const CLEAR_REASON = "Old tasks from an earlier session";
 
+/** How often the per-repository task counts are read again, ms. */
+const COUNTS_MS = 20_000;
+
+/** What a pill says while its verb is waiting on the service. */
+const VERB_WORDS = { start: "Starting…", retry: "Retrying…", stop: "Stopping…" };
+
 /** The font shprd's ids and the graph's guide lines are set in. */
 const MONO = "JetBrains Mono";
 
 export default class Tasks extends View {
   init(_props, cx) {
     this.cx = cx;
-    this.state = null;
+    // The board each repository was last read as, kept for the window's life: a
+    // switch of space shows that repository's last board at once and the read
+    // refreshes it in place. `state` is the shown repository's entry; null means
+    // nothing was read for it yet, which draws "Loading tasks…", never an empty state.
+    this.cache = new RepoCache();
+    this.shownKey = this.cache.key();
+    this.state = this.cache.get();
     this.failure = null;
     this.client = null;
+    // How many tasks each repository holds (`GET /api/repos`), by folder key: it is
+    // what tells "known empty" from "has tasks, still reading" before a board has
+    // been read. Absent until the first answer.
+    this.counts = new Map();
+    this.countsAt = 0;
+    // The verb each row is waiting on (`{id, label}` by task id): its pill is busy
+    // from the press until the board has been read again.
+    this.busy = new Map();
     this.watching = false;
     // The add-task form: closed until the header's `+` is pressed, then its three
     // fields are state that lives as long as the form is open.
@@ -85,11 +106,8 @@ export default class Tasks extends View {
     this.clearReason = null;
     this.allDone = this.load("alldone", false) === true;
     this.searching = false;
-    // Group by (For you / Space / Status) and the pinned tasks, remembered; the
-    // pins are also shared as `tasks.pinned`, Shepherdr's key.
+    // Group by (For you / Space / Status), remembered.
     this.groupBy = groupMode(this.load("groupby", "you"));
-    this.pinned = new Set(this.load("pinned", shared("tasks.pinned") ?? []));
-    setShared("tasks.pinned", [...this.pinned]);
     this.chips = { primary: [], more: [] };
     // PROTOTYPE (SHPR-18): one panel, two views of the same board.
     this.view = this.load("view", "tasks") === "graph" ? "graph" : "tasks";
@@ -106,13 +124,24 @@ export default class Tasks extends View {
       cx.notify();
     });
     this.refresh();
-    cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    cx.timer.every(FLOOR_MS, (cx) => {
+      this.refresh(cx);
+      if (Date.now() - this.countsAt > COUNTS_MS) this.readCounts(cx);
+    });
     // New task from anywhere (`openAddTask` in `lib/panel.js`) is a shared request,
     // because this mod's commands do not exist while it is not the shown child.
     this.takeAdd(cx);
     cx.timer.every(300, (cx) => {
       this.takeAdd(cx);
       this.takeChoice();
+      // A switch of space is noticed on this beat: the cached board is drawn at
+      // once and read again now, not at the next 4 s floor.
+      if (this.cache.key() !== this.shownKey) {
+        this.sync();
+        cx.notify();
+        this.refresh(cx);
+        this.readCounts(cx);
+      }
     });
     // The app's own way into a focusable mod: every command is delivered here by
     // name (`run("shprd-tasks.add")`, the palette, a key), and the loop is one
@@ -167,6 +196,9 @@ export default class Tasks extends View {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
         this.client = null;
+        // No service: whatever was cached belonged to it, and an old board is not
+        // painted for a service that is gone.
+        this.cache = new RepoCache();
         this.state = null;
         this.failure = downNotice();
         cx.notify();
@@ -175,8 +207,14 @@ export default class Tasks extends View {
       if (next.restarted) this.forget();
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
+      const folder = this.client.folder ?? null;
+      const board = await this.client.state();
+      // Kept under the repository it was read for; what is shown is whichever one
+      // the window shows now, so a read that finished after a switch is not drawn.
+      this.cache.set(folder, board);
+      this.sync();
       this.failure = null;
+      if (this.countsAt === 0) this.readCounts(cx);
     } catch (err) {
       this.client = null;
       this.failure = reason(err);
@@ -192,9 +230,52 @@ export default class Tasks extends View {
    * true of the new service's run.
    */
   forget() {
-    this.state = null;
+    // The cached boards stay: an old board drawn until the next read is better than
+    // an empty pane, and the read replaces it in place.
     this.actionError = null;
     this.addError = null;
+  }
+
+  /** What the shown repository's body is: `list`, `loading`, `empty` or `neutral` (see [`paneState`]). */
+  pane() {
+    return paneState({ cached: this.state !== null, count: this.counts.get(this.cache.key()) });
+  }
+
+  /**
+   * Reads how many tasks each served repository holds, one light call, and
+   * repaints. Asked at start, on a switch and every [`COUNTS_MS`]; a failure leaves
+   * the counts as they were (the pane is then neutral, not wrong).
+   */
+  async readCounts(cx = this.cx) {
+    if (!this.client || this.countsBusy) return;
+    this.countsBusy = true;
+    try {
+      const answer = await this.client.repos();
+      const next = new Map();
+      for (const repo of answer?.repos ?? []) {
+        if (Number.isFinite(repo.tasks)) next.set(normalizeFolder(repo.root), repo.tasks);
+      }
+      this.counts = next;
+      this.countsAt = Date.now();
+    } catch {
+      // Keep what was known.
+    }
+    this.countsBusy = false;
+    cx.notify();
+  }
+
+  /**
+   * Points `state` at the shown repository's cached board, once per switch. A
+   * repository nothing was read for gives null: the pane says it is loading.
+   */
+  sync() {
+    const key = this.cache.key();
+    if (key !== this.shownKey) {
+      this.shownKey = key;
+      this.failure = null;
+      this.actionError = null;
+    }
+    this.state = this.cache.get();
   }
 
   /** Follows the service's change file for as long as this copy lives. */
@@ -286,15 +367,6 @@ export default class Tasks extends View {
     this.cx.notify();
   }
 
-  /** Pins or unpins one task, remembered and shared. */
-  togglePin(id) {
-    if (this.pinned.has(id)) this.pinned.delete(id);
-    else this.pinned.add(id);
-    this.save("pinned", [...this.pinned]);
-    setShared("tasks.pinned", [...this.pinned]);
-    this.cx.notify();
-  }
-
   /** Opens one of the panel's popups (Group by, More) over the header. */
   popup(menu) {
     const items = menu === "more" ? this.chips.more : GROUP_MODES;
@@ -342,15 +414,19 @@ export default class Tasks extends View {
    * one that did. The board is read again after success, so the row shows the
    * status the engine's own pass would give it.
    */
-  async verb(task, action) {
-    if (!this.client) return;
+  async verb(task, action, label = "Working…") {
+    if (!this.client || this.busy.has(task.id)) return;
     this.actionError = null;
+    // The pill is busy at once, before the service has said anything.
+    this.busy.set(task.id, { id: action, label });
+    this.cx.notify();
     try {
       await this.client.action({ kind: action, task: task.id });
       await this.refresh();
     } catch (err) {
       this.actionError = `${action} ${task.id}: ${reason(err)}`;
     }
+    this.busy.delete(task.id);
     this.cx.notify();
   }
 
@@ -539,6 +615,7 @@ export default class Tasks extends View {
   }
 
   render() {
+    this.sync();
     const t = theme();
     const colors = tone(t);
     // The picked space (`spaces.picked`) narrows the list and the Graph; the
@@ -559,9 +636,9 @@ export default class Tasks extends View {
       olderOpen: this.olderOpen,
       allDone: this.allDone,
       groupBy: this.groupBy,
-      pinned: this.pinned,
       spaces: spacesOf(this.state).map((space) => ({ id: space.id, name: space.name })),
     });
+    const pane = this.pane();
     const empty = view.groups.length === 0 && view.doneLine === null;
     const head = h_flex()
       .gap(6)
@@ -601,7 +678,13 @@ export default class Tasks extends View {
         ...(this.clearing !== null ? [this.clearForm(t, colors)] : []),
         ...(this.failure !== null
           ? [note(t, this.failure), note(t, "This fills in when the service answers.")]
-          : this.state === null || (this.state.tasks ?? []).length === 0
+          : pane !== "list"
+            ? pane === "loading"
+              ? [note(t, "Loading tasks…")]
+              : pane === "empty"
+                ? [note(t, "No tasks yet."), note(t, "Add one with + above; the engine starts it when it may.")]
+                : []
+            : (this.state.tasks ?? []).length === 0
             ? [note(t, "No tasks yet."), note(t, "Add one with + above; the engine starts it when it may.")]
             : empty
               ? [note(t, query.trim() !== "" ? `No tasks match “${query.trim()}”.` : "Nothing here.")]
@@ -630,11 +713,16 @@ export default class Tasks extends View {
    * `graphRows`; nothing is asked of a graph program.
    */
   graph(t, colors, head) {
+    const pane = this.pane();
     const rows = this.state ? graphRows(this.state, shared("spaces.picked") ?? null, spaces()) : [];
     const body =
       this.failure !== null
         ? [note(t, this.failure)]
-        : rows.length === 0
+        : pane === "loading"
+          ? [note(t, "Loading tasks…")]
+          : pane !== "list" && pane !== "empty"
+            ? []
+            : rows.length === 0
           ? [note(t, "No tasks yet.")]
           : rows.map((row) => (row.kind === "phase" ? this.phase(t, row) : this.node(t, colors, row)));
     return card(t, [
@@ -1139,34 +1227,11 @@ export default class Tasks extends View {
           ),
       )
       .child(v_flex().flex_1().min_w(0).child(left))
-      .child(this.pin(t, task))
       .when(acts.length > 0, (el) =>
         el.child(this.act(t, task, acts[0])),
       )
       // A second act (Drop beside Retry) is a pill of its own.
       .when(acts.length > 1, (el) => el.child(this.act(t, task, acts[1])));
-  }
-
-  /** The pin toggle at a row's end: ★ when pinned, ☆ when not; a press stops at it. */
-  pin(t, task) {
-    const on = this.pinned.has(task.id);
-    return h_flex()
-      .id(`task-${task.id}-pin`)
-      .h(H.xs)
-      .w(H.xs)
-      .flex_none()
-      .items_center()
-      .justify_center()
-      .rounded(RADIUS.control)
-      .text_size(TEXT.label)
-      .text_color(on ? tone(t).amber : t.dim)
-      .cursor_pointer()
-      .hover((style) => style.bg(t.hover).text_color(t.foreground))
-      .on_click((_event, cx) => {
-        cx.stop_propagation();
-        this.togglePin(task.id);
-      })
-      .child(on ? "★" : "☆");
   }
 
   /**
@@ -1177,6 +1242,10 @@ export default class Tasks extends View {
    * where the decision is made.
    */
   act(t, task, act) {
+    const busy = this.busy.get(task.id) ?? null;
+    // The pressed pill says what it is doing; the row's other pill is dimmed. A press
+    // on a busy row is ignored, so a double press cannot send a verb twice.
+    const mine = busy !== null && busy.id === act.id;
     const el = h_flex()
       .id(`task-${task.id}-${act.id}`)
       .h(H.xs)
@@ -1188,14 +1257,23 @@ export default class Tasks extends View {
       .border_color(t.input)
       .text_size(TEXT.label)
       .text_color(t.foreground)
-      .cursor_pointer()
-      .hover((style) => style.bg(t.hover))
-      .child(act.label);
+      .when(busy === null, (e) => e.cursor_pointer().hover((style) => style.bg(t.hover)))
+      .when(busy !== null, (e) => e.opacity(mine ? 0.7 : 0.4))
+      .child(mine ? busy.label : act.label);
     return el.on_click((_event, cx) => {
       cx.stop_propagation();
+      if (this.busy.has(task.id)) return;
       // Review is the card, as a dialog: the panel underneath stays as it was.
-      if (act.action === null) openAccept({ task: task.id, title: task.title, drop: act.id === "drop" });
-      else this.verb(task, act.action);
+      if (act.action === null) {
+        this.busy.set(task.id, { id: act.id, label: "Opening…" });
+        cx.notify();
+        openAccept({ task: task.id, title: task.title, drop: act.id === "drop", snapshot: task });
+        // The dialog is its own window; the pill is released once it has had time to appear.
+        cx.timer.after(900, (cx) => {
+          this.busy.delete(task.id);
+          cx.notify();
+        });
+      } else this.verb(task, act.action, VERB_WORDS[act.id] ?? "Working…");
     });
   }
 }

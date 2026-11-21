@@ -15,7 +15,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, shared, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { taskById } from "./lib/board.js";
 import { VIEW_WORDS, artifactSections, streamLines } from "./lib/taskview.js";
 import { threadAgent } from "./lib/accept.js";
@@ -34,6 +34,7 @@ export default class TaskView extends View {
     // A copy's props never change, so which view this is is read once.
     this.kind = props()?.view === "artifacts" ? "artifacts" : "stream";
     this.state = null;
+    adoptCache(this);
     this.client = null;
     this.failure = null;
     this.watching = false;
@@ -41,6 +42,7 @@ export default class TaskView extends View {
     this.screenFor = null;
     this.refresh();
     cx.timer.every(this.kind === "stream" ? STREAM_MS : FLOOR_MS, (cx) => this.refresh(cx));
+    watchSwitch(this, cx);
   }
 
   /** The task the panel picked, from the one shared selection. */
@@ -60,13 +62,13 @@ export default class TaskView extends View {
       if (!next.client) {
         this.client = null;
         this.failure = downNotice();
-        this.state = null;
+        forgetAll(this);
         cx.notify();
         return;
       }
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
+      remember(this, this.client, await this.client.state());
       this.failure = null;
       if (this.kind === "stream") await this.readScreen();
     } catch (err) {
@@ -108,6 +110,7 @@ export default class TaskView extends View {
   }
 
   render() {
+    syncRepo(this);
     return this.kind === "artifacts" ? this.artifacts() : this.stream();
   }
 

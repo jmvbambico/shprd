@@ -22,7 +22,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { shared, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { taskById } from "./lib/board.js";
 import { card as surface, cardHeader, note } from "./lib/panel.js";
 import { PR_WORDS, branchLine, openUrl, prSize, taskPr } from "./lib/taskpr.js";
@@ -38,6 +38,7 @@ export default class TaskPr extends View {
   init(_props, cx) {
     this.cx = cx;
     this.state = null;
+    adoptCache(this);
     this.client = null;
     this.failure = null;
     this.watching = false;
@@ -47,6 +48,7 @@ export default class TaskPr extends View {
     this.copied = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    watchSwitch(this, cx);
   }
 
   /** The task the panel picked, from the one shared selection. */
@@ -73,13 +75,13 @@ export default class TaskPr extends View {
       if (!next.client) {
         this.client = null;
         this.failure = downNotice();
-        this.state = null;
+        forgetAll(this);
         cx.notify();
         return;
       }
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
+      remember(this, this.client, await this.client.state());
       this.failure = null;
       await this.readChanges();
     } catch (err) {
@@ -132,6 +134,7 @@ export default class TaskPr extends View {
   }
 
   render() {
+    syncRepo(this);
     const t = theme();
     const colors = tone(t);
     const task = this.selected();
