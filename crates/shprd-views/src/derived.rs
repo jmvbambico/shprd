@@ -544,7 +544,7 @@ fn reported_wait(task: &Task) -> Option<String> {
     Some(if asked > answered {
         // A review the engine moved to the next reviewer says why, plainly.
         match request.and_then(|request| request.note.as_deref()) {
-            Some(note) => format!("In review: {note}"),
+            Some(note) => shprd_core::review::short_note(note),
             None => "In review".to_string(),
         }
     } else {

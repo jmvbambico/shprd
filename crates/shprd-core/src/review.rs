@@ -63,6 +63,21 @@ pub enum ReviewSwitch {
     },
 }
 
+/// A review note as a card's one short line: the dates and the "instead" go,
+/// `codex is out of quota; GLM (pi) reviews`.
+pub fn short_note(note: &str) -> String {
+    note.split("; ")
+        .map(|part| {
+            let part = part.strip_suffix(" instead").unwrap_or(part);
+            match part.find(" until ") {
+                Some(at) => &part[..at],
+                None => part,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// What the person's card says when no reviewer is left.
 pub fn none_left_body(task: &str, attempt: u32, why: &str) -> String {
     format!(
@@ -295,6 +310,20 @@ mod tests {
         assert!(
             settled_mtime(&dir.path().join("missing.json")).is_none(),
             "a missing file says nothing about the review"
+        );
+    }
+
+    #[test]
+    fn a_switch_note_is_one_short_card_line() {
+        assert_eq!(
+            crate::review::short_note(
+                "codex is out of quota until Dec 18; GLM (pi) reviews instead"
+            ),
+            "codex is out of quota; GLM (pi) reviews"
+        );
+        assert_eq!(
+            crate::review::short_note("nothing to cut"),
+            "nothing to cut"
         );
     }
 

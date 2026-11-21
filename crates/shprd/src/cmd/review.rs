@@ -704,6 +704,10 @@ pub struct ReviewerRole {
     /// The programs the run knows are out of quota or rate-limited right now:
     /// a review skips them for the next line instead of starting there.
     pub dry: Vec<DryProgram>,
+    /// True when `perm` came from a program line's own mode rather than the
+    /// role's: a line's read-only mode cannot write the packet's `findings.json`,
+    /// so a review never runs under it (see [`choose_main_reviewer`]).
+    pub line_perm: bool,
 }
 
 /// A program the run recorded as out of quota, until a time or until someone
@@ -758,6 +762,7 @@ impl ReviewerRole {
             same_vendor_ok: false,
             fallbacks: lines.iter().skip(1).cloned().collect(),
             dry: Vec::new(),
+            line_perm: false,
         };
         if !own_first && let Some(first) = lines.first() {
             let from = |value: &Option<String>| {
@@ -771,6 +776,7 @@ impl ReviewerRole {
             // The line's own access mode, else the role's.
             if first.perm.is_some() {
                 this.perm = from(&first.perm);
+                this.line_perm = true;
             }
         }
         this
@@ -805,6 +811,7 @@ impl ReviewerRole {
             same_vendor_ok: false,
             fallbacks: Vec::new(),
             dry: Vec::new(),
+            line_perm: false,
         }
     }
 
@@ -946,6 +953,7 @@ pub fn choose_reviewer(
             .perm
             .as_deref()
             .map(|perm| Sourced::new(perm.to_owned(), Source::You));
+        next.line_perm = next.perm.is_some();
         next.readonly = role.readonly;
         next.may_review = role.may_review;
         next.same_vendor_ok = role.same_vendor_ok;
@@ -1062,6 +1070,13 @@ fn choose_main_reviewer(
             .perm()
             .filter(|id| program.spec.permissions.mode(id).is_some())
             .filter(|id| program.spec.permissions.full.as_deref() != Some(*id))
+            // A program line's read-only mode (pi's `--tools read,grep,find,ls`)
+            // has no tool that writes `findings.json`: the reviewer would read
+            // the diff, say its findings on the screen and never land a verdict.
+            // The role's own explicit mode is still honoured.
+            .filter(|id| {
+                !(role.line_perm && program.spec.permissions.readonly.as_deref() == Some(*id))
+            })
             .map(str::to_owned),
         spec: program.spec.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
