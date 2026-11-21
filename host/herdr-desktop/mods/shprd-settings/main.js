@@ -107,14 +107,13 @@ import { H, RADIUS, SPACE, TEXT, tone } from "./lib/tokens.js";
 
 /**
  * One compact grid for every line of every role: a gutter, a button just wide enough
- * for "Select Harness ⌄" (a longer label is cut with an ellipsis), and the × slot.
+ * for "Select Harness ⌄" (a longer label is cut with an ellipsis), and the × slot (only
+ * where a ×  shows; a lone line's ⌄ ends in the same column, so all roles share one right edge).
  * Every dropdown in the window is as wide as the button.
  */
 const BTN_W = 124;
 const GUTTER_W = 22;
 const X_SLOT = 24;
-/** The button's right padding (5) and its 12 px ⌄: a "+" centred in this lines up with the caret. */
-const CARET_SLOT = 22;
 const LINE_W = GUTTER_W + BTN_W + X_SLOT;
 
 /** How often the window re-reads the service, so another window's write shows. */
@@ -1522,6 +1521,8 @@ export default class Settings extends View {
       .flex_none()
       .items_center()
       .justify_end()
+      // No × here: the ⌄ takes the × glyph's column (its centre, 1 px in), so every role ends at one edge.
+      .pr(1)
       .child(
         selectButton(
           t,
@@ -1531,8 +1532,7 @@ export default class Settings extends View {
           (at) => this.openModelMenu(at, `role:${role.id}`, roleSelection(this.settings, role.id)),
           { disabled, width: BTN_W },
         ),
-      )
-      .child(div().w(X_SLOT).flex_none());
+      );
   }
 
   /**
@@ -1556,6 +1556,8 @@ export default class Settings extends View {
       .items_center()
       .justify_end()
       .when(lines.length > 1, (el) => el.child(this.chainGutter(t, role.id, at, lines.length)))
+      // A lone line has no × slot: its ⌄ takes the × glyph's column instead (see modelButton).
+      .when(lines.length === 1, (el) => el.pr(1))
       .child(
         selectButton(
           t,
@@ -1566,18 +1568,18 @@ export default class Settings extends View {
           { disabled, width: BTN_W },
         ),
       )
-      .child(
-        div()
-          .w(X_SLOT)
-          .flex_none()
-          .flex()
-          .items_center()
-          .justify_center()
-          .when(lines.length > 1, (el) =>
-            el.child(
+      .when(lines.length > 1, (el) =>
+        el.child(
+          div()
+            .w(X_SLOT)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
               link(t, `remove-${id}`, "×", () => this.setLines(role.id, withLine(lines, at, null)), this.writing !== null),
             ),
-          ),
+        ),
       );
   }
 
@@ -1633,12 +1635,8 @@ export default class Settings extends View {
             .flex_none()
             .items_center()
             .justify_end()
-            // With one line there is no ×: the "+" sits in the ⌄'s column (the button's own
-            // right padding and chevron), one × slot in from the edge. With more it is in the × slot.
-            .pr(shown.length > 1 ? 0 : X_SLOT)
-            .child(
-              addNew(t, `add-line-${role.id}`, () => this.addLine(role.id), this.writing !== null, shown.length > 1 ? X_SLOT : CARET_SLOT),
-            ),
+            // The "+" is always in the × glyph's column, which a lone line's ⌄ shares.
+            .child(addNew(t, `add-line-${role.id}`, () => this.addLine(role.id), this.writing !== null, X_SLOT)),
         ),
       );
   }
