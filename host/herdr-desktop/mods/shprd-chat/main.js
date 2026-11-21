@@ -30,7 +30,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { Input, InputState, ScrollHandle, Textarea, TextareaState, TextView, h_flex, v_flex } from "gpui-base";
-import { closeOverlay, exec, knownAgents, openOverlay, props, setShared, shared, theme } from "herdr";
+import { closeOverlay, exec, knownAgents, nextCommand, openOverlay, props, setShared, shared, theme } from "herdr";
 
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
 import * as files from "./attach.js";
@@ -203,6 +203,40 @@ export default class Chat extends View {
     this.keep = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // The app's way into a focusable mod (`herdr-app do shprd-chat.<command>`, the palette, a
+    // key): one command at a time. A live check has no pointer or keyboard for the window, so
+    // these press the composer's own handlers by name; each is the function the key or the
+    // click calls, never another path.
+    cx.spawn(async (cx2) => {
+      for (;;) {
+        const command = await nextCommand();
+        if (typeof command === "string") this.command(command, cx2);
+      }
+    });
+  }
+
+  /**
+   * One command by name: `focus` (the keyboard goes to the box), `type:<words>` (as typing),
+   * `enter` (what the Enter key calls), `send` (what the send button calls), `attach:<path>`,
+   * `menu` (the model menu), `pick:<agent>:<model>[:<effort>]` (what the menu's answer does),
+   * `stop`, `mic`.
+   */
+  command(command, cx) {
+    const [name, ...rest] = command.split(":");
+    const arg = rest.join(":");
+    if (name === "focus") this.input.focus();
+    else if (name === "type") this.input.replace(arg);
+    else if (name === "enter") this.enter();
+    else if (name === "send") this.send();
+    else if (name === "attach") this.addFiles(files.entries([arg]));
+    else if (name === "menu") this.openModelMenu(this.pickRec.at ?? null);
+    else if (name === "pick") {
+      const [agent, model, effort] = arg.split(":");
+      this.picked = { value: { agent, model, effort: effort || null, fast: false, perm: null }, stamp: 0 };
+      this.applyPick();
+    } else if (name === "stop") this.stop();
+    else if (name === "mic") this.toggleDictation();
+    cx?.notify?.();
   }
 
   /** The space to show now: the thread's task (it moves), a pane's own, or the coordinator's. */

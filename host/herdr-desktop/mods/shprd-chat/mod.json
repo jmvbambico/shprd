@@ -1,4 +1,5 @@
 {
   "place": "none",
-  "title": "Chat"
+  "title": "Chat",
+  "focusable": true
 }
