@@ -10,6 +10,7 @@ Helpers are small Swift programs compiled once into a tools folder (`tools(dir)`
 """
 import os
 import re
+import time
 import subprocess
 
 SWIFT_CLICK = r'''
@@ -132,21 +133,24 @@ def find(shot_path, text, row_of=None, nth=0, region=None):
     return (w[0] + w[2] / 2, w[1] + w[3] / 2)
 
 
-def click_px(pids, px, size, log=print, mode="--topid"):
-    """Clicks at a shot's pixel (px) in the window owned by one of `pids`."""
+def click_px(pids, px, size, log=print, mode="--topid", waits=6):
+    """Clicks at a shot's pixel (px) in the window owned by one of `pids` (retrying while the window is not on screen)."""
     last = ""
-    for pid in pids:
-        b = subprocess.run([_tools["click"], str(pid), "0", "0", "--bounds"], capture_output=True, text=True).stdout.split()
-        if len(b) != 4:
-            continue
-        ww, wh = float(b[2]), float(b[3])
-        sx, sy = ww / size[0], wh / size[1]
-        r = subprocess.run([_tools["click"], str(pid), f"{px[0] * sx:.1f}", f"{px[1] * sy:.1f}", mode], capture_output=True, text=True)
-        last = (r.stdout + r.stderr).strip()
-        log(f"  click pid {pid} px {px[0]:.0f},{px[1]:.0f} -> {last}")
-        if r.returncode == 0:
-            return True
-        if "no window" in last:
-            continue
-        return False
+    for attempt in range(waits):
+        for pid in pids:
+            b = subprocess.run([_tools["click"], str(pid), "0", "0", "--bounds"], capture_output=True, text=True).stdout.split()
+            try:
+                ww, wh = float(b[2]), float(b[3])
+            except (ValueError, IndexError):
+                continue
+            sx, sy = ww / size[0], wh / size[1]
+            r = subprocess.run([_tools["click"], str(pid), f"{px[0] * sx:.1f}", f"{px[1] * sy:.1f}", mode], capture_output=True, text=True)
+            last = (r.stdout + r.stderr).strip()
+            log(f"  click pid {pid} px {px[0]:.0f},{px[1]:.0f} -> {last}")
+            if r.returncode == 0:
+                return True
+            if "refuse" in last:
+                return False
+        time.sleep(2)
+    log(f"  click not sent: {last or 'no window on screen for the private Herdr'}")
     return False
