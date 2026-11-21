@@ -36,6 +36,19 @@ export const BUBBLE_MAX = 420;
  */
 export const COMPACT_MAX = 110;
 
+/**
+ * Shepherdr's readable column (`mods/chat` `COLUMN`): the chat's rows never
+ * outgrow it and sit centered in a wider pane, 18 px in from its edge in a
+ * narrower one (SHPR-79: shprd's chat measured against Shepherdr's).
+ */
+export const COLUMN = 760;
+/** The room a row keeps at each side of the column, as Shepherdr's `col()`. */
+export const GUTTER = 18;
+/** The widest a message bubble is at a pane width: 80% of the column or the pane. */
+export function bubbleWidth(width) {
+  return Math.max(240, Math.floor(Math.min(Number(width) || 0, COLUMN) * 0.8));
+}
+
 /** The space a panel shows when it was not told: the coordinator's. */
 export const COORDINATOR = "coordinator";
 
