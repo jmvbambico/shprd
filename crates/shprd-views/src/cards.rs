@@ -124,8 +124,10 @@ pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
     }
     // A review whose first turn never arrived is retired by the review being started again:
     // the engine records a new request, which the Retry review button asks for.
-    if (escalation.body == "review kickoff not delivered"
-        || escalation.body == "review brief not delivered")
+    // The body may end with what the CLI was waiting on ("...: claude is asking
+    // to trust the folder"), so the turn's own words are matched as a prefix.
+    if (escalation.body.starts_with("review kickoff not delivered")
+        || escalation.body.starts_with("review brief not delivered"))
         && task.latest_attempt().is_some_and(|latest| {
             latest
                 .reviews
@@ -359,6 +361,15 @@ mod tests {
             seq,
             by_agent: false,
         };
+        // SHPR-86: the body may say what the CLI was waiting on; it retires the same way.
+        let named_at = |seq| Escalation {
+            body: String::from(
+                "review kickoff not delivered: claude is asking to trust the folder",
+            ),
+            ..card_at(seq)
+        };
+        assert!(card(&state, &named_at(4)).is_some());
+        assert!(card(&state, &named_at(2)).is_none());
         assert!(
             card(&state, &card_at(4)).is_some(),
             "no newer review request: it stands"
