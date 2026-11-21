@@ -220,6 +220,47 @@ export function foreignTab(tab, panes) {
   return (panes ?? []).some((pane) => pane?.tab === tab?.id && pane?.mod === FOREIGN_CHAT_MOD);
 }
 
+/** Whether a tab is the one shprd made for a space's coordinator (`shprd-coordinator-<space>`). */
+export function shprdCoordinatorTab(tab) {
+  return /(^|\/)shprd-coordinator(-|$)/.test(String(tab?.id ?? ""));
+}
+
+/**
+ * The tab to select so a shprd space's center shows shprd's coordinator and
+ * nothing else (SHPR-79), or `null` when nothing needs to move.
+ *
+ * Shepherdr's tab bar adds an "Assistant" tab to every space it has not seen and
+ * selects it, and the layout's center shows the active tab. Hiding the pill does
+ * not stop that tab from being the one shown, so the bar moves the selection to
+ * the coordinator's tab. A space with no shprd coordinator tab is not shprd's,
+ * and a Shepherdr Assistant in it (or in `shprd · shprd`, where the orchestrator
+ * runs) is left exactly as it is: nothing is closed, killed or renamed here.
+ */
+export function strayTab(space, panes) {
+  const tabs = space?.tabs ?? [];
+  const active = tabs.find((tab) => tab?.active);
+  if (!active || !foreignTab(active, panes)) return null;
+  const own = tabs.find((tab) => shprdCoordinatorTab(tab) && !foreignTab(tab, panes));
+  return own?.id ?? null;
+}
+
+/**
+ * Shepherdr's `coordinator.seen` list with shprd's own spaces added, or `null`
+ * when it already holds them (or Shepherdr has not started the list: it will
+ * note every space then). A space in that list is one Shepherdr never gives an
+ * Assistant to when its tab bar next draws, which is the way an Assistant tab
+ * got into a space made while the shprd layout was shown.
+ */
+export function seenWith(seen, spaces) {
+  if (!Array.isArray(seen)) return null;
+  const add = (spaces ?? [])
+    .filter((space) => !space?.machine && !String(space?.id ?? "").includes("/"))
+    .filter((space) => String(space?.name ?? "").startsWith("shprd · "))
+    .map((space) => space.id)
+    .filter((id) => !seen.includes(id));
+  return add.length > 0 ? [...seen, ...add] : null;
+}
+
 /** The pills' counts, for a heading or a test. */
 export function pillCounts(rows) {
   const tally = { total: 0, working: 0, needs: 0, ready: 0 };

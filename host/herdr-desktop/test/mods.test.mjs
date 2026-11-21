@@ -1483,3 +1483,14 @@ test("the chat's column and bubbles follow Shepherdr's at every pane width (SHPR
   assert.equal(bubbleWidth(2000), 608);
   assert.equal(bubbleWidth(100), 240);
 });
+
+test("a done task's second line says it is done, never a stale agent line; the bar follows the board (SHPR-79)", () => {
+  const stale = { id: "T1", title: "ops", status: "passed", derived: { status: "done", reason: "No longer waiting" }, last_status: { message: "committed, handing in" }, attempts: [] };
+  assert.equal(secondLine(stale), "Done");
+  const reported = { ...stale, attempts: [{ report: { summary: "Added convert()" } }] };
+  assert.equal(secondLine(reported), "Added convert()");
+  const t = (id, status) => ({ id, title: id, status: "queued", derived: { status }, attempts: [] });
+  const state = (...words) => ({ run: { id: "tcalc1" }, tasks: words.map((w, i) => t(`T${i}`, w)) });
+  assert.equal(runShort(state("working", "working", "ready", "to_do")), "run tcalc1 · 2 working · 1 ready");
+  assert.equal(runShort(state("done", "done")), "run tcalc1 · all done");
+});
