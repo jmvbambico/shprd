@@ -336,18 +336,24 @@ export default class Chrome extends View {
   }
 }
 
-/** The folder of every space the window has, one each, in a stable order. */
+/**
+ * The folder of every space the window has, one each, in a stable order. The
+ * folder is sent as the window names it: the service compares it with the spaces'
+ * own folders to adopt the one that is already there (SHPR-65), so a symlink
+ * prefix must not be rewritten.
+ */
 function spaceFolders() {
-  const seen = new Set();
+  const seen = new Map();
   try {
     for (const space of spaces() ?? []) {
-      const folder = space?.folder ? normalizeFolder(space.folder) : "";
-      if (folder) seen.add(folder);
+      const raw = space?.folder ? String(space.folder) : "";
+      const key = normalizeFolder(raw);
+      if (key && !seen.has(key)) seen.set(key, raw.replace(/\/+$/, ""));
     }
   } catch {
     // no spaces to list: nothing to tell the service.
   }
-  return [...seen].sort();
+  return [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([, raw]) => raw);
 }
 
 /** Directories for a sentence: the home folder as `~`, a few of them. */
