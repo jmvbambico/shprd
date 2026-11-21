@@ -325,7 +325,8 @@ export function overlay(board, folder, ops, now = Date.now()) {
     }
     notes.push({ op: op.id, kind: op.kind, tasks: op.tasks, text: `${NOTICE[op.kind] ?? "Working on"} ${op.tasks.join(", ")}…` });
     for (const item of op.items ?? []) {
-      const raw = patches.has(item.id) ? null : find(board, item.id);
+      // A later op on the same task wins: ops are in press order, and each judges the raw board.
+      const raw = find(board, item.id);
       // The board shows the task as it was at the press: the effect holds. Anything
       // else is the outcome or the truth, and the board wins.
       if (!raw || raw.status !== item.from.status || word(raw) !== item.from.word) continue;

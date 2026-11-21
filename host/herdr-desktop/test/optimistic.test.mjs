@@ -166,3 +166,13 @@ test("an Accept whose merge the engine could not do shows the task as it is, wit
   // Still holding Merging at 20 s when the board has shown nothing yet.
   assert.equal(opt.overlay(board(), FOLDER, opt.read().ops, 21_000).tasks[0].derived.status, "merging");
 });
+
+test("a newer action on a confirmed task wins over the older one", () => {
+  const raw = { tasks: [task("S", "queued", "to_do")] };
+  const start = opt.begin({ kind: "task.start", tasks: ["S"], board: raw, folder: FOLDER });
+  opt.confirm(start.id);
+  const stop = opt.begin({ kind: "task.stop", tasks: ["S"], board: raw, folder: FOLDER });
+  assert.ok(stop, "a different verb on a confirmed task is a new decision");
+  const shown = opt.overlay(raw, FOLDER, opt.read().ops);
+  assert.equal(shown.tasks[0].pending.label, "Stopping…");
+});
