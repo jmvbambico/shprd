@@ -40,7 +40,6 @@ import {
   panes,
   run,
   setShared,
-  shared,
   settings,
   shared,
   spaces,
