@@ -231,10 +231,8 @@ def main():
                         break
                     if [w for w in right if w[1] < 400 and w[4].strip(".,:") == a.get("task")]:
                         continue  # in the thread already: wait for the card again on the next pass
-                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 70, size[0], 400))
-                    if back:
-                        click(p, back, size, "back to the list")
-                        time.sleep(1.5)
+                    sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
+                    time.sleep(1.5)
                 if opened:
                     px = rc.find(p, first, nth=-1, region=(int(0.59 * size[0]), 0, size[0], size[1])) if first else None
                     seen = f"opened the row; '{first}' {'found' if px else 'NOT on screen'}"
@@ -269,10 +267,10 @@ def main():
                     if px:
                         break
                     # The pane may still show a task's thread (the card was answered there): back to the list.
-                    back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 70, size[0], 400))
-                    if back:
-                        click(p, back, size, "back to the Tasks list")
-                        time.sleep(2)
+                    # The pane may still show a task's thread (the card was answered there). The pane's own
+                    # command shows the list (its "‹ Tasks" link is a click the OCR reads as "‹asks").
+                    sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
+                    time.sleep(2)
                 if not px:
                     sc.record(f"{tid} Review", "the row shows a Review pill", "no Review pill found on the row", t1, False)
                     failed = True
