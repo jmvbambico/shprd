@@ -59,6 +59,7 @@
 
 pub mod agents;
 pub mod api;
+pub mod attachments;
 pub mod bindings;
 pub mod changes;
 pub mod chat;

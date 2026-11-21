@@ -88,14 +88,20 @@ export function empty(space = COORDINATOR) {
  * A page is *what came after the cursor*, so it is appended. The one exception
  * is a new session — the agent restarted, or the space was handed to another
  * program — where the panel starts over rather than gluing two conversations
- * together. The list is trimmed from the front to [`KEEP`], because a panel
+ * together (unless `keep` names why the person restarted it: then the old
+ * messages stay, followed by one news line saying `keep`). The list is trimmed from the front to [`KEEP`], because a panel
  * that grew for ever would cost a render its time budget.
  */
-export function fold(chat, answer) {
+export function fold(chat, answer, keep = null) {
   const held = chat ?? empty(answer?.space ?? COORDINATOR);
   const session = answer?.session ?? null;
   const restarted = held.session !== null && session !== null && held.session !== session;
-  const messages = restarted ? [] : held.messages.slice();
+  // A restart the person asked for (the model picker) keeps what was said so far
+  // and says why the conversation changed hands, instead of an empty panel.
+  const messages = restarted && keep === null ? [] : held.messages.slice();
+  if (restarted && keep !== null) {
+    messages.push(normalize({ role: "news", text: String(keep), tools: [], at_ms: Date.now() }));
+  }
   for (const message of answer?.messages ?? []) messages.push(normalize(message));
   const kept = messages.length > KEEP ? messages.slice(messages.length - KEEP) : messages;
   return {
@@ -221,10 +227,31 @@ export function status(chat) {
  * The words are trimmed and never sent empty: an empty turn is a submit of a
  * key that was pressed twice, not a message.
  */
-export function outgoing(space, text) {
+export function outgoing(space, text, files = []) {
   const words = String(text ?? "").trim();
-  if (words === "") return null;
-  return { space: space || COORDINATOR, text: words };
+  const attached = (files ?? []).filter((file) => typeof file?.path === "string" && file.path !== "");
+  // Files alone are a message: the service names them to the agent.
+  if (words === "" && attached.length === 0) return null;
+  const body = { space: space || COORDINATOR, text: words };
+  if (attached.length > 0) body.attachments = attached.map((file) => ({ path: file.path, name: file.name }));
+  return body;
+}
+
+/**
+ * What a key press in the composer does: `"send"` (Enter, also with Ctrl or Cmd),
+ * `"newline"` (Alt+Enter, which the text area would not turn into one itself) or
+ * `null` (anything else, Shift+Enter included: the text area makes that a new
+ * line). The composer asks this before the text area sees the key, because the
+ * text area's own `submit` event is only Ctrl/Cmd+Enter: a plain Enter reached
+ * it as a new line (SHPR-84).
+ */
+export function keyAction(event) {
+  const key = String(event?.key ?? "").toLowerCase();
+  if (key !== "enter" && key !== "return") return null;
+  const m = event?.modifiers ?? {};
+  if (m.alt) return "newline";
+  if (m.shift) return null;
+  return "send";
 }
 
 /** The time a message's row shows, or `""` when the program recorded none. */

@@ -1660,8 +1660,28 @@ pub struct ChatDto {
 pub struct ChatSendDto {
     /// The space to type into: `coordinator`, or a task's id.
     pub space: String,
-    /// The words to send, as one turn of the person's input.
+    /// The words to send, as one turn of the person's input. May be empty when
+    /// files are attached.
     pub text: String,
+    /// Files to attach, picked by the person on this machine. Each is copied into
+    /// the agent's own working directory (`.shprd/attachments/`, kept out of git)
+    /// so the agent reads it without a permission prompt, and the message names
+    /// the copy by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attachments: Option<Vec<ChatAttachmentDto>>,
+}
+
+/// One file to attach to a chat line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatAttachmentDto.ts")]
+pub struct ChatAttachmentDto {
+    /// The file's absolute path on the machine the service runs on.
+    pub path: String,
+    /// The name to give the copy, when not the file's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
 }
 
 /// What one send did.
@@ -1677,6 +1697,24 @@ pub struct ChatSendReply {
     /// sent (it made the folder a git repository), when it did. The chat shows it
     /// once, above the conversation.
     pub notice: Option<String>,
+}
+
+/// A request to stop a space's agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatStopDto.ts")]
+pub struct ChatStopDto {
+    /// The space to stop: `coordinator`, or a task's id.
+    pub space: String,
+}
+
+/// What one stop did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatStopReply.ts")]
+pub struct ChatStopReply {
+    /// The space whose agent got the Escape.
+    pub space: String,
+    /// True when the key was pressed in the agent's pane.
+    pub stopped: bool,
 }
 
 /// What one write did to the key it named.
@@ -1797,7 +1835,10 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ChatToolDto>()?,
         one::<ChatDto>()?,
         one::<ChatSendDto>()?,
+        one::<ChatAttachmentDto>()?,
         one::<ChatSendReply>()?,
+        one::<ChatStopDto>()?,
+        one::<ChatStopReply>()?,
         one::<TerminalServerMsg>()?,
         one::<TerminalClientMsg>()?,
         one::<SnapshotDto>()?,

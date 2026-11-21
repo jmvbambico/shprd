@@ -37,6 +37,8 @@ const PORT: u16 = 18_082;
 #[derive(Debug, Default)]
 struct Recorder {
     lines: Mutex<Vec<(Option<String>, String)>>,
+    /// The spaces an Escape was pressed in.
+    stops: Mutex<Vec<Option<String>>>,
     refuse: bool,
     /// When the coordinator this writer types into started, if it says.
     started_ms: Option<u64>,
@@ -50,6 +52,11 @@ impl Recorder {
 }
 
 impl ChatWriter for Recorder {
+    fn interrupt(&self, space: Option<&str>) -> Result<(), String> {
+        self.stops.lock().unwrap().push(space.map(str::to_owned));
+        Ok(())
+    }
+
     fn started_ms(&self, space: Option<&str>) -> Option<u64> {
         space.is_none().then_some(self.started_ms).flatten()
     }
@@ -618,6 +625,146 @@ async fn sending_types_the_line_into_the_coordinators_pane() {
         [(None, "hello".to_string())],
         "the coordinator is the space with no task id, and its words are trimmed"
     );
+}
+
+#[tokio::test]
+async fn an_attachment_is_copied_into_the_agents_folder_and_named_by_path() {
+    let fixture = Fixture::new("claude");
+    // The repository is one git knows, so "never committed" can be asked of git.
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(fixture.repo.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let picked = tempfile::tempdir().unwrap();
+    let file = picked.path().join("my notes.txt");
+    std::fs::write(&file, "the secret word is teal").unwrap();
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({
+                    "space": "coordinator",
+                    "text": "what is in the attachment?",
+                    "attachments": [{"path": file.display().to_string()}],
+                }),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let lines = fixture.recorder.lines();
+    assert_eq!(lines.len(), 1);
+    let typed = &lines[0].1;
+    assert!(
+        typed.starts_with("what is in the attachment?\n\nAttached file"),
+        "{typed}"
+    );
+    let path = typed.lines().last().unwrap();
+    assert!(
+        std::path::Path::new(path).starts_with(fixture.repo.path().join(".shprd/attachments")),
+        "{path}"
+    );
+    assert!(!path.contains(' '), "no quoting needed: {path}");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "the secret word is teal"
+    );
+    let ignored = std::process::Command::new("git")
+        .args(["check-ignore", "-q", path])
+        .current_dir(fixture.repo.path())
+        .status()
+        .unwrap();
+    assert!(ignored.success(), "git must ignore {path}");
+}
+
+#[tokio::test]
+async fn files_alone_are_a_message_and_a_missing_file_refuses_everything() {
+    let fixture = Fixture::new("claude");
+    let picked = tempfile::tempdir().unwrap();
+    let file = picked.path().join("a.png");
+    std::fs::write(&file, [1, 2, 3]).unwrap();
+    let alone = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "", "attachments": [{"path": file.display().to_string()}]}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(alone.status, StatusCode::OK, "{}", alone.body);
+    assert!(fixture.recorder.lines()[0].1.starts_with("Attached file"));
+    let gone = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "x", "attachments": [{"path": "/nonexistent/zzz.txt"}]}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(gone.status, StatusCode::BAD_REQUEST, "{}", gone.body);
+    assert_eq!(fixture.recorder.lines().len(), 1, "nothing was typed");
+}
+
+#[tokio::test]
+async fn a_refused_send_leaves_no_attachment_copies_behind() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    let recorder = Arc::new(Recorder {
+        refuse: true,
+        ..Recorder::default()
+    });
+    let fixture = Fixture::prepared_with(repo, home, recorder);
+    let picked = tempfile::tempdir().unwrap();
+    let file = picked.path().join("a.txt");
+    std::fs::write(&file, "x").unwrap();
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "hi", "attachments": [{"path": file.display().to_string()}]}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    let left = std::fs::read_dir(fixture.repo.path().join(".shprd/attachments"))
+        .map_or(0, Iterator::count);
+    assert_eq!(left, 0, "the refused message's copies were removed");
+}
+
+#[tokio::test]
+async fn stop_presses_escape_in_the_coordinators_pane_and_is_a_write() {
+    let fixture = Fixture::new("claude");
+    let reply = fixture
+        .send(
+            Call::post("/api/chat/stop", json!({"space": "coordinator"}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["stopped"], true);
+    assert_eq!(*fixture.recorder.stops.lock().unwrap(), [None]);
+    let no_header = fixture
+        .send(
+            Call::post("/api/chat/stop", json!({"space": "coordinator"}))
+                .with_token(&fixture.token),
+        )
+        .await;
+    assert_eq!(no_header.status, StatusCode::FORBIDDEN);
+    assert_eq!(fixture.recorder.stops.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

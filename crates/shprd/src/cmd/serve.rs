@@ -534,6 +534,18 @@ impl shprd_server::ChatWriter for HostChat {
             .started_ms
     }
 
+    fn interrupt(&self, space: Option<&str>) -> Result<(), String> {
+        let ctx = Ctx::new(self.repo.clone(), Actor::Human, false, true);
+        let pane = match space {
+            None => crate::cmd::spawn::coordinator_pane(self.host.as_ref(), &self.home, &ctx),
+            Some(task) => crate::cmd::spawn::task_pane(self.host.as_ref(), &self.home, &ctx, task),
+        }
+        .map_err(|err| err.to_string())?;
+        self.host
+            .keys(&pane, &[shprd_mux::Key::Esc])
+            .map_err(|err| err.to_string())
+    }
+
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String> {
         // A folder that is not a repository yet becomes one now, at the person's
         // first message and not when the window merely showed it: the work

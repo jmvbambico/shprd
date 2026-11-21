@@ -28,11 +28,25 @@
 // Markdown is drawn by the window's own text view, never as HTML: what an agent
 // wrote is shown as text, and only a web link may be opened from it.
 
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { Input, InputState, ScrollHandle, Textarea, TextareaState, TextView, h_flex, v_flex } from "gpui-base";
-import { exec, props, setShared, shared, theme } from "herdr";
+import { closeOverlay, exec, knownAgents, nextCommand, openOverlay, props, setShared, shared, theme } from "herdr";
 
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
+import * as files from "./attach.js";
+import { Dictation, available as dictationAvailable } from "./dictate.js";
+import { iconFile, popupAt, press as clickPress } from "./lib/panel.js";
+import {
+  MENU_W,
+  PICK_KEY,
+  coordinatorRunning,
+  menuHeight,
+  menusOf,
+  pickLabel,
+  priorInScope,
+  roleSelection,
+  selectionWrites,
+} from "./lib/settings.js";
 import { answeredAsks, errorLine, noticeLine, overlay, probe, read as readOps } from "./lib/optimistic.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
@@ -44,12 +58,14 @@ import {
   coordinatorDown,
   empty,
   firstCard,
+  keyAction,
   lineCount,
   fold,
   folding,
   markdownOf,
   mine,
   nextCursor,
+  normalize,
   outgoing,
   safeLink,
   spaceOf,
@@ -73,6 +89,21 @@ const LOADING_MS = 4000;
 
 /** How many pages one refresh takes before leaving the rest to the next look. */
 const PAGES = 4;
+
+/** How long the model menu is quiet before its choice is written (it answers on each change), ms. */
+const PICK_SETTLE_MS = 1200;
+
+/** How long a restart the person asked for keeps the conversation, ms. */
+const KEEP_MS = 10 * 60 * 1000;
+
+/** A second Enter this close to the first is the same press (the key and the chord's submit), ms. */
+const ENTER_DEBOUNCE_MS = 120;
+
+/** Where a restart's conversation waits for the chat pane the restart opens (the old pane is closed with the agent). */
+const CARRY_KEY = "shprd.chat.carry";
+
+/** The round buttons in the composer's bottom row, px. */
+const ROUND = 28;
 
 
 export default class Chat extends View {
@@ -121,11 +152,95 @@ export default class Chat extends View {
     this.input = TextareaState.new({ placeholder: this.placeholder() });
     this.input.set_rows?.(1);
     this.inputRows = 1;
+    // The text area's own `submit` is Ctrl/Cmd+Enter only: a plain Enter never reached
+    // it and was a new line (SHPR-84). Enter is taken before the text area sees it, in
+    // the composer's `on_key_down`; this stays for the chord, and `enter` makes the two
+    // never send twice.
     this.input.on("submit", (e) => {
-      if (!e?.shift) this.send();
+      if (!e?.shift) this.enter();
     });
+    this.input.on?.("focus", (_e, cx) => {
+      this.boxFocused = true;
+      cx?.notify?.();
+    });
+    this.input.on?.("blur", (_e, cx) => {
+      this.boxFocused = false;
+      cx?.notify?.();
+    });
+    // A paste with no text (an image, copied files) becomes attachments.
+    this.input.on?.("paste_other", (_e, cx) => cx.spawn(async (cx2) => {
+      try {
+        const got = await files.fromClipboard();
+        if (got.length > 0) this.addFiles(got);
+      } catch (err) {
+        this.fileError = String(err?.message ?? err);
+      }
+      cx2.notify();
+    }));
+    /** What the person attached to the message being written: `{ path, name, image, temp }`. */
+    this.files = [];
+    this.fileError = null;
+    this.boxFocused = false;
+    this.enterAt = 0;
+    this.stopping = false;
+    // Dictation: the mic is drawn only where Shepherdr's recorder is installed.
+    this.dict = new Dictation("chat");
+    this.micOn = false;
+    this.level = 0;
+    dictationAvailable().then((ok) => {
+      this.micOn = ok;
+      cx.notify();
+    });
+    // The model picker: the settings the coordinator runs on and the roster of what it
+    // may run, read from the service (Settings → Agents → Assistant reads the same).
+    this.doc = null;
+    this.roster = null;
+    this.menus = null;
+    this.icons = {};
+    this.rosterAsked = false;
+    this.pickRec = { at: null };
+    this.popup = null;
+    this.lastReply = shared(PICK_KEY)?.at ?? null;
+    this.picked = null;
+    this.switching = null;
+    /** Why the next new session continues this conversation (a restart the person asked for). */
+    this.keep = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    // The app's way into a focusable mod (`herdr-app do shprd-chat.<command>`, the palette, a
+    // key): one command at a time. A live check has no pointer or keyboard for the window, so
+    // these press the composer's own handlers by name; each is the function the key or the
+    // click calls, never another path.
+    cx.spawn(async (cx2) => {
+      for (;;) {
+        const command = await nextCommand();
+        if (typeof command === "string") this.command(command, cx2);
+      }
+    });
+  }
+
+  /**
+   * One command by name: `focus` (the keyboard goes to the box), `type:<words>` (as typing),
+   * `enter` (what the Enter key calls), `send` (what the send button calls), `attach:<path>`,
+   * `menu` (the model menu), `pick:<agent>:<model>[:<effort>]` (what the menu's answer does),
+   * `stop`, `mic`.
+   */
+  command(command, cx) {
+    const [name, ...rest] = command.split(":");
+    const arg = rest.join(":");
+    if (name === "focus") this.input.focus();
+    else if (name === "type") this.input.replace(arg);
+    else if (name === "enter") this.enter();
+    else if (name === "send") this.send();
+    else if (name === "attach") this.addFiles(files.entries([arg]));
+    else if (name === "menu") this.openModelMenu(this.pickRec.at ?? null);
+    else if (name === "pick") {
+      const [agent, model, effort] = arg.split(":");
+      this.picked = { value: { agent, model, effort: effort || null, fast: false, perm: null }, stamp: 0 };
+      this.applyPick();
+    } else if (name === "stop") this.stop();
+    else if (name === "mic") this.toggleDictation();
+    cx?.notify?.();
   }
 
   /** The space to show now: the thread's task (it moves), a pane's own, or the coordinator's. */
@@ -222,6 +337,7 @@ export default class Chat extends View {
       }
       this.client = next.client;
       this.follow();
+      this.carry();
       // The conversation this read is for: a switch of space while it runs makes
       // its answer another conversation's, which is not folded into this one.
       if (this.slot !== undefined && this.slotKey() !== this.slot) this.forget(false);
@@ -231,6 +347,7 @@ export default class Chat extends View {
       if (stale()) return;
       this.state = board;
       this.asks = asks;
+      await this.readModel(cx, space);
       if (space !== null) {
         // `more` means the page filled up: a long conversation arrives over a few
         // calls rather than one slow one, and the next timer catches any left over.
@@ -243,7 +360,10 @@ export default class Chat extends View {
           // The person moved to another task while this was in flight: this answer
           // is for the one they left.
           if (space !== this.space || slot !== this.slot || stale()) return;
-          this.chat = fold(this.chat, answer);
+          const was = this.chat.session;
+          const keep = this.keep ?? null;
+          this.chat = fold(this.chat, answer, keep !== null && Date.now() < keep.until ? keep.text : null);
+          if (keep !== null && (this.chat.session !== was || Date.now() >= keep.until)) this.keep = null;
           if (!this.chat.more) break;
         }
       }
@@ -257,6 +377,20 @@ export default class Chat extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * A restart the person asked for (the model menu) closes the coordinator's pane and opens
+   * a new one, so the conversation is handed over in shared state: this takes it, once, into
+   * an empty chat of the same folder, followed by the line saying why it changed hands.
+   */
+  carry() {
+    if (this.space !== COORDINATOR || (this.chat?.messages ?? []).length > 0) return;
+    const held = shared(CARRY_KEY);
+    if (!held || Date.now() - held.at > KEEP_MS || held.folder !== (this.client?.folder ?? null)) return;
+    setShared(CARRY_KEY, null);
+    const note = normalize({ role: "news", text: String(held.text ?? ""), tools: [], at_ms: held.at });
+    this.chat = { ...this.chat, messages: [...(held.messages ?? []), ...(note.text === "" ? [] : [note])] };
   }
 
   /** Starts the conversation again: a new record names nothing the old cursor did. */
@@ -298,9 +432,255 @@ export default class Chat extends View {
     });
   }
 
-  /** Types the composer's words into the agent, as the person. */
+  /**
+   * The settings the coordinator runs on, and (once) the roster of programs and models
+   * it may run: what the model button shows and its menu lists. Only the coordinator's
+   * chat has them; a task's agent is the task's, not a setting of the chat.
+   */
+  async readModel(cx, space) {
+    if (space !== COORDINATOR || !this.client) return;
+    try {
+      this.doc = await this.client.settings();
+    } catch {
+      // The button keeps what it had.
+    }
+    if (this.rosterAsked) return;
+    this.rosterAsked = true;
+    try {
+      this.roster = await this.client.roster();
+      this.menus = menusOf(this.roster);
+    } catch {
+      this.rosterAsked = false;
+    }
+    try {
+      for (const entry of (await knownAgents()) ?? []) {
+        const id = entry.key ?? (entry.run ?? [])[0];
+        if (id && entry.icon) this.icons[id] = { icon: entry.icon, tint: Boolean(entry.tint) };
+      }
+    } catch {
+      // Words only.
+    }
+    cx?.notify?.();
+  }
+
+  /** What the coordinator runs on now: `{ agent, model, effort, fast, perm }`. */
+  selection() {
+    return this.doc ? roleSelection(this.doc, "coordinator") : null;
+  }
+
+  /** The model button's words: "Opus 5.5 · Medium", what is being switched to, or the program. */
+  modelWords() {
+    if ((this.switching ?? null) !== null) return `Switching to ${this.switching}…`;
+    const sel = this.selection();
+    if (sel?.agent && this.menus) return pickLabel(this.menus, sel) || sel.agent;
+    return sel?.agent ?? this.chat.program ?? "Model";
+  }
+
+  /** Opens the model menu (`shprd-models`, the one Settings uses) over the button. */
+  openModelMenu(at) {
+    const sel = this.selection();
+    if (!sel || !this.menus || (this.switching ?? null) !== null) return;
+    this.closePopup();
+    const height = menuHeight(this.menus);
+    const place = popupAt(at, MENU_W, height);
+    this.popup = openOverlay({
+      mod: "shprd-models",
+      kind: "popup",
+      frame: "none",
+      width: MENU_W,
+      height,
+      at: place,
+      props: {
+        mode: "models",
+        key: "chat:coordinator",
+        current: sel,
+        menus: this.menus,
+        icons: this.icons,
+        width: MENU_W,
+        height,
+        below: place !== "pointer" && at !== null && place.y > at.y,
+        light: false,
+        allowNone: false,
+        taken: [],
+        blocked: {},
+        blockedModels: {},
+      },
+    });
+  }
+
+  /** Puts the open model menu away. */
+  closePopup() {
+    if (this.popup === null) return;
+    try {
+      closeOverlay(this.popup);
+    } catch {
+      // Already gone: a click beside it closed it.
+    }
+    this.popup = null;
+  }
+
+  /**
+   * Takes what the model menu answered. The menu answers on every change (a model, then
+   * a level), so the switch waits until the answers stop, then writes them once and
+   * restarts the coordinator once. Answers of the Settings window are not this chat's.
+   */
+  takeReply() {
+    const reply = shared(PICK_KEY);
+    if (!reply || reply.at === (this.lastReply ?? null) || typeof reply.key !== "string") return;
+    this.lastReply = reply.at;
+    if (reply.key !== "chat:coordinator" || reply.field !== "selection" || !reply.value) return;
+    this.pickSeq = (this.pickSeq ?? 0) + 1;
+    const stamp = this.pickSeq;
+    this.picked = { value: reply.value, stamp };
+    this.cx.timer.after(PICK_SETTLE_MS, () => {
+      if (this.picked?.stamp === stamp) this.applyPick();
+    });
+  }
+
+  /**
+   * Switches the coordinator to the picked choice: the same keys Settings → Agents →
+   * Assistant writes, for this repository (the service serves one: this space), then a
+   * restart, because a running agent takes a new model only that way. The conversation
+   * stays on screen with one line saying where it changed hands. A refused write puts
+   * back the ones before it.
+   */
+  async applyPick() {
+    const after = this.picked?.value;
+    this.picked = null;
+    const before = this.selection();
+    if (!after || !before || !this.client) return;
+    const writes = selectionWrites("coordinator", before, after);
+    if (writes.length === 0) return;
+    const label = pickLabel(this.menus, after) || after.model || after.agent;
+    this.switching = label;
+    this.refusal = null;
+    this.cx.notify();
+    const done = [];
+    try {
+      for (const write of writes) {
+        const prior = priorInScope(this.doc, write.key, true);
+        await this.client.putSetting(write.key, write.value, true);
+        done.push({ key: write.key, prior });
+      }
+      this.doc = await this.client.settings();
+      if (coordinatorRunning(this.state)) {
+        this.keep = { text: `Switched the coordinator to ${label}`, until: Date.now() + KEEP_MS };
+        setShared(CARRY_KEY, { folder: this.client.folder ?? null, at: Date.now(), text: this.keep.text, messages: this.chat.messages });
+        await this.client.restartCoordinator();
+      }
+    } catch (err) {
+      this.refusal = reason(err);
+      for (const write of done.reverse()) {
+        try {
+          await this.client.putSetting(write.key, write.prior, true);
+        } catch {
+          // Leave it: the Settings window shows what is stored.
+        }
+      }
+      this.keep = null;
+    }
+    this.switching = null;
+    this.cx.notify();
+    this.refresh();
+  }
+
+  /** Adds files to the message being written (a path once). */
+  addFiles(list) {
+    for (const file of list) {
+      if (!this.files.some((held) => held.path === file.path)) this.files.push(file);
+    }
+    this.fileError = null;
+  }
+
+  /** Takes one file off the message. */
+  removeFile(index) {
+    const [gone] = this.files.splice(index, 1);
+    if (gone) files.forget(gone);
+    this.cx.notify();
+  }
+
+  /** The system's file picker, for the + button. */
+  async pickFiles() {
+    try {
+      const chosen = await files.pick();
+      if (chosen.length > 0) this.addFiles(chosen);
+    } catch (err) {
+      this.fileError = String(err?.message ?? err);
+    }
+    this.input.focus();
+    this.cx.notify();
+  }
+
+  /** Enter: sends, once however many ways the key reached here. */
+  enter() {
+    if (Date.now() - this.enterAt < ENTER_DEBOUNCE_MS) return;
+    this.enterAt = Date.now();
+    this.send();
+  }
+
+  /** The agent shown, when the service lists it as running: the coordinator, or the task's worker. */
+  liveAgent() {
+    const list = Array.isArray(this.state?.live_agents) ? this.state.live_agents : [];
+    return (
+      list.find((agent) =>
+        !agent.ended_ms && (this.space === COORDINATOR || this.space === null ? agent.role === "coordinator" : agent.task === this.space),
+      ) ?? null
+    );
+  }
+
+  /** Whether the agent shown is working (Esc and the Stop button stop it). */
+  working() {
+    return this.liveAgent()?.state === "working";
+  }
+
+  /** Presses Escape in the agent's pane: what every program takes as "stop". */
+  async stop() {
+    if (!this.client || this.stopping) return;
+    this.stopping = true;
+    this.cx.notify();
+    try {
+      await this.client.call("POST", "/api/chat/stop", { body: { space: this.space ?? COORDINATOR } });
+    } catch (err) {
+      this.refusal = reason(err);
+    }
+    this.stopping = false;
+    this.cx.notify();
+    this.refresh();
+  }
+
+  /** The mic: starts a dictation, or ends it and puts its words in the box. */
+  toggleDictation() {
+    if (this.dict.state === "idle") {
+      this.dict.start();
+      this.cx.notify();
+      this.cx.spawn(async (cx) => {
+        while (this.dict.state === "recording") {
+          this.level = await this.dict.level();
+          cx.notify();
+          await cx.sleep(150);
+        }
+        cx.notify();
+      });
+      return;
+    }
+    if (this.dict.state === "recording") this.finishDictation();
+  }
+
+  /** Ends the recording and writes it into the box to edit; nothing is sent by itself. */
+  async finishDictation() {
+    this.cx.notify();
+    const words = await this.dict.stop();
+    if (words.trim() !== "") {
+      const have = this.input.value();
+      this.input.replace(`${have !== "" && !/\s$/.test(have) ? " " : ""}${words.trim()} `);
+    }
+    this.input.focus();
+    this.cx.notify();
+  }
+
+  /** Types the composer's words, and any files, into the agent, as the person. */
   async send() {
-    const body = outgoing(this.space, this.input.value());
+    const body = outgoing(this.space, this.input.value(), this.files ?? []);
     if (body === null || this.sending) return;
     if (!this.client) {
       this.refusal = downNotice();
@@ -313,6 +693,10 @@ export default class Chat extends View {
     try {
       const reply = await this.client.call("POST", "/api/chat", { body });
       this.input.set_value("");
+      // Sent: the service holds its own copies, so a pasted image's temporary file goes.
+      for (const file of this.files ?? []) files.forget(file);
+      this.files = [];
+      this.fileError = null;
       this.pinned = "bottom";
       // One plain line about what shprd did first (it made the folder a git
       // repository); it stays above the composer for this conversation.
@@ -434,6 +818,7 @@ export default class Chat extends View {
       this.refresh();
     }
     this.revalidate();
+    this.takeReply();
     const t = theme();
     const colors = tone(t);
     // What the person just pressed shows at once: the board with the pending actions
@@ -482,6 +867,10 @@ export default class Chat extends View {
       .when(said !== null && rows.length > 0, (el) =>
         el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(t.muted).child(said))),
       )
+      .when((this.fileError ?? null) !== null, (el) =>
+        el.child(this.column(div().pb(4).text_size(TEXT.label).text_color(colors.red).child(this.fileError))),
+      )
+      .when(this.working(), (el) => el.child(this.workingLine(t)))
       .child(this.composer(t, colors));
   }
 
@@ -798,51 +1187,249 @@ export default class Chat extends View {
       .child(word);
   }
 
-  /** The composer: one line of words, and the round send at its end. */
+  /** "Working · Esc to stop", with a Stop button, above the box while the agent works. */
+  workingLine(t) {
+    return this.column(
+      h_flex()
+        .h(28)
+        .gap(8)
+        .items_center()
+        .child(div().size(6).flex_none().rounded(3).bg(t.accent))
+        .child(div().text_size(TEXT.label).text_color(t.muted).child("Working"))
+        .child(div().flex_1())
+        .child(
+          h_flex()
+            .id("chat-stop")
+            .h(24)
+            .px(8)
+            .gap(5)
+            .flex_none()
+            .items_center()
+            .rounded(RADIUS.control)
+            .border_1()
+            .border_color(t.input ?? t.border)
+            .text_size(TEXT.label)
+            .text_color(this.stopping ? t.dim : t.foreground)
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover))
+            .on_click(clickPress(() => this.stop()))
+            .child(svg(iconFile("stop-fill")).size(10).flex_none())
+            .child("Stop")
+            .child(div().text_color(t.dim).child("Esc")),
+        ),
+    );
+  }
+
+  /**
+   * One round, 28 px button of the composer's bottom row (Shepherdr's shape: Send, the +,
+   * the mic never change size, only their icon and fill). A press takes the click for
+   * itself, so no ancestor's handler runs on it.
+   */
+  round(t, id, icon, fill, fn) {
+    const el = div()
+      .id(id)
+      .size(ROUND)
+      .flex_none()
+      .flex()
+      .items_center()
+      .justify_center()
+      .rounded(ROUND / 2)
+      .when(fill === "solid", (e) => e.bg(t.solid ?? t.foreground).text_color(t.solid_foreground ?? t.background))
+      .when(fill === "off", (e) => e.bg(t.raised).text_color(t.dim))
+      .when(fill === "rec", (e) => e.bg(t.blocked ? `${t.blocked}22` : t.raised).text_color(t.blocked ?? t.foreground))
+      .when(fill === "ghost", (e) => e.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)))
+      .child(svg(iconFile(icon)).size(14).flex_none());
+    if (!fn) return el;
+    return el.cursor_pointer().on_click(clickPress(fn));
+  }
+
+  /** The attached files, as chips above the words: a name and a × to take it off. */
+  tiles(t) {
+    if ((this.files ?? []).length === 0) return null;
+    return h_flex()
+      .w_full()
+      .px(10)
+      .pt(8)
+      .gap(6)
+      .flex_wrap()
+      .children(
+        this.files.map((file, index) =>
+          h_flex()
+            .id(`chat-file-${index}`)
+            .h(24)
+            .max_w(220)
+            .pl(8)
+            .pr(4)
+            .gap(5)
+            .items_center()
+            .rounded(RADIUS.control)
+            .bg(t.raised)
+            .text_size(TEXT.label)
+            .text_color(t.foreground)
+            .child(svg(iconFile(file.image ? "files" : "file-text")).size(12).flex_none().text_color(t.dim))
+            .child(div().min_w(0).truncate().child(file.name))
+            .child(
+              div()
+                .id(`chat-file-x-${index}`)
+                .size(16)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(8)
+                .text_color(t.dim)
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                .on_click(clickPress(() => this.removeFile(index)))
+                .child(svg(iconFile("x")).size(10).flex_none()),
+            ),
+        ),
+      );
+  }
+
+  /** The row under the words while recording: cancel, the level, how long, done. */
+  recordingRow(t) {
+    const writing = this.dict.state === "writing";
+    const secs = Math.max(0, Math.floor((Date.now() - this.dict.n) / 1000));
+    const bar = (i) => div().w(3).h(3 + Math.round(Math.min(1, this.level * (0.5 + (i % 3) * 0.25)) * 18)).flex_none().rounded(2).bg(t.foreground);
+    return h_flex()
+      .h(36)
+      .pl(6)
+      .pr(6)
+      .gap(8)
+      .items_center()
+      .child(writing ? div().size(ROUND).flex_none() : this.round(t, "chat-mic-cancel", "x", "ghost", () => this.dict.cancel()))
+      .child(
+        h_flex()
+          .flex_1()
+          .min_w(0)
+          .gap(2)
+          .items_center()
+          .justify_center()
+          .children(writing ? [] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(bar))
+          .child(div().pl(8).text_size(TEXT.label).text_color(t.muted).child(writing ? "Writing it down…" : `Recording ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`)),
+      )
+      .child(writing ? div().size(ROUND).flex_none() : this.round(t, "chat-mic-done", "mic", "rec", () => this.toggleDictation()));
+  }
+
+  /**
+   * The composer, as Shepherdr draws its own: one rounded box holding the words, with the
+   * + on the left of its bottom row, then what the coordinator runs on (the model button),
+   * the mic and the round Send at the right. It grows with what is typed, to eight lines.
+   *
+   * Keys are taken here, before the text area has them: Enter sends, Alt+Enter and
+   * Shift+Enter are new lines, Esc stops a working agent while the box is empty.
+   */
   composer(t, colors) {
     // The box grows with what is in it, up to eight lines, then scrolls.
-    const lines = Math.min(8, Math.max(1, lineCount(this.input.value(), 70)));
+    const chars = Math.max(20, Math.floor((this.width - 2 * GUTTER - 24) / 7.5));
+    const lines = Math.min(8, Math.max(1, lineCount(this.input.value(), chars)));
     if (lines !== this.inputRows) {
       this.inputRows = lines;
       this.input.set_rows?.(lines);
     }
-    const sendable = this.input.value().trim() !== "" && !this.sending && this.space !== null;
+    const sendable = (this.input.value().trim() !== "" || (this.files ?? []).length > 0) && !this.sending && this.space !== null;
+    const recording = (this.dict?.state ?? "idle") !== "idle";
+    const coordinator = this.space === COORDINATOR && this.selection() !== null;
     return this.column(
-      h_flex()
-      .pt(6)
-      .pb(12)
-      .gap(8)
-      .items_center()
-      .child(
-        h_flex()
-          .flex_1()
-          .min_h(32)
-          .px(10)
-          .py(4)
-          .items_center()
-          .rounded(RADIUS.bubble)
-          .bg(t.input)
-          .border_1()
-          .border_color(t.border)
-          .on_click(() => this.input.focus())
-          .child(div().flex_1().min_w(0).text_size(TEXT.body).child(Textarea.new(this.input))),
-      )
-      .child(
-        h_flex()
-          .id("chat-send")
-          .h(28)
-          .w(28)
-          .flex_none()
-          .items_center()
-          .justify_center()
-          .rounded(14)
-          .bg(sendable ? t.accent : t.raised)
-          .text_size(TEXT.body)
-          .text_color(sendable ? colors.on : t.dim)
-          .cursor_pointer()
-          .on_click(() => this.send())
-          .child(this.sending ? "…" : "↑"),
-      ),
+      div()
+        .w_full()
+        .pt(6)
+        .pb(12)
+        .child(
+          v_flex()
+            .id("chat-composer")
+            .w_full()
+            .rounded(10)
+            .border_1()
+            .border_color((this.boxFocused ?? false) ? t.accent : (t.input ?? t.border))
+            .bg(t.background)
+            .on_key_down((e, cx) => {
+              const action = keyAction(e);
+              if (action === "send") {
+                cx.stop_propagation();
+                this.enter();
+                return;
+              }
+              if (action === "newline") {
+                cx.stop_propagation();
+                this.input.replace("\n");
+                cx.notify();
+                return;
+              }
+              if (String(e?.key ?? "").toLowerCase() === "escape" && this.working() && this.input.value().trim() === "") {
+                cx.stop_propagation();
+                this.stop();
+              }
+            })
+            .on_drop((e, cx) => {
+              this.addFiles(files.entries(e.paths ?? []));
+              this.input.focus();
+              cx.notify();
+            })
+            .child(this.tiles(t) ?? div())
+            .child(
+              div()
+                .id("chat-words")
+                .w_full()
+                .px(12)
+                .pt(9)
+                .pb(4)
+                .on_click(() => this.input.focus())
+                .child(Textarea.new(this.input).w_full().text_size(TEXT.body).text_color(t.foreground)),
+            )
+            .child(
+              recording
+                ? this.recordingRow(t)
+                : h_flex()
+                    .h(36)
+                    .pl(6)
+                    .pr(6)
+                    .gap(4)
+                    .items_center()
+                    .child(this.round(t, "chat-attach", "plus", "ghost", () => this.pickFiles()))
+                    .child(
+                      div()
+                        .flex_1()
+                        .min_w(0)
+                        .truncate()
+                        .text_size(TEXT.label)
+                        .text_color(colors.red)
+                        .child(this.dict?.error ?? ""),
+                    )
+                    .when(coordinator, (el) =>
+                      el.child(
+                        h_flex()
+                          .id("chat-model-pick")
+                          .h(ROUND)
+                          .pl(8)
+                          .pr(5)
+                          .gap(4)
+                          .min_w(0)
+                          .max_w(280)
+                          .items_center()
+                          .rounded(6)
+                          .text_size(TEXT.label)
+                          .font_medium()
+                          .text_color(t.muted)
+                          .cursor_pointer()
+                          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                          .on_mouse_down("left", (event) => {
+                            this.pickRec.at =
+                              event?.bounds ??
+                              (event?.position ? { x: event.position.x - 40, y: event.position.y - 14, width: 80, height: 28 } : null);
+                          })
+                          .on_click(clickPress(() => this.openModelMenu(this.pickRec.at ?? null)))
+                          .child(div().min_w(0).whitespace_nowrap().truncate().child(this.modelWords()))
+                          .child(svg(iconFile("chevron-down")).size(12).flex_none()),
+                      ),
+                    )
+                    .when(this.micOn === true, (el) => el.child(this.round(t, "chat-mic", "mic", "ghost", () => this.toggleDictation())))
+                    .child(
+                      this.round(t, "chat-send", this.sending ? "spinner" : "send", sendable ? "solid" : "off", () => this.send()),
+                    ),
+            ),
+        ),
     );
   }
 }

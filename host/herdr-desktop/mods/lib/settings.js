@@ -1399,3 +1399,19 @@ export function menuHeight(menus, { light = false, none = false } = {}) {
   const lighter = light ? full - (9 + 26 + 34 + 31 + 31) : full;
   return lighter + (none ? 31 : 0);
 }
+
+/**
+ * The words a model button shows for a selection: "Opus 5.5 · Medium", the model's
+ * name and the reasoning level that applies (Shepherdr's chat button), "Fast"
+ * after them when it is on. A model the catalog does not list shows its id; no
+ * model at all shows the program's name.
+ */
+export function pickLabel(menus, sel) {
+  if (!sel?.agent) return "";
+  const program = menus?.programs?.[sel.agent];
+  const model = modelIn(menus, sel);
+  // A model the catalog does not list shows its own name, not its provider path (`pi`'s ids are paths).
+  const name = model?.name ?? (sel.model ? String(sel.model).split("/").pop() : null) ?? program?.name ?? sel.agent;
+  const level = levelOf(menus, sel);
+  return [name, level ? levelWord(level) : null, sel.fast ? "Fast" : null].filter(Boolean).join(" · ");
+}

@@ -22,6 +22,11 @@ export function home() {
   return HOME;
 }
 
+/** The app's own folder, as `appHome()` answers it. */
+export function appHome() {
+  return HOME;
+}
+
 export async function readTextFile(path) {
   READS.push(path);
   const entry = FILES.get(path);

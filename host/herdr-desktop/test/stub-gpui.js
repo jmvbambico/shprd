@@ -19,7 +19,7 @@ export function record(on) {
 
 /** One chainable element: every method answers itself, `child`/`children` included. */
 function element() {
-  const node = { idv: null, click: null, down: null, kids: [], calls: [] };
+  const node = { idv: null, click: null, down: null, keydown: null, drop: null, kids: [], calls: [] };
   const add = (c) => {
     if (Array.isArray(c)) c.forEach(add);
     else if (c !== null && c !== undefined && c !== false) node.kids.push(c);
@@ -49,6 +49,18 @@ function element() {
       if (recording && name === "on_click") {
         return (fn) => {
           node.click = fn;
+          return proxy;
+        };
+      }
+      if (recording && name === "on_key_down") {
+        return (fn) => {
+          node.keydown = fn;
+          return proxy;
+        };
+      }
+      if (recording && name === "on_drop") {
+        return (fn) => {
+          node.drop = fn;
           return proxy;
         };
       }
@@ -112,6 +124,36 @@ export function click(root, id) {
   return { ran, stopped };
 }
 
+/**
+ * Presses a key the way the window delivers it: the key event starts at the element
+ * with `id` (where the keyboard is) and goes up through each ancestor's `on_key_down`
+ * until one calls `cx.stop_propagation()`. Answers `{ ran, stopped }`.
+ */
+export function keydown(root, id, event) {
+  const path = [];
+  const find = (el) => {
+    const node = el?.__node;
+    if (!node) return false;
+    path.push(node);
+    if (node.idv === id) return true;
+    if (node.kids.some(find)) return true;
+    path.pop();
+    return false;
+  };
+  if (!find(root)) throw new Error(`no element ${id}`);
+  const ran = [];
+  let stopped = false;
+  const cx = { stop_propagation: () => { stopped = true; }, notify: () => {}, timer: { after: () => ({ cancel: () => {} }) } };
+  for (let i = path.length - 1; i >= 0 && !stopped; i -= 1) {
+    const node = path[i];
+    if (node.keydown) {
+      ran.push(node.idv ?? "(unnamed)");
+      node.keydown({ key: "", modifiers: {}, ...event }, cx);
+    }
+  }
+  return { ran, stopped };
+}
+
 /** The base `View` a mod extends: `render` is the mod's own. */
 export class View {}
 
@@ -135,8 +177,9 @@ export function inputState(options = {}) {
     set_value: (next) => {
       text = typeof next === "string" ? next : (next?.text ?? "");
     },
+    // Typing at the end: the selection is not modelled.
     replace: (next) => {
-      text = String(next ?? "");
+      text += String(next ?? "");
     },
     on: (event, handler) => {
       handlers.set(event, handler);
