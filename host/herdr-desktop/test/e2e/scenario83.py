@@ -191,7 +191,7 @@ def main():
         sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
 
         ensure_tasks_pane()
-        accepted, answered, clicked_review, tries = set(), set(), {}, {}
+        accepted, answered, clicked_review, tries, review_tries = set(), set(), {}, {}, {}
         deadline = time.time() + args.minutes * 60
         last = {}
         while time.time() < deadline:
@@ -278,7 +278,9 @@ def main():
                 if t["derived"]["status"] != "ready" or tid in accepted:
                     continue
                 t1 = time.time()
-                accepted.add(tid)
+                review_tries[tid] = review_tries.get(tid, 0) + 1
+                if review_tries[tid] >= 3:
+                    accepted.add(tid)
                 for _ in range(3):
                     p = shoot(f"{tid}-ready-list")
                     px, size = row_action(p, tid, "Review")
@@ -290,9 +292,16 @@ def main():
                     sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
                     time.sleep(2)
                 if not px:
-                    sc.record(f"{tid} Review", "the row shows a Review pill", "no Review pill found on the row", t1, False)
-                    failed = True
+                    ready_now = [i for i, x in by_id(state()).items() if x["derived"]["status"] == "ready"]
+                    pills = [w for w in rc.words(p)[0] if w[0] > 0.59 * size[0] and w[4] == "Review"]
+                    if len(ready_now) == 1 and len(pills) == 1:  # OCR lost the id word; the one pill is this task's
+                        px = (pills[0][0] + pills[0][2] / 2, pills[0][1] + pills[0][3] / 2)
+                if not px:
+                    if review_tries[tid] >= 3:
+                        sc.record(f"{tid} Review", "the row shows a Review pill", "no Review pill found on the row", t1, False)
+                        failed = True
                     continue
+                accepted.add(tid)
                 click(p, px, size, f"{tid} Review")
                 time.sleep(2.5)
                 p = shoot(f"{tid}-dialog")
