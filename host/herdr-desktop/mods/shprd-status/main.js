@@ -22,7 +22,7 @@ import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { keys, run, spaces, theme, window } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { counts, lastFailure, runShort, since } from "./lib/board.js";
 import { badge, countBadge, icon } from "./lib/panel.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
@@ -42,6 +42,7 @@ const FAILURE_W = 200;
 export default class Status extends View {
   init(_props, cx) {
     this.state = null;
+    adoptCache(this);
     this.failure = null;
     this.service = null;
     this.client = null;
@@ -52,6 +53,7 @@ export default class Status extends View {
     // polled would be a minute behind the board beside it. The timer is the
     // floor, so a service that started after the window did is found anyway.
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    watchSwitch(this, cx);
   }
 
   /**
@@ -75,7 +77,7 @@ export default class Status extends View {
       if (!next.client) {
         this.client = null;
         this.service = null;
-        this.state = null;
+        forgetAll(this);
         this.failure = downNotice();
         cx.notify();
         return;
@@ -83,7 +85,7 @@ export default class Status extends View {
       this.client = next.client;
       this.follow();
       this.service = this.client.record;
-      this.state = await this.client.state();
+      remember(this, this.client, await this.client.state());
       this.failure = null;
     } catch (err) {
       // A service that restarted or went away: forget the client so the next
@@ -146,6 +148,7 @@ export default class Status extends View {
   }
 
   render() {
+    syncRepo(this);
     const t = theme();
     const colors = tone(t);
     const live = this.service !== null;

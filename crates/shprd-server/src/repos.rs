@@ -214,6 +214,11 @@ pub struct RepoInfo {
     pub root: String,
     /// The directory whose `changes` file a mod watches.
     pub dir: String,
+    /// How many tasks the repository's ledger holds, when the answer was asked for
+    /// (`GET /api/repos`): a window's cheap way to know a repository is empty
+    /// before it reads the whole board. `None` when not counted or unreadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<usize>,
 }
 
 /// The id and data directory for the repository at `root`, in `state_dir`.
@@ -254,6 +259,19 @@ impl Registry {
         self.slots
             .read()
             .map(|slots| slots.values().map(|slot| info(slot)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Every registered repository with the state its handlers see, by id.
+    fn counted(&self) -> Vec<(RepoInfo, AppState)> {
+        self.slots
+            .read()
+            .map(|slots| {
+                slots
+                    .values()
+                    .map(|slot| (info(slot), slot.state.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -562,6 +580,7 @@ fn info(slot: &Slot) -> RepoInfo {
         id: slot.id.clone(),
         root: slot.root.display().to_string(),
         dir: slot.dir.display().to_string(),
+        tasks: None,
     }
 }
 
@@ -659,9 +678,22 @@ struct ReposDto {
 }
 
 async fn list_repos(State(registry): State<Arc<Registry>>) -> Json<ReposDto> {
-    Json(ReposDto {
-        repos: registry.list(),
+    let counted = registry.counted();
+    // Counting folds each repository's ledger: off the runtime, like the board read.
+    let repos = tokio::task::spawn_blocking(move || {
+        counted
+            .into_iter()
+            .map(|(mut repo, state)| {
+                repo.tasks = crate::ledger::load(&state.repo)
+                    .ok()
+                    .map(|(folded, _)| folded.tasks.len());
+                repo
+            })
+            .collect()
     })
+    .await
+    .unwrap_or_default();
+    Json(ReposDto { repos })
 }
 
 #[derive(Deserialize)]

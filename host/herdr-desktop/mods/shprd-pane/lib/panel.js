@@ -521,7 +521,9 @@ export function openAccept(p) {
     modal: true,
     width: 640,
     height: 640,
-    props: { task: p.task, title: p.title ?? "", ...(p.drop ? { drop: true } : {}) },
+    // `snapshot`: the task as the panel has it, so the dialog draws it at once and
+    // refreshes from the service in place instead of starting empty.
+    props: { task: p.task, title: p.title ?? "", ...(p.drop ? { drop: true } : {}), ...(p.snapshot ? { snapshot: p.snapshot } : {}) },
   });
 }
 

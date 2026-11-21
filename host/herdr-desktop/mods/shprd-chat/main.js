@@ -32,7 +32,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, ScrollHandle, Textarea, TextareaState, TextView, h_flex, v_flex } from "gpui-base";
 import { exec, props, setShared, shared, theme } from "herdr";
 
-import { SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
   COORDINATOR,
@@ -75,6 +75,13 @@ export default class Chat extends View {
     this.fixed = props()?.space ?? null;
     this.space = this.wanted();
     this.chat = empty(this.space ?? COORDINATOR);
+    // Each conversation (repository + agent) is kept for the window's life, so
+    // coming back to one shows it at once and the read only adds what is new; one
+    // never read says "Loading…", not "No messages yet".
+    this.keys = new RepoCache();
+    this.chats = new Map();
+    this.loaded = new Set();
+    this.slot = this.slotKey();
     this.state = null;
     this.asks = null;
     this.client = null;
@@ -171,7 +178,12 @@ export default class Chat extends View {
         cx.notify();
         return;
       }
-      if (next.restarted) this.forget();
+      if (next.restarted) {
+        // The same service shown for another repository keeps every conversation;
+        // a service that restarted wrote none of the cursors held.
+        const sameService = this.client !== null && this.client.id() === next.client.id();
+        this.forget(!sameService);
+      }
       this.client = next.client;
       this.follow();
       this.state = await this.client.state();
@@ -193,6 +205,7 @@ export default class Chat extends View {
         }
       }
       this.failure = null;
+      if (space === this.space) this.loaded?.add(this.slot);
     } catch (err) {
       // A restarted service answers with another id: forget the client so the
       // next look finds the new port instead of dialling a dead one.
@@ -203,13 +216,28 @@ export default class Chat extends View {
   }
 
   /** Starts the conversation again: a new record names nothing the old cursor did. */
-  forget() {
-    this.chat = empty(this.space ?? COORDINATOR);
-    this.opened = new Set();
+  forget(reset = false) {
+    const now = this.slotKey();
+    if (this.chats) {
+      if (this.slot !== undefined) this.chats.set(this.slot, { chat: this.chat, opened: this.opened });
+      if (reset) {
+        this.chats.clear();
+        this.loaded.clear();
+      }
+    }
+    const kept = this.chats?.get(now) ?? null;
+    this.slot = now;
+    this.chat = kept?.chat ?? empty(this.space ?? COORDINATOR);
+    this.opened = kept?.opened ?? new Set();
     this.refusal = null;
     this.answerRefusal = null;
     this.typing = null;
     this.sending = false;
+  }
+
+  /** The key of the conversation shown: the repository's folder and the agent's space. */
+  slotKey() {
+    return `${this.keys?.key() ?? ""}|${this.space ?? ""}`;
   }
 
   /** Follows the service's change file for as long as this copy lives. */
@@ -348,6 +376,12 @@ export default class Chat extends View {
 
   render() {
     if (this.thread || this.fixed === null) this.follow_space();
+    // Another repository's space: its conversation as last read is drawn now and
+    // the read adds what is new (the same service, so its cursors still hold).
+    if (this.slot !== undefined && this.slotKey() !== this.slot) {
+      this.forget(false);
+      this.refresh();
+    }
     this.revalidate();
     const t = theme();
     const colors = tone(t);
@@ -409,6 +443,9 @@ export default class Chat extends View {
 
   /** What an empty timeline says, in the panel and not in a tooltip. */
   blank(t, said) {
+    if (this.loaded && !this.loaded.has(this.slot) && this.failure === null) {
+      return v_flex().w_full().flex_1().px(24).py(32).items_center().child(div().text_size(TEXT.label).text_color(t.muted).child("Loading…"));
+    }
     return v_flex()
       .w_full()
       .flex_1()

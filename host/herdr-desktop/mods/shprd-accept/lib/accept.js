@@ -296,7 +296,10 @@ export function verbs(task, policy) {
   // what `passed` and the Ready word mean. A hand-in nobody has reviewed yet is
   // not a decision waiting for the person, and an approval there would be a
   // stamp on work the run has not looked at.
-  const reviewed = status === "passed" || task?.derived?.status === "ready";
+  // A passed task whose agent took the work up again reads Working: that is not a
+  // decision waiting for the person either (the row's Review follows the same word).
+  const word = task?.derived?.status;
+  const reviewed = word === "ready" || (status === "passed" && (word == null || word === "needs_you"));
   const accept = reviewed && asksFirst(policy);
   const note = reviewed && !asksFirst(policy)
     ? `tasks.merge is ${policy}: ${task?.id ?? "it"} lands without an approval`

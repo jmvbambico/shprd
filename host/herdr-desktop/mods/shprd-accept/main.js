@@ -30,7 +30,7 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { closeOverlay, focused, layout, nextCommand, props, run, setShared, shared, terminals, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { RepoCache, attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import {
   WORDS,
   card,
@@ -85,7 +85,15 @@ export default class Accept extends View {
     if (!this.headCopy) this.handle.focus();
     this.viewing = null;
     this.focusedTerminal = null;
-    this.state = null;
+    // The last board read per repository (see `RepoCache`): the head keeps drawing
+    // the shared task's row across a switch of space instead of going blank.
+    this.cache = new RepoCache();
+    this.shownKey = this.cache.key();
+    this.state = this.cache.get();
+    // The dialog's first picture: the task as the Tasks panel held it, drawn until
+    // the service has answered.
+    this.snapshot = props()?.snapshot ?? null;
+    this.title = props()?.title ?? "";
     this.client = null;
     this.failure = null;
     this.watching = false;
@@ -119,7 +127,7 @@ export default class Accept extends View {
           const task = this.selected();
           const views = { "view-chat": VIEW.chat.id, "view-term": terminalChild(task ? threadAgent(this.state, task.id) : null, terminals()), "view-pr": VIEW.pr.id, "view-artifacts": VIEW.artifacts.id };
           if (command in views && task) this.view(views[command], task);
-          else if (command === "review" && task) openAccept({ task: task.id, title: task.title });
+          else if (command === "review" && task) openAccept({ task: task.id, title: task.title, snapshot: task });
         }
       });
     }
@@ -131,7 +139,15 @@ export default class Accept extends View {
    */
   selected() {
     const id = this.headCopy ? (shared("tasks.thread")?.task ?? null) : this.taskId;
-    return card(this.state, id);
+    const key = this.cache?.key();
+    if (this.cache && key !== this.shownKey) {
+      this.shownKey = key;
+      this.state = this.cache.get();
+    }
+    const found = card(this.state, id);
+    // Until the first read answers, the dialog draws the task it was opened with.
+    if (!found && this.state === null && !this.headCopy && this.snapshot?.id === id) return this.snapshot;
+    return found;
   }
 
   /**
@@ -155,14 +171,15 @@ export default class Accept extends View {
       if (!next.client) {
         this.client = null;
         this.failure = downNotice();
-        this.state = null;
         cx.notify();
         return;
       }
       if (next.restarted) this.forget();
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
+      const board = await this.client.state();
+      this.cache.set(this.client.folder ?? null, board);
+      this.state = this.cache.get();
       this.failure = null;
       // Only the dialog needs the merge policy and the branch's changes: the head
       // would otherwise make a git read at the service for numbers it never draws.
@@ -182,7 +199,6 @@ export default class Accept extends View {
    * task's changes are reads of that run, and a new service has its own.
    */
   forget() {
-    this.state = null;
     this.policy = null;
     this.policyAt = 0;
     this.changes = null;
@@ -263,6 +279,8 @@ export default class Accept extends View {
     if (!this.client || !task || this.busy) return;
     this.busy = action;
     this.error = null;
+    // The button says what it is doing at once, before the service has answered.
+    this.cx.notify();
     try {
       await this.client.action({ kind: action, task: task.id, ...extra });
       this.dropping = false;
@@ -384,7 +402,7 @@ export default class Accept extends View {
           .bg(t.solid)
           .text_color(t.solid_foreground)
           .hover((style) => style.opacity(0.9))
-          .on_click(() => openAccept({ task: task.id, title: task.title }))
+          .on_click(() => openAccept({ task: task.id, title: task.title, snapshot: task }))
           .child("Review")
       : null;
     return v_flex()
@@ -530,7 +548,7 @@ export default class Accept extends View {
     // The question is only a question where there is something to accept: a task
     // that failed, or one that landed, is named by its reference instead (the
     // same distinction Shepherdr's card makes between "Accept X?" and the ref).
-    const title = !task ? WORDS.title : wired.accept ? WORDS.question(task.id) : task.id;
+    const title = !task ? (this.taskId ? WORDS.question(this.taskId) : WORDS.title) : wired.accept ? WORDS.question(task.id) : task.id;
     const closer = div()
       .id("accept-close")
       .w(H.sm)
@@ -593,7 +611,7 @@ export default class Accept extends View {
               .min_w(0)
               .gap(4)
               .child(div().text_size(TEXT.title).font_semibold().text_color(t.foreground).child(title))
-              .child(div().min_w(0).truncate().text_color(t.muted).child(task?.title ?? "")),
+              .child(div().min_w(0).truncate().text_color(t.muted).child(task?.title ?? this.title)),
           )
           .child(div().mt(-2).mr(-6).child(closer)),
       )
@@ -934,6 +952,9 @@ export default class Accept extends View {
           .text_color(t.foreground)
           .hover((style) => style.bg(t.hover)),
       )
+      // A verb is waiting on the service: its buttons are dimmed (and a second press
+      // is ignored in `verb`), the one pressed says what it is doing.
+      .when(this.busy !== null && id !== "cancel", (el) => el.opacity(0.6))
       .on_click(onClick)
       .child(label);
   }

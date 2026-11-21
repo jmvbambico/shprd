@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import Tasks from "../mods/shprd-tasks/main.js";
+import { RepoCache } from "../mods/lib/client.js";
 import {
   Client,
   alive,
@@ -235,6 +236,11 @@ function panel() {
   run.cx.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 20)));
   const view = new Tasks();
   view.cx = run.cx;
+  view.cache = new RepoCache();
+  view.shownKey = view.cache.key();
+  view.counts = new Map();
+  view.countsAt = Date.now();
+  view.busy = new Map();
   view.state = null;
   view.failure = null;
   view.client = null;

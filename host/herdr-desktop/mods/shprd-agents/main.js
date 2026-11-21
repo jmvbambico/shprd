@@ -15,7 +15,7 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { nextCommand, run, setShared, theme } from "herdr";
 
-import { attach, downNotice, reason, singleFlight } from "./lib/client.js";
+import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { note, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { agentRows } from "./lib/tree.js";
@@ -28,6 +28,7 @@ export default class Agents extends View {
   init(_props, cx) {
     this.cx = cx;
     this.state = null;
+    adoptCache(this);
     this.failure = null;
     this.client = null;
     this.watching = false;
@@ -35,6 +36,7 @@ export default class Agents extends View {
     this.picked = null;
     this.refresh();
     cx.timer.every(FLOOR_MS, (cx) => this.refresh(cx));
+    watchSwitch(this, cx);
     // Commands, for a key, the palette or a script: `grouped` flips the toggle and
     // `open:<agent id>` does what a click on that row does.
     cx.spawn(async () => {
@@ -62,14 +64,14 @@ export default class Agents extends View {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
       if (!next.client) {
         this.client = null;
-        this.state = null;
+        forgetAll(this);
         this.failure = downNotice();
         cx.notify();
         return;
       }
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
+      remember(this, this.client, await this.client.state());
       this.failure = null;
     } catch (err) {
       this.client = null;
@@ -133,12 +135,13 @@ export default class Agents extends View {
   }
 
   render() {
+    syncRepo(this);
     const t = theme();
     const colors = tone(t);
     const rows = this.state ? agentRows(this.state, { grouped: this.grouped }) : null;
     const body =
       rows === null
-        ? [note(t, this.failure ?? "No run yet.")]
+        ? [note(t, this.failure ?? (this.state === null ? "Loading…" : "No run yet."))]
         : rows.length === 0
           ? [note(t, "No agents running.")]
           : rows.map((row) => (row.kind === "head" ? this.head(t, row) : this.row(t, colors, row)));
