@@ -331,6 +331,11 @@ def main():
                 time.sleep(2.5)
                 p = shoot(f"{tid}-dialog")
                 apx, size = dialog_accept(p)
+                if not apx:  # the click may only have focused the window: once more
+                    click(p, px, size, f"{tid} Review (again)")
+                    time.sleep(3)
+                    p = shoot(f"{tid}-dialog")
+                    apx, size = dialog_accept(p)
                 if not apx:
                     sc.record(f"{tid} Review", "the Accept dialog opens", "no dialog Accept found", t1, False)
                     failed = True

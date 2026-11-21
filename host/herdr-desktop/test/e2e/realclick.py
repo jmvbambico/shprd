@@ -164,6 +164,9 @@ def click_px(pids, px, size, log=print, mode="--topid", waits=6):
                 time.sleep(1.5)
                 continue
             sx, sy = ww / size[0], wh / size[1]
+            # A window of a background app takes its first click as "focus me": bring it forward first.
+            subprocess.run([_tools["click"], str(pid), "--activate"], capture_output=True, text=True)
+            time.sleep(0.4)
             r = subprocess.run([_tools["click"], str(pid), f"{px[0] * sx:.1f}", f"{px[1] * sy:.1f}", mode], capture_output=True, text=True)
             last = (r.stdout + r.stderr).strip()
             log(f"  click pid {pid} px {px[0]:.0f},{px[1]:.0f} -> {last}")
