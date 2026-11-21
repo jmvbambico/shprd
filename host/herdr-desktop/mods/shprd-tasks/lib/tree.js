@@ -261,7 +261,7 @@ export function treeTasks(state, space, spaceCount = 1, now = Date.now()) {
  * numbers a row's badge would show.
  */
 export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
-  const list = spacesOf(state);
+  const list = rebindSpaces(spacesOf(state), herdrSpaces);
   const own = list.map((space) => {
     const tasks = treeTasks(state, space, list.length, now);
     return {
@@ -278,6 +278,27 @@ export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
     };
   });
   return inWindowOrder([...own, ...plainSpaces(list, herdrSpaces)], list, herdrSpaces);
+}
+
+/**
+ * Served spaces whose Herdr space was closed, bound to the Herdr space the person
+ * made for the same folder since (SHPR-80). The service keeps a space by its
+ * folder, so a folder closed and added again is the same served space with a new
+ * Herdr id: left as it was, the row would name the closed space and the new one
+ * would show beside it as a second, plain row.
+ */
+export function rebindSpaces(served, herdrSpaces = []) {
+  const live = Array.isArray(herdrSpaces) ? herdrSpaces.filter((space) => space?.id) : [];
+  if (live.length === 0) return served;
+  const taken = new Set(served.map((space) => space.herdr_id).filter((id) => live.some((h) => h.id === id)));
+  return served.map((space) => {
+    if (!space.herdr_id || live.some((h) => h.id === space.herdr_id)) return space;
+    const folder = trimFolder(space.folder);
+    const home = live.find((h) => folder !== "" && trimFolder(h.folder) === folder && !taken.has(h.id));
+    if (!home) return space;
+    taken.add(home.id);
+    return { ...space, herdr_id: home.id, herdr_name: home.name ?? space.herdr_name };
+  });
 }
 
 /**

@@ -966,7 +966,16 @@ export async function attach(current, io = {}) {
  */
 async function shown(client, folder) {
   if (!folder) return client.forFolder(null);
-  const key = `${client.id()}|${normalizeFolder(folder)}`;
+  // The shown Herdr space is part of the key: a folder whose space was closed and added
+  // again is a new space, and the service dropped the repository when the first one closed,
+  // so it must be told again (it prepares the space's coordinator when it is shown).
+  let space = "";
+  try {
+    space = String((spaces() ?? []).find((entry) => entry.active)?.id ?? "");
+  } catch {
+    space = "";
+  }
+  const key = `${client.id()}|${normalizeFolder(folder)}|${space}`;
   let repo = registered.get(key);
   if (!repo) {
     const answer = await client.forFolder(folder).register(folder);
