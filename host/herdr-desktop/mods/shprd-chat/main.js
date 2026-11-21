@@ -476,7 +476,8 @@ export default class Chat extends View {
     if (!reply || reply.at === (this.lastReply ?? null) || typeof reply.key !== "string") return;
     this.lastReply = reply.at;
     if (reply.key !== "chat:coordinator" || reply.field !== "selection" || !reply.value) return;
-    const stamp = Date.now();
+    this.pickSeq = (this.pickSeq ?? 0) + 1;
+    const stamp = this.pickSeq;
     this.picked = { value: reply.value, stamp };
     this.cx.timer.after(PICK_SETTLE_MS, () => {
       if (this.picked?.stamp === stamp) this.applyPick();
