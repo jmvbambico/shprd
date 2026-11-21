@@ -64,7 +64,7 @@ function element() {
           return proxy;
         };
       }
-      if (recording && (name === "w" || name === "pr")) {
+      if (recording && ["w", "pr", "bg", "gap", "border_1", "border_t"].includes(name)) {
         return (n) => {
           node.calls.push([name, n]);
           return proxy;

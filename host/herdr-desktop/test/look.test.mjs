@@ -14,6 +14,7 @@ import * as herdr from "herdr";
 import { iconFile, pieFile } from "../mods/lib/panel.js";
 import { progressOf } from "../mods/lib/board.js";
 import Pane from "../mods/shprd-pane/main.js";
+import { record, walk } from "./stub-gpui.js";
 import Toasts from "../mods/shprd-toasts/main.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -87,4 +88,32 @@ test("a pane header writes the home folder as ~", () => {
   assert.equal(pane.short("/Users/someone/dev/shop"), "~/dev/shop");
   assert.equal(pane.short("/srv/other"), "/srv/other");
   assert.equal(pane.short(null), "");
+});
+
+test("toasts are one card: no frame or background each, a divider between them", () => {
+  const view = new Toasts();
+  const now = Date.now();
+  view.items = ["a", "b", "c"].map((id) => ({ id, title: id, at: now, level: "info" }));
+  view.dismissed = new Set();
+  view.hovered = null;
+  view.frozen = null;
+  record(true);
+  try {
+    const column = view.render({ notify() {} });
+    const nodes = walk(column);
+    const toasts = nodes.filter((n) => String(n.idv).startsWith("toast-") && !String(n.idv).startsWith("toast-x-"));
+    assert.equal(toasts.length, 3);
+    const names = (n) => n.calls.map((c) => c[0]);
+    for (const n of nodes) {
+      assert.ok(!names(n).includes("bg") || n.idv === null || !String(n.idv).startsWith("toast-"), "no toast background");
+      assert.ok(!names(n).includes("border_1"), "no frame");
+    }
+    assert.ok(!names(nodes[0]).includes("gap"), "no gap between toasts");
+    // The mod's tone dot is the only .bg inside a toast; the toast itself has none.
+    assert.ok(toasts.every((n) => !names(n).includes("bg")));
+    assert.ok(toasts.slice(1).every((n) => names(n).includes("border_t")), "a divider above each later toast");
+    assert.ok(!names(toasts[0]).includes("border_t"), "none above the first");
+  } finally {
+    record(false);
+  }
 });
