@@ -16,6 +16,11 @@ import subprocess
 SWIFT_CLICK = r'''
 import Cocoa
 let a = CommandLine.arguments
+if a.count >= 3 && a[2] == "--activate", let pid = Int32(a[1]) {
+  // Brings the private window's app to the front (and its Space), so its window is on screen to click.
+  let ok = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps]) ?? false
+  print("activated \(ok)"); exit(0)
+}
 guard a.count >= 4, let pid = Int32(a[1]), let rx = Double(a[2]), let ry = Double(a[3]) else { print("usage"); exit(2) }
 let l = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String:Any]]
 var best: (Double, Double, Double, Double)? = nil
@@ -142,6 +147,10 @@ def click_px(pids, px, size, log=print, mode="--topid", waits=6):
             try:
                 ww, wh = float(b[2]), float(b[3])
             except (ValueError, IndexError):
+                # Not on screen (another Space, or covered by a full-screen app): bring the private Herdr forward.
+                a = subprocess.run([_tools["click"], str(pid), "--activate"], capture_output=True, text=True).stdout.strip()
+                log(f"  window of pid {pid} not on screen: {a}")
+                time.sleep(1.5)
                 continue
             sx, sy = ww / size[0], wh / size[1]
             r = subprocess.run([_tools["click"], str(pid), f"{px[0] * sx:.1f}", f"{px[1] * sy:.1f}", mode], capture_output=True, text=True)
