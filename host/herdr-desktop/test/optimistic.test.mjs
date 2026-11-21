@@ -209,3 +209,19 @@ test("SHPR-83: a queued task held back for a shared file says so on the row and 
   assert.equal(rows.find((r) => r.id === "T4").word, "waits T3");
   assert.equal(rows.find((r) => r.id === "T4").waits, true);
 });
+
+test("SHPR-83: a hand-in whose review kickoff was not delivered has a Retry review button, not Review or Accept", async () => {
+  const stuck = task("T1", "reported", "needs_you", { derived: { status: "needs_you", need: "attention", reason: "review kickoff not delivered" } });
+  const acts = rowActions(stuck);
+  assert.deepEqual(acts.map((a) => [a.id, a.action]), [["retry_review", "task.review_again"], ["drop", null]]);
+  // Pressing it goes through the optimistic layer like any verb.
+  const raw = { run: { id: "r1" }, tasks: [stuck] };
+  const cache = cacheWith(raw);
+  const owner = { client: { folder: FOLDER }, cache, state: null };
+  let sent = null;
+  const out = await press(owner, { kind: "task.review_again", tasks: ["T1"], send: async () => (sent = "task.review_again", { ok: true }) });
+  assert.equal(out.ok, true);
+  assert.equal(sent, "task.review_again");
+  // A passed task whose engine card is something else is unchanged.
+  assert.equal(rowActions(task("T2", "passed", "ready"))[0].id, "review");
+});

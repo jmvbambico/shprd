@@ -197,7 +197,7 @@ def main():
         sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
 
         ensure_tasks_pane()
-        accepted, answered, clicked_review, tries, review_tries = set(), set(), {}, {}, {}
+        accepted, answered, clicked_review, tries, review_tries, retried = set(), set(), {}, {}, {}, {}
         deadline = time.time() + args.minutes * 60
         last = {}
         while time.time() < deadline:
@@ -279,9 +279,28 @@ def main():
                 failed |= not ok
                 if args.stop_after_ask:
                     return 0 if ok else 1
-            # ---- Review and Accept, by real clicks ----
+            # ---- a review that could not start: the row's Retry review button, by a real click ----
             for tid, t in sorted(ts.items()):
-                if t["derived"]["status"] != "ready" or tid in accepted:
+                d = t["derived"]
+                if t["status"] == "reported" and d["status"] == "needs_you" and str(d.get("reason", "")).startswith("review kickoff not delivered") and retried.get(tid, 0) < 3:
+                    retried[tid] = retried.get(tid, 0) + 1
+                    ensure_tasks_pane()
+                    sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
+                    time.sleep(2)
+                    t1 = time.time()
+                    p = shoot(f"{tid}-kickoff-card")
+                    px, size = row_action(p, tid, "Retry")
+                    if not px:
+                        say(f"  ({tid}: no Retry pill found yet)")
+                        continue
+                    click(p, px, size, f"{tid} Retry review")
+                    cleared = sc.wait_for(lambda: (lambda x: x if x and x["derived"]["status"] != "needs_you" else None)(by_id(state()).get(tid)), f"{tid} review restarted", 90, 3.0)
+                    shoot(f"{tid}-after-retry")
+                    sc.record(f"{tid} Retry review (real click)", "the card goes and the review runs again", f"{tid} is {by_id(state())[tid]['derived']['status']}", t1, bool(cleared))
+                    failed |= not cleared
+            # ---- Review and Accept, by real clicks (a task that passed review reads Ready, or Needs you with a card beside it) ----
+            for tid, t in sorted(ts.items()):
+                if not (t["derived"]["status"] == "ready" or (t["status"] == "passed" and t["derived"]["status"] == "needs_you")) or tid in accepted:
                     continue
                 t1 = time.time()
                 review_tries[tid] = review_tries.get(tid, 0) + 1
@@ -298,7 +317,7 @@ def main():
                     sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
                     time.sleep(2)
                 if not px:
-                    ready_now = [i for i, x in by_id(state()).items() if x["derived"]["status"] == "ready"]
+                    ready_now = [i for i, x in by_id(state()).items() if x["derived"]["status"] == "ready" or (x["status"] == "passed" and x["derived"]["status"] == "needs_you")]
                     pills = [w for w in rc.words(p)[0] if w[0] > 0.59 * size[0] and w[4] == "Review"]
                     if len(ready_now) == 1 and len(pills) == 1:  # OCR lost the id word; the one pill is this task's
                         px = (pills[0][0] + pills[0][2] / 2, pills[0][1] + pills[0][3] / 2)

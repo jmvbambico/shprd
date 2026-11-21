@@ -113,6 +113,19 @@ pub fn card(state: &RunState, escalation: &Escalation) -> Option<Card> {
     {
         return None;
     }
+    // A review whose first turn never arrived is retired by the review being started again:
+    // the engine records a new request, which the Retry review button asks for.
+    if (escalation.body == "review kickoff not delivered"
+        || escalation.body == "review brief not delivered")
+        && task.latest_attempt().is_some_and(|latest| {
+            latest
+                .reviews
+                .iter()
+                .any(|request| request.seq > escalation.seq)
+        })
+    {
+        return None;
+    }
     if let Some(attempt) = spent_review_attempt(id, &escalation.body)
         && let Some(answer) = gate::rounds_spent_answer(state, task, attempt)
     {
@@ -313,6 +326,37 @@ mod tests {
         assert!(
             card(&state, &claim(false, 4)).is_some(),
             "an engine card is a fact"
+        );
+    }
+
+    #[test]
+    fn a_review_kickoff_card_is_retired_by_the_review_starting_again() {
+        // SHPR-83: "review kickoff not delivered" kept T1 at Needs you even after the review
+        // was started again and passed, so its Accept never showed.
+        let mut at = attempt(1);
+        at.reviews.push(shprd_core::state::ReviewRequest {
+            reviewer: "claude".into(),
+            degraded: false,
+            seq: 3,
+        });
+        let mut state = RunState::default();
+        state
+            .tasks
+            .insert(String::from("T1"), task(TaskStatus::Reported, vec![at]));
+        let card_at = |seq| Escalation {
+            task: Some(String::from("T1")),
+            body: String::from("review kickoff not delivered"),
+            default_action: String::from("press Retry review"),
+            seq,
+            by_agent: false,
+        };
+        assert!(
+            card(&state, &card_at(4)).is_some(),
+            "no newer review request: it stands"
+        );
+        assert!(
+            card(&state, &card_at(2)).is_none(),
+            "a review started after it retires it"
         );
     }
 

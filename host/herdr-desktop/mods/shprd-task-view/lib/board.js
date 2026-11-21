@@ -549,6 +549,11 @@ export function rowActions(task) {
   // still `passed`/`reported`, but there is nothing to review, and a Stop the
   // engine would refuse is worse than no button, so such a row has none.
   const handedIn = status === "passed" || status === "reported";
+  // A hand-in whose review could not start ("review kickoff not delivered") has nothing to
+  // review or accept yet: its button restarts the review (SHPR-83), so nobody types the verb.
+  if (status === "reported" && word === "needs_you" && /^review (kickoff|brief) not delivered/.test(String(task?.derived?.reason ?? ""))) {
+    return [{ id: "retry_review", label: "Retry review", action: "task.review_again" }, ...drop];
+  }
   if (word === "ready" || (handedIn && (word === "needs_you" || word == null))) {
     return [{ id: "review", label: "Review", action: null }, ...(word === "needs_you" ? drop : [])];
   }

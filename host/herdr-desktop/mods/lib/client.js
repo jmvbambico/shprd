@@ -392,6 +392,7 @@ const VERB_NAMES = {
   "task.accept": "Accept",
   "task.start": "Start",
   "task.retry": "Retry",
+  "task.review_again": "Retry review",
   "task.stop": "Stop",
   "task.drop": "Drop",
   "task.drop_many": "Drop",

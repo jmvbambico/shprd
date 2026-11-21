@@ -574,7 +574,10 @@ fn ask_history(events: &[Event], task: &str) -> String {
                 answer,
                 ..
             } if of == task => {
-                if let Some(found) = asks.iter_mut().find(|(id, _, _)| id.as_str() == ask.as_str()) {
+                if let Some(found) = asks
+                    .iter_mut()
+                    .find(|(id, _, _)| id.as_str() == ask.as_str())
+                {
                     found.2 = Some(shorten(answer));
                 }
             }
@@ -3778,7 +3781,9 @@ project_dirs = []
         let asked = notices(&[plan.clone(), review(true, 2)], None, MergePolicy::Ask);
         assert_eq!(asked.len(), 1, "{asked:?}");
         assert!(
-            asked[0].line.contains("Review and Accept it in the Tasks pane"),
+            asked[0]
+                .line
+                .contains("Review and Accept it in the Tasks pane"),
             "{}",
             asked[0].line
         );

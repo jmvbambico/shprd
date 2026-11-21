@@ -53,6 +53,7 @@ export const LABELS = {
   "task.accept": "Merging…",
   "task.start": "Starting…",
   "task.retry": "Retrying…",
+  "task.review_again": "Retrying review…",
   "task.stop": "Stopping…",
   "task.drop": "Dropping…",
   "task.drop_many": "Dropping…",
@@ -65,6 +66,7 @@ const NOTICE = {
   "task.accept": "Accepting",
   "task.start": "Starting",
   "task.retry": "Retrying",
+  "task.review_again": "Retrying review of",
   "task.stop": "Stopping",
   "task.drop": "Dropping",
   "task.drop_many": "Dropping",
@@ -125,6 +127,7 @@ export function plan(kind, board, tasks, extra = {}) {
         put(task, { status: "dropped", word: word(task), label });
         break;
       case "review":
+      case "task.review_again":
         put(task, { label });
         break;
       case "ask.answer":
