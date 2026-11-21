@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-import { followPick, livePick, inWindowOrder, subtitle, age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
+import { rebindSpaces, followPick, livePick, inWindowOrder, subtitle, age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
 const NOW = 1_800_000_000_000;
 const state = JSON.parse(readFileSync(new URL("./fixtures/proto.json", import.meta.url), "utf8"));
@@ -224,4 +224,13 @@ test("the pick follows the window's space: a dead pick moves to it, so does a pi
   const served = { ...state, spaces: [{ id: "sp-scratch", name: "scratchpad", folder: "/p/scratchpad/", herdr_id: "sp2aad" }] };
   assert.equal(followPick(served, "sp-scratch", herdr, "spother"), "sp-scratch", "a served pick that stands for the active space stays");
   assert.equal(followPick(state, "herdr:sp1201", [], null), "herdr:sp1201", "no list, nothing to follow");
+});
+
+test("a served space whose Herdr space was closed binds to the same folder's new space: one row, not two", () => {
+  const served = { ...state, spaces: [{ id: "sp-scratch", name: "scratchpad", folder: "/p/scratchpad/", herdr_id: "sp1201", herdr_name: "shprd · scratchpad" }], tasks: [] };
+  const herdr = [{ id: "sp2aad", name: "shprd · scratchpad", folder: "/p/scratchpad", active: true }, { id: "spjm", name: "jmanager", folder: "/p/jm" }];
+  const rows = spaceTree(served, herdr);
+  assert.deepEqual(rows.map((row) => [row.id, row.herdr]), [["sp-scratch", "sp2aad"], ["herdr:spjm", "spjm"]]);
+  assert.equal(rebindSpaces(served.spaces, []).at(0).herdr_id, "sp1201", "no Herdr list, nothing to bind to");
+  assert.equal(rebindSpaces(served.spaces, [{ id: "sp1201", folder: "/p/other" }]).at(0).herdr_id, "sp1201", "a live space is left alone");
 });

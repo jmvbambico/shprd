@@ -11,7 +11,7 @@ expected and what it saw, with timings, and writes a screenshot per step into
 
 Isolation (the rules every live check here follows):
 - ONE private Herdr window at a time: a copy of the person's `~/.config/herdr-app`
-  (their Settings and Shepherdr mods, `spaces.picked` dropped), a private
+  (their Settings and Shepherdr mods, `spaces.picked` kept as it is), a private
   `HC_SESSION`, private `XDG_*` and `SHPRD_HOME`, and a Dock-like PATH whose
   first entry is the binary under test. Nothing is read from or written to the
   person's own state; every command starts with the guards below.
@@ -325,7 +325,13 @@ def main():
     shared_path = f"{env.app}/shared.json"
     shared = json.load(open(shared_path))
     shared.pop("spaces.picked", None)
+    # The person's shared.json is kept as it is, `spaces.picked` included (SHPR-80: SHPR-79 dropped it and
+    # so never met a pick of a closed space). Only the layout is set. A real file with no pick gets a dead one,
+    # because a closed space is what a pick is left pointing at.
     shared["layout"] = "shprd"
+    if not shared.get("spaces.picked"):
+        shared["spaces.picked"] = "herdr:sp0000dead0000000000000000000000000"
+    stale0 = shared["spaces.picked"]
     json.dump(shared, open(shared_path, "w"))
     e = env.env(binary_dir)
     r = run([binary, "install", "herdr-desktop", "--from", mods, "--app-home", env.app], e, timeout=60)
@@ -348,7 +354,20 @@ def main():
     shot(e, out, "00-window-shprd-layout")
     say("window up in the shprd layout")
 
-    def step_a():
+    def picked_now():
+        """`spaces.picked` as the window last wrote it, and the ids of the spaces Herdr has."""
+        try:
+            pick = json.load(open(f"{env.app}/shared.json")).get("spaces.picked")
+        except (OSError, ValueError):
+            pick = None
+        ids = [sp.get("id") for sp in (ls(e).get("spaces", []) if isinstance(ls(e), dict) else [])]
+        return pick, ids
+
+    def pick_ok(pick, ids):
+        """A pick is none or a space Herdr has: never a closed one, never drawn as a raw id."""
+        return pick is None or str(pick).replace("herdr:", "") in ids
+
+    def step_a(label="a add folder (window's own flow)"):
         t0 = time.time()
         os.makedirs(os.path.dirname(folder), exist_ok=True)
         # The New space dialog's own order: make the folder, make it a repo, space.new, the chat tab, close the window's tab.
@@ -368,10 +387,43 @@ def main():
         names = [(t["name"], t["id"]) for t in tabs]
         stray = foreign_assistants(e, tabs)
         ok = bool(up) and len(shown) == 1 and not stray and ("shprd-coordinator" in str(shown[0]["id"]) or not [t for t in tabs if "shprd-coordinator" in str(t["id"])])
-        return record("a add folder (window's own flow)", "only shprd's chat in the space; service up", f"tabs {names}; shown {[t['name'] for t in shown]}; foreign {stray}; service {'up' if up else 'DOWN'}", t0, ok), space
+        return record(label, "only shprd's chat in the space; service up", f"tabs {names}; shown {[t['name'] for t in shown]}; foreign {stray}; service {'up' if up else 'DOWN'}", t0, ok), space
 
     ok, space = step_a()
     failed |= not ok
+    # ---- a2: the person's real stale pick is dropped by the first look ----
+    t0 = time.time()
+    time.sleep(3)
+    pick, ids = picked_now()
+    shot(e, out, "a2-first-open")
+    failed |= not record("a2 first open from the real state", f"the real window's stale pick ({stale0[:14]}…) is not kept; the panes follow the new space",
+                         f"spaces.picked {pick!r}; spaces {ids}", t0, pick_ok(pick, ids) and pick != stale0)
+    # ---- a3: close the folder's space, add the same folder again (a new id) ----
+    t0 = time.time()
+    app_do(e, "space.close", id=space, confirmed="true")
+    time.sleep(4)
+    gone = space not in picked_now()[1]
+
+    def dropped():
+        """The window's sync has told the service the folder has no space: it stopped serving it, as it does
+        a minute after a person closes a space (a re-add inside that beat is a known gap, see the README)."""
+        svc = service(e)
+        req = urllib.request.Request(f"{svc['base']}/api/repos", headers={"authorization": f"Bearer {svc['token']}"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            listed = json.loads(r.read().decode())
+        names = [str(x.get("folder") or x.get("root") or x) for x in (listed.get("repos", []) if isinstance(listed, dict) else listed)]
+        return not any(folder.rstrip("/") in n for n in names)
+
+    synced = wait_for(dropped, "service drops the closed space's repo", 90, 2.0)
+    say(f"service dropped the closed space's repo: {bool(synced)}")
+    ok3, space2 = step_a("a3 re-add the same folder")
+    shot(e, out, "a3-readded")
+    pick, ids = picked_now()
+    failed |= not ok3
+    failed |= not record("a3 closed then re-added", "a new space id, ready chat, panes on the new space, no pick of the closed one",
+                         f"closed {gone}; old {space}, new {space2}; spaces.picked {pick!r}; spaces {ids}", t0,
+                         gone and space2 != space and pick_ok(pick, ids) and pick != f"herdr:{space}")
+    space = space2
     if args.stop_after == "a":
         teardown(env, binary_dir, args.keep)
         return 1 if failed else 0
@@ -421,6 +473,10 @@ def main():
     seen += f"; herdr-task list: {hl[:80]!r}"
     ok_c = bool(ts) and not re.search(r"\b(TC|SHPR|T)-?\d", hl) and any(t.get("deps") for t in ts)
     failed |= not record("c tasks appear in both panes", "all tasks within seconds, 3 after 1, none in herdr-task list", seen, t0, ok_c)
+
+    if args.stop_after == "c":
+        teardown(env, binary_dir, args.keep)
+        return 1 if failed else 0
 
     # ---- e: review -> accept task 1 ----
     t0 = time.time()

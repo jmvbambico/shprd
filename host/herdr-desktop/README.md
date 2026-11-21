@@ -302,8 +302,8 @@ switch to.
 
 ## The end-to-end run (before every desktop merge)
 
-`test/e2e/scenario.py` is one uninterrupted add-folder -> chat -> tasks -> Accept
-run in a private window (SHPR-79), with a screenshot at each step and a table of
+`test/e2e/scenario.py` is one uninterrupted add-folder -> close the space -> re-add the
+same folder -> chat -> tasks -> Accept run in a private window (SHPR-79), with a screenshot at each step and a table of
 expected against seen:
 
 ```
@@ -314,13 +314,16 @@ python3 host/herdr-desktop/test/e2e/scenario.py --cleanup /private/tmp/shpe2e-XX
 ```
 
 It copies the person's `~/.config/herdr-app` (their Settings and Shepherdr mods,
-`spaces.picked` dropped) and `~/.config/shprd` into a private home under
+`spaces.picked` and every other key kept as it is, SHPR-80) and `~/.config/shprd` into a private home under
 `/private/tmp`, installs this checkout's mods into it, and drives what the
 window's own flows run (the New space dialog's commands, the chat pane's
 `POST /api/chat`, a card's answer and the Accept button's `POST /api/action`):
 the window has no command for a click or a keystroke. It tears the window down
 by recorded pid and stops the private core (`hc server stop`); never pkill by
-name. Run it against the base mods (`--mods` a `git archive` of the base's
+name. The run waits for the service to drop a closed space's repository before re-adding
+the folder, as a person's pause does: a re-add inside the window's sync beat (a few
+seconds) keeps the old repository's slot, whose coordinator is not started again
+(a known gap, `Registry::show` prepares a repository once). Run it against the base mods (`--mods` a `git archive` of the base's
 `host/herdr-desktop`) to see a failing step: step f fails there.
 
 ## Starting the service
