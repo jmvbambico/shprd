@@ -160,6 +160,18 @@ fn copy_one(folder: &Path, index: usize, item: &ChatAttachmentDto) -> Result<Pat
     Ok(target)
 }
 
+/// Removes the copies of a message that was not sent (the host refused it), so a retry does not
+/// leave the first try's files behind. Each copy sits alone in its message's folder.
+pub fn discard(stored: &[PathBuf]) {
+    for folder in stored.iter().filter_map(|path| path.parent()) {
+        // Only a message's own folder under the attachments folder is ever removed.
+        if !folder.to_string_lossy().contains(DIR) {
+            continue;
+        }
+        let _ = fs::remove_dir_all(folder);
+    }
+}
+
 /// The message the agent receives: the person's words, then the files as
 /// absolute paths one to a line, in a form every agent opens with its own file
 /// tools (claude shows an image path as an image).

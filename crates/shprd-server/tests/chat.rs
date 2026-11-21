@@ -715,6 +715,36 @@ async fn files_alone_are_a_message_and_a_missing_file_refuses_everything() {
 }
 
 #[tokio::test]
+async fn a_refused_send_leaves_no_attachment_copies_behind() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    let recorder = Arc::new(Recorder {
+        refuse: true,
+        ..Recorder::default()
+    });
+    let fixture = Fixture::prepared_with(repo, home, recorder);
+    let picked = tempfile::tempdir().unwrap();
+    let file = picked.path().join("a.txt");
+    std::fs::write(&file, "x").unwrap();
+    let reply = fixture
+        .send(
+            Call::post(
+                "/api/chat",
+                json!({"space": "coordinator", "text": "hi", "attachments": [{"path": file.display().to_string()}]}),
+            )
+            .with_token(&fixture.token)
+            .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    let left = std::fs::read_dir(fixture.repo.path().join(".shprd/attachments"))
+        .map_or(0, Iterator::count);
+    assert_eq!(left, 0, "the refused message's copies were removed");
+}
+
+#[tokio::test]
 async fn stop_presses_escape_in_the_coordinators_pane_and_is_a_write() {
     let fixture = Fixture::new("claude");
     let reply = fixture

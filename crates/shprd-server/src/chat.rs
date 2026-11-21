@@ -288,9 +288,11 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
     // directory), and the message names the copies.
     let stored = attachments::store(&place.cwd, &attachments)?;
     let message = attachments::compose(text, &stored);
-    writer
-        .send(space.target(), &message)
-        .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was sent")))?;
+    writer.send(space.target(), &message).map_err(|reason| {
+        // Nothing reached the agent, so the copies are not left behind for a retry to repeat.
+        attachments::discard(&stored);
+        ApiReject::refused(format!("{reason}. Nothing was sent"))
+    })?;
     Ok(ChatSendReply {
         space: space.name().to_owned(),
         sent: true,
