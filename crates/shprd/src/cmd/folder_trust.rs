@@ -154,6 +154,7 @@ pub(crate) fn trust_folder(
         argv.extend(trust_args(program, folder));
         return Ok(Trusted::Argument);
     }
+    accept_bypass_warning(argv);
     let Some(config) = claude_config_file(base_env) else {
         return Ok(Trusted::Unknown);
     };
@@ -168,6 +169,46 @@ pub(crate) fn trust_folder(
     match trust_claude_projects(&config, &folders)? {
         true => Ok(Trusted::Wrote(config)),
         false => Ok(Trusted::Already),
+    }
+}
+
+/// The settings key that records Claude's one-time "Bypass Permissions mode"
+/// warning as accepted.
+const CLAUDE_BYPASS_KEY: &str = "skipDangerousModePermissionPrompt";
+
+/// Keeps a claude launched with `--dangerously-skip-permissions` from stopping on
+/// that mode's one-time warning, which a machine that never saw it asks in the
+/// pane (2.1.330 shows "No, exit / Yes, I accept" until the key is in the
+/// person's own settings).
+///
+/// The key goes in as `--settings`, which writes nothing: the flag takes inline
+/// JSON, and a second `--settings` replaces the first instead of adding to it,
+/// so an existing one (the fast switch's) is extended and none is repeated.
+fn accept_bypass_warning(argv: &mut Vec<String>) {
+    if !argv
+        .iter()
+        .any(|arg| arg == "--dangerously-skip-permissions")
+    {
+        return;
+    }
+    let existing = argv
+        .iter()
+        .position(|arg| arg == "--settings")
+        .filter(|at| at + 1 < argv.len());
+    match existing {
+        Some(at) => {
+            // A value that is a file path or not an object is left as it was.
+            if let Ok(serde_json::Value::Object(mut settings)) =
+                serde_json::from_str::<serde_json::Value>(&argv[at + 1])
+            {
+                settings.insert(CLAUDE_BYPASS_KEY.to_string(), serde_json::Value::Bool(true));
+                argv[at + 1] = serde_json::Value::Object(settings).to_string();
+            }
+        }
+        None => {
+            argv.push("--settings".to_string());
+            argv.push(serde_json::json!({ CLAUDE_BYPASS_KEY: true }).to_string());
+        }
     }
 }
 
@@ -346,6 +387,42 @@ mod tests {
         assert_eq!(doc["projects"][&key]["hasTrustDialogAccepted"], true);
         let real = folder.canonicalize().expect("real").display().to_string();
         assert_eq!(doc["projects"][&real]["hasTrustDialogAccepted"], true);
+    }
+
+    #[test]
+    fn a_bypass_launch_accepts_the_one_time_warning_without_writing_anything() {
+        let mut argv = ["claude", "--dangerously-skip-permissions"]
+            .map(String::from)
+            .to_vec();
+        accept_bypass_warning(&mut argv);
+        assert_eq!(
+            argv[2..],
+            [
+                "--settings",
+                r#"{"skipDangerousModePermissionPrompt":true}"#
+            ]
+        );
+        // The fast switch's own `--settings` is extended, never repeated: a
+        // second flag would replace it.
+        let mut argv = [
+            "claude",
+            "--settings",
+            r#"{"fastMode":true}"#,
+            "--dangerously-skip-permissions",
+        ]
+        .map(String::from)
+        .to_vec();
+        accept_bypass_warning(&mut argv);
+        assert_eq!(argv.iter().filter(|arg| *arg == "--settings").count(), 1);
+        let settings: serde_json::Value = serde_json::from_str(&argv[2]).expect("json");
+        assert_eq!(settings["fastMode"], true);
+        assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
+        // Any other mode has no such warning.
+        let mut plan = ["claude", "--permission-mode", "plan"]
+            .map(String::from)
+            .to_vec();
+        accept_bypass_warning(&mut plan);
+        assert_eq!(plan.len(), 3);
     }
 
     #[test]
