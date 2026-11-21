@@ -119,7 +119,7 @@ def main():
     # codex quota can run out mid-run, so a private run reviews with Claude (a flag picks codex).
     import re
     if args.reviewer == "claude":
-        settings = re.sub(r"\[roles\.reviewer\][^\[]*", '[roles.reviewer]\nagent = "claude"\nmodel = "sonnet"\nperm = "auto"\n\n', settings, count=1)
+        settings = re.sub(r"(?ms)^\[roles\.reviewer\].*?(?=^\[|\Z)", '[roles.reviewer]\nagent = "claude"\nmodel = "sonnet"\nperm = "auto"\n\n', settings, count=1)
     open(f"{private_cfg}/settings.toml", "w").write(settings)
     shared_path = f"{env.app}/shared.json"
     shared = json.load(open(shared_path))
