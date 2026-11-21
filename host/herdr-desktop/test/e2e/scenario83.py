@@ -185,7 +185,7 @@ def main():
         sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
 
         ensure_tasks_pane()
-        accepted, answered, clicked_review = set(), set(), {}
+        accepted, answered, clicked_review, tries = set(), set(), {}, {}
         deadline = time.time() + args.minutes * 60
         last = {}
         while time.time() < deadline:
@@ -218,13 +218,19 @@ def main():
                         ensure_tasks_pane()
                         continue
                     click(p, (idw[0][0] + 300, idw[0][1] - 40), size, f"the {a.get('task')} row")
-                    time.sleep(2.5)
-                    p = shoot(f"ask-{a.get('task')}-card")
-                    ws2, size2 = rc.words(p)
-                    head = [w for w in ws2 if w[0] > 0.59 * size2[0] and w[4].strip(".,:") in ("Question", first)]
-                    if head:
-                        opened = True
+                    # The thread opens at once; its question card draws a moment later.
+                    for _ in range(6):
+                        time.sleep(2)
+                        p = shoot(f"ask-{a.get('task')}-card")
+                        ws2, size2 = rc.words(p)
+                        right = [w for w in ws2 if w[0] > 0.59 * size2[0]]
+                        if [w for w in right if w[4] == "Question"] and [w for w in right if w[4].strip(".,:") == first]:
+                            opened = True
+                            break
+                    if opened:
                         break
+                    if [w for w in right if w[1] < 400 and w[4].strip(".,:") == a.get("task")]:
+                        continue  # in the thread already: wait for the card again on the next pass
                     back = rc.find(p, "Tasks", region=(int(0.59 * size[0]), 70, size[0], 400))
                     if back:
                         click(p, back, size, "back to the list")
@@ -242,6 +248,10 @@ def main():
                         ok = bool(sc.wait_for(gone, "ask answered", 30, 2.0))
                         seen = f"clicked '{first}' at {px[0]:.0f},{px[1]:.0f}; card gone: {ok}"
                         shoot(f"ask-{a.get('task')}-answered")
+                tries[key] = tries.get(key, 0) + 1
+                if not ok and tries[key] < 3:
+                    say(f"  (ask {a.get('task')}: {seen}; trying again)")
+                    continue
                 answered.add(key)
                 sc.record(f"ask {a.get('task')} answer by click", f"the card's answer ('{pick}') is taken", seen, t1, ok)
                 failed |= not ok
