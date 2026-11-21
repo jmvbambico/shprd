@@ -681,7 +681,7 @@ test("the bar names the run, its failure and the service's absence", () => {
   assert.equal(runState({ ...STATE, finished: true }), "finished");
   assert.equal(runState({ seq: 0, run: null }), "none");
   assert.equal(runLabel(STATE), "run m10a · integration/m10");
-  assert.equal(runShort(STATE), "run m10a", "the bar names the run; the sidebar names the branch");
+  assert.equal(runShort(STATE), "run m10a · 1 working · 1 ready", "the bar names the run and where its tasks stand");
   assert.equal(runLabel({ seq: 0, run: null, hint: "no run yet" }), "no tasks yet: say what you want in the chat");
   assert.equal(runShort({ seq: 0, run: null, hint: "no run yet: start one with `shprd run start`" }), "no tasks yet: say what you want in the chat");
   assert.match(lastFailure(STATE), /^land on T2: could not run git/);
