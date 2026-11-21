@@ -361,7 +361,15 @@ impl shprd_server::RepoFactory for Factory {
                 // once the program is back, and the chat's reason follows each try.
                 if failed.is_some() && !withheld {
                     std::thread::spawn(move || {
-                        retry_coordinator(host, ctx, home, (root, folder), failure, every, &retired);
+                        retry_coordinator(
+                            host,
+                            ctx,
+                            home,
+                            (root, folder),
+                            failure,
+                            every,
+                            &retired,
+                        );
                     });
                 }
             }) as shprd_server::Prepare
@@ -1195,12 +1203,11 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_space_stops_its_coordinator_and_agents_and_only_those() {
-        // SHPR-86: the window closed the space and its coordinator kept running,
-        // attached to no space. The agents of the closed space stop; another
-        // repository's coordinator and the run's state on disk stay.
+    fn agents_of_a_space_the_host_still_has_open_are_never_stopped() {
+        // SHPR-86: a folder added again before the retire ran has a new space and
+        // a new coordinator; the sweep must not take it, nor a transient empty
+        // list from the window take every repository's agents.
         let repo = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
-        let other = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let home = TempDir::new().unwrap_or_else(|err| panic!("{err}"));
         let mux = FakeMux::default().with_starter_tab();
         prepare_space(
@@ -1209,62 +1216,27 @@ mod tests {
             None,
             start_in(&mux, home.path(), repo.path()),
         );
-        prepare_space(
-            &mux,
-            other.path(),
-            None,
-            start_in(&mux, home.path(), other.path()),
-        );
         let label = label_of(repo.path());
         let space = mux
             .find_space(&label)
             .ok()
             .flatten()
             .unwrap_or_else(|| panic!("the space exists"));
-        let worker = mux
-            .spawn_agent(&shprd_mux::AgentLaunch {
-                space: &space.id,
-                title: "worker",
-                argv: &["sh".to_string()],
-                env: &[],
-                cwd: repo.path(),
-                role: shprd_mux::AgentRole::Worker,
-                task: Some("T1"),
-                program: "sh",
-                parent: None,
-            })
-            .unwrap_or_else(|err| panic!("{err}"));
-        let coordinators = |mux: &FakeMux| -> Vec<(String, bool)> {
-            mux.list_coordinators()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|agent| (agent.space.as_str().to_string(), agent.live))
-                .collect()
-        };
-        assert_eq!(coordinators(&mux).len(), 2);
         let ctx = crate::ctx::Ctx::new(repo.path().to_path_buf(), Actor::Human, false, true);
         let record = crate::cmd::spawn::coordinator_pane_path(home.path(), repo.path(), &space.id);
         assert!(record.exists(), "the coordinator is recorded");
 
         let done = crate::cmd::spawn::stop_repo_agents(&mux, &ctx, home.path(), repo.path());
 
-        assert_eq!(done.stopped, 2, "the coordinator and the worker: {done:?}");
-        assert!(done.kept.is_empty(), "{done:?}");
-        let live: Vec<_> = coordinators(&mux)
-            .into_iter()
-            .filter(|(_, live)| *live)
-            .collect();
-        assert_eq!(live.len(), 1, "the other repository's coordinator runs on");
+        assert_eq!(done, crate::cmd::spawn::Retired::default());
         assert!(
-            mux.list_agents()
+            mux.list_coordinators()
                 .unwrap_or_default()
                 .iter()
-                .any(|agent| agent.tab.id == worker.id && !agent.live),
-            "the worker stopped"
+                .all(|agent| agent.live),
+            "the coordinator of the open space runs on"
         );
-        assert!(!record.exists(), "the closed space's record is dropped");
-        let again = crate::cmd::spawn::stop_repo_agents(&mux, &ctx, home.path(), repo.path());
-        assert_eq!(again.stopped, 0, "stopping twice is harmless");
+        assert!(record.exists(), "its record stays");
     }
 
     #[test]

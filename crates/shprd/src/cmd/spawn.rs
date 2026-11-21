@@ -2586,48 +2586,85 @@ pub(crate) struct Retired {
     pub(crate) kept: Vec<String>,
 }
 
+/// The agents of the spaces that are gone: those the host lists, still running,
+/// whose space is one of the `recorded` spaces of the repository and not one of
+/// the `open` ones. Each pane once.
+fn agents_of_closed_spaces(
+    recorded: &[String],
+    open: &[String],
+    agents: Vec<shprd_mux::LiveAgent>,
+) -> Vec<shprd_mux::LiveAgent> {
+    let mut seen: Vec<PaneId> = Vec::new();
+    let mut found = Vec::new();
+    for agent in agents {
+        let names = [
+            path_safe(agent.space.as_str()),
+            path_safe(&bare_id(agent.space.as_str())),
+        ];
+        let of_repo = names.iter().any(|name| recorded.contains(name));
+        let still_open = names.iter().any(|name| open.contains(name));
+        if !agent.live || !of_repo || still_open || seen.contains(&agent.tab.root_pane) {
+            continue;
+        }
+        seen.push(agent.tab.root_pane.clone());
+        found.push(agent);
+    }
+    found
+}
+
 /// Stops the agents shprd started for a repository whose space was closed: its
 /// coordinator, and every worker and reviewer of its run.
 ///
 /// The space is gone, so the agents are found the way they were recorded: the
 /// coordinator records name the repository's spaces (`<home>/.shprd/coordinators/
-/// <repo>/<space>`), and every agent the host lists for one of those spaces is
-/// stopped, as is every tab the current run recorded for a task. Tasks, briefs
-/// and the run log stay as they are, so a folder added again resumes the run
-/// with a fresh coordinator. The records of the closed spaces are dropped:
-/// they name panes that no longer run.
+/// <repo>/<space>`), and every agent the host lists for one of those spaces that
+/// the host no longer has open is stopped. A host that cannot say which spaces
+/// are open stops nothing, and a space still open for the folder (a folder added
+/// again before this ran) keeps its agents and the run's tabs. Tasks, briefs and
+/// the run log stay as they are, so a folder added again resumes the run with a
+/// fresh coordinator. The records of the closed spaces are dropped: they name
+/// panes that no longer run.
 pub(crate) fn stop_repo_agents(mux: &dyn Host, ctx: &Ctx, home: &Path, repo: &Path) -> Retired {
     let mut retired = Retired::default();
-    // Workers and reviewers the run recorded a tab for.
-    retired.kept.extend(
-        close_run_tabs(mux, ctx, Some(home))
-            .into_iter()
-            .map(|left| left.id),
+    // Fail closed: without the host's list of open spaces nothing is known to be
+    // closed.
+    let Ok(spaces) = mux.list_spaces() else {
+        return retired;
+    };
+    let mut open: Vec<String> = spaces
+        .iter()
+        .map(|space| path_safe(&bare_id(space.id.as_str())))
+        .collect();
+    open.extend(
+        spaces
+            .iter()
+            .map(|space| path_safe(space.id.as_str()))
+            .collect::<Vec<_>>(),
     );
+    let reshown = mux
+        .spaces_in_folder(repo)
+        .map(|found| !found.is_empty())
+        .unwrap_or(true);
     let dir = coordinator_dir(home, repo);
     let records: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default();
-    let spaces: Vec<String> = records
+    let recorded: Vec<String> = records
         .iter()
         .filter_map(|path| path.file_name())
         .map(|name| name.to_string_lossy().to_string())
         .collect();
+    // The run's own tabs belong to whichever space shows the folder now.
+    if !reshown {
+        retired.kept.extend(
+            close_run_tabs(mux, ctx, Some(home))
+                .into_iter()
+                .map(|left| left.id),
+        );
+    }
     let mut agents = mux.list_coordinators().unwrap_or_default();
     agents.extend(mux.list_agents().unwrap_or_default());
-    let mut seen: Vec<PaneId> = Vec::new();
-    for agent in agents {
-        let named = [
-            path_safe(agent.space.as_str()),
-            path_safe(&bare_id(agent.space.as_str())),
-        ];
-        if !agent.live
-            || !named.iter().any(|name| spaces.contains(name))
-            || seen.contains(&agent.tab.root_pane)
-        {
-            continue;
-        }
-        seen.push(agent.tab.root_pane.clone());
+    for agent in agents_of_closed_spaces(&recorded, &open, agents) {
         match mux.kill(&agent.tab.root_pane) {
             Ok(()) => retired.stopped += 1,
             Err(shprd_mux::MuxError::NotFound { .. }) => {}
@@ -2639,7 +2676,12 @@ pub(crate) fn stop_repo_agents(mux: &dyn Host, ctx: &Ctx, home: &Path, repo: &Pa
     }
     if retired.kept.is_empty() {
         for record in records {
-            let _ = std::fs::remove_file(record);
+            let closed = record
+                .file_name()
+                .is_some_and(|name| !open.contains(&name.to_string_lossy().to_string()));
+            if closed {
+                let _ = std::fs::remove_file(record);
+            }
         }
     }
     retired
@@ -6975,6 +7017,51 @@ mod tests {
     use shprd_agents::skills::Role as SkillRole;
     use shprd_core::event::{Finding, Severity};
     use shprd_core::state::{GateResult, TaskStatus};
+
+    fn live_agent(
+        pane: &str,
+        space: &str,
+        role: shprd_mux::AgentRole,
+        live: bool,
+    ) -> shprd_mux::LiveAgent {
+        shprd_mux::LiveAgent {
+            tab: shprd_mux::Tab {
+                id: shprd_mux::TabId::new(format!("tab-{pane}")),
+                title: pane.to_string(),
+                root_pane: PaneId::new(pane),
+            },
+            task: None,
+            role,
+            program: "claude".to_string(),
+            space: shprd_mux::SpaceId::new(space),
+            state: shprd_mux::AgentState::Idle,
+            live,
+            started_ms: None,
+            ended_ms: None,
+        }
+    }
+
+    #[test]
+    fn only_running_agents_of_this_repositorys_closed_spaces_are_chosen() {
+        use shprd_mux::AgentRole::{Coordinator, Worker};
+        let recorded = vec!["spc1".to_string(), "spc2".to_string()];
+        // spc2 was added again before the sweep ran, so it is open; spc9 is
+        // another repository's.
+        let open = vec!["spc2".to_string(), "spc9".to_string()];
+        let agents = vec![
+            live_agent("coordinator-1", "spc1", Coordinator, true),
+            live_agent("worker-1", "vm/spc1", Worker, true),
+            live_agent("coordinator-2", "spc2", Coordinator, true),
+            live_agent("other", "spc9", Coordinator, true),
+            live_agent("ended", "spc1", Worker, false),
+            live_agent("worker-1", "spc1", Worker, true),
+        ];
+        let chosen: Vec<String> = agents_of_closed_spaces(&recorded, &open, agents)
+            .iter()
+            .map(|agent| agent.tab.root_pane.as_str().to_string())
+            .collect();
+        assert_eq!(chosen, ["coordinator-1", "worker-1"]);
+    }
 
     #[test]
     fn a_task_tab_record_is_matched_by_its_whole_name() {
