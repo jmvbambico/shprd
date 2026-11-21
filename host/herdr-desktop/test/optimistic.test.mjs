@@ -183,3 +183,20 @@ test("a confirmed answer is not sent twice while its op lives", () => {
   opt.confirm(first.id);
   assert.equal(opt.begin({ kind: "ask.answer", tasks: ["A"], board: raw, folder: FOLDER, extra: { ask: "q1", remaining: 2 } }), null);
 });
+
+test("SHPR-83: Accept pressed in the card a Review opened is not ignored (the Review op ends, the Accept starts)", async () => {
+  const raw = board();
+  const cache = cacheWith(raw);
+  // The row's Review (a click), then the dialog's Accept (a click): the same task, one after the other.
+  assert.ok(opt.startReview(raw.tasks[0], FOLDER));
+  assert.equal(opt.startReview(raw.tasks[0], FOLDER), null, "a second Review press is still a double press");
+  const owner = { client: { folder: FOLDER }, cache, state: null };
+  let sent = 0;
+  const out = await press(owner, { kind: "task.accept", tasks: ["A"], send: async () => (sent += 1, { ok: true }) });
+  assert.equal(out.ignored, undefined, "the Accept is not turned away by the Review");
+  assert.equal(out.ok, true);
+  assert.equal(sent, 1);
+  const live = opt.read(herdr.shared).ops.filter((op) => op.tasks.includes("A"));
+  assert.deepEqual(live.map((op) => op.kind), ["task.accept"], "no Reviewing… is left under the Accept");
+  assert.equal(opt.begin({ kind: "task.accept", tasks: ["A"], board: raw, folder: FOLDER }), null, "a second Accept is a double press");
+});
