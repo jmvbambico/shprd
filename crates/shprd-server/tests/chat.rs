@@ -37,6 +37,8 @@ const PORT: u16 = 18_082;
 #[derive(Debug, Default)]
 struct Recorder {
     lines: Mutex<Vec<(Option<String>, String)>>,
+    /// The spaces an Escape was pressed in.
+    stops: Mutex<Vec<Option<String>>>,
     refuse: bool,
     /// When the coordinator this writer types into started, if it says.
     started_ms: Option<u64>,
@@ -50,6 +52,11 @@ impl Recorder {
 }
 
 impl ChatWriter for Recorder {
+    fn interrupt(&self, space: Option<&str>) -> Result<(), String> {
+        self.stops.lock().unwrap().push(space.map(str::to_owned));
+        Ok(())
+    }
+
     fn started_ms(&self, space: Option<&str>) -> Option<u64> {
         space.is_none().then_some(self.started_ms).flatten()
     }
@@ -702,6 +709,29 @@ async fn files_alone_are_a_message_and_a_missing_file_refuses_everything() {
         .await;
     assert_eq!(gone.status, StatusCode::BAD_REQUEST, "{}", gone.body);
     assert_eq!(fixture.recorder.lines().len(), 1, "nothing was typed");
+}
+
+#[tokio::test]
+async fn stop_presses_escape_in_the_coordinators_pane_and_is_a_write() {
+    let fixture = Fixture::new("claude");
+    let reply = fixture
+        .send(
+            Call::post("/api/chat/stop", json!({"space": "coordinator"}))
+                .with_token(&fixture.token)
+                .with_write_header(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["stopped"], true);
+    assert_eq!(*fixture.recorder.stops.lock().unwrap(), [None]);
+    let no_header = fixture
+        .send(
+            Call::post("/api/chat/stop", json!({"space": "coordinator"}))
+                .with_token(&fixture.token),
+        )
+        .await;
+    assert_eq!(no_header.status, StatusCode::FORBIDDEN);
+    assert_eq!(fixture.recorder.stops.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

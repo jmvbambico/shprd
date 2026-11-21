@@ -34,7 +34,9 @@ use shprd_core::state::{RunState, Task};
 
 use crate::api::AppState;
 use crate::attachments;
-use crate::dto::{ChatDto, ChatMessageDto, ChatSendDto, ChatSendReply, ChatToolDto};
+use crate::dto::{
+    ChatDto, ChatMessageDto, ChatSendDto, ChatSendReply, ChatStopDto, ChatStopReply, ChatToolDto,
+};
 use crate::error::ApiReject;
 use crate::ledger;
 
@@ -62,6 +64,12 @@ pub trait ChatWriter: Send + Sync {
     /// open; the caller tells the person and nothing is retried, because
     /// retyping a message the agent may have read already is worse than not.
     fn send(&self, space: Option<&str>, text: &str) -> Result<(), String>;
+
+    /// Press Escape in `space`'s agent, which every supported program takes as
+    /// "stop what you are doing". A host that cannot press a key says so.
+    fn interrupt(&self, _space: Option<&str>) -> Result<(), String> {
+        Err(String::from("this service cannot press a key in a terminal"))
+    }
 
     /// When the agent `send` types into for `space` started, in epoch
     /// milliseconds, when the host says. The chat shows the conversation that
@@ -285,6 +293,27 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
         space: space.name().to_owned(),
         sent: true,
         notice: writer.take_notice(),
+    })
+}
+
+/// `POST /api/chat/stop`: press Escape in a space's agent, as the person.
+pub(crate) fn stop(state: &AppState, body: &[u8]) -> Result<ChatStopReply, ApiReject> {
+    let request: ChatStopDto = serde_json::from_slice(body).map_err(|err| {
+        ApiReject::bad_request(format!(
+            "the body is not a stop request: {err}; send {{\"space\": \"coordinator\"}}"
+        ))
+    })?;
+    let space = Space::parse(Some(&request.space));
+    let writer = state.chat.get().ok_or_else(|| {
+        ApiReject::refused("this service cannot press a key in a terminal. Nothing was stopped")
+    })?;
+    place_of(state, &space)?;
+    writer
+        .interrupt(space.target())
+        .map_err(|reason| ApiReject::refused(format!("{reason}. Nothing was stopped")))?;
+    Ok(ChatStopReply {
+        space: space.name().to_owned(),
+        stopped: true,
     })
 }
 

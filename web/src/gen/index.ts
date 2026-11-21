@@ -19,6 +19,8 @@ export * from "./ChatDto";
 export * from "./ChatMessageDto";
 export * from "./ChatSendDto";
 export * from "./ChatSendReply";
+export * from "./ChatStopDto";
+export * from "./ChatStopReply";
 export * from "./ChatToolDto";
 export * from "./CheckDto";
 export * from "./ClientMessage";

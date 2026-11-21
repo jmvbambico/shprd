@@ -1699,6 +1699,24 @@ pub struct ChatSendReply {
     pub notice: Option<String>,
 }
 
+/// A request to stop a space's agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatStopDto.ts")]
+pub struct ChatStopDto {
+    /// The space to stop: `coordinator`, or a task's id.
+    pub space: String,
+}
+
+/// What one stop did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export_to = "ChatStopReply.ts")]
+pub struct ChatStopReply {
+    /// The space whose agent got the Escape.
+    pub space: String,
+    /// True when the key was pressed in the agent's pane.
+    pub stopped: bool,
+}
+
 /// What one write did to the key it named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -1819,6 +1837,8 @@ pub(crate) fn exports() -> Result<Vec<(String, String)>, ts_rs::ExportError> {
         one::<ChatSendDto>()?,
         one::<ChatAttachmentDto>()?,
         one::<ChatSendReply>()?,
+        one::<ChatStopDto>()?,
+        one::<ChatStopReply>()?,
         one::<TerminalServerMsg>()?,
         one::<TerminalClientMsg>()?,
         one::<SnapshotDto>()?,
