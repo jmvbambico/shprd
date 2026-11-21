@@ -16,7 +16,7 @@ import * as herdr from "herdr";
 import {
   Client,
   attach,
-  canonicalRoot,
+  forgetRegistered,
   pendingDeadlines,
   singleFlight,
   ServiceError,
@@ -27,7 +27,6 @@ import {
   downNotice,
   forgetStateHome,
   normalizeFolder,
-  pickService,
   repoName,
   probeStateDir,
   readServiceRecord,
@@ -184,8 +183,8 @@ test("a record with no token beside it is no service", async () => {
 
 test("discovery is probed from the home when no directory is given", async () => {
   herdr.setHome("/home/ana");
-  const dir = `${stateDir("/home/ana", {})}/repos/shop-1`;
-  herdr.putFile(serviceFile(dir), '{"port": 9000, "id": "abc", "root": "/work/shop"}');
+  const dir = stateDir("/home/ana", {});
+  herdr.putFile(serviceFile(dir), '{"port": 9000, "id": "abc"}');
   herdr.putFile(tokenFile(dir), "token-1");
   const doFetch = fakeFetch({ "/api/health": { body: { id: "abc" } } });
   const found = await discover({ fetch: doFetch });
@@ -214,15 +213,14 @@ test("a mod with no environment asks the shell where the state directory is", as
 
   // And `discover` uses it, which is the whole point: the record is looked for
   // under what the shell said, not under the XDG default.
-  herdr.putFile("/var/state/shprd/repos/shop-1/service.json", '{"port": 7788, "id": "abc", "root": "/work/shop"}');
-  herdr.putFile("/var/state/shprd/repos/shop-1/token", "token-1");
+  herdr.putFile("/var/state/shprd/service.json", '{"port": 7788, "id": "abc"}');
+  herdr.putFile("/var/state/shprd/token", "token-1");
   const exec = herdr.exec;
   const found = await discover({
-    run: (command, args) =>
-      command === "sh" && args[2] === "sh" ? exec(command, args) : run(command, args),
+    run: (command, args) => run(command, args),
     fetch: fakeFetch({ "/api/health": { body: { id: "abc" } } }),
   });
-  assert.equal(found.dir, "/var/state/shprd/repos/shop-1");
+  assert.equal(found.dir, "/var/state/shprd");
   assert.equal(found.base, "http://127.0.0.1:7788");
   forgetStateHome();
 });
@@ -614,87 +612,102 @@ test("attach looks once more before believing a null", async () => {
   assert.ok(next.client, "the second look found the service");
 });
 
-// -- several repositories, one service each (SHPR-68) -------------------------
+// -- several repositories, one service (SHPR-77) -------------------------------
 
-/** A service per repository, as two `shprd serve` runs write them. */
-function twoServices() {
-  const base = stateDir("/home/ana", {});
+/** The one service's files, and a fake `fetch` that answers health and registration. */
+function oneService() {
+  const dir = stateDir("/home/ana", {});
   herdr.setHome("/home/ana");
-  for (const [name, root, port, id] of [
-    ["shop-1", "/work/shop", 7001, "id-shop"],
-    ["pad-2", "/work/scratchpad", 7002, "id-pad"],
-  ]) {
-    herdr.putFile(serviceFile(`${base}/repos/${name}`), JSON.stringify({ port, id, pid: 1, root }));
-    herdr.putFile(tokenFile(`${base}/repos/${name}`), `token-${name}\n`);
-  }
-  return fakeFetch({
-    "/api/health": (url) => ({ body: { id: new URL(url).port === "7001" ? "id-shop" : "id-pad" } }),
+  herdr.putFile(serviceFile(dir), JSON.stringify({ port: 7001, id: "id-one", pid: 1 }));
+  herdr.putFile(tokenFile(dir), "token-one\n");
+  const registered = [];
+  const doFetch = fakeFetch({
+    "/api/health": { body: { id: "id-one" } },
+    "/api/state": { body: { seq: 1, tasks: [] } },
+    "/api/roster": { body: {} },
+    "/api/repos": (_url, init) => {
+      const folder = JSON.parse(init.body).folder;
+      registered.push(folder);
+      const id = `${folder.split("/").pop()}-hash`;
+      return { body: { id, root: folder, dir: `${dir}/repos/${id}` } };
+    },
   });
+  doFetch.registered = registered;
+  return doFetch;
 }
 
-test("the service found is the one for the space the window shows", async () => {
-  const doFetch = twoServices();
+test("one record finds the one service whatever space the window shows", async () => {
+  const doFetch = oneService();
   const shop = await discover({ fetch: doFetch, folder: "/work/shop" });
   const pad = await discover({ fetch: doFetch, folder: "/work/scratchpad" });
+  const none = await discover({ fetch: doFetch, folder: null });
   assert.equal(shop.base, "http://127.0.0.1:7001");
-  assert.equal(pad.base, "http://127.0.0.1:7002");
-  assert.equal(shop.token, "token-shop-1", "each service's own token");
-  assert.equal(await discover({ fetch: doFetch, folder: "/work/other" }), null, "no service for another repo");
-  // With no space shown and two services there is no honest pick.
-  assert.equal(await discover({ fetch: doFetch, folder: null }), null);
-});
-
-test("a space under the repository's folder, or a symlinked path, finds its service", () => {
-  const entries = [
-    { dir: "/s/a", record: { root: "/private/var/work/shop" } },
-    { dir: "/s/b", record: { root: "/private/var/work/shop/vendor" } },
-  ];
-  assert.equal(pickService(entries, "/var/work/shop/")?.dir, "/s/a");
-  assert.equal(pickService(entries, "/var/work/shop/vendor/x")?.dir, "/s/b", "the deepest root wins");
-  assert.equal(pickService(entries, "/var/work/shopping"), null, "a prefix of the name is not a parent");
+  assert.equal(pad.base, shop.base, "the same service");
+  assert.equal(pad.token, "token-one");
+  assert.ok(none, "even with no space shown the service is there");
   assert.equal(normalizeFolder("/private/tmp/x/"), "/tmp/x");
   assert.equal(repoName("/work/shop/"), "shop");
 });
 
-test("moving to another repository's space is a new client and a restart", async () => {
-  const doFetch = twoServices();
+test("a repository's calls name it, and a global route does not", async () => {
+  const doFetch = oneService();
+  forgetRegistered();
   const made = await attach(null, { fetch: doFetch, folder: "/work/shop" });
-  assert.equal(made.client.base, "http://127.0.0.1:7001");
+  await made.client.state();
+  await made.client.call("GET", "/api/roster");
+  const urls = doFetch.calls.map((call) => call.url);
+  assert.ok(urls.some((url) => url.endsWith("/api/state?repo=shop-hash")), urls.join("\n"));
+  assert.ok(urls.some((url) => url.endsWith("/api/roster")), "no repo on a global route");
+  assert.equal(made.client.dir, `${stateDir("/home/ana", {})}/repos/shop-hash`, "the change file is the repository's own");
+});
+
+test("switching to another space re-points the client: no discovery, no health check", async () => {
+  const doFetch = oneService();
+  forgetRegistered();
+  const made = await attach(null, { fetch: doFetch, folder: "/work/shop" });
   const same = await attach(made.client, { fetch: doFetch, folder: "/work/shop" });
   assert.equal(same.client, made.client);
   assert.equal(same.restarted, false);
+
   const moved = await attach(made.client, { fetch: doFetch, folder: "/work/scratchpad" });
-  assert.equal(moved.client.base, "http://127.0.0.1:7002");
+  assert.equal(moved.client.base, made.client.base, "the same service and token");
+  assert.equal(moved.client.folder, "/work/scratchpad");
   assert.equal(moved.restarted, true, "everything kept for the repo left is thrown away");
-  const none = await attach(moved.client, { fetch: doFetch, folder: "/work/new" });
-  assert.equal(none.client, null);
-  assert.equal(none.restarted, true);
+  assert.deepEqual(doFetch.registered, ["/work/shop", "/work/scratchpad"], "each repo is registered on its first visit");
+
+  const before = doFetch.calls.length;
+  const back = await attach(moved.client, { fetch: doFetch, folder: "/work/shop" });
+  assert.equal(back.client.folder, "/work/shop");
+  assert.equal(doFetch.calls.length, before, "a return visit makes no call at all");
+  assert.equal(doFetch.registered.length, 2, "and registers nothing again");
 });
 
-test("a panel without a service says which repository and why, never a command", () => {
+test("a restarted service is found again and every repository registered again", async () => {
+  const doFetch = oneService();
+  forgetRegistered();
+  const made = await attach(null, { fetch: doFetch, folder: "/work/shop" });
+  const dir = stateDir("/home/ana", {});
+  herdr.putFile(serviceFile(dir), JSON.stringify({ port: 7001, id: "id-two", pid: 2 }));
+  const fresh = fakeFetch({
+    "/api/health": { body: { id: "id-two" } },
+    "/api/repos": { body: { id: "shop-hash", root: "/work/shop", dir: `${dir}/repos/shop-hash` } },
+  });
+  const next = await attach(made.client, { fetch: fresh, folder: "/work/shop" });
+  assert.equal(next.restarted, true);
+  assert.equal(next.client.id(), "id-two");
+  assert.ok(fresh.calls.some((call) => call.url.endsWith("/api/repos")), "the new service is told");
+});
+
+test("a panel without a service says why in one plain sentence, never a command", () => {
   herdr.setSpaces([{ id: "s1", active: true, folder: "/work/shop" }]);
-  assert.equal(downNotice(), "The service for shop is not up yet");
+  assert.equal(downNotice(), "The shprd service is not up yet");
   herdr.setShared("service.status", { folder: "/work/shop", phase: "starting" });
-  assert.equal(downNotice(), "Starting the service for shop…");
+  assert.equal(downNotice(), "Starting the shprd service…");
   herdr.setShared("service.status", { folder: "/work/shop", phase: "failed", reason: "no git repository" });
-  assert.equal(downNotice(), "The service for shop isn't running (the reason is in the footer)");
-  herdr.setShared("service.status", { folder: "/work/other", phase: "starting" });
-  assert.equal(downNotice(), "The service for shop is not up yet", "another repo's status is not this one's");
+  assert.equal(downNotice(), "The shprd service isn't running (the reason is in the footer)");
   herdr.setSpaces([]);
   assert.equal(downNotice(), "Open a repository's space to use shprd");
   assert.doesNotMatch(downNotice("/work/shop"), /shprd serve/);
-});
-
-test("a space opened through a symlink still finds its service by git's canonical root", async () => {
-  const doFetch = twoServices();
-  const exec = herdr.exec;
-  const run = async (command, args, options) =>
-    command === "git"
-      ? { code: 0, stdout: "/work/shop/.git\n", stderr: "" }
-      : exec(command, args, options);
-  const found = await discover({ fetch: doFetch, folder: "/home/ana/link/shop", run });
-  assert.equal(found.base, "http://127.0.0.1:7001");
-  assert.equal(await canonicalRoot("/nowhere", async () => ({ code: 128, stdout: "", stderr: "x" })), null);
 });
 
 test("a ready task's needs-you words point at the Tasks pane, never a command or the forge", async () => {

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 
 import * as herdr from "herdr";
 import Chrome from "../mods/shprd-chrome/main.js";
-import { SEND_PROBLEM, terminalName } from "../mods/shprd-chrome/lib/client.js";
+import { SEND_PROBLEM, SERVICE_TERMINAL, terminalName } from "../mods/shprd-chrome/lib/client.js";
 
 /** A context that answers `cx.sleep`, `cx.notify` and `cx.timer`. */
 function context() {
@@ -57,6 +57,7 @@ function shell(bin = "/Users/me/.cargo/bin/shprd") {
 /** A footer whose first look found nothing, so the start row is live. */
 async function footer() {
   herdr.reset();
+  herdr.setHome("/home/ana");
   herdr.setSpaces([{ id: "s1", active: true, folder: "/repo/demo" }]);
   herdr.setExec(shell());
   const run = context();
@@ -69,7 +70,7 @@ async function footer() {
 
 test("the start is hc run --bg, never the app's bounded exec", async () => {
   const { view } = await footer();
-  await view.start("/repo/demo");
+  await view.start();
 
   const run = herdr.HC_CALLS.find((args) => args[0] === "run");
   assert.ok(run, "a terminal was started");
@@ -79,9 +80,13 @@ test("the start is hc run --bg, never the app's bounded exec", async () => {
   assert.ok(run.includes("--keep"), "a lost program leaves a shell, not a restart");
   assert.ok(run.includes("--no-parent"), "the service is nobody's child");
   const name = run[run.indexOf("--name") + 1];
-  assert.equal(name, terminalName("/repo/demo"), "a terminal per repository");
+  assert.equal(name, SERVICE_TERMINAL, "one terminal for the one service");
   assert.match(name, /^[a-z0-9_-]{1,32}$/, "a name hc accepts");
-  assert.equal(run[run.indexOf("--cwd") + 1], "/repo/demo");
+  assert.equal(
+    run[run.indexOf("--cwd") + 1],
+    "/home/ana/.local/state/shprd",
+    "its folder is its own state directory, never a repository",
+  );
   // herdr-core's PATH lacks ~/.cargo/bin (SHPR-72): the program is named by its
   // path and carries the login shell's PATH, never a bare `shprd`.
   const after = run.slice(run.indexOf("--") + 1);
@@ -92,7 +97,7 @@ test("the start is hc run --bg, never the app's bounded exec", async () => {
   assert.deepEqual(herdr.HC_CALLS[0], ["kill", name]);
 });
 
-test("two repositories get two terminals, and two folders of one name stay apart", () => {
+test("the terminals an earlier version named per repository stay apart (they are ended once)", () => {
   assert.notEqual(terminalName("/work/shop"), terminalName("/work/scratchpad"));
   assert.notEqual(terminalName("/work/shop"), terminalName("/other/shop"));
   assert.equal(terminalName("/work/shop/"), terminalName("/work/shop"));
@@ -103,11 +108,11 @@ test("a start that fails says why, in the row, and does not retry every look", a
   herdr.setHc(async (args) =>
     args[0] === "run" ? { code: 1, stdout: "", stderr: "no such folder: /repo/demo\nmore text" } : { code: 0, stdout: "", stderr: "" },
   );
-  await view.start("/repo/demo");
+  await view.start();
   assert.equal(view.failure, "no such folder: /repo/demo", "the first line, not the stack");
   assert.equal(view.service, null);
   const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
-  assert.equal(word, "demo: no such folder: /repo/demo");
+  assert.equal(word, "shprd: no such folder: /repo/demo");
   assert.equal(herdr.shared("service.status").phase, "failed");
 
   // The next look inside the retry window starts nothing.
@@ -123,7 +128,7 @@ test("a service that dies at once is explained by what it said", async () => {
       ? { code: 0, stdout: "starting\nError: a shprd service is already running for /repo/demo\n", stderr: "" }
       : { code: 0, stdout: "", stderr: "" },
   );
-  await view.start("/repo/demo");
+  await view.start();
   assert.equal(view.failure, "a shprd service is already running for /repo/demo");
 });
 
@@ -135,7 +140,7 @@ test("SHPR-70: a folder that is not a git repository is served all the same", as
   herdr.setExec(async (command, args, options) =>
     command === "git" ? { code: 128, stdout: "", stderr: "fatal: not a git repository" } : base(command, args, options),
   );
-  await view.start("/repo/demo");
+  await view.start();
   assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "the service was started for it");
   assert.ok(!String(view.failure ?? "").includes("not a git repository"), `no refusal: ${view.failure}`);
 });
@@ -147,14 +152,14 @@ test("SHPR-70: a chat line that could not be sent says why in the sidebar's foot
   const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
   assert.match(word, /demo: I couldn't make this folder a git repository/);
   herdr.setShared(SEND_PROBLEM, { folder: "/elsewhere", text: "not ours" });
-  assert.equal(view.actions(herdr.theme()).find((action) => action.id === "service").word, "demo: service up");
+  assert.equal(view.actions(herdr.theme()).find((action) => action.id === "service").word, "shprd: service up · demo");
   herdr.setShared(SEND_PROBLEM, null);
 });
 
-test("a space with no service starts one by itself; an up service is left alone", async () => {
+test("a window with no service starts the one by itself; an up service is left alone", async () => {
   const { view } = await footer();
   await view.check(view.cx);
-  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "clicking a repo's space starts its service");
+  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), `loading the layout starts the service: ${view.failure}`);
 
   const second = await footer();
   second.view.service = null;
@@ -164,19 +169,57 @@ test("a space with no service starts one by itself; an up service is left alone"
   assert.equal(herdr.HC_CALLS.length, calls, "no second start while one is starting");
 });
 
-test("a start with no space to point at says so and starts nothing", async () => {
+test("the service starts with no space shown: it is not tied to one", async () => {
   const { view } = await footer();
   herdr.setSpaces([]);
   await view.check(view.cx);
-  assert.equal(herdr.HC_CALLS.length, 0, "nothing was started");
-  const word = view.actions(herdr.theme()).find((action) => action.id === "service").word;
-  assert.equal(word, "Add a folder to start");
+  assert.ok(herdr.HC_CALLS.some((args) => args[0] === "run"), "started");
+});
+
+test("switching spaces starts nothing and only changes the repository the row names", async () => {
+  const { view } = await footer();
+  view.service = { base: "http://127.0.0.1:7001", dir: "/s", record: { id: "x", port: 7001 }, token: "t" };
+  herdr.setSpaces([
+    { id: "s1", active: false, folder: "/repo/demo" },
+    { id: "s2", active: true, folder: "/repo/other" },
+  ]);
+  view.folder = "/repo/other";
+  const calls = herdr.HC_CALLS.length;
+  assert.equal(view.actions(herdr.theme())[2].word, "shprd: service up · other");
+  view.folder = "/repo/demo";
+  assert.equal(view.actions(herdr.theme())[2].word, "shprd: service up · demo");
+  assert.equal(herdr.HC_CALLS.length, calls, "no start, no kill");
+});
+
+test("the footer tells the service every space's folder, once per change", async () => {
+  const { view } = await footer();
+  view.service = { base: "http://127.0.0.1:7001", dir: "/s", record: { id: "x", port: 7001 }, token: "t" };
+  herdr.setSpaces([
+    { id: "s1", active: true, folder: "/repo/demo" },
+    { id: "s2", active: false, folder: "/repo/other/" },
+    { id: "s3", active: false, folder: "/repo/demo" },
+  ]);
+  const sent = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url, init });
+    return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+  };
+  try {
+    await view.sync();
+  } finally {
+    globalThis.fetch = real;
+  }
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].init.method, "PUT");
+  assert.ok(sent[0].url.endsWith("/api/repos"));
+  assert.deepEqual(JSON.parse(sent[0].init.body), { folders: ["/repo/demo", "/repo/other"] });
 });
 
 test("a start that the core is already serving is not run twice", async () => {
   const { view } = await footer();
   view.starting = true;
-  await view.start("/repo/demo");
+  await view.start();
   assert.equal(herdr.HC_CALLS.length, 0, "a second click while starting does nothing");
 });
 
@@ -197,7 +240,7 @@ test("the footer's rows are the app's settings, shprd's own, and the service", a
   view.folder = "/repo/demo";
   view.service = { record: { port: 7311 } };
   assert.equal(view.actions(herdr.theme())[2].onClick, null);
-  assert.equal(view.actions(herdr.theme())[2].word, "demo: service up");
+  assert.equal(view.actions(herdr.theme())[2].word, "shprd: service up · demo");
 });
 
 test("the shprd row opens the settings window over the layout, not a panel tab", async () => {
@@ -233,9 +276,9 @@ test("the app's own settings row is still the app's", async () => {
 test("a record whose process is alive is never killed or restarted", async () => {
   const { view } = await footer();
   herdr.setHome("/home/ana");
-  herdr.putFile("/home/ana/.local/state/shprd/repos/demo-1/service.json", JSON.stringify({ port: 7001, id: "x", pid: 4242, root: "/repo/demo" }));
+  herdr.putFile("/home/ana/.local/state/shprd/service.json", JSON.stringify({ port: 7001, id: "x", pid: 4242, root: "/repo/demo" }));
   herdr.setExec(async (command, args) => (command === "kill" ? { code: 0, stdout: "", stderr: "" } : { code: 0, stdout: "", stderr: "" }));
-  await view.start("/repo/demo");
+  await view.start();
   assert.equal(herdr.HC_CALLS.length, 0, "a busy service is left alone");
   assert.equal(view.failure, null);
 });
@@ -243,7 +286,7 @@ test("a record whose process is alive is never killed or restarted", async () =>
 test("a shprd that is nowhere is said in one plain sentence, and nothing is started", async () => {
   const { view } = await footer();
   herdr.setExec(async () => ({ code: 1, stdout: "", stderr: "" }));
-  await view.start("/repo/demo");
+  await view.start();
   assert.match(view.failure, /^shprd isn't installed where Herdr can find it \(looked in /);
   assert.ok(!herdr.HC_CALLS.some((args) => args[0] === "run"), "no terminal was started");
   assert.equal(herdr.shared("service.status").phase, "failed");
@@ -256,7 +299,7 @@ test("hc's JSON spawn error reads as a sentence, not as JSON", async () => {
       ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { hint: "check the program name and cwd", kind: "spawn_failed", message: 'cannot start "shprd": No such file or directory (os error 2)' } }) }
       : { code: 0, stdout: "", stderr: "" },
   );
-  await view.start("/repo/demo");
+  await view.start();
   assert.equal(view.failure, "shprd isn't installed where Herdr can find it");
 });
 

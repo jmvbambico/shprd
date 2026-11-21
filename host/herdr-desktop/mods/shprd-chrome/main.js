@@ -13,12 +13,14 @@
 // `lib/panel.js`), never as a tab of the side panel. It is the only way in, which
 // is why the row is the one that says what is behind it.
 //
-// shprd's own twist: the third row is the service of the repository whose space
-// the window shows (every repository has its own, side by side). A window whose
-// board is empty because no service runs looks exactly like a run nobody added a
-// task to, so this row says which repository it is and whether it is up, and it
-// starts the service itself when the shown space has none. Nobody types
-// `shprd serve`. Everything else in the window reads that service.
+// shprd's own twist: the third row is the one shprd service. There is one for every
+// repository (SHPR-77): it starts once, when this layout loads, and then keeps
+// running across space switches and window restarts. Switching spaces only
+// changes which repository the panels read, so the row says "service up" plus the
+// repository the window shows, and the failure in one plain sentence when there
+// is one. The footer also tells the service every space's folder, so a repository
+// whose space is added gets its own run, tick and coordinator, and one whose space
+// is closed stops being ticked. Nobody types `shprd serve`.
 //
 // The start is `hc run --bg`, not the app's own `exec`, and that is deliberate:
 //
@@ -38,20 +40,22 @@
 
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, hc, home, run, setShared, shared, theme } from "herdr";
+import { exec, hc, home, run, setShared, shared, spaces, theme } from "herdr";
 
 import {
+  Client,
   SEND_PROBLEM,
   SERVICE_STATUS,
+  SERVICE_TERMINAL,
   activeFolder,
   discover,
   lastReason,
-  listServices,
   normalizeFolder,
-  pickService,
+  readServiceRecord,
   reason,
   resolveShprd,
   repoName,
+  serviceFile,
   stateDir,
   stateHome,
   terminalName,
@@ -61,9 +65,9 @@ import { SPACE, TEXT, tone } from "./lib/tokens.js";
 
 /** How often the footer asks whether the service is up. */
 const FLOOR_MS = 8000;
-/** How often it looks at which space is shown, so a click on a space is answered at once. */
+/** How often it looks at which space is shown and which spaces there are. */
 const WATCH_MS = 1200;
-/** How long a failed start waits before the footer tries that repository again on its own. */
+/** How long a failed start waits before the footer tries again on its own. */
 const RETRY_MS = 60_000;
 /** How long a start waits for the service to write its record, ms. */
 const UP_WAIT_MS = 12_000;
@@ -74,22 +78,30 @@ export default class Chrome extends View {
     this.service = null;
     this.failure = null;
     this.starting = false;
+    this.failedAt = null;
     this.folder = activeFolder();
-    this.failedAt = new Map();
+    this.synced = "";
+    this.cleaned = false;
     this.look();
     cx.timer.every(FLOOR_MS, (cx) => this.look(cx));
     cx.timer.every(WATCH_MS, (cx) => {
-      if ((activeFolder() ?? null) !== (this.folder ?? null)) this.look(cx);
+      // A switch of space is a repaint of the footer's words and, when the
+      // spaces themselves changed, a word to the service: never a start.
+      const folder = activeFolder();
+      if ((folder ?? null) !== (this.folder ?? null)) {
+        this.folder = folder;
+        this.publish();
+        cx.notify();
+      }
+      if (this.service && spaceFolders().join("\n") !== this.synced) this.sync();
     });
   }
 
   /**
-   * Looks for the service of the shown space, remembers what it found, and starts
-   * it when the space names a repository nobody serves yet.
-   *
-   * The footer is the one owner of starting: every other panel only reads the
-   * state it publishes (`downNotice`), so a click on a repo's space just works and
-   * nobody types a command.
+   * Looks for the service, remembers what it found, and starts it when there is
+   * none. The footer is the one owner of starting: every other panel only reads
+   * the state it publishes (`downNotice`), so the window just works and nobody
+   * types a command.
    */
   async check(cx = this.cx) {
     try {
@@ -111,44 +123,49 @@ export default class Chrome extends View {
 
   /** The look itself (see `check`). */
   async inspect(cx) {
-    const folder = activeFolder();
-    if ((folder ?? null) !== (this.folder ?? null)) {
-      this.folder = folder;
-      this.failure = null;
-    }
-    const found = await discover({ wait: (ms) => cx.sleep(ms), folder });
-    // The window moved to another space while this look was in flight: the answer
-    // is for the one it left, so look again for the one it shows.
-    if ((activeFolder() ?? null) !== (folder ?? null)) return this.inspect(cx);
-    this.service = found;
+    this.folder = activeFolder();
+    const before = this.service?.record.id ?? null;
+    this.service = await discover({ wait: (ms) => cx.sleep(ms) });
     if (this.service) {
       this.failure = null;
-      this.failedMap().delete(normalizeFolder(folder ?? ""));
+      this.failedAt = null;
     }
+    if (this.service && this.service.record.id !== before) this.synced = "";
     this.publish();
     cx.notify();
-    if (this.service === null && folder && !this.starting) {
-      const failed = this.failedMap().get(normalizeFolder(folder));
-      if (failed === undefined || Date.now() - failed > RETRY_MS) await this.start(folder);
+    if (this.service === null && !this.starting) {
+      if (this.failedAt == null || Date.now() - this.failedAt > RETRY_MS) await this.start();
     }
+    if (this.service && spaceFolders().join("\n") !== this.synced) await this.sync();
   }
 
-  /** Whether a record for `folder` names a process that is still running. */
-  async alive(folder) {
-    const entries = await listServices(stateDir(home(), await stateHome()));
-    const entry = pickService(entries, folder);
-    if (!entry || !entry.record.pid) return false;
-    const probe = await exec("kill", ["-0", String(entry.record.pid)]).catch(() => null);
+  /** Whether the recorded service's process is still running. */
+  async alive() {
+    const record = await readServiceRecord(serviceFile(stateDir(home(), await stateHome())));
+    if (!record || !record.pid) return false;
+    const probe = await exec("kill", ["-0", String(record.pid)]).catch(() => null);
     return probe?.code === 0;
   }
 
-  /** When each repository's start last failed (made on first use). */
-  failedMap() {
-    this.failedAt ??= new Map();
-    return this.failedAt;
+  /**
+   * Tells the service the folder of every space the window has, so each one has
+   * its own run, tick and coordinator before it is ever shown, and a closed one
+   * stops being ticked. A failure is not the footer's to report: the panels
+   * register the space they show themselves.
+   */
+  async sync() {
+    const folders = spaceFolders();
+    const key = folders.join("\n");
+    try {
+      const client = new Client(this.service, { wait: (ms) => this.cx.sleep(ms) });
+      await client.syncRepos(folders);
+      this.synced = key;
+    } catch {
+      // The next look tries again.
+    }
   }
 
-  /** Tells the other panels how the shown repository's service is doing. */
+  /** Tells the other panels how the service is doing. */
   publish() {
     const folder = this.folder;
     const phase = this.service ? "up" : this.starting ? "starting" : this.failure ? "failed" : "none";
@@ -162,41 +179,39 @@ export default class Chrome extends View {
   }
 
   /**
-   * Starts `shprd serve` for `folder`: the repository a space shows.
+   * Starts the one `shprd serve`.
    *
    * The command is `hc run --bg`, so the call is the *start* of a terminal and
    * not the life of the server: it answers as soon as the core has it, and the
-   * process stays in the core. The footer then waits for `service.json` itself, so
-   * what it reports is the service's own answer and never this call's hope. A
-   * service that dies at once leaves its words in the terminal; they are read back
-   * and shown, and the dead terminal is ended so its name is free for the retry.
+   * process stays in the core, where terminals outlive the window. The footer then
+   * waits for `service.json` itself, so what it reports is the service's own
+   * answer and never this call's hope. A service that dies at once leaves its
+   * words in the terminal; they are read back and shown, and the dead terminal is
+   * ended so its name is free for the retry.
    *
-   * The terminal is `--keep` (a crash leaves a shell, never a re-run) and named per
-   * repository, so two repositories run side by side.
+   * The terminal is `--keep` and has one fixed name. Its folder is the service's
+   * own state directory, never a repository: the service registers repositories
+   * as it is told about them.
    */
-  async start(folder) {
+  async start() {
     if (this.starting) return;
-    const key = normalizeFolder(folder);
     this.starting = true;
     this.failure = null;
     this.publish();
     this.cx.notify();
-    const name = terminalName(folder);
+    const name = SERVICE_TERMINAL;
     let launched = false;
     try {
-      // A folder that is not a git repository yet is served all the same: the
-      // service makes it one when the person sends their first chat message
-      // (never because a space was merely shown), so nothing is refused here.
       // A record whose process is alive is a service that did not answer in time
-      // (busy), not one that is gone: it is left running, never killed.
-      if (await this.alive(folder)) {
+      // (busy), not one that is gone: it is left running, never killed — it
+      // serves every repository, so ending it would stop them all.
+      if (await this.alive()) {
         this.starting = false;
         this.failure = null;
         this.publish();
         this.cx.notify();
         return;
       }
-      // A kept terminal that outlived its service still holds the name.
       // herdr-core starts the program with its own PATH (the one it was started
       // under, which lacks ~/.cargo/bin), so the start names `shprd` by its path
       // and hands it the PATH the person's login shell has.
@@ -204,10 +219,13 @@ export default class Chrome extends View {
       if (!where.bin) {
         throw new Error(`shprd isn't installed where Herdr can find it (looked in ${shorten(where.looked, home())})`);
       }
+      const dir = stateDir(home(), await stateHome());
+      await exec("mkdir", ["-p", dir]).catch(() => null);
       launched = true;
+      // A kept terminal that outlived its service still holds the name.
       await hc(["kill", name]).catch(() => null);
       const answer = await hc([
-        "run", "--bg", "--keep", "--no-parent", "--name", name, "--cwd", folder, "--",
+        "run", "--bg", "--keep", "--no-parent", "--name", name, "--cwd", dir, "--",
         "/usr/bin/env", `PATH=${where.path}`, where.bin, "serve",
       ]);
       if (answer?.code !== 0) {
@@ -215,21 +233,32 @@ export default class Chrome extends View {
       }
       for (let waited = 0; ; waited += 500) {
         await this.cx.sleep(500);
-        this.service = await discover({ wait: (ms) => this.cx.sleep(ms), folder });
+        this.service = await discover({ wait: (ms) => this.cx.sleep(ms) });
         if (this.service) break;
         if (waited >= UP_WAIT_MS) {
           const tail = await hc(["read", name, "--lines", "30"]).catch(() => null);
           throw new Error(lastReason(tail?.stdout) || "it did not come up in time");
         }
       }
+      await this.endOldTerminals();
     } catch (err) {
       this.failure = reason(err);
-      this.failedMap().set(key, Date.now());
+      this.failedAt = Date.now();
       if (launched) await hc(["kill", name]).catch(() => null);
     }
     this.starting = false;
     this.publish();
     this.cx.notify();
+  }
+
+  /**
+   * Ends the terminals an earlier version ran a repository's own service in: the
+   * one service stopped those services when it started, and each left a shell.
+   */
+  async endOldTerminals() {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    for (const folder of spaceFolders()) await hc(["kill", terminalName(folder)]).catch(() => null);
   }
 
   render() {
@@ -259,15 +288,15 @@ export default class Chrome extends View {
   actions(t) {
     const online = this.service !== null;
     const name = repoName(this.folder ?? "");
-    const word = !this.folder
-      ? "Add a folder to start"
-      : online
-        ? `${name}: service up`
-        : this.starting
-          ? `${name}: starting the service…`
-          : this.failure
-            ? `${name}: ${this.failure}`
-            : `${name}: service not up`;
+    const word = online
+      ? name
+        ? `shprd: service up · ${name}`
+        : "shprd: service up"
+      : this.starting
+        ? "shprd: starting the service…"
+        : this.failure
+          ? `shprd: ${this.failure}`
+          : "shprd: service not up";
     const colors = tone(t);
     // A chat line that could not be sent (a folder git would not take) says why
     // here too, in the chat's own words, while the service itself is fine.
@@ -281,10 +310,10 @@ export default class Chrome extends View {
       { id: "shprd", word: "shprd", icon: "crook", color: t.muted, onClick: () => openSettings() },
       {
         id: "service",
-        word: stuck ? `${name}: ${stuck}` : word,
+        word: stuck ? `${name || "shprd"}: ${stuck}` : word,
         icon: "plug",
         color: stuck ? colors.red : online ? colors.green : this.starting ? colors.amber : colors.red,
-        onClick: online || this.starting || !this.folder ? null : () => this.start(this.folder),
+        onClick: online || this.starting ? null : () => this.start(),
       },
     ];
   }
@@ -305,6 +334,20 @@ export default class Chrome extends View {
     const live = action.onClick ? base.cursor_pointer().on_click(action.onClick) : base;
     return live.child(icon(action.icon, 14, action.color)).child(action.word);
   }
+}
+
+/** The folder of every space the window has, one each, in a stable order. */
+function spaceFolders() {
+  const seen = new Set();
+  try {
+    for (const space of spaces() ?? []) {
+      const folder = space?.folder ? normalizeFolder(space.folder) : "";
+      if (folder) seen.add(folder);
+    }
+  } catch {
+    // no spaces to list: nothing to tell the service.
+  }
+  return [...seen].sort();
 }
 
 /** Directories for a sentence: the home folder as `~`, a few of them. */

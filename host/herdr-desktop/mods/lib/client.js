@@ -474,12 +474,12 @@ export function singleFlight(owner, work) {
 }
 
 /**
- * Finds the service for the space the window shows: `{base, dir, record, token,
- * health, folder}` or null when there is none.
+ * Finds the one service: `{base, dir, record, token, health, folder}` or null
+ * when none is running.
  *
- * Several repositories can be served at once, each with its own state directory,
- * so the record is the one whose `root` holds the shown space's folder
- * ([`pickService`]).
+ * There is one service for every repository, so there is one record to read,
+ * `<state>/shprd/service.json`; `folder` is only the space the window shows, kept
+ * for the [`Client`] made from the answer.
  *
  * The `id` check is the point of the handshake (Shepherdr's GitHub #635): a
  * record left behind by a service that died names a port something else may now
@@ -488,29 +488,18 @@ export function singleFlight(owner, work) {
  *
  * `io` is `{read, fetch, wait, dir, folder, run}` when a caller supplies its own
  * (a test); the defaults are Herdr's `readTextFile` and the mod runtime's `fetch`.
- * `io.dir` names one state directory outright and skips the search.
+ * `io.dir` names the state directory outright and skips the shell's answer.
  */
 export async function discover(io = {}) {
   const read = io.read ?? readTextFile;
   const doFetch = io.fetch ?? fetch;
   const folder = io.folder === undefined ? activeFolder() : io.folder;
   let dir = io.dir;
-  let record = null;
-  if (dir) {
-    record = await readServiceRecord(serviceFile(dir), read);
-  } else {
+  if (!dir) {
     const xdg = io.xdg ?? (await stateHome(io.run));
-    const entries = await listServices(stateDir(home(), xdg), io.run);
-    let entry = pickService(entries, folder);
-    if (!entry && folder && entries.length > 0) {
-      const root = await canonicalRoot(folder, io.run);
-      if (root) entry = pickService(entries, root);
-    }
-    if (entry) {
-      dir = entry.dir;
-      record = entry.record;
-    }
+    dir = stateDir(home(), xdg);
   }
+  const record = await readServiceRecord(serviceFile(dir), read);
   if (!record) return null;
   const base = baseUrl(record);
   const health = await getJson(doFetch, `${base}/api/health`, io.wait ?? null);
@@ -519,6 +508,12 @@ export async function discover(io = {}) {
   if (!token) return null;
   return { base, dir, record, token, health, folder: folder ?? null };
 }
+
+/** The routes that are about one repository: they carry `?repo=` (see the service's `repos.rs`). */
+const SCOPED = /^\/api\/(state|changes|asks|chat|terminal|action|graph|tasks|settings|coordinator|agents|ws)(\/|\?|$)/;
+
+/** Repositories this copy has already registered, by service id and folder, so a switch back is free. */
+const registered = new Map();
 
 /**
  * One service, as a mod uses it: reads, writes and the long poll.
@@ -536,12 +531,55 @@ export class Client {
    */
   constructor(found, io = {}) {
     this.base = found.base;
-    this.dir = found.dir;
+    // The service's own directory (record and token); `dir` is where the shown
+    // repository's change file is, once it is registered.
+    this.serviceDir = found.dir;
+    this.dir = found.repoDir ?? found.dir;
+    this.repoId = found.repoId ?? null;
     this.record = found.record;
     this.folder = found.folder ?? null;
     this.token = found.token;
     this.fetch = io.fetch ?? fetch;
     this.wait = io.wait ?? null;
+  }
+
+  /**
+   * The same service for another folder: nothing is found or checked again, only
+   * which repository this client's calls name changes.
+   */
+  forFolder(folder, repo = null) {
+    const next = Object.create(Client.prototype);
+    Object.assign(next, this, {
+      folder: folder ?? null,
+      repoId: repo?.id ?? null,
+      dir: repo?.dir ?? this.serviceDir,
+    });
+    return next;
+  }
+
+  /**
+   * `POST /api/repos`: tell the service the window shows this folder. It answers
+   * at once with `{id, root, dir}`; the service prepares the repository's space and
+   * coordinator in the background. It is idempotent, so a repeat is only an answer.
+   */
+  async register(folder = this.folder) {
+    return this.call("POST", "/api/repos", { body: { folder } });
+  }
+
+  /**
+   * `PUT /api/repos`: the folders of every space the window has. The service
+   * serves exactly these (plus any it was started for): a repository whose space
+   * was closed stops being ticked.
+   */
+  syncRepos(folders) {
+    return this.call("PUT", "/api/repos", { body: { folders } });
+  }
+
+  /** The path with the repository this client shows named, for a repo-scoped route. */
+  scoped(path) {
+    const name = this.repoId ?? this.folder;
+    if (!name || !SCOPED.test(path)) return path;
+    return `${path}${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(name)}`;
   }
 
   /** The headers every call carries; a write adds `x-shprd: 1`. */
@@ -577,7 +615,7 @@ export class Client {
    */
   async call(method, path, { body = null, wait = READ_WAIT, strict = false } = {}) {
     const write = method !== "GET";
-    const url = `${this.base}${path}`;
+    const url = `${this.base}${this.scoped(path)}`;
     const init = { method, headers: this.headers(write) };
     if (body !== null) init.body = JSON.stringify(body);
     const call = (async () => {
@@ -770,7 +808,7 @@ export class Client {
 }
 
 /**
- * The service a panel should talk to now, and whether it changed under it.
+ * The service a panel should talk to now, and whether anything it kept is stale.
  *
  * A panel keeps one [`Client`] between reads, and a `shprd serve` that restarted
  * is a different service: its `id` is new, its port may be the same one, and its
@@ -780,13 +818,20 @@ export class Client {
  * read of the board, and a record that names another `id` (or is gone) is a
  * restart.
  *
+ * A window that moves to another repository's space is **not** a restart: it is
+ * the same service and the same token, so the answer is the same client pointed at
+ * the other repository (`restarted: true`, because what the panel kept belongs to
+ * the one it left). The first visit to a repository registers it (one quick
+ * `POST /api/repos`); every later visit costs nothing at all.
+ *
  * `current` is the panel's client, or `null` when it has none yet. `io` is what
  * [`discover`] takes (`read`, `fetch`, `wait`, `dir`, `run`), so a test drives
  * this with a table of files and a fake fetch.
  *
  * The answer is `{client, restarted}`: `client` is `null` when no service is
  * running, `restarted` is true when the panel's old client is no longer the
- * service on disk and every cache it kept must be thrown away.
+ * service on disk, or no longer the repository shown, and every cache it kept must
+ * be thrown away.
  */
 export async function attach(current, io = {}) {
   const read = io.read ?? readTextFile;
@@ -794,21 +839,42 @@ export async function attach(current, io = {}) {
   // One empty answer is not "not running": a busy service misses a health check
   // now and then, so a null is looked for once more before it is believed.
   const find = async () => (await discover(io)) ?? (await discover(io));
+  const folder = io.folder === undefined ? activeFolder() : io.folder;
   if (!current) {
     const found = await find();
-    return { client: found ? make(found) : null, restarted: false };
+    return { client: found ? await shown(make(found), folder) : null, restarted: false };
   }
-  // The window moved to another repository's space: that is another service, and
-  // everything the panel kept belongs to the one it left.
-  const folder = io.folder === undefined ? activeFolder() : io.folder;
-  if ((folder ?? null) !== (current.folder ?? null)) {
+  const record = await readServiceRecord(serviceFile(current.serviceDir), read);
+  if (!record || record.id !== current.id()) {
     const found = await find();
-    return { client: found ? make(found) : null, restarted: true };
+    return { client: found ? await shown(make(found), folder) : null, restarted: true };
   }
-  const record = await readServiceRecord(serviceFile(current.dir), read);
-  if (record && record.id === current.id()) return { client: current, restarted: false };
-  const found = await find();
-  return { client: found ? make(found) : null, restarted: true };
+  if ((folder ?? null) !== (current.folder ?? null)) {
+    return { client: await shown(current, folder), restarted: true };
+  }
+  return { client: current, restarted: false };
+}
+
+/**
+ * `client` pointed at `folder`'s repository, registering it the first time this
+ * copy sees it on this service. A folder that cannot be registered (not a folder)
+ * is the error a panel shows.
+ */
+async function shown(client, folder) {
+  if (!folder) return client.forFolder(null);
+  const key = `${client.id()}|${normalizeFolder(folder)}`;
+  let repo = registered.get(key);
+  if (!repo) {
+    const answer = await client.forFolder(folder).register(folder);
+    repo = { id: answer?.id ?? null, dir: answer?.dir ?? null };
+    if (repo.id) registered.set(key, repo);
+  }
+  return client.forFolder(folder, repo);
+}
+
+/** Forgets which repositories were registered, so the next look registers them again. */
+export function forgetRegistered() {
+  registered.clear();
 }
 
 /** One sentence from a refusal body, for a toast or an inline error. */export function describe(body, status = 0) {
