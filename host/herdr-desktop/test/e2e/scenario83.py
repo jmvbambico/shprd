@@ -53,7 +53,7 @@ def row_action(shot_path, task_id, label):
     for w in ws:
         if w[0] < 0.59 * size[0] or w[4].strip(".,:") != task_id:
             continue
-        same = [o for o in ws if o is not w and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]
+        same = [o for o in ws if o is not w and any(ch.isalnum() for ch in o[4]) and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]
         if not same:
             ids.append(w)
     pills = [w for w in ws if w[4].strip(".,:") == label]
@@ -199,7 +199,7 @@ def main():
                     # The list moves as tasks change state: shoot, find the row and click in one go.
                     p = shoot(f"ask-{a.get('task')}-list")
                     ws, size = rc.words(p)
-                    idw = [w for w in ws if w[0] > 0.59 * size[0] and w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
+                    idw = [w for w in ws if w[0] > 0.59 * size[0] and w[4].strip(".,:") == a.get("task") and not [o for o in ws if o is not w and any(ch.isalnum() for ch in o[4]) and abs(o[1] - w[1]) < 14 and o[0] < w[0] and w[0] - o[0] < 400]]
                     if not idw:
                         time.sleep(2)
                         continue
