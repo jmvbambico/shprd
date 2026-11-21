@@ -481,13 +481,7 @@ fn pane_text(server: &LiveServer, pane: &str) -> String {
         .unwrap_or_else(|err| format!("(the pane could not be read: {err})"))
 }
 
-/// The one service directory under this state home (each repository has its own,
-/// and these tests serve one repository each).
+/// The one service's directory under this state home.
 fn service_dir(state: &Path) -> PathBuf {
-    let repos = state.join("shprd").join("repos");
-    std::fs::read_dir(&repos)
-        .ok()
-        .and_then(|mut dirs| dirs.find_map(|entry| entry.ok()))
-        .map(|entry| entry.path())
-        .unwrap_or_else(|| repos.join("none"))
+    state.join("shprd")
 }

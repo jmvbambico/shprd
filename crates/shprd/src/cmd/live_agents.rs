@@ -40,7 +40,7 @@ pub(crate) struct HostLive {
     seen: Mutex<BTreeMap<String, Seen>>,
     /// Whether the service has a space of its own for the repository: when it
     /// does not (a host it could not reach), no name is reported for one.
-    has_space: bool,
+    has_space: std::sync::atomic::AtomicBool,
 }
 
 impl HostLive {
@@ -63,17 +63,18 @@ impl HostLive {
             host,
             now,
             seen: Mutex::new(BTreeMap::new()),
-            has_space: false,
+            has_space: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Says the service made or reused the host's own space for the repository,
     /// which `spaces` reports by the name the host shows *now*: the window draws
     /// a space's name a moment after it makes it, so a name read once at start
-    /// would be the raw id for ever.
-    pub(crate) fn with_space(mut self, has_space: bool) -> Self {
-        self.has_space = has_space;
-        self
+    /// would be the raw id for ever. The service prepares the space after the
+    /// repository is registered, so it is told later.
+    pub(crate) fn set_space(&self, has_space: bool) {
+        self.has_space
+            .store(has_space, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The terminal an agent runs in, when it is listed: what a terminal socket
@@ -200,7 +201,7 @@ fn state_word(state: AgentState) -> &'static str {
 
 impl LiveSource for HostLive {
     fn space(&self) -> Option<HostSpace> {
-        if !self.has_space {
+        if !self.has_space.load(std::sync::atomic::Ordering::SeqCst) {
             return None;
         }
         let label = self.label()?;

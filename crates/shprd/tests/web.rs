@@ -46,7 +46,7 @@ impl Fixture {
 
     /// The state directory the service and these verbs share.
     fn state(&self) -> PathBuf {
-        shprd_server::repo_state_dir(&self.home.path().join(".local/state"), self.home.path())
+        shprd_server::state_dir(&self.home.path().join(".local/state"))
     }
 
     /// Runs `shprd web <args>` with `stdin` as the given lines.
@@ -253,11 +253,8 @@ fn the_password_lives_in_the_state_directory_the_service_reads() {
     let state = fixture.state();
     assert_eq!(
         state,
-        shprd_server::repo_state_dir(
-            &fixture.home.path().join(".local/state"),
-            fixture.home.path()
-        ),
-        "the same per-repository directory the service's discovery files live in"
+        shprd_server::state_dir(&fixture.home.path().join(".local/state")),
+        "the same directory the one service's discovery files live in"
     );
     assert!(state.join("web-auth.json").is_file());
 }

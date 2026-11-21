@@ -12,15 +12,18 @@
 // - Commit: `a3f327a` (tag `v3.1.34`)
 // - License: MIT — Copyright (c) 2026 Elias Stravik
 //
-// What is shprd's own here: each repository has its own service, and each service
-// its own state directory, `$XDG_STATE_HOME/shprd/repos/<name>-<hash>` (else under
-// `<home>/.local/state`). A mod finds the service for the space the window shows
-// by reading every `repos/*/service.json` and matching the record's `root` with
-// that space's folder (`pickService`), so a second repository never needs the first
-// one stopped. `GET /api/health` answers
-// `{ok, id, version}`, a write needs `x-shprd: 1` beside the bearer token, and
-// the service touches `<its state dir>/changes` after every ledger write so a mod
-// can watch a file instead of guessing when to read again (`lib/watch.js`).
+// What is shprd's own here: ONE service for every repository (SHPR-77), with one
+// state directory, `$XDG_STATE_HOME/shprd` (else under `<home>/.local/state`), one
+// `service.json`, one token and one port. A mod reads that one record; a call
+// about a repository names it with `?repo=<id or folder>` ([`Client.call`]), so
+// switching the window to another space only changes which repository a panel's
+// calls name: nothing is discovered, started or health-checked again. A repository
+// is registered with the service once per service start (`POST /api/repos`, which
+// answers at once and gives the directory its `changes` file is in). `GET
+// /api/health` answers `{ok, id, version}`, a write needs `x-shprd: 1` beside the
+// bearer token, and the service touches `<repo dir>/changes` after every ledger
+// write so a mod can watch a file instead of guessing when to read again
+// (`lib/watch.js`).
 //
 // A mod has no environment of its own (the M7ef spike measured it), so the state
 // directory is found by asking this computer's shell once (`probeStateDir`).
@@ -231,35 +234,6 @@ export async function readServiceRecord(path, read = readTextFile) {
   return parseServiceRecord(text);
 }
 
-/** The shell loop that prints every service's directory and record, a line each. */
-export const LIST_SCRIPT =
-  'for f in "$1"/repos/*/service.json; do [ -f "$f" ] || continue; ' +
-  'printf "%s\\t" "${f%/service.json}"; tr -d "\\n" < "$f"; printf "\\n"; done';
-
-/**
- * Every service this computer has written a record for: `[{dir, record}]`.
- *
- * It is one `exec` of a shell loop, because a mod has no directory listing. A
- * panel asks only when it has no service or the window moved to another space
- * (a service it already talks to is checked by reading its own record), so it is
- * not on the hot path. A record does not mean the service is up: [`discover`]
- * checks it answers.
- */
-export async function listServices(base, run = exec) {
-  const result = await run("sh", ["-c", LIST_SCRIPT, "sh", base]).catch(() => null);
-  const entries = [];
-  for (const line of String(result?.stdout ?? "").split("\n")) {
-    const tab = line.indexOf("\t");
-    if (tab < 1) continue;
-    const record = parseServiceRecord(line.slice(tab + 1));
-    if (record) entries.push({ dir: line.slice(0, tab), record });
-  }
-  return entries;
-}
-
-/** Kept for callers that used to drop a cached list: there is none now. */
-export function forgetServices() {}
-
 /**
  * A folder as it is compared: no trailing slash, and macOS's `/private` prefix of
  * `/var`, `/tmp` and `/etc` taken off (a service reports the real path, a space
@@ -277,51 +251,6 @@ export function repoName(folder) {
   return text.split("/").filter(Boolean).pop() ?? "";
 }
 
-/**
- * The service for `folder` among `entries`: the one whose `root` is that folder
- * or holds it (the deepest wins), else null.
- *
- * A window with no shown folder uses the one service there is, so a person who
- * runs one repository sees what they always did; with several it is ambiguous and
- * answers null rather than a guess.
- */
-export function pickService(entries, folder) {
-  const want = folder ? normalizeFolder(folder) : "";
-  if (want === "") return entries.length === 1 ? entries[0] : null;
-  let best = null;
-  for (const entry of entries) {
-    const root = normalizeFolder(entry.record.root);
-    if (root === "") continue;
-    if (want === root || want.startsWith(`${root}/`)) {
-      if (!best || root.length > normalizeFolder(best.record.root).length) best = entry;
-    }
-  }
-  return best;
-}
-
-const roots = new Map();
-/** How long a folder that resolved to no repository is left alone, ms. */
-const ROOT_RETRY_MS = 10_000;
-
-/**
- * The repository a folder belongs to, as git writes it (every symlink resolved,
- * a subfolder or a linked worktree answered by its repository): the path a
- * service records as its `root`. Null when it is no repository.
- *
- * The footer's names for a folder (`~/dev` through a symlink) and the service's
- * canonical root differ, and a string match alone would miss the service that is
- * running. The answer is kept: a repository does not move.
- */
-export async function canonicalRoot(folder, run = exec) {
-  const kept = roots.get(folder);
-  if (kept && (kept.root || Date.now() - kept.at < ROOT_RETRY_MS)) return kept.root;
-  const answer = await run("git", ["-C", folder, "rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
-  const line = String(answer?.stdout ?? "").trim().split("\n").pop() ?? "";
-  const root = answer?.code === 0 && line.endsWith("/.git") ? line.slice(0, -"/.git".length) : null;
-  roots.set(folder, { root, at: Date.now() });
-  return root;
-}
-
 /** The folder of the space the window shows, or null. */
 export function activeFolder() {
   try {
@@ -332,9 +261,13 @@ export function activeFolder() {
   }
 }
 
+/** The terminal the one service runs in (`hc` takes 1-32 of `a-z 0-9 - _`). */
+export const SERVICE_TERMINAL = "shprd-service";
+
 /**
- * The name of the terminal one repository's service runs in: `hc` takes 1-32 of
- * `a-z 0-9 - _`, and two folders of one name must not share a terminal.
+ * The name of the terminal an earlier version ran one repository's service in:
+ * the footer ends those (they hold a shell and nothing else once the service is
+ * migrated away) the first time the one service is up.
  */
 export function terminalName(folder) {
   const path = normalizeFolder(folder);
@@ -377,16 +310,13 @@ export const SEND_PROBLEM = "chat.problem";
  */
 export function downNotice(folder = activeFolder()) {
   if (!folder) return "Open a repository's space to use shprd";
-  const name = repoName(folder) || "this repository";
   const status = shared(SERVICE_STATUS);
-  if (status && normalizeFolder(status.folder) === normalizeFolder(folder)) {
-    if (status.phase === "starting") return `Starting the service for ${name}…`;
-    if (status.phase === "failed") {
-      // The footer says why in full; every other panel only points at it.
-      return `The service for ${name} isn't running (the reason is in the footer)`;
-    }
+  if (status?.phase === "starting") return "Starting the shprd service…";
+  if (status?.phase === "failed") {
+    // The footer says why in full; every other panel only points at it.
+    return "The shprd service isn't running (the reason is in the footer)";
   }
-  return `The service for ${name} is not up yet`;
+  return "The shprd service is not up yet";
 }
 
 /**

@@ -99,8 +99,10 @@ impl std::fmt::Debug for RepoParts {
 pub(crate) struct Slot {
     /// The stable id: `<name>-<hash>`, the name of its data directory.
     pub(crate) id: String,
-    /// The repository root, canonical.
+    /// The repository root, as its own tools name it.
     pub(crate) root: PathBuf,
+    /// The same root with every symlink resolved, for comparing paths.
+    canon: PathBuf,
     /// Where its change file and last pass live.
     pub(crate) dir: PathBuf,
     /// The state its handlers see.
@@ -116,6 +118,10 @@ pub(crate) struct Slot {
     stop: tokio::sync::watch::Sender<bool>,
     /// The log watcher and the tick.
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Preparing the repository's space and coordinator, until it has run. A
+    /// repository nobody has opened and that has no run of its own is not
+    /// prepared at all: a window that lists it does not start an agent for it.
+    prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Slot {
@@ -140,6 +146,18 @@ impl Slot {
                 })
                 .await;
             }));
+        }
+    }
+
+    /// Runs the repository's preparation, once; on this thread when `wait`.
+    fn run_prepare(&self, wait: bool) {
+        let step = self.prepare.lock().ok().and_then(|mut step| step.take());
+        match step {
+            Some(step) if wait => step(),
+            Some(step) => {
+                std::thread::spawn(step);
+            }
+            None => {}
         }
     }
 
@@ -239,6 +257,7 @@ impl Registry {
         let (stop, _) = tokio::sync::watch::channel(false);
         let slot = Arc::new(Slot {
             id: id.clone(),
+            canon: std::fs::canonicalize(&state.repo).unwrap_or_else(|_| state.repo.clone()),
             root: state.repo.clone(),
             dir,
             router: router(state.clone()),
@@ -247,6 +266,7 @@ impl Registry {
             tick,
             stop,
             tasks: Mutex::new(Vec::new()),
+            prepare: Mutex::new(None),
         });
         if let Ok(mut slots) = self.slots.write() {
             slots.insert(id, Arc::clone(&slot));
@@ -265,17 +285,34 @@ impl Registry {
     /// One plain sentence: no factory, a folder that is not there, or the
     /// factory's own refusal.
     pub fn register_folder(&self, folder: &Path, pinned: bool) -> Result<RepoInfo, String> {
+        self.register_folder_wait(folder, pinned, false)
+    }
+
+    /// [`Registry::register_folder`], optionally running the repository's
+    /// preparation (its space and coordinator) before it answers: the service's
+    /// own start does, so its banner can say what was prepared.
+    ///
+    /// # Errors
+    ///
+    /// As [`Registry::register_folder`].
+    pub fn register_folder_wait(
+        &self,
+        folder: &Path,
+        pinned: bool,
+        wait: bool,
+    ) -> Result<RepoInfo, String> {
         let factory = self
             .factory
             .as_ref()
             .ok_or_else(|| "this service was started without a way to serve a repository".to_string())?;
-        let folder = std::fs::canonicalize(folder)
-            .map_err(|_| format!("{} is not a folder this computer has", folder.display()))?;
         if !folder.is_dir() {
-            return Err(format!("{} is not a folder", folder.display()));
+            return Err(format!("{} is not a folder this computer has", folder.display()));
         }
+        let folder = folder.to_path_buf();
         let _one_at_a_time = self.registering.lock().map_err(|_| "registration failed".to_string())?;
-        let root = std::fs::canonicalize(factory.root_of(&folder)).unwrap_or_else(|_| factory.root_of(&folder));
+        // The root is what the repository's own tools (git, the CLI's `--repo`)
+        // call it; the id and the lookups below compare canonical paths.
+        let root = factory.root_of(&folder);
         let (id, dir) = slot_dir(&self.dir, &root);
         if let Some(found) = self.slots.read().ok().and_then(|slots| slots.get(&id).cloned()) {
             return Ok(info(&found));
@@ -301,6 +338,7 @@ impl Registry {
         let (stop, _) = tokio::sync::watch::channel(false);
         let slot = Arc::new(Slot {
             id: id.clone(),
+            canon: std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone()),
             root,
             dir,
             router: router(state.clone()),
@@ -309,6 +347,7 @@ impl Registry {
             tick: parts.tick,
             stop,
             tasks: Mutex::new(Vec::new()),
+            prepare: Mutex::new(parts.prepare),
         });
         if let Ok(mut slots) = self.slots.write() {
             slots.insert(id, Arc::clone(&slot));
@@ -316,10 +355,28 @@ impl Registry {
         if self.ticking.load(Ordering::SeqCst) {
             slot.start(None);
         }
-        if let Some(prepare) = parts.prepare {
-            std::thread::spawn(prepare);
+        // A repository with a run of its own is prepared at once (its tick may
+        // have a task to start); any other waits until it is opened.
+        if wait || crate::ledger::last_seq(&slot.root).unwrap_or(0) > 0 {
+            slot.run_prepare(wait);
         }
         Ok(info(&slot))
+    }
+
+    /// Registers the repository `folder` belongs to and prepares it now: the
+    /// window shows its space (or someone sent it a message), so its space and
+    /// coordinator are made if they are not yet. Quick like registering: the
+    /// preparation runs on its own thread.
+    ///
+    /// # Errors
+    ///
+    /// As [`Registry::register_folder`].
+    pub fn show(&self, folder: &Path) -> Result<RepoInfo, String> {
+        let found = self.register_folder(folder, false)?;
+        if let Some(slot) = self.slots.read().ok().and_then(|slots| slots.get(&found.id).cloned()) {
+            slot.run_prepare(false);
+        }
+        Ok(found)
     }
 
     /// Makes `folders` exactly the set of repositories being served, apart from
@@ -386,7 +443,7 @@ impl Registry {
         let key_path = std::fs::canonicalize(key).unwrap_or_else(|_| PathBuf::from(key));
         slots
             .values()
-            .filter(|slot| key_path.starts_with(&slot.root))
+            .filter(|slot| key_path.starts_with(&slot.canon) || key_path.starts_with(&slot.root))
             .max_by_key(|slot| slot.root.as_os_str().len())
             .cloned()
     }
@@ -577,7 +634,7 @@ async fn add_repo(
     Json(body): Json<FolderBody>,
 ) -> Result<Json<RepoInfo>, ApiReject> {
     token_only(&door)?;
-    let found = tokio::task::spawn_blocking(move || registry.register_folder(Path::new(&body.folder), false))
+    let found = tokio::task::spawn_blocking(move || registry.show(Path::new(&body.folder)))
         .await
         .map_err(|err| ApiReject::internal(err.to_string()))?
         .map_err(ApiReject::bad_request)?;
