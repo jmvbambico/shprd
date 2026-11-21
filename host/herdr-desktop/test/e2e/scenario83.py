@@ -186,6 +186,7 @@ def main():
         sc.record("2 five tasks appear", "T1..T5 within minutes; T2 after T1", ", ".join(f"{t['id']}={t['derived']['status']}(deps {t.get('deps')})" for t in (got or {}).get("tasks", [])), t_sent, bool(got))
         failed |= not got
         if not got:
+            shoot("02-no-tasks")
             return 1
         sc.run(["herdr-app", "do", "layout.select", "--stack", "tasks", "--child", "tasks-list"], e, timeout=20)
 
