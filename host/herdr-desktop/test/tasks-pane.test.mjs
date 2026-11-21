@@ -83,35 +83,46 @@ test("a read that finishes after a switch is kept for its own repository, not dr
   assert.equal(view.state.tasks.length, 1);
 });
 
-test("a verb's pill is busy from the press, a second press is ignored, and it is released after the answer", async () => {
+test("a pressed verb shows at once in the pane, a second press is ignored, and it is confirmed after the answer", async () => {
+  herdr.SHARED.clear();
   herdr.setSpaces([{ folder: "/work/shop", active: true }]);
   const view = pane();
   const calls = [];
   let answer;
   view.client = {
+    folder: "/work/shop",
     action: (body) => {
       calls.push(body);
       return new Promise((resolve) => (answer = resolve));
     },
   };
   view.refresh = async () => {};
-  const task = { id: "T1" };
-  const first = view.verb(task, "task.start", "Starting…");
-  assert.deepEqual(view.busy.get("T1"), { id: "task.start", label: "Starting…" }, "busy before the service answered");
-  await view.verb(task, "task.start", "Starting…");
+  view.cache.set("/work/shop", board("T1"));
+  view.sync();
+  const task = view.state.tasks[0];
+  const first = view.verb(task, "task.start");
+  view.sync();
+  assert.equal(view.state.tasks[0].derived.status, "working", "the row moved before the service answered");
+  assert.equal(view.state.tasks[0].pending.label, "Starting…");
+  await view.verb(task, "task.start");
   assert.equal(calls.length, 1, "a double press sends one verb");
   answer({});
   await first;
-  assert.equal(view.busy.has("T1"), false, "released once the board was read again");
   assert.equal(view.actionError, null);
 });
 
-test("a refused verb frees the pill and says why in one line", async () => {
+test("a refused verb rolls the row back and says why in one line", async () => {
+  herdr.SHARED.clear();
   herdr.setSpaces([{ folder: "/work/shop", active: true }]);
   const view = pane();
-  view.client = { action: () => Promise.reject(new Error("nope")) };
+  view.client = { folder: "/work/shop", action: () => Promise.reject(new Error("nope")) };
   view.refresh = async () => {};
-  await view.verb({ id: "T1" }, "task.stop", "Stopping…");
-  assert.equal(view.busy.has("T1"), false);
-  assert.match(view.actionError, /task\.stop T1/);
+  view.cache.set("/work/shop", { seq: 1, tasks: [{ id: "T1", status: "working", derived: { status: "working" } }] });
+  view.sync();
+  await view.verb(view.state.tasks[0], "task.stop");
+  view.sync();
+  assert.equal(view.state.tasks[0].derived.status, "working", "back to the true state");
+  assert.equal(view.state.tasks[0].pending, undefined);
+  assert.match(view.actionError, /Stop T1: nope/);
+  herdr.SHARED.clear();
 });

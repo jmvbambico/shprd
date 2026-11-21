@@ -58,6 +58,8 @@
 
 import { exec, home, readTextFile, shared, spaces } from "herdr";
 
+import * as optimistic from "./optimistic.js";
+
 /** The first look at a service gives up after this many ms. */
 export const HEALTH_WAIT = 1500;
 /** A read gives up after this many ms, so one slow call never wedges a panel. */
@@ -275,6 +277,7 @@ export function activeFolder() {
 export class RepoCache {
   constructor() {
     this.map = new Map();
+    this.memo = new Map();
   }
 
   /** The key of `folder` (default: the space the window shows). */
@@ -282,8 +285,29 @@ export class RepoCache {
     return folder ? normalizeFolder(folder) : "";
   }
 
-  /** The last answer for `folder`, or null when none was read yet. */
+  /**
+   * The board for `folder` as the panes show it: what the service last said with
+   * the task actions still waiting for it applied (SHPR-81, [`optimistic`]), or
+   * null when none was read yet. The service's own board is never changed ([`raw`]).
+   */
   get(folder = activeFolder()) {
+    const key = this.key(folder);
+    const board = this.map.get(key) ?? null;
+    if (board === null) return null;
+    const { v, ops } = optimistic.read();
+    if (ops.length === 0) return board;
+    // The same board and the same ops give the same answer, for a second at most
+    // (an op's age is part of it), so drawing again costs nothing.
+    const stamp = `${v}:${Math.floor(Date.now() / 1000)}`;
+    const memo = this.memo.get(key);
+    if (memo && memo.board === board && memo.stamp === stamp) return memo.shown;
+    const shown = optimistic.overlay(board, key, ops);
+    this.memo.set(key, { board, stamp, shown });
+    return shown;
+  }
+
+  /** The board exactly as the service said it, or null. */
+  raw(folder = activeFolder()) {
     return this.map.get(this.key(folder)) ?? null;
   }
 
@@ -321,9 +345,12 @@ export function adoptCache(owner) {
 export function syncRepo(owner) {
   if (!owner.cache) return;
   const key = owner.cache.key();
-  if (key === owner.shownKey) return;
-  owner.shownKey = key;
-  owner.failure = null;
+  if (key !== owner.shownKey) {
+    owner.shownKey = key;
+    owner.failure = null;
+  }
+  // Drawn again every time: a task action pressed in another pane changes what
+  // the shown board says (`tasks.optimistic`), and `setShared` re-renders every mod.
   owner.state = owner.cache.get();
 }
 
@@ -336,7 +363,7 @@ export function remember(owner, client, board) {
   owner.cache.set(client?.folder ?? null, board);
   if (owner.cache.key(client?.folder ?? null) === owner.cache.key()) {
     owner.shownKey = owner.cache.key();
-    owner.state = board;
+    owner.state = owner.cache.get();
   }
 }
 
@@ -354,6 +381,52 @@ export function watchSwitch(owner, cx) {
     cx.notify();
     owner.refresh(cx);
   });
+}
+
+/** The verbs' words for a refusal line: "Accept SHPR-3: <why>". */
+const VERB_NAMES = {
+  "task.accept": "Accept",
+  "task.start": "Start",
+  "task.retry": "Retry",
+  "task.stop": "Stop",
+  "task.drop": "Drop",
+  "task.drop_many": "Drop",
+  "ask.answer": "Answer",
+};
+
+/**
+ * Presses one task action through the optimistic layer (SHPR-81), the one way every
+ * pane does it.
+ *
+ * The effect shows in every pane before `send` has been called; `send()` posts it.
+ * When the service answers it is confirmed; when it refuses (or nothing answers) the
+ * effect is rolled back to the true state and one plain line says why. A press on a
+ * task that already has an action under way is ignored.
+ *
+ * `owner` is the pane (`owner.client`, `owner.cache`); answers `{ignored}`, `{ok,
+ * reply, op}` or `{ok: false, error, reason, op}` where `error` is that plain line ("Accept SHPR-3: <why>") and `reason` is the why alone. The
+ * caller redraws; it is never thrown.
+ */
+export async function press(owner, { kind, tasks, send, extra = {} }) {
+  const client = owner.client;
+  const folder = client?.folder ?? null;
+  const board = owner.cache?.raw(folder) ?? owner.state ?? null;
+  const op = optimistic.begin({ kind, tasks, board, folder, extra });
+  if (op === null) return { ignored: true };
+  if (owner.cache) owner.state = owner.cache.get(folder);
+  owner.cx?.notify?.();
+  try {
+    const reply = await send();
+    optimistic.confirm(op.id);
+    if (owner.cache) owner.state = owner.cache.get(folder);
+    return { ok: true, reply, op };
+  } catch (err) {
+    const why = reason(err);
+    const line = `${VERB_NAMES[kind] ?? "Action"} ${tasks[0] ?? ""}: ${why}`.replace(/\s+:/, ":");
+    optimistic.fail(op.id, line);
+    if (owner.cache) owner.state = owner.cache.get(folder);
+    return { ok: false, error: line, reason: why, op };
+  }
 }
 
 /** The terminal the one service runs in (`hc` takes 1-32 of `a-z 0-9 - _`). */

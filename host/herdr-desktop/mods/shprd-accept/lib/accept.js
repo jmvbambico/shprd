@@ -332,7 +332,7 @@ export function head(task) {
   return {
     id: task.id,
     title: task.title ?? "",
-    word: (derived.status ?? "").replace(/_/g, " "),
+    word: task.pending?.label ?? (derived.status ?? "").replace(/_/g, " "),
     tone: derived.status === "ready" ? "green" : derived.status === "needs_you" ? "red" : "dim",
     question: WORDS.question(task.id),
   };

@@ -26,7 +26,8 @@ import { View, div } from "gpui-kit";
 import { Input, InputState, h_flex, v_flex } from "gpui-base";
 import { nextCommand, openOverlay, run, setShared, shared, spaces, theme } from "herdr";
 
-import { RepoCache, attach, normalizeFolder, downNotice, reason, singleFlight } from "./lib/client.js";
+import { RepoCache, attach, normalizeFolder, downNotice, press, reason, singleFlight } from "./lib/client.js";
+import { errorLine, startReview } from "./lib/optimistic.js";
 import {
   counts,
   etaMinutes,
@@ -55,9 +56,6 @@ const CLEAR_REASON = "Old tasks from an earlier session";
 
 /** How often the per-repository task counts are read again, ms. */
 const COUNTS_MS = 20_000;
-
-/** What a pill says while its verb is waiting on the service. */
-const VERB_WORDS = { start: "Starting…", retry: "Retrying…", stop: "Stopping…" };
 
 /** The font shprd's ids and the graph's guide lines are set in. */
 const MONO = "JetBrains Mono";
@@ -435,19 +433,19 @@ export default class Tasks extends View {
    * one that did. The board is read again after success, so the row shows the
    * status the engine's own pass would give it.
    */
-  async verb(task, action, label = "Working…") {
-    if (!this.client || this.busy.has(task.id)) return;
+  async verb(task, action) {
+    if (!this.client) return;
     this.actionError = null;
-    // The pill is busy at once, before the service has said anything.
-    this.busy.set(task.id, { id: action, label });
-    this.cx.notify();
-    try {
-      await this.client.action({ kind: action, task: task.id });
-      await this.refresh();
-    } catch (err) {
-      this.actionError = `${action} ${task.id}: ${reason(err)}`;
-    }
-    this.busy.delete(task.id);
+    // The row, the Graph, the status bar and the chat change at once (the
+    // optimistic layer, `press`); the service's answer confirms it or rolls it back.
+    const sent = await press(this, {
+      kind: action,
+      tasks: [task.id],
+      send: () => this.client.action({ kind: action, task: task.id }),
+    });
+    if (sent.ignored) return;
+    if (!sent.ok) this.actionError = sent.error;
+    else await this.refresh();
     this.cx.notify();
   }
 
@@ -476,18 +474,18 @@ export default class Tasks extends View {
   async submitClear() {
     if (!this.client || this.clearBusy || this.clearing === null) return;
     const text = String(this.clearReason?.value() ?? "").trim();
-    this.clearBusy = true;
-    this.clearError = null;
-    this.cx.notify();
-    try {
-      await this.client.action({ kind: "task.drop_many", tasks: this.clearing, reason: text || CLEAR_REASON });
-      await this.refresh();
-      this.endClear();
-      return;
-    } catch (err) {
-      this.clearError = reason(err);
-    }
-    this.clearBusy = false;
+    const ids = this.clearing;
+    // The confirm closes and the rows go at once; a refusal puts them back and says why.
+    this.endClear();
+    this.actionError = null;
+    const sent = await press(this, {
+      kind: "task.drop_many",
+      tasks: ids,
+      send: () => this.client.action({ kind: "task.drop_many", tasks: ids, reason: text || CLEAR_REASON }),
+    });
+    if (sent.ignored) return;
+    if (!sent.ok) this.actionError = sent.error;
+    else await this.refresh();
     this.cx.notify();
   }
 
@@ -694,7 +692,7 @@ export default class Tasks extends View {
       .py(6)
       .gap(2)
       .children([
-        ...(this.actionError !== null ? [this.wrong(t, this.actionError)] : []),
+        ...(this.actionError ?? errorLine(this.state) ? [this.wrong(t, this.actionError ?? errorLine(this.state))] : []),
         ...(this.adding ? [this.form(t, colors)] : []),
         ...(this.clearing !== null ? [this.clearForm(t, colors)] : []),
         ...(this.failure !== null
@@ -809,15 +807,10 @@ export default class Tasks extends View {
       .child(statusGlyph(t, row, colors, 12))
       .child(div().flex_none().font_family(MONO).text_color(t.foreground).child(ref(row.id)))
       .child(div().flex_1().min_w(0).truncate().text_color(row.waits ? t.dim : t.muted).child(row.title))
-      .child(div().flex_none().max_w(150).truncate().text_color(word).font_medium().child(row.word))
-      // A fixed slot for the pill, so every row's status word ends at the same edge.
-      .child(
-        h_flex()
-          .w(64)
-          .flex_none()
-          .justify_end()
-          .when(acts.length > 0, (el) => el.child(this.act(t, task, acts[0]))),
-      );
+      // The act's pill sits before the state word, so every row's word ends at the
+      // pane's right edge, the same edge as the header's "4/4 done".
+      .when(acts.length > 0, (el) => el.child(this.act(t, task, acts[0])))
+      .child(div().flex_none().max_w(150).truncate().text_color(word).font_medium().child(row.word));
   }
 
   /**
@@ -1263,7 +1256,8 @@ export default class Tasks extends View {
    * where the decision is made.
    */
   act(t, task, act) {
-    const busy = this.busy.get(task.id) ?? null;
+    // A row whose action the service has not answered yet is busy too, whichever pane pressed it.
+    const busy = this.busy.get(task.id) ?? (task.pending && task.pending.kind !== "review" ? { id: "", label: "" } : null);
     // The pressed pill says what it is doing; the row's other pill is dimmed. A press
     // on a busy row is ignored, so a double press cannot send a verb twice.
     const mine = busy !== null && busy.id === act.id;
@@ -1283,10 +1277,12 @@ export default class Tasks extends View {
       .child(mine ? busy.label : act.label);
     return el.on_click((_event, cx) => {
       cx.stop_propagation();
-      if (this.busy.has(task.id)) return;
+      if (this.busy.has(task.id) || (task.pending && task.pending.kind !== "review")) return;
       // Review is the card, as a dialog: the panel underneath stays as it was.
       if (act.action === null) {
         this.busy.set(task.id, { id: act.id, label: "Opening…" });
+        // The row says "Reviewing…" in every pane until the card is closed.
+        if (act.id === "review") startReview(task, this.client?.folder ?? null);
         cx.notify();
         openAccept({ task: task.id, title: task.title, drop: act.id === "drop", snapshot: task });
         // The dialog is its own window; the pill is released once it has had time to appear.
@@ -1294,7 +1290,7 @@ export default class Tasks extends View {
           this.busy.delete(task.id);
           cx.notify();
         });
-      } else this.verb(task, act.action, VERB_WORDS[act.id] ?? "Working…");
+      } else this.verb(task, act.action);
     });
   }
 }
