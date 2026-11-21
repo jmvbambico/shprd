@@ -278,6 +278,8 @@ export class RepoCache {
   constructor() {
     this.map = new Map();
     this.memo = new Map();
+    /** Which pane this cache is, for the live check's probe. */
+    this.label = "pane";
   }
 
   /** The key of `folder` (default: the space the window shows). */
@@ -302,6 +304,7 @@ export class RepoCache {
     const memo = this.memo.get(key);
     if (memo && memo.board === board && memo.stamp === stamp) return memo.shown;
     const shown = optimistic.overlay(board, key, ops);
+    optimistic.probe(this.label, shown);
     this.memo.set(key, { board, stamp, shown });
     return shown;
   }
@@ -338,6 +341,7 @@ export class RepoCache {
  */
 export function adoptCache(owner) {
   owner.cache = new RepoCache();
+  owner.cache.label = owner.constructor?.name ?? "pane";
   owner.shownKey = owner.cache.key();
 }
 

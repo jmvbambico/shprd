@@ -89,6 +89,7 @@ export default class Accept extends View {
     // The last board read per repository (see `RepoCache`): the head keeps drawing
     // the shared task's row across a switch of space instead of going blank.
     this.cache = new RepoCache();
+    this.cache.label = "Accept";
     this.shownKey = this.cache.key();
     this.state = this.cache.get();
     // The dialog's first picture: the task as the Tasks panel held it, drawn until

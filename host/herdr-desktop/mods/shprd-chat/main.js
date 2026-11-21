@@ -33,7 +33,7 @@ import { Input, InputState, ScrollHandle, Textarea, TextareaState, TextView, h_f
 import { exec, props, setShared, shared, theme } from "herdr";
 
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, press, reason, singleFlight } from "./lib/client.js";
-import { answeredAsks, errorLine, noticeLine, overlay, read as readOps } from "./lib/optimistic.js";
+import { answeredAsks, errorLine, noticeLine, overlay, probe, read as readOps } from "./lib/optimistic.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
   COORDINATOR,
@@ -440,6 +440,7 @@ export default class Chat extends View {
     // applied, and the questions they answered already gone (`tasks.optimistic`).
     const folder = this.client?.folder ?? activeFolder();
     const board = overlay(this.state, folder, readOps().ops);
+    probe("Chat", board);
     const gone = answeredAsks(folder);
     const open = this.asks ? { ...this.asks, asks: (this.asks.asks ?? []).filter((ask) => !gone.has(`${ask.task}/${ask.id}`)) } : this.asks;
     const list = this.space === null ? [] : forSpace(cardsOf(board, open), this.space);

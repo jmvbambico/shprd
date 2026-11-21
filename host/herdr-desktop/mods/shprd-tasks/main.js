@@ -68,6 +68,7 @@ export default class Tasks extends View {
     // refreshes it in place. `state` is the shown repository's entry; null means
     // nothing was read for it yet, which draws "Loading tasks…", never an empty state.
     this.cache = new RepoCache();
+    this.cache.label = "Tasks";
     this.shownKey = this.cache.key();
     this.state = this.cache.get();
     this.failure = null;
@@ -155,6 +156,13 @@ export default class Tasks extends View {
           const [, id, view] = command.split(":");
           const task = (this.state?.tasks ?? []).find((entry) => entry.id === id);
           if (task) this.open(task, view === "terminal" ? "terminal" : "chat");
+        } else if (command.startsWith("press:")) {
+          // `run("shprd-tasks.press:task.accept:T1")`: a script's way to press a task
+          // action exactly as a row's pill or the card does (the same `verb`, so the
+          // same optimistic layer), which a live check has no pointer for.
+          const [, kind, id] = command.split(":");
+          const task = (this.state?.tasks ?? []).find((entry) => entry.id === id);
+          if (task) this.verb(task, kind);
         } else if (command === "graph") this.show("graph");
         else if (command === "tasks") this.show("tasks");
         else if (command === "group") this.popup("group");
@@ -197,6 +205,7 @@ export default class Tasks extends View {
         // No service: whatever was cached belonged to it, and an old board is not
         // painted for a service that is gone.
         this.cache = new RepoCache();
+        this.cache.label = "Tasks";
         this.state = null;
         this.failure = downNotice();
         cx.notify();

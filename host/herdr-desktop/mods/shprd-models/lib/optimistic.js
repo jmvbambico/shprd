@@ -29,7 +29,7 @@
 // Shared: the source is `mods/lib/optimistic.js`; `bin/sync-shared` copies it into
 // every mod folder as `lib/optimistic.js`. Edit the source, never a copy.
 
-import { setShared, shared } from "herdr";
+import { exec, setShared, shared } from "herdr";
 
 /** The shared key the list of ops lives under. */
 export const KEY = "tasks.optimistic";
@@ -296,14 +296,14 @@ export function overlay(board, folder, ops, now = Date.now()) {
   let error = null;
   for (const op of mine) {
     if (op.phase === "failed") {
-      error = { task: op.tasks[0] ?? null, text: op.error ?? "" };
+      error = { op: op.id, task: op.tasks[0] ?? null, text: op.error ?? "" };
       continue;
     }
     if (resolved(op, board) === "failed") {
-      error = { task: op.tasks[0] ?? null, text: landError(op, board) };
+      error = { op: op.id, task: op.tasks[0] ?? null, text: landError(op, board) };
       continue;
     }
-    notes.push({ kind: op.kind, tasks: op.tasks, text: `${NOTICE[op.kind] ?? "Working on"} ${op.tasks.join(", ")}…` });
+    notes.push({ op: op.id, kind: op.kind, tasks: op.tasks, text: `${NOTICE[op.kind] ?? "Working on"} ${op.tasks.join(", ")}…` });
     for (const item of op.items ?? []) {
       const raw = patches.has(item.id) ? null : find(board, item.id);
       // The board shows the task as it was at the press: the effect holds. Anything
@@ -358,4 +358,34 @@ export function noticeLine(board) {
  */
 export function startReview(task, folder, io = {}) {
   return begin({ kind: "review", tasks: [task.id], board: { tasks: [task] }, folder, ...io });
+}
+
+/** What a pane has already told the e2e probe about, by pane and op. */
+const told = new Set();
+
+/**
+ * The live check's probe: when a run sets the shared key `e2e.probe` to a file, each
+ * pane appends one line the first time it draws an op's effect (or its refusal), with
+ * the time on its own clock, so a run can say how long a press took to reach every
+ * pane. Nothing happens when the key is not set, which is always outside a check.
+ */
+export function probe(label, board) {
+  let path = null;
+  try {
+    path = shared("e2e.probe");
+  } catch {
+    return;
+  }
+  if (typeof path !== "string" || path === "" || !board?.optimistic) return;
+  const seen = [
+    ...board.optimistic.notes.map((note) => ({ op: note.op, what: note.kind })),
+    ...(board.optimistic.error ? [{ op: board.optimistic.error.op, what: "error" }] : []),
+  ];
+  for (const one of seen) {
+    const key = `${label}:${one.op}:${one.what}`;
+    if (told.has(key)) continue;
+    told.add(key);
+    const line = JSON.stringify({ pane: label, op: one.op, what: one.what, at: Date.now() });
+    exec("sh", ["-c", `printf '%s\\n' '${line}' >> '${path.replace(/'/g, "")}'`]).catch(() => null);
+  }
 }
