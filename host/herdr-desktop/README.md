@@ -300,6 +300,29 @@ it closes the window, and the cards are all read off those answers. It also read
 `layouts/shprd.json` to prove the panel keeps no settings block for a tab to
 switch to.
 
+## The end-to-end run (before every desktop merge)
+
+`test/e2e/scenario.py` is one uninterrupted add-folder -> chat -> tasks -> Accept
+run in a private window (SHPR-79), with a screenshot at each step and a table of
+expected against seen:
+
+```
+cargo build -p shprd
+python3 host/herdr-desktop/test/e2e/scenario.py --shprd target/debug/shprd \
+    --mods host/herdr-desktop --out /tmp/e2e-out        # real agents: ~8 minutes
+python3 host/herdr-desktop/test/e2e/scenario.py --cleanup /private/tmp/shpe2e-XXXX   # a run that died
+```
+
+It copies the person's `~/.config/herdr-app` (their Settings and Shepherdr mods,
+`spaces.picked` dropped) and `~/.config/shprd` into a private home under
+`/private/tmp`, installs this checkout's mods into it, and drives what the
+window's own flows run (the New space dialog's commands, the chat pane's
+`POST /api/chat`, a card's answer and the Accept button's `POST /api/action`):
+the window has no command for a click or a keystroke. It tears the window down
+by recorded pid and stops the private core (`hc server stop`); never pkill by
+name. Run it against the base mods (`--mods` a `git archive` of the base's
+`host/herdr-desktop`) to see a failing step: step f fails there.
+
 ## Starting the service
 
 The footer's third row says which repository's service the shown space uses and
