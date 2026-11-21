@@ -1410,7 +1410,8 @@ export function pickLabel(menus, sel) {
   if (!sel?.agent) return "";
   const program = menus?.programs?.[sel.agent];
   const model = modelIn(menus, sel);
-  const name = model?.name ?? sel.model ?? program?.name ?? sel.agent;
+  // A model the catalog does not list shows its own name, not its provider path (`pi`'s ids are paths).
+  const name = model?.name ?? (sel.model ? String(sel.model).split("/").pop() : null) ?? program?.name ?? sel.agent;
   const level = levelOf(menus, sel);
   return [name, level ? levelWord(level) : null, sel.fast ? "Fast" : null].filter(Boolean).join(" · ");
 }

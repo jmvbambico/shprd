@@ -1405,7 +1405,8 @@ export default class Chat extends View {
                           .pl(8)
                           .pr(5)
                           .gap(4)
-                          .flex_none()
+                          .min_w(0)
+                          .max_w(280)
                           .items_center()
                           .rounded(6)
                           .text_size(TEXT.label)
@@ -1419,7 +1420,7 @@ export default class Chat extends View {
                               (event?.position ? { x: event.position.x - 40, y: event.position.y - 14, width: 80, height: 28 } : null);
                           })
                           .on_click(clickPress(() => this.openModelMenu(this.pickRec.at ?? null)))
-                          .child(div().flex_none().whitespace_nowrap().child(this.modelWords()))
+                          .child(div().min_w(0).whitespace_nowrap().truncate().child(this.modelWords()))
                           .child(svg(iconFile("chevron-down")).size(12).flex_none()),
                       ),
                     )
