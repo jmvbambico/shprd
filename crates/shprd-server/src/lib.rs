@@ -67,6 +67,7 @@ pub mod engine;
 pub mod error;
 pub mod graph;
 pub mod pass;
+pub mod repos;
 pub mod service;
 pub mod snapshot;
 pub mod tasks;
@@ -97,9 +98,10 @@ pub use graph::{Dagr, Located, Missing, Origin};
 pub use live::{HostSpace, LiveAgentRow, LiveAgents, LiveSource};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
+pub use repos::{REPO_HEADER, Registry, RepoFactory, RepoInfo, RepoParts};
 pub use service::{
     AfterWrite, Config, PassNotice, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig,
-    VERSION, repo_state_dir, serve, shutdown_signal, state_dir, state_home,
+    VERSION, repo_dir_in, repo_state_dir, serve, shutdown_signal, state_dir, state_home,
 };
 pub use shprd_remote::AllowedHosts;
 pub use snapshot::NO_RUN_HINT;

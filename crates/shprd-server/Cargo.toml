@@ -20,6 +20,7 @@ shprd-views = { path = "../shprd-views" }
 shprd-watch = { path = "../shprd-watch" }
 thiserror.workspace = true
 tokio.workspace = true
+tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
@@ -29,7 +30,6 @@ http-body-util.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
-tower.workspace = true
 ureq.workspace = true
 
 [lints]

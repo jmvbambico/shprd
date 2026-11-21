@@ -254,6 +254,89 @@ pub(crate) struct Paths {
     pub(crate) allowed_hosts: shprd_remote::AllowedHosts,
 }
 
+/// What every repository served by one service shares: the discovery files, the
+/// gate (one token, one password, one set of sessions), the tunnel and what the
+/// machine resolved. A repository's own slot is this state with its own repo,
+/// hub, host adapters and tick laid over it ([`crate::repos`]).
+pub(crate) struct Shared;
+
+impl Shared {
+    /// Takes the state directory's lock, prepares the gate and writes
+    /// `service.json` for `port`; answers the files and the base state, whose
+    /// `repo` is `root` or empty.
+    pub(crate) fn prepare(
+        state_dir: &Path,
+        port: u16,
+        actor: &Actor,
+        paths: Paths,
+        root: Option<&Path>,
+    ) -> Result<(ServiceFiles, AppState), ServerError> {
+        let files = match root {
+            Some(root) => ServiceFiles::prepare(state_dir)?.with_root(root),
+            None => ServiceFiles::prepare(state_dir)?,
+        };
+        // The gate is prepared before the record, so a client that finds the
+        // record finds a service that can already answer it.
+        let gateway = shprd_remote::Gateway::new(state_dir, Arc::new(SystemClock))
+            .with_token(files.token())
+            .with_hosts(paths.allowed_hosts.clone());
+        // A session that has expired is not found whatever happens, so this is
+        // tidying: the file a start leaves behind never holds dead rows.
+        if let Err(err) = gateway.sessions().purge() {
+            tracing::warn!(%err, "could not tidy the expired sessions");
+        }
+        // A new service has no tunnel, whatever a service that was killed left in
+        // `web.json`; the manager says so before anything can read it.
+        let tunnel_factory: Arc<dyn shprd_remote::tunnel::TunnelFactory> = Arc::new(
+            shprd_remote::tunnel::SystemTunnels::new(paths.path_env.clone().unwrap_or_default()),
+        );
+        let tunnels = shprd_remote::tunnel::TunnelManager::new(
+            state_dir,
+            &gateway,
+            Arc::new(SystemClock),
+            tunnel_factory.clone(),
+        );
+        tunnels.reset();
+        // The change file goes before the record, so a client that polls for
+        // `service.json` never finds a record whose change file is missing.
+        if let Some(root) = root {
+            let _ = crate::changes::touch(state_dir, ledger::last_seq(root).unwrap_or(0));
+        }
+        files.write_record(port)?;
+        let state = AppState {
+            repo: root.map(Path::to_path_buf).unwrap_or_default(),
+            port,
+            token: files.token().to_string(),
+            id: files.id().to_string(),
+            version: VERSION.to_string(),
+            actor: actor.clone(),
+            hub: Hub::new(),
+            after_write: None,
+            ws: WsLimits::default(),
+            // Everything the service reads from the machine is resolved by the
+            // binary and carried in ([`crate::service::Config`]); a service
+            // prepared by hand reads nothing of the process's environment.
+            remote: Arc::new(gateway),
+            home: paths.home,
+            state_dir: state_dir.to_path_buf(),
+            data: paths.data,
+            engine: None,
+            prompts_dir: paths.prompts_dir,
+            path_env: paths.path_env,
+            dagr: paths.dagr,
+            chat: ChatHost::new(),
+            terminal: crate::terminal::TerminalPort::new(),
+            agents: crate::agents::Agents::new(),
+            live: crate::live::LiveAgents::new(),
+            transcript_roots: paths.transcript_roots,
+            web: crate::web::Source::Embedded,
+            tunnels,
+            tunnel_factory,
+        };
+        Ok((files, state))
+    }
+}
+
 /// One prepared service: its state, its router and its discovery files.
 ///
 /// It is the seam a test drives without a socket, and what [`crate::service`]
@@ -321,65 +404,12 @@ impl App {
         hub: Hub,
         paths: Paths,
     ) -> Result<Self, ServerError> {
-        let files = ServiceFiles::prepare(state_dir)?.with_root(repo);
-        // A mod that starts before the run moves has nothing to watch for: the
-        // change file is written once here, naming the log as it stands, so a
-        // panel's first look at it is a real answer rather than a missing file.
-        // It goes before the record, so a client that polls for `service.json`
-        // never finds a record whose change file is still missing.
-        let _ = crate::changes::touch(state_dir, ledger::last_seq(repo).unwrap_or(0));
-        // The gate is prepared before the record, so a client that finds the
-        // record finds a service that can already answer it.
-        let gateway = shprd_remote::Gateway::new(state_dir, Arc::new(SystemClock))
-            .with_token(files.token())
-            .with_hosts(paths.allowed_hosts.clone());
-        // A session that has expired is not found whatever happens, so this is
-        // tidying: the file a start leaves behind never holds dead rows.
-        if let Err(err) = gateway.sessions().purge() {
-            tracing::warn!(%err, "could not tidy the expired sessions");
-        }
-        // A new service has no tunnel, whatever a service that was killed left in
-        // `web.json`; the manager says so before anything can read it.
-        let tunnel_factory: Arc<dyn shprd_remote::tunnel::TunnelFactory> = Arc::new(
-            shprd_remote::tunnel::SystemTunnels::new(paths.path_env.clone().unwrap_or_default()),
-        );
-        let tunnels = shprd_remote::tunnel::TunnelManager::new(
-            state_dir,
-            &gateway,
-            Arc::new(SystemClock),
-            tunnel_factory.clone(),
-        );
-        tunnels.reset();
-        files.write_record(port)?;
+        let (files, base) = Shared::prepare(state_dir, port, actor, paths, Some(repo))?;
         let state = AppState {
             repo: repo.to_path_buf(),
-            port,
-            token: files.token().to_string(),
-            id: files.id().to_string(),
-            version: VERSION.to_string(),
-            actor: actor.clone(),
             hub,
             after_write,
-            ws: WsLimits::default(),
-            // Everything the service reads from the machine is resolved by the
-            // binary and carried in ([`crate::service::Config`]); a service
-            // prepared by hand reads nothing of the process's environment.
-            remote: Arc::new(gateway),
-            home: paths.home,
-            state_dir: state_dir.to_path_buf(),
-            data: paths.data,
-            engine: None,
-            prompts_dir: paths.prompts_dir,
-            path_env: paths.path_env,
-            dagr: paths.dagr,
-            chat: ChatHost::new(),
-            terminal: crate::terminal::TerminalPort::new(),
-            agents: crate::agents::Agents::new(),
-            live: crate::live::LiveAgents::new(),
-            transcript_roots: paths.transcript_roots,
-            web: crate::web::Source::Embedded,
-            tunnels,
-            tunnel_factory,
+            ..base
         };
         let router = router(state.clone());
         Ok(Self {

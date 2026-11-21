@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use shprd_agents::data::DataDir;
 use tokio::net::TcpListener;
 
-use crate::api::{App, Paths};
+use crate::api::Paths;
 use crate::error::ServerError;
 
 /// The version every answer reports.
@@ -29,17 +29,22 @@ pub fn state_dir(state_home: &Path) -> PathBuf {
     state_home.join("shprd")
 }
 
-/// Where the service for the repository at `root` keeps its files:
-/// `<state_home>/shprd/repos/<name>-<hash>`.
+/// Where one repository's own files live under the service: `<state_home>/shprd/repos/<name>-<hash>`.
 ///
-/// One state directory serves one repository (the directory's lock allows one
-/// service), so several repositories are served at once by giving each its own
-/// directory under `repos/`. The name is the folder's name, for a person looking
-/// at the disk; the hash (FNV-1a over the whole path) keeps two folders of the
-/// same name apart. Everything a service owns lives in it: the discovery record,
-/// the token, the change file, the web password, the sessions and the tunnel's
-/// record.
+/// One service serves every repository (SHPR-77), so this directory holds only
+/// what belongs to one repository: its change file and its last pass. The
+/// discovery record, the token, the web password, the sessions and the tunnel's
+/// record are the service's own and live in [`state_dir`]. The name is the
+/// folder's name, for a person looking at the disk; the hash (FNV-1a over the
+/// whole path) keeps two folders of the same name apart.
 pub fn repo_state_dir(state_home: &Path, root: &Path) -> PathBuf {
+    repo_dir_in(&state_dir(state_home), root)
+}
+
+/// The data directory of the repository at `root` inside the service's state
+/// directory `state_dir`: `<state_dir>/repos/<name>-<hash>`. Its name is also the
+/// repository's stable id in the API.
+pub fn repo_dir_in(state_dir: &Path, root: &Path) -> PathBuf {
     // The same folder reached through a symlink (macOS's `/var` and `/private/var`)
     // is one repository, so it is one directory.
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -61,9 +66,7 @@ pub fn repo_state_dir(state_home: &Path, root: &Path) -> PathBuf {
             }
         })
         .collect();
-    state_dir(state_home)
-        .join("repos")
-        .join(format!("{name}-{hash:016x}"))
+    state_dir.join("repos").join(format!("{name}-{hash:016x}"))
 }
 
 /// The state home for `home`: `xdg_state_home` (the `$XDG_STATE_HOME` the caller
@@ -512,7 +515,10 @@ pub struct ServiceInfo {
 /// Everything a service is started with.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The repository whose run log the service reads and writes.
+    /// The repository the service serves from the start, built from this
+    /// config's own `engine`, `chat`, `terminal`, `agents`, `live`, `tick`,
+    /// `hub` and `after_write`; empty for a service that is only told its
+    /// repositories as they are registered ([`Config::service`]).
     pub repo: PathBuf,
     /// The state directory holding `service.json` and the token.
     pub state_dir: PathBuf,
@@ -615,6 +621,9 @@ pub struct Config {
     /// every request, and an unknown `Host` is a `421`. The default is loopback
     /// only, so a service nothing put on the internet answers to nothing else.
     pub allowed_hosts: shprd_remote::AllowedHosts,
+    /// What makes a repository's slot when one is registered, when the binary
+    /// supplies one. A service without it serves only [`Config::repo`].
+    pub factory: Option<std::sync::Arc<dyn crate::repos::RepoFactory>>,
 }
 
 /// Told what a pass did, after it did it, for the caller's own output.
@@ -675,7 +684,19 @@ impl Config {
             live: crate::live::LiveAgents::new(),
             transcript_roots: None,
             allowed_hosts: shprd_remote::AllowedHosts::loopback_only(),
+            factory: None,
         }
+    }
+
+    /// A config for the one service every repository shares: no repository of
+    /// its own, its repositories made by `factory` as they are registered.
+    pub fn service(
+        state_dir: impl Into<PathBuf>,
+        factory: std::sync::Arc<dyn crate::repos::RepoFactory>,
+    ) -> Self {
+        let mut config = Self::new(PathBuf::new(), state_dir);
+        config.factory = Some(factory);
+        config
     }
 
     /// The names this service answers to, as a shared handle.
@@ -690,14 +711,20 @@ impl Config {
 impl Service {
     /// The names this running service answers to, as a shared handle.
     pub fn allowed_hosts(&self) -> shprd_remote::AllowedHosts {
-        self.app.allowed_hosts()
+        self.registry.base().remote.hosts()
+    }
+
+    /// The repositories this service serves, and the way to add one.
+    pub fn registry(&self) -> std::sync::Arc<crate::repos::Registry> {
+        std::sync::Arc::clone(&self.registry)
     }
 }
 
 /// A service whose socket is bound and whose discovery files are written.
 #[derive(Debug)]
 pub struct Service {
-    app: App,
+    registry: std::sync::Arc<crate::repos::Registry>,
+    files: ServiceFiles,
     listener: TcpListener,
     info: ServiceInfo,
     tick: Option<TickConfig>,
@@ -717,13 +744,11 @@ impl Service {
             .local_addr()
             .map_err(ServerError::NoAddress)?
             .port();
-        let app = App::prepare_all(
-            &config.repo,
+        let has_repo = !config.repo.as_os_str().is_empty();
+        let (files, base) = crate::api::Shared::prepare(
+            &config.state_dir,
             port,
             &config.actor,
-            &config.state_dir,
-            config.after_write.clone(),
-            config.hub.clone(),
             // Everything the service reads from the machine was resolved by the
             // binary and carried here, so the service never consults the
             // environment for a path of its own.
@@ -736,21 +761,33 @@ impl Service {
                 transcript_roots: config.transcript_roots.clone(),
                 allowed_hosts: config.allowed_hosts.clone(),
             },
-        )?
-        // The spawn and the close are the binary's, wired exactly as the tick's
-        // steps are; a service without them refuses the three actions that need
-        // a host.
-        .with_engine_opt(config.engine.clone())
-        // The chat's writer is that same host. Attaching it rebuilds the router,
-        // which a client never sees: the record is written before either is
-        // wired, and a request cannot arrive until the listener is serving.
-        .with_chat_opt(config.chat.get().cloned())
-        .with_terminal_opt(config.terminal.get().cloned())
-        // The "+" menu's *Start an agent* is that host too: one adapter, so a
-        // program the tab bar starts and a chat line type into the same window.
-        .with_agent_opener_opt(config.agents.get().cloned())
-        .with_live_opt(config.live.get().cloned());
-        let info = app.info();
+            has_repo.then_some(config.repo.as_path()),
+        )?;
+        let registry = crate::repos::Registry::new(base.clone(), config.factory.clone());
+        if has_repo {
+            // The repository the config names is served as the service always
+            // served one: its pieces come from this config.
+            let state = crate::api::AppState {
+                repo: config.repo.clone(),
+                hub: config.hub.clone(),
+                after_write: config.after_write.clone(),
+                engine: config.engine.clone(),
+                chat: config.chat.clone(),
+                terminal: config.terminal.clone(),
+                agents: config.agents.clone(),
+                live: config.live.clone(),
+                ..base
+            };
+            registry.register_state(state, config.tick.clone());
+        }
+        let info = ServiceInfo {
+            port,
+            id: files.id().to_string(),
+            version: VERSION.to_string(),
+            pid: std::process::id(),
+            token_path: files.token_path(),
+            service_json: files.service_json_path(),
+        };
         let tick = config.tick.clone();
         tracing::info!(port, id = %info.id, "shprd service listening on loopback");
         // The page is served from this same port. Saying whether this binary
@@ -765,7 +802,8 @@ impl Service {
             );
         }
         Ok(Self {
-            app,
+            registry,
+            files,
             listener,
             info,
             tick,
@@ -789,61 +827,46 @@ impl Service {
         self.run_with_tick(shutdown, tick).await
     }
 
-    /// Serves, running `tick` beside the API until `shutdown`.
+    /// Serves, running every repository's tick beside the API until `shutdown`.
     ///
-    /// The tick is one more task in the same runtime, so stopping the service
-    /// stops it: a pass in flight finishes, and no pass starts after the
-    /// shutdown resolves.
+    /// `tick` is the tick of the one repository a config named (a repository
+    /// registered later brings its own). Each tick is one more task in the same
+    /// runtime, so stopping the service stops them: a pass in flight finishes,
+    /// and no pass starts after the shutdown resolves.
     pub async fn run_with_tick(
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
         tick: Option<TickConfig>,
     ) -> Result<(), ServerError> {
         let Self {
-            app,
+            registry,
+            files,
             listener,
             info,
             tick: _,
         } = self;
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         // Writers outside this process — a program's ask hook, the CLI — append
         // to the same log. Watching its stamp is what wakes a long poll for an
         // ask raised that way, so a card arrives without waiting for a client
         // to poll the file.
-        let watcher = tokio::spawn(watch_log(app.repo().to_path_buf(), app.hub()));
-        let ticker = tick.map(|tick| {
-            let worker = std::sync::Arc::clone(&tick.worker);
-            let interval = tick.interval;
-            let notice = tick.notice.clone();
-            tokio::spawn(async move {
-                crate::tick::run(worker, interval, notice, async {
-                    // The service's own shutdown is awaited here, so the
-                    // loop ends with it rather than with the socket.
-                    let _ = stopped.await;
-                })
-                .await;
-            })
-        });
+        registry.start_ticks(tick);
         // The peer address is the kernel's, and it is what every rate limit is
         // keyed on: `X-Forwarded-For` is a header a client writes, and is ignored
         // until the tunnel task decides when it may be trusted.
         let served = axum::serve(
             listener,
-            app.router()
+            registry
+                .router()
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown)
         .await;
-        let _ = stop.send(());
-        watcher.abort();
+        registry.stop_all().await;
         // The tunnel dies with the service: stopped here, so a Tailscale mapping
         // is removed too (a child process would also die with the runtime, but
         // `tailscale serve` outlives its command).
-        app.tunnels().shutdown().await;
-        if let Some(ticker) = ticker {
-            let _ = ticker.await;
-        }
-        let removed = app.remove_record();
+        registry.base().tunnels.shutdown().await;
+        let removed = files.remove_record();
         tracing::info!(port = info.port, "shprd service stopped");
         served.map_err(ServerError::Serve)?;
         removed
@@ -854,7 +877,7 @@ impl Service {
 ///
 /// The log is re-read only when its stamp changes, so a quiet run costs a
 /// `stat` per tick; the publish is what wakes long polls and sockets.
-async fn watch_log(repo: std::path::PathBuf, hub: crate::hub::Hub) {
+pub(crate) async fn watch_log(repo: std::path::PathBuf, hub: crate::hub::Hub) {
     let mut seen: Option<crate::ledger::Stamp> = None;
     let mut last = 0;
     loop {
