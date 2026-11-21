@@ -152,6 +152,17 @@ pub(crate) fn worker_with_hub(
                 .map_err(|err| err.to_string())
         }) as shprd_server::ReviewCloser
     });
+    // A reviewer whose account is spent hands its review to the next reviewer in
+    // the settings list on the pass that sees it, through the same `review()`.
+    let switch_home = home.to_path_buf();
+    let switch_host = std::sync::Arc::clone(&host);
+    let switch_actor = actor.clone();
+    let switch_reviewers: Option<shprd_server::ReviewSwitcher> = (!record_only()).then(|| {
+        std::sync::Arc::new(move |repo: &Path| {
+            let ctx = Ctx::new(repo.to_path_buf(), switch_actor.clone(), false, true);
+            crate::cmd::review::switch_exhausted(&*switch_host, &ctx, &switch_home)
+        }) as shprd_server::ReviewSwitcher
+    });
     // A landing closes the task's whole space, for the same reason and through
     // the same one path `shprd agent integrate` uses: the worker and the
     // reviewer are tabs of it, so one close takes both, and a landed task cannot
@@ -208,6 +219,7 @@ pub(crate) fn worker_with_hub(
         start,
         review,
         close_reviewer,
+        switch_reviewers,
         close_worker,
         actor,
         after_write: None,

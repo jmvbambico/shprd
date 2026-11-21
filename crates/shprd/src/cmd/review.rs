@@ -94,6 +94,12 @@ impl ReviewEnv<'_> {
                 reviewer.same_vendor_ok = same_vendor_ok;
             }
         }
+        // A program the run recorded as out of quota is skipped for as long as
+        // the CLI said it would be (or the bounded cooldown the switch chose).
+        let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
+        if let Ok(state) = spawn.ctx.state() {
+            reviewer.dry = dry_programs(&state, now_ms);
+        }
         Ok(ReviewEnv {
             spawn,
             reviews_dir: real_dir(&home).join(".shprd").join("reviews"),
@@ -101,6 +107,21 @@ impl ReviewEnv<'_> {
             brief_retry_wait: BRIEF_RETRY_WAIT,
         })
     }
+}
+
+/// The programs `state` has as dry at `now_ms`: dry, and not past the time
+/// they were expected back.
+pub fn dry_programs(state: &shprd_core::state::RunState, now_ms: u64) -> Vec<DryProgram> {
+    state
+        .agents
+        .iter()
+        .filter(|(_, info)| info.dry && info.dry_until_ms.is_none_or(|until| until > now_ms))
+        .map(|(agent, info)| DryProgram {
+            agent: agent.clone(),
+            reason: info.dry_reason.clone().unwrap_or_default(),
+            until_ms: info.dry_until_ms,
+        })
+        .collect()
 }
 
 /// `dir` with its symlinks resolved, or `dir` itself when it cannot be.
@@ -680,12 +701,58 @@ pub struct ReviewerRole {
     /// the one before is not installed here or cannot review this change (it
     /// shares the author's vendor).
     pub fallbacks: Vec<WorkerLine>,
+    /// The programs the run knows are out of quota or rate-limited right now:
+    /// a review skips them for the next line instead of starting there.
+    pub dry: Vec<DryProgram>,
+    /// True when `perm` came from a program line's own mode rather than the
+    /// role's: a line's read-only mode cannot write the packet's `findings.json`,
+    /// so a review never runs under it (see [`choose_main_reviewer`]).
+    pub line_perm: bool,
+}
+
+/// A program the run recorded as out of quota, until a time or until someone
+/// re-admits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DryProgram {
+    /// The program's harness id.
+    pub agent: String,
+    /// Why, as the `Dry` event recorded it: `out of quota` or `rate-limited`,
+    /// then the CLI's own phrase.
+    pub reason: String,
+    /// When it is expected back, ms since the epoch, when the CLI said.
+    pub until_ms: Option<u64>,
+}
+
+impl DryProgram {
+    /// The plain words for this program's state: `codex is out of quota until
+    /// Dec 18`.
+    pub fn sentence(&self) -> String {
+        let state = if self.reason.starts_with("rate-limited") {
+            "rate-limited"
+        } else {
+            "out of quota"
+        };
+        match self.until_ms.and_then(shprd_agents::exhausted::day_of) {
+            Some(day) => format!("{} is {state} until {day}", self.agent),
+            None => format!("{} is {state}", self.agent),
+        }
+    }
 }
 
 impl ReviewerRole {
     /// The role as one settings resolution answers it.
+    ///
+    /// The reviewer lines are the settings' own list, in its order: the role's
+    /// `agent` first when it names one, else the first of `agents`. A role that
+    /// lists its programs under `agents` alone is reviewed by the first of them,
+    /// never by a program the old `config.toml` named.
     pub fn resolved(role: &ResolvedRole) -> Self {
-        Self {
+        let lines = role.lines();
+        let own_first = role
+            .agent
+            .as_ref()
+            .is_some_and(|agent| lines.first().is_some_and(|line| line.agent == agent.value));
+        let mut this = Self {
             agent: role.agent.clone(),
             model: role.model.clone(),
             effort: role.effort.clone(),
@@ -693,8 +760,26 @@ impl ReviewerRole {
             readonly: role.readonly.value,
             may_review: role.may_review(),
             same_vendor_ok: false,
-            fallbacks: role.lines().into_iter().skip(1).collect(),
+            fallbacks: lines.iter().skip(1).cloned().collect(),
+            dry: Vec::new(),
+            line_perm: false,
+        };
+        if !own_first && let Some(first) = lines.first() {
+            let from = |value: &Option<String>| {
+                value
+                    .clone()
+                    .map(|value| Sourced::new(value, role.agents.source))
+            };
+            this.agent = Some(Sourced::new(first.agent.clone(), role.agents.source));
+            this.model = from(&first.model);
+            this.effort = from(&first.effort);
+            // The line's own access mode, else the role's.
+            if first.perm.is_some() {
+                this.perm = from(&first.perm);
+                this.line_perm = true;
+            }
         }
+        this
     }
 
     /// A reviewer written the pre-M9 way, `program/model`, as the legacy layer
@@ -725,7 +810,14 @@ impl ReviewerRole {
             may_review: true,
             same_vendor_ok: false,
             fallbacks: Vec::new(),
+            dry: Vec::new(),
+            line_perm: false,
         }
+    }
+
+    /// The recorded dry state of `agent`, when it is dry.
+    fn dry_entry(&self, agent: &str) -> Option<&DryProgram> {
+        self.dry.iter().find(|dry| dry.agent == agent)
     }
 
     /// The program, when the role names one.
@@ -794,6 +886,9 @@ pub struct Reviewer {
     pub degraded: bool,
     /// A one-line note to show the human when a flag had no effect.
     pub note: Option<String>,
+    /// The plain sentence for the task's card when this reviewer is not the
+    /// first choice because the first is out of quota.
+    pub card_note: Option<String>,
 }
 
 impl Reviewer {
@@ -829,20 +924,36 @@ pub fn choose_reviewer(
     programs: &[Program],
     degraded: bool,
 ) -> Result<Reviewer, CliError> {
-    let main = choose_main_reviewer(role, author, author_model, programs, degraded);
-    if role.fallbacks.is_empty() {
+    // A program the run knows is out of quota is not tried: the next line is.
+    let main_dry = role.agent().and_then(|agent| role.dry_entry(agent));
+    let main = match main_dry {
+        Some(dry) => Err(CliError::Invalid(anyhow!(dry.sentence()))),
+        None => choose_main_reviewer(role, author, author_model, programs, degraded),
+    };
+    if role.fallbacks.is_empty() && main_dry.is_none() {
         return main;
     }
     // The main reviewer stands when it can start here: the next lines are for a
-    // program that is not installed, or one that cannot review this change.
+    // program that is not installed, one that is out of quota, or one that
+    // cannot review this change.
     let why = match &main {
         Ok(chosen) if installed(programs, &chosen.agent) => return main,
         Ok(chosen) => format!("`{}` is not installed here", chosen.agent),
         Err(error) => error.to_string(),
     };
+    let mut spent: Vec<String> = main_dry.iter().map(|dry| dry.sentence()).collect();
     for line in &role.fallbacks {
+        if let Some(dry) = role.dry_entry(&line.agent) {
+            spent.push(dry.sentence());
+            continue;
+        }
         let fallback = line.agent_ref();
         let mut next = ReviewerRole::written(&fallback, line.effort.as_deref().or(role.effort()));
+        next.perm = line
+            .perm
+            .as_deref()
+            .map(|perm| Sourced::new(perm.to_owned(), Source::You));
+        next.line_perm = next.perm.is_some();
         next.readonly = role.readonly;
         next.may_review = role.may_review;
         next.same_vendor_ok = role.same_vendor_ok;
@@ -853,11 +964,51 @@ pub fn choose_reviewer(
             chosen.note = Some(format!(
                 "note: the fallback reviewer `{fallback}` reviews, because {why}"
             ));
+            if !spent.is_empty() {
+                chosen.card_note = Some(format!(
+                    "{}; {} reviews instead",
+                    spent.join("; "),
+                    reviewer_label(&chosen.agent, chosen.model.as_deref())
+                ));
+            }
             return Ok(chosen);
         }
     }
+    if !spent.is_empty() {
+        // Every program that could review is out of quota: the one plain
+        // sentence the person's card is made of.
+        return Err(CliError::Invalid(anyhow!(
+            "{NO_REVIEWER_LEFT}: {}",
+            spent.join("; ")
+        )));
+    }
     // No line can do better: the main reviewer's own answer stands.
     main
+}
+
+pub use shprd_core::review::NO_REVIEWER_LEFT;
+
+/// A reviewer as a person reads it: the model's family word, then the program,
+/// `GLM (pi)`; the bare program when no model is named.
+pub fn reviewer_label(agent: &str, model: Option<&str>) -> String {
+    let family = model
+        .and_then(|model| model.rsplit('/').next())
+        .map(|name| {
+            name.chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty());
+    match family {
+        Some(word) if word.len() <= 4 => format!("{} ({agent})", word.to_ascii_uppercase()),
+        Some(word) => {
+            let mut chars = word.chars();
+            let head = chars.next().map(|c| c.to_ascii_uppercase());
+            let rest: String = chars.collect();
+            format!("{}{rest} ({agent})", head.unwrap_or_default())
+        }
+        None => agent.to_owned(),
+    }
 }
 
 /// Whether the program is installed on this machine.
@@ -919,6 +1070,13 @@ fn choose_main_reviewer(
             .perm()
             .filter(|id| program.spec.permissions.mode(id).is_some())
             .filter(|id| program.spec.permissions.full.as_deref() != Some(*id))
+            // A program line's read-only mode (pi's `--tools read,grep,find,ls`)
+            // has no tool that writes `findings.json`: the reviewer would read
+            // the diff, say its findings on the screen and never land a verdict.
+            // The role's own explicit mode is still honoured.
+            .filter(|id| {
+                !(role.line_perm && program.spec.permissions.readonly.as_deref() == Some(*id))
+            })
             .map(str::to_owned),
         spec: program.spec.clone(),
         blocking_prompts: program.spec.blocking_prompts.clone(),
@@ -928,6 +1086,7 @@ fn choose_main_reviewer(
         // branches below set it, and it stays false for an independent review.
         degraded: false,
         note: None,
+        card_note: None,
     };
     // `review.cross_vendor = false` is the person's own answer: any reviewer will
     // do, and nothing about this review is labelled degraded.
@@ -1426,6 +1585,7 @@ pub fn review(
         attempt: attempt.n,
         reviewer: reviewer.agent.clone(),
         degraded: reviewer.degraded,
+        note: reviewer.card_note.clone(),
     })?;
     let (tab_id, tab) = open_reviewer(mux, env, &task.id, &reviewer, &dir, &brief, &brief_path)?;
     spawn::write_tab(
@@ -1492,16 +1652,200 @@ pub fn review_again_for_tick(ctx: &Ctx, home: &Path, task: &str) -> Result<Strin
 fn start_review(ctx: &Ctx, home: &Path, task: &str, again: bool) -> Result<String, String> {
     let mux = spawn::real_mux();
     let env = ReviewEnv::build(ctx, Some(home)).map_err(|err| err.to_string())?;
+    // `review again` on a task whose review never started (every reviewer was
+    // out of quota) is a plain review: there is no reviewer to close.
+    let started = env
+        .spawn
+        .ctx
+        .state()
+        .ok()
+        .and_then(|state| {
+            state
+                .tasks
+                .get(task)
+                .and_then(|found| found.attempts.last())
+                .map(|attempt| !attempt.reviews.is_empty())
+        })
+        .unwrap_or(true);
     let request = ReviewRequest {
         task: task.to_string(),
         degraded: false,
-        again,
+        again: again && started,
     };
     let report = review(&mux, &env, &request).map_err(|err| err.to_string())?;
     Ok(format!(
         "started {} on {} attempt {} in tab {}",
         report.agent, report.task, report.attempt, report.tab
     ))
+}
+
+/// How long a program stays skipped when it is out of quota and printed no
+/// time to come back: an hour for an allowance, ten minutes for a rate limit.
+const QUOTA_COOLDOWN_MS: u64 = 60 * 60 * 1000;
+/// The cooldown of a plain rate limit with no time printed.
+const RATE_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+
+/// What a reviewer's pane says when its account cannot answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spent {
+    /// `out of quota` or `rate-limited`, then the CLI's own phrase.
+    pub reason: String,
+    /// When the CLI said it comes back, ms since the epoch.
+    pub reset_at_ms: Option<u64>,
+}
+
+/// Reads a reviewer pane's bottom for an out-of-quota or rate-limit message.
+///
+/// Only the last few non-blank lines count, and never a line shprd or the
+/// person typed: the short phrases the table holds (`quota`, `credit`) are
+/// ordinary words in a diff, and a reviewer reads diffs. A pane whose agent is
+/// still working is not read at all: a CLI that hit its limit has stopped.
+pub fn spent_pane(patterns: &[String], screen: &str, working: bool, now_ms: u64) -> Option<Spent> {
+    if working {
+        return None;
+    }
+    let lines: Vec<&str> = screen
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail: Vec<&str> = lines[lines
+        .len()
+        .saturating_sub(shprd_watch::screen::VERDICT_LINES)..]
+        .iter()
+        .copied()
+        .filter(|line| !line.starts_with("$ ") && !line.starts_with("> "))
+        .collect();
+    let text = tail.join("\n");
+    let phrase = shprd_agents::exhausted::exhausted_pane(patterns, &text)?;
+    let lowered = phrase.to_ascii_lowercase();
+    let rate = lowered.contains("rate") || lowered.contains("429") || lowered.contains("many");
+    // A message whose printed reset has passed is a stale screen, not a spent
+    // account: it must not start a new cooldown.
+    let printed = shprd_agents::exhausted::reset_at_ms(&text);
+    if printed.is_some_and(|at| at <= now_ms) {
+        return None;
+    }
+    let reset_at_ms = printed;
+    let (state, cooldown) = if rate {
+        ("rate-limited", RATE_COOLDOWN_MS)
+    } else {
+        ("out of quota", QUOTA_COOLDOWN_MS)
+    };
+    Some(Spent {
+        reason: format!("{state}: {phrase}"),
+        reset_at_ms: reset_at_ms.or(Some(now_ms + cooldown)),
+    })
+}
+
+/// One pass over the reviewers that are out: a reviewer whose account is spent
+/// is stopped, its program is remembered as dry, and the review starts again on
+/// the next reviewer in the settings list, with no question to anyone.
+///
+/// A task with no reviewer left is reported so the caller puts one plain card in
+/// front of the person; everything else a pass finds is left alone.
+pub fn switch_exhausted(
+    mux: &dyn Host,
+    ctx: &Ctx,
+    home: &Path,
+) -> Vec<shprd_core::review::ReviewSwitch> {
+    use shprd_core::review::ReviewSwitch;
+    let mut out = Vec::new();
+    let Ok(state) = ctx.state() else {
+        return out;
+    };
+    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
+    let waiting: Vec<(String, u32, String)> = state
+        .tasks
+        .values()
+        .filter_map(|task| {
+            let attempt = shprd_core::tick::awaiting_verdict(task)?;
+            let request = task.latest_attempt()?.reviews.last()?;
+            Some((task.id.clone(), attempt, request.reviewer.clone()))
+        })
+        .collect();
+    if waiting.is_empty() {
+        return out;
+    }
+    let Ok(env) = ReviewEnv::build(ctx, Some(home)) else {
+        return out;
+    };
+    for (task, attempt, reviewer) in waiting {
+        // A verdict on its way is not a reviewer to move.
+        let findings = findings_path(&env.reviews_dir, &env.spawn.run, &task, attempt);
+        if findings.exists() {
+            continue;
+        }
+        let Ok(tab) = std::fs::read_to_string(tab_record_path(
+            &env.spawn.briefs_dir,
+            &env.spawn.run,
+            &task,
+            attempt,
+        )) else {
+            continue;
+        };
+        let Ok(Some(pane)) = crate::cmd::watch::pane_for(mux, &env.spawn, tab.trim()) else {
+            continue;
+        };
+        let (Ok(screen), Ok(agent_state)) = (
+            mux.read(&pane, shprd_watch::screen::WINDOW_LINES),
+            mux.agent_state(&pane),
+        ) else {
+            continue;
+        };
+        let patterns = env
+            .spawn
+            .programs
+            .iter()
+            .find(|program| program.spec.id == reviewer)
+            .map(|program| program.spec.dry_patterns.clone())
+            .unwrap_or_default();
+        let working = agent_state == shprd_mux::AgentState::Working;
+        let Some(spent) = spent_pane(&patterns, &screen, working, now_ms) else {
+            continue;
+        };
+        let already = state
+            .agents
+            .get(&reviewer)
+            .is_some_and(|info| info.dry && info.dry_until_ms.is_none_or(|until| until > now_ms));
+        if !already
+            && let Err(err) = ctx.commit(EventKind::Dry {
+                agent: reviewer.clone(),
+                reason: spent.reason.clone(),
+                reset_at_ms: spent.reset_at_ms,
+            })
+        {
+            eprintln!("warning: could not record that {reviewer} is dry: {err}");
+            continue;
+        }
+        match start_review(ctx, home, &task, true) {
+            Ok(_) => {
+                let line = ctx
+                    .state()
+                    .ok()
+                    .and_then(|state| {
+                        state
+                            .tasks
+                            .get(&task)?
+                            .latest_attempt()?
+                            .reviews
+                            .last()?
+                            .note
+                            .clone()
+                    })
+                    .unwrap_or_else(|| format!("{reviewer} is out of quota; the review moved on"));
+                out.push(ReviewSwitch::Switched { task, line });
+            }
+            Err(message) if message.contains(NO_REVIEWER_LEFT) => {
+                let why = message
+                    .split_once(": ")
+                    .map_or(message.as_str(), |(_, rest)| rest)
+                    .to_owned();
+                out.push(ReviewSwitch::NoneLeft { task, attempt, why });
+            }
+            Err(message) => eprintln!("warning: could not move {task}'s review: {message}"),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -3463,6 +3807,175 @@ project_dirs = []
         let chosen = choose_reviewer(&role, "claude", None, &programs, false)
             .unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(chosen.agent, "codex");
+    }
+
+    /// Codex's own words when its account is spent, as its pane shows them.
+    const CODEX_PANE: &str = "\u{2022} Working on the review\n\nERROR: You've hit your usage limit. \
+         Upgrade to Plus to continue using Codex, or try again at Dec 18th, 2026 6:50 AM.\n\n\
+         gpt-6-luna \u{b7} 100% context left";
+
+    /// The person's own settings: a reviewer list of one `pi` GLM line and no
+    /// `agent`, over an old `config.toml` that still names `codex`.
+    fn glm_only_reviewer() -> ReviewerRole {
+        let layer: ConfigLayer = toml::from_str("[roster]\nreviewer = \"codex/gpt-6-luna\"\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = Loaded::default();
+        loaded.file = File::parse(
+            "[roles.reviewer]\nperm = \"auto\"\nagents = [\"pi|Command Code/z-ai/glm-5.3-flash|||read-only\"]\n",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        loaded.file.legacy = layer.settings_projection();
+        ReviewerRole::resolved(
+            &loaded
+                .resolve(None)
+                .role(REVIEWER_ROLE)
+                .unwrap_or_else(|| panic!("the reviewer role is missing")),
+        )
+    }
+
+    #[test]
+    fn a_reviewer_list_under_agents_alone_never_reviews_on_an_old_roster_program() {
+        let role = glm_only_reviewer();
+        assert_eq!(
+            role.agent(),
+            Some("pi"),
+            "the settings list, not the old key"
+        );
+        assert_eq!(role.model(), Some("Command Code/z-ai/glm-5.3-flash"));
+        assert!(role.fallbacks.is_empty(), "{:?}", role.fallbacks);
+        let programs = family_programs();
+        let chosen = choose_reviewer(
+            &role,
+            "pi",
+            Some("deepseek/deepseek-v4.1-flash"),
+            &programs,
+            false,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "pi");
+        assert_eq!(
+            chosen.model.as_deref(),
+            Some("Command Code/z-ai/glm-5.3-flash")
+        );
+        // Not even when everything else is out: codex is not in the list.
+        let mut spent = role.clone();
+        spent.dry = vec![DryProgram {
+            agent: "pi".into(),
+            reason: "out of quota: usage limit".into(),
+            until_ms: None,
+        }];
+        let err = choose_reviewer(&spent, "claude", None, &programs, false)
+            .err()
+            .map(|err| err.to_string())
+            .unwrap_or_default();
+        assert!(err.contains(NO_REVIEWER_LEFT), "{err}");
+    }
+
+    #[test]
+    fn the_first_of_agents_is_the_reviewer_when_no_agent_is_set() {
+        let role = settings_reviewer(
+            "[roles.reviewer]\nagents = [\"codex|gpt-6-luna||\", \"pi|Command Code/z-ai/glm-5.3-flash||\"]\n",
+        );
+        assert_eq!(role.agent(), Some("codex"));
+        assert_eq!(role.fallbacks.len(), 1);
+        assert_eq!(role.fallbacks[0].agent, "pi");
+    }
+
+    #[test]
+    fn a_reviewer_out_of_quota_is_skipped_for_the_next_line_with_a_plain_note() {
+        let mut role = settings_reviewer(
+            "[roles.reviewer]\nagents = [\"codex|gpt-6-luna||\", \"pi|Command Code/z-ai/glm-5.3-flash||\"]\n",
+        );
+        let reset = shprd_agents::exhausted::reset_at_ms(CODEX_PANE).expect("a reset time");
+        role.dry = vec![DryProgram {
+            agent: "codex".into(),
+            reason: "out of quota: usage limit".into(),
+            until_ms: Some(reset),
+        }];
+        let programs = family_programs();
+        let chosen = choose_reviewer(
+            &role,
+            "pi",
+            Some("deepseek/deepseek-v4.1-flash"),
+            &programs,
+            false,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(chosen.agent, "pi");
+        assert_eq!(
+            chosen.card_note.as_deref(),
+            Some("codex is out of quota until Dec 18; GLM (pi) reviews instead")
+        );
+        // Nobody else in the list can review: one plain refusal.
+        role.fallbacks.clear();
+        let err = choose_reviewer(
+            &role,
+            "pi",
+            Some("deepseek/deepseek-v4.1-flash"),
+            &programs,
+            false,
+        )
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_default();
+        assert!(
+            err.contains(NO_REVIEWER_LEFT) && err.contains("codex is out of quota until Dec 18"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_dry_mark_ends_at_the_time_the_cli_gave() {
+        let mut state = shprd_core::state::RunState::default();
+        state.agents.insert(
+            "codex".into(),
+            shprd_core::state::AgentInfo {
+                dry: true,
+                dry_until_ms: Some(1_000),
+                dry_reason: Some("out of quota: usage limit".into()),
+            },
+        );
+        assert_eq!(dry_programs(&state, 999).len(), 1);
+        assert!(dry_programs(&state, 1_001).is_empty(), "past the reset");
+    }
+
+    #[test]
+    fn codexs_usage_limit_pane_is_spent_and_a_diff_that_says_quota_is_not() {
+        let now = 0;
+        let spent = spent_pane(&[], CODEX_PANE, false, now).expect("codex is spent");
+        assert!(spent.reason.starts_with("out of quota"), "{}", spent.reason);
+        let day = spent.reset_at_ms.and_then(shprd_agents::exhausted::day_of);
+        assert_eq!(day.as_deref(), Some("Dec 18"));
+        // Still working: nothing is read.
+        assert!(spent_pane(&[], CODEX_PANE, true, now).is_none());
+        // A reviewer reading code that mentions a quota, far above the bottom.
+        let diff = format!(
+            "+ // the quota check: usage limit and credit\n{}\ndone reading\nthinking about it\nwriting findings\nstill here\nmore\nlast line",
+            "x\n".repeat(3)
+        );
+        assert!(
+            spent_pane(&[], &diff, false, now).is_none(),
+            "content is not a verdict"
+        );
+        // A prompt echoed at the bottom is never a verdict.
+        assert!(spent_pane(&[], "> check the usage limit wording", false, now).is_none());
+        // A stale message (its printed reset has passed) is not a spent account.
+        assert!(spent_pane(&[], CODEX_PANE, false, u64::MAX / 2).is_none());
+        // Short words that are ordinary text are never a verdict.
+        assert!(
+            spent_pane(
+                &[],
+                "reviewing the billing quota code: 429 credit",
+                false,
+                now
+            )
+            .is_none()
+        );
+        // No time printed: a bounded cooldown, not for ever.
+        let bare =
+            spent_pane(&[], "ERROR: rate limit reached, slow down", false, 100).expect("rate");
+        assert!(bare.reason.starts_with("rate-limited"));
+        assert_eq!(bare.reset_at_ms, Some(100 + RATE_COOLDOWN_MS));
     }
 
     #[test]

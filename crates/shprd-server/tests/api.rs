@@ -1410,6 +1410,7 @@ fn put_review_requested(log: &mut EventLog, attempt: u32) -> u64 {
             attempt,
             reviewer: "codex".into(),
             degraded: false,
+            note: None,
         },
         &SystemClock,
     )

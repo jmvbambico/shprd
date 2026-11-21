@@ -39,6 +39,54 @@ pub const REVIEW_AGAIN_CHOICE: &str = "review again";
 /// The choice that drops the task.
 pub const STUCK_DROP_CHOICE: &str = "drop it";
 
+/// What a refused review begins with when every reviewer is out of quota.
+pub const NO_REVIEWER_LEFT: &str = "no reviewer is left to take this review";
+
+/// What one pass over the running reviewers did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewSwitch {
+    /// A reviewer that ran out of quota was replaced by the next one.
+    Switched {
+        /// The task under review.
+        task: String,
+        /// The plain sentence for the log and the card.
+        line: String,
+    },
+    /// A reviewer ran out of quota and no other can take the review.
+    NoneLeft {
+        /// The task under review.
+        task: String,
+        /// The attempt being reviewed.
+        attempt: u32,
+        /// The reviewers that are out of quota, in plain words.
+        why: String,
+    },
+}
+
+/// A review note as a card's one short line: the dates and the "instead" go,
+/// `codex is out of quota; GLM (pi) reviews`.
+pub fn short_note(note: &str) -> String {
+    note.split("; ")
+        .map(|part| {
+            let part = part.strip_suffix(" instead").unwrap_or(part);
+            match part.find(" until ") {
+                Some(at) => &part[..at],
+                None => part,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// What the person's card says when no reviewer is left.
+pub fn none_left_body(task: &str, attempt: u32, why: &str) -> String {
+    format!(
+        "{task}: no reviewer can review attempt {attempt} right now: {why}. Add another \
+         reviewer in Settings, or wait until one is back, then choose review again; or drop \
+         the task"
+    )
+}
+
 /// The id of the `n`th card a review of `attempt` has put in front of a person.
 pub fn stuck_ask(attempt: u32, n: usize) -> String {
     format!("{STUCK_ASK_PREFIX}{attempt}-{n}")
@@ -262,6 +310,20 @@ mod tests {
         assert!(
             settled_mtime(&dir.path().join("missing.json")).is_none(),
             "a missing file says nothing about the review"
+        );
+    }
+
+    #[test]
+    fn a_switch_note_is_one_short_card_line() {
+        assert_eq!(
+            crate::review::short_note(
+                "codex is out of quota until Dec 18; GLM (pi) reviews instead"
+            ),
+            "codex is out of quota; GLM (pi) reviews"
+        );
+        assert_eq!(
+            crate::review::short_note("nothing to cut"),
+            "nothing to cut"
         );
     }
 

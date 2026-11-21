@@ -683,6 +683,7 @@ mod tests {
         attempt.reviews.push(crate::state::ReviewRequest {
             reviewer: String::from("reviewer"),
             degraded: false,
+            note: None,
             seq: 7,
         });
         let mut reviewed = task(vec![attempt]);

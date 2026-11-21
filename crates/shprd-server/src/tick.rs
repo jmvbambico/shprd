@@ -353,6 +353,14 @@ pub type Starter = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sy
 /// closure returns one line about the reviewer it opened.
 pub type Reviewer = Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>;
 
+/// What the tick needs to move a review off a reviewer that is out of quota.
+///
+/// The binary passes its own `review::switch_exhausted`, which looks at every
+/// running reviewer's pane, remembers a spent program as dry and starts the
+/// review again on the next reviewer in the settings list. The closure takes
+/// the repository and reports what it did.
+pub type ReviewSwitcher = Arc<dyn Fn(&Path) -> Vec<shprd_core::review::ReviewSwitch> + Send + Sync>;
+
 /// What the tick needs to close a reviewer's tab once its verdict is recorded.
 ///
 /// The verdict itself is the service's to decide and record; the tab belongs to
@@ -412,6 +420,10 @@ pub struct Worker {
     /// `None` when the caller has no host (a test, a record-only pass): a
     /// verdict is still recorded, and nothing is left open to close.
     pub close_reviewer: Option<ReviewCloser>,
+    /// Moves a review off a reviewer that is out of quota.
+    ///
+    /// `None` when the caller has no host (a test, a record-only pass).
+    pub switch_reviewers: Option<ReviewSwitcher>,
     /// Closes a landed task's space once the landing is recorded.
     ///
     /// `None` when the caller has no host (a test, a record-only pass): a
@@ -534,6 +546,13 @@ impl Worker {
     /// `review again` closes the reviewer and starts a new one. A request that
     /// already has a card since it was made is not raised again.
     pub fn watch_reviews(&self, now_ms: u64) {
+        // A reviewer out of quota is moved on first, so a review that has just
+        // been handed to the next reviewer is not also a stuck one.
+        if let Some(switch) = &self.switch_reviewers {
+            for outcome in switch(&self.repo) {
+                self.report_switch(outcome);
+            }
+        }
         let Ok((state, events)) = ledger::load(&self.repo) else {
             return;
         };
@@ -557,6 +576,48 @@ impl Worker {
             ) {
                 tracing::warn!(task = %stuck.task, %err, "the card for a stuck review could not be recorded");
             }
+        }
+    }
+
+    /// Puts a review that no reviewer can take in front of the person, once.
+    ///
+    /// A switch to the next reviewer needs no card: the log and the task's card
+    /// already say it. Only a review with no reviewer left is a question, and it
+    /// is the same answerable card a stuck review raises, so `review again` and
+    /// `drop it` mean what they always do.
+    fn report_switch(&self, outcome: shprd_core::review::ReviewSwitch) {
+        let shprd_core::review::ReviewSwitch::NoneLeft { task, attempt, why } = outcome else {
+            return;
+        };
+        let Ok((state, _)) = ledger::load(&self.repo) else {
+            return;
+        };
+        let Some(request) = state
+            .tasks
+            .get(&task)
+            .and_then(|task| task.latest_attempt())
+            .and_then(|current| current.reviews.last())
+        else {
+            return;
+        };
+        let prefix = format!("{}{attempt}-", shprd_core::review::STUCK_ASK_PREFIX);
+        let own: Vec<_> = state
+            .asks
+            .values()
+            .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
+            .collect();
+        // A card still waiting is the one question; an answered one that led
+        // nowhere (the retry was refused too) is asked again.
+        if own
+            .iter()
+            .any(|ask| ask.raised_seq > request.seq && ask.answer.is_none())
+        {
+            return;
+        }
+        let text = shprd_core::review::none_left_body(&task, attempt, &why);
+        let id = shprd_core::review::stuck_ask(attempt, own.len() + 1);
+        if let Err(err) = self.raise_card(&task, &id, &text, shprd_core::review::stuck_options()) {
+            tracing::warn!(%task, %err, "the card for a review with no reviewer left could not be recorded");
         }
     }
 
@@ -637,6 +698,11 @@ impl Worker {
             return Ok(());
         }
         let error = run.error.lines().next().unwrap_or_default().trim();
+        // The card for a review with no reviewer left is already raised, in
+        // plain words, by the review step itself.
+        if error.contains(shprd_core::review::NO_REVIEWER_LEFT) {
+            return Ok(());
+        }
         let seq = self.commit(EventKind::Escalated {
             task: Some(run.task.clone()),
             body: format!("{marker}{error}"),
@@ -698,11 +764,12 @@ impl Worker {
     fn reviews_hand_ins(&self) -> bool {
         match shprd_core::settings::Loaded::read(&self.home, Some(&self.repo)) {
             Ok(loaded) => loaded.resolve(None).role("reviewer").is_some_and(|role| {
+                // A reviewer list kept under `agents` alone is a reviewer too.
                 role.may_review()
                     && role
-                        .agent
-                        .as_ref()
-                        .is_some_and(|agent| !agent.value.trim().is_empty())
+                        .lines()
+                        .iter()
+                        .any(|line| !line.agent.trim().is_empty())
             }),
             Err(_) => self.config.roster.reviewer.is_some(),
         }
@@ -1680,6 +1747,31 @@ impl Worker {
         task: &str,
         reason: &str,
     ) -> Result<(), String> {
+        // Every reviewer is out of quota: one plain card with the choices in
+        // words, not an escalation naming commands.
+        if let Some((_, why)) =
+            reason.split_once(&format!("{}: ", shprd_core::review::NO_REVIEWER_LEFT))
+        {
+            let attempt = attempt_of(state, task);
+            let prefix = format!("{}{attempt}-", shprd_core::review::STUCK_ASK_PREFIX);
+            let open = state
+                .asks
+                .values()
+                .any(|ask| ask.task == task && ask.id.starts_with(&prefix) && ask.answer.is_none());
+            if open {
+                return Ok(());
+            }
+            let n = state
+                .asks
+                .values()
+                .filter(|ask| ask.task == task && ask.id.starts_with(&prefix))
+                .count();
+            let text = shprd_core::review::none_left_body(task, attempt, why);
+            let id = shprd_core::review::stuck_ask(attempt, n + 1);
+            return self
+                .raise_card(task, &id, &text, shprd_core::review::stuck_options())
+                .map(|_| ());
+        }
         let marker = review_failure_prefix(task);
         let already = state.escalations.iter().any(|escalation| {
             escalation.task.as_deref() == Some(task) && escalation.body.starts_with(&marker)

@@ -561,6 +561,11 @@ pub enum EventKind {
         reviewer: String,
         /// True when the reviewer shares the author's vendor.
         degraded: bool,
+        /// One plain line when this review is not the first choice, for the
+        /// task's card: "codex is out of quota until Dec 18; GLM (pi) reviews
+        /// instead". Empty for an ordinary review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// An agent was put on cooldown (rate limit, quota, auth).
     Dry {
@@ -1013,6 +1018,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "codex".to_string(),
                 degraded: true,
+                note: None,
             },
             EventKind::Dry {
                 agent: "codex".to_string(),

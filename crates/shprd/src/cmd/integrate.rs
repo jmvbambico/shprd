@@ -365,6 +365,7 @@ mod tests {
                 attempt: 1,
                 reviewer: "codex/m1".to_string(),
                 degraded: false,
+                note: None,
             })
             .unwrap_or_else(|err| panic!("{err}"));
             let request_seq = ctx

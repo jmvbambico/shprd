@@ -1075,6 +1075,7 @@ mod tests {
                 attempt: 1,
                 reviewer: reviewer.to_string(),
                 degraded,
+                note: None,
             },
         )
     }

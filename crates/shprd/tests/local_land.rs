@@ -209,6 +209,7 @@ impl Fixture {
                 attempt: 1,
                 reviewer: "c1".to_string(),
                 degraded: false,
+                note: None,
             },
         };
         let line = serde_json::to_string(&event).expect("serialize the request");

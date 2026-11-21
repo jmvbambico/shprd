@@ -97,6 +97,7 @@ impl Fixture {
             start,
             review: None,
             close_reviewer: None,
+            switch_reviewers: None,
             close_worker: None,
             actor: Actor::Engine,
             after_write: None,
@@ -317,6 +318,7 @@ fn ready(seq: u64, commit: &str) -> Vec<Event> {
                 attempt: 1,
                 reviewer: String::from("codex"),
                 degraded: false,
+                note: None,
             },
         ),
         ev(
@@ -432,6 +434,7 @@ fn a_pass_publishes_its_writes_on_the_service_hub() {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: None,
         close_reviewer: None,
+        switch_reviewers: None,
         close_worker: None,
         actor: Actor::Engine,
         after_write: None,
@@ -721,6 +724,7 @@ fn a_hand_in_starts_the_engine_reviewer() {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
         close_reviewer: None,
+        switch_reviewers: None,
         close_worker: None,
         actor: Actor::Engine,
         after_write: None,
@@ -758,6 +762,7 @@ fn a_pass_without_a_reviewer_leaves_the_hand_in_alone() {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
         close_reviewer: None,
+        switch_reviewers: None,
         close_worker: None,
         actor: Actor::Engine,
         after_write: None,
@@ -784,6 +789,7 @@ fn reviewing(fixture: &Fixture, review: shprd_server::Reviewer) -> Worker {
         start: recording_start(Arc::new(Mutex::new(Vec::new()))),
         review: Some(review),
         close_reviewer: None,
+        switch_reviewers: None,
         close_worker: None,
         actor: Actor::Engine,
         after_write: None,
@@ -829,6 +835,7 @@ fn a_review_that_fails_after_its_request_is_escalated_once() {
                 attempt: 1,
                 reviewer: String::from("codex"),
                 degraded: false,
+                note: None,
             },
             &SystemClock,
         )
@@ -1054,6 +1061,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
             attempt: 1,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         },
     );
     write_findings_for_attempt(
@@ -1159,6 +1167,7 @@ fn a_failed_review_is_sent_back_and_the_second_round_lands() {
             attempt: 2,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         },
     );
     write_findings_for_attempt(&fixture, "A", 2, "[]");
@@ -1836,6 +1845,7 @@ fn handed_in_and_reviewed() -> Fixture {
             attempt: 1,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         },
     ));
     Fixture::new(log)
@@ -1981,6 +1991,7 @@ fn two_spent_rounds() -> Fixture {
             attempt: 1,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         },
     ));
     log.push(review_failed(6, "A", 1, 5));
@@ -1992,6 +2003,7 @@ fn two_spent_rounds() -> Fixture {
             attempt: 2,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         },
     ));
     log.push(review_failed(10, "A", 2, 9));
@@ -2190,6 +2202,7 @@ fn a_review_verdict_that_spends_the_rounds_leaves_one_card() {
             attempt: 2,
             reviewer: String::from("codex"),
             degraded: false,
+            note: None,
         },
         &SystemClock,
     )
@@ -2629,6 +2642,7 @@ fn reviewer_out() -> Fixture {
             attempt: 1,
             reviewer: String::from("opencode"),
             degraded: false,
+            note: None,
         },
     ));
     Fixture::new(log)
@@ -2684,9 +2698,55 @@ fn a_review_out_too_long_becomes_one_card_with_a_review_again_choice() {
             attempt: 1,
             reviewer: String::from("opencode"),
             degraded: false,
+            note: None,
         },
     );
     worker.watch_reviews(later + shprd_core::review::STUCK_AFTER_MS + 1);
+    assert_eq!(fixture.state().asks.len(), 2);
+}
+
+#[test]
+fn a_review_with_no_reviewer_left_is_one_plain_card_asked_again_once_answered() {
+    let fixture = reviewer_out();
+    let mut worker = reviewing(
+        &fixture,
+        Arc::new(|_repo: &Path, task: &str| Ok(format!("started a reviewer on {task}"))),
+    );
+    worker.switch_reviewers = Some(Arc::new(|_repo: &Path| {
+        vec![shprd_core::review::ReviewSwitch::NoneLeft {
+            task: String::from("A"),
+            attempt: 1,
+            why: String::from("codex is out of quota until Dec 18"),
+        }]
+    }));
+    let now = SystemClock.now_ms();
+
+    // At once, not after half an hour, and only once while it waits.
+    worker.watch_reviews(now);
+    worker.watch_reviews(now);
+    let state = fixture.state();
+    assert_eq!(state.asks.len(), 1, "{:?}", state.asks);
+    let ask = state.asks.values().next().expect("the card");
+    assert_eq!(ask.id, shprd_core::review::stuck_ask(1, 1));
+    assert!(ask.text.contains("no reviewer can review"), "{}", ask.text);
+    assert!(
+        ask.text.contains("codex is out of quota until Dec 18"),
+        "{}",
+        ask.text
+    );
+    assert!(!ask.text.contains("shprd "), "no commands: {}", ask.text);
+
+    // Answered, and the retry was refused again: the person is asked again.
+    append(
+        &fixture,
+        Actor::Engine,
+        EventKind::AskAnswered {
+            task: String::from("A"),
+            ask: shprd_core::review::stuck_ask(1, 1),
+            answer: String::from(shprd_core::review::REVIEW_AGAIN_CHOICE),
+        },
+    );
+    worker.watch_reviews(now);
     assert_eq!(fixture.state().asks.len(), 2);
 }
 

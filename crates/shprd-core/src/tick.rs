@@ -814,6 +814,7 @@ mod tests {
                 attempt,
                 reviewer: "codex".to_string(),
                 degraded: false,
+                note: None,
             },
         )
     }
