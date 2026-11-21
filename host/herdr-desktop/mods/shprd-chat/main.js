@@ -35,7 +35,6 @@ import { exec, props, setShared, shared, theme } from "herdr";
 import { RepoCache, SEND_PROBLEM, activeFolder, attach, downNotice, reason, singleFlight } from "./lib/client.js";
 import { answerBody, cards as cardsOf, footer, forSpace } from "./lib/asks.js";
 import {
-  COLUMN,
   COORDINATOR,
   GUTTER,
   bubbleSpan,
@@ -65,6 +64,12 @@ import { followChanges } from "./lib/watch.js";
 /** How often the chat reads the conversation when nothing wakes it, ms. */
 const FLOOR_MS = 3000;
 
+/** The longest one read of the service may take before the chat says so, ms. */
+const READ_MS = 20000;
+
+/** The longest "Loading…" is drawn for a conversation, ms: after it, the empty chat or the reason. */
+const LOADING_MS = 4000;
+
 /** How many pages one refresh takes before leaving the rest to the next look. */
 const PAGES = 4;
 
@@ -85,6 +90,7 @@ export default class Chat extends View {
     this.chats = new Map();
     this.loaded = new Set();
     this.slot = this.slotKey();
+    this.slotSince = Date.now();
     this.state = null;
     this.asks = null;
     this.client = null;
@@ -167,14 +173,40 @@ export default class Chat extends View {
   refresh(cx = this.cx) {
     // One read at a time: a refresh asked for while another runs is folded into
     // one more run after it, never started beside it.
-    return singleFlight(this, () => this.readOnce(cx));
+    return singleFlight(this, () => this.bounded(cx));
+  }
+
+  /**
+   * One read that cannot hang the chat: a call that never settles would keep the
+   * one read in flight for ever (and with it "Loading…"), so after [`READ_MS`] the
+   * read is given up as a failure, the client is forgotten and the next beat
+   * looks again.
+   */
+  async bounded(cx) {
+    const start = Date.now();
+    // Each read has a generation; a read given up on is stale and changes nothing
+    // if it ever finishes (a newer read owns the state by then).
+    this.gen = (this.gen ?? 0) + 1;
+    const read = this.readOnce(cx, this.gen).then(() => "done");
+    // A clock that fires early (a stub's) is not a read that took too long.
+    const gave = (cx?.sleep?.(READ_MS) ?? new Promise(() => {})).then(() => (Date.now() - start >= READ_MS - 100 ? "late" : "early"));
+    let outcome = await Promise.race([read, gave]);
+    if (outcome === "early") outcome = await read;
+    if (outcome === "late") {
+      this.gen += 1;
+      this.client = null;
+      this.failure = downNotice();
+      cx.notify();
+    }
   }
 
   /** One read of the service and one repaint; [`refresh`] is what callers use. */
-  async readOnce(cx) {
+  async readOnce(cx, gen = this.gen) {
     const space = this.space;
+    const stale = () => gen !== this.gen;
     try {
       const next = await attach(this.client, { wait: (ms) => cx.sleep(ms) });
+      if (stale()) return;
       if (!next.client) {
         this.client = null;
         this.failure = downNotice();
@@ -189,8 +221,15 @@ export default class Chat extends View {
       }
       this.client = next.client;
       this.follow();
-      this.state = await this.client.state();
-      this.asks = await this.client.asks();
+      // The conversation this read is for: a switch of space while it runs makes
+      // its answer another conversation's, which is not folded into this one.
+      if (this.slot !== undefined && this.slotKey() !== this.slot) this.forget(false);
+      const slot = this.slot;
+      const board = await this.client.state();
+      const asks = await this.client.asks();
+      if (stale()) return;
+      this.state = board;
+      this.asks = asks;
       if (space !== null) {
         // `more` means the page filled up: a long conversation arrives over a few
         // calls rather than one slow one, and the next timer catches any left over.
@@ -202,14 +241,15 @@ export default class Chat extends View {
           );
           // The person moved to another task while this was in flight: this answer
           // is for the one they left.
-          if (space !== this.space) return;
+          if (space !== this.space || slot !== this.slot || stale()) return;
           this.chat = fold(this.chat, answer);
           if (!this.chat.more) break;
         }
       }
       this.failure = null;
-      if (space === this.space) this.loaded?.add(this.slot);
+      if (space === this.space && slot === this.slot) this.loaded?.add(slot);
     } catch (err) {
+      if (stale()) return;
       // A restarted service answers with another id: forget the client so the
       // next look finds the new port instead of dialling a dead one.
       this.client = null;
@@ -230,6 +270,7 @@ export default class Chat extends View {
     }
     const kept = this.chats?.get(now) ?? null;
     this.slot = now;
+    this.slotSince = Date.now();
     this.chat = kept?.chat ?? empty(this.space ?? COORDINATOR);
     this.opened = kept?.opened ?? new Set();
     this.refusal = null;
@@ -452,22 +493,35 @@ export default class Chat extends View {
   }
 
   /**
-   * One row's place: Shepherdr's readable column, centered when the pane is
-   * wide, `GUTTER` px in from each edge when it is not. Every row, card and the
-   * composer sit in it, so the edges line up at every pane width.
+   * One row's place: the pane's full width, `GUTTER` px in from each edge (as
+   * Shepherdr's 36). Every row, card and the composer sit in it, so the edges line
+   * up at every pane width.
    */
   column(el) {
     return h_flex()
       .w_full()
       .flex_none()
       .justify_center()
-      .child(div().w_full().max_w(COLUMN + 2 * GUTTER).px(GUTTER).child(el));
+      .child(div().w_full().px(GUTTER).child(el));
   }
 
   /** What an empty timeline says, in the panel and not in a tooltip. */
   blank(t, said) {
+    // "Loading…" is for the first moments of a conversation never read: once the
+    // read has failed, or taken longer than LOADING_MS, the chat is the empty one
+    // (or says why), never a spinner for ever.
     if (this.loaded && !this.loaded.has(this.slot) && this.failure === null) {
-      return v_flex().w_full().flex_1().px(24).py(32).items_center().child(div().text_size(TEXT.label).text_color(t.muted).child("Loading…"));
+      if (Date.now() - this.slotSince < LOADING_MS) {
+        // Repaint when the wait is over, whatever the read did.
+        if (this.timed !== this.slotSince) {
+          this.timed = this.slotSince;
+          this.cx.spawn(async () => {
+            await this.cx.sleep(LOADING_MS);
+            this.cx.notify();
+          });
+        }
+        return v_flex().w_full().flex_1().px(24).py(32).items_center().child(div().text_size(TEXT.label).text_color(t.muted).child("Loading…"));
+      }
     }
     return v_flex()
       .w_full()

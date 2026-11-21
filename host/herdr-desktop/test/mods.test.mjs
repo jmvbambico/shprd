@@ -1478,7 +1478,7 @@ test("seenWith notes shprd's spaces so Shepherdr never adds an Assistant to them
 
 test("the chat's column and bubbles follow Shepherdr's at every pane width (SHPR-79)", () => {
   assert.equal(COLUMN, 760);
-  assert.equal(GUTTER, 18);
+  assert.equal(GUTTER, 36);
   assert.equal(bubbleWidth(600), 480);
   assert.equal(bubbleWidth(2000), 608);
   assert.equal(bubbleWidth(100), 240);

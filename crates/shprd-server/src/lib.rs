@@ -98,7 +98,7 @@ pub use graph::{Dagr, Located, Missing, Origin};
 pub use live::{HostSpace, LiveAgentRow, LiveAgents, LiveSource};
 pub use news::{Coordinator, NewsDesk, NewsSent};
 pub use pass::{FailedStep, LastPass};
-pub use repos::{REPO_HEADER, Registry, RepoFactory, RepoInfo, RepoParts};
+pub use repos::{Prepare, REPO_HEADER, Registry, RepoFactory, RepoInfo, RepoParts};
 pub use service::{
     AfterWrite, Config, PassNotice, Service, ServiceFiles, ServiceInfo, ServiceRecord, TickConfig,
     VERSION, repo_dir_in, repo_state_dir, serve, shutdown_signal, state_dir, state_home,

@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-import { inWindowOrder, subtitle, age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
+import { rebindSpaces, followPick, livePick, inWindowOrder, subtitle, age, agentKept, agentLine, agentRows, agentsOfTask, graphRows, plainSpaces, pickedName, resolveSpace, scopeToSpace, spaceTree, spacesOf } from "../mods/lib/tree.js";
 
 const NOW = 1_800_000_000_000;
 const state = JSON.parse(readFileSync(new URL("./fixtures/proto.json", import.meta.url), "utf8"));
@@ -198,4 +198,39 @@ test("every row's subtitle is its folder; only an unusual branch is added (SHPR-
   assert.equal(subtitle({ folder: "/p/a", branch: "" }), "/p/a");
   assert.equal(subtitle({ folder: "/p/a", branch: "integration/m11" }), "/p/a · integration/m11");
   assert.equal(subtitle({ folder: "", branch: "dev" }), "dev");
+});
+
+// SHPR-80: a folder's space closed and the same folder added again is a new space (new id, same folder).
+test("a pick of a closed Herdr space is dropped, never shown as a raw id", () => {
+  const herdr = [{ id: "sp2aad", name: "shprd · scratchpad", folder: "/p/scratchpad", active: true }];
+  assert.equal(livePick("herdr:sp1201", herdr), null);
+  assert.equal(livePick("herdr:sp2aad", herdr), "herdr:sp2aad");
+  assert.equal(livePick(null, herdr), null);
+  assert.equal(livePick("sp-shop", herdr), "sp-shop", "a served id is left to scopeToSpace");
+  assert.equal(livePick("herdr:sp1201", []), "herdr:sp1201", "an empty list says nothing");
+  assert.equal(pickedName(state, "herdr:sp1201", herdr), "This space", "no raw id even if it is drawn");
+});
+
+test("the pick follows the window's space: a dead pick moves to it, so does a pick when the window moves on", () => {
+  const herdr = [
+    { id: "sp2aad", name: "shprd · scratchpad", folder: "/p/scratchpad", active: true },
+    { id: "spjm", name: "jmanager", folder: "/p/jm" },
+  ];
+  assert.equal(followPick(state, "herdr:sp1201", herdr, null), "herdr:sp2aad");
+  assert.equal(followPick(state, null, herdr, "spjm"), null, "All spaces stays all");
+  assert.equal(followPick(state, "herdr:sp2aad", herdr, "sp2aad"), "herdr:sp2aad");
+  assert.equal(followPick(state, "herdr:spjm", herdr, null), "herdr:spjm", "the first look does not move a live pick");
+  assert.equal(followPick(state, "herdr:spjm", herdr, "spother"), "herdr:sp2aad", "the window moved to another space");
+  const served = { ...state, spaces: [{ id: "sp-scratch", name: "scratchpad", folder: "/p/scratchpad/", herdr_id: "sp2aad" }] };
+  assert.equal(followPick(served, "sp-scratch", herdr, "spother"), "sp-scratch", "a served pick that stands for the active space stays");
+  assert.equal(followPick(state, "herdr:sp1201", [], null), "herdr:sp1201", "no list, nothing to follow");
+});
+
+test("a served space whose Herdr space was closed binds to the same folder's new space: one row, not two", () => {
+  const served = { ...state, spaces: [{ id: "sp-scratch", name: "scratchpad", folder: "/p/scratchpad/", herdr_id: "sp1201", herdr_name: "shprd · scratchpad" }], tasks: [] };
+  const herdr = [{ id: "sp2aad", name: "shprd · scratchpad", folder: "/p/scratchpad", active: true }, { id: "spjm", name: "jmanager", folder: "/p/jm" }];
+  const rows = spaceTree(served, herdr);
+  assert.deepEqual(rows.map((row) => [row.id, row.herdr]), [["sp-scratch", "sp2aad"], ["herdr:spjm", "spjm"]]);
+  assert.equal(rebindSpaces(served.spaces, []).at(0).herdr_id, "sp1201", "no Herdr list, nothing to bind to");
+  assert.equal(rebindSpaces(served.spaces, [{ id: "sp1201", folder: "/p/other" }]).at(0).herdr_id, "sp1201", "a live space is left alone");
 });

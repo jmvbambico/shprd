@@ -106,6 +106,44 @@ export function resolveSpace(state, pickedId, herdrSpaces = []) {
   return same ? same.id : pickedId;
 }
 
+/**
+ * Whether a picked id still names a space: a `herdr:<id>` whose Herdr space was
+ * closed does not, and is dropped (`null`) rather than drawn as a raw id or used
+ * to scope the panes to nothing. A served id and an unknowable case (Herdr's list
+ * is empty) are kept; `scopeToSpace` already falls back for a served id it lacks.
+ */
+export function livePick(pickedId, herdrSpaces = []) {
+  if (pickedId === null || pickedId === undefined) return null;
+  const id = String(pickedId);
+  const list = Array.isArray(herdrSpaces) ? herdrSpaces : [];
+  if (!id.startsWith("herdr:") || list.length === 0) return pickedId;
+  const herdrId = id.slice("herdr:".length);
+  return list.some((space) => space?.id === herdrId) ? pickedId : null;
+}
+
+/**
+ * What `spaces.picked` should be now, so the panes follow the window's own space.
+ *
+ * - none picked ("All spaces") stays none;
+ * - a pick whose Herdr space was closed moves to the space the window shows;
+ * - when the window's space changes (`previousActive` was another), a pick that
+ *   does not stand for the new one follows it.
+ *
+ * Returns the id to share, the same as `pickedId` when nothing changes.
+ */
+export function followPick(state, pickedId, herdrSpaces = [], previousActive = null) {
+  if (pickedId === null || pickedId === undefined) return null;
+  const list = Array.isArray(herdrSpaces) ? herdrSpaces : [];
+  const active = list.find((space) => space?.active) ?? null;
+  const mine = active ? `herdr:${active.id}` : null;
+  if (livePick(pickedId, list) === null) return mine;
+  if (active && previousActive !== null && previousActive !== active.id) {
+    const same = resolveSpace(state, pickedId, list) === resolveSpace(state, mine, list);
+    if (!same) return mine;
+  }
+  return pickedId;
+}
+
 /** The name to draw for a picked id: the served space's, else Herdr's, never a raw id. */
 export function pickedName(state, pickedId, herdrSpaces = []) {
   const resolved = resolveSpace(state, pickedId, herdrSpaces);
@@ -113,7 +151,9 @@ export function pickedName(state, pickedId, herdrSpaces = []) {
   if (served) return served.herdr_name ?? served.name;
   const herdrId = String(pickedId).replace(/^herdr:/, "");
   const herdr = (herdrSpaces ?? []).find((space) => space?.id === herdrId);
-  return String(herdr?.name ?? String(pickedId).replace(/^(sp-|herdr:)/, ""));
+  // Never a raw `sp…` id: a closed space's name is gone, so say what it is.
+  if (herdr?.name) return String(herdr.name);
+  return String(pickedId).startsWith("herdr:") ? "This space" : String(pickedId).replace(/^sp-/, "");
 }
 
 /**
@@ -221,7 +261,7 @@ export function treeTasks(state, space, spaceCount = 1, now = Date.now()) {
  * numbers a row's badge would show.
  */
 export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
-  const list = spacesOf(state);
+  const list = rebindSpaces(spacesOf(state), herdrSpaces);
   const own = list.map((space) => {
     const tasks = treeTasks(state, space, list.length, now);
     return {
@@ -238,6 +278,27 @@ export function spaceTree(state, herdrSpaces = [], now = Date.now()) {
     };
   });
   return inWindowOrder([...own, ...plainSpaces(list, herdrSpaces)], list, herdrSpaces);
+}
+
+/**
+ * Served spaces whose Herdr space was closed, bound to the Herdr space the person
+ * made for the same folder since (SHPR-80). The service keeps a space by its
+ * folder, so a folder closed and added again is the same served space with a new
+ * Herdr id: left as it was, the row would name the closed space and the new one
+ * would show beside it as a second, plain row.
+ */
+export function rebindSpaces(served, herdrSpaces = []) {
+  const live = Array.isArray(herdrSpaces) ? herdrSpaces.filter((space) => space?.id) : [];
+  if (live.length === 0) return served;
+  const taken = new Set(served.map((space) => space.herdr_id).filter((id) => live.some((h) => h.id === id)));
+  return served.map((space) => {
+    if (!space.herdr_id || live.some((h) => h.id === space.herdr_id)) return space;
+    const folder = trimFolder(space.folder);
+    const home = live.find((h) => folder !== "" && trimFolder(h.folder) === folder && !taken.has(h.id));
+    if (!home) return space;
+    taken.add(home.id);
+    return { ...space, herdr_id: home.id, herdr_name: home.name ?? space.herdr_name };
+  });
 }
 
 /**

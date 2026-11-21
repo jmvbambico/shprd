@@ -66,6 +66,10 @@ pub trait RepoFactory: std::fmt::Debug + Send + Sync {
     fn build(&self, root: &Path, folder: &Path, hub: Hub, dir: &Path) -> Result<RepoParts, String>;
 }
 
+/// Preparing a repository's space and coordinator. It is idempotent: a running coordinator is
+/// reused, so showing the repository again simply runs it again.
+pub type Prepare = Arc<dyn Fn() + Send + Sync>;
+
 /// One repository's collaborators, as the factory made them.
 #[derive(Default)]
 pub struct RepoParts {
@@ -86,7 +90,7 @@ pub struct RepoParts {
     /// Preparing the repository's own space and its coordinator, which asks the
     /// host and so can take seconds: it runs on its own thread after the slot
     /// answers, never in a request.
-    pub prepare: Option<Box<dyn FnOnce() + Send>>,
+    pub prepare: Option<Prepare>,
 }
 
 impl std::fmt::Debug for RepoParts {
@@ -121,7 +125,9 @@ pub(crate) struct Slot {
     /// Preparing the repository's space and coordinator, until it has run. A
     /// repository nobody has opened and that has no run of its own is not
     /// prepared at all: a window that lists it does not start an agent for it.
-    prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    prepare: Option<Prepare>,
+    /// Whether a preparation is running: a second one is not started beside it.
+    preparing: Arc<AtomicBool>,
 }
 
 impl Slot {
@@ -151,13 +157,24 @@ impl Slot {
 
     /// Runs the repository's preparation, once; on this thread when `wait`.
     fn run_prepare(&self, wait: bool) {
-        let step = self.prepare.lock().ok().and_then(|mut step| step.take());
-        match step {
-            Some(step) if wait => step(),
-            Some(step) => {
-                std::thread::spawn(step);
-            }
-            None => {}
+        let Some(step) = self.prepare.clone() else {
+            return;
+        };
+        // One at a time: the step is idempotent (a running coordinator is reused),
+        // so a window showing the repository again (a folder's space closed and
+        // added again) just runs it again, and a run already in flight is enough.
+        if self.preparing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let flag = Arc::clone(&self.preparing);
+        let run = move || {
+            step();
+            flag.store(false, Ordering::SeqCst);
+        };
+        if wait {
+            run();
+        } else {
+            std::thread::spawn(run);
         }
     }
 
@@ -291,7 +308,8 @@ impl Registry {
             tick,
             stop,
             tasks: Mutex::new(Vec::new()),
-            prepare: Mutex::new(None),
+            prepare: None,
+            preparing: Arc::new(AtomicBool::new(false)),
         });
         if let Ok(mut slots) = self.slots.write() {
             slots.insert(id, Arc::clone(&slot));
@@ -383,7 +401,8 @@ impl Registry {
             tick: parts.tick,
             stop,
             tasks: Mutex::new(Vec::new()),
-            prepare: Mutex::new(parts.prepare),
+            prepare: parts.prepare,
+            preparing: Arc::new(AtomicBool::new(false)),
         });
         if let Ok(mut slots) = self.slots.write() {
             slots.insert(id, Arc::clone(&slot));

@@ -295,7 +295,9 @@ impl shprd_server::RepoFactory for Factory {
             let (root, folder) = (root.to_path_buf(), folder.to_path_buf());
             let (failure, live, every) = (start_failure.clone(), live.clone(), tick.interval);
             let built = self.built.clone();
-            Box::new(move || {
+            Arc::new(move || {
+                let (host, ctx, home) = (host.clone(), ctx.clone(), home.clone());
+                let (root, folder, failure) = (root.clone(), folder.clone(), failure.clone());
                 // The guard is asked before anything touches the host (M11 fix
                 // Y): a live check run from a temporary checkout inherits the
                 // pane's `HERDR_SOCKET_PATH`, and a service that prepared its
@@ -344,7 +346,7 @@ impl shprd_server::RepoFactory for Factory {
                         retry_coordinator(host, ctx, home, root, folder, failure, every);
                     });
                 }
-            }) as Box<dyn FnOnce() + Send>
+            }) as shprd_server::Prepare
         };
         Ok(shprd_server::RepoParts {
             after_write: Some(after_write(&ctx)),

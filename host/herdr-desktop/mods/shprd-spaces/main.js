@@ -45,7 +45,7 @@ import { closeOverlay, nextCommand, openOverlay, props, run, setShared, shared, 
 
 import { adoptCache, attach, downNotice, forgetAll, reason, remember, singleFlight, syncRepo, watchSwitch } from "./lib/client.js";
 import { MENU, closeWords, isOpen, menuHeight, menuItems, pickOpen, toggleOpen } from "./lib/spaces.js";
-import { plainSpaces, spaceTree, subtitle } from "./lib/tree.js";
+import { livePick, plainSpaces, spaceTree, subtitle } from "./lib/tree.js";
 import { note, openNewSpace, openThread, statusGlyph } from "./lib/panel.js";
 import { H, RADIUS, SPACE, TEXT, ref, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -186,7 +186,7 @@ export default class Spaces extends View {
 
   /** The picked space's id, or null for "All spaces". */
   get selected() {
-    return shared("spaces.picked") ?? null;
+    return livePick(shared("spaces.picked") ?? null, spaces());
   }
 
   /**
