@@ -66,11 +66,16 @@ def row_action(shot_path, task_id, label):
 
 
 def dialog_accept(shot_path):
+    """The dialog's Accept: on the footer line that also holds Cancel (the chat may say "Accept" too)."""
     ws, size = rc.words(shot_path)
-    hits = [w for w in ws if w[4] == "Accept"]
-    if len(hits) < 2:
+    cancel = [w for w in ws if w[4] == "Cancel"]
+    if not cancel:
         return None, size
-    w = max(hits, key=lambda q: q[1])
+    c = max(cancel, key=lambda q: q[1])
+    hits = [w for w in ws if w[4] == "Accept" and abs(w[1] - c[1]) < 25 and w[0] > c[0]]
+    if not hits:
+        return None, size
+    w = hits[0]
     return (w[0] + w[2] / 2, w[1] + w[3] / 2), size
 
 
