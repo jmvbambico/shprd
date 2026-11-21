@@ -647,8 +647,14 @@ fn the_coordinator_says_accept_in_the_tasks_pane() {
 #[test]
 fn the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade() {
     let shipped = shipped_prompt("assistant").expect("shipped");
-    for needed in ["Never run `herdr-task`", "Every task is made with `shprd agent task add`"] {
-        assert!(shipped.text.contains(needed), "the brief must say {needed:?}");
+    for needed in [
+        "Never run `herdr-task`",
+        "Every task is made with `shprd agent task add`",
+    ] {
+        assert!(
+            shipped.text.contains(needed),
+            "the brief must say {needed:?}"
+        );
     }
     assert_eq!(
         digest(ASSISTANT_M11_ACCEPT.as_bytes()),
