@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 HOME = os.path.expanduser("~")
@@ -158,8 +159,11 @@ def api(env, method, path, folder, body=None, tries=1):
         headers.update({"content-type": "application/json", "x-shprd": "1"})
         data = json.dumps(body or {}).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        txt = r.read().decode()
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            txt = r.read().decode()
+    except urllib.error.HTTPError as err:
+        raise RuntimeError(f"{method} {path}: HTTP {err.code} {err.read().decode()[:300]}") from None
     return json.loads(txt) if txt.strip() else {}
 
 
@@ -195,9 +199,10 @@ def foreign_assistants(env_dict, tabs):
     """What in this space is Shepherdr's Assistant: a second tab named Assistant (the New space flow makes one
     shprd-chat tab of that name itself), or a live terminal carrying Shepherdr's coordinator labels."""
     out = []
-    named = [t for t in tabs if str(t["name"]).strip() == "Assistant" and "shprd-coordinator" not in str(t["id"])]
-    if len(named) > 1:
-        out += [f"extra Assistant tab {t['id']}" for t in named[1:]]
+    own = [t for t in tabs if "shprd-coordinator" in str(t["id"])]
+    # Once shprd has made its coordinator's tab, any other tab named Assistant is Shepherdr's.
+    if own:
+        out += [f"extra Assistant tab {t['id']}" for t in tabs if str(t["name"]).strip() == "Assistant" and t not in own]
     r = run(["hc", "ls", "--json"], env_dict, timeout=20)
     try:
         addresses = [t.get("address") for t in json.loads(r.stdout or "{}").get("terminals", [])]
@@ -303,6 +308,20 @@ def main():
     shutil.copytree(REAL_APP, env.app, ignore=shutil.ignore_patterns("herdr-app.sock", "*.sock"), symlinks=True)
     if os.path.isdir(REAL_CORE):
         shutil.copytree(REAL_CORE, f"{env.dirs['cfg']}/herdr-core", symlinks=True, ignore=shutil.ignore_patterns("*.sock"))
+    # The person's shprd settings are copied (their roles and prompts), with the worker and the coordinator on Sonnet
+    # so a small run stays small, and the reviewer another vendor (shprd refuses a same-vendor review); their file names the model of a role, not the settings' shape.
+    real_cfg = f"{HOME}/.config/shprd"
+    private_cfg = f"{env.shprd_home}/.config/shprd"
+    os.makedirs(os.path.dirname(private_cfg), exist_ok=True)
+    if os.path.isdir(real_cfg):
+        shutil.copytree(real_cfg, private_cfg, symlinks=True)
+    else:
+        os.makedirs(private_cfg, exist_ok=True)
+    open(f"{private_cfg}/settings.toml", "w").write(
+        "version = 1\n\n[roles.worker]\nagent = \"claude\"\nmodel = \"sonnet\"\neffort = \"low\"\n\n"
+        "[roles.coordinator]\nagent = \"claude\"\nmodel = \"sonnet\"\nperm = \"bypassPermissions\"\n\n"
+        "[roles.reviewer]\nagent = \"codex\"\nmodel = \"gpt-6-luna\"\nperm = \"auto\"\n"
+    )
     shared_path = f"{env.app}/shared.json"
     shared = json.load(open(shared_path))
     shared.pop("spaces.picked", None)
@@ -348,7 +367,7 @@ def main():
         shown = [t for t in tabs if t["active"]]
         names = [(t["name"], t["id"]) for t in tabs]
         stray = foreign_assistants(e, tabs)
-        ok = bool(up) and len(shown) == 1 and not stray
+        ok = bool(up) and len(shown) == 1 and not stray and ("shprd-coordinator" in str(shown[0]["id"]) or not [t for t in tabs if "shprd-coordinator" in str(t["id"])])
         return record("a add folder (window's own flow)", "only shprd's chat in the space; service up", f"tabs {names}; shown {[t['name'] for t in shown]}; foreign {stray}; service {'up' if up else 'DOWN'}", t0, ok), space
 
     ok, space = step_a()
@@ -370,7 +389,8 @@ def main():
     sh("git", "init", "-q", "--initial-branch=main")
     sh("git", "add", "-A")
     sh("git", "-c", "user.name=e2e", "-c", "user.email=e2e@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "seed tcalc")
-    sent = api(e, "POST", "/api/chat", folder, {"space": "coordinator", "text": MESSAGE})
+    # The chat pane refuses (and the person retries) until the coordinator is up: so does this.
+    sent = wait_for(lambda: api(e, "POST", "/api/chat", folder, {"space": "coordinator", "text": MESSAGE}) or {"ok": True}, "chat send", 240, 4.0)
     time_sent = time.time()
     say(f"sent: {json.dumps(sent)[:200]}")
     ok_b = record("b seed + send the message", "the coordinator takes the message", "sent" if sent is not None else "refused", t0, sent is not None)
@@ -402,20 +422,6 @@ def main():
     ok_c = bool(ts) and not re.search(r"\b(TC|SHPR|T)-?\d", hl) and any(t.get("deps") for t in ts)
     failed |= not record("c tasks appear in both panes", "all tasks within seconds, 3 after 1, none in herdr-task list", seen, t0, ok_c)
 
-    # ---- d: the question card ----
-    t0 = time.time()
-    asks = wait_for(lambda: (api(e, "GET", "/api/asks", folder) or {}).get("asks") or api(e, "GET", "/api/asks", folder) or None, "a question card", 400, 4.0)
-    cards = asks if isinstance(asks, list) else (asks or {}).get("asks", []) if isinstance(asks, dict) else []
-    if cards:
-        shot(e, out, "d-question-card")
-    seen = f"{len(cards)} card(s): " + "; ".join(str(c.get("title") or c.get("body") or c)[:90] for c in cards)
-    failed |= not record("d question card for task 2", "a card asks about rounding", seen, t0, bool(cards))
-    if cards:
-        c = cards[0]
-        api(e, "POST", "/api/asks/answer", folder, {"task": c.get("task"), "ask": c.get("id") or c.get("ask"), "answer": "Round to 2 decimal places."})
-        time.sleep(3)
-        shot(e, out, "d-answered")
-
     # ---- e: review -> accept task 1 ----
     t0 = time.time()
     first = (ts or [{}])[0].get("id")
@@ -435,14 +441,35 @@ def main():
     time.sleep(4)
     shot(e, out, "e-task1-done")
     st = api(e, "GET", "/api/state", folder) if t1 else {"tasks": []}
-    third = next((x for x in st["tasks"] if "cli" in x["title"].lower() or "convert" in x["title"].lower() and x["id"] != first and x.get("deps")), None)
-    sub = None
-    if merged:
-        sub = [x for x in st["tasks"] if x["id"] == first][0]
-    log = sh("git", "log", "--oneline", "-5").stdout.strip().replace("\n", " | ")
-    seen = f"task1 {merged and merged['derived']['status']}; main: {log[:120]}; dependent {third and (third['id'], third['derived']['status'])}"
-    ok_e = bool(merged) and bool(third) and third["derived"]["status"] in ("working", "ready", "done", "needs_you", "merging")
+    # What starts "by itself" after Accept: a task that was waiting on task 1 and is now running (a task that
+    # shares a path with a running one still waits for it, which the row says).
+    deps_of_first = [x for x in st["tasks"] if first in (x.get("deps") or [])]
+    def started():
+        now = api(e, "GET", "/api/state", folder)["tasks"]
+        return next((x for x in now if first in (x.get("deps") or []) and x["derived"]["status"] in ("working", "ready", "done", "needs_you", "merging")), None)
+
+    third = wait_for(started, "a dependent starts", 90, 3.0) if merged else None
+    log = sh("git", "log", "--oneline", "--all", "-6").stdout.strip().replace("\n", " | ")
+    seen = f"task1 {merged and merged['derived']['status']}; branches: {log[:160]}; started by itself: {third and (third['id'], third['derived']['status'])}"
+    ok_e = bool(merged) and bool(third)
     failed |= not record("e review -> accept task 1", "merged locally, row Done, task 3 starts by itself", seen, t0, ok_e)
+
+    # ---- d: the question card (task 2 starts once task 1 is accepted, so it comes after e) ----
+    t0 = time.time()
+    def card_list():
+        got = api(e, "GET", "/api/asks", folder)
+        return (got if isinstance(got, list) else (got or {}).get("asks", [])) or None
+
+    cards = wait_for(card_list, "a question card", 600, 4.0) or []
+    if cards:
+        shot(e, out, "d-question-card")
+    seen = f"{len(cards)} card(s): " + "; ".join(str(c.get("title") or c.get("body") or c)[:90] for c in cards)
+    failed |= not record("d question card for task 2", "a card asks about rounding", seen, t0, bool(cards))
+    if cards:
+        c = cards[0]
+        api(e, "POST", "/api/asks/answer", folder, {"task": c.get("task"), "ask": c.get("id") or c.get("ask"), "answer": "Round to 2 decimal places."})
+        time.sleep(3)
+        shot(e, out, "d-answered")
 
     if args.stop_after == "e":
         teardown(env, binary_dir, args.keep)
@@ -466,8 +493,12 @@ def main():
     shot(e, out, "f-back-in-shprd")
     tabs, shown, ids, foreign, ntasks = view_ok("f")
     seen = f"tabs {ids}; shown {[t['name'] for t in shown]}; tasks {ntasks}"
-    ok_f = len(shown) == 1 and not foreign and ntasks >= 3
+    ok_f = len(shown) == 1 and 'shprd-coordinator' in str(shown[0]['id']) and not foreign and ntasks >= 3
     failed |= not record("f layout shprd -> shepherdr -> shprd", "only shprd's chat; panes still show the run", seen, t0, ok_f)
+
+    if args.stop_after == "f":
+        teardown(env, binary_dir, args.keep)
+        return 1 if failed else 0
 
     # ---- g: close and reopen the window ----
     t0 = time.time()
@@ -479,7 +510,7 @@ def main():
         shot(e, out, "g-reopened")
         tabs, shown, ids, foreign, ntasks = view_ok("g")
         seen = f"tabs {ids}; shown {[t['name'] for t in shown]}; tasks {ntasks}"
-        ok_g = len(shown) == 1 and not foreign and ntasks >= 3
+        ok_g = len(shown) == 1 and 'shprd-coordinator' in str(shown[0]['id']) and not foreign and ntasks >= 3
     else:
         seen, ok_g = "the window did not come back", False
     failed |= not record("g close and reopen the window", "same as f", seen, t0, ok_g)
