@@ -412,6 +412,7 @@ impl shprd_server::RepoFactory for Factory {
             tick: Some(tick),
             prepare: Some(prepare),
             retire: Some(retire),
+            retired: Some(retired),
         })
     }
 }

@@ -291,7 +291,10 @@ async fn showing_a_repository_again_prepares_its_space_again() {
 
 /// A factory whose repositories count how often they were retired.
 #[derive(Debug)]
-struct Retiring(Arc<std::sync::atomic::AtomicUsize>);
+struct Retiring(
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 impl RepoFactory for Retiring {
     fn root_of(&self, folder: &Path) -> std::path::PathBuf {
@@ -307,6 +310,7 @@ impl RepoFactory for Retiring {
     ) -> Result<RepoParts, String> {
         let count = Arc::clone(&self.0);
         Ok(RepoParts {
+            retired: Some(Arc::clone(&self.1)),
             retire: Some(Arc::new(move || {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })),
@@ -320,10 +324,11 @@ async fn a_repository_whose_space_closed_is_retired_and_one_still_shown_is_not()
     // SHPR-86: the window's layout sync no longer lists a closed space's folder;
     // the service drops the repository and stops the agents it started for it.
     let retired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let state = tempfile::tempdir().unwrap();
     let service = Service::start(Config::service(
         state.path().join("shprd"),
-        Arc::new(Retiring(Arc::clone(&retired))),
+        Arc::new(Retiring(Arc::clone(&retired), Arc::clone(&flag))),
     ))
     .await
     .expect("the service starts");
@@ -332,6 +337,11 @@ async fn a_repository_whose_space_closed_is_retired_and_one_still_shown_is_not()
     let registry = service.registry();
     registry.sync(&[shop.clone().into(), blog.clone().into()]);
     registry.sync(&[shop.clone().into()]);
+    // Set before the retire step's own thread runs, so a preparation in flight stops.
+    assert!(
+        flag.load(std::sync::atomic::Ordering::SeqCst),
+        "the retired flag is set as the repository is dropped"
+    );
     for _ in 0..100 {
         if retired.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             break;

@@ -191,24 +191,27 @@ fn accept_bypass_warning(argv: &mut Vec<String>) {
     {
         return;
     }
-    let existing = argv
+    // The last `--settings` is the one claude reads.
+    let last = argv
         .iter()
-        .position(|arg| arg == "--settings")
+        .rposition(|arg| arg == "--settings")
         .filter(|at| at + 1 < argv.len());
-    match existing {
-        Some(at) => {
-            // A value that is a file path or not an object is left as it was.
-            if let Ok(serde_json::Value::Object(mut settings)) =
-                serde_json::from_str::<serde_json::Value>(&argv[at + 1])
-            {
-                settings.insert(CLAUDE_BYPASS_KEY.to_string(), serde_json::Value::Bool(true));
-                argv[at + 1] = serde_json::Value::Object(settings).to_string();
-            }
+    let Some(at) = last else {
+        argv.push("--settings".to_string());
+        argv.push(serde_json::json!({ CLAUDE_BYPASS_KEY: true }).to_string());
+        return;
+    };
+    match serde_json::from_str::<serde_json::Value>(&argv[at + 1]) {
+        Ok(serde_json::Value::Object(mut settings)) => {
+            settings.insert(CLAUDE_BYPASS_KEY.to_string(), serde_json::Value::Bool(true));
+            argv[at + 1] = serde_json::Value::Object(settings).to_string();
         }
-        None => {
-            argv.push("--settings".to_string());
-            argv.push(serde_json::json!({ CLAUDE_BYPASS_KEY: true }).to_string());
-        }
+        // A file path or anything else is not ours to edit: claude's own
+        // warning stays the way, and the pane watcher answers it.
+        _ => eprintln!(
+            "shprd: --settings {} is not inline JSON, so claude's one-time bypass warning is not accepted for it",
+            argv[at + 1]
+        ),
     }
 }
 
@@ -417,6 +420,23 @@ mod tests {
         let settings: serde_json::Value = serde_json::from_str(&argv[2]).expect("json");
         assert_eq!(settings["fastMode"], true);
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
+        // Two `--settings`: the last is the one claude reads, so it is the one extended.
+        let mut argv = [
+            "claude",
+            "--settings",
+            r#"{"a":1}"#,
+            "--settings",
+            r#"{"fastMode":false}"#,
+            "--dangerously-skip-permissions",
+        ]
+        .map(String::from)
+        .to_vec();
+        accept_bypass_warning(&mut argv);
+        assert_eq!(argv[2], r#"{"a":1}"#);
+        assert!(
+            argv[4].contains("skipDangerousModePermissionPrompt"),
+            "{argv:?}"
+        );
         // Any other mode has no such warning.
         let mut plan = ["claude", "--permission-mode", "plan"]
             .map(String::from)

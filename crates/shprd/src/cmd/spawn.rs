@@ -2664,6 +2664,15 @@ pub(crate) fn stop_repo_agents(mux: &dyn Host, ctx: &Ctx, home: &Path, repo: &Pa
     }
     let mut agents = mux.list_coordinators().unwrap_or_default();
     agents.extend(mux.list_agents().unwrap_or_default());
+    // Asked again after the agents were listed, so a space opened in between (a
+    // folder added again) is seen before anything of it is killed.
+    let Ok(spaces) = mux.list_spaces() else {
+        return retired;
+    };
+    for space in &spaces {
+        open.push(path_safe(&bare_id(space.id.as_str())));
+        open.push(path_safe(space.id.as_str()));
+    }
     for agent in agents_of_closed_spaces(&recorded, &open, agents) {
         match mux.kill(&agent.tab.root_pane) {
             Ok(()) => retired.stopped += 1,

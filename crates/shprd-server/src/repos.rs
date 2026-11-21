@@ -96,6 +96,9 @@ pub struct RepoParts {
     /// service drops it. It leaves the tasks and the run's state on disk, and it
     /// asks the host, so it runs on a thread of its own.
     pub retire: Option<Prepare>,
+    /// Set the moment the repository is dropped, before [`RepoParts::retire`]
+    /// runs on its thread, so a preparation still going stops starting agents.
+    pub retired: Option<Arc<AtomicBool>>,
 }
 
 impl std::fmt::Debug for RepoParts {
@@ -133,6 +136,8 @@ pub(crate) struct Slot {
     prepare: Option<Prepare>,
     /// Stopping the repository's agents, when its space closed and it is dropped.
     retire: Option<Prepare>,
+    /// Set as the repository is dropped.
+    retired: Option<Arc<AtomicBool>>,
     /// Whether a preparation is running: a second one is not started beside it.
     preparing: Arc<AtomicBool>,
 }
@@ -188,6 +193,9 @@ impl Slot {
     /// Stops the repository's agents on a thread of its own: the host answers
     /// slowly, and the request that dropped the repository must not wait.
     fn run_retire(&self) {
+        if let Some(flag) = &self.retired {
+            flag.store(true, Ordering::SeqCst);
+        }
         if let Some(step) = self.retire.clone() {
             std::thread::spawn(move || step());
         }
@@ -325,6 +333,7 @@ impl Registry {
             tasks: Mutex::new(Vec::new()),
             prepare: None,
             retire: None,
+            retired: None,
             preparing: Arc::new(AtomicBool::new(false)),
         });
         if let Ok(mut slots) = self.slots.write() {
@@ -419,6 +428,7 @@ impl Registry {
             tasks: Mutex::new(Vec::new()),
             prepare: parts.prepare,
             retire: parts.retire,
+            retired: parts.retired,
             preparing: Arc::new(AtomicBool::new(false)),
         });
         if let Ok(mut slots) = self.slots.write() {
