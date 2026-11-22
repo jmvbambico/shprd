@@ -81,6 +81,14 @@ pub trait ChatWriter: Send + Sync {
         None
     }
 
+    /// Whether shprd's own coordinator is running now, when the host can say:
+    /// `Some(false)` is "none is" (never another product's Assistant in the
+    /// same folder), `None` is not knowing. With no coordinator the chat shows
+    /// no conversation at all, because the newest one in the folder is not shprd's.
+    fn coordinator_running(&self) -> Option<bool> {
+        None
+    }
+
     /// What the last `send` did on its own first, as one plain sentence, taken
     /// once: the chat shows it with the answer and it is not said again. `None`
     /// is nothing.
@@ -187,6 +195,20 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
     let Some(program) = place.program.as_deref() else {
         return Ok(answer);
     };
+    // No shprd coordinator is running: the chat reads nothing from the folder.
+    // The newest conversation there can be another product's Assistant, which is
+    // never shown here.
+    if matches!(space, Space::Coordinator)
+        && state
+            .chat
+            .get()
+            .is_some_and(|writer| writer.coordinator_running() == Some(false))
+    {
+        answer.note = Some(String::from(
+            "shprd's coordinator isn't running yet: shprd starts it for this space",
+        ));
+        return Ok(answer);
+    }
     let Some(spec) = harness_spec(state, program)? else {
         answer.note = Some(format!(
             "no harness entry for {program:?}: the chat reads the programs in the data directory"

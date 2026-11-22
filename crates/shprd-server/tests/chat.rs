@@ -42,6 +42,8 @@ struct Recorder {
     refuse: bool,
     /// When the coordinator this writer types into started, if it says.
     started_ms: Option<u64>,
+    /// Whether it says shprd's coordinator is running (`None`: it does not say).
+    running: Option<bool>,
 }
 
 impl Recorder {
@@ -55,6 +57,10 @@ impl ChatWriter for Recorder {
     fn interrupt(&self, space: Option<&str>) -> Result<(), String> {
         self.stops.lock().unwrap().push(space.map(str::to_owned));
         Ok(())
+    }
+
+    fn coordinator_running(&self) -> Option<bool> {
+        self.running
     }
 
     fn started_ms(&self, space: Option<&str>) -> Option<u64> {
@@ -1210,4 +1216,36 @@ async fn the_coordinators_chat_is_the_conversation_it_began_not_an_older_one_in_
         "T7 needs you: pick one (Add pow)"
     );
     assert_eq!(reply.messages()[1]["role"], "assistant");
+}
+
+/// SHPR-88: with no shprd coordinator running, the chat shows nothing from the
+/// folder: the newest conversation there is another product's Assistant (it
+/// has the same folder and the same program), and it is never shown as shprd's.
+#[tokio::test]
+async fn no_coordinator_running_means_no_conversation_not_the_newest_one_in_the_folder() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    start_run(repo.path());
+    let home = tempfile::tempdir().expect("home dir");
+    write_settings(home.path(), "claude");
+    let first = Fixture::prepared(repo, home);
+    // Another product's Assistant wrote this one, in the repository's folder.
+    first.write_session(
+        first.repo.path(),
+        "assistant.jsonl",
+        &[(true, "hello Assistant"), (false, "hi")],
+    );
+    let Fixture { repo, home, .. } = first;
+    let fixture = Fixture::prepared_with(
+        repo,
+        home,
+        Arc::new(Recorder {
+            running: Some(false),
+            ..Recorder::default()
+        }),
+    );
+    let reply = fixture.chat("coordinator", "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(reply.messages().is_empty(), "{}", reply.body);
+    assert!(reply.body["session"].is_null(), "{}", reply.body);
+    assert!(reply.note().contains("isn't running"), "{}", reply.note());
 }
