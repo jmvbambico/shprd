@@ -544,7 +544,12 @@ fn every_role_opens_with_who_it_is() {
         let text = shipped_prompt(id).expect("shipped").text;
         let body = text.split("-->").nth(1).expect("a licence header");
         assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
-        assert!(text.contains("Shepherdr"), "{id} names what it is not");
+        if id == "assistant" {
+            assert!(
+                !body.contains("Shepherdr"),
+                "the coordinator's words name no other product"
+            );
+        }
     }
 }
 
@@ -642,13 +647,14 @@ fn the_coordinator_says_accept_in_the_tasks_pane() {
     assert!(text.contains("Never tell them to run `shprd approve`"));
 }
 
-/// SHPR-79: the coordinator never uses Shepherdr's tools, and the wording that
+/// SHPR-79: the coordinator uses only shprd's verbs, and the wording that
 /// did not forbid them is retired and upgrades.
 #[test]
-fn the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade() {
+fn the_coordinator_uses_only_shprd_verbs_and_the_old_words_upgrade() {
     let shipped = shipped_prompt("assistant").expect("shipped");
     for needed in [
-        "Never run `herdr-task`",
+        "Use only the `shprd` commands named here",
+        "ignore any other tool's task, board or settings commands",
         "Every task is made with `shprd agent task add`",
     ] {
         assert!(
@@ -699,7 +705,7 @@ fn an_untouched_pre_shpr83_assistant_is_upgraded() {
 const PINNED: [(&str, &str); 4] = [
     (
         "assistant",
-        "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f",
+        "e482982fc547944b949a371eb414a6e762aa976996db107ebbcf28f21ece1c23",
     ),
     (
         "worker",
@@ -747,4 +753,31 @@ fn the_loader_drops_the_credit_comment_and_the_file_keeps_it() {
         "plain <!-- x -->"
     );
     assert_eq!(strip_leading_comment("<!-- open"), "<!-- open");
+}
+
+/// The coordinator's long wording is retired, upgrades, and the shipped body
+/// names no other product and states the verbs the rewrite must keep.
+#[test]
+fn the_condensed_coordinator_replaces_the_long_one() {
+    let shipped = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_M11_LONG.as_bytes()),
+        ASSISTANT_M11_LONG_DIGEST
+    );
+    assert!(shipped.old.contains(&ASSISTANT_M11_LONG_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(!body.contains("Shepherdr"), "{body}");
+    assert!(!body.contains("shepherdr"), "{body}");
+    for needed in [
+        "shprd agent task widen",
+        "shprd settings set",
+        "Accept it in the Tasks pane",
+        "never approve, push, merge",
+    ] {
+        assert!(body.contains(needed), "the brief must say {needed:?}");
+    }
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_M11_LONG).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
 }
