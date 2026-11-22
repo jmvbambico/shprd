@@ -91,7 +91,6 @@ export function empty(space = COORDINATOR) {
     more: false,
     older: null,
     expanded: false,
-    trimmed: false,
     note: null,
   };
 }
@@ -140,7 +139,6 @@ export function fold(chat, answer, keep = null) {
     // forward and leave it alone.
     older: first ? (answer?.older ?? null) : (held.older ?? null),
     expanded,
-    trimmed: false,
     note: answer?.note ?? null,
   };
 }
@@ -512,7 +510,7 @@ export function timeline(chat, cards = []) {
   const waiting = cards.slice().sort((a, b) => (a.at ?? Infinity) - (b.at ?? Infinity));
   let next = 0;
   if (chat?.older) rows.push({ kind: "older", key: "older" });
-  else if (!chat?.more && !chat?.trimmed && messages.length > 0) rows.push({ kind: "top", key: "top" });
+  else if (!chat?.more && messages.length > 0) rows.push({ kind: "top", key: "top" });
   for (const message of messages) {
     while (next < waiting.length && waiting[next].at !== null && message.at_ms !== null && waiting[next].at < message.at_ms) {
       rows.push({ kind: "card", key: waiting[next].id, card: waiting[next] });
