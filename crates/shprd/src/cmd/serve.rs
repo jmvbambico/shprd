@@ -83,6 +83,7 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Res
     for note in &migrated {
         eprintln!("   migrated:     {note}");
     }
+    install_self_update(&home, &state_dir);
     let data = resolve_data_dir();
     let factory = Arc::new(Factory {
         actor: ctx.actor.clone(),
@@ -172,6 +173,22 @@ pub fn run(ctx: &Ctx, args: &ServeArgs, home: Option<&Path>, named: bool) -> Res
             .await
             .map_err(|err| CliError::other(anyhow!(err).context("serving the run")))
     })
+}
+
+/// Lets a landing start the self-update helper, when the person turned it on.
+///
+/// The binary's own file is captured here, once, before anything renames it: the
+/// helper swaps that file and keeps the previous one beside it as `shprd.prev`.
+/// No path is built in; a service whose own file cannot be found updates nothing.
+fn install_self_update(home: &Path, state_dir: &Path) {
+    let Ok(exe) = std::env::current_exe().and_then(|path| path.canonicalize()) else {
+        tracing::warn!("the running binary's file could not be found; self-update is off");
+        return;
+    };
+    let (home_dir, state) = (home.to_path_buf(), state_dir.to_path_buf());
+    let spawn: shprd_server::self_update::Spawn =
+        Arc::new(move |job| crate::cmd::self_update::spawn_for(&exe, &home_dir, &state, job));
+    shprd_server::self_update::install(shprd_server::self_update::Trigger::new(home, spawn));
 }
 
 /// What the banner says about the service and the repository it was started for.

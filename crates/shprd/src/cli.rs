@@ -183,6 +183,15 @@ pub enum Command {
     /// writes nothing the second time; `--dry-run` writes nothing and prints
     /// the same plan.
     Install(InstallArgs),
+    /// Apply an accepted change to shprd itself: build it, swap it in, restart
+    /// once, and roll back when the new one does not come up. The service starts
+    /// this when `tasks.self_update` is on; it is not for typing.
+    #[command(hide = true)]
+    SelfUpdate {
+        /// What to do.
+        #[command(subcommand)]
+        cmd: SelfUpdateCommand,
+    },
     /// Advance the run once, now: start what may start, land what may land.
     ///
     /// This is the same pass `shprd serve` runs every `tasks.tick_secs`
@@ -380,6 +389,54 @@ pub struct ServeArgs {
     /// as `shprd_server=debug`.
     #[arg(long, value_name = "PORT", default_value_t = 0)]
     pub port: u16,
+}
+
+/// The verbs under `self-update`.
+#[derive(Debug, Subcommand)]
+pub enum SelfUpdateCommand {
+    /// Run one update for a repository, under the updater's lock.
+    Run(SelfUpdateArgs),
+}
+
+/// Arguments for `self-update run`. Every path is required: the helper has no
+/// default install to fall back on.
+#[derive(Debug, Args)]
+pub struct SelfUpdateArgs {
+    /// The updater's folder: its lock, request counter and what is installed.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub work_dir: PathBuf,
+    /// The service's state directory, where `service.json` names the pid.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub state_dir: PathBuf,
+    /// The repository whose landing is being applied.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub repo: PathBuf,
+    /// The branch the task landed on.
+    #[arg(long, value_name = "BRANCH", required = true)]
+    pub base: String,
+    /// The landing was local (no forge): read the head from the local branch.
+    #[arg(long)]
+    pub local: bool,
+    /// The running binary's own file: the one swapped, with `.prev` kept beside.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub install_path: PathBuf,
+    /// The shprd home the desktop install and the news are for.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub home_dir: PathBuf,
+    /// The Herdr app home to install the desktop into, when not the default.
+    #[arg(long, value_name = "PATH")]
+    pub app_home: Option<PathBuf>,
+    /// Seconds the restarted service has to answer its health check.
+    #[arg(long, value_name = "SECS", default_value_t = 90)]
+    pub health_timeout_secs: u64,
+    /// Do not tell the coordinator (a test has none).
+    #[arg(long)]
+    pub no_news: bool,
+    /// The build command, after `--`; the default is rustup's `cargo build
+    /// --release -p shprd`. It runs in the build worktree and leaves its binary
+    /// at `$CARGO_TARGET_DIR/release/shprd`.
+    #[arg(last = true)]
+    pub build: Vec<String>,
 }
 
 /// Arguments for `install`.

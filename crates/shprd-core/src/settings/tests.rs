@@ -46,6 +46,7 @@ fn an_empty_file_resolves_to_the_built_in_values() {
     assert_eq!(shown(&resolved, "tasks.news_settle_secs"), "5");
     assert_eq!(shown(&resolved, "tasks.proof"), "true");
     assert_eq!(shown(&resolved, "tasks.worktrees"), "true");
+    assert_eq!(shown(&resolved, "tasks.self_update"), "false");
     assert_eq!(shown(&resolved, "tasks.base"), "\"\"");
     assert_eq!(shown(&resolved, "tasks.branch"), "\"{run}/{task}\"");
     assert_eq!(shown(&resolved, "review.cross_vendor"), "true");

@@ -26,6 +26,7 @@ pub mod review;
 pub mod roster;
 pub mod run;
 pub mod run_lock;
+pub mod self_update;
 pub mod serve;
 pub mod serve_migrate;
 pub mod set;
@@ -42,7 +43,7 @@ mod web_tunnel;
 use anyhow::anyhow;
 use shprd_core::event::{Event, EventKind};
 
-use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, TaskVerb};
+use crate::cli::{AskCommand, Cli, Command, DagrCommand, RunCommand, SelfUpdateCommand, TaskVerb};
 use crate::ctx::{CliError, Ctx, resolve_actor, resolve_home, resolve_root};
 
 /// Runs whichever verb the command line asked for.
@@ -75,6 +76,13 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     // outside a repository too.
     if let Some(Command::Install(args)) = &cli.command {
         return install::run(args, cli.global.home.as_deref(), cli.global.json);
+    }
+    // `self-update` is the helper the service starts; it names every path it
+    // touches and reads no run log.
+    if let Some(Command::SelfUpdate { cmd }) = &cli.command {
+        return match cmd {
+            SelfUpdateCommand::Run(args) => self_update::run(args),
+        };
     }
     // `web` reads and writes the state directory of the one service (every
     // repository is served by it), not a log, so it answers before any run
@@ -147,6 +155,10 @@ pub fn dispatch(cli: Cli) -> Result<(), CliError> {
         }
         // Unreachable in practice: `install` returns above.
         Some(Command::Install(args)) => install::run(&args, None, ctx.json),
+        // Unreachable in practice: `self-update` returns above.
+        Some(Command::SelfUpdate { cmd }) => match cmd {
+            SelfUpdateCommand::Run(args) => self_update::run(&args),
+        },
         // Unreachable in practice: `prompts` returns above.
         Some(Command::Prompts { cmd }) => prompts::run(&cmd, ctx.json, None),
         Some(Command::Doctor(args)) => doctor::run(&args, ctx.json, None),
