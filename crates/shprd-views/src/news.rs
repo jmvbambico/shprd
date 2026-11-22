@@ -170,6 +170,11 @@ pub struct Reading {
     /// (`news.py:41-53`). An agent at work must count: a worker running a long
     /// quiet build is ordinary, and not news.
     pub last_activity_ms: u64,
+    /// The number of the attempt this reading is about: its newest.
+    ///
+    /// A stop is told about one attempt only: once a newer attempt exists, the
+    /// older one's end is nobody's news. `None` when the caller does not know.
+    pub attempt: Option<u32>,
 }
 
 impl Reading {
@@ -187,8 +192,15 @@ impl Reading {
             review_failed: None,
             backup: None,
             last_activity_ms: 0,
+            attempt: None,
         }
     }
+}
+
+/// Whether a reading says its agent stopped: a task that needs the person
+/// because nobody is on it any more.
+fn says_stopped(reading: &Reading) -> bool {
+    reading.status == DerivedStatus::NeedsYou && reading.need == Some(Need::Stopped)
 }
 
 /// The tasks of one pass, by id: every space's tasks together, so a pass that
@@ -234,6 +246,12 @@ struct Seen {
     review_failed: Option<String>,
     /// The last backup mark it carried.
     backup: Option<String>,
+    /// The attempt whose agent was read as stopped on the pass before, when it
+    /// was: a stop is told only when a second pass reads it the same way, so a
+    /// worker missing for a single pass (a send-back or a retry starting its
+    /// new terminal) is never reported as one that stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_seen: Option<u32>,
 }
 
 impl Seen {
@@ -259,6 +277,7 @@ impl Seen {
                 .as_ref()
                 .map(|mark| mark.id.clone())
                 .or_else(|| prev.and_then(|seen| seen.backup.clone())),
+            stop_seen: None,
         }
     }
 }
@@ -273,6 +292,8 @@ enum Holds {
     Stalled(String),
     /// The newest failed review is still this one.
     ReviewFailed(String),
+    /// The task still reads as stopped, and this is still its newest attempt.
+    Stopped(u32),
     /// A backup's line is news either way (Shepherdr's `holds()`).
     Always,
 }
@@ -311,6 +332,9 @@ impl Item {
                 .get(&self.task)
                 .and_then(|reading| stall_of(reading, now_ms))
                 .is_some_and(|stall| stall.id == *mark),
+            Holds::Stopped(attempt) => current
+                .get(&self.task)
+                .is_some_and(|reading| says_stopped(reading) && stop_key(reading) == *attempt),
             Holds::ReviewFailed(mark) => current
                 .get(&self.task)
                 .and_then(|reading| reading.review_failed.as_ref())
@@ -441,14 +465,30 @@ impl News {
                     Holds::ReviewFailed(failed.id.clone()),
                 ));
             }
+            // A stop is told once a second pass confirms it for the same
+            // attempt. The first look only notes it, and leaves the task as it
+            // was last told so the next pass looks again.
+            let mut deferred = false;
             if prev.status != reading.status
                 && let Some(event) = event_of(prev, reading)
             {
-                lines.push((
-                    event,
-                    line(task, reading, event, None),
-                    Holds::Status(reading.status),
-                ));
+                if says_stopped(reading) && event == NewsEvent::Failed {
+                    if prev.stop_seen == Some(stop_key(reading)) {
+                        lines.push((
+                            event,
+                            line(task, reading, event, None),
+                            Holds::Stopped(stop_key(reading)),
+                        ));
+                    } else {
+                        deferred = true;
+                    }
+                } else {
+                    lines.push((
+                        event,
+                        line(task, reading, event, None),
+                        Holds::Status(reading.status),
+                    ));
+                }
             }
             if let Some(stall) = &stall
                 && prev.stall.as_deref() != Some(stall.id.as_str())
@@ -462,10 +502,13 @@ impl News {
             for (event, text, holds) in lines {
                 self.queue(now_ms, task, reading, event, text, holds);
             }
-            self.seen.insert(
-                task.clone(),
-                Seen::after(Some(prev), reading, stall.as_ref()),
-            );
+            let mut now = Seen::after(Some(prev), reading, stall.as_ref());
+            if deferred {
+                now.status = prev.status;
+                now.need = prev.need;
+                now.stop_seen = Some(stop_key(reading));
+            }
+            self.seen.insert(task.clone(), now);
         }
         // A task the pass no longer has is forgotten: the run dropped it, or it
         // is in another space that nobody looked at.
@@ -551,6 +594,11 @@ impl News {
     pub fn waiting(&self) -> &[Item] {
         &self.outbox
     }
+}
+
+/// Which attempt a stop is about, for telling it once.
+fn stop_key(reading: &Reading) -> u32 {
+    reading.attempt.unwrap_or(0)
 }
 
 /// Whether a line is told for its own sake, whatever else the task says.
@@ -727,7 +775,7 @@ mod tests {
         let mut landed = reading("repo", DerivedStatus::Done);
         landed.outcome = Some(String::from("merged"));
         let mut failed = reading("repo", DerivedStatus::NeedsYou);
-        failed.need = Some(Need::Stopped);
+        failed.failed = Some(String::from("its attempt failed"));
         let mut needs_you = reading("repo", DerivedStatus::NeedsYou);
         needs_you.need = Some(Need::Asks);
         needs_you.reason = Some(String::from("Question for you"));
@@ -1211,5 +1259,72 @@ mod tests {
         let batches = settled_at(&mut back, NOW + 20_000, &current);
         assert_eq!(batches.len(), 1, "a restarted news still tells it");
         assert_eq!(batches[0].items[0].event, NewsEvent::Started);
+    }
+
+    /// A task read as at work on attempt `n`.
+    fn working_on(n: u32) -> Reading {
+        let mut reading = reading("repo", DerivedStatus::Working);
+        reading.attempt = Some(n);
+        reading
+    }
+
+    /// A task whose agent is read as gone, on attempt `n`.
+    fn gone_on(n: u32) -> Reading {
+        let mut reading = reading("repo", DerivedStatus::NeedsYou);
+        reading.need = Some(Need::Stopped);
+        reading.reason = Some(String::from("Agent stopped"));
+        reading.attempt = Some(n);
+        reading
+    }
+
+    /// A send-back: the old terminal exits and the new one is seen one pass
+    /// later. The pass in between reads the worker as gone, and says nothing.
+    #[test]
+    fn a_worker_missing_for_one_pass_is_not_a_stop() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let gap = snapshot(vec![("T1", gone_on(1))]);
+        news.observe(NOW + 10_000, &gap);
+        assert!(settled_at(&mut news, NOW + 20_000, &gap).is_empty());
+        let back = snapshot(vec![("T1", working_on(2))]);
+        news.observe(NOW + 30_000, &back);
+        assert!(settled_at(&mut news, NOW + 60_000, &back).is_empty());
+        assert!(news.waiting().is_empty(), "nothing was queued at all");
+        // A later real stop of the new attempt is still told, once confirmed.
+        let gone = snapshot(vec![("T1", gone_on(2))]);
+        news.observe(NOW + 70_000, &gone);
+        assert!(settled_at(&mut news, NOW + 80_000, &gone).is_empty());
+        news.observe(NOW + 90_000, &gone);
+        assert_eq!(settled_at(&mut news, NOW + 100_000, &gone).len(), 1);
+    }
+
+    /// A current worker that really exits is told once.
+    #[test]
+    fn a_worker_that_really_exits_is_told_once() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let gone = snapshot(vec![("T1", gone_on(1))]);
+        news.observe(NOW + 10_000, &gone);
+        news.observe(NOW + 20_000, &gone);
+        let batches = settled_at(&mut news, NOW + 30_000, &gone);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 1);
+        assert_eq!(batches[0].items[0].event, NewsEvent::Failed);
+        assert!(batches[0].text().contains("Agent stopped"));
+        news.told(&batches[0]);
+        news.observe(NOW + 40_000, &gone);
+        news.observe(NOW + 50_000, &gone);
+        assert!(settled_at(&mut news, NOW + 60_000, &gone).is_empty());
+    }
+
+    /// A stop that was queued is dropped when a newer attempt now exists, or
+    /// when the worker is back.
+    #[test]
+    fn a_queued_stop_is_dropped_when_a_newer_attempt_exists() {
+        let mut news = after_first_look(snapshot(vec![("T1", working_on(1))]));
+        let gone = snapshot(vec![("T1", gone_on(1))]);
+        news.observe(NOW + 10_000, &gone);
+        news.observe(NOW + 20_000, &gone);
+        assert_eq!(news.waiting().len(), 1);
+        let newer = snapshot(vec![("T1", gone_on(2))]);
+        assert!(settled_at(&mut news, NOW + 30_000, &newer).is_empty());
     }
 }
