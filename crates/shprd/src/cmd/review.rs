@@ -278,11 +278,43 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     };
     out.push_str(&format!("- summary: {}\n", report.summary));
     out.push_str(&listed("tests", &report.tests));
+    out.push_str(&checks_section(&report.checks));
     out.push_str(&listed("changed paths", &report.changed_paths));
     out.push_str(&listed("proof", &report.proofs));
     out.push_str(&proof_section(input.proof_copies));
     if let Some(commit) = &report.commit {
         out.push_str(&format!("- commit: {commit}\n"));
+    }
+    out
+}
+
+/// The checks the hand-in named: gate, command, exit code and, when one was
+/// given, the output tail in a fenced block.
+///
+/// The reviewer judges "gates not named" from this list, so every check of the
+/// attempt's hand-in appears here, not only a count of them.
+fn checks_section(checks: &[shprd_core::event::CheckReport]) -> String {
+    let mut out = String::from("- checks:\n");
+    if checks.is_empty() {
+        out.push_str("  - none claimed\n");
+    }
+    for check in checks {
+        let exit = match check.exit_code {
+            Some(code) => code.to_string(),
+            None => "killed by timeout".to_string(),
+        };
+        out.push_str(&format!(
+            "  - {}: `{}` exited {exit}\n",
+            check.gate, check.command
+        ));
+        let tail = check.output_tail.trim_end();
+        if !tail.is_empty() {
+            out.push_str("    ```\n");
+            for line in tail.lines() {
+                out.push_str(&format!("    {line}\n"));
+            }
+            out.push_str("    ```\n");
+        }
     }
     out
 }
