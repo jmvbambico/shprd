@@ -1,8 +1,0 @@
-# m11-chat-latency: key press -> turn shown (ms), stand-in service: deliver 150, page 60, board/asks 40 each, transcript holds the turn 400 after delivery
-## BEFORE (HEAD): composer clears only when the POST returns; the turn shows only once a read finds it in the transcript (here never within 4s: the next read is the 3000 ms timer, so ~3150+ ms; null = not shown)
-{"cleared":154,"shown":null,"settled":null,"postReturned":150,"copiesAtEnd":0}
-## AFTER: composer clears and the turn shows at 0 ms; chat-only reads at 120/300/700/1500 ms settle on the transcript copy (settled), one copy at the end
-{"cleared":0,"shown":0,"settled":694,"postReturned":151,"copiesAtEnd":1}
-## Server hops: not measured against a live terminal (would type into the person's real coordinator). POST /api/chat now logs resolve_ms/attachments_ms/deliver_ms at debug (SHPRD_LOG=shprd_server=debug). The read side is already a plain file read; the only wait found was the 3000 ms poll between the POST and the read-back, now replaced by short follow-up reads.
-## Attempt 4: a refused send keeps words typed during the flight; a read settles only its own conversation's echoes (both tested; mod gate: 415 pass, 0 fail).
-## Server hops: deliver path has no fixed sleep or settle window in crates/shprd-server/src/chat.rs send(); resolve/attachments/deliver ms are logged at debug. Not timed against a live terminal (it would type into the person's real coordinator).

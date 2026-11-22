@@ -639,7 +639,7 @@ test("the transcript's copy replaces the echo: no duplicate, no flicker", async 
   await view.send();
   const texts = () => withEchoes(view.chat, view.myEchoes()).messages.map((m) => m.text);
   assert.deepEqual(texts(), ["what landed?"], "the echo is the only copy until the transcript holds the turn");
-  view.client.call = async () => page({ messages: [{ role: "user", text: "what landed?", at_ms: 5 }], cursor: "s1@2" });
+  view.client.call = async () => page({ messages: [{ role: "user", text: "what landed?", at_ms: Date.now() + 5 }], cursor: "s1@2" });
   await view.pull(COORDINATOR, view.slot);
   assert.deepEqual(texts(), ["what landed?"], "then the transcript's alone");
   assert.equal(view.myEchoes().length, 0);
@@ -659,7 +659,7 @@ test("an echo the transcript never confirms goes after two minutes; an attachmen
   assert.deepEqual(settleEchoes([a], [], 60_000), [a]);
   assert.deepEqual(settleEchoes([a], [], 130_000), []);
   const filesOnly = echoOf({ text: "", attachments: [{ path: "/t/shot.png", name: "shot.png" }] }, 0);
-  assert.deepEqual(settleEchoes([filesOnly], [{ role: "user", text: "see shot.png" }], 1), []);
+  assert.deepEqual(settleEchoes([filesOnly], [{ role: "user", text: "Attached file (open it with your file tools):\n/w/shot.png" }], 1), []);
 });
 
 test("a refused send takes the echo away and gives the words and files back", async () => {
@@ -706,8 +706,30 @@ test("a refused send keeps words typed while it was in flight, with the refused 
 });
 
 test("a read of one conversation never settles another conversation's echo", async () => {
-  const { view } = panel([page({ messages: [{ role: "user", text: "same words", at_ms: 1 }], cursor: "s1@1" })]);
+  const { view } = panel([page({ messages: [{ role: "user", text: "same words", at_ms: Date.now() + 1 }], cursor: "s1@1" })]);
   view.echoes = [{ ...echoOf({ text: "same words" }), slot: "other-slot", sent: true }];
   await view.pull(COORDINATOR, view.slot);
   assert.equal(view.echoes.length, 1);
+});
+
+test("an echo is confirmed by the same turn, not by a longer line that starts alike or one from before the send", () => {
+  const a = echoOf({ text: "ok" }, 100_000);
+  assert.deepEqual(settleEchoes([a], [{ role: "user", text: "ok then, and also more" }], 100_001), [a], "a prefix is another message");
+  assert.deepEqual(settleEchoes([a], [{ role: "user", text: "ok", at_ms: 1000 }], 100_001), [a], "an older line is another turn");
+  assert.deepEqual(settleEchoes([a], [{ role: "user", text: "ok", at_ms: 100_500 }], 100_501), []);
+  const withFile = echoOf({ text: "see", attachments: [{ path: "/t/s.png", name: "s.png" }] }, 100_000);
+  assert.deepEqual(settleEchoes([withFile], [{ role: "user", text: "see\n\nAttached file (open it with your file tools):\n/w/s.png" }], 100_001), []);
+  assert.deepEqual(settleEchoes([withFile], [{ role: "user", text: "see s.png" }], 100_001), [withFile], "no composed header, no match");
+});
+
+test("a refusal shows only on the conversation the send came from", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  view.input.set_value("hello");
+  view.client.call = async (method) => {
+    if (method === "GET") return page({ messages: [] });
+    view.slot = "another-slot";
+    throw new Error("no open pane");
+  };
+  await view.send();
+  assert.equal(view.refusal, null);
 });

@@ -777,9 +777,11 @@ export default class Chat extends View {
         this.input.set_value(now.trim() === "" ? typed : `${typed}\n${now}`);
         this.files = [...taken, ...(this.files ?? [])];
       }
-      this.refusal = reason(err);
-      // The sidebar's foot says the same sentence, for the folder shown.
-      setShared(SEND_PROBLEM, { folder: this.client?.folder ?? activeFolder(), text: this.refusal });
+      const said = reason(err);
+      // Only the conversation the send came from shows the refusal; the sidebar's
+      // foot says the sentence for the folder.
+      if (slot === this.slot) this.refusal = said;
+      setShared(SEND_PROBLEM, { folder: this.client?.folder ?? activeFolder(), text: said });
     }
     this.inflight -= 1;
     this.sending = this.inflight > 0;

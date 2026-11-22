@@ -251,12 +251,28 @@ export function echoOf(body, now = Date.now()) {
   return { text, files, shown: [text, ...files.map((name) => `📎 ${name}`)].filter((part) => part !== "").join("\n"), at_ms: now, sent: false };
 }
 
-/** Whether a transcript message is the turn an echo stands for. */
+/** How far before the send a transcript line may be stamped and still be its turn (clock slack). */
+const ECHO_SKEW_MS = 5000;
+
+/**
+ * Whether a transcript message is the turn an echo stands for: the same words
+ * exactly (the service types them unchanged, files named after them), recorded
+ * no earlier than the send. A line a read brought in from before the send is
+ * never this turn, and a longer line that merely starts with the words is not
+ * either.
+ */
 export function confirms(echo, message) {
   if (message?.role !== "user") return false;
+  if (typeof message.at_ms === "number" && message.at_ms < echo.at_ms - ECHO_SKEW_MS) return false;
   const said = String(message?.text ?? "");
-  if (echo.text.trim() !== "") return said.trim() === echo.text.trim() || said.startsWith(echo.text.trim());
-  return echo.files.length > 0 && echo.files.some((name) => said.includes(name));
+  const words = echo.text.trim();
+  if (echo.files.length === 0) return said.trim() === words;
+  // The service composes: the words, a blank line, a header naming the files, one path per line.
+  const header = said.search(/(^|\n\n)Attached files? \(open /);
+  if (header === -1) return false;
+  const front = said.slice(0, header).trim();
+  if (front !== words) return false;
+  return echo.files.every((name) => said.includes(name));
 }
 
 /**
