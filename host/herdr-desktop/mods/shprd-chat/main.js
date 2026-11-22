@@ -62,6 +62,7 @@ import {
   keyAction,
   lineCount,
   fold,
+  foldOlder,
   folding,
   markdownOf,
   mine,
@@ -407,6 +408,33 @@ export default class Chat extends View {
     this.echoes = [...others, ...settleEchoes(here, answer?.messages ?? [])];
     if (this.chat.session !== was && was !== null) this.echoes = (this.echoes ?? []).filter((echo) => echo.slot !== slot);
     return true;
+  }
+
+  /**
+   * Reads the page of messages before the oldest shown and puts it in front.
+   * One at a time; the forward cursor and the echoes are not touched, and a page
+   * that arrives after the person moved on is dropped.
+   */
+  async loadOlder() {
+    const space = this.space;
+    const slot = this.slot;
+    const older = this.chat?.older;
+    if (space === null || !this.client || !older || this.loadingOlder) return;
+    this.loadingOlder = true;
+    try {
+      const answer = await this.client.call(
+        "GET",
+        `/api/chat?space=${encodeURIComponent(space)}&since=${encodeURIComponent(nextCursor(this.chat))}&before=${encodeURIComponent(older)}`,
+        { strict: true },
+      );
+      if (space !== this.space || slot !== this.slot || this.chat?.older !== older) return;
+      this.chat = foldOlder(this.chat, answer);
+      this.cx.notify();
+    } catch {
+      // The timer's read reports a service that is down; the row stays to retry.
+    } finally {
+      this.loadingOlder = false;
+    }
   }
 
   /**
@@ -1038,6 +1066,19 @@ export default class Chat extends View {
         .text_size(TEXT.label)
         .text_color(t.dim)
         .child(WORDS.top);
+    }
+    if (row.kind === "older") {
+      return div()
+        .w_full()
+        .flex_none()
+        .py(8)
+        .flex()
+        .justify_center()
+        .text_size(TEXT.label)
+        .text_color(t.muted)
+        .cursor_pointer()
+        .on_click(clickPress(() => void this.loadOlder()))
+        .child(WORDS.older);
     }
     if (row.kind === "card") return this.card(t, colors, row.card);
     if (row.kind === "tools") return this.tools(t, row);

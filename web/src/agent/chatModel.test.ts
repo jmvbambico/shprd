@@ -13,6 +13,7 @@ function page(over: Partial<ChatDto> = {}): ChatDto {
     messages: [],
     cursor: "c1",
     more: false,
+    older: null,
     note: null,
     ...over,
   };
