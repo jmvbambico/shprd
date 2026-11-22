@@ -573,6 +573,21 @@ pub enum RuleError {
     PullRequestUnmerged,
 }
 
+/// The gate a landing records as failed when the task's branch clashes with
+/// work that landed after it was cut.
+///
+/// The planner reads it: a task whose attempt ends on this failed gate is sent
+/// back for a fresh attempt at once, without spending a review round.
+pub const LANDING_CONFLICT_GATE: &str = "integrate";
+
+/// Whether `task`'s newest attempt ended on a landing that clashed with the
+/// integration branch.
+pub fn landing_conflict(task: &Task) -> bool {
+    task.latest_attempt()
+        .and_then(|attempt| attempt.gates.last())
+        .is_some_and(|gate| gate.gate == LANDING_CONFLICT_GATE && !gate.passed)
+}
+
 /// Rule name a human overrides to integrate an attempt whose gate failed.
 pub const INTEGRATE_AFTER_FAILED_GATE: &str = "integrate_after_failed_gate";
 

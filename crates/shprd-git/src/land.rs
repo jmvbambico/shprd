@@ -319,6 +319,9 @@ pub enum LandError {
         commit: String,
         /// The files git reported as unmerged.
         files: Vec<String>,
+        /// The pull request that carries the stale branch, when the conflict
+        /// was found on a forge landing; a local landing has none.
+        pr: Option<u64>,
     },
     /// A failed merge could not be undone, so the integration branch is not
     /// where the caller may assume it is.
@@ -340,6 +343,9 @@ impl LandError {
     /// The failure as one plain sentence a person can read: no command line, no
     /// forge advice, no "run X".
     pub fn plain(&self, task: &str) -> String {
+        if matches!(self, LandError::Conflict { .. }) {
+            return conflict_words(task);
+        }
         let reason = match self {
             LandError::Git(_) => String::from("git could not finish the merge"),
             LandError::Forge(ForgeError::Failed { stderr, .. }) => forge_reason(stderr),
@@ -352,11 +358,7 @@ impl LandError {
             LandError::Dirty { .. } => {
                 String::from("the integration branch has changes nobody saved")
             }
-            LandError::Conflict { files, .. } => format!(
-                "its work conflicts with the integration branch in {} {}",
-                files.len(),
-                if files.len() == 1 { "file" } else { "files" }
-            ),
+            LandError::Conflict { .. } => conflict_words(task),
             LandError::NotRestored { .. } => {
                 String::from("a failed merge could not be undone cleanly")
             }
@@ -368,6 +370,14 @@ impl LandError {
         };
         format!("Couldn't merge {task}: {reason}")
     }
+}
+
+/// What a person is told when a task's branch clashes with work that landed
+/// after it was cut: the cause, and that it is already being put right.
+pub fn conflict_words(task: &str) -> String {
+    format!(
+        "{task} clashed with work that landed after it; it is being redone on top of the latest"
+    )
 }
 
 /// What a forge client's own complaint comes to, in plain words.
@@ -455,8 +465,69 @@ pub fn land(
     };
     match reason {
         Some(reason) => Ok(Landed::Waiting { pr, reason, head }),
-        None => merge_now(forge, pr, head),
+        None => {
+            // A branch that clashes with what landed after it can never merge:
+            // say so, with the files, rather than let the forge refuse it.
+            if let Some(files) = trial_conflicts(git, &base, &head) {
+                return Err(LandError::Conflict {
+                    commit: head,
+                    files,
+                    pr: Some(pr.number),
+                });
+            }
+            let number = pr.number;
+            match merge_now(forge, pr, head.clone()) {
+                Err(LandError::Forge(refused)) => {
+                    // The forge works out "mergeable" lazily, so a refusal is
+                    // the moment it may finally know.
+                    match clash(forge, git, &base, number, &head) {
+                        Some(files) => Err(LandError::Conflict {
+                            commit: head,
+                            files,
+                            pr: Some(number),
+                        }),
+                        None => Err(LandError::Forge(refused)),
+                    }
+                }
+                other => other,
+            }
+        }
     }
+}
+
+/// The files `head` would conflict in against `base`, when it would: a trial
+/// merge git runs without a worktree, or else the forge's own word that the
+/// pull request conflicts (then no file is known). `None` means it merges
+/// cleanly, or that nobody can say.
+fn clash(forge: &dyn Forge, git: &Git, base: &str, number: u64, head: &str) -> Option<Vec<String>> {
+    trial_conflicts(git, base, head)
+        .or_else(|| (forge.mergeable(number).ok().flatten() == Some(false)).then(Vec::new))
+}
+
+/// The files a merge of `head` into `base` would leave unmerged, found with
+/// `git merge-tree`, which writes objects but touches no worktree and no ref.
+/// `None` when the merge is clean or git could not tell.
+fn trial_conflicts(git: &Git, base: &str, head: &str) -> Option<Vec<String>> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["merge-tree", "--write-tree", "--name-only", base, head])
+        .current_dir(git.dir())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null());
+    let output = shprd_core::spawn::output(&mut command).ok()?;
+    if output.status.code() != Some(1) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // The first line is the tree; the unmerged names follow until a blank line.
+    Some(
+        text.lines()
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Lands one task into its integration branch, with no forge involved.
@@ -630,6 +701,7 @@ fn undo_failed_merge(git: &Git, base: &str, commit: &str) -> LandError {
     LandError::Conflict {
         commit: commit.to_string(),
         files,
+        pr: None,
     }
 }
 
@@ -1638,10 +1710,11 @@ mod tests {
         let conflict = LandError::Conflict {
             commit: "abc".into(),
             files: vec!["a".into(), "b".into()],
+            pr: None,
         };
         assert_eq!(
             conflict.plain("T2"),
-            "Couldn't merge T2: its work conflicts with the integration branch in 2 files"
+            "T2 clashed with work that landed after it; it is being redone on top of the latest"
         );
         for text in [line, conflict.plain("T2")] {
             assert!(
