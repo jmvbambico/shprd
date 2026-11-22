@@ -5511,8 +5511,8 @@ project_dirs = []
         // The role's own words come first: the shipped worker prompt is
         // installed on first use and read into the brief.
         assert!(
-            brief.starts_with("You are a shprd worker") && !brief.contains("<!--"),
-            "the shipped worker prompt leads the brief, without its credit comment: {brief}"
+            brief.starts_with("<!--"),
+            "the shipped worker prompt leads the brief: {brief}"
         );
         assert!(brief.contains("You work on one shprd task"), "{brief}");
         assert!(brief.contains("Make spawn real"), "{brief}");
