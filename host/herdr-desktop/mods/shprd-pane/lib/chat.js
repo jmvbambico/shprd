@@ -112,7 +112,11 @@ export function fold(chat, answer, keep = null) {
   const restarted = held.session !== null && session !== null && held.session !== session;
   // A restart the person asked for (the model picker) keeps what was said so far
   // and says why the conversation changed hands, instead of an empty panel.
-  const messages = restarted && keep === null ? [] : held.messages.slice();
+  // A panel that trimmed its front asked for a fresh first read (its cursor is
+  // empty): that read is the newest page again, with a new `older` cursor, so
+  // it replaces what is held instead of following it.
+  const resync = !restarted && held.session !== null && held.cursor === "";
+  const messages = (restarted && keep === null) || resync ? [] : held.messages.slice();
   if (restarted && keep !== null) {
     messages.push(normalize({ role: "news", text: String(keep), tools: [], at_ms: Date.now() }));
   }
@@ -128,13 +132,15 @@ export function fold(chat, answer, keep = null) {
     program: answer?.program ?? held.program,
     session: session ?? held.session,
     messages: kept,
-    cursor: answer?.cursor ?? held.cursor,
+    // Trimmed: start over from the newest page on the next read, so earlier
+    // history stays reachable through a fresh `older` cursor.
+    cursor: trims ? "" : (answer?.cursor ?? held.cursor),
     more: Boolean(answer?.more),
     // The first read names where history goes back from; later pages follow
     // forward and leave it alone.
-    older: first ? (answer?.older ?? null) : trims ? null : (held.older ?? null),
+    older: first ? (answer?.older ?? null) : (held.older ?? null),
     expanded,
-    trimmed: !restarted && (held.trimmed === true || trims),
+    trimmed: false,
     note: answer?.note ?? null,
   };
 }

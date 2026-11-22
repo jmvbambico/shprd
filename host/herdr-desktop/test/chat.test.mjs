@@ -141,12 +141,20 @@ test("a message keeps its shape even when the service left a field out", () => {
 
 test("the panel keeps a bounded tail of a long conversation", () => {
   let chat = empty();
-  for (let n = 0; n < KEEP + 20; n += 1) {
-    chat = fold(chat, page({ messages: [{ role: "user", text: `m${n}` }] }));
-  }
+  chat = fold(chat, page({ cursor: "s1@1", older: "s1@0", messages: [{ role: "user", text: "m0" }] }));
+  const burst = [];
+  for (let n = 1; n < KEEP + 20; n += 1) burst.push({ role: "user", text: `m${n}` });
+  chat = fold(chat, page({ cursor: "s1@2", messages: burst }));
   assert.equal(chat.messages.length, KEEP);
   assert.equal(chat.messages[0].text, "m20");
   assert.equal(chat.messages[KEEP - 1].text, `m${KEEP + 19}`);
+  // Trimmed: the next read is a fresh first read, and earlier history stays reachable.
+  assert.equal(chat.cursor, "");
+  assert.equal(chat.older, "s1@0");
+  assert.equal(timeline(chat)[0].kind, "older");
+  const again = fold(chat, page({ cursor: "s1@9", older: "s1@5", messages: [{ role: "user", text: "fresh" }] }));
+  assert.deepEqual(again.messages.map((m) => m.text), ["fresh"], "the first read replaces, never duplicates");
+  assert.equal(again.older, "s1@5");
 });
 
 test("latest is the tail a short panel draws, oldest first", () => {

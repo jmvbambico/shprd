@@ -255,6 +255,30 @@ fn a_half_written_last_line_is_read_once_it_is_complete() {
 }
 
 #[test]
+fn a_half_written_last_line_is_not_lost_by_the_tail_read() {
+    let (_dir, home) = recorded("claude");
+    let transcript = locate("claude", &home);
+    let path = transcript.path().expect("a file format").to_path_buf();
+    let text = fs::read_to_string(&path).unwrap();
+    let start = text.rfind('\n').map(|at| at + 1).unwrap_or(0);
+    let last = &text[start..];
+    let half = last.len() / 2;
+    fs::write(&path, format!("{}{}", &text[..start], &last[..half])).unwrap();
+    // The tail read leaves the partial line out, and its cursor stops before it.
+    let tail = transcript.read_tail().expect("the tail reads");
+    assert_eq!(tail.messages.len(), 3, "the half-written line is not read");
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(format!("{}\n", &last[half..]).as_bytes())
+        .unwrap();
+    let next = transcript.read(&tail.cursor).expect("reads on");
+    assert_eq!(next.messages.len(), 1, "the finished line arrives once");
+    assert_eq!(
+        next.messages[0].text,
+        "The last pass started T2 and landed T1."
+    );
+}
+
+#[test]
 fn a_resumed_offset_reads_only_what_the_record_gained() {
     let (_dir, home) = recorded("claude");
     let transcript = locate("claude", &home);
