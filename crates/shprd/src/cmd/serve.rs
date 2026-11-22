@@ -550,13 +550,16 @@ impl shprd_server::ChatWriter for HostChat {
     }
 
     fn coordinator_running(&self) -> Option<bool> {
-        let name = crate::cmd::spawn::repo_name(&self.repo)
+        // A host that cannot say counts as "none running": the chat then shows
+        // nothing rather than risk another product's conversation in the folder.
+        let Ok(name) = crate::cmd::spawn::repo_name(&self.repo)
             .map(|name| crate::cmd::spawn::repo_space_name(&name))
-            .ok()?;
+        else {
+            return Some(false);
+        };
         let space = match shprd_mux::find_marked_space(self.host.as_ref(), &name) {
             Ok(Some(space)) => space,
-            Ok(None) => return Some(false),
-            Err(_) => return None,
+            Ok(None) | Err(_) => return Some(false),
         };
         Some(
             crate::cmd::spawn::find_coordinator(&self.home, &self.repo, self.host.as_ref(), &space)
