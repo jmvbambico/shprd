@@ -56,6 +56,7 @@ import {
   WORDS,
   emptyWords,
   coordinatorDown,
+  echoOf,
   empty,
   firstCard,
   keyAction,
@@ -68,12 +69,14 @@ import {
   normalize,
   outgoing,
   safeLink,
+  settleEchoes,
   spaceOf,
   status,
   timeline,
   toolLine,
   toolsSummary,
   when,
+  withEchoes,
 } from "./lib/chat.js";
 import { RADIUS, TEXT, tone } from "./lib/tokens.js";
 import { followChanges } from "./lib/watch.js";
@@ -352,18 +355,7 @@ export default class Chat extends View {
         // `more` means the page filled up: a long conversation arrives over a few
         // calls rather than one slow one, and the next timer catches any left over.
         for (let page = 0; page < PAGES; page += 1) {
-          const answer = await this.client.call(
-            "GET",
-            `/api/chat?space=${encodeURIComponent(space)}&since=${encodeURIComponent(nextCursor(this.chat))}`,
-            { strict: true },
-          );
-          // The person moved to another task while this was in flight: this answer
-          // is for the one they left.
-          if (space !== this.space || slot !== this.slot || stale()) return;
-          const was = this.chat.session;
-          const keep = this.keep ?? null;
-          this.chat = fold(this.chat, answer, keep !== null && Date.now() < keep.until ? keep.text : null);
-          if (keep !== null && (this.chat.session !== was || Date.now() >= keep.until)) this.keep = null;
+          if (!(await this.pull(space, slot, stale))) return;
           if (!this.chat.more) break;
         }
       }
@@ -377,6 +369,66 @@ export default class Chat extends View {
       this.failure = reason(err);
     }
     cx.notify();
+  }
+
+  /**
+   * Reads one page of the conversation and folds it in. It answers `false` when the
+   * answer is not for the conversation shown any more (another task, a newer read).
+   *
+   * A page is only folded when the cursor it was asked from is still the chat's:
+   * a read after a send runs beside the timer's, and the same page folded twice
+   * would show every message twice.
+   */
+  async pull(space, slot, stale = () => false) {
+    const asked = nextCursor(this.chat);
+    const answer = await this.client.call(
+      "GET",
+      `/api/chat?space=${encodeURIComponent(space)}&since=${encodeURIComponent(asked)}`,
+      { strict: true },
+    );
+    // The person moved to another task while this was in flight: this answer
+    // is for the one they left.
+    if (space !== this.space || slot !== this.slot || stale()) return false;
+    if (nextCursor(this.chat) !== asked) return true;
+    const was = this.chat.session;
+    const keep = this.keep ?? null;
+    this.chat = fold(this.chat, answer, keep !== null && Date.now() < keep.until ? keep.text : null);
+    if (keep !== null && (this.chat.session !== was || Date.now() >= keep.until)) this.keep = null;
+    // A turn the transcript now holds is no longer an echo; a restart of the agent
+    // starts another conversation, which no echo of the old one belongs to.
+    // Only this conversation's echoes: another task's echo is not settled by this one's lines.
+    const here = (this.echoes ?? []).filter((echo) => echo.slot === slot);
+    const others = (this.echoes ?? []).filter((echo) => echo.slot !== slot);
+    this.echoes = [...others, ...settleEchoes(here, answer?.messages ?? [])];
+    if (this.chat.session !== was && was !== null) this.echoes = (this.echoes ?? []).filter((echo) => echo.slot !== slot);
+    return true;
+  }
+
+  /**
+   * After a send the transcript may not hold the turn yet: read just the chat page
+   * (not the board and the asks) soon, and again a little later, until the echo is
+   * confirmed. The 3 s timer is only the fallback.
+   */
+  follow_up(delays = [120, 300, 700, 1500]) {
+    const slot = this.slot;
+    const space = this.space;
+    if (space === null || !this.client) return;
+    const waiting = () => (this.echoes ?? []).some((echo) => echo.slot === slot && echo.sent);
+    const step = async (at) => {
+      if (at >= delays.length || !waiting() || slot !== this.slot || !this.client) return;
+      try {
+        if (await this.pull(space, slot)) this.cx.notify();
+      } catch {
+        // The timer's read reports a service that is down.
+      }
+      if (waiting()) this.cx.timer?.after?.(delays[at + 1] ?? 0, () => step(at + 1));
+    };
+    this.cx.timer?.after?.(delays[0], () => step(0));
+  }
+
+  /** The echoes of the conversation shown. */
+  myEchoes() {
+    return (this.echoes ?? []).filter((echo) => echo.slot === this.slot);
   }
 
   /**
@@ -678,38 +730,63 @@ export default class Chat extends View {
     this.cx.notify();
   }
 
-  /** Types the composer's words, and any files, into the agent, as the person. */
+  /**
+   * Types the composer's words, and any files, into the agent, as the person.
+   *
+   * The turn shows in the chat and the composer empties before the service has
+   * answered (the optimistic echo); the transcript's own copy replaces the echo
+   * when it is read back. A refusal takes the echo away and gives the words and
+   * files back to the composer, with the reason.
+   */
   async send() {
     const body = outgoing(this.space, this.input.value(), this.files ?? []);
-    if (body === null || this.sending) return;
+    if (body === null) return;
     if (!this.client) {
       this.refusal = downNotice();
       this.cx.notify();
       return;
     }
+    const slot = this.slot;
+    const taken = this.files ?? [];
+    const typed = this.input.value();
+    const echo = { ...echoOf(body), slot };
+    this.echoes = [...(this.echoes ?? []), echo];
+    this.inflight = (this.inflight ?? 0) + 1;
     this.sending = true;
     this.refusal = null;
+    this.input.set_value("");
+    this.files = [];
+    this.fileError = null;
+    this.pinned = "bottom";
     this.cx.notify();
     try {
       const reply = await this.client.call("POST", "/api/chat", { body });
-      this.input.set_value("");
+      echo.sent = true;
       // Sent: the service holds its own copies, so a pasted image's temporary file goes.
-      for (const file of this.files ?? []) files.forget(file);
-      this.files = [];
-      this.fileError = null;
-      this.pinned = "bottom";
+      for (const file of taken) files.forget(file);
       // One plain line about what shprd did first (it made the folder a git
       // repository); it stays above the composer for this conversation.
       if (typeof reply?.notice === "string" && reply.notice !== "") this.notice = reply.notice;
       setShared(SEND_PROBLEM, null);
     } catch (err) {
-      // The words stay in the composer: a refused line is retyped, not lost.
-      this.refusal = reason(err);
-      // The sidebar's foot says the same sentence, for the folder shown.
-      setShared(SEND_PROBLEM, { folder: this.client?.folder ?? activeFolder(), text: this.refusal });
+      // The echo goes, and the words stay in the composer: a refused line is retyped, not lost.
+      this.echoes = (this.echoes ?? []).filter((held) => held !== echo);
+      if (slot === this.slot) {
+        // Words typed while the send was in flight stay; the refused words go back before them.
+        const now = this.input.value();
+        this.input.set_value(now.trim() === "" ? typed : `${typed}\n${now}`);
+        this.files = [...taken, ...(this.files ?? [])];
+      }
+      const said = reason(err);
+      // Only the conversation the send came from shows the refusal; the sidebar's
+      // foot says the sentence for the folder.
+      if (slot === this.slot) this.refusal = said;
+      setShared(SEND_PROBLEM, { folder: this.client?.folder ?? activeFolder(), text: said });
     }
-    this.sending = false;
+    this.inflight -= 1;
+    this.sending = this.inflight > 0;
     this.cx.notify();
+    if (echo.sent) this.follow_up();
     this.refresh();
   }
 
@@ -829,7 +906,7 @@ export default class Chat extends View {
     const gone = answeredAsks(folder);
     const open = this.asks ? { ...this.asks, asks: (this.asks.asks ?? []).filter((ask) => !gone.has(`${ask.task}/${ask.id}`)) } : this.asks;
     const list = this.space === null ? [] : forSpace(cardsOf(board, open), this.space);
-    const rows = timeline(this.chat, list);
+    const rows = timeline(withEchoes(this.chat, this.myEchoes()), list);
     this.reveal(rows, list);
     const said =
       this.refusal ??
@@ -1328,7 +1405,7 @@ export default class Chat extends View {
       this.inputRows = lines;
       this.input.set_rows?.(lines);
     }
-    const sendable = (this.input.value().trim() !== "" || (this.files ?? []).length > 0) && !this.sending && this.space !== null;
+    const sendable = (this.input.value().trim() !== "" || (this.files ?? []).length > 0) && this.space !== null;
     const recording = (this.dict?.state ?? "idle") !== "idle";
     const coordinator = this.space === COORDINATOR && this.selection() !== null;
     return this.column(

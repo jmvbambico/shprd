@@ -237,6 +237,67 @@ export function outgoing(space, text, files = []) {
   return body;
 }
 
+/** How long an echo that the transcript has not confirmed yet stays on screen. */
+export const ECHO_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * The line a message shows the instant it is sent (the optimistic echo): the
+ * person's words, with each attached file named, as the agent's own record will
+ * say them once it has read the turn.
+ */
+export function echoOf(body, now = Date.now()) {
+  const files = (body?.attachments ?? []).map((file) => String(file?.name ?? file?.path ?? "")).filter((name) => name !== "");
+  const text = String(body?.text ?? "");
+  return { text, files, shown: [text, ...files.map((name) => `📎 ${name}`)].filter((part) => part !== "").join("\n"), at_ms: now, sent: false };
+}
+
+/** How far before the send a transcript line may be stamped and still be its turn (clock slack). */
+const ECHO_SKEW_MS = 5000;
+
+/**
+ * Whether a transcript message is the turn an echo stands for: the same words
+ * exactly (the service types them unchanged, files named after them), recorded
+ * no earlier than the send. A line a read brought in from before the send is
+ * never this turn, and a longer line that merely starts with the words is not
+ * either.
+ */
+export function confirms(echo, message) {
+  if (message?.role !== "user") return false;
+  if (typeof message.at_ms === "number" && message.at_ms < echo.at_ms - ECHO_SKEW_MS) return false;
+  const said = String(message?.text ?? "");
+  const words = echo.text.trim();
+  if (echo.files.length === 0) return said.trim() === words;
+  // The service composes: the words, a blank line, a header naming the files, one path per line.
+  const header = said.search(/(^|\n\n)Attached files? \(open /);
+  if (header === -1) return false;
+  const front = said.slice(0, header).trim();
+  if (front !== words) return false;
+  return echo.files.every((name) => said.includes(name));
+}
+
+/**
+ * The echoes still waiting after an answer: each transcript message that is the
+ * turn of an echo removes that one echo (never two for one message), and an echo
+ * the transcript never confirmed goes after [`ECHO_TTL_MS`].
+ */
+export function settleEchoes(echoes, messages, now = Date.now()) {
+  const left = (echoes ?? []).slice();
+  for (const message of messages ?? []) {
+    const at = left.findIndex((echo) => confirms(echo, message));
+    if (at !== -1) left.splice(at, 1);
+  }
+  return left.filter((echo) => now - echo.at_ms < ECHO_TTL_MS);
+}
+
+/** The chat as drawn: what the transcript holds, then the turns it has not shown yet. */
+export function withEchoes(chat, echoes) {
+  if (!echoes || echoes.length === 0) return chat;
+  const messages = (chat?.messages ?? []).concat(
+    echoes.map((echo) => normalize({ role: "user", text: echo.shown, tools: [], at_ms: echo.at_ms })),
+  );
+  return { ...chat, messages };
+}
+
 /**
  * What a key press in the composer does: `"send"` (Enter, also with Ctrl or Cmd),
  * `"newline"` (Alt+Enter, which the text area would not turn into one itself) or
