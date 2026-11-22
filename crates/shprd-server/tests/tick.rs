@@ -234,6 +234,14 @@ impl Forge for SharedFake {
     fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
         self.with(|forge| forge.merge(number, head_sha))
     }
+
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        self.with(|forge| forge.mergeable(number))
+    }
+
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        self.with(|forge| forge.close(number, comment))
+    }
 }
 
 /// An event with `kind` at position `seq`.
@@ -275,26 +283,33 @@ fn added(seq: u64, id: &str) -> Event {
     )
 }
 
-/// Task `a` driven from added to ready to land, with one passing check and an
+/// Task `id` driven from added to ready to land, with one passing check and an
 /// independent, engine-recorded review.
-fn ready(seq: u64, commit: &str) -> Vec<Event> {
+fn ready_task(
+    seq: u64,
+    id: &str,
+    commit: &str,
+    worktree: &str,
+    branch: &str,
+    number: u64,
+) -> Vec<Event> {
     vec![
-        added(seq, "A"),
+        added(seq, id),
         ev(
             seq + 1,
             EventKind::Spawned {
-                task: String::from("A"),
+                task: id.to_string(),
                 attempt: 1,
                 agent: String::from("claude"),
                 model: None,
-                worktree: String::from("/wt/A"),
-                branch: String::from("shprd/r1/A"),
+                worktree: worktree.to_string(),
+                branch: branch.to_string(),
             },
         ),
         ev(
             seq + 2,
             EventKind::Reported {
-                task: String::from("A"),
+                task: id.to_string(),
                 attempt: 1,
                 status: ReportStatus::Completed,
                 summary: String::from("done"),
@@ -314,7 +329,7 @@ fn ready(seq: u64, commit: &str) -> Vec<Event> {
         ev(
             seq + 3,
             EventKind::ReviewRequested {
-                task: String::from("A"),
+                task: id.to_string(),
                 attempt: 1,
                 reviewer: String::from("codex"),
                 degraded: false,
@@ -324,7 +339,7 @@ fn ready(seq: u64, commit: &str) -> Vec<Event> {
         ev(
             seq + 4,
             EventKind::GatePassed {
-                task: String::from("A"),
+                task: id.to_string(),
                 attempt: 1,
                 gate: String::from("review"),
                 findings: Vec::new(),
@@ -340,13 +355,19 @@ fn ready(seq: u64, commit: &str) -> Vec<Event> {
         ev(
             seq + 5,
             EventKind::TaskPrOpened {
-                task: String::from("A"),
-                number: 1,
-                url: String::from("https://example.invalid/pull/1"),
-                head: String::from("shprd/r1/A"),
+                task: id.to_string(),
+                number,
+                url: format!("https://example.invalid/pull/{number}"),
+                head: branch.to_string(),
             },
         ),
     ]
+}
+
+/// Task `a` driven from added to ready to land, with one passing check and an
+/// independent, engine-recorded review.
+fn ready(seq: u64, commit: &str) -> Vec<Event> {
+    ready_task(seq, "A", commit, "/wt/A", "shprd/r1/A", 1)
 }
 
 /// The config a pass runs under: `merge`, four slots.
@@ -2854,4 +2875,204 @@ fn an_overlapping_task_at_the_head_does_not_hold_back_disjoint_ones() {
         *calls.lock().expect("calls"),
         vec![String::from("T5"), String::from("T6")]
     );
+}
+
+/// A repository, an `origin` it pushes to, and two task branches in their own
+/// worktrees, as a forge landing sees them: `shprd/r1/A` modifies `proof.log`,
+/// which `main` has since deleted (a modify/delete clash), and `shprd/r1/B`
+/// adds a file of its own and merges cleanly.
+///
+/// Returns the worktrees and heads of A and B.
+fn clashing_and_clean(fixture: &Fixture) -> [(PathBuf, String); 2] {
+    let origin = fixture.home.join("origin.git");
+    std::fs::create_dir_all(&origin).expect("mkdir origin");
+    git_in(&origin, &["init", "--bare", "-b", "main"]);
+    git_in(&fixture.repo, &["init", "-b", "main"]);
+    std::fs::write(fixture.repo.join("proof.log"), "numbers\n").expect("write proof");
+    git_in(&fixture.repo, &["add", "proof.log"]);
+    git_in(&fixture.repo, &["commit", "-m", "seed"]);
+    git_in(
+        &fixture.repo,
+        &["remote", "add", "origin", &origin.display().to_string()],
+    );
+    git_in(&fixture.repo, &["push", "origin", "main"]);
+    let mut out = Vec::new();
+    for (id, file, text) in [("A", "proof.log", "changed\n"), ("B", "b.txt", "b\n")] {
+        let tree = fixture.home.join(format!("wt-{id}"));
+        git_in(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("shprd/r1/{id}"),
+                &tree.display().to_string(),
+                "main",
+            ],
+        );
+        std::fs::write(tree.join(file), text).expect("write the work");
+        git_in(&tree, &["add", file]);
+        git_in(&tree, &["commit", "-m", &format!("work of {id}")]);
+        let head = git_in(&tree, &["rev-parse", "HEAD"]);
+        out.push((tree, head));
+    }
+    // Work that landed after both were cut: `proof.log` is gone.
+    git_in(&fixture.repo, &["rm", "proof.log"]);
+    git_in(&fixture.repo, &["commit", "-m", "drop proof.log"]);
+    git_in(&fixture.repo, &["push", "origin", "main"]);
+    let b = out.pop().expect("b");
+    let a = out.pop().expect("a");
+    [a, b]
+}
+
+/// A forge that holds one open pull request per task, each at its branch tip.
+fn forge_with(tasks: &[(&str, u64, &str)]) -> Arc<SharedFake> {
+    Arc::new(SharedFake::new(
+        tasks
+            .iter()
+            .map(|(id, number, head)| {
+                (
+                    Pr {
+                        number: *number,
+                        url: format!("https://example.invalid/pull/{number}"),
+                        head: format!("shprd/r1/{id}"),
+                    },
+                    PrStatus {
+                        approved: false,
+                        checks_passed: Some(true),
+                        merged: false,
+                        head_sha: (*head).to_string(),
+                    },
+                )
+            })
+            .collect(),
+    ))
+}
+
+#[test]
+fn a_clash_found_while_landing_sends_the_task_back_and_never_blocks_the_next_task() {
+    // The live case: a modify/delete clash, the branch checked out in its
+    // worktree, a forge landing. The clash is recorded as the failed landing
+    // gate the planner sends back on (with the file named), the stale pull
+    // request is closed, and an approved task that merges cleanly lands in the
+    // very same pass: one task's failed landing never starves another's.
+    let fixture = Fixture::new(vec![started()]);
+    let [(tree_a, head_a), (tree_b, head_b)] = clashing_and_clean(&fixture);
+    let mut log = Vec::new();
+    log.extend(ready_task(
+        2,
+        "A",
+        &head_a,
+        &tree_a.display().to_string(),
+        "shprd/r1/A",
+        1,
+    ));
+    // Sequence numbers must match the log's own: a review's request is named by
+    // its position, and A's six events fill 2..=7.
+    log.extend(ready_task(
+        8,
+        "B",
+        &head_b,
+        &tree_b.display().to_string(),
+        "shprd/r1/B",
+        2,
+    ));
+    for event in log {
+        append(&fixture, event.actor, event.kind);
+    }
+    let forge = forge_with(&[("A", 1, &head_a), ("B", 2, &head_b)]);
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        forge.clone(),
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let report = worker.tick().expect("the pass ran");
+    let land_a = report
+        .steps
+        .iter()
+        .find(|step| step.action == "land" && step.task == "A")
+        .expect("A was planned a landing");
+    assert!(
+        land_a.ok,
+        "a clash is an outcome, not a failure: {land_a:?}"
+    );
+    let first_line = land_a.detail.lines().next().unwrap_or_default();
+    assert_eq!(
+        first_line,
+        "A clashed with work that landed after it; it is being redone on top of the latest (files in conflict: proof.log)",
+        "{land_a:?}"
+    );
+    assert!(
+        !land_a.detail.contains("problem on this machine"),
+        "{land_a:?}"
+    );
+    let land_b = report
+        .steps
+        .iter()
+        .find(|step| step.action == "land" && step.task == "B")
+        .unwrap_or_else(|| panic!("B was planned a landing: {report:?}"));
+    assert!(land_b.ok, "B still lands in the same pass: {land_b:?}");
+    let calls = forge.calls();
+    assert!(
+        calls.iter().any(|call| call.starts_with("close 1 ")),
+        "the stale pull request is closed: {calls:?}"
+    );
+    assert!(
+        calls.iter().all(|call| !call.starts_with("merge 1 ")),
+        "the clashing task is never merged: {calls:?}"
+    );
+    let state = fixture.state();
+    assert_eq!(
+        state.tasks.get("B").map(|task| task.status),
+        Some(shprd_core::state::TaskStatus::Integrated),
+        "B landed"
+    );
+    let a = state.tasks.get("A").expect("A");
+    assert!(
+        shprd_core::rules::landing_conflict(a),
+        "the clash is recorded for the planner to send back on: {:?}",
+        a.attempts
+    );
+    // And the next pass sends it back for a fresh attempt.
+    let next = worker.tick().expect("the next pass ran");
+    assert!(
+        next.steps
+            .iter()
+            .any(|step| step.action == "send_back" && step.task == "A"),
+        "A is sent back: {next:?}"
+    );
+}
+
+#[test]
+fn a_landing_that_fails_for_a_machine_reason_records_its_real_cause() {
+    // The worktree is not there, so reading the branch tip fails: the person's
+    // line names that step, and the pass's record keeps the git command, its
+    // exit code and stderr on the lines after.
+    let mut log = vec![started()];
+    log.extend(ready(2, "abc123"));
+    let fixture = Fixture::new(log);
+    let forge = forge_with(&[("A", 1, "abc123")]);
+    let worker = fixture.worker(
+        Arc::new(Scripted::default()),
+        forge,
+        config(shprd_core::config::MergePolicy::Auto),
+        recording_start(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let report = worker.tick().expect("the pass ran");
+    let step = &report.steps[0];
+    assert!(!step.ok, "{step:?}");
+    let mut lines = step.detail.lines();
+    let plain = lines.next().unwrap_or_default();
+    assert_eq!(
+        plain,
+        "Couldn't merge A: it hit a problem on this machine while reading the branch tip, and the details are in the shprd log"
+    );
+    let cause: Vec<&str> = lines.collect();
+    assert!(
+        cause.iter().any(|line| line.contains("git")),
+        "the cause names the command: {cause:?}"
+    );
+    let last = shprd_server::pass::LastPass::of(&report, &fixture.repo, 0);
+    assert!(last.failed[0].error.contains("reading the branch tip"));
 }

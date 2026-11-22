@@ -36,7 +36,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use shprd_core::config::{Config, MergePolicy};
 use shprd_core::event::{
-    Actor, EventKind, FallbackAction, Finding, LandOutcome, ProviderClass, ResourceKind, Severity,
+    Actor, EventKind, FallbackAction, LandOutcome, ProviderClass, ResourceKind,
 };
 use shprd_core::gate;
 use shprd_core::log::{Clock, SystemClock};
@@ -285,6 +285,48 @@ impl StepReport {
             ok: false,
             detail: detail.into(),
             seq: None,
+        }
+    }
+
+    /// This report with the real cause of its failure on the lines after the
+    /// plain one: the command, its exit code and the last lines of its stderr.
+    /// The first line is what a person reads (`shprd status` shows only it); the
+    /// rest is what the pass's record keeps for whoever has to find out why.
+    fn with_cause(mut self, cause: Option<String>) -> Self {
+        if let Some(cause) = cause {
+            self.detail = format!("{}\n{cause}", self.detail);
+        }
+        self
+    }
+}
+
+/// A landing that failed: the line a person reads, and the real cause.
+struct LandFail {
+    /// The plain line, when the failure is one a person is already told in full
+    /// (a clash, a refusal); `None` for a raw error, which gets the generic line.
+    line: Option<String>,
+    /// The command, its exit code and the last lines of its stderr.
+    cause: String,
+}
+
+impl LandFail {
+    /// A failure of `step` (a few plain words: "reading the branch tip") whose
+    /// raw error is `err`.
+    fn at(task: &str, step: &str, err: impl std::fmt::Display) -> Self {
+        Self {
+            line: Some(format!(
+                "Couldn't merge {task}: it hit a problem on this machine while {step}, and the details are in the shprd log"
+            )),
+            cause: land::tail_lines(&format!("{step}: {err}")),
+        }
+    }
+}
+
+impl From<String> for LandFail {
+    fn from(cause: String) -> Self {
+        Self {
+            line: None,
+            cause: land::tail_lines(&cause),
         }
     }
 }
@@ -1200,26 +1242,28 @@ impl Worker {
         step: &Step,
         quiet: &BTreeSet<(String, String)>,
     ) -> StepReport {
+        let mut cause: Option<String> = None;
         let result = match step {
             Step::Start { task } => self.start_task(task),
             // Never reached: `tick` turns a wait into `hold` before it gets here.
             Step::Wait { .. } => Ok(StepReport::done(step, "waiting", None)),
             Step::Review { task } => self.review_task(state, task),
             Step::Verdict { task } => self.verdict_task(config, state, task),
-            Step::Land { task, policy } => {
-                self.land_task(state, task, *policy).map_err(|raw| {
-                    // A person reads one plain sentence; the raw text (a git
-                    // command line, a path) goes to the log.
-                    if raw.starts_with("Couldn't merge ") {
-                        raw
-                    } else {
-                        tracing::warn!(task = %task, %raw, "a landing failed");
+            Step::Land { task, policy } => match self.land_task(state, task, *policy) {
+                Ok(report) => Ok(report),
+                Err(fail) => {
+                    // A person reads one plain sentence; the command line, the
+                    // exit code and stderr go to the log and the pass's record.
+                    tracing::warn!(task = %task, cause = %fail.cause, "a landing failed");
+                    let line = fail.line.unwrap_or_else(|| {
                         format!(
-                            "Couldn't merge {task}: it hit a problem on this machine, and the details are in the shprd log"
+                            "Couldn't merge {task}: it hit a problem on this machine while landing, and the details are in the shprd log"
                         )
-                    }
-                })
-            }
+                    });
+                    cause = Some(fail.cause);
+                    Err(line)
+                }
+            },
             Step::MarkLanded {
                 task,
                 outcome,
@@ -1251,7 +1295,7 @@ impl Worker {
                 } else {
                     tracing::warn!(action = step.action(), task = step.task(), %reason, "tick step failed");
                 }
-                StepReport::failed(step, reason)
+                StepReport::failed(step, reason).with_cause(cause)
             }
         }
     }
@@ -1833,7 +1877,7 @@ impl Worker {
         state: &RunState,
         task: &str,
         policy: MergePolicy,
-    ) -> Result<StepReport, String> {
+    ) -> Result<StepReport, LandFail> {
         let step = Step::Land {
             task: task.to_string(),
             policy,
@@ -1852,7 +1896,9 @@ impl Worker {
             .ok_or_else(|| String::from("the run has not started"))?;
         let worktree = PathBuf::from(&attempt.worktree);
         let git = Git::new(&worktree);
-        let head = git.head_sha().map_err(|err| err.to_string())?;
+        let head = git
+            .head_sha()
+            .map_err(|err| LandFail::at(task, "reading the branch tip", err))?;
         let approved = found
             .approved_head
             .as_deref()
@@ -1881,7 +1927,8 @@ impl Worker {
             &run.run_id,
             task,
             &pr::task_pr_body_marked(found),
-        )?;
+        )
+        .map_err(|err| LandFail::at(task, "writing the pull request text", err))?;
         let forge = self.forge();
         let landing = Landing {
             task,
@@ -1891,8 +1938,26 @@ impl Worker {
             body: &body,
             has_work,
         };
-        let landed = land::land(forge, &git, &landing, policy, approved)
-            .map_err(|err| describe_land_error(err, task))?;
+        let landed = match land::land(forge, &git, &landing, policy, approved) {
+            Ok(landed) => landed,
+            // A branch that clashes with what landed after it is closed out and
+            // sent back for a fresh attempt: the planner does the sending.
+            Err(err @ LandError::Conflict { .. }) => {
+                if let LandError::Conflict {
+                    pr: Some(number), ..
+                } = &err
+                {
+                    // Best effort: a pull request that cannot be closed is left
+                    // for a human, and the new attempt opens its own.
+                    let _ = forge.close(*number, &stale_pr_comment(task));
+                }
+                // Not a failure: the clash is recorded as the gate the planner
+                // sends the task back on, so this pass has done its job.
+                let seq = self.record_conflict(found, &base, &err)?;
+                return Ok(StepReport::done(&step, conflict_message(task, &err), seq));
+            }
+            Err(err) => return Err(land_fail(err, task)),
+        };
         let seq = self.record_landing(state, task, &base, &landed)?;
         Ok(StepReport::done(
             &step,
@@ -1920,7 +1985,7 @@ impl Worker {
         policy: MergePolicy,
         approved: bool,
         has_work: bool,
-    ) -> Result<StepReport, String> {
+    ) -> Result<StepReport, LandFail> {
         let repo_name = self
             .repo
             .file_name()
@@ -1940,7 +2005,7 @@ impl Worker {
             &run.integration_branch,
             &run.base_branch,
         )
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| LandFail::at(&task.id, "opening the integration worktree", err))?;
         let landing = LocalLanding {
             task: &task.id,
             branch,
@@ -1956,10 +2021,14 @@ impl Worker {
         ) {
             Ok(landed) => landed,
             Err(err @ LandError::Conflict { .. }) => {
-                self.record_conflict(task, branch, &err)?;
-                return Err(describe_land_error(err, &task.id));
+                let seq = self.record_conflict(task, &run.integration_branch, &err)?;
+                return Ok(StepReport::done(
+                    step,
+                    conflict_message(&task.id, &err),
+                    seq,
+                ));
             }
-            Err(err) => return Err(describe_land_error(err, &task.id)),
+            Err(err) => return Err(land_fail(err, &task.id)),
         };
         let seq = self.record_local_landing(&task.id, &run.integration_branch, &landed)?;
         Ok(StepReport::done(
@@ -1988,42 +2057,38 @@ impl Worker {
             .map(Some)
     }
 
-    /// Records a local merge that conflicted, and the human it needs.
+    /// Records a landing that clashed with the integration branch as a failed
+    /// `integrate` gate.
     ///
-    /// A failed `integrate` gate takes the task out of `Passed`, so the next
-    /// pass does not try the same conflicting merge again; the escalation is
-    /// what a person sees and acts on.
-    fn record_conflict(&self, task: &Task, commit: &str, err: &LandError) -> Result<(), String> {
+    /// The failed gate takes the task out of `Passed`, so the next pass does not
+    /// try the same merge again, and it is what the planner reads to send the
+    /// task back as a new attempt. The ledger note is not a question: nobody has
+    /// to decide anything.
+    fn record_conflict(
+        &self,
+        task: &Task,
+        base: &str,
+        err: &LandError,
+    ) -> Result<Option<u64>, String> {
         let LandError::Conflict { files, .. } = err else {
-            return Ok(());
+            return Ok(None);
         };
         let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
-        let finding = Finding {
-            severity: Severity::Major,
-            title: "conflicts with the integration branch".to_string(),
-            location: files.first().cloned(),
-            detail: format!("merging {commit} conflicts in {}", files.join(", ")),
-        };
         let failed = self.commit(EventKind::GateFailed {
             task: task.id.clone(),
             attempt,
-            gate: "integrate".to_string(),
-            findings: vec![finding],
+            gate: shprd_core::rules::LANDING_CONFLICT_GATE.to_string(),
+            findings: vec![land::conflict_finding(base, files)],
             source: None,
         })?;
         self.notify(Some(failed));
-        let body = format!(
-            "{}: its work conflicts with the integration branch ({}), so it needs a person",
-            task.id,
-            files.join(", ")
-        );
         let escalated = self.commit(EventKind::Escalated {
             task: Some(task.id.clone()),
-            body,
-            default_action: String::from("send the task back to a worker"),
+            body: conflict_message(&task.id, err),
+            default_action: String::from("redo the task on top of the latest"),
         })?;
         self.notify(Some(escalated));
-        Ok(())
+        Ok(Some(failed))
     }
 
     /// Records what a landing touched, once per pull request and outcome.
@@ -2377,9 +2442,32 @@ fn local_checks_passed(task: &Task) -> bool {
         })
 }
 
-/// Why a landing failed, in the words the CLI would use.
-fn describe_land_error(err: LandError, task: &str) -> String {
-    err.plain(task)
+/// A landing error as a failure: the plain line, and the real cause for the log.
+fn land_fail(err: LandError, task: &str) -> LandFail {
+    LandFail {
+        line: Some(err.plain(task)),
+        cause: err.cause(),
+    }
+}
+
+/// What a clashing landing says: the plain sentence, then the files.
+fn conflict_message(task: &str, err: &LandError) -> String {
+    match err {
+        LandError::Conflict { files, .. } if !files.is_empty() => format!(
+            "{} (files in conflict: {})",
+            err.plain(task),
+            files.join(", ")
+        ),
+        _ => err.plain(task),
+    }
+}
+
+/// What the stale pull request is closed with.
+fn stale_pr_comment(task: &str) -> String {
+    format!(
+        "{task} clashed with work that landed after it was cut. It is being redone on top \
+         of the latest, and the new attempt opens its own pull request."
+    )
 }
 
 /// The settle window `tasks.news_settle_secs` names, in ms, when some settings

@@ -340,6 +340,12 @@ pub enum LandError {
 }
 
 impl LandError {
+    /// The failure's real cause for a log or a record: the command, its exit
+    /// code and the last lines of its stderr, never shown to a person.
+    pub fn cause(&self) -> String {
+        tail_lines(&self.to_string())
+    }
+
     /// The failure as one plain sentence a person can read: no command line, no
     /// forge advice, no "run X".
     pub fn plain(&self, task: &str) -> String {
@@ -378,6 +384,41 @@ pub fn conflict_words(task: &str) -> String {
     format!(
         "{task} clashed with work that landed after it; it is being redone on top of the latest"
     )
+}
+
+/// How many trailing lines of a failure's own text a record keeps.
+const CAUSE_LINES: usize = 20;
+
+/// The last [`CAUSE_LINES`] lines of `text`: what a record keeps of a command's
+/// complaint, so one failure cannot fill a file.
+pub fn tail_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let from = lines.len().saturating_sub(CAUSE_LINES);
+    lines[from..].join("\n")
+}
+
+/// The finding a clashing landing records on the failed `integrate` gate: the
+/// part of the new attempt's brief that says to carry the earlier commits over
+/// and resolve these files. `files` empty means the forge said so without
+/// naming any.
+pub fn conflict_finding(base: &str, files: &[String]) -> shprd_core::event::Finding {
+    let which = if files.is_empty() {
+        String::from("the files it touches")
+    } else {
+        files.join(", ")
+    };
+    shprd_core::event::Finding {
+        severity: shprd_core::event::Severity::Major,
+        title: String::from(
+            "clashed with work that landed after it; it is being redone on top of the latest",
+        ),
+        location: files.first().cloned(),
+        detail: format!(
+            "clashes with {base} in {which}. Bring the previous attempt's commits onto the \
+             latest {base} (merge it, or cherry-pick the archive named above), resolve \
+             keeping both sides' work, hand in again"
+        ),
+    }
 }
 
 /// What a forge client's own complaint comes to, in plain words.
