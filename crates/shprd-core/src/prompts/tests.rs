@@ -198,7 +198,7 @@ fn a_reference_reads_an_id_or_a_path() {
         by_id
             .read(temp.path(), home.path())
             .expect("the shipped prompt"),
-        worker().text
+        strip_leading_comment(worker().text)
     );
 
     let file = temp.path().join("notes.md");
@@ -666,4 +666,85 @@ fn the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade() {
     std::fs::write(temp.path().join("assistant.md"), ASSISTANT_M11_ACCEPT).expect("an old install");
     let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+#[test]
+fn the_pre_shpr83_assistant_digest_is_the_listed_one() {
+    let assistant = shipped_prompt("assistant").expect("shipped");
+    assert_eq!(
+        digest(ASSISTANT_PRE_SHPR83.as_bytes()),
+        ASSISTANT_PRE_SHPR83_DIGEST
+    );
+    assert!(assistant.old.contains(&ASSISTANT_PRE_SHPR83_DIGEST));
+}
+
+/// The text shipped before SHPR-83 read `edited` forever; it upgrades now.
+#[test]
+fn an_untouched_pre_shpr83_assistant_is_upgraded() {
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "assistant"), ASSISTANT_PRE_SHPR83).expect("old install");
+    let installed = ensure(temp.path(), "assistant").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+    assert_eq!(installed.state, State::Default);
+    assert_eq!(
+        installed.text,
+        shipped_prompt("assistant").expect("shipped").text
+    );
+}
+
+/// The digest of each shipped template the last time someone edited it. When a
+/// template changes, this stays the old digest, which must then be in the
+/// prompt's retired list: the next edit cannot strand an install. After adding
+/// the retired digest, replace the pin with the new current digest.
+const PINNED: [(&str, &str); 4] = [
+    (
+        "assistant",
+        "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f",
+    ),
+    (
+        "worker",
+        "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa",
+    ),
+    (
+        "reviewer",
+        "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488",
+    ),
+    (
+        "backup",
+        "4cbcd2fd8c152a6c734421c5831cafb33c5a9549bcbfa5d255302f011761c485",
+    ),
+];
+
+#[test]
+fn a_shipped_templates_previous_digest_is_retired() {
+    for (id, pinned) in PINNED {
+        let prompt = shipped_prompt(id).expect("shipped");
+        let current = digest(prompt.text.as_bytes());
+        assert!(
+            pinned == current || prompt.old.contains(&pinned),
+            "`{id}` changed (now {current}, pinned {pinned}): add {pinned} to its retired list, keep the old text under data/templates/history/, then pin {current}"
+        );
+    }
+}
+
+#[test]
+fn the_loader_drops_the_credit_comment_and_the_file_keeps_it() {
+    let temp = dir();
+    let home = TempDir::new().expect("home");
+    for prompt in shipped() {
+        let words = PromptRef::Prompt(prompt.id.to_owned())
+            .read(temp.path(), home.path())
+            .expect("reads");
+        assert!(!words.contains("<!--") && !words.contains("-->"), "{words}");
+        assert!(!words.contains("eliasstravik"), "{}", prompt.id);
+        assert!(!words.trim().is_empty());
+        let on_disk = std::fs::read_to_string(path_of(temp.path(), prompt.id)).expect("file");
+        assert!(on_disk.starts_with("<!--"), "the file keeps its credit");
+    }
+    assert_eq!(strip_leading_comment("<!-- a\nb -->\n\nhello"), "hello");
+    assert_eq!(
+        strip_leading_comment("plain <!-- x -->"),
+        "plain <!-- x -->"
+    );
+    assert_eq!(strip_leading_comment("<!-- open"), "<!-- open");
 }
