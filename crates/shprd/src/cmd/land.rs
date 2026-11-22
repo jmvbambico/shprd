@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::anyhow;
 use shprd_core::config::{self, Config, MergePolicy};
-use shprd_core::event::{Event, EventKind, Finding, ResourceAction, ResourceKind, Severity};
+use shprd_core::event::{Event, EventKind, ResourceAction, ResourceKind};
 use shprd_core::gate::REVIEW_GATE;
 use shprd_core::rules;
 use shprd_core::state::{RunState, Task, TaskStatus};
@@ -437,18 +437,7 @@ fn record_conflict(
     } else {
         files.join(", ")
     };
-    let finding = Finding {
-        severity: Severity::Major,
-        title: String::from(
-            "clashed with work that landed after it; it is being redone on top of the latest",
-        ),
-        location: files.first().cloned(),
-        detail: format!(
-            "clashes with {base} in {which}. Bring the previous attempt's commits onto the \
-             latest {base} (merge it, or cherry-pick the archive named above), resolve \
-             keeping both sides' work, hand in again"
-        ),
-    };
+    let finding = land::conflict_finding(base, files);
     let event = ctx.commit(EventKind::GateFailed {
         task: task_id.to_string(),
         attempt,
