@@ -299,12 +299,12 @@ fn checks_section(checks: &[shprd_core::event::CheckReport]) -> String {
         out.push_str("  - none claimed\n");
     }
     for check in checks {
-        let exit = match check.exit_code {
-            Some(code) => code.to_string(),
-            None => "killed by timeout".to_string(),
+        let outcome = match check.exit_code {
+            Some(code) => format!("exited {code}"),
+            None => "killed by timeout (no exit code)".to_string(),
         };
         out.push_str(&format!(
-            "  - {}: `{}` exited {exit}\n",
+            "  - {}: `{}` {outcome}\n",
             check.gate, check.command
         ));
         let tail = check.output_tail.trim_end();
