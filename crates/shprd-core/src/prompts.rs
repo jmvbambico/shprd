@@ -130,6 +130,15 @@ const WORKER_PRE_IDENTITY: &str =
 const WORKER_PRE_IDENTITY_DIGEST: &str =
     "4349b51d144d5377b3036cbf48c7af6a9e3af29db67e27a090641fde320116ba";
 
+/// The worker wording that named another product in its identity line.
+#[cfg(test)]
+const WORKER_PRODUCT_NAMES: &str =
+    include_str!("../../../data/templates/history/worker-product-names.md");
+
+/// The SHA-256 of [`WORKER_PRODUCT_NAMES`].
+const WORKER_PRODUCT_NAMES_DIGEST: &str =
+    "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -138,6 +147,7 @@ const WORKER_OLD: &[&str] = &[
     WORKER_M9_PROOF_DIGEST,
     WORKER_M10_PROOF_DIGEST,
     WORKER_PRE_IDENTITY_DIGEST,
+    WORKER_PRODUCT_NAMES_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
@@ -232,6 +242,15 @@ const ASSISTANT_PRE_SHPR83: &str =
 const ASSISTANT_PRE_SHPR83_DIGEST: &str =
     "b2bb0172dfa307a6f7e93f3a2883b3c00c99f21a836d25772a86a2d1d24340a5";
 
+/// The coordinator wording that named another product in its identity line.
+#[cfg(test)]
+const ASSISTANT_PRODUCT_NAMES: &str =
+    include_str!("../../../data/templates/history/assistant-product-names.md");
+
+/// The SHA-256 of [`ASSISTANT_PRODUCT_NAMES`].
+const ASSISTANT_PRODUCT_NAMES_DIGEST: &str =
+    "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -241,6 +260,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M11_TASKS_ONLY_DIGEST,
     ASSISTANT_M11_ACCEPT_DIGEST,
     ASSISTANT_PRE_SHPR83_DIGEST,
+    ASSISTANT_PRODUCT_NAMES_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet
@@ -265,7 +285,20 @@ const REVIEWER_PRE_IDENTITY_DIGEST: &str =
     "2c28ab6907cffc0e9d2173d49042a0918f4f7c744ad8be2183cfd752d51c291e";
 
 /// The reviewer's retired defaults.
-const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST, REVIEWER_PRE_IDENTITY_DIGEST];
+/// The reviewer wording that named another product in its identity line.
+#[cfg(test)]
+const REVIEWER_PRODUCT_NAMES: &str =
+    include_str!("../../../data/templates/history/reviewer-product-names.md");
+
+/// The SHA-256 of [`REVIEWER_PRODUCT_NAMES`].
+const REVIEWER_PRODUCT_NAMES_DIGEST: &str =
+    "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488";
+
+const REVIEWER_OLD: &[&str] = &[
+    REVIEWER_M9_ASKS_DIGEST,
+    REVIEWER_PRE_IDENTITY_DIGEST,
+    REVIEWER_PRODUCT_NAMES_DIGEST,
+];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [
