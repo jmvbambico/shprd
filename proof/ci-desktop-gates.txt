@@ -1,0 +1,64 @@
+Desktop CI gates, attempt 3 (env stripped of HERDR_*/HC_*/SHPRD_*)
+
+$ cargo fmt --all --check
+exit 0
+
+$ cargo clippy --workspace --all-targets -- -D warnings
+exit 0 (Finished dev profile, no warnings)
+
+$ cargo test --workspace --no-fail-fast -- --test-threads=2
+exit 0
+last lines:
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Note: a first run with the HERDR/HC variables inherited failed environment-dependent tests; not a code change (diff touches only ci.yml).
+
+$ host/herdr-desktop/bin/check --no-app
+exit 0
+shared modules are in date
+== gate-env
+ok: gate-env writes a private home and refuses the real one
+== isolate
+ok: isolate strips every host variable and keeps a later assignment
+== client unit tests
+   (bun)
+bun test v1.4.4 (38afee6c8)
+
+ 406 pass
+ 0 fail
+Ran 406 tests across 19 files. [1.69s]
+
+ci.yml diff:
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 3a0a37e..b3f3ce4 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -2,7 +2,7 @@ name: CI
+ 
+ on:
+   push:
+-    branches: [main, "integration/**", "feature/**"]
++    branches: ["**"]
+   pull_request:
+ 
+ concurrency:
+@@ -97,10 +97,10 @@ jobs:
+       - name: Checkout
+         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+ 
+-      - name: Install Node LTS
++      - name: Install Node 24.11.1
+         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+         with:
+-          node-version: 24
++          node-version: 24.11.1
+ 
+       - name: Desktop mod checks
+         run: host/herdr-desktop/bin/check --no-app
