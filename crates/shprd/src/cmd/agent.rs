@@ -242,11 +242,27 @@ fn task_widen(ctx: &Ctx, args: &TaskWidenArgs) -> Result<(), CliError> {
     emit(ctx, &event)
 }
 
+/// How many sends a note gets before the person is told it never arrived.
+const NOTE_SEND_CAP: u32 = 5;
+
+/// What one try at typing a note into its task's worker came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoteSend {
+    /// The worker's terminal took the note.
+    Sent,
+    /// The task has no live worker: its next brief lists the paths itself.
+    NoWorker,
+    /// A live worker's terminal refused the write; worth trying again.
+    Failed,
+}
+
 /// Types every queued worker note into its task's live worker.
 ///
-/// A note with no live worker to receive it is skipped: the next attempt's
-/// brief is built from the widened scope and lists the paths itself. Nothing is
-/// typed twice, because a note is settled whether or not it was delivered.
+/// A note is skipped only when the task has no live worker: the next attempt's
+/// brief is built from the widened scope and lists the paths itself. A failed
+/// write to a live worker leaves the note pending for the next pass, up to
+/// [`NOTE_SEND_CAP`] tries, after which the person is told in plain words. A
+/// note is settled as sent only when it was delivered, so nothing is typed twice.
 pub(crate) fn deliver_worker_notes(ctx: &Ctx) {
     let notes = shprd_core::ask::WorkerNotes::for_repo(&ctx.root);
     let pending = notes.pending();
@@ -254,10 +270,73 @@ pub(crate) fn deliver_worker_notes(ctx: &Ctx) {
         return;
     }
     let mux = spawn::real_mux();
-    for note in &pending {
-        let sent = spawn::prompt(&*mux, &ctx.root, &note.task, &note.text).is_ok();
-        notes.settle(note, sent);
+    let home = crate::ctx::resolve_home(None).ok();
+    let reader = Ctx::new(
+        ctx.root.clone(),
+        shprd_core::event::Actor::Human,
+        false,
+        true,
+    );
+    let told = deliver_notes_with(&notes, &pending, |note| {
+        let Some(home) = &home else {
+            return NoteSend::NoWorker;
+        };
+        let Ok(pane) = spawn::task_pane(&*mux, home, &reader, &note.task) else {
+            return NoteSend::NoWorker;
+        };
+        match mux.write(&pane, &note.text, true) {
+            Ok(()) => NoteSend::Sent,
+            Err(_) => NoteSend::Failed,
+        }
+    });
+    for task in told {
+        let status = EventKind::TaskStatus {
+            task,
+            message: status_line("could not tell the worker its scope was widened"),
+            progress: None,
+        };
+        let _ = ctx.commit(status);
     }
+}
+
+/// Runs one delivery pass over `pending` with `send`, settling what is final.
+///
+/// Returns the tasks whose note ran out of tries, for the caller to tell the
+/// person about. The try count lives beside the note, so it survives passes.
+pub(crate) fn deliver_notes_with(
+    notes: &shprd_core::ask::WorkerNotes,
+    pending: &[shprd_core::ask::WorkerNote],
+    mut send: impl FnMut(&shprd_core::ask::WorkerNote) -> NoteSend,
+) -> Vec<String> {
+    let mut gave_up = Vec::new();
+    for note in pending {
+        let tries_file = note.path.with_extension("tries");
+        match send(note) {
+            NoteSend::Sent => {
+                notes.settle(note, true);
+                let _ = std::fs::remove_file(&tries_file);
+            }
+            NoteSend::NoWorker => {
+                notes.settle(note, false);
+                let _ = std::fs::remove_file(&tries_file);
+            }
+            NoteSend::Failed => {
+                let tries = std::fs::read_to_string(&tries_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+                    .unwrap_or(0)
+                    + 1;
+                if tries >= NOTE_SEND_CAP {
+                    notes.settle(note, false);
+                    let _ = std::fs::remove_file(&tries_file);
+                    gave_up.push(note.task.clone());
+                } else {
+                    let _ = std::fs::write(&tries_file, tries.to_string());
+                }
+            }
+        }
+    }
+    gave_up
 }
 
 /// Types one turn of input into the tab a spawned agent is working in.
@@ -752,7 +831,76 @@ fn override_rule(ctx: &Ctx, args: &OverrideArgs) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_check;
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{NoteSend, deliver_notes_with, parse_check};
+
+    #[test]
+    fn a_failed_send_stays_pending_then_delivers_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let notes = shprd_core::ask::WorkerNotes::for_repo(dir.path());
+        notes.queue("T1", "widened").expect("queue");
+        let mut sends = 0;
+        let mut script = vec![NoteSend::Failed, NoteSend::Sent].into_iter();
+        for _ in 0..3 {
+            let pending = notes.pending();
+            deliver_notes_with(&notes, &pending, |_| {
+                sends += 1;
+                script.next().expect("no third send")
+            });
+        }
+        assert_eq!(sends, 2, "one failure, one delivery, then nothing pending");
+        assert!(notes.pending().is_empty());
+        let settled: Vec<_> = std::fs::read_dir(dir.path().join(".shprd/worker-notes/T1"))
+            .expect("dir")
+            .flatten()
+            .map(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(settled, ["sent"]);
+    }
+
+    #[test]
+    fn no_live_worker_skips_the_note() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let notes = shprd_core::ask::WorkerNotes::for_repo(dir.path());
+        notes.queue("T1", "widened").expect("queue");
+        let pending = notes.pending();
+        let told = deliver_notes_with(&notes, &pending, |_| NoteSend::NoWorker);
+        assert!(told.is_empty());
+        assert!(notes.pending().is_empty());
+        let settled: Vec<_> = std::fs::read_dir(dir.path().join(".shprd/worker-notes/T1"))
+            .expect("dir")
+            .flatten()
+            .map(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(settled, ["skipped"]);
+    }
+
+    #[test]
+    fn a_note_that_keeps_failing_gives_up_and_names_the_task() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let notes = shprd_core::ask::WorkerNotes::for_repo(dir.path());
+        notes.queue("T1", "widened").expect("queue");
+        let mut told = Vec::new();
+        for _ in 0..super::NOTE_SEND_CAP {
+            let pending = notes.pending();
+            told = deliver_notes_with(&notes, &pending, |_| NoteSend::Failed);
+        }
+        assert_eq!(told, ["T1"]);
+        assert!(notes.pending().is_empty());
+    }
 
     #[test]
     fn a_check_spec_carries_its_gate_command_and_exit_code() {
