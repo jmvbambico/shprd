@@ -210,7 +210,10 @@ fn land_task(
     // own worktree; a non-GitHub remote is then pushed to, best effort.
     let local = local_landing(&Git::new(&ctx.root));
     // The scope is judged on the branch's real diff, not on the paths the
-    // hand-in listed: a file the worker left off the list is caught here.
+    // hand-in listed: a file the worker left off the list is caught here. It
+    // is read against the same base the review's packet used (the run's base
+    // branch) on a forge landing, and against the integration branch the task
+    // is merged into on a local one.
     let scope_base = if local {
         &run.integration_branch
     } else {
