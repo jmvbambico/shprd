@@ -305,12 +305,22 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
     })?;
     // Resolving the space first means a task that does not exist is refused
     // before anything is typed anywhere.
+    let began = std::time::Instant::now();
     let place = place_of(state, &space)?;
+    let resolved = began.elapsed();
     // Files go where the agent reads without asking (its own working
     // directory), and the message names the copies.
     let stored = attachments::store(&place.cwd, &attachments)?;
     let message = attachments::compose(text, &stored);
-    writer.send(space.target(), &message).map_err(|reason| {
+    let stored_at = began.elapsed();
+    let typed = writer.send(space.target(), &message);
+    tracing::debug!(
+        resolve_ms = resolved.as_millis() as u64,
+        attachments_ms = (stored_at - resolved).as_millis() as u64,
+        deliver_ms = (began.elapsed() - stored_at).as_millis() as u64,
+        "chat send hops"
+    );
+    typed.map_err(|reason| {
         // Nothing reached the agent, so the copies are not left behind for a retry to repeat.
         attachments::discard(&stored);
         ApiReject::refused(format!("{reason}. Nothing was sent"))

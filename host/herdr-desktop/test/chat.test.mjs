@@ -610,3 +610,85 @@ test("a read given up on changes nothing if it finishes late (SHPR-80)", async (
   assert.equal(view.state, before, "the stale read left the board alone");
   assert.equal(view.chat.messages.length, 0, "and the conversation");
 });
+
+// --- optimistic echo (m11-chat-latency) ---
+
+import { echoOf, settleEchoes, withEchoes } from "../mods/lib/chat.js";
+
+test("a send shows the turn and empties the composer before the service answers", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  let release;
+  view.client.call = (method, path) =>
+    method === "GET"
+      ? Promise.resolve(page({ messages: [] }))
+      : new Promise((resolve) => {
+          release = () => resolve({ sent: true });
+        });
+  view.input.set_value("what landed?");
+  const pending = view.send();
+  assert.equal(view.input.value(), "", "the composer is empty at once");
+  const shown = withEchoes(view.chat, view.myEchoes()).messages;
+  assert.deepEqual(shown.map((m) => [m.role, m.text]), [["user", "what landed?"]], "the turn shows before the POST returns");
+  release();
+  await pending;
+});
+
+test("the transcript's copy replaces the echo: no duplicate, no flicker", async () => {
+  const { view } = panel([page({ messages: [], cursor: "s1@1" })]);
+  view.input.set_value("what landed?");
+  await view.send();
+  const texts = () => withEchoes(view.chat, view.myEchoes()).messages.map((m) => m.text);
+  assert.deepEqual(texts(), ["what landed?"], "the echo is the only copy until the transcript holds the turn");
+  view.client.call = async () => page({ messages: [{ role: "user", text: "what landed?", at_ms: 5 }], cursor: "s1@2" });
+  await view.pull(COORDINATOR, view.slot);
+  assert.deepEqual(texts(), ["what landed?"], "then the transcript's alone");
+  assert.equal(view.myEchoes().length, 0);
+});
+
+test("two identical turns keep two echoes, and one transcript line settles only one", () => {
+  const a = echoOf({ text: "ok" }, 1000);
+  const b = echoOf({ text: "ok" }, 1001);
+  const left = settleEchoes([a, b], [{ role: "user", text: "ok" }], 1002);
+  assert.deepEqual(left, [b]);
+  assert.deepEqual(settleEchoes([a], [{ role: "assistant", text: "ok" }], 1002), [a], "only the person's lines confirm");
+});
+
+test("an echo the transcript never confirms goes after two minutes; an attachment echo names its files", () => {
+  const a = echoOf({ text: "hi", attachments: [{ path: "/t/shot.png", name: "shot.png" }] }, 0);
+  assert.match(a.shown, /hi\n📎 shot\.png/);
+  assert.deepEqual(settleEchoes([a], [], 60_000), [a]);
+  assert.deepEqual(settleEchoes([a], [], 130_000), []);
+  const filesOnly = echoOf({ text: "", attachments: [{ path: "/t/shot.png", name: "shot.png" }] }, 0);
+  assert.deepEqual(settleEchoes([filesOnly], [{ role: "user", text: "see shot.png" }], 1), []);
+});
+
+test("a refused send takes the echo away and gives the words and files back", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  view.files = [{ path: "/t/a.png", name: "a.png" }];
+  view.input.set_value("hello");
+  view.client.call = async (method) => {
+    if (method === "GET") return page({ messages: [] });
+    throw new Error("no open pane for the coordinator");
+  };
+  await view.send();
+  assert.equal(view.myEchoes().length, 0, "no echo of a turn that was not sent");
+  assert.equal(view.input.value(), "hello");
+  assert.deepEqual(view.files, [{ path: "/t/a.png", name: "a.png" }]);
+  assert.equal(view.refusal, "no open pane for the coordinator");
+});
+
+test("a send is posted exactly once, and a second Enter on the emptied composer sends nothing", async () => {
+  const { view, calls } = panel([page({ messages: [] })]);
+  view.input.set_value("once");
+  const first = view.send();
+  const second = view.send();
+  await Promise.all([first, second]);
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
+});
+
+test("a page read twice from one cursor is folded once", async () => {
+  const answer = page({ messages: [{ role: "assistant", text: "hi", at_ms: 1 }], cursor: "s1@3" });
+  const { view } = panel([answer]);
+  await Promise.all([view.pull(COORDINATOR, view.slot), view.pull(COORDINATOR, view.slot)]);
+  assert.equal(view.chat.messages.length, 1);
+});
