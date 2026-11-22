@@ -2,8 +2,8 @@
 
 Status: M0–M6 done (gate passed 2026-10-29). Re-planned from M7 on 2026-11-14:
 see "M7 onward · the pivot". M7 and M8 done 2026-11-14; M9 gate passed 2026-11-15;
-M10 gate passed 2026-11-16 (gates below). M11 work is merged on `integration/m11`;
-the M11 gate is being run, and the coordinator adds its result. Language: Rust (service) and TypeScript (web app).
+M10 gate passed 2026-11-16 (gates below). M11 finished on `integration/m11`
+(2026-11-22); its gate result and known gaps are under M11. Language: Rust (service) and TypeScript (web app).
 
 The plan is cut into milestones. Each one ends at a **gate**: a demo you can run
 and a check that has to pass before the next milestone starts. Inside a
@@ -441,6 +441,36 @@ with a real terminal; a task's thread switches between Chat and Terminal); Tasks
 and the graph are one panel; the Spaces sidebar is a tree of live tasks with an
 Agents pane below; the coordinator is the space's Assistant chat tab.
 
+**Desktop work, SHPR-49 to SHPR-88.** After the gate, the work moved to making the
+shprd layout work with zero commands. Pull request numbers are on `integration/m11`.
+
+| ID | Task | Scope | Size |
+|---|---|---|---|
+| SHPR-49 | Install takes the layout from the binary's own tree (#120) | `shprd/src/cmd/`, `host/herdr-desktop` | S |
+| SHPR-50, 51, 52 | Accept with a short SHA and refused actions say why (#121); review diffs from the attempt's own base (#122); install refuses the real herdr-app under an agent (#123) | `shprd-server`, `shprd-core`, `shprd/src/cmd/` | M |
+| SHPR-57, 59 | Worker questions and permissions become cards (#126); cards that act: take as is, refused hand-in, stale asks, dead reviewer (#130) | `shprd-core`, `host/herdr-desktop` | M |
+| SHPR-58 | Second attempts keep their commits; Retry without raw git (#134) | `shprd-core`, `shprd-git` | M |
+| SHPR-62, 63 | Proof on the Accept card and in the review packet (#127); Tasks pane minors and the question-card focus bug (#129) | `shprd-core`, `host/herdr-desktop` | M |
+| SHPR-61 | A fresh repo can add tasks; a serve restart keeps the space and chat (#131) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-65, 66, 69 | Reused repo space (real name, one live coordinator, own agents only, #135); the layout's Assistant is shprd's coordinator (#136); chat never talks to Shepherdr's Assistant (#138) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-67 | Old tasks never block a fresh start: fold Done, clear stale in one action (#137) | `shprd-core`, `host/herdr-desktop` | S |
+| SHPR-68, 70 | Click a repo space and it works with no manual `shprd serve`, several repos at once (#139); add a folder in the layout and chat with zero commands (#140) | `shprd-server`, `host/herdr-desktop` | L |
+| SHPR-71, 72 | The coordinator makes tasks and never does the work, no Claude trust prompt (#141); adding a folder starts nothing (#142) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-73 | Chat renders like Shepherdr: folded tool calls, no raw `hc` tags, line breaks kept (#145) | `host/herdr-desktop` | S |
+| SHPR-75 | Sidebar spaces stable, toggle reliable; a new space opens on the Assistant (#143) | `host/herdr-desktop` | S |
+| SHPR-76 | Accept merges locally when the repo has no GitHub remote; plain land errors (#146) | `shprd-git`, `shprd-server` | M |
+| SHPR-77 | One shprd service for every repo; switching spaces is instant (#147) | `shprd-server`, `shprd/src/cmd/`, `host/herdr-desktop` | L |
+| SHPR-79, 80 | Chat is always shprd's coordinator and tasks always reach the panes, proven end to end (#149); a re-added folder never hangs on Loading (#150) | `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-81 | Task actions update the panes at once, rolled back on error; Graph states right-aligned (#152) | `host/herdr-desktop` | S |
+| SHPR-83 | Accept works with a real click; coordinator escalations true and command-free; held tasks say why (#155) | `shprd-core`, `host/herdr-desktop` | L |
+| SHPR-84 | Chat composer like Shepherdr's: Enter sends, model picker, voice, attachments the coordinator can read (#153) | `shprd-server`, `host/herdr-desktop` | L |
+| SHPR-85 | Toasts draw one card with a divider between messages (#154) | `host/herdr-desktop` | S |
+| SHPR-86 | Agents never stop on a trust prompt; closing a space stops its agents (#156) | `shprd-agent`, `shprd-server`, `host/herdr-desktop` | M |
+| SHPR-87 | A reviewer out of quota hands the review to the next reviewer; the reviewer comes from Settings (#157) | `shprd-core`, `shprd-server` | M |
+| SHPR-88 | Switching an existing space to the shprd layout starts shprd's coordinator and shows it in the chat (#158) | `shprd-server`, `host/herdr-desktop` | M |
+
+SHPR-36 to SHPR-48 (gate fixes and Settings rounds) are in the gate result below.
+
 **Gate:** the M10 flow runs from a desktop browser and from a phone over each
 tunnel, and every request without a session is refused.
 
@@ -466,6 +496,31 @@ Parked gaps:
 - G3: the desktop graph omits dropped tasks.
 - G4: a landed task's accept card says no changes.
 - G5: the coordinator can stay stuck at "blocked (permission)".
+
+**Gate result (2026-11-22).** The integration gate passed on `integration/m11`
+head 2bd4cd4: `cargo fmt --all --check`, clippy, and the tests (2384 passed, 21
+ignored). CI is green.
+
+Known gaps:
+
+- #107, #109 and #110 merged without a passing cross-vendor review.
+- G1 to G5 above are still open.
+- SHPR-61, 71, 72, 75 and 76 have gaps noted in their pull requests.
+- SHPR-81: the live check had no real agents.
+- SHPR-83: all five tasks never reached Done in one run, the `ops.py` conflict case
+  never came up live, and Retry review is covered by tests only.
+- SHPR-84: real OS key presses are not proven, and the mic is unproven (it needs
+  the person's ElevenLabs key).
+- SHPR-85: the only independent review was GLM, after codex returned nothing; there
+  is no light-theme screenshot.
+- SHPR-86: round 2 was recorded before its last fixes, and the bypass warning is
+  not a known blocking prompt.
+- SHPR-87: the "no reviewer left" card is tested, not seen live. Reviewers ignore a
+  program line's read-only mode, because pi's read-only tools cannot write the
+  findings file.
+- Several reviews ran on GLM only because codex was out of quota.
+- The doctor tests read `SHPRD_REPO` from the environment (fixed by task
+  `m11-doctor-env`).
 
 ---
 
