@@ -940,7 +940,7 @@ async fn chat_page(
 ) -> Result<Json<ChatDto>, ApiReject> {
     let space = Space::parse(query.space.as_deref());
     let since = query.since.unwrap_or_default();
-    let answer = blocking(move || chat::page(&state, &space, &since)).await?;
+    let answer = blocking(move || chat::page_with_failure(&state, &space, &since)).await?;
     Ok(Json(answer?))
 }
 

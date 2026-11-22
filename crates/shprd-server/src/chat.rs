@@ -102,7 +102,34 @@ pub trait ChatWriter: Send + Sync {
 /// A host has no printable state and a service is logged with its state in tow,
 /// so the wrapper says only whether one is wired.
 #[derive(Clone, Default)]
-pub struct ChatHost(Option<std::sync::Arc<dyn ChatWriter>>);
+pub struct ChatHost {
+    writer: Option<std::sync::Arc<dyn ChatWriter>>,
+    /// What the background deliveries and transcript watchers share.
+    shared: std::sync::Arc<Shared>,
+}
+
+/// State the chat keeps between requests: deliveries that failed after the
+/// send had returned, and the transcripts a watcher is following.
+#[derive(Default)]
+struct Shared {
+    /// A delivery's failure, by space, until the next page says it once.
+    failures: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    /// The transcript files a watcher thread is following now.
+    watched: std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
+    /// Epoch ms of the last page read, so an idle watcher ends.
+    last_read_ms: std::sync::atomic::AtomicU64,
+}
+
+/// How long a send waits for the host before answering "accepted" (ms): a
+/// failure the host reports at once still refuses the send; a slow delivery
+/// (the draft hold) goes on in the background.
+const ACCEPT_GRACE_MS: u64 = 150;
+
+/// How often a watcher looks at a transcript's size (ms).
+const WATCH_EVERY_MS: u64 = 100;
+
+/// How long a watcher outlives the last page read (ms).
+const WATCH_IDLE_MS: u64 = 120_000;
 
 impl ChatHost {
     /// A host with no writer: a send is refused rather than pretended.
@@ -112,19 +139,22 @@ impl ChatHost {
 
     /// The host that types chat lines through `writer`.
     pub fn with(writer: std::sync::Arc<dyn ChatWriter>) -> Self {
-        Self(Some(writer))
+        Self {
+            writer: Some(writer),
+            shared: std::sync::Arc::default(),
+        }
     }
 
     /// The writer, when one is wired.
     pub fn get(&self) -> Option<&std::sync::Arc<dyn ChatWriter>> {
-        self.0.as_ref()
+        self.writer.as_ref()
     }
 }
 
 impl std::fmt::Debug for ChatHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatHost")
-            .field("wired", &self.0.is_some())
+            .field("wired", &self.writer.is_some())
             .finish()
     }
 }
@@ -253,6 +283,7 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         });
         return Ok(answer);
     };
+    watch_transcript(state, &transcript);
     let page = transcript
         .read(since)
         .map_err(|err| ApiReject::internal(err.to_string()))?;
@@ -280,6 +311,84 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         answer.note = Some(String::from("nothing new"));
     }
     Ok(answer)
+}
+
+/// `GET /api/chat`'s answer, with a delivery failure the person has not heard
+/// of yet said once in its note.
+pub(crate) fn page_with_failure(
+    state: &AppState,
+    space: &Space,
+    since: &str,
+) -> Result<ChatDto, ApiReject> {
+    state
+        .chat
+        .shared
+        .last_read_ms
+        .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    let mut answer = page(state, space, since)?;
+    let failed = state
+        .chat
+        .shared
+        .failures
+        .lock()
+        .ok()
+        .and_then(|mut held| held.remove(space.name()));
+    if let Some(reason) = failed {
+        answer.note = Some(format!(
+            "Your last message was not delivered: {reason}. Nothing was sent"
+        ));
+    }
+    Ok(answer)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Follows a transcript file's size and publishes a change when it grows, so a
+/// client's chat refreshes within ~`WATCH_EVERY_MS` of a reply chunk instead of
+/// waiting for its poll. One thread per file; it ends when nobody reads the
+/// chat for [`WATCH_IDLE_MS`].
+fn watch_transcript(state: &AppState, transcript: &Transcript) {
+    let Some(path) = transcript.path().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let shared = std::sync::Arc::clone(&state.chat.shared);
+    let started = shared
+        .watched
+        .lock()
+        .map(|mut held| held.insert(path.clone()))
+        .unwrap_or(false);
+    if !started {
+        return;
+    }
+    let hub = state.hub.clone();
+    std::thread::spawn(move || {
+        let size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let mut last = size(&path);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(WATCH_EVERY_MS));
+            let idle = now_ms().saturating_sub(
+                shared
+                    .last_read_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+            if idle > WATCH_IDLE_MS {
+                break;
+            }
+            let now = size(&path);
+            if now != last {
+                last = now;
+                hub.poke();
+            }
+        }
+        if let Ok(mut held) = shared.watched.lock() {
+            held.remove(&path);
+        }
+    });
 }
 
 /// `POST /api/chat`: type one turn into a space's agent, as the person.
@@ -313,23 +422,76 @@ pub(crate) fn send(state: &AppState, body: &[u8]) -> Result<ChatSendReply, ApiRe
     let stored = attachments::store(&place.cwd, &attachments)?;
     let message = attachments::compose(text, &stored);
     let stored_at = began.elapsed();
-    let typed = writer.send(space.target(), &message);
+    // Delivery (which may hold a draft for seconds) runs off the request: the
+    // person's send returns once the host has had a moment to refuse it.
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let background = BackgroundSend {
+        writer: std::sync::Arc::clone(writer),
+        shared: std::sync::Arc::clone(&state.chat.shared),
+        hub: state.hub.clone(),
+        space: space.clone(),
+        message,
+        stored,
+        began,
+    };
+    let delivered_after = stored_at;
+    std::thread::spawn(move || background.run(done_tx, resolved, delivered_after));
+    if let Ok(Err(reason)) = done_rx.recv_timeout(std::time::Duration::from_millis(ACCEPT_GRACE_MS))
+    {
+        return Err(ApiReject::refused(format!("{reason}. Nothing was sent")));
+    }
     tracing::debug!(
-        resolve_ms = resolved.as_millis() as u64,
-        attachments_ms = (stored_at - resolved).as_millis() as u64,
-        deliver_ms = (began.elapsed() - stored_at).as_millis() as u64,
-        "chat send hops"
+        returned_ms = began.elapsed().as_millis() as u64,
+        "chat send returned"
     );
-    typed.map_err(|reason| {
-        // Nothing reached the agent, so the copies are not left behind for a retry to repeat.
-        attachments::discard(&stored);
-        ApiReject::refused(format!("{reason}. Nothing was sent"))
-    })?;
     Ok(ChatSendReply {
         space: space.name().to_owned(),
         sent: true,
         notice: writer.take_notice(),
     })
+}
+
+/// One accepted message, on its way to the agent's pane.
+struct BackgroundSend {
+    writer: std::sync::Arc<dyn ChatWriter>,
+    shared: std::sync::Arc<Shared>,
+    hub: crate::hub::Hub,
+    space: Space,
+    message: String,
+    stored: Vec<PathBuf>,
+    began: std::time::Instant,
+}
+
+impl BackgroundSend {
+    fn run(
+        self,
+        done: std::sync::mpsc::Sender<Result<(), String>>,
+        resolved: std::time::Duration,
+        stored_at: std::time::Duration,
+    ) {
+        let typed = self.writer.send(self.space.target(), &self.message);
+        tracing::debug!(
+            resolve_ms = resolved.as_millis() as u64,
+            attachments_ms = (stored_at - resolved).as_millis() as u64,
+            deliver_ms = (self.began.elapsed() - stored_at).as_millis() as u64,
+            ok = typed.is_ok(),
+            "chat send hops"
+        );
+        match &typed {
+            Ok(()) => {}
+            Err(reason) => {
+                // Nothing reached the agent, so the copies are not left behind for a retry to repeat.
+                attachments::discard(&self.stored);
+                if let Ok(mut held) = self.shared.failures.lock() {
+                    held.insert(self.space.name().to_owned(), reason.clone());
+                }
+            }
+        }
+        // The line is in the pane (or the failure is waiting): tell every
+        // watching client now rather than at its next poll.
+        self.hub.poke();
+        let _ = done.send(typed);
+    }
 }
 
 /// `POST /api/chat/stop`: press Escape in a space's agent, as the person.
