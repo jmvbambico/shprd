@@ -69,6 +69,7 @@ pub mod error;
 pub mod graph;
 pub mod pass;
 pub mod repos;
+pub mod self_update;
 pub mod service;
 pub mod snapshot;
 pub mod tasks;

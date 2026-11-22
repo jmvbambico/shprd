@@ -523,10 +523,12 @@ pub enum TaskKey {
     TickSecs,
     /// Seconds a change must hold before the coordinator is told about it.
     NewsSettleSecs,
+    /// Whether shprd rebuilds and restarts itself after a landed task changes it.
+    SelfUpdate,
 }
 
 /// Every `tasks.*` key, in the order a settings UI lists them.
-pub const TASK_KEYS: [TaskKey; 14] = [
+pub const TASK_KEYS: [TaskKey; 15] = [
     TaskKey::Merge,
     TaskKey::ReviewRounds,
     TaskKey::MustFix,
@@ -541,6 +543,7 @@ pub const TASK_KEYS: [TaskKey; 14] = [
     TaskKey::FinishNotes,
     TaskKey::TickSecs,
     TaskKey::NewsSettleSecs,
+    TaskKey::SelfUpdate,
 ];
 
 impl TaskKey {
@@ -561,6 +564,7 @@ impl TaskKey {
             Self::FinishNotes => "finish_notes",
             Self::TickSecs => "tick_secs",
             Self::NewsSettleSecs => "news_settle_secs",
+            Self::SelfUpdate => "self_update",
         }
     }
 
@@ -747,7 +751,7 @@ impl Key {
                 _ => Kind::Text,
             },
             Self::Task(key) => match key {
-                TaskKey::Proof | TaskKey::Worktrees => Kind::Switch,
+                TaskKey::Proof | TaskKey::Worktrees | TaskKey::SelfUpdate => Kind::Switch,
                 TaskKey::Merge | TaskKey::MustFix => match key.words() {
                     Some(words) => Kind::OneOf(words),
                     None => Kind::Text,
@@ -1525,6 +1529,7 @@ pub fn builtin() -> Layer {
         Value::Text(config.janitor.namespace),
     );
     layer.set(Key::Task(TaskKey::Worktrees), Value::Switch(true));
+    layer.set(Key::Task(TaskKey::SelfUpdate), Value::Switch(false));
     layer.set(Key::Task(TaskKey::Base), Value::Text(String::new()));
     layer.set(
         Key::Task(TaskKey::Branch),
@@ -2063,6 +2068,8 @@ pub struct Tasks {
     pub archive_namespace: String,
     /// Whether every task gets its own worktree.
     pub worktrees: bool,
+    /// Whether shprd rebuilds and restarts itself after a landed task changes it.
+    pub self_update: bool,
     /// The branch new tasks start from and merge into.
     pub base: String,
     /// The pattern new tasks' branches are named after.
@@ -2226,6 +2233,7 @@ impl Resolved {
                 .unwrap_or(&defaults.janitor.namespace)
                 .to_owned(),
             worktrees: self.on(TaskKey::Worktrees, true),
+            self_update: self.on(TaskKey::SelfUpdate, false),
             base: self.text(TaskKey::Base).unwrap_or_default().to_owned(),
             branch: self
                 .text(TaskKey::Branch)

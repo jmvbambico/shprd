@@ -2080,6 +2080,12 @@ impl Worker {
         })?;
         self.notify(Some(event));
         self.close_worker_task(task);
+        // A landing is what makes shprd rebuild itself, when the person asked
+        // for that: the trigger reads the setting and starts the helper, and is
+        // nothing where no service installed one.
+        if outcome.is_landed() {
+            crate::self_update::landed(&self.repo, base, self.local);
+        }
         Ok(event)
     }
 

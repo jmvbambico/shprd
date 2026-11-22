@@ -920,6 +920,12 @@ export const WORKFLOW = [
     unit: "seconds",
   },
   {
+    key: "tasks.self_update",
+    title: "Update shprd after a change to it",
+    about: "When an accepted task changes shprd itself, shprd rebuilds, swaps in the new version and restarts once. A build that fails changes nothing; a new version that does not start is rolled back.",
+    kind: "switch",
+  },
+  {
     key: "review.cross_vendor",
     title: "Cross-vendor review",
     about: "A reviewer never shares the worker's vendor, so the review is independent.",
