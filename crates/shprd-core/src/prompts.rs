@@ -232,6 +232,16 @@ const ASSISTANT_PRE_SHPR83: &str =
 const ASSISTANT_PRE_SHPR83_DIGEST: &str =
     "b2bb0172dfa307a6f7e93f3a2883b3c00c99f21a836d25772a86a2d1d24340a5";
 
+/// The coordinator wording before the condensed rewrite: it named another
+/// product by name and ran longer than a model needs.
+#[cfg(test)]
+const ASSISTANT_M11_LONG: &str =
+    include_str!("../../../data/templates/history/assistant-m11-long.md");
+
+/// The SHA-256 of [`ASSISTANT_M11_LONG`].
+const ASSISTANT_M11_LONG_DIGEST: &str =
+    "391d4cc326bf5fd542a2486474a1496d9da08bb2f77294fd4ca7d0a0740a0e5f";
+
 /// The coordinator's retired defaults.
 const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M9_ASKS_DIGEST,
@@ -241,6 +251,7 @@ const ASSISTANT_OLD: &[&str] = &[
     ASSISTANT_M11_TASKS_ONLY_DIGEST,
     ASSISTANT_M11_ACCEPT_DIGEST,
     ASSISTANT_PRE_SHPR83_DIGEST,
+    ASSISTANT_M11_LONG_DIGEST,
 ];
 
 /// The reviewer wording M9.6 shipped, which did not name the asks the packet
