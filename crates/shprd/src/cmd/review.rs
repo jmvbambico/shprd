@@ -1392,32 +1392,15 @@ pub fn render_review_brief(input: &ReviewBrief<'_>) -> String {
              your findings.\n\n"
         ));
     }
-    out.push_str("You are a REVIEWER. You do not write code and you do not fix anything.\n\n");
-    out.push_str("## What you may read\n\n");
+    out.push_str("## Files\n\n");
+    out.push_str("Read these, in this folder, in this order, and nothing else:\n\n");
+    out.push_str("1. `contract.md` — the task, what \"done\" meant, what the agent reported, and the asks it raised with the person's answers\n");
     out.push_str(
-        "- `diff.patch` — the whole change, against its merge base with the integration branch\n",
+        "2. `diff.patch` — the whole change, against its merge base with the integration branch\n",
     );
-    out.push_str(
-        "- `contract.md` — the task, what \"done\" meant, what the agent reported, and the \
-         asks it raised with the person's answers\n",
-    );
-    out.push_str("- `findings.schema.json` — the shape of what you write\n");
-    out.push_str(
-        "- `proof/` — copies of the proof files the worker named, when it named any; `contract.md` says where each one is\n\n",
-    );
-    out.push_str("- Read those files, in this folder, and nothing else.\n");
-    out.push_str("- Never open or edit the repository or any worktree; the diff is the truth you judge. If the packet does not show something you need, record that as a finding.\n");
-    out.push_str("- Write nothing outside this folder.\n\n");
-    out.push_str("## What to write\n\n");
-    out.push_str("Write `findings.json` in this folder, matching `findings.schema.json`: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write an empty array — `[]` — when nothing is wrong: an empty array is a clean review, and it is the answer to aim for.\n\n");
-    out.push_str("Judge the diff against the acceptance criteria and the scope: what it does wrong, what it misses, what it changes that it may not touch. A critical or major finding blocks integration, so spend them on things that matter.\n\n");
-    out.push_str("A criterion that is about asking the person is checked from the contract's asks: their text, their options and the answer the person gave. An ask with `answer: unanswered` never got the person's word. The reported proofs are the artifacts to check a criterion about proof against; one the worker did not name is not there.\n\n");
-    out.push_str("## Then\n\n");
-    out.push_str(
-        "Write `findings.json` and stop. Do not run any `shprd` command: the folder you are in is \
-         not a repository, so no command of yours would reach the run log. The engine reads your \
-         file and records the verdict itself, naming you and the hash of what you wrote.\n",
-    );
+    out.push_str("3. `proof/` — copies of the proof files the worker named, when it named any; `contract.md` says where each one is\n");
+    out.push_str("4. `findings.schema.json` — the shape of what you write\n\n");
+    out.push_str("Write `findings.json` in this folder once: a JSON array of `{severity, title, location, detail}`, where severity is one of `critical`, `major`, `minor` or `trivial`. Write nothing else, and nothing outside this folder.\n");
     out
 }
 
@@ -2510,8 +2493,11 @@ project_dirs = []
         // its folder is outside the repository and the engine records the
         // verdict.
         assert!(!brief.contains("shprd agent"), "{brief}");
-        assert!(brief.contains("findings.json` and stop"), "{brief}");
-        assert!(brief.contains("REVIEWER"), "{brief}");
+        assert!(
+            brief.contains("Write `findings.json` in this folder once"),
+            "{brief}"
+        );
+        assert!(brief.contains("# REVIEW "), "{brief}");
         assert!(!brief.contains(DEGRADED_LABEL), "{brief}");
     }
 
@@ -3085,7 +3071,7 @@ project_dirs = []
         assert!(
             calls
                 .iter()
-                .any(|call| matches!(call, Call::Write(_, text, _) if text.contains("REVIEWER"))),
+                .any(|call| matches!(call, Call::Write(_, text, _) if text.contains("# REVIEW "))),
             "the brief was never typed in: {calls:?}"
         );
     }
@@ -3420,7 +3406,7 @@ project_dirs = []
             1,
             "the retried brief lands once: {delivered:?}"
         );
-        assert!(delivered[0].contains("REVIEWER"), "{delivered:?}");
+        assert!(delivered[0].contains("# REVIEW "), "{delivered:?}");
         let landed = mux.calls().into_iter().find_map(|call| match call {
             Call::Write(pane, _, _) => Some(pane),
             _ => None,
@@ -3586,13 +3572,13 @@ project_dirs = []
         );
         let brief = std::fs::read_to_string(&report.brief).unwrap_or_else(|err| panic!("{err}"));
         assert!(
-            brief.contains("REVIEWER"),
+            brief.contains("# REVIEW "),
             "the brief still points at the packet"
         );
         assert!(
             mux.calls()
                 .into_iter()
-                .any(|call| matches!(call, Call::Write(pane, text, _) if pane == fresh && text.contains("REVIEWER"))),
+                .any(|call| matches!(call, Call::Write(pane, text, _) if pane == fresh && text.contains("# REVIEW "))),
             "the brief is delivered to the fresh reviewer"
         );
         assert_eq!(

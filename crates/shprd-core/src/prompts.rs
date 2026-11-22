@@ -285,8 +285,22 @@ const REVIEWER_PRE_IDENTITY: &str =
 const REVIEWER_PRE_IDENTITY_DIGEST: &str =
     "2c28ab6907cffc0e9d2173d49042a0918f4f7c744ad8be2183cfd752d51c291e";
 
+/// The reviewer wording before the condensed rewrite: it named another product
+/// and said the packet's files and the findings file more than once.
+#[cfg(test)]
+const REVIEWER_M11_LONG: &str =
+    include_str!("../../../data/templates/history/reviewer-m11-long.md");
+
+/// The SHA-256 of [`REVIEWER_M11_LONG`].
+const REVIEWER_M11_LONG_DIGEST: &str =
+    "c187a5267112fc4148487499f64ef7ac444e10bce3a0a2a901bd38daf2ef0488";
+
 /// The reviewer's retired defaults.
-const REVIEWER_OLD: &[&str] = &[REVIEWER_M9_ASKS_DIGEST, REVIEWER_PRE_IDENTITY_DIGEST];
+const REVIEWER_OLD: &[&str] = &[
+    REVIEWER_M9_ASKS_DIGEST,
+    REVIEWER_PRE_IDENTITY_DIGEST,
+    REVIEWER_M11_LONG_DIGEST,
+];
 
 /// The prompts this build ships, in the order `shprd prompts list` prints them.
 pub const SHIPPED: [ShippedPrompt; 4] = [

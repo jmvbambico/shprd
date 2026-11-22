@@ -544,7 +544,7 @@ fn every_role_opens_with_who_it_is() {
         let text = shipped_prompt(id).expect("shipped").text;
         let body = text.split("-->").nth(1).expect("a licence header");
         assert!(body.trim_start().starts_with(first), "{id}: {body:.80}");
-        if id == "assistant" || id == "worker" {
+        if id != "backup" {
             assert!(
                 !body.contains("Shepherdr"),
                 "the coordinator's words name no other product"
@@ -808,5 +808,36 @@ fn the_condensed_worker_replaces_the_long_one() {
     let temp = dir();
     std::fs::write(path_of(temp.path(), "worker"), WORKER_M11_LONG).expect("old install");
     let installed = ensure(temp.path(), "worker").expect("the upgrade runs");
+    assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
+}
+
+/// The reviewer's long wording is retired and upgrades; the shipped body names
+/// no other product and keeps the instructions the findings file depends on.
+#[test]
+fn the_condensed_reviewer_replaces_the_long_one() {
+    let shipped = shipped_prompt("reviewer").expect("shipped");
+    assert_eq!(
+        digest(REVIEWER_M11_LONG.as_bytes()),
+        REVIEWER_M11_LONG_DIGEST
+    );
+    assert!(shipped.old.contains(&REVIEWER_M11_LONG_DIGEST));
+    let body = strip_leading_comment(shipped.text);
+    assert!(!body.to_lowercase().contains("shepherdr"), "{body}");
+    for needed in [
+        "never edit files",
+        "ARE the gate evidence",
+        "`answer: unanswered`",
+        "`critical` and `major`",
+        "named in a finding",
+        "never aim for an empty array",
+        "`findings.json`",
+        "degraded review",
+        "Run no `shprd` command",
+    ] {
+        assert!(body.contains(needed), "the reviewer must say {needed:?}");
+    }
+    let temp = dir();
+    std::fs::write(path_of(temp.path(), "reviewer"), REVIEWER_M11_LONG).expect("old install");
+    let installed = ensure(temp.path(), "reviewer").expect("the upgrade runs");
     assert_eq!(installed.change, Change::Upgraded, "{installed:?}");
 }
