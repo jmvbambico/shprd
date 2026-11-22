@@ -125,3 +125,13 @@ The person's decisions after the M11 desktop audit. They replace 2026-11-14's
 Not yet true in the code: `layouts/shprd.json` on `integration/m11` still has a
 `sidebar-footer` block (the `shprd-chrome` mod's three rows). Removing it is the
 decision; it has not landed.
+
+## 2026-11-22
+
+M11 is finished on `integration/m11`, and the way work is done changes with it.
+
+- **shprd coordinates its own development.** From now on a shprd coordinator,
+  inside the shprd layout, plans the tasks. Workers are claude on sonnet and the
+  reviewer is pi on GLM. This replaces the Shepherdr coordinator.
+- **When shprd misbehaves while coordinating, that is planned as a task.** It is
+  not worked around.
