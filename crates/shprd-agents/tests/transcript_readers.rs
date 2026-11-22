@@ -1015,3 +1015,95 @@ fn the_roots_of_a_launch_come_from_its_environment() {
     assert_eq!(roots.home, PathBuf::new());
     assert_eq!(roots.data_home, PathBuf::new());
 }
+
+/// Rewrite the claude fixture's record as `count` numbered user lines, with a
+/// padded body so the file is large; returns the transcript and its size.
+fn big_record(home: &Path, count: usize) -> (Transcript, u64) {
+    let transcript = locate("claude", home);
+    let path = transcript.path().unwrap().to_path_buf();
+    let pad = "x".repeat(180);
+    let mut body = String::new();
+    for n in 0..count {
+        // Every tenth line is bookkeeping, which is not a message.
+        if n % 10 == 9 {
+            body.push_str("{\"type\":\"queue-operation\"}\n");
+        }
+        body.push_str(&format!(
+            "{{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-11-04T10:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"m{n} {pad}\"}}}}\n"
+        ));
+    }
+    fs::write(&path, &body).unwrap();
+    (transcript, body.len() as u64)
+}
+
+fn number_of(text: &str) -> usize {
+    text.trim_start_matches('m')
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn the_tail_of_a_large_record_is_the_newest_page_and_opens_fast() {
+    let (_dir, home) = recorded("claude");
+    // 80,000 lines of ~280 bytes is a record of about 22 MB.
+    let (transcript, size) = big_record(&home, 80_000);
+    assert!(size > 20 * 1024 * 1024, "{size}");
+    let started = std::time::Instant::now();
+    let tail = transcript.read_tail().expect("the tail reads");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(tail.messages.len(), shprd_agents::transcript::MAX_MESSAGES);
+    assert_eq!(number_of(&tail.messages.last().unwrap().text), 79_999);
+    assert!(tail.older.is_some());
+    // Nothing is newer than the tail: a forward read from its cursor is empty.
+    let after = transcript.read(&tail.cursor).expect("the fixture reads");
+    assert!(after.messages.is_empty());
+}
+
+#[test]
+fn backward_pages_join_the_tail_with_nothing_lost_or_repeated() {
+    let (_dir, home) = recorded("claude");
+    let (transcript, _) = big_record(&home, 1_234);
+    let mut numbers = Vec::new();
+    let tail = transcript.read_tail().unwrap();
+    let mut pages = vec![tail.messages.clone()];
+    let mut older = tail.older.clone();
+    while let Some(cursor) = older {
+        let page = transcript.read_before(&cursor).unwrap();
+        older = page.older.clone();
+        pages.push(page.messages);
+    }
+    // Oldest page first.
+    for page in pages.iter().rev() {
+        for message in page {
+            numbers.push(number_of(&message.text));
+        }
+    }
+    assert_eq!(numbers, (0..1_234).collect::<Vec<_>>());
+    // A tail then a forward read of what is appended afterwards.
+    append_line(
+        transcript.path().unwrap(),
+        r#"{"type":"user","isSidechain":false,"timestamp":"2026-11-04T10:01:00.000Z","message":{"role":"user","content":"m1234 new"}}"#,
+    );
+    let page = transcript.read(&tail.cursor).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].text, "m1234 new");
+}
+
+#[test]
+fn a_small_record_is_one_tail_page_with_nothing_older() {
+    let (_dir, home) = recorded("claude");
+    let transcript = locate("claude", &home);
+    let tail = transcript.read_tail().unwrap();
+    assert_eq!(tail.messages.len(), 4);
+    assert!(tail.older.is_none());
+    let whole = transcript.read("").unwrap();
+    assert_eq!(tail.messages, whole.messages);
+    assert_eq!(tail.cursor, whole.cursor);
+}
