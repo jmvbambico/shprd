@@ -7,7 +7,7 @@ use shprd_core::event::{CheckReport, EventKind, Finding, output_tail, status_lin
 
 use crate::cli::{
     AgentCommand, EscalateArgs, GateArgs, GateOutcome, HandoffArgs, OverrideArgs, PromptArgs,
-    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand, TaskStatusArgs,
+    ReportArgs, SpawnArgs, TaskAddArgs, TaskCommand, TaskStatusArgs, TaskWidenArgs,
 };
 use crate::cmd::{emit, handoff, spawn};
 use crate::ctx::{CliError, Ctx};
@@ -25,6 +25,7 @@ pub fn dispatch(
         AgentCommand::Task { cmd } => match cmd {
             TaskCommand::Add(args) => task_add(ctx, &args),
             TaskCommand::Report(args) => report(ctx, &args),
+            TaskCommand::Widen(args) => task_widen(ctx, &args),
         },
         AgentCommand::Spawn(args) => spawn_cmd(ctx, &args, home),
         AgentCommand::Prompt(args) => prompt_cmd(ctx, &args),
@@ -166,11 +167,96 @@ fn print_report(ctx: &Ctx, report: &spawn::SpawnReport) {
 /// Shared with `shprd serve`: a write made through the API is a write the same
 /// way a CLI write is, so it leaves the same document behind.
 pub(crate) fn sync_dagr(ctx: &Ctx) {
+    deliver_worker_notes(ctx);
     if ctx.no_dagr {
         return;
     }
     if let Err(err) = crate::cmd::dagr::sync(ctx) {
         eprintln!("warning: dagr sync failed: {err}");
+    }
+}
+
+/// Raises the card that proposes a wider scope for a task.
+///
+/// It writes no scope: the card's `widen` answer, given by the person, does.
+fn task_widen(ctx: &Ctx, args: &TaskWidenArgs) -> Result<(), CliError> {
+    let state = ctx.state()?;
+    if !state.tasks.contains_key(&args.task) {
+        return Err(CliError::Invalid(anyhow!(
+            "no task {:?} in this run: name one `shprd status` lists",
+            args.task
+        )));
+    }
+    let mut paths = Vec::new();
+    for path in &args.scope {
+        let path = shprd_core::scope::normalize(path)
+            .map_err(|err| CliError::Invalid(anyhow!("scope path {path:?}: {err}")))?;
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if args.reason.trim().is_empty() {
+        return Err(CliError::Invalid(anyhow!(
+            "`--reason` is empty: tell the person why the task needs the paths"
+        )));
+    }
+    let earlier = state
+        .asks
+        .values()
+        .filter(|ask| {
+            ask.task == args.task && ask.id.starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
+        })
+        .count();
+    let id = shprd_core::ask::scope_widen_ask(earlier + 1);
+    let text = shprd_core::ask::scope_widen_body(&args.task, &paths, &args.reason);
+    let options = shprd_core::ask::scope_widen_options(&paths);
+    let now_ms = shprd_core::log::Clock::now_ms(&shprd_core::log::SystemClock);
+    let ask = shprd_core::ask::Ask::new(
+        id.clone(),
+        args.task.clone(),
+        shprd_core::ask::AskKind::Question,
+        text.clone(),
+        now_ms,
+    )
+    .with_options(options.clone());
+    let queue = shprd_core::ask::AskQueue::for_repo(&ctx.root);
+    queue
+        .raise(&ask)
+        .map_err(|err| CliError::other(anyhow!(err).context("writing the ask")))?;
+    let raised = EventKind::AskRaised {
+        task: args.task.clone(),
+        ask: id.clone(),
+        ask_kind: shprd_core::ask::AskKind::Question,
+        text,
+        options,
+        created_at_ms: now_ms,
+        expires_at_ms: None,
+    };
+    let event = match ctx.commit(raised) {
+        Ok(event) => event,
+        Err(err) => {
+            let _ = queue.remove(&args.task, &id);
+            return Err(err);
+        }
+    };
+    emit(ctx, &event)
+}
+
+/// Types every queued worker note into its task's live worker.
+///
+/// A note with no live worker to receive it is skipped: the next attempt's
+/// brief is built from the widened scope and lists the paths itself. Nothing is
+/// typed twice, because a note is settled whether or not it was delivered.
+pub(crate) fn deliver_worker_notes(ctx: &Ctx) {
+    let notes = shprd_core::ask::WorkerNotes::for_repo(&ctx.root);
+    let pending = notes.pending();
+    if pending.is_empty() {
+        return;
+    }
+    let mux = spawn::real_mux();
+    for note in &pending {
+        let sent = spawn::prompt(&*mux, &ctx.root, &note.task, &note.text).is_ok();
+        notes.settle(note, sent);
     }
 }
 

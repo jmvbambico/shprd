@@ -488,27 +488,24 @@ pub(crate) fn answer_ask(
     // A refused hand-in's card widens the scope or sends the task back. Both
     // are checked before the answer is consumed, for the same reason.
     let hand_in = shprd_core::gate::hand_in_refused_choice(ask, answer);
-    let widening = match &hand_in {
-        Some(shprd_core::gate::HandInChoice::Widen(paths)) => {
+    let widening = match shprd_core::ask::widening_of(ask, answer) {
+        Some(paths) => {
             let kind = EventKind::ScopeWidened {
                 task: task.to_string(),
-                paths: paths.clone(),
+                paths,
             };
             before
                 .check_as(ctx.actor, &kind, SystemClock.now_ms())
                 .map_err(|err| ApiReject::refused(err.to_string()))?;
             Some(kind)
         }
-        Some(shprd_core::gate::HandInChoice::SendBack) => {
-            if ctx.engine.is_none() {
-                return Err(ApiReject::refused(
-                    "this service was started without a host, so it cannot start another attempt",
-                ));
-            }
-            None
-        }
         None => None,
     };
+    if matches!(hand_in, Some(shprd_core::gate::HandInChoice::SendBack)) && ctx.engine.is_none() {
+        return Err(ApiReject::refused(
+            "this service was started without a host, so it cannot start another attempt",
+        ));
+    }
     // A stuck review's `review again` needs a host to start the reviewer on.
     let review_again = ask.starts_with(shprd_core::review::STUCK_ASK_PREFIX)
         && answer
@@ -547,20 +544,27 @@ pub(crate) fn answer_ask(
         ctx.hub.publish(acted.seq);
     }
     if let Some(kind) = widening {
-        // The scope is wider now; the worker is told to hand in again, which
-        // is the brief it was given with the new scope. A host that cannot
-        // deliver it leaves the line below to say what is waiting.
+        // The scope is wider now. A worker that is running is told which paths
+        // it may change: its brief still names the old scope, so a resend would
+        // only repeat it. The note is typed by the step after this write; with
+        // no live worker, the next attempt's brief lists the paths itself.
+        let EventKind::ScopeWidened { paths, .. } = &kind else {
+            return Err(ApiReject::internal("a widening is not a widening"));
+        };
+        let note = shprd_core::ask::widened_note(paths);
         let widened = ledger::commit(ctx.repo, ctx.actor, kind).map_err(commit_error)?;
         ctx.hub.publish(widened.seq);
-        let note = EventKind::TaskStatus {
+        shprd_core::ask::WorkerNotes::for_repo(ctx.repo)
+            .queue(task, &note)
+            .map_err(|err| {
+                ApiReject::internal(format!("could not queue the worker note: {err}"))
+            })?;
+        let status = EventKind::TaskStatus {
             task: task.to_string(),
-            message: status_line("scope widened: hand in again"),
+            message: status_line("scope widened: worker told"),
             progress: None,
         };
-        commit(ctx, note)?;
-        if let Some(engine) = ctx.engine {
-            let _ = engine.resend(ctx.repo, task);
-        }
+        commit(ctx, status)?;
     }
     if review_again && let Some(engine) = ctx.engine {
         // The answer is the person's word that the old reviewer is gone, so
