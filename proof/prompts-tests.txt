@@ -1,46 +1,92 @@
 test config::tests::the_orchestrator_runs_without_prompts_only_when_asked ... ok
 test prompts::tests::a_read_failure_names_the_file_once_and_keeps_its_cause ... ok
+test prompts::tests::an_edited_file_is_never_overwritten ... ok
+test prompts::tests::a_shipped_templates_previous_digest_is_retired ... ok
+test prompts::tests::a_write_saves_the_persons_words ... ok
+test prompts::tests::a_second_use_leaves_the_file_alone ... ok
 test prompts::tests::a_custom_prompt_is_read_and_a_missing_one_is_refused ... ok
 test prompts::tests::an_id_that_could_leave_the_prompts_directory_is_refused ... ok
-test prompts::tests::a_shipped_templates_previous_digest_is_retired ... ok
-test prompts::tests::an_edited_file_is_never_overwritten ... ok
-test prompts::tests::a_second_use_leaves_the_file_alone ... ok
-test prompts::tests::a_write_saves_the_persons_words ... ok
-test prompts::tests::an_untouched_old_default_is_upgraded ... ok
 test prompts::tests::a_reference_reads_an_id_or_a_path ... ok
+test prompts::tests::an_untouched_reviewer_default_is_upgraded ... ok
 test prompts::tests::an_untouched_asks_raise_default_is_upgraded ... ok
+test prompts::tests::an_untouched_old_default_is_upgraded ... ok
+test prompts::tests::an_unreadable_prompt_is_listed_with_its_reason ... ok
 test prompts::tests::every_role_opens_with_who_it_is ... ok
 test prompts::tests::every_shipped_prompt_credits_shepherdr ... ok
-test prompts::tests::an_untouched_m10_proof_default_is_upgraded ... ok
 test prompts::tests::an_untouched_asks_default_is_upgraded ... ok
-test prompts::tests::an_untouched_proof_default_is_upgraded ... ok
 test prompts::tests::first_use_writes_the_shipped_words ... ok
-test prompts::tests::the_config_root_prefers_the_xdg_setting_over_the_home_one ... ok
 test prompts::tests::the_backup_m9_asks_digest_is_the_listed_one ... ok
 test prompts::tests::the_coordinator_is_not_sent_to_the_task_only_raise_verb ... ok
+test prompts::tests::the_config_root_prefers_the_xdg_setting_over_the_home_one ... ok
 test prompts::tests::the_coordinator_is_the_assistant_prompt ... ok
+test prompts::tests::an_untouched_pre_shpr83_assistant_is_upgraded ... ok
 test prompts::tests::the_coordinator_says_accept_in_the_tasks_pane ... ok
-test prompts::tests::an_unreadable_prompt_is_listed_with_its_reason ... ok
-test prompts::tests::the_coordinator_turns_every_ask_into_tasks_and_never_does_the_work ... ok
-test prompts::tests::an_untouched_reviewer_default_is_upgraded ... ok
 test prompts::tests::reset_puts_the_shipped_words_back ... ok
+test prompts::tests::an_untouched_proof_default_is_upgraded ... ok
+test prompts::tests::the_coordinator_turns_every_ask_into_tasks_and_never_does_the_work ... ok
 test prompts::tests::the_coordinators_asks_raise_digest_is_the_listed_one ... ok
 test prompts::tests::the_coordinators_m9_asks_digest_is_the_listed_one ... ok
+test prompts::tests::the_pre_shpr83_assistant_digest_is_the_listed_one ... ok
 test prompts::tests::the_prompts_directory_sits_under_the_config_root ... ok
-test prompts::tests::an_untouched_pre_shpr83_assistant_is_upgraded ... ok
 test prompts::tests::list_writes_every_shipped_prompt_and_finds_the_persons_own ... ok
+test prompts::tests::an_untouched_m10_proof_default_is_upgraded ... ok
 test prompts::tests::the_reviewers_m9_asks_digest_is_the_listed_one ... ok
 test prompts::tests::the_worker_first_digest_is_the_listed_one ... ok
-test prompts::tests::the_pre_shpr83_assistant_digest_is_the_listed_one ... ok
 test prompts::tests::the_worker_m10_proof_digest_is_the_listed_one ... ok
 test prompts::tests::the_worker_m9_asks_digest_is_the_listed_one ... ok
-test prompts::tests::the_loader_drops_the_credit_comment_and_the_file_keeps_it ... ok
-test prompts::tests::the_worker_prompt_points_at_the_brief_for_how_to_ask ... ok
-test prompts::tests::the_worker_m9_proof_digest_is_the_listed_one ... ok
-test prompts::tests::the_worker_prompt_hands_in_and_never_starts_its_own_review ... ok
-test prompts::tests::the_worker_m9_digest_is_the_listed_one ... ok
-test prompts::tests::the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade ... ok
 test prompts::tests::the_identity_era_coordinator_words_are_retired_and_upgrade ... ok
+test prompts::tests::the_worker_m9_proof_digest_is_the_listed_one ... ok
+test prompts::tests::the_loader_drops_the_credit_comment_and_the_file_keeps_it ... ok
+test prompts::tests::the_worker_m9_digest_is_the_listed_one ... ok
+test prompts::tests::the_worker_prompt_hands_in_and_never_starts_its_own_review ... ok
+test prompts::tests::the_worker_prompt_points_at_the_brief_for_how_to_ask ... ok
+test prompts::tests::the_coordinator_never_uses_shepherdrs_tools_and_the_old_words_upgrade ... ok
 test prompts::tests::the_tasks_only_coordinator_words_are_retired_and_upgrade ... ok
 test prompts::tests::the_pre_identity_defaults_are_retired_and_upgrade ... ok
 test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 309 filtered out; finished in 0.01s
+test cmd::spawn::flow_tests::a_brief_no_agent_ever_takes_is_a_warning_and_an_escalation ... ok
+test cmd::review::tests::a_brief_that_fails_twice_is_escalated_once ... ok
+test cmd::review::tests::a_brief_whose_first_delivery_fails_is_retried_once ... ok
+test cmd::handoff::tests::the_hand_off_brief_starts_from_the_attempt_s_real_brief ... ok
+test cmd::deliver::tests::an_answerable_trust_prompt_gets_enter_and_then_the_brief ... ok
+test cmd::handoff::tests::the_brief_says_where_to_continue ... ok
+test cmd::spawn::flow_tests::a_brief_read_off_the_ready_line_keeps_a_task_the_host_cannot_report_alive ... ok
+test cmd::spawn::tests::a_brief_repeats_only_a_failed_earlier_gate ... ok
+test cmd::spawn::tests::a_new_attempts_brief_carries_the_previous_findings ... ok
+test cmd::spawn::tests::brief_states_scope_rules_and_skills ... ok
+test cmd::spawn::flow_tests::an_agent_given_the_brief_as_a_system_prompt_gets_a_kickoff ... ok
+test cmd::spawn::flow_tests::a_mode_the_program_lacks_is_not_claimed_in_the_brief ... ok
+test cmd::spawn::flow_tests::an_agent_without_system_prompt_arguments_gets_the_whole_brief ... ok
+test cmd::spawn::flow_tests::the_roles_access_mode_and_fast_switch_reach_the_launch_and_the_brief ... ok
+test cmd::deliver::tests::a_brief_waits_for_a_late_agent_then_lands ... ok
+test cmd::spawn::flow_tests::start_and_finish_notes_are_in_the_workers_brief ... ok
+test cmd::spawn::flow_tests::a_brief_lands_once_the_host_detects_the_agent ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 399 filtered out; finished in 0.68s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+test an_opencode_worker_on_a_private_desktop_receives_its_brief_with_nobody_typing ... ignored, needs a real hc, a private Herdr desktop and an opencode turn; run by hand
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test an_opencode_worker_receives_its_brief_with_nobody_typing ... ignored, starts a real herdr server and a real opencode turn; run by hand
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
