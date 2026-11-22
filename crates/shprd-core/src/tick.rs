@@ -497,12 +497,22 @@ fn after_failed_review(
     if task.latest_attempt().is_some_and(|attempt| attempt.stopped) {
         return None;
     }
-    gate::latest_failed_review(task)?;
+    // A landing that clashed with work that landed after the task was cut is
+    // not a review failure: it goes back at once and spends no review round.
+    let conflict = rules::landing_conflict(task);
+    if !conflict {
+        gate::latest_failed_review(task)?;
+    }
     let attempt = task.latest_attempt()?.n;
     // The allowance is the configured one plus every round a person granted by
     // answering this task's card, so one answer buys one attempt.
     let allowed = gate::allowance(state, task, input.config.review.rounds);
-    match gate::after_failure(task, allowed) {
+    let next = if conflict {
+        Next::SendBack
+    } else {
+        gate::after_failure(task, allowed)
+    };
+    match next {
         // A send-back is a spawn, so it takes a slot and an agent that is still
         // live on the task keeps it: the attempt it replaces must be finished.
         Next::SendBack => {
@@ -1961,9 +1971,9 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_non_review_gate_is_left_to_its_own_escalation() {
-        // A landing that conflicted records a failed `integrate` gate and an
-        // escalation of its own; the review passed, so it is not sent back.
+    fn a_landing_that_clashed_is_sent_back_without_spending_a_review_round() {
+        // A landing that conflicted records a failed `integrate` gate. The
+        // review passed, so no round is spent: the task goes back at once.
         let mut log = ready_log("A");
         log.push(ev(
             7,
@@ -1973,7 +1983,7 @@ mod tests {
                 gate: String::from("integrate"),
                 findings: vec![crate::event::Finding {
                     severity: crate::event::Severity::Major,
-                    title: String::from("conflicts with the integration branch"),
+                    title: String::from("clashed with work that landed after it"),
                     location: None,
                     detail: String::new(),
                 }],
@@ -1982,7 +1992,15 @@ mod tests {
         ));
         let state = folded(&log);
         let steps = plan_for(&state, &Facts::default(), &config(MergePolicy::Auto, 4));
-        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            steps,
+            vec![Step::SendBack {
+                task: String::from("A"),
+                attempt: 1
+            }]
+        );
+        assert_eq!(crate::gate::failed_review_rounds(&state.tasks["A"]), 0);
+        // Said once: the attempt it started is the next pass's newest.
     }
 
     #[test]

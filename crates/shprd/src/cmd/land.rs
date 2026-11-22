@@ -247,6 +247,17 @@ fn land_task(
     let policy = config.land.policy_for(&base);
     let landed = match land::land(forge.as_ref(), &git, &landing, policy, approved) {
         Ok(landed) => landed,
+        // A branch that clashes with what landed after it is closed out and
+        // sent back for a fresh attempt: the planner does the sending.
+        Err(err @ land::LandError::Conflict { pr, .. }) => {
+            if let Some(number) = pr {
+                // Best effort: a pull request that cannot be closed is left for
+                // a human, and the new attempt opens its own.
+                let _ = forge.close(number, &stale_pr_comment(task_id));
+            }
+            record_conflict(ctx, task, task_id, &base, &err)?;
+            return Err(CliError::Invalid(anyhow!(conflict_message(task_id, &err))));
+        }
         // These three leave the pull request where a human can look at it, and
         // the next landing can act: they are refusals (exit 2), not failures.
         Err(
@@ -314,8 +325,8 @@ fn land_task_local(
     let landed = match land::land_local(&worktree, &landing, policy, approved, checks_passed) {
         Ok(landed) => landed,
         Err(err @ land::LandError::Conflict { .. }) => {
-            record_conflict(ctx, task, task_id, branch, &err)?;
-            return Err(CliError::Invalid(anyhow!(err.plain(task_id))));
+            record_conflict(ctx, task, task_id, &run.integration_branch, &err)?;
+            return Err(CliError::Invalid(anyhow!(conflict_message(task_id, &err))));
         }
         Err(err) => {
             return Err(CliError::other(anyhow!(err.plain(task_id))));
@@ -394,47 +405,81 @@ fn record_local_landing(
     Ok(())
 }
 
-/// Records a local merging conflict as a failed gate and an escalation.
+/// What the stale pull request is closed with.
+fn stale_pr_comment(task_id: &str) -> String {
+    format!(
+        "{task_id} clashed with work that landed after it was cut. It is being redone on top \
+         of the latest, and the new attempt opens its own pull request."
+    )
+}
+
+/// Records a landing that clashed with the integration branch as a failed
+/// `integrate` gate.
 ///
-/// The failed `integrate` gate takes the task out of `Passed`, so the next tick
-/// does not try the same conflicting merge again; the escalation is what a
-/// person sees and acts on.
+/// The failed gate takes the task out of `Passed`, so the next tick does not try
+/// the same conflicting merge again, and it is what the planner reads to send
+/// the task back as a new attempt: the finding is the part of the new brief that
+/// says to carry the earlier commits over and resolve these files. No card is
+/// raised, because nobody has to decide anything.
 fn record_conflict(
     ctx: &Ctx,
     task: &Task,
     task_id: &str,
-    branch: &str,
+    base: &str,
     err: &land::LandError,
 ) -> Result<(), CliError> {
     let land::LandError::Conflict { files, .. } = err else {
         return Ok(());
     };
     let attempt = task.attempts.last().map(|attempt| attempt.n).unwrap_or(1);
+    let which = if files.is_empty() {
+        String::from("the files it touches")
+    } else {
+        files.join(", ")
+    };
     let finding = Finding {
         severity: Severity::Major,
-        title: "conflicts with the integration branch".to_string(),
+        title: String::from(
+            "clashed with work that landed after it; it is being redone on top of the latest",
+        ),
         location: files.first().cloned(),
-        detail: format!("merging {branch} conflicts in {}", files.join(", ")),
+        detail: format!(
+            "clashes with {base} in {which}. Bring the previous attempt's commits onto the \
+             latest {base} (merge it, or cherry-pick the archive named above), resolve \
+             keeping both sides' work, hand in again"
+        ),
     };
     let event = ctx.commit(EventKind::GateFailed {
         task: task_id.to_string(),
         attempt,
-        gate: "integrate".to_string(),
+        gate: rules::LANDING_CONFLICT_GATE.to_string(),
         findings: vec![finding],
         source: None,
     })?;
     crate::cmd::emit(ctx, &event)?;
-    let body = format!(
-        "{task_id}: its work conflicts with the integration branch ({}), so it needs a person",
-        files.join(", ")
-    );
+    // A note in the ledger, not a question: nothing is left to decide.
     let event = ctx.commit(EventKind::Escalated {
         task: Some(task_id.to_string()),
-        body,
-        default_action: String::from("send the task back to a worker"),
+        body: format!(
+            "{} (files in conflict: {which})",
+            land::conflict_words(task_id)
+        ),
+        default_action: String::from("redo the task on top of the latest"),
     })?;
     crate::cmd::emit(ctx, &event)?;
     Ok(())
+}
+
+/// What a clashing landing prints: the plain sentence, then the files.
+fn conflict_message(task_id: &str, err: &land::LandError) -> String {
+    match err {
+        land::LandError::Conflict { files, .. } if !files.is_empty() => format!(
+            "{} (files in conflict: {})",
+            err.plain(task_id),
+            files.join(", ")
+        ),
+        _ => err.plain(task_id),
+    }
 }
 
 /// The line a landing prints: what happened, and what a human does next.

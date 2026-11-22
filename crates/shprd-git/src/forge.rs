@@ -13,7 +13,7 @@
 //! a title can never turn into a command.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -132,6 +132,31 @@ pub trait Forge {
     ///
     /// Fails when the forge refuses to merge it.
     fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError>;
+
+    /// Whether pull request `number` merges cleanly into its base right now:
+    /// `Some(false)` when the forge says it conflicts, `None` when it cannot
+    /// say yet (a forge computes this lazily) or does not report it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the forge cannot be asked.
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        let _ = number;
+        Ok(None)
+    }
+
+    /// Closes pull request `number` unmerged, leaving `comment` on it.
+    ///
+    /// A forge that cannot close one does nothing: the stale pull request is
+    /// then left for a human, and a fresh attempt opens its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the forge refuses to close it.
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        let _ = (number, comment);
+        Ok(())
+    }
 }
 
 /// The real forge: `gh`, run in the repository the pull request belongs to.
@@ -342,6 +367,34 @@ impl Forge for GhForge {
         ];
         self.run(&args).map(|_| ())
     }
+
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        let args = vec![
+            "pr".to_string(),
+            "view".to_string(),
+            number.to_string(),
+            "--json".to_string(),
+            "mergeable".to_string(),
+        ];
+        let text = self.run(&args)?;
+        let value: Value = self.parse(&text, "pr view mergeable")?;
+        Ok(match value.get("mergeable").and_then(Value::as_str) {
+            Some("CONFLICTING") => Some(false),
+            Some("MERGEABLE") => Some(true),
+            _ => None,
+        })
+    }
+
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        let args = vec![
+            "pr".to_string(),
+            "close".to_string(),
+            number.to_string(),
+            "--comment".to_string(),
+            comment.to_string(),
+        ];
+        self.run(&args).map(|_| ())
+    }
 }
 
 /// A forge that records what it was asked and answers from a script.
@@ -377,6 +430,8 @@ struct FakeState {
     /// True when `merge` leaves the pull request unmerged, standing in for a
     /// forge that accepted the call without merging anything.
     merge_silent: bool,
+    /// The pull requests the forge reports as conflicting with their base.
+    conflicting: BTreeSet<u64>,
 }
 
 impl Default for FakeState {
@@ -389,6 +444,7 @@ impl Default for FakeState {
             create_url: None,
             merge_fails: false,
             merge_silent: false,
+            conflicting: BTreeSet::new(),
         }
     }
 }
@@ -437,6 +493,9 @@ impl FakeForge {
                     what: String::from("script row number"),
                     detail: row.to_string(),
                 })?;
+                if row.get("mergeable").and_then(Value::as_bool) == Some(false) {
+                    state.conflicting.insert(number);
+                }
                 state.statuses.insert(number, Self::status_from(row)?);
             }
         }
@@ -505,6 +564,11 @@ impl FakeForge {
     /// merge settled gets tested.
     pub fn silence_merges(&self) {
         self.state.borrow_mut().merge_silent = true;
+    }
+
+    /// Makes `mergeable` report pull request `number` as conflicting.
+    pub fn set_conflicting(&self, number: u64) {
+        self.state.borrow_mut().conflicting.insert(number);
     }
 
     /// Scripts the status `status` for pull request `number`.
@@ -596,6 +660,23 @@ impl Forge for FakeForge {
                 merged: false,
                 head_sha: String::new(),
             }))
+    }
+
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        self.record(format!("mergeable {number}"));
+        Ok(self
+            .state
+            .borrow()
+            .conflicting
+            .contains(&number)
+            .then_some(false))
+    }
+
+    fn close(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        self.record(format!("close {number} {comment}"));
+        let mut state = self.state.borrow_mut();
+        state.open.retain(|pr| pr.number != number);
+        Ok(())
     }
 
     fn merge(&self, number: u64, head_sha: &str) -> Result<(), ForgeError> {
