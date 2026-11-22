@@ -7,5 +7,5 @@
 /web/dist
 
 # Proof notes live in the worktree, never in the repository.
-proof/
+/proof/
 .shprd/proof/
