@@ -608,7 +608,9 @@ test("a read given up on changes nothing if it finishes late (SHPR-80)", async (
   release();
   await read;
   assert.equal(view.state, before, "the stale read left the board alone");
-  assert.equal(view.chat.messages.length, 0, "and the conversation");
+  // The conversation is read first, while this read still owned the view, so it is
+  // already folded in before the board read is given up on.
+  assert.equal(view.chat.messages.length, 1, "the conversation read while it was current stays");
 });
 
 // --- optimistic echo (m11-chat-latency) ---
