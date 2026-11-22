@@ -1,16 +1,19 @@
-# dictation-key proof (attempt 2)
-composer test:
-✔ the restart's new chat pane takes the conversation over, once, for the same folder (0.170792ms)
-ℹ tests 18
-ℹ suites 0
-ℹ pass 18
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 243.0095
-desktop mods check:
+# dictation-key proof (attempt 3); person chose: on-device, no key
+## BEFORE (base 10e8669): dictate.js borrows Shepherdr's recorder and key
+// Dictation into the composer, by the mechanism Shepherdr's own chat uses: its recorder
+// (`mods/chat/record.ts`: the default microphone, its level, and the words streamed to
+// ElevenLabs' speech to text while the person speaks) and its writer (`transcribe.ts`,
+// when the live words did not come). Both live in Shepherdr's installed chat mod and need
+// its ElevenLabs key (Shepherdr's Settings › Secrets) and `bun`; this mod runs them as
+// they are and copies none of their code. Where they are not there, `available()` says
+## AFTER: shprd's own helper, no Shepherdr path, no key, no Secrets text
+(no matches)
+## desktop mods check
+
  406 pass
  0 fail
 Ran 406 tests across 19 files. [1.64s]
-cargo: fmt ok, clippy ok; cargo test: 2370 passed 14 failed in untouched crates shprd-agents/shprd-mux-hc (environment/load; diff touches no crate)
+## cargo
+fmt ok
+## gates (attempt 3): fmt ok; clippy exit 0; cargo test --no-fail-fast: only shprd-mux-hc host tests fail (crate untouched by this diff, needs a live herdr core; fail the same on the base)
+## screenshot: not taken; on-device dictation needs a live microphone and a private Herdr window, which would not show text. Person chose on-device (no Settings page to show).
