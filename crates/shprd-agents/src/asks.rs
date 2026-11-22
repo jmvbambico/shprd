@@ -710,6 +710,100 @@ mod tests {
         assert_eq!(value["hooks"]["Stop"].as_array().map(Vec::len), Some(1));
     }
 
+    /// Folds the OSC 7501 reports in `bytes` the way a terminal does: the last
+    /// state report wins.
+    fn fold_status(bytes: &[u8]) -> Option<shprd_mux_hc::model::AgentState> {
+        use shprd_mux_hc::osc::{Report, ReportWord, scan};
+        let mut state = None;
+        for found in scan(bytes) {
+            let Some(report) = found.body.and_then(Report::parse) else {
+                continue;
+            };
+            if let ReportWord::State(next) = report.word {
+                state = Some(next);
+            }
+        }
+        state
+    }
+
+    /// Runs a hook command from the settings file with `/dev/tty` pointed at
+    /// `tty`, a file standing in for the agent's terminal, and returns what
+    /// the terminal received.
+    fn run_hook_on(command: &str, tty: &Path) -> Vec<u8> {
+        let command = command.replace("/dev/tty", &tty.display().to_string());
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .status()
+            .expect("run hook");
+        assert!(status.success(), "{command}");
+        std::fs::read(tty).expect("read tty")
+    }
+
+    /// G5, end to end: blocked -> answered -> no longer Needs you, for the
+    /// coordinator's worktree and for a task worker's. The hooks the installer
+    /// writes are run for real and their output is read by the OSC 7501 parser
+    /// that feeds the pane header and sidebar.
+    #[test]
+    fn a_blocked_claude_stops_needing_you_once_the_prompt_is_answered() {
+        use crate::spec::SettleEvent;
+        use shprd_mux_hc::model::AgentState;
+        for role in ["coordinator", "worker"] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let worktree = dir.path().join(role);
+            std::fs::create_dir_all(&worktree).expect("worktree");
+            let mut spec = claude_spec();
+            spec.settle = vec![
+                SettleEvent {
+                    event: "PostToolUse".to_owned(),
+                    state: "working".to_owned(),
+                },
+                SettleEvent {
+                    event: "Stop".to_owned(),
+                    state: "idle".to_owned(),
+                },
+            ];
+            let installer = ClaudeAskHook::new(&spec, "claude");
+            let (hook, binary) = paths(&worktree);
+            let hook_paths = AskHookPaths::new(&hook, &worktree, &binary);
+            installer.install(&hook_paths).expect("install");
+            let text = std::fs::read_to_string(worktree.join(".claude/settings.local.json"))
+                .expect("read settings");
+            let value: serde_json::Value = serde_json::from_str(&text).expect("parse");
+            let command_of = |event: &str| -> String {
+                value["hooks"][event][0]["hooks"][0]["command"]
+                    .as_str()
+                    .expect("command")
+                    .to_owned()
+            };
+
+            // Claude asks for a permission: the terminal is blocked.
+            let blocked = b"\x1b]7501;state=blocked:kind=permission\x1b\\";
+            assert!(fold_status(blocked).expect("blocked").needs_a_person());
+
+            // The prompt is still open: the ask's own event reports nothing, so
+            // it stays blocked (no regression).
+            assert!(!command_of("PermissionRequest").contains("7501"), "{role}");
+
+            // The person answers and Claude runs the tool: the next status
+            // is working, so Needs you drops.
+            let tty = dir.path().join("tty-working");
+            std::fs::write(&tty, blocked).expect("seed tty");
+            let seen = run_hook_on(&command_of("PostToolUse"), &tty);
+            let after = fold_status(&seen).expect("a status");
+            assert_eq!(after, AgentState::Working, "{role}");
+            assert!(!after.needs_a_person(), "{role}");
+
+            // The turn ends with nothing open: idle, never Needs you.
+            let tty = dir.path().join("tty-idle");
+            std::fs::write(&tty, blocked).expect("seed tty");
+            let seen = run_hook_on(&command_of("Stop"), &tty);
+            let after = fold_status(&seen).expect("a status");
+            assert_eq!(after, AgentState::Idle, "{role}");
+            assert!(!after.needs_a_person(), "{role}");
+        }
+    }
+
     #[test]
     fn claude_keeps_what_else_the_settings_file_held() {
         let dir = tempfile::tempdir().expect("temp dir");

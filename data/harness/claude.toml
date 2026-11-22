@@ -176,6 +176,10 @@ event = "PermissionRequest"
 # terminal (OSC 7501 through /dev/tty): a tool that runs after an answer says
 # working, a turn that ends says idle. PermissionRequest is never listed, so a
 # prompt that is still open stays blocked.
+# Checked for the others: pi and opencode have no ask hook (`supported = false`), so
+# nothing sets `blocked` for them and there is nothing to settle; Codex's only
+# hook is PermissionRequest and it reports no status of its own, so the status
+# word comes from its screen and clears when the prompt does.
 [[asks.settle]]
 event = "PostToolUse"
 state = "working"

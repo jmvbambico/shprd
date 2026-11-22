@@ -1326,6 +1326,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shprd-core",
+ "shprd-mux-hc",
  "tempfile",
  "thiserror",
  "toml",

@@ -1,7 +1,5 @@
-G5 proof (no live claude window; see the hand-in summary for why):
-- settle-hook-pty.txt: the hook command shprd now installs for Claude, run as a child of a pty,
-  writes ESC]7501;state=working ESC\ to that terminal (what hc reads as the status).
-- workspace-tests.log: cargo test --workspace; the shprd-mux-hc host/client and shprd serve
-  tests that fail under load pass when run alone (mux-hc with --test-threads=1).
-- unit tests: asks::tests::claude_settles_a_blocked_status_once_the_prompt_is_answered and
-  spec::tests::claude_settles_a_blocked_status_without_touching_the_open_prompt.
+G5 proof. No live claude window was opened: a private Herdr window with a real claude permission prompt needs a signed-in claude and a model call, which a worker must not make here.
+- asks::tests::a_blocked_claude_stops_needing_you_once_the_prompt_is_answered (shprd-agents): installs the hooks into a coordinator and a worker worktree, runs the real PostToolUse and Stop hook commands against a stand-in terminal, and folds their output with the OSC 7501 parser: blocked -> working / idle, never Needs you; the PermissionRequest hook reports nothing, so an open prompt stays blocked.
+- settle-hook-pty.txt: the hook command run under a real pty writes ESC]7501;state=working ESC\.
+- workspace-tests.log: cargo test --workspace --no-fail-fast.
+- Codex, Pi, OpenCode: pi/opencode have no ask hook; codex's only hook is PermissionRequest and sets no status (noted in data/harness/claude.toml).
