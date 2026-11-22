@@ -1,0 +1,16 @@
+# dictation-key proof (attempt 2)
+composer test:
+✔ the restart's new chat pane takes the conversation over, once, for the same folder (0.170792ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 243.0095
+desktop mods check:
+ 406 pass
+ 0 fail
+Ran 406 tests across 19 files. [1.64s]
+cargo: fmt ok, clippy ok; cargo test: 2370 passed 14 failed in untouched crates shprd-agents/shprd-mux-hc (environment/load; diff touches no crate)

@@ -156,7 +156,7 @@ stopSource.resume()
 let dropSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 dropSource.setEventHandler { engine.stop(); task.cancel(); exit(0) }
 dropSource.resume()
-// the program that started it gone: nobody will ask for the words
+// if the program that started it is gone, nobody will ask for the words
 let parent = getppid()
 let watch = DispatchSource.makeTimerSource(queue: .global())
 watch.schedule(deadline: .now() + 0.5, repeating: 0.5)
