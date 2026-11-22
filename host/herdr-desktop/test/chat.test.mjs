@@ -692,3 +692,22 @@ test("a page read twice from one cursor is folded once", async () => {
   await Promise.all([view.pull(COORDINATOR, view.slot), view.pull(COORDINATOR, view.slot)]);
   assert.equal(view.chat.messages.length, 1);
 });
+
+test("a refused send keeps words typed while it was in flight, with the refused words before them", async () => {
+  const { view } = panel([page({ messages: [] })]);
+  view.input.set_value("first");
+  view.client.call = async (method) => {
+    if (method === "GET") return page({ messages: [] });
+    view.input.set_value("second");
+    throw new Error("no open pane");
+  };
+  await view.send();
+  assert.equal(view.input.value(), "first\nsecond");
+});
+
+test("a read of one conversation never settles another conversation's echo", async () => {
+  const { view } = panel([page({ messages: [{ role: "user", text: "same words", at_ms: 1 }], cursor: "s1@1" })]);
+  view.echoes = [{ ...echoOf({ text: "same words" }), slot: "other-slot", sent: true }];
+  await view.pull(COORDINATOR, view.slot);
+  assert.equal(view.echoes.length, 1);
+});

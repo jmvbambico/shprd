@@ -396,7 +396,10 @@ export default class Chat extends View {
     if (keep !== null && (this.chat.session !== was || Date.now() >= keep.until)) this.keep = null;
     // A turn the transcript now holds is no longer an echo; a restart of the agent
     // starts another conversation, which no echo of the old one belongs to.
-    this.echoes = settleEchoes(this.echoes ?? [], answer?.messages ?? []);
+    // Only this conversation's echoes: another task's echo is not settled by this one's lines.
+    const here = (this.echoes ?? []).filter((echo) => echo.slot === slot);
+    const others = (this.echoes ?? []).filter((echo) => echo.slot !== slot);
+    this.echoes = [...others, ...settleEchoes(here, answer?.messages ?? [])];
     if (this.chat.session !== was && was !== null) this.echoes = (this.echoes ?? []).filter((echo) => echo.slot !== slot);
     return true;
   }
@@ -769,7 +772,9 @@ export default class Chat extends View {
       // The echo goes, and the words stay in the composer: a refused line is retyped, not lost.
       this.echoes = (this.echoes ?? []).filter((held) => held !== echo);
       if (slot === this.slot) {
-        if (this.input.value().trim() === "") this.input.set_value(typed);
+        // Words typed while the send was in flight stay; the refused words go back before them.
+        const now = this.input.value();
+        this.input.set_value(now.trim() === "" ? typed : `${typed}\n${now}`);
         this.files = [...taken, ...(this.files ?? [])];
       }
       this.refusal = reason(err);
