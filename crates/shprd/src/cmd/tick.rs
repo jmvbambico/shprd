@@ -40,6 +40,7 @@
 //! failed is printed and stays in the report — it never stops the other steps,
 //! so it is not the verb's own failure.
 
+use shprd_core::state::TaskStatus;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -125,7 +126,7 @@ pub(crate) fn worker_with_hub(
     let spawn_actor = actor.clone();
     let start: Starter = std::sync::Arc::new(move |repo: &Path, task: &str| {
         let spawn_ctx = Ctx::new(repo.to_path_buf(), spawn_actor.clone(), false, true);
-        crate::cmd::agent::start_for_tick(&spawn_ctx, &spawn_home, task)
+        start_once(&spawn_ctx, &spawn_home, repo, task)
     });
     // The engine starts the reviewer on a hand-in, as `shprd agent review` does:
     // the closure is that verb's own `review()`, so the cross-vendor rule, the
@@ -226,6 +227,30 @@ pub(crate) fn worker_with_hub(
         hub,
         news,
     })
+}
+
+/// Starts `task` unless another pass already has.
+///
+/// The service's own tick and a coordinator's `shprd tick` can plan the same
+/// start in the same moment. The start lock is held from the fresh read of the
+/// log to the spawn, so the second pass waits, then finds the task running and
+/// leaves it alone: it is not a failure, and nothing is written about it.
+fn start_once(ctx: &Ctx, home: &Path, repo: &Path, task: &str) -> Result<String, String> {
+    let name = crate::cmd::spawn::repo_name(repo).map_err(|err| err.to_string())?;
+    let (run, _) = run_and_briefs(repo, home)?;
+    let _lock =
+        crate::cmd::run_lock::lock_start(home, &name, &run).map_err(|err| err.to_string())?;
+    let fresh = ctx.state().map_err(|err| err.to_string())?;
+    if let Some(found) = fresh.tasks.get(task)
+        && !found.attempts.is_empty()
+        && matches!(
+            found.status,
+            TaskStatus::Working | TaskStatus::Reported | TaskStatus::Passed
+        )
+    {
+        return Ok(format!("{task} was already started by another pass"));
+    }
+    crate::cmd::agent::start_for_tick(ctx, home, task)
 }
 
 /// The run id and the briefs directory of `repo`, as a tab-closing closure needs

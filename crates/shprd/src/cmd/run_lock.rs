@@ -33,7 +33,22 @@ pub struct RunLock {
 /// therefore takes this before it reads the head, so whatever landed while it
 /// waited is part of what it works on.
 pub fn lock_run(home: &Path, repo_name: &str, run: &str) -> Result<RunLock, CliError> {
-    let path = lock_path(home, repo_name, run);
+    take(lock_path(home, repo_name, run))
+}
+
+/// Takes the run's start lock, blocking until it is free.
+///
+/// Two start passes (the service's own and a coordinator's `shprd tick`) can
+/// pick the same queued task in the same moment. A start holds this lock from
+/// reading the log to writing the attempt, so the second one waits, then sees
+/// the task already started and leaves it alone. It is not the integration
+/// lock: a start can take a while and must not hold up an integrate.
+pub fn lock_start(home: &Path, repo_name: &str, run: &str) -> Result<RunLock, CliError> {
+    take(start_lock_path(home, repo_name, run))
+}
+
+/// Opens `path` and takes an exclusive advisory lock on it.
+fn take(path: PathBuf) -> Result<RunLock, CliError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating {}", dir.display()))
@@ -61,6 +76,13 @@ fn lock_path(home: &Path, repo_name: &str, run: &str) -> PathBuf {
     home.join(".shprd")
         .join("locks")
         .join(format!("{repo_name}-{run}-int.lock"))
+}
+
+/// The file the run's start lock sits on.
+fn start_lock_path(home: &Path, repo_name: &str, run: &str) -> PathBuf {
+    home.join(".shprd")
+        .join("locks")
+        .join(format!("{repo_name}-{run}-start.lock"))
 }
 
 #[cfg(test)]

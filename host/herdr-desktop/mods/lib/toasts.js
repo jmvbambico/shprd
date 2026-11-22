@@ -218,6 +218,20 @@ export function passItem(state) {
   const first = failed[0];
   const where = first.task ? ` on ${first.task}` : "";
   const others = failed.length - 1;
+  // A task that could not start is said in plain words: which task, and that
+  // nothing was lost. The engine's own wording (pass, attempt, branch names)
+  // stays in its log.
+  if (first.step === "start" && first.task) {
+    return {
+      id: passId(tick.at_ms),
+      level: "error",
+      title: "A task could not start",
+      body: clip(
+        `${first.task} could not start. Nothing was lost; it is still waiting to be started again.${others > 0 ? ` (+${others} more)` : ""}`,
+      ),
+      task: first.task,
+    };
+  }
   return {
     id: passId(tick.at_ms),
     level: "error",
