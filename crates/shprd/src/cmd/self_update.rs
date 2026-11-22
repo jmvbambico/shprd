@@ -9,7 +9,8 @@
 //! Every path is an explicit argument and none has a default, so a missing one is
 //! a usage error rather than the person's real install. This module reads no
 //! settings and resolves no home of its own; the one environment variable it
-//! reads is `CARGO_HOME`/`HOME`, to find rustup's `cargo`, at the edge.
+//! reads are `CARGO_HOME`, `RUSTUP_HOME` and `HOME`, to find the pinned
+//! toolchain's `cargo`, at the edge.
 
 use std::cell::RefCell;
 use std::fs;
@@ -185,27 +186,24 @@ impl<'a> Machine<'a> {
         let _ = self.repo_git().run(&["worktree", "prune"]);
     }
 
-    /// The command that builds shprd: the override the caller gave, else rustup's
-    /// own `cargo` (never whichever `cargo` is first on `PATH`: Homebrew's ignores
-    /// `rust-toolchain.toml`).
+    /// The command that builds shprd: the override the caller gave, else a
+    /// `cargo` that honours `rust-toolchain.toml` (see [`find_cargo`]; never
+    /// whichever `cargo` is first on `PATH`: Homebrew's ignores the pin).
     fn build_command(&self) -> Result<Vec<String>, String> {
         if !self.args.build.is_empty() {
             return Ok(self.args.build.clone());
         }
-        let cargo_home = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
-        let rustup_cargo = cargo_home
-            .map(|dir| dir.join("bin").join("cargo"))
-            .filter(|path| path.is_file());
-        // No fallback to the `cargo` first on PATH: it may be one that ignores
-        // the pinned toolchain, and a build with the wrong compiler is worse
-        // than no build.
-        let Some(program) = rustup_cargo else {
-            return Err(String::from(
-                "rustup's cargo was not found ($CARGO_HOME/bin/cargo), so shprd was not built with the pinned toolchain",
-            ));
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let places = CargoPlaces {
+            cargo_home: std::env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.as_ref().map(|home| home.join(".cargo"))),
+            rustup_home: std::env::var_os("RUSTUP_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.as_ref().map(|home| home.join(".rustup"))),
+            repo: self.args.repo.clone(),
         };
+        let program = find_cargo(&places, &rustup_which_cargo)?;
         Ok(vec![
             program.to_string_lossy().into_owned(),
             "build".into(),
@@ -214,6 +212,101 @@ impl<'a> Machine<'a> {
             "shprd".into(),
         ])
     }
+}
+
+/// Where to look for a pinned-toolchain `cargo`, read from the environment at
+/// the edge so [`find_cargo`] stays testable.
+struct CargoPlaces {
+    /// `$CARGO_HOME`, else `~/.cargo`.
+    cargo_home: Option<PathBuf>,
+    /// `$RUSTUP_HOME`, else `~/.rustup`.
+    rustup_home: Option<PathBuf>,
+    /// The repository, whose `rust-toolchain.toml` names the toolchain.
+    repo: PathBuf,
+}
+
+/// Asks `rustup which cargo` (rustup from `PATH`) in `repo`; `None` when rustup
+/// is missing, fails, or names a file that is not there.
+fn rustup_which_cargo(repo: &Path) -> Option<PathBuf> {
+    let output = Command::new("rustup")
+        .args(["which", "cargo"])
+        .current_dir(repo)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let path = PathBuf::from(text.trim());
+    (!text.trim().is_empty() && path.is_file()).then_some(path)
+}
+
+/// The channel named in the repository's `rust-toolchain.toml`, if any.
+fn pinned_channel(repo: &Path) -> Option<String> {
+    let text = fs::read_to_string(repo.join("rust-toolchain.toml")).ok()?;
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "channel").then(|| value.trim().trim_matches(['"', '\'']).to_string())
+    })
+}
+
+/// A `cargo` that honours `rust-toolchain.toml`, in order: `$CARGO_HOME/bin/cargo`
+/// when it resolves to a real file (a dangling link does not); else what
+/// `rustup which cargo` says in the repo; else the pinned toolchain's own
+/// `$RUSTUP_HOME/toolchains/<channel>-<host>/bin/cargo`. When none is found the
+/// error names each place that was looked at.
+fn find_cargo(
+    places: &CargoPlaces,
+    rustup_which: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let mut looked = Vec::new();
+    if let Some(home) = &places.cargo_home {
+        let path = home.join("bin").join("cargo");
+        if path.is_file() {
+            return Ok(path);
+        }
+        looked.push(format!("{} (missing or a broken link)", path.display()));
+    } else {
+        looked.push("the cargo folder (CARGO_HOME and HOME are not set)".to_string());
+    }
+    if let Some(path) = rustup_which(&places.repo) {
+        return Ok(path);
+    }
+    looked.push("what `rustup which cargo` says (rustup is missing or has no answer)".to_string());
+    match (pinned_channel(&places.repo), places.rustup_home.as_ref()) {
+        (Some(channel), Some(rustup_home)) => {
+            let toolchains = rustup_home.join("toolchains");
+            let prefix = format!("{channel}-");
+            let mut found: Vec<PathBuf> = fs::read_dir(&toolchains)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                .map(|entry| entry.path().join("bin").join("cargo"))
+                .filter(|path| path.is_file())
+                .collect();
+            found.sort();
+            if let Some(path) = found.into_iter().next() {
+                return Ok(path);
+            }
+            looked.push(format!(
+                "the {channel} toolchain folder under {}",
+                toolchains.display()
+            ));
+        }
+        (None, _) => looked.push(
+            "the toolchain named in rust-toolchain.toml (the file or its channel is missing)"
+                .to_string(),
+        ),
+        (_, None) => {
+            looked.push("the rustup folder (RUSTUP_HOME and HOME are not set)".to_string());
+        }
+    }
+    Err(format!(
+        "no cargo that honours the pinned toolchain was found, so shprd was not built; looked at: {}",
+        looked.join("; ")
+    ))
 }
 
 /// The last lines of a command's output, as one short reason.
@@ -523,5 +616,93 @@ impl Steps for Machine<'_> {
         let up = self.wait_for_new_service();
         installed?;
         up.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+    }
+
+    /// A repo pinned to 1.99.1, a cargo home and a rustup home in `root`.
+    fn places(root: &Path) -> CargoPlaces {
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            repo.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.99.1\"\n",
+        )
+        .unwrap();
+        CargoPlaces {
+            cargo_home: Some(root.join("cargo")),
+            rustup_home: Some(root.join("rustup")),
+            repo,
+        }
+    }
+
+    fn no_rustup(_: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    #[test]
+    fn a_working_cargo_home_cargo_is_used_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let places = places(dir.path());
+        let cargo = dir.path().join("cargo/bin/cargo");
+        touch(&cargo);
+        touch(&dir.path().join("rustup/toolchains/1.99.1-x/bin/cargo"));
+        assert_eq!(find_cargo(&places, &no_rustup), Ok(cargo));
+    }
+
+    #[test]
+    fn a_dangling_cargo_home_link_falls_through_to_the_toolchain_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let places = places(dir.path());
+        fs::create_dir_all(dir.path().join("cargo/bin")).unwrap();
+        symlink("rustup", dir.path().join("cargo/bin/cargo")).unwrap();
+        symlink(
+            "/nonexistent/rustup-init",
+            dir.path().join("cargo/bin/rustup"),
+        )
+        .unwrap();
+        let tool = dir
+            .path()
+            .join("rustup/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo");
+        touch(&tool);
+        touch(
+            &dir.path()
+                .join("rustup/toolchains/1.50.0-aarch64-apple-darwin/bin/cargo"),
+        );
+        assert_eq!(find_cargo(&places, &no_rustup), Ok(tool));
+    }
+
+    #[test]
+    fn rustup_which_comes_before_the_toolchain_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let places = places(dir.path());
+        touch(&dir.path().join("rustup/toolchains/1.99.1-x/bin/cargo"));
+        let which = dir.path().join("brew/cargo");
+        touch(&which);
+        let answer = which.clone();
+        assert_eq!(
+            find_cargo(&places, &move |_| Some(answer.clone())),
+            Ok(which)
+        );
+    }
+
+    #[test]
+    fn nothing_found_names_every_place_in_plain_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let places = places(dir.path());
+        let err = find_cargo(&places, &no_rustup).unwrap_err();
+        assert!(err.contains("cargo/bin/cargo"), "{err}");
+        assert!(err.contains("rustup which cargo"), "{err}");
+        assert!(err.contains("1.99.1 toolchain folder"), "{err}");
     }
 }
