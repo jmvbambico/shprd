@@ -1,28 +1,44 @@
-// Dictation into the composer, by the mechanism Shepherdr's own chat uses: its recorder
-// (`mods/chat/record.ts`: the default microphone, its level, and the words streamed to
-// ElevenLabs' speech to text while the person speaks) and its writer (`transcribe.ts`,
-// when the live words did not come). Both live in Shepherdr's installed chat mod and need
-// its ElevenLabs key (Shepherdr's Settings › Secrets) and `bun`; this mod runs them as
-// they are and copies none of their code. Where they are not there, `available()` says
+// Dictation into the composer, on this Mac and with no key: a small helper of shprd's own
+// (`dictate-helper.js`, built once with the Mac's `swiftc`) records the default microphone while
+// Apple's speech recognizer writes the words down on-device. No account, no key, no audio leaves
+// the machine and none is kept. Where that cannot run (not a Mac, no `swiftc`), `available()` says
 // so and the composer has no mic rather than a dead one.
 //
-// The text goes into the box to edit: nothing is sent by itself and no audio is kept.
+// The text goes into the box to edit: nothing is sent by itself.
 
 import { appHome, exec, readTextFile } from "herdr";
+import { INFO_PLIST, SOURCE } from "./dictate-helper.js";
 
-const SHEPHERDR = () => `${appHome()}/mods/chat`;
 const DIR = () => `${appHome()}/data/shprd-chat-dictation`;
 
-/** bun where a Dock-launched window's PATH lacks it. */
-const BUN_PATH = 'PATH="$PATH:$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"; export PATH; ';
+/** A short stable name for this version of the helper, so a changed helper is rebuilt. */
+function stamp(text) {
+  let h = 5381;
+  for (let i = 0; i < text.length; i += 1) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
 
-/** Whether Shepherdr's recorder, its writer and `bun` are all here. */
+/** Where the built helper lives (one folder per version of its source). */
+const HELPER_DIR = () => `${DIR()}/helper-${stamp(SOURCE + INFO_PLIST)}`;
+
+/**
+ * A shell snippet that builds the helper into "$H" when it is not there ($H, $SRC and $PLIST are
+ * its arguments' names); it leaves the build's complaint in "$H/build.log".
+ */
+const BUILD =
+  '[ -x "$H/shprd-dictate" ] || { mkdir -p "$H" && printf %s "$SRC" > "$H/dictate.swift" && printf %s "$PLIST" > "$H/Info.plist" && ' +
+  'swiftc -O -o "$H/shprd-dictate.tmp" "$H/dictate.swift" -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$H/Info.plist" >"$H/build.log" 2>&1 && ' +
+  'mv "$H/shprd-dictate.tmp" "$H/shprd-dictate"; }';
+
+/** Whether this is a Mac whose `swiftc` has built the helper (builds it the first time: about half a minute). */
 export async function available() {
   const r = await exec("sh", [
     "-c",
-    `${BUN_PATH}command -v bun >/dev/null && [ -f "$1/record.ts" ] && [ -f "$1/transcribe.ts" ] && echo yes; true`,
+    `[ "$(uname)" = Darwin ] && command -v swiftc >/dev/null && H="$1" SRC="$2" PLIST="$3" && ${BUILD}; [ -x "$1/shprd-dictate" ] && echo yes; true`,
     "x",
-    SHEPHERDR(),
+    HELPER_DIR(),
+    SOURCE,
+    INFO_PLIST,
   ]).catch(() => null);
   return r?.stdout?.trim() === "yes";
 }
@@ -53,12 +69,15 @@ export class Dictation {
     this.n = Date.now();
     this.run = exec("sh", [
       "-c",
-      BUN_PATH +
-        'mkdir -p "$(dirname "$1")" && rm -f "$1" "$2" "$1.txt" && { bun "$3" "$1" "$2" </dev/null >/dev/null 2>&1 & echo $! > "$1.pid"; wait; }',
+      `H="$3" SRC="$4" PLIST="$5"; ${BUILD}; ` +
+        'mkdir -p "$(dirname "$1")" && rm -f "$1" "$2" "$1.txt" && { [ -x "$3/shprd-dictate" ] || { printf "!%s" "The dictation helper could not be built on this Mac." > "$2"; exit 0; }; ' +
+        '"$3/shprd-dictate" "$1" "$2" </dev/null >/dev/null 2>&1 & echo $! > "$1.pid"; wait; }',
       "x",
       this.file,
       this.levelFile,
-      `${SHEPHERDR()}/record.ts`,
+      HELPER_DIR(),
+      SOURCE,
+      INFO_PLIST,
     ]).catch(() => null);
   }
 
@@ -92,14 +111,6 @@ export class Dictation {
         said = JSON.parse((await readTextFile(`${file}.txt`).catch(() => null)) ?? "");
       } catch {
         said = null;
-      }
-      if (typeof said?.text !== "string") {
-        const r = await exec("sh", ["-c", BUN_PATH + 'bun "$1" "$2" </dev/null 2>/dev/null', "x", `${SHEPHERDR()}/transcribe.ts`, file]);
-        try {
-          said = JSON.parse(r.stdout.trim().split("\n").pop());
-        } catch {
-          said = null;
-        }
       }
       if (!mine()) return "";
       if (typeof said?.text === "string") return said.text;

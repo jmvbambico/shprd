@@ -354,7 +354,7 @@ test("Esc stops a working agent while the box is empty; Stop asks the service", 
   assert.equal(idle.view.working(), false);
 });
 
-test("the mic is offered only where Shepherdr's recorder and bun are", async () => {
+test("the mic is offered only where shprd's own on-device helper is built", async () => {
   herdr.setExec(async () => ({ code: 0, stdout: "yes\n", stderr: "" }));
   assert.equal(await available(), true);
   herdr.setExec(async () => ({ code: 0, stdout: "", stderr: "" }));
@@ -376,7 +376,9 @@ test("a dictation records, then its words come back to put in the box", async ()
   assert.equal(dict.state, "recording");
   assert.equal(await dict.stop(), "hello world");
   assert.equal(dict.state, "idle");
-  assert.ok(ran.some((line) => line.includes("record.ts") || line.includes("kill -INT")));
+  // No key, no other product: nothing it runs or says names Shepherdr, ElevenLabs or Secrets.
+  assert.ok(!/shepherdr|elevenlabs|secrets|record\.ts|bun/i.test(ran.join("\n")), "no borrowed recorder");
+  assert.ok(ran.some((line) => line.includes("shprd-dictate") || line.includes("kill -INT")));
   // A mic that cannot work cancels and says why.
   herdr.putFile(`${herdr.appHome()}/data/shprd-chat-dictation/t-2.level`, "!Microphone access is off.");
   Date.now = () => 2;
@@ -385,6 +387,21 @@ test("a dictation records, then its words come back to put in the box", async ()
   assert.equal(await dict.level(), 0);
   assert.equal(dict.error, "Microphone access is off.");
   assert.equal(dict.state, "idle");
+});
+
+test("dictation is on-device: the helper insists on it and a failed write says so plainly", async () => {
+  const { SOURCE } = await import("../mods/shprd-chat/dictate-helper.js");
+  assert.match(SOURCE, /requiresOnDeviceRecognition = true/);
+  assert.ok(!/https?:|xi-api-key|apikey/i.test(SOURCE), "no network, no key");
+  herdr.putFile(`${herdr.appHome()}/data/shprd-chat-dictation/t-3.wav.txt`, '{"error":"Couldn\'t write that down on this Mac. Try again."}');
+  herdr.setExec(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const dict = new Dictation("t");
+  const realNow = Date.now;
+  Date.now = () => 3;
+  dict.start();
+  Date.now = realNow;
+  assert.equal(await dict.stop(), "");
+  assert.equal(dict.error, "Couldn't write that down on this Mac. Try again.");
 });
 
 test("a restart the person asked for keeps the old messages and says why", () => {
