@@ -13,3 +13,24 @@
 /// adapter's own live tests need the same rule, and two copies would drift.
 #[path = "../../../shprd-mux-herdr/tests/support/herdr_env.rs"]
 pub mod herdr;
+
+/// Shprd's own session variables: a test run from inside a shprd session (a
+/// worker, the coordinator) inherits them, and the binary under test would
+/// then read the person's repo, actor or home instead of its fixture.
+const SESSION_VARS: &[&str] = &[
+    "SHPRD_REPO",
+    "SHPRD_ACTOR",
+    "SHPRD_BIN",
+    "SHPRD_HOME",
+    "SHPRD_TASK",
+];
+
+/// [`herdr::isolate`], plus removal of shprd's own session variables. `SHPRD_HOME`
+/// is then set to `anchor` by the herdr rule; a test that sets any of these on
+/// purpose does so after this call, and wins.
+pub fn isolate(command: &mut std::process::Command, anchor: &std::path::Path) {
+    for name in SESSION_VARS {
+        command.env_remove(name);
+    }
+    herdr::isolate(command, anchor);
+}

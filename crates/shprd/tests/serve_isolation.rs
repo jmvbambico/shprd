@@ -41,7 +41,8 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-use support::herdr::{PRIVATE_HC_SESSION, absent_socket, isolate};
+use support::herdr::{PRIVATE_HC_SESSION, absent_socket};
+use support::isolate;
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_shprd");
