@@ -39,6 +39,10 @@ use serde::{Deserialize, Serialize};
 /// data, the desktop's layout and mods, and the workspace manifests.
 pub const WATCHED: [&str; 4] = ["crates/", "data/", "host/herdr-desktop/", "Cargo."];
 
+const NOTHING_TO_DO: &str = "nothing needs doing; shprd is as it was";
+const BACK_ON_OLD: &str = "nothing needs doing; shprd is back on the version it had";
+const START_BY_HAND: &str = "start shprd again by hand: it may not be running";
+
 /// The most passes one run of the pipeline makes, so a request counter that
 /// keeps moving cannot hold the helper for ever.
 pub const MAX_PASSES: usize = 5;
@@ -75,12 +79,32 @@ impl Dirs {
         &self.root
     }
 
+    /// The machine-wide lock: one swap and restart at a time, whichever
+    /// repository asked for it.
     fn lock(&self) -> PathBuf {
         self.root.join("lock")
     }
 
-    fn request(&self) -> PathBuf {
-        self.root.join("request")
+    /// One repository's own folder. Its lock and request counter live here, so
+    /// a landing in one repository is never read as another's.
+    fn repo_dir(&self, repo: &str) -> PathBuf {
+        // FNV-1a: the same key in the service and in the helper, whatever
+        // version of Rust each was built with.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in repo.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        self.root.join("repos").join(format!("{hash:016x}"))
+    }
+
+    fn repo_lock(&self, repo: &str) -> PathBuf {
+        self.repo_dir(repo).join("lock")
+    }
+
+    /// The file holding `repo`'s request counter.
+    pub fn request(&self, repo: &str) -> PathBuf {
+        self.repo_dir(repo).join("request")
     }
 
     fn installed(&self) -> PathBuf {
@@ -139,26 +163,38 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+fn open_lock(path: &Path) -> Option<fs::File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .ok()
+}
+
 fn now_ms() -> u64 {
     use shprd_core::log::{Clock, SystemClock};
     SystemClock.now_ms()
 }
 
-/// Notes that something landed: the holder of the lock, or the next one, will
-/// look again. Returns the counter's new value.
-pub fn bump(dirs: &Dirs) -> Result<u128, String> {
+/// Notes that something landed in `repo`: the holder of its lock, or the next
+/// one, will look again. Returns the counter's new value.
+pub fn bump(dirs: &Dirs, repo: &str) -> Result<u128, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
     // Two bumps in one clock tick must still differ, or the holder would read
     // them as one.
-    let next = nanos.max(read_request(dirs).saturating_add(1));
-    write_file(&dirs.request(), next.to_string().as_bytes())?;
+    let next = nanos.max(read_request(dirs, repo).saturating_add(1));
+    write_file(&dirs.request(repo), next.to_string().as_bytes())?;
     Ok(next)
 }
 
-fn read_request(dirs: &Dirs) -> u128 {
-    fs::read_to_string(dirs.request())
+fn read_request(dirs: &Dirs, repo: &str) -> u128 {
+    fs::read_to_string(dirs.request(repo))
         .ok()
         .and_then(|text| text.trim().parse().ok())
         .unwrap_or(0)
@@ -185,8 +221,8 @@ pub trait Steps {
     /// Tells the coordinator, in a line.
     fn say(&self, line: &str);
     /// Puts a card in front of the person: something went wrong and they should
-    /// know, in plain words.
-    fn escalate(&self, body: &str);
+    /// know, in plain words. `default_action` is what happens if they do nothing.
+    fn escalate(&self, body: &str, default_action: &str);
     /// Stops the service by its recorded pid. Whatever restarts the service
     /// then starts it from the swapped binary.
     fn restart(&self) -> Result<(), String>;
@@ -200,7 +236,8 @@ pub trait Steps {
 /// How one pass ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Another helper holds the lock; it will see this landing.
+    /// Another helper for this repository holds its lock; it will see this
+    /// landing.
     Busy,
     /// The installed commit is the head: nothing to do.
     UpToDate,
@@ -246,30 +283,39 @@ impl<S: Steps> Pipeline<'_, S> {
     }
 
     fn locked(&self) -> Vec<Outcome> {
-        let file = match fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.dirs.lock())
-        {
-            Ok(file) => file,
-            Err(err) => return vec![Outcome::Unknown(err.to_string())],
+        // This repository's own lock first: a second helper for the same
+        // repository leaves, because the holder sees its landing (the counter).
+        let Some(mine) = open_lock(&self.dirs.repo_lock(self.repo)) else {
+            return vec![Outcome::Unknown(String::from(
+                "the lock could not be opened",
+            ))];
         };
-        if file.try_lock().is_err() {
+        if mine.try_lock().is_err() {
             return vec![Outcome::Busy];
+        }
+        // Then the machine's: another repository's update is one binary being
+        // swapped, so this one waits its turn rather than being dropped.
+        let Some(machine) = open_lock(&self.dirs.lock()) else {
+            return vec![Outcome::Unknown(String::from(
+                "the lock could not be opened",
+            ))];
+        };
+        if let Err(err) = machine.lock() {
+            return vec![Outcome::Unknown(err.to_string())];
         }
         let mut outcomes = Vec::new();
         for _ in 0..MAX_PASSES {
-            let seen = read_request(self.dirs);
+            let seen = read_request(self.dirs, self.repo);
             let outcome = self.once();
             let finished = matches!(outcome, Outcome::Stuck(_));
             outcomes.push(outcome);
-            if finished || read_request(self.dirs) == seen {
+            if finished || read_request(self.dirs, self.repo) == seen {
                 break;
             }
         }
-        // Dropping the file releases the lock.
-        drop(file);
+        // Dropping the files releases the locks.
+        drop(machine);
+        drop(mine);
         outcomes
     }
 
@@ -307,7 +353,7 @@ impl<S: Steps> Pipeline<'_, S> {
                     "shprd could not build the accepted change ({short}), so it is still running the version it had. Nothing was changed. Reason: {why}"
                 );
                 self.finish(false, &line);
-                self.steps.escalate(&line);
+                self.steps.escalate(&line, NOTHING_TO_DO);
                 return Outcome::BuildFailed(why);
             }
         };
@@ -319,7 +365,7 @@ impl<S: Steps> Pipeline<'_, S> {
                 "shprd built the accepted change ({short}) but could not put it in place, so it is still running the version it had. Reason: {why}"
             );
             self.finish(false, &line);
-            self.steps.escalate(&line);
+            self.steps.escalate(&line, NOTHING_TO_DO);
             return Outcome::Stuck(why);
         }
         let came_up = self
@@ -346,7 +392,7 @@ impl<S: Steps> Pipeline<'_, S> {
                         "The new shprd ({short}) did not start properly, so shprd went back to the version it had before. Reason: {why}"
                     );
                     self.finish(false, &line);
-                    self.steps.escalate(&line);
+                    self.steps.escalate(&line, BACK_ON_OLD);
                     self.steps.say(&line);
                     Outcome::RolledBack(why)
                 }
@@ -355,7 +401,7 @@ impl<S: Steps> Pipeline<'_, S> {
                         "The new shprd ({short}) did not start properly and putting the old one back failed too ({also}). shprd may not be running: start it again by hand. Reason: {why}"
                     );
                     self.finish(false, &line);
-                    self.steps.escalate(&line);
+                    self.steps.escalate(&line, START_BY_HAND);
                     Outcome::Stuck(also)
                 }
             },
@@ -421,7 +467,7 @@ impl Trigger {
         if !self.enabled(repo) {
             return;
         }
-        if let Err(why) = bump(&self.dirs) {
+        if let Err(why) = bump(&self.dirs, &repo.to_string_lossy()) {
             tracing::warn!(%why, "the self-update request could not be recorded");
         }
         let job = Job {
@@ -512,7 +558,7 @@ mod tests {
             self.calls.borrow_mut().push(format!("build {head}"));
             for next in self.landings_during_build.borrow_mut().drain(..) {
                 self.heads.borrow_mut().push(next);
-                bump(self.dirs).expect("a bump");
+                bump(self.dirs, "/repo").expect("a bump");
             }
             if self.build_fails {
                 Err(String::from("error[E0308]: mismatched types"))
@@ -531,8 +577,10 @@ mod tests {
         fn say(&self, line: &str) {
             self.said.borrow_mut().push(line.to_string());
         }
-        fn escalate(&self, body: &str) {
-            self.escalated.borrow_mut().push(body.to_string());
+        fn escalate(&self, body: &str, default_action: &str) {
+            self.escalated
+                .borrow_mut()
+                .push(format!("{body} || {default_action}"));
         }
         fn restart(&self) -> Result<(), String> {
             self.calls.borrow_mut().push(String::from("restart"));
@@ -688,7 +736,44 @@ mod tests {
             Installed::read(&dirs).0.is_empty(),
             "the bad commit is not recorded as installed"
         );
-        assert!(fake.escalated.borrow()[0].contains("went back to the version it had"));
+        let card = fake.escalated.borrow();
+        assert!(card[0].contains("went back to the version it had"));
+        assert!(card[0].contains(BACK_ON_OLD), "{card:?}");
+    }
+
+    #[test]
+    fn another_repos_update_holding_the_machine_does_not_drop_this_landing() {
+        let tmp = TempDir::new().unwrap();
+        let dirs = Dirs::at(tmp.path());
+        fs::create_dir_all(dirs.root()).unwrap();
+        // Repository A's helper holds the machine-wide lock.
+        let held = open_lock(&dirs.lock()).unwrap();
+        held.lock().unwrap();
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let fake = Fake::new(&dirs, "h1", &["crates/a.rs"]);
+                let out = Pipeline {
+                    dirs: &dirs,
+                    steps: &fake,
+                    repo: "/repo-b",
+                }
+                .run();
+                (out, fake.count("build"))
+            });
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!handle.is_finished(), "B waits for A rather than leaving");
+            drop(held);
+            let (out, builds) = handle.join().unwrap();
+            assert!(
+                matches!(out.as_slice(), [Outcome::Updated { .. }]),
+                "{out:?}"
+            );
+            assert_eq!(builds, 1);
+        });
+        assert_eq!(
+            Installed::read(&dirs).0.get("/repo-b").map(String::as_str),
+            Some("h1")
+        );
     }
 
     #[test]
@@ -696,12 +781,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dirs = Dirs::at(tmp.path());
         fs::create_dir_all(dirs.root()).unwrap();
-        let held = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dirs.lock())
-            .unwrap();
+        let held = open_lock(&dirs.repo_lock("/repo")).unwrap();
         held.try_lock().unwrap();
         let fake = Fake::new(&dirs, "h1", &["crates/a.rs"]);
         assert_eq!(run(&fake, &dirs), vec![Outcome::Busy]);
@@ -733,6 +813,11 @@ mod tests {
         assert!(trigger.enabled(repo.path()));
         trigger.landed(repo.path(), "integration/m1", true);
         assert_eq!(jobs.lock().unwrap().len(), 1);
-        assert!(read_request(&Dirs::under_home(home.path())) > 0);
+        assert!(
+            read_request(
+                &Dirs::under_home(home.path()),
+                &repo.path().to_string_lossy()
+            ) > 0
+        );
     }
 }

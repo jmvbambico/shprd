@@ -188,9 +188,9 @@ impl<'a> Machine<'a> {
     /// The command that builds shprd: the override the caller gave, else rustup's
     /// own `cargo` (never whichever `cargo` is first on `PATH`: Homebrew's ignores
     /// `rust-toolchain.toml`).
-    fn build_command(&self) -> Vec<String> {
+    fn build_command(&self) -> Result<Vec<String>, String> {
         if !self.args.build.is_empty() {
-            return self.args.build.clone();
+            return Ok(self.args.build.clone());
         }
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
@@ -198,17 +198,21 @@ impl<'a> Machine<'a> {
         let rustup_cargo = cargo_home
             .map(|dir| dir.join("bin").join("cargo"))
             .filter(|path| path.is_file());
-        let program = rustup_cargo.map_or_else(
-            || String::from("cargo"),
-            |path| path.to_string_lossy().into_owned(),
-        );
-        vec![
-            program,
+        // No fallback to the `cargo` first on PATH: it may be one that ignores
+        // the pinned toolchain, and a build with the wrong compiler is worse
+        // than no build.
+        let Some(program) = rustup_cargo else {
+            return Err(String::from(
+                "rustup's cargo was not found ($CARGO_HOME/bin/cargo), so shprd was not built with the pinned toolchain",
+            ));
+        };
+        Ok(vec![
+            program.to_string_lossy().into_owned(),
             "build".into(),
             "--release".into(),
             "-p".into(),
             "shprd".into(),
-        ]
+        ])
     }
 }
 
@@ -349,13 +353,13 @@ impl Steps for Machine<'_> {
     }
 
     fn build(&self, head: &str) -> Result<PathBuf, String> {
+        let command = self.build_command()?;
         self.clear_worktree();
         fs::create_dir_all(self.work()).map_err(|err| err.to_string())?;
         let wt = self.worktree();
         self.repo_git()
             .run(&["worktree", "add", "--detach", &wt.to_string_lossy(), head])
             .map_err(|err| format!("could not check out {head}: {err}"))?;
-        let command = self.build_command();
         let Some((program, rest)) = command.split_first() else {
             return Err(String::from("no build command"));
         };
@@ -448,13 +452,13 @@ impl Steps for Machine<'_> {
         }
     }
 
-    fn escalate(&self, body: &str) {
+    fn escalate(&self, body: &str, default_action: &str) {
         let ctx = Ctx::new(self.args.repo.clone(), Actor::Engine, true, true)
             .with_home(Some(self.args.home_dir.clone()));
         let kind = EventKind::Escalated {
             task: None,
             body: body.to_string(),
-            default_action: String::from("nothing needs doing; shprd is as it was"),
+            default_action: default_action.to_string(),
         };
         if let Err(why) = ctx.commit(kind) {
             eprintln!("the person was not told: {why}");

@@ -85,7 +85,7 @@ fi
 if [ "$BUILD_MODE" = land ] && [ ! -f "$FAKE_STATE/landed-once" ]; then
   touch "$FAKE_STATE/landed-once"
   (cd "$FAKE_REPO" && echo more >> crates/x.rs && git commit -qam "land two")
-  echo 99999999999999999999 > "$FAKE_WORK/request"
+  echo 99999999999999999999 > "$FAKE_REQUEST"
 fi
 mkdir -p "$CARGO_TARGET_DIR/release"
 cp "$NEW_BINARY" "$CARGO_TARGET_DIR/release/shprd"
@@ -314,6 +314,11 @@ impl World {
             .env("FAKE_LOG", &self.log)
             .env("FAKE_STATE", &self.state)
             .env("FAKE_WORK", &self.work)
+            .env(
+                "FAKE_REQUEST",
+                shprd_server::self_update::Dirs::at(&self.work)
+                    .request(&self.repo.display().to_string()),
+            )
             .env("FAKE_REPO", &self.repo)
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@example.com")
