@@ -269,7 +269,7 @@ pub fn render_contract(input: &ContractInput<'_>) -> String {
     for path in &task.scope {
         out.push_str(&format!("- {path}\n"));
     }
-    out.push_str(&asks_section(attempt, input.asks));
+    out.push_str(&asks_section(&task.id, attempt, input.asks));
     out.push_str("\n## What the agent reported\n\n");
     let report = attempt.and_then(|attempt| attempt.report.as_ref());
     let Some(report) = report else {
@@ -386,44 +386,89 @@ fn copy_proofs(worktree: &Path, proofs: &[String], packet: &Path) -> Vec<(String
     out
 }
 
-/// The asks this attempt raised, and what the person answered.
+/// Whether an ask is a card the engine raised (a refused hand-in or a scope
+/// widening) rather than one the worker raised itself.
+fn engine_card(record: &AskRecord) -> bool {
+    record
+        .id
+        .starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
+        || record
+            .id
+            .starts_with(shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX)
+}
+
+/// One ask as the contract lists it: text, options and the answer.
+fn push_ask(out: &mut String, record: &AskRecord) {
+    out.push_str(&format!(
+        "- {} `{}`: {}\n",
+        record.kind.word(),
+        record.id,
+        record.text
+    ));
+    out.push_str(&format!(
+        "  - options: {}\n",
+        if record.options.is_empty() {
+            "none".to_owned()
+        } else {
+            record.options.join(", ")
+        }
+    ));
+    out.push_str(&format!(
+        "  - answer: {}\n",
+        match &record.answer {
+            Some(answer) => answer.text.as_str(),
+            None => "unanswered",
+        }
+    ));
+}
+
+/// The asks of the task, in three groups: the worker's own asks in this
+/// attempt, the worker's asks in earlier attempts (their answers still stand),
+/// and the cards the engine raised, listed apart.
 ///
-/// The section is written even when the attempt asked nothing: a reviewer
-/// reading "none" knows a criterion about asking was never met, while a missing
-/// section reads like a packet that lost something.
-fn asks_section(attempt: Option<&Attempt>, asks: &[(TaskId, AskId, AskRecord)]) -> String {
-    let mut out = String::from("\n## Asks raised during this attempt\n\n");
-    let found: Vec<&AskRecord> = asks
+/// The first section is written even when the attempt asked nothing: a
+/// reviewer reading "none" knows a criterion about asking was never met, while
+/// a missing section reads like a packet that lost something. An ask answered
+/// in an earlier attempt is shown too, so a later attempt is never judged for
+/// "never asking" when the person already answered.
+fn asks_section(
+    task: &str,
+    attempt: Option<&Attempt>,
+    asks: &[(TaskId, AskId, AskRecord)],
+) -> String {
+    let mut records: Vec<&AskRecord> = asks
         .iter()
-        .filter(|(_, _, record)| raised_in(attempt, record))
+        .filter(|(owner, _, _)| owner == task)
         .map(|(_, _, record)| record)
         .collect();
-    if found.is_empty() {
+    records.sort_by_key(|record| record.raised_seq);
+    let worker = records.iter().copied().filter(|r| !engine_card(r));
+    let (this, earlier): (Vec<&AskRecord>, Vec<&AskRecord>) =
+        worker.partition(|record| raised_in(attempt, record));
+    // An earlier ask still standing is one the person answered.
+    let earlier: Vec<&AskRecord> = earlier
+        .into_iter()
+        .filter(|record| record.answer.is_some())
+        .collect();
+    let cards: Vec<&AskRecord> = records.iter().copied().filter(|r| engine_card(r)).collect();
+    let mut out = String::from("\n## Asks raised during this attempt\n\n");
+    if this.is_empty() {
         out.push_str("- none: this attempt asked the person nothing\n");
-        return out;
     }
-    for record in found {
-        out.push_str(&format!(
-            "- {} `{}`: {}\n",
-            record.kind.word(),
-            record.id,
-            record.text
-        ));
-        out.push_str(&format!(
-            "  - options: {}\n",
-            if record.options.is_empty() {
-                "none".to_owned()
-            } else {
-                record.options.join(", ")
-            }
-        ));
-        out.push_str(&format!(
-            "  - answer: {}\n",
-            match &record.answer {
-                Some(answer) => answer.text.as_str(),
-                None => "unanswered",
-            }
-        ));
+    for record in this {
+        push_ask(&mut out, record);
+    }
+    if !earlier.is_empty() {
+        out.push_str("\n## Asks raised in earlier attempts (their answers still stand)\n\n");
+        for record in earlier {
+            push_ask(&mut out, record);
+        }
+    }
+    if !cards.is_empty() {
+        out.push_str("\n## Cards the engine raised (not the worker's own asks)\n\n");
+        for record in cards {
+            push_ask(&mut out, record);
+        }
     }
     out
 }
@@ -2560,6 +2605,90 @@ project_dirs = []
             contract.contains("- proof:\n  - .shprd/proof/test-run.txt\n"),
             "the proof is in the packet: {contract}"
         );
+    }
+
+    /// An ask record the way the fold holds it.
+    fn ask_record(id: &str, seq: u64, answer: Option<&str>) -> AskRecord {
+        AskRecord {
+            id: id.to_string(),
+            task: "T1".to_string(),
+            kind: shprd_core::ask::AskKind::Question,
+            text: format!("text of {id}"),
+            options: vec!["yes".to_string()],
+            created_at_ms: 1_000,
+            expires_at_ms: None,
+            raised_seq: seq,
+            answer: answer.map(|text| shprd_core::state::AskAnswerRecord {
+                text: text.to_string(),
+                seq: seq + 1,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_later_attempts_contract_carries_asks_answered_in_an_earlier_one() {
+        let attempt = Attempt {
+            n: 2,
+            agent: "claude".to_string(),
+            model: None,
+            worktree: "/wt".to_string(),
+            branch: "b".to_string(),
+            report: None,
+            gates: Vec::new(),
+            reviews: Vec::new(),
+            spawn_seq: Some(50),
+            stopped: false,
+        };
+        let asks: Vec<(TaskId, AskId, AskRecord)> = vec![
+            ("dictation", Some("use mic")),
+            ("scope-widen-1", Some("keep")),
+            ("hand-in-refused-2-1", None),
+        ]
+        .into_iter()
+        .zip([10u64, 60, 70])
+        .map(|((id, answer), seq)| {
+            (
+                "T1".to_string(),
+                id.to_string(),
+                ask_record(id, seq, answer),
+            )
+        })
+        .collect();
+        let mut asks = asks;
+        asks.push((
+            "T2".to_string(),
+            "foreign".to_string(),
+            ask_record("foreign", 11, Some("no")),
+        ));
+        asks.push((
+            "T1".to_string(),
+            "never-answered".to_string(),
+            ask_record("never-answered", 12, None),
+        ));
+        let text = asks_section("T1", Some(&attempt), &asks);
+        let earlier = text
+            .find("## Asks raised in earlier attempts")
+            .unwrap_or_else(|| panic!("an earlier group: {text}"));
+        let cards = text
+            .find("## Cards the engine raised")
+            .unwrap_or_else(|| panic!("a cards group: {text}"));
+        assert!(
+            text.contains("- none: this attempt asked the person nothing"),
+            "{text}"
+        );
+        let earlier_part = &text[earlier..cards];
+        assert!(
+            earlier_part.contains("`dictation`") && earlier_part.contains("answer: use mic"),
+            "{text}"
+        );
+        let cards_part = &text[cards..];
+        assert!(
+            cards_part.contains("`scope-widen-1`") && cards_part.contains("`hand-in-refused-2-1`"),
+            "{text}"
+        );
+        assert!(!earlier_part.contains("scope-widen"), "{text}");
+        assert!(!text.contains("foreign"), "{text}");
+        assert!(!text.contains("never-answered"), "{text}");
     }
 
     #[test]

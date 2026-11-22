@@ -13,7 +13,7 @@
 
 use shprd_core::event::{Event, Finding, Severity};
 use shprd_core::settings::{Key, Resolved, ResolvedRole, Source, Sourced, TaskKey, Value};
-use shprd_core::state::{GateResult, OverrideRecord, RunState, Task, TaskStatus};
+use shprd_core::state::{AskRecord, GateResult, OverrideRecord, RunState, Task, TaskStatus};
 
 use crate::clock;
 
@@ -370,6 +370,14 @@ const DETAIL_LIMIT: usize = 300;
 /// touch, which skills to load, how to report, and the Settings block naming
 /// every value that shapes the work and the layer that set it.
 pub fn task_brief(input: &BriefInput<'_>) -> String {
+    task_brief_with_asks(input, &[])
+}
+
+/// [`task_brief`] for a retry that also carries the asks the person already
+/// answered in the task's earlier attempts, so the agent never asks again what
+/// was settled. `asks` is every ask of the task from the fold; only the
+/// worker's own answered asks raised before this attempt are shown.
+pub fn task_brief_with_asks(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     let mut out = String::new();
     if let Some(prompt) = input.prompt {
         out.push_str(prompt.trim_end());
@@ -388,7 +396,7 @@ pub fn task_brief(input: &BriefInput<'_>) -> String {
         out.push_str(start);
         out.push_str("\n\n");
     }
-    out.push_str(&task_sections(input));
+    out.push_str(&task_sections(input, asks));
     if let Some(finish) = notes
         .as_ref()
         .map(|tasks| tasks.finish_notes.trim())
@@ -412,9 +420,53 @@ pub fn task_brief(input: &BriefInput<'_>) -> String {
     out
 }
 
+/// The asks the person answered in earlier attempts, which still stand.
+///
+/// Empty for a first attempt and when nothing was answered. The engine's own
+/// cards (a refused hand-in, a scope widening) are left out: they were about
+/// that attempt's change, not about the task.
+fn earlier_asks(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
+    let spawn = input
+        .task
+        .attempts
+        .iter()
+        .find(|attempt| attempt.n == input.attempt)
+        .and_then(|attempt| attempt.spawn_seq);
+    let mut found: Vec<&AskRecord> = asks
+        .iter()
+        .filter(|ask| ask.task == input.task.id)
+        .filter(|ask| {
+            !ask.id.starts_with(shprd_core::ask::SCOPE_WIDEN_ASK_PREFIX)
+                && !ask
+                    .id
+                    .starts_with(shprd_core::gate::HAND_IN_REFUSED_ASK_PREFIX)
+        })
+        .filter(|ask| ask.answer.is_some())
+        .filter(|ask| spawn.is_none_or(|spawn| ask.raised_seq < spawn))
+        .collect();
+    if input.attempt <= 1 || found.is_empty() {
+        return String::new();
+    }
+    found.sort_by_key(|ask| ask.raised_seq);
+    let mut out =
+        String::from("## Asks the person already answered (these answers still stand)\n\n");
+    for ask in found {
+        let answer = ask
+            .answer
+            .as_ref()
+            .map_or("", |answer| answer.text.as_str());
+        out.push_str(&format!(
+            "- you asked \"{}\", the person answered \"{answer}\"\n",
+            ask.text
+        ));
+    }
+    out.push_str("\nDo not ask these again.\n\n");
+    out
+}
+
 /// The task's own half of the brief: everything but the role's words and the
 /// Settings block.
-fn task_sections(input: &BriefInput<'_>) -> String {
+fn task_sections(input: &BriefInput<'_>, asks: &[AskRecord]) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {} {}\n\n", input.task.id, input.task.title));
     out.push_str(&format!(
@@ -447,6 +499,7 @@ fn task_sections(input: &BriefInput<'_>) -> String {
         }
         out.push_str("Fix these first; keep what already works.\n");
     }
+    out.push_str(&earlier_asks(input, asks));
     out.push_str("## Acceptance criteria\n\n");
     for item in &input.task.acceptance {
         out.push_str(&format!("- {item}\n"));
@@ -1206,6 +1259,57 @@ Each line ends with the layer that set it: `this task`, `this repo`, `you`, `the
             program_line: None,
         });
         assert!(!text.contains("## Warnings"), "{text}");
+    }
+
+    /// A retry's brief shows the asks the person answered in attempt 1.
+    #[test]
+    fn a_retry_brief_carries_the_asks_answered_in_an_earlier_attempt() {
+        let plan = brief_task();
+        let ask = |id: &str, text: &str, seq: u64| shprd_core::state::AskRecord {
+            id: id.to_string(),
+            task: plan.id.clone(),
+            kind: shprd_core::ask::AskKind::Question,
+            text: text.to_string(),
+            options: Vec::new(),
+            created_at_ms: 0,
+            expires_at_ms: None,
+            raised_seq: seq,
+            answer: Some(shprd_core::state::AskAnswerRecord {
+                text: "use the mic".to_string(),
+                seq: seq + 1,
+            }),
+        };
+        let asks = vec![
+            ask("q1", "which input?", 5),
+            ask("scope-widen-1", "widen?", 6),
+        ];
+        let input = |attempt: u32| BriefInput {
+            task: &plan,
+            run: "m9",
+            attempt,
+            agent: "claude",
+            model: None,
+            branch: "b",
+            worktree: "/wt",
+            skills: &[],
+            gates: &[],
+            archive: None,
+            prompt: None,
+            ask: AskRoute::Hook,
+            proof: true,
+            settings: None,
+            role: None,
+            warnings: &[],
+            program_line: None,
+        };
+        let retry = task_brief_with_asks(&input(2), &asks);
+        assert!(
+            retry.contains("which input?") && retry.contains("use the mic"),
+            "{retry}"
+        );
+        assert!(!retry.contains("widen?"), "{retry}");
+        let first = task_brief_with_asks(&input(1), &asks);
+        assert!(!first.contains("which input?"), "{first}");
     }
 
     /// The plainest brief, with `ask` naming how its program asks.
