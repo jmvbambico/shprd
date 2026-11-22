@@ -428,9 +428,9 @@ async fn a_cursor_pages_forward_and_a_repeated_cursor_sees_nothing_again() {
 }
 
 #[tokio::test]
-async fn a_long_record_pages_with_more_and_then_the_rest() {
+async fn a_long_record_opens_at_the_newest_and_pages_back_to_the_start() {
     let fixture = Fixture::new("claude");
-    let messages: Vec<(bool, String)> = (0..250).map(|n| (true, format!("message {n}"))).collect();
+    let messages: Vec<(bool, String)> = (0..450).map(|n| (true, format!("message {n}"))).collect();
     let borrowed: Vec<(bool, &str)> = messages
         .iter()
         .map(|(who, text)| (*who, text.as_str()))
@@ -438,11 +438,49 @@ async fn a_long_record_pages_with_more_and_then_the_rest() {
     fixture.write_session(fixture.repo.path(), "s1.jsonl", &borrowed);
     let first = fixture.chat("coordinator", "").await;
     assert_eq!(first.messages().len(), 200);
-    assert_eq!(first.body["more"], true);
-    let second = fixture.chat("coordinator", &first.cursor()).await;
-    assert_eq!(second.messages().len(), 50);
-    assert_eq!(second.body["more"], false);
-    assert_eq!(second.messages()[49]["text"], "message 249");
+    assert_eq!(first.body["more"], false);
+    assert_eq!(first.messages()[0]["text"], "message 250");
+    assert_eq!(first.messages()[199]["text"], "message 449");
+    let mut older = first.body["older"].as_str().expect("older").to_owned();
+    let mut texts: Vec<String> = Vec::new();
+    let mut pages = Vec::new();
+    loop {
+        let page = fixture
+            .send(
+                Call::get(&format!(
+                    "/api/chat?space=coordinator&since={}&before={older}",
+                    first.cursor()
+                ))
+                .with_token(&fixture.token),
+            )
+            .await;
+        // A backward page never moves the forward cursor.
+        assert_eq!(page.cursor(), first.cursor());
+        pages.push(
+            page.messages()
+                .iter()
+                .map(|m| m["text"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+        );
+        match page.body["older"].as_str() {
+            Some(next) => older = next.to_owned(),
+            None => break,
+        }
+    }
+    for page in pages.iter().rev() {
+        texts.extend(page.iter().cloned());
+    }
+    assert_eq!(texts.len(), 250);
+    assert_eq!(texts[0], "message 0");
+    assert_eq!(texts[249], "message 249");
+    // What is appended after the first read follows forward, once.
+    fixture.append(false, "after");
+    let next = fixture.chat("coordinator", &first.cursor()).await;
+    assert_eq!(next.messages().len(), 1);
+    assert_eq!(next.messages()[0]["text"], "after");
+    // A reload that lost its cursor opens at the newest, not at the start.
+    let reload = fixture.chat("coordinator", "").await;
+    assert_eq!(reload.messages()[199]["text"], "after");
 }
 
 #[tokio::test]

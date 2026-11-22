@@ -41,12 +41,14 @@ export interface Chat {
   messages: ChatMessageDto[];
   cursor: string;
   more: boolean;
+  /** Where to ask for earlier history, from the first (newest) read. */
+  older: string | null;
   note: string | null;
 }
 
 /** An empty chat, before the first page arrives. */
 export function empty(space: string = COORDINATOR): Chat {
-  return { space, program: null, session: null, messages: [], cursor: "", more: false, note: null };
+  return { space, program: null, session: null, messages: [], cursor: "", more: false, older: null, note: null };
 }
 
 /**
@@ -70,6 +72,7 @@ export function fold(chat: Chat | null, answer: ChatDto): Chat {
     messages: messages.length > KEEP ? messages.slice(messages.length - KEEP) : messages,
     cursor: answer.cursor,
     more: answer.more,
+    older: held.session === null || restarted || held.cursor === "" ? answer.older : held.older,
     note: answer.note,
   };
 }

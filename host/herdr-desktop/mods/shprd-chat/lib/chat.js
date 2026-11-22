@@ -22,7 +22,7 @@ import { spaceIndex } from "./spaces.js";
 
 /** How many messages a panel keeps, as Shepherdr's reader keeps `KEEP = 2000`
  * records and its chat draws 200-record pages. */
-export const KEEP = 200;
+export const KEEP = 1000;
 
 /** How many characters one bubble shows before it is folded. */
 export const BUBBLE_MAX = 420;
@@ -89,6 +89,8 @@ export function empty(space = COORDINATOR) {
     messages: [],
     cursor: "",
     more: false,
+    older: null,
+    expanded: false,
     note: null,
   };
 }
@@ -109,20 +111,51 @@ export function fold(chat, answer, keep = null) {
   const restarted = held.session !== null && session !== null && held.session !== session;
   // A restart the person asked for (the model picker) keeps what was said so far
   // and says why the conversation changed hands, instead of an empty panel.
-  const messages = restarted && keep === null ? [] : held.messages.slice();
+  // A panel that trimmed its front asked for a fresh first read (its cursor is
+  // empty): that read is the newest page again, with a new `older` cursor, so
+  // it replaces what is held instead of following it.
+  const resync = !restarted && held.session !== null && held.cursor === "";
+  const messages = (restarted && keep === null) || resync ? [] : held.messages.slice();
   if (restarted && keep !== null) {
     messages.push(normalize({ role: "news", text: String(keep), tools: [], at_ms: Date.now() }));
   }
   for (const message of answer?.messages ?? []) messages.push(normalize(message));
-  const kept = messages.length > KEEP ? messages.slice(messages.length - KEEP) : messages;
+  // Trimming the front leaves a gap between it and the `older` cursor, so a
+  // panel whose person went back through history keeps what it loaded.
+  const first = restarted || held.session === null || held.cursor === "";
+  const expanded = !restarted && held.expanded === true;
+  const trims = !expanded && messages.length > KEEP;
+  const kept = trims ? messages.slice(messages.length - KEEP) : messages;
   return {
     space: answer?.space ?? held.space,
     program: answer?.program ?? held.program,
     session: session ?? held.session,
     messages: kept,
-    cursor: answer?.cursor ?? held.cursor,
+    // Trimmed: start over from the newest page on the next read, so earlier
+    // history stays reachable through a fresh `older` cursor.
+    cursor: trims ? "" : (answer?.cursor ?? held.cursor),
     more: Boolean(answer?.more),
+    // The first read names where history goes back from; later pages follow
+    // forward and leave it alone.
+    older: first ? (answer?.older ?? null) : (held.older ?? null),
+    expanded,
     note: answer?.note ?? null,
+  };
+}
+
+/**
+ * Fold an *older* page (the answer to `before=`) in front of the messages held.
+ *
+ * The forward cursor stays as it is. A page for another session is dropped.
+ */
+export function foldOlder(chat, answer) {
+  if (!chat || (answer?.session ?? null) !== chat.session) return chat;
+  const before = (answer?.messages ?? []).map(normalize);
+  return {
+    ...chat,
+    messages: [...before, ...chat.messages],
+    older: answer?.older ?? null,
+    expanded: true,
   };
 }
 
@@ -354,6 +387,7 @@ export function nextCursor(chat) {
 /** Shepherdr's fixed words for the timeline (`core/chat-view.js` `WORDS`). */
 export const WORDS = {
   top: "Start of conversation",
+  older: "Load earlier messages",
   showMore: "Show more",
   showLess: "Show less",
   emptyTitle: "No messages yet",
@@ -475,7 +509,8 @@ export function timeline(chat, cards = []) {
   const messages = chat?.messages ?? [];
   const waiting = cards.slice().sort((a, b) => (a.at ?? Infinity) - (b.at ?? Infinity));
   let next = 0;
-  if (!chat?.more && messages.length > 0) rows.push({ kind: "top", key: "top" });
+  if (chat?.older) rows.push({ kind: "older", key: "older" });
+  else if (!chat?.more && messages.length > 0) rows.push({ kind: "top", key: "top" });
   for (const message of messages) {
     while (next < waiting.length && waiting[next].at !== null && message.at_ms !== null && waiting[next].at < message.at_ms) {
       rows.push({ kind: "card", key: waiting[next].id, card: waiting[next] });

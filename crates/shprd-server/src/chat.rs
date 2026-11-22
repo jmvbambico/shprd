@@ -211,7 +211,12 @@ struct Place {
 }
 
 /// `GET /api/chat`: the messages a space's agent record gained since `since`.
-pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatDto, ApiReject> {
+pub(crate) fn page(
+    state: &AppState,
+    space: &Space,
+    since: &str,
+    before: &str,
+) -> Result<ChatDto, ApiReject> {
     let place = place_of(state, space)?;
     let mut answer = ChatDto {
         space: space.name().to_owned(),
@@ -220,6 +225,7 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         messages: Vec::new(),
         cursor: since.to_owned(),
         more: false,
+        older: None,
         note: place.note.clone(),
     };
     let Some(program) = place.program.as_deref() else {
@@ -284,12 +290,25 @@ pub(crate) fn page(state: &AppState, space: &Space, since: &str) -> Result<ChatD
         return Ok(answer);
     };
     watch_transcript(state, &transcript);
-    let page = transcript
-        .read(since)
-        .map_err(|err| ApiReject::internal(err.to_string()))?;
+    // No cursor of this session (a first read, a panel that reloaded, an agent
+    // that started a new session) opens at the newest messages; a cursor of this
+    // session follows forward; `before` goes back through history.
+    let page = if transcript.names(before) {
+        transcript.read_before(before)
+    } else if transcript.names(since) {
+        transcript.read(since)
+    } else {
+        transcript.read_tail()
+    }
+    .map_err(|err| ApiReject::internal(err.to_string()))?;
     answer.session = Some(transcript.session().to_owned());
-    answer.cursor = page.cursor;
+    answer.cursor = if transcript.names(before) {
+        since.to_owned()
+    } else {
+        page.cursor
+    };
     answer.more = page.more;
+    answer.older = page.older;
     answer.messages = page
         .messages
         .into_iter()
@@ -319,13 +338,14 @@ pub(crate) fn page_with_failure(
     state: &AppState,
     space: &Space,
     since: &str,
+    before: &str,
 ) -> Result<ChatDto, ApiReject> {
     state
         .chat
         .shared
         .last_read_ms
         .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-    let mut answer = page(state, space, since)?;
+    let mut answer = page(state, space, since, before)?;
     let failed = state
         .chat
         .shared

@@ -927,6 +927,8 @@ struct ChatQuery {
     space: Option<String>,
     /// The cursor the client already has.
     since: Option<String>,
+    /// An `older` cursor: answer the page of messages before it.
+    before: Option<String>,
 }
 
 /// `GET /api/chat`: what a space's agent record gained since `since`.
@@ -940,7 +942,8 @@ async fn chat_page(
 ) -> Result<Json<ChatDto>, ApiReject> {
     let space = Space::parse(query.space.as_deref());
     let since = query.since.unwrap_or_default();
-    let answer = blocking(move || chat::page_with_failure(&state, &space, &since)).await?;
+    let before = query.before.unwrap_or_default();
+    let answer = blocking(move || chat::page_with_failure(&state, &space, &since, &before)).await?;
     Ok(Json(answer?))
 }
 

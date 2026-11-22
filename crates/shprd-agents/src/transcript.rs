@@ -147,6 +147,9 @@ pub struct Page {
     pub cursor: String,
     /// Whether the record had more to give when the page filled up.
     pub more: bool,
+    /// Where to ask (with [`Transcript::read_before`]) for the messages written
+    /// before this page, or `None` when the page starts at the record's start.
+    pub older: Option<String>,
 }
 
 /// One session's record, found and ready to read.
@@ -272,6 +275,134 @@ impl Transcript {
         }
     }
 
+    /// The newest messages: the last page of the record, read from its end
+    /// without parsing what comes before it.
+    ///
+    /// `cursor` is where [`Transcript::read`] continues from (the end of what was
+    /// read), `older` where [`Transcript::read_before`] goes back from.
+    pub fn read_tail(&self) -> Result<Page, TranscriptError> {
+        self.read_back(None)
+    }
+
+    /// The page of messages written just before `before` (an `older` cursor of
+    /// this session). A cursor of another session answers the newest page.
+    pub fn read_before(&self, before: &str) -> Result<Page, TranscriptError> {
+        self.read_back(self.position_of(before))
+    }
+
+    /// One page ending at `end` (the record's end when `None`).
+    fn read_back(&self, end: Option<usize>) -> Result<Page, TranscriptError> {
+        match &self.source {
+            Source::File(path) => self.read_file_back(path, end),
+            Source::Store { root, session } => {
+                let messages = store_messages(root, session)?;
+                let total = messages.len();
+                let stop = end.map_or(total, |end| end.min(total));
+                let start = stop.saturating_sub(MAX_MESSAGES);
+                let mut page = Vec::new();
+                for (path, id) in &messages[start..stop] {
+                    if let Some(message) = store_message(root, id, path) {
+                        page.push(message);
+                    }
+                }
+                Ok(self.indexed_page(page, start, stop))
+            }
+            Source::Database { path, session } => {
+                let rows = database_messages(path, session)?;
+                let total = rows.len();
+                let stop = end.map_or(total, |end| end.min(total));
+                let start = stop.saturating_sub(MAX_MESSAGES);
+                let page = rows[start..stop]
+                    .iter()
+                    .filter_map(database_message)
+                    .collect();
+                Ok(self.indexed_page(page, start, stop))
+            }
+        }
+    }
+
+    /// A page of an index-addressed store: `[start, stop)`.
+    fn indexed_page(&self, messages: Vec<Message>, start: usize, stop: usize) -> Page {
+        Page {
+            messages,
+            cursor: self.cursor(stop),
+            more: false,
+            older: (start > 0).then(|| self.cursor(start)),
+        }
+    }
+
+    /// One JSONL record read backwards from `end` (its length when `None`):
+    /// whole lines only, in windows that double until a page of messages is held
+    /// or the start of the file is reached. Only the windows read are parsed.
+    fn read_file_back(&self, path: &Path, end: Option<usize>) -> Result<Page, TranscriptError> {
+        let fail = |source: std::io::Error| TranscriptError::Read {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut file = std::fs::File::open(path).map_err(fail)?;
+        let len = file.metadata().map_err(fail)?.len();
+        let end = end.map_or(len, |end| (end as u64).min(len));
+        let mut window = MAX_BYTES as u64;
+        loop {
+            let start = end.saturating_sub(window);
+            file.seek(SeekFrom::Start(start)).map_err(fail)?;
+            let mut buffer = vec![0u8; (end - start) as usize];
+            file.read_exact(&mut buffer).map_err(fail)?;
+            // A window that does not reach the file's start begins mid-line: that
+            // partial line is left to the next, wider window.
+            let skip = if start > 0 {
+                buffer
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(buffer.len(), |at| at + 1)
+            } else {
+                0
+            };
+            let (whole, used) = whole_lines(&buffer[skip..], end >= len);
+            let mut lines: Vec<(usize, Message)> = Vec::new();
+            let mut at = start as usize + skip;
+            for raw in whole.split_inclusive(|byte| *byte == b'\n') {
+                let text = raw.strip_suffix(b"\n").unwrap_or(raw);
+                if let Some(message) = parse_line(self.format, text) {
+                    lines.push((at, message));
+                }
+                at += raw.len();
+            }
+            if start > 0 && lines.len() < MAX_MESSAGES {
+                window = window.saturating_mul(2);
+                continue;
+            }
+            let dropped = lines.len().saturating_sub(MAX_MESSAGES);
+            let kept = lines.split_off(dropped);
+            let older = match kept.first() {
+                // Everything before the first kept message was read and is
+                // all of it when the window reached the file's start.
+                Some((position, _)) if start > 0 || dropped > 0 => Some(self.cursor(*position)),
+                _ => None,
+            };
+            return Ok(Page {
+                messages: kept.into_iter().map(|(_, message)| message).collect(),
+                cursor: self.cursor(start as usize + skip + used),
+                more: false,
+                older,
+            });
+        }
+    }
+
+    /// Whether `cursor` names a position in this session (not another's, not empty).
+    pub fn names(&self, cursor: &str) -> bool {
+        self.position_of(cursor).is_some()
+    }
+
+    /// The position `since` names in this session, if it names one.
+    fn position_of(&self, since: &str) -> Option<usize> {
+        let (session, position) = since.rsplit_once('@')?;
+        if session != self.session {
+            return None;
+        }
+        position.trim().parse::<usize>().ok()
+    }
+
     /// The position `since` names in this session, or 0 when it names none.
     fn offset(&self, since: &str) -> usize {
         let Some((session, position)) = since.rsplit_once('@') else {
@@ -338,6 +469,7 @@ impl Transcript {
             messages,
             cursor: self.cursor(position),
             more,
+            older: None,
         })
     }
 
@@ -358,6 +490,7 @@ impl Transcript {
             messages: page,
             cursor: self.cursor(position),
             more: position < total,
+            older: None,
         })
     }
 
@@ -386,6 +519,7 @@ impl Transcript {
             messages: page,
             cursor: self.cursor(position),
             more: position < total,
+            older: None,
         })
     }
 }

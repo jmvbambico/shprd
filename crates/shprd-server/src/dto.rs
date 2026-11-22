@@ -1648,7 +1648,11 @@ pub struct ChatToolDto {
 /// `cursor` is opaque to a client: it names the session and how far into it the
 /// page reached, so a client that polls with the last cursor it was given sees
 /// each message once. A cursor from another session (the agent started a new
-/// one) reads that session from its start, which is what a panel wants to show.
+/// one) answers the newest page of the new session.
+///
+/// A read with no cursor answers the *newest* messages, `cursor` to follow
+/// forward and `older` to go back for earlier history (`before=` on the
+/// request).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export_to = "ChatDto.ts")]
 pub struct ChatDto {
@@ -1664,6 +1668,10 @@ pub struct ChatDto {
     pub cursor: String,
     /// Whether the record has more to give: ask again at once with `cursor`.
     pub more: bool,
+    /// Where to ask (as `before`) for the messages written before this page, when
+    /// the page does not start at the record's start. Only a first read (and a
+    /// read with `before`) names one.
+    pub older: Option<String>,
     /// Why the page is empty, in words a panel shows, when it is.
     pub note: Option<String>,
 }

@@ -43,6 +43,7 @@ import {
   bubble,
   empty,
   fold,
+  foldOlder,
   header,
   latest,
   mine,
@@ -140,12 +141,20 @@ test("a message keeps its shape even when the service left a field out", () => {
 
 test("the panel keeps a bounded tail of a long conversation", () => {
   let chat = empty();
-  for (let n = 0; n < KEEP + 20; n += 1) {
-    chat = fold(chat, page({ messages: [{ role: "user", text: `m${n}` }] }));
-  }
+  chat = fold(chat, page({ cursor: "s1@1", older: "s1@0", messages: [{ role: "user", text: "m0" }] }));
+  const burst = [];
+  for (let n = 1; n < KEEP + 20; n += 1) burst.push({ role: "user", text: `m${n}` });
+  chat = fold(chat, page({ cursor: "s1@2", messages: burst }));
   assert.equal(chat.messages.length, KEEP);
   assert.equal(chat.messages[0].text, "m20");
   assert.equal(chat.messages[KEEP - 1].text, `m${KEEP + 19}`);
+  // Trimmed: the next read is a fresh first read, and earlier history stays reachable.
+  assert.equal(chat.cursor, "");
+  assert.equal(chat.older, "s1@0");
+  assert.equal(timeline(chat)[0].kind, "older");
+  const again = fold(chat, page({ cursor: "s1@9", older: "s1@5", messages: [{ role: "user", text: "fresh" }] }));
+  assert.deepEqual(again.messages.map((m) => m.text), ["fresh"], "the first read replaces, never duplicates");
+  assert.equal(again.older, "s1@5");
 });
 
 test("latest is the tail a short panel draws, oldest first", () => {
@@ -398,7 +407,7 @@ test("the timeline puts waiting cards among the messages by time, and the rest l
   assert.equal(firstCard(rows), 2);
   assert.equal(firstCard(timeline(chat, [])), -1);
   // A chat that has older pages to read has no "Start of conversation" yet.
-  assert.equal(timeline({ ...chat, more: true }, []).some((row) => row.kind === "top"), false);
+  assert.equal(timeline({ ...chat, more: true, older: "s1@9" }, []).some((row) => row.kind === "top"), false);
 });
 
 test("a card belongs to its task's chat, and the run's to the coordinator's", () => {
@@ -734,4 +743,48 @@ test("a refusal shows only on the conversation the send came from", async () => 
   };
   await view.send();
   assert.equal(view.refusal, null);
+});
+
+test("a first read opens at the newest messages and older pages go in front, in order", async () => {
+  const tail = page({
+    messages: [{ role: "user", text: "m3" }, { role: "assistant", text: "m4" }],
+    cursor: "s1@40",
+    older: "s1@20",
+  });
+  const earlier = page({ messages: [{ role: "user", text: "m1" }, { role: "assistant", text: "m2" }], cursor: "s1@40", older: "s1@8" });
+  const first = page({ messages: [{ role: "user", text: "m0" }], cursor: "s1@40", older: null });
+  const { view, calls } = panel([tail]);
+  await view.refresh();
+  assert.deepEqual(view.chat.messages.map((m) => m.text), ["m3", "m4"]);
+  assert.equal(view.chat.older, "s1@20");
+  assert.equal(timeline(view.chat, [])[0].kind, "older");
+  // A forward page leaves the older cursor and the order alone.
+  view.client.call = async (method, path) => {
+    calls.push({ method, path });
+    if (path.includes("before=s1%4020")) return earlier;
+    if (path.includes("before=s1%408")) return first;
+    return page({ messages: [{ role: "assistant", text: "m5" }], cursor: "s1@50" });
+  };
+  await view.refresh();
+  assert.equal(view.chat.older, "s1@20");
+  await view.loadOlder();
+  assert.deepEqual(view.chat.messages.map((m) => m.text), ["m1", "m2", "m3", "m4", "m5"]);
+  assert.equal(view.chat.cursor, "s1@50", "going back never moves the forward cursor");
+  await view.loadOlder();
+  assert.deepEqual(view.chat.messages.map((m) => m.text), ["m0", "m1", "m2", "m3", "m4", "m5"]);
+  assert.equal(view.chat.older, null);
+  assert.equal(timeline(view.chat, [])[0].kind, "top");
+  // A reload (a new panel) opens at the newest again, not the beginning.
+  const again = panel([tail]);
+  await again.view.refresh();
+  assert.equal(again.calls.find((c) => c.method === "GET").path, "/api/chat?space=coordinator&since=");
+  assert.deepEqual(again.view.chat.messages.map((m) => m.text), ["m3", "m4"]);
+});
+
+test("loaded history is not trimmed away by new messages", () => {
+  let chat = fold(empty(), page({ messages: [{ role: "user", text: "z" }], older: "s1@3" }));
+  chat = foldOlder(chat, page({ messages: [{ role: "user", text: "y" }], older: null }));
+  for (let n = 0; n < KEEP + 5; n += 1) chat = fold(chat, page({ messages: [{ role: "user", text: `n${n}` }] }));
+  assert.equal(chat.messages[0].text, "y");
+  assert.equal(foldOlder(chat, page({ session: "other" })), chat, "another session's page is dropped");
 });
