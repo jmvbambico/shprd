@@ -330,6 +330,30 @@ impl World {
         command.output().unwrap()
     }
 
+    /// Starts the run the repository's own log needs before it can hold a card.
+    fn start_run(&self) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_shprd"));
+        support::isolate(&mut command, &self.root);
+        let out = command
+            .arg("--home")
+            .arg(self.root.join("home"))
+            .arg("--repo")
+            .arg(&self.repo)
+            .args([
+                "run",
+                "start",
+                "--run-id",
+                "t1",
+                "--base",
+                "integ",
+                "--integration",
+                "integ-m",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
     fn log_lines(&self, prefix: &str) -> Vec<String> {
         fs::read_to_string(&self.log)
             .unwrap()
@@ -499,4 +523,91 @@ fn a_new_binary_that_fails_its_health_check_is_rolled_back() {
         world.log_lines("install v1").len() == 1,
         "the old desktop is put back too"
     );
+}
+
+/// The cards a repository's own log draws, as the chat and board show them.
+fn open_cards(repo: &Path) -> Vec<String> {
+    let state = ctx_state(repo);
+    state
+        .escalations
+        .iter()
+        .filter_map(|escalation| shprd_views::cards::card(&state, escalation))
+        .map(|card| card.body)
+        .collect()
+}
+
+#[test]
+fn a_failed_update_card_clears_once_a_later_update_succeeds() {
+    if !have_python() {
+        return;
+    }
+    let world = World::new("crates/x.rs", "v2");
+    world.start_run();
+    let out = world.helper("fail", "v2");
+    assert!(out.status.success(), "{out:?}");
+    // The card the real failed build raised is one the settle logic recognises.
+    let state = ctx_state(&world.repo);
+    assert!(
+        shprd_core::gate::has_open_update_failure(&state, &world.repo.display().to_string()),
+        "{:?}",
+        state.escalations
+    );
+    assert_eq!(open_cards(&world.repo).len(), 1, "one card for the failure");
+    // A later update succeeds: the card leaves.
+    let ok = world.helper("ok", "v2");
+    assert!(ok.status.success(), "{ok:?}");
+    assert!(world.binary_text().contains("VERSION=v2"));
+    assert!(open_cards(&world.repo).is_empty(), "the card is settled");
+    // A success with nothing to settle records nothing more.
+    let before = ctx_state(&world.repo).escalations.len();
+    let again = world.helper("ok", "v2");
+    assert!(again.status.success(), "{again:?}");
+    assert_eq!(ctx_state(&world.repo).escalations.len(), before);
+}
+
+#[test]
+fn a_failure_after_a_success_stays_open() {
+    if !have_python() {
+        return;
+    }
+    let world = World::new("crates/x.rs", "v2");
+    world.start_run();
+    world.helper("fail", "v2");
+    world.helper("ok", "v2");
+    assert!(open_cards(&world.repo).is_empty());
+    // A new landing whose build fails raises a card newer than the success.
+    fs::write(world.repo.join("crates/y.rs"), "fn y() {}\n").unwrap();
+    git(&world.repo, &["add", "."]);
+    git(&world.repo, &["commit", "-qm", "later landing"]);
+    world.helper("fail", "v3");
+    assert_eq!(open_cards(&world.repo).len(), 1, "the new failure is open");
+}
+
+fn ctx_state(repo: &Path) -> shprd_core::state::RunState {
+    let log = repo.join(".shprd").join("events.jsonl");
+    let read = shprd_core::log::EventLog::read_all(&log).unwrap();
+    shprd_core::state::RunState::fold(&read.events).unwrap()
+}
+
+#[test]
+fn another_repositorys_success_leaves_a_failure_open() {
+    if !have_python() {
+        return;
+    }
+    let (a, b) = (
+        World::new("crates/x.rs", "v2"),
+        World::new("crates/x.rs", "v2"),
+    );
+    a.start_run();
+    b.start_run();
+    b.helper("fail", "v2");
+    a.helper("ok", "v2");
+    assert!(a.binary_text().contains("VERSION=v2"));
+    assert_eq!(open_cards(&b.repo).len(), 1, "B's failure is still open");
+    assert!(shprd_core::gate::has_open_update_failure(
+        &ctx_state(&b.repo),
+        &b.repo.display().to_string()
+    ));
+    // A's own log never held B's failure, and a success there records nothing.
+    assert!(open_cards(&a.repo).is_empty());
 }

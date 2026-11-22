@@ -44,12 +44,20 @@ pub fn run(args: &SelfUpdateArgs) -> Result<(), CliError> {
     let mut failed = None;
     for outcome in &outcomes {
         println!("{}", describe(outcome));
-        if let Outcome::Updated { version, .. } = outcome {
-            machine.settle(version);
-        }
         if let Outcome::Stuck(why) = outcome {
             failed = Some(why.clone());
         }
+    }
+    // The pipeline raised its cards while it ran, so a settle recorded now is
+    // newer than all of them: only a run whose last word was a success may
+    // settle, or a failure after the success would be hidden with the rest.
+    let last_ok = outcomes.iter().rev().find_map(|outcome| match outcome {
+        Outcome::Updated { version, .. } => Some(Some(version)),
+        Outcome::BuildFailed(_) | Outcome::RolledBack(_) | Outcome::Stuck(_) => Some(None),
+        _ => None,
+    });
+    if let Some(Some(version)) = last_ok {
+        machine.settle(version);
     }
     match failed {
         Some(why) => Err(CliError::other(anyhow!("self-update is stuck: {why}"))),
@@ -150,6 +158,18 @@ impl<'a> Machine<'a> {
     /// engine escalation of its own that draws no card; a failure after it
     /// stays open.
     fn settle(&self, version: &str) {
+        // The log is this repository's own, so only its failures are settled;
+        // with none open there is nothing to record.
+        let ctx = Ctx::new(self.args.repo.clone(), Actor::Engine, true, true)
+            .with_home(Some(self.args.home_dir.clone()));
+        match ctx.state() {
+            Ok(state)
+                if shprd_core::gate::has_open_update_failure(
+                    &state,
+                    &self.args.repo.to_string_lossy(),
+                ) => {}
+            _ => return,
+        }
         self.escalate(
             &shprd_core::gate::update_settled_body(version),
             "nothing needs doing; shprd is up to date",
@@ -564,7 +584,7 @@ impl Steps for Machine<'_> {
             .with_home(Some(self.args.home_dir.clone()));
         let kind = EventKind::Escalated {
             task: None,
-            body: body.to_string(),
+            body: shprd_core::gate::tag_update_repo(body, &self.args.repo.to_string_lossy()),
             default_action: default_action.to_string(),
         };
         if let Err(why) = ctx.commit(kind) {

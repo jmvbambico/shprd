@@ -445,15 +445,53 @@ pub fn is_update_settled(escalation: &Escalation) -> bool {
     escalation.task.is_none() && escalation.body.starts_with(UPDATE_SETTLED_PREFIX)
 }
 
+/// `body` marked as concerning `repo`, the way every update card and settle
+/// record is written, so a success settles only its own repository's failures.
+pub fn tag_update_repo(body: &str, repo: &str) -> String {
+    format!("{body} (repository {repo})")
+}
+
+/// The repository an update card or settle record names, when it was tagged by
+/// [`tag_update_repo`]; `None` for one written before the tag existed.
+pub fn update_repo(escalation: &Escalation) -> Option<&str> {
+    let body = escalation.body.strip_suffix(')')?;
+    let at = body.rfind(" (repository ")?;
+    Some(&body[at + " (repository ".len()..])
+}
+
+/// Whether `settle` (a successful update's record) settles `failed`: it is
+/// newer, and it is for the same repository. An untagged failure belongs to the
+/// log it sits in, so any later success settles it.
+fn settles(settle: &Escalation, failed: &Escalation) -> bool {
+    settle.seq > failed.seq
+        && is_update_settled(settle)
+        && match update_repo(failed) {
+            Some(repo) => update_repo(settle) == Some(repo),
+            None => true,
+        }
+}
+
 /// Whether `escalation` is a failed update's card that a later successful
-/// update has settled. A failure newer than the last success stays open.
+/// update of the same repository has settled. A failure newer than that
+/// repository's last success stays open, and so does another repository's.
 pub fn update_failure_settled(state: &RunState, escalation: &Escalation) -> bool {
     escalation.task.is_none()
         && UPDATE_FAILED_ACTIONS.contains(&escalation.default_action.as_str())
         && state
             .escalations
             .iter()
-            .any(|later| later.seq > escalation.seq && is_update_settled(later))
+            .any(|later| settles(later, escalation))
+}
+
+/// Whether a failed update's card for `repo` is open in `state`: raised, and
+/// not yet settled by a later success of that repository.
+pub fn has_open_update_failure(state: &RunState, repo: &str) -> bool {
+    state.escalations.iter().any(|escalation| {
+        escalation.task.is_none()
+            && UPDATE_FAILED_ACTIONS.contains(&escalation.default_action.as_str())
+            && update_repo(escalation).is_none_or(|named| named == repo)
+            && !update_failure_settled(state, escalation)
+    })
 }
 
 /// The words every escalation about a send-back that did not start begins with.
@@ -1102,6 +1140,45 @@ mod tests {
         let after = state_of(vec![failed.clone(), ok, again.clone()]);
         assert!(update_failure_settled(&after, &failed));
         assert!(!update_failure_settled(&after, &again));
+    }
+
+    #[test]
+    fn a_success_settles_only_its_own_repositorys_failures() {
+        use super::{
+            UPDATE_FAILED_ACTIONS, has_open_update_failure, tag_update_repo,
+            update_failure_settled, update_settled_body,
+        };
+        let fail = |seq, repo: &str| {
+            run_wide(
+                seq,
+                &tag_update_repo("shprd could not build", repo),
+                UPDATE_FAILED_ACTIONS[0],
+            )
+        };
+        let (a_fail, b_fail) = (fail(1, "/repo/a"), fail(2, "/repo/b"));
+        let a_ok = run_wide(
+            3,
+            &tag_update_repo(&update_settled_body("1.0"), "/repo/a"),
+            "nothing needs doing",
+        );
+        let state = state_of(vec![a_fail.clone(), b_fail.clone(), a_ok]);
+        assert!(update_failure_settled(&state, &a_fail));
+        assert!(!update_failure_settled(&state, &b_fail));
+        assert!(!has_open_update_failure(&state, "/repo/a"));
+        assert!(has_open_update_failure(&state, "/repo/b"));
+    }
+
+    /// The recogniser's strings are the pipeline's: a drift in either side
+    /// would leave the fix inert.
+    #[test]
+    fn the_failed_update_actions_are_the_pipelines() {
+        let source = include_str!("../../shprd-server/src/self_update.rs");
+        for action in super::UPDATE_FAILED_ACTIONS {
+            assert!(
+                source.contains(&format!("\"{action}\"")),
+                "the pipeline no longer raises {action:?}"
+            );
+        }
     }
 
     #[test]
