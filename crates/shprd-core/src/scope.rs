@@ -89,13 +89,65 @@ fn starts_with_drive(text: &str) -> bool {
     }
 }
 
-/// True when `path` is one of `scope` or sits underneath one of its entries.
+/// True when `path` is one of `scope` or sits underneath one of its entries,
+/// or is implied by one (see [`implied`]).
 ///
 /// `path` and the entries of `scope` are expected to be normalized.
 pub fn within(path: &str, scope: &[String]) -> bool {
     scope
         .iter()
-        .any(|entry| path == entry || is_child(path, entry))
+        .any(|entry| path == entry || is_child(path, entry) || implied(path, entry))
+}
+
+/// Prefix of the desktop mods' folder.
+const MODS: &str = "host/herdr-desktop/mods";
+
+/// True when a scope `entry` implies `path` without declaring it:
+///
+/// - an entry under `crates/<crate>/` implies that crate's `tests/` folder;
+/// - an entry `host/herdr-desktop/mods/lib/<file>` implies each synced copy
+///   `host/herdr-desktop/mods/<mod>/lib/<file>`;
+/// - an entry under `host/herdr-desktop/mods/` implies `host/herdr-desktop/test/`.
+///
+/// Only [`within`] uses it: [`overlaps`] compares declared paths, so two tasks
+/// whose implied paths meet still run in parallel.
+fn implied(path: &str, entry: &str) -> bool {
+    if let Some(rest) = entry.strip_prefix("crates/")
+        && let Some((krate, below)) = rest.split_once('/')
+        && !krate.is_empty()
+        && !below.is_empty()
+    {
+        let tests = format!("crates/{krate}/tests");
+        if path == tests || is_child(path, &tests) {
+            return true;
+        }
+    }
+    if entry == MODS || is_child(entry, MODS) {
+        let test = "host/herdr-desktop/test";
+        if path == test || is_child(path, test) {
+            return true;
+        }
+    }
+    let lib = format!("{MODS}/lib");
+    let shared = if entry == lib {
+        Some("")
+    } else {
+        entry
+            .strip_prefix(lib.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+    };
+    if let Some(shared) = shared
+        && let Some(under) = path.strip_prefix(&format!("{MODS}/"))
+        && let Some((module, copy)) = under.split_once('/')
+        && module != "lib"
+        && let Some(tail) = copy.strip_prefix("lib")
+    {
+        return match tail.strip_prefix('/') {
+            None => tail.is_empty() && shared.is_empty(),
+            Some(t) => shared.is_empty() || t == shared || is_child(t, shared),
+        };
+    }
+    false
 }
 
 /// True when any entry of `a` and any entry of `b` are equal or one contains
@@ -200,5 +252,44 @@ mod tests {
         assert!(!within("docs/plan.md.bak", &scope));
         assert!(!within("srcx", &scope));
         assert!(!within("src", &[]));
+    }
+
+    #[test]
+    fn crate_scope_implies_that_crates_tests_only() {
+        let scope = paths(&["crates/shprd-core/src/prompts.rs"]);
+        assert!(within("crates/shprd-core/tests/x.rs", &scope));
+        assert!(!within("crates/shprd/tests/x.rs", &scope));
+        assert!(!within("crates/shprd-core/src/other.rs", &scope));
+        assert!(!within("crates/shprd-core/testsx/x.rs", &scope));
+    }
+
+    #[test]
+    fn shared_lib_scope_implies_the_synced_copies() {
+        let scope = paths(&["host/herdr-desktop/mods/lib/chat.js"]);
+        let copy = "host/herdr-desktop/mods/shprd-chat/lib/chat.js";
+        assert!(within(copy, &scope));
+        assert!(!within(
+            "host/herdr-desktop/mods/shprd-chat/lib/other.js",
+            &scope
+        ));
+        assert!(!within(
+            "host/herdr-desktop/mods/shprd-chat/chat.js",
+            &scope
+        ));
+        assert!(within("host/herdr-desktop/test/e2e/x.py", &scope));
+    }
+
+    #[test]
+    fn mods_scope_implies_the_desktop_tests() {
+        let scope = paths(&["host/herdr-desktop/mods/shprd-chat/main.js"]);
+        assert!(within("host/herdr-desktop/test/a.py", &scope));
+        assert!(!within("host/herdr-desktop/bin/check", &scope));
+    }
+
+    #[test]
+    fn implied_paths_do_not_make_scopes_overlap() {
+        let a = paths(&["crates/shprd-core/src/a.rs"]);
+        let b = paths(&["crates/shprd-core/tests/x.rs"]);
+        assert!(!overlaps(&a, &b));
     }
 }
