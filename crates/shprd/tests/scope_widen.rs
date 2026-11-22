@@ -350,3 +350,21 @@ fn the_help_documents_the_verb() {
         "{help}"
     );
 }
+
+#[test]
+fn a_free_typed_answer_is_normalised_before_the_widening_is_written() {
+    let (repo, state, home) = fixture();
+    assert!(raise(repo.path(), "T1").status.success());
+    let _service = Service::start(repo.path(), state.path(), home.path());
+    let status = answer(
+        state.path(),
+        repo.path(),
+        "widen the scope to ./docs/extra.md, docs/extra.md, crates/other/",
+    );
+    assert_eq!(status, 200);
+    let widened = events(repo.path())
+        .into_iter()
+        .find(|event| event["kind"] == "scope_widened")
+        .expect("the widening");
+    assert_eq!(widened["paths"], json!(["docs/extra.md", "crates/other"]));
+}

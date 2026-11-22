@@ -490,6 +490,17 @@ pub(crate) fn answer_ask(
     let hand_in = shprd_core::gate::hand_in_refused_choice(ask, answer);
     let widening = match shprd_core::ask::widening_of(ask, answer) {
         Some(paths) => {
+            // Free-typed paths are normalised like the verb's, so a stray
+            // `./` or backslash cannot widen to a path nothing matches.
+            let mut clean: Vec<String> = Vec::new();
+            for path in paths {
+                let path = shprd_core::scope::normalize(&path)
+                    .map_err(|err| ApiReject::bad_request(format!("scope path {path:?}: {err}")))?;
+                if !clean.contains(&path) {
+                    clean.push(path);
+                }
+            }
+            let paths = clean;
             let kind = EventKind::ScopeWidened {
                 task: task.to_string(),
                 paths,
