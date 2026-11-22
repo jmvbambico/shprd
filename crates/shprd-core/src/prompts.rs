@@ -130,6 +130,15 @@ const WORKER_PRE_IDENTITY: &str =
 const WORKER_PRE_IDENTITY_DIGEST: &str =
     "4349b51d144d5377b3036cbf48c7af6a9e3af29db67e27a090641fde320116ba";
 
+/// The worker wording before the condensed rewrite: it named another product
+/// and said some rules twice (once here, once in the brief).
+#[cfg(test)]
+const WORKER_M11_LONG: &str = include_str!("../../../data/templates/history/worker-m11-long.md");
+
+/// The SHA-256 of [`WORKER_M11_LONG`].
+const WORKER_M11_LONG_DIGEST: &str =
+    "d9a7bb2a42b8245b45d85b172eb659138329186079b7d4bd2303a202e48df9fa";
+
 /// The worker's retired defaults.
 const WORKER_OLD: &[&str] = &[
     WORKER_FIRST_DIGEST,
@@ -138,6 +147,7 @@ const WORKER_OLD: &[&str] = &[
     WORKER_M9_PROOF_DIGEST,
     WORKER_M10_PROOF_DIGEST,
     WORKER_PRE_IDENTITY_DIGEST,
+    WORKER_M11_LONG_DIGEST,
 ];
 
 /// The backup wording M9.5 shipped, retired for the same reason as the worker's:
